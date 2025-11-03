@@ -1,4 +1,4 @@
-use crate::{config::Config, dirs::WorkflowDirs, error::Result};
+use crate::error::Result;
 
 // Step modules
 pub mod step_1;
@@ -23,45 +23,45 @@ pub use step_4::sign_submissions;
 pub use step_5::execute_submissions;
 
 /// Run all steps in sequence
-pub async fn run_all_steps(config: &Config, dirs: &WorkflowDirs) -> Result {
+pub async fn run_all_steps() -> Result {
     tracing::info!("Starting full workflow");
 
     // Step 1: Upload DARs and generate keys (run on each participant)
     tracing::info!("Step 1: Upload DARs and generate keys");
-    upload_dars(config, dirs).await?;
-    generate_keys(config, dirs).await?;
+    upload_dars().await?;
+    generate_keys().await?;
 
     // Step 1a: Create proposals (run once by coordinator)
     tracing::info!("Step 1a: Create proposals");
-    create_proposals(config, dirs).await?;
+    create_proposals().await?;
 
     // Step 2: Sign DNS proposals (run on each attestor)
     tracing::info!("Step 2: Sign DNS proposals");
-    sign_dns_proposals(config, dirs).await?;
+    sign_dns_proposals().await?;
 
     // Step 2a: Submit DNS proposals (run once by coordinator)
     tracing::info!("Step 2a: Submit DNS proposals");
-    submit_dns_proposals(config, dirs).await?;
+    submit_dns_proposals().await?;
 
     // Step 3: Sign P2P/PTK proposals (run on each attestor)
     tracing::info!("Step 3: Sign P2P/PTK proposals");
-    sign_p2p_ptk_proposals(config, dirs).await?;
+    sign_p2p_ptk_proposals().await?;
 
     // Step 3a: Submit final proposals (run once by coordinator)
     tracing::info!("Step 3a: Submit final proposals");
-    submit_final_proposals(config, dirs).await?;
+    submit_final_proposals().await?;
 
     // Step 3b: Prepare submissions (run once by coordinator)
     tracing::info!("Step 3b: Prepare submissions");
-    prepare_submissions(config, dirs).await?;
+    prepare_submissions().await?;
 
     // Step 4: Sign submissions (run on each attestor)
     tracing::info!("Step 4: Sign submissions");
-    sign_submissions(config, dirs).await?;
+    sign_submissions().await?;
 
     // Step 5: Execute submissions (run once by coordinator)
     tracing::info!("Step 5: Execute submissions");
-    execute_submissions(config, dirs).await?;
+    execute_submissions().await?;
 
     tracing::info!("Full workflow completed successfully");
     Ok(())
