@@ -1,230 +1,34 @@
-use std::{collections::HashMap, path::Path};
+use std::path::Path;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use crate::error::Result;
 
-/// Coordinator selection strategy
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum CoordinatorStrategy {
-    /// Explicitly designated coordinator (via role field)
-    Explicit,
-    /// First participant in the list becomes coordinator
-    First,
-    /// Leader election using Bully algorithm
-    Election,
+#[derive(Debug, Clone, Deserialize)]
+pub struct Config {
+    pub connection: ConnectionConfig,
+    pub topology: TopologyConfig,
 }
 
-/// Role of a participant in the network
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum ParticipantRole {
-    Coordinator,
-    Attestor,
-}
-
-/// Network-wide configuration shared by all participants
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct NetworkConfig {
-    pub network: NetworkInfo,
-    pub participants: Vec<Participant>,
-    #[serde(default)]
-    pub timeouts: Timeouts,
-}
-
-/// Basic network information
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct NetworkInfo {
-    pub name: String,
-    pub protocol_version: String,
-    pub port: u16,
-    pub coordinator_strategy: CoordinatorStrategy,
-    /// Operator party ID (optional, can be allocated dynamically if not provided)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub operator_party: Option<String>,
-}
-
-/// Participant in the network
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct Participant {
-    pub id: String,
-    pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub role: Option<ParticipantRole>,
-    pub address: String,
-    pub port: u16,
-    /// Hex-encoded Noise static public key
-    pub public_key: String,
-    /// Canton party ID (optional, can be allocated dynamically if not provided)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub party: Option<String>,
-}
-
-/// Timeout configuration
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct Timeouts {
-    #[serde(default = "default_handshake_timeout")]
-    pub handshake_timeout_secs: u64,
-    #[serde(default = "default_message_timeout")]
-    pub message_timeout_secs: u64,
-    #[serde(default = "default_connection_retry_attempts")]
-    pub connection_retry_attempts: u32,
-    #[serde(default = "default_connection_retry_delay")]
-    pub connection_retry_delay_secs: u64,
-}
-
-fn default_handshake_timeout() -> u64 {
-    30
-}
-fn default_message_timeout() -> u64 {
-    120
-}
-fn default_connection_retry_attempts() -> u32 {
-    3
-}
-fn default_connection_retry_delay() -> u64 {
-    5
-}
-
-impl Default for Timeouts {
-    fn default() -> Self {
-        Self {
-            handshake_timeout_secs: default_handshake_timeout(),
-            message_timeout_secs: default_message_timeout(),
-            connection_retry_attempts: default_connection_retry_attempts(),
-            connection_retry_delay_secs: default_connection_retry_delay(),
-        }
-    }
-}
-
-impl NetworkConfig {
-    /// Load network configuration from a TOML file
-    pub async fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let content = tokio::fs::read_to_string(path.as_ref()).await?;
-        let config: NetworkConfig = toml::from_str(&content)?;
-        Ok(config)
-    }
-
-    /// Get the governance threshold for multi-sig operations
-    /// Returns majority threshold: (n/2 + 1)
-    pub fn governance_threshold(&self) -> u32 {
-        ((self.participants.len() / 2) + 1) as u32
-    }
-
-    /// Get participant by ID
-    pub fn get_participant(&self, id: &str) -> Option<&Participant> {
-        self.participants.iter().find(|p| p.id == id)
-    }
-
-    /// Get the coordinator based on the strategy
-    pub fn get_coordinator(&self) -> Result<&Participant> {
-        match self.network.coordinator_strategy {
-            CoordinatorStrategy::Explicit => {
-                // Find participant with coordinator role
-                self.participants
-                    .iter()
-                    .find(|p| p.role == Some(ParticipantRole::Coordinator))
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("No coordinator found with explicit coordinator role")
-                    })
-            }
-            CoordinatorStrategy::First => {
-                // First participant is coordinator
-                self.participants.first().ok_or_else(|| {
-                    anyhow::anyhow!("No participants defined in network configuration")
-                })
-            }
-            CoordinatorStrategy::Election => {
-                // For election, we need runtime state, so this will be handled elsewhere
-                // For now, fall back to explicit or first
-                if let Some(coordinator) = self
-                    .participants
-                    .iter()
-                    .find(|p| p.role == Some(ParticipantRole::Coordinator))
-                {
-                    Ok(coordinator)
-                } else {
-                    self.participants.first().ok_or_else(|| {
-                        anyhow::anyhow!("No participants defined in network configuration")
-                    })
-                }
-            }
-        }
-    }
-
-    /// Check if a node ID is the coordinator
-    pub fn is_coordinator(&self, node_id: &str) -> Result<bool> {
-        let coordinator = self.get_coordinator()?;
-        Ok(coordinator.id == node_id)
-    }
-
-    /// Get all attestors (non-coordinator participants)
-    pub fn get_attestors(&self) -> Result<Vec<&Participant>> {
-        let coordinator = self.get_coordinator()?;
-        Ok(self
-            .participants
-            .iter()
-            .filter(|p| p.id != coordinator.id)
-            .collect())
-    }
-
-    /// Create a map of public keys to participant IDs for verification
-    pub fn get_public_key_allowlist(&self) -> HashMap<String, String> {
-        self.participants
-            .iter()
-            .map(|p| (p.public_key.clone(), p.id.clone()))
-            .collect()
-    }
-}
-
-/// Individual node configuration
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct NodeConfig {
-    pub node: NodeInfo,
-    pub network_config: String,
-    pub canton: CantonConfig,
-}
-
-/// Node-specific information
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct NodeInfo {
-    /// Must match one of the participant IDs in network.toml
-    pub node_id: String,
-    /// Path to this node's static private key
-    pub static_key_file: String,
-    #[serde(default = "default_listen_address")]
-    pub listen_address: String,
-}
-
-fn default_listen_address() -> String {
-    "0.0.0.0".to_string()
-}
-
-/// Canton participant configuration
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct CantonConfig {
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConnectionConfig {
     pub admin_api_host: String,
     pub admin_api_port: u16,
     pub ledger_api_host: String,
     pub ledger_api_port: u16,
-    #[serde(default = "default_synchronizer")]
+    pub token: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TopologyConfig {
     pub synchronizer: String,
-    /// Optional JWT token for Ledger API authentication
-    /// If not provided, requests will be sent without authentication
-    #[serde(default)]
-    pub ledger_api_token: Option<String>,
 }
 
-fn default_synchronizer() -> String {
-    "global".to_string()
-}
-
-impl NodeConfig {
-    /// Load node configuration from a TOML file
+impl Config {
+    /// Load configuration from a TOML file
     pub async fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = tokio::fs::read_to_string(path.as_ref()).await?;
-        let config: NodeConfig = toml::from_str(&content)?;
+        let config: Config = toml::from_str(&content)?;
         Ok(config)
     }
 
@@ -232,7 +36,7 @@ impl NodeConfig {
     pub fn admin_api_url(&self) -> String {
         format!(
             "http://{}:{}",
-            self.canton.admin_api_host, self.canton.admin_api_port
+            self.connection.admin_api_host, self.connection.admin_api_port
         )
     }
 
@@ -240,13 +44,13 @@ impl NodeConfig {
     pub fn ledger_api_url(&self) -> String {
         format!(
             "http://{}:{}",
-            self.canton.ledger_api_host, self.canton.ledger_api_port
+            self.connection.ledger_api_host, self.connection.ledger_api_port
         )
     }
 
-    /// Get the synchronizer name
-    pub fn synchronizer(&self) -> &str {
-        &self.canton.synchronizer
+    /// Get the authorization token if present
+    pub fn auth_token(&self) -> Option<&str> {
+        self.connection.token.as_deref()
     }
 }
 
@@ -255,129 +59,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_coordinator_strategy_explicit() -> Result {
-        let network = NetworkConfig {
-            network: NetworkInfo {
-                name: "test".to_string(),
-                protocol_version: "1.0".to_string(),
-                port: 9000,
-                coordinator_strategy: CoordinatorStrategy::Explicit,
-                operator_party: None,
+    fn test_urls() {
+        let config = Config {
+            connection: ConnectionConfig {
+                admin_api_host: "localhost".to_string(),
+                admin_api_port: 5001,
+                ledger_api_host: "localhost".to_string(),
+                ledger_api_port: 5002,
+                token: Some("test_token".to_string()),
             },
-            participants: vec![
-                Participant {
-                    id: "node1".to_string(),
-                    name: "Node 1".to_string(),
-                    role: Some(ParticipantRole::Coordinator),
-                    address: "10.0.1.1".to_string(),
-                    port: 9000,
-                    public_key: "abc123".to_string(),
-                    party: None,
-                },
-                Participant {
-                    id: "node2".to_string(),
-                    name: "Node 2".to_string(),
-                    role: None,
-                    address: "10.0.1.2".to_string(),
-                    port: 9000,
-                    public_key: "def456".to_string(),
-                    party: None,
-                },
-            ],
-            timeouts: Timeouts::default(),
+            topology: TopologyConfig {
+                synchronizer: "global".to_string(),
+            },
         };
 
-        let coordinator = network.get_coordinator()?;
-        assert_eq!(coordinator.id, "node1");
-        assert!(network.is_coordinator("node1")?);
-        assert!(!network.is_coordinator("node2")?);
-        Ok(())
-    }
-
-    #[test]
-    fn test_coordinator_strategy_first() -> Result {
-        let network = NetworkConfig {
-            network: NetworkInfo {
-                name: "test".to_string(),
-                protocol_version: "1.0".to_string(),
-                port: 9000,
-                coordinator_strategy: CoordinatorStrategy::First,
-                operator_party: None,
-            },
-            participants: vec![
-                Participant {
-                    id: "node1".to_string(),
-                    name: "Node 1".to_string(),
-                    role: None,
-                    address: "10.0.1.1".to_string(),
-                    port: 9000,
-                    public_key: "abc123".to_string(),
-                    party: None,
-                },
-                Participant {
-                    id: "node2".to_string(),
-                    name: "Node 2".to_string(),
-                    role: None,
-                    address: "10.0.1.2".to_string(),
-                    port: 9000,
-                    public_key: "def456".to_string(),
-                    party: None,
-                },
-            ],
-            timeouts: Timeouts::default(),
-        };
-
-        let coordinator = network.get_coordinator()?;
-        assert_eq!(coordinator.id, "node1");
-        Ok(())
-    }
-
-    #[test]
-    fn test_get_attestors() -> Result {
-        let network = NetworkConfig {
-            network: NetworkInfo {
-                name: "test".to_string(),
-                protocol_version: "1.0".to_string(),
-                port: 9000,
-                coordinator_strategy: CoordinatorStrategy::First,
-                operator_party: None,
-            },
-            participants: vec![
-                Participant {
-                    id: "node1".to_string(),
-                    name: "Node 1".to_string(),
-                    role: None,
-                    address: "10.0.1.1".to_string(),
-                    port: 9000,
-                    public_key: "abc123".to_string(),
-                    party: None,
-                },
-                Participant {
-                    id: "node2".to_string(),
-                    name: "Node 2".to_string(),
-                    role: None,
-                    address: "10.0.1.2".to_string(),
-                    port: 9000,
-                    public_key: "def456".to_string(),
-                    party: None,
-                },
-                Participant {
-                    id: "node3".to_string(),
-                    name: "Node 3".to_string(),
-                    role: None,
-                    address: "10.0.1.3".to_string(),
-                    port: 9000,
-                    public_key: "ghi789".to_string(),
-                    party: None,
-                },
-            ],
-            timeouts: Timeouts::default(),
-        };
-
-        let attestors = network.get_attestors()?;
-        assert_eq!(attestors.len(), 2);
-        assert_eq!(attestors[0].id, "node2");
-        assert_eq!(attestors[1].id, "node3");
-        Ok(())
+        assert_eq!(config.admin_api_url(), "http://localhost:5001");
+        assert_eq!(config.ledger_api_url(), "http://localhost:5002");
+        assert_eq!(config.auth_token(), Some("test_token"));
     }
 }
