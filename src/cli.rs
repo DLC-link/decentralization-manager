@@ -1,15 +1,53 @@
-use std::borrow::Cow;
+use std::path::PathBuf;
+
+use clap::Subcommand;
 
 pub use clap::Parser;
 
 #[derive(Parser)]
+#[command(name = "grpc-test")]
+#[command(about = "Canton workflow automation - port of Scala scripts to Rust", long_about = None)]
 pub struct Cli {
-    #[arg(long, default_value_t = Cow::Borrowed("http://localhost"))]
-    pub host_url: Cow<'static, str>,
+    /// Path to configuration file (TOML)
+    #[arg(short, long, value_name = "FILE")]
+    pub config: Option<PathBuf>,
 
-    #[arg(long, default_value_t = 5001)]
-    pub ledger_api_port: u16,
+    #[command(subcommand)]
+    pub command: Commands,
+}
 
-    #[arg(long, default_value_t = 5002)]
-    pub admin_api_port: u16,
+#[derive(Subcommand)]
+pub enum Commands {
+    /// Run all steps in sequence
+    All,
+
+    /// Step 1: Upload DARs
+    UploadDars,
+
+    /// Step 1: Generate keys and export participant ID
+    GenerateKeys,
+
+    /// Step 1a: Create topology proposals
+    CreateProposals,
+
+    /// Step 2: Sign DNS proposals
+    SignDnsProposals,
+
+    /// Step 2a: Submit DNS proposals
+    SubmitDnsProposals,
+
+    /// Step 3: Sign P2P and PTK proposals
+    SignP2pPtkProposals,
+
+    /// Step 3a: Submit final proposals
+    SubmitFinalProposals,
+
+    /// Step 3b: Prepare ledger submissions
+    PrepareSubmissions,
+
+    /// Step 4: Sign ledger submissions
+    SignSubmissions,
+
+    /// Step 5: Execute ledger submissions
+    ExecuteSubmissions,
 }

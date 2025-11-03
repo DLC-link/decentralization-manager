@@ -1,3 +1,8 @@
+pub mod config;
+pub mod error;
+pub mod steps;
+pub mod utils;
+
 pub mod proto {
     pub mod com {
         pub mod digitalasset {
@@ -43,5 +48,3 @@ pub mod proto {
         }
     }
 }
-
-pub mod error;

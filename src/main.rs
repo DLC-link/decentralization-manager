@@ -1,25 +1,43 @@
 mod cli;
 
-use cli::{Cli, Parser};
+use cli::{Cli, Commands, Parser};
 
-use grpc_test::{
-    error::Result,
-    proto::com::digitalasset::canton::admin::health::v30::{
-        GetLastErrorsRequest, status_service_client::StatusServiceClient,
-    },
-};
+use grpc_test::{error::Result, steps};
 
 #[tokio::main]
 async fn main() -> Result {
+    // Initialize tracing
+    tracing_subscriber::fmt()
+        .with_target(false)
+        .with_thread_ids(false)
+        .with_level(true)
+        .init();
+
     let args = Cli::parse();
 
-    let admin_api_url = format!("{}:{}", args.host_url, args.admin_api_port);
+    // Load configuration if provided
+    if let Some(config_path) = &args.config {
+        tracing::info!("Loading configuration from: {}", config_path.display());
 
-    let mut client = StatusServiceClient::connect(admin_api_url).await?;
+        let _config = grpc_test::config::Config::from_file(config_path).await?;
+        // TODO: Pass config to step functions
+    }
 
-    let request = tonic::Request::new(GetLastErrorsRequest {});
-    let errors = client.get_last_errors(request).await?;
-    println!("Errors collected from the chain: {errors:?}");
+    // Execute the requested command
+    match args.command {
+        Commands::All => steps::run_all_steps().await?,
+        Commands::UploadDars => steps::upload_dars().await?,
+        Commands::GenerateKeys => steps::generate_keys().await?,
+        Commands::CreateProposals => steps::create_proposals().await?,
+        Commands::SignDnsProposals => steps::sign_dns_proposals().await?,
+        Commands::SubmitDnsProposals => steps::submit_dns_proposals().await?,
+        Commands::SignP2pPtkProposals => steps::sign_p2p_ptk_proposals().await?,
+        Commands::SubmitFinalProposals => steps::submit_final_proposals().await?,
+        Commands::PrepareSubmissions => steps::prepare_submissions().await?,
+        Commands::SignSubmissions => steps::sign_submissions().await?,
+        Commands::ExecuteSubmissions => steps::execute_submissions().await?,
+    }
 
+    tracing::info!("Command completed successfully");
     Ok(())
 }
