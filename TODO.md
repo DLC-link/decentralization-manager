@@ -448,15 +448,15 @@ Attestors sign ledger submissions, coordinator executes them on the ledger.
 ## Implementation Tasks
 
 ### Phase 1: Infrastructure Setup
-- [ ] Set up Rust project structure for all steps (step_1 through step_5)
-- [ ] Add dependencies: `tonic`, `prost`, `tokio`, cryptography libraries
-- [ ] Create common utilities module:
-  - [ ] Protobuf file I/O utilities
-  - [ ] Configuration loading (connection strings, OAuth tokens)
-  - [ ] Retry/polling utilities
-  - [ ] Error types
-- [ ] Set up CLI with subcommands for each step
-- [ ] Add gRPC client builders with authentication
+- [x] Set up Rust project structure for all steps (step_1 through step_5)
+- [x] Add dependencies: `tonic`, `prost`, `tokio`, cryptography libraries
+- [x] Create common utilities module:
+  - [x] Protobuf file I/O utilities
+  - [x] Configuration loading (connection strings, OAuth tokens)
+  - [x] Retry/polling utilities
+  - [x] Error types
+- [x] Set up CLI with subcommands for each step
+- [x] Add gRPC client builders with authentication
 
 ### Phase 2: Step 1 Implementation
 - [ ] Implement `upload_dars()`: Step 1 - 00_UploadDars
