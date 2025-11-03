@@ -8,10 +8,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     for entry in WalkDir::new("proto").into_iter().filter_map(Result::ok) {
         let path = entry.path();
 
-        if let Some(ext) = path.extension() {
-            if ext == "proto" {
-                protos.push(path.to_string_lossy().into_owned());
-            }
+        if let Some(ext) = path.extension()
+            && ext == "proto"
+        {
+            protos.push(path.to_string_lossy().into_owned());
         }
     }
 

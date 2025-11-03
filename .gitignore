@@ -1,2 +1,6 @@
 proto/googleapis/
 target/
+
+# Generated keys and configuration
+keys/
+config.toml
