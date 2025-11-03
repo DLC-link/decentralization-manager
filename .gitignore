@@ -1,4 +1,5 @@
 target/
 
 # Generated keys and configuration
-workflow-data/
+keys/
+config.toml

@@ -2,16 +2,21 @@
 # Copy this to config.toml and update with your values
 
 [connection]
-# Admin API endpoint
+# Participant Admin API endpoint
+# Used for: Uploading DARs, generating keys, topology management
 admin_api_host = "localhost"
-admin_api_port = 5001
+admin_api_port = 5012
 
-# Ledger API endpoint
+# Participant Ledger API endpoint
+# Used for: Submitting commands, reading ledger state
 ledger_api_host = "localhost"
-ledger_api_port = 5002
+ledger_api_port = 5011
 
 # OAuth token (optional, if authentication is required)
 # token = "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIsImtpZCI6IjEifQ..."
+
+# Note: Sequencer ports (5001: public API, 5002: admin API) are not used
+# by participant operations. Only connect to participant ports.
 
 [topology]
 # The name of the synchronizer to use

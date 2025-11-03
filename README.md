@@ -48,9 +48,77 @@ For detailed implementation plans and progress, see [TODO.md](./TODO.md).
 
 ## Setup
 
-### List Avaliable Services
+### List Available Services
 
-#### Admin API
+#### Participant Admin API (Port 5012)
+
+This is the primary endpoint for participant operations.
+
+Command
+
+```sh
+grpcurl -plaintext localhost:5012 list
+```
+
+Response
+
+```
+com.digitalasset.canton.admin.health.v30.StatusService
+com.digitalasset.canton.admin.participant.v30.EnterpriseParticipantReplicationService
+com.digitalasset.canton.admin.participant.v30.InspectionService
+com.digitalasset.canton.admin.participant.v30.PackageService
+com.digitalasset.canton.admin.participant.v30.PartyManagementService
+com.digitalasset.canton.admin.participant.v30.PingPongService
+com.digitalasset.canton.admin.participant.v30.PruningService
+com.digitalasset.canton.admin.participant.v30.RepairService
+com.digitalasset.canton.admin.participant.v30.ResourceManagementService
+com.digitalasset.canton.admin.participant.v30.TrafficControlService
+com.digitalasset.canton.connection.v30.ApiInfoService
+com.digitalasset.canton.crypto.admin.v30.VaultService
+com.digitalasset.canton.topology.admin.v30.IdentityInitializationService
+com.digitalasset.canton.topology.admin.v30.TopologyAggregationService
+com.digitalasset.canton.topology.admin.v30.TopologyManagerReadService
+com.digitalasset.canton.topology.admin.v30.TopologyManagerWriteService
+grpc.reflection.v1alpha.ServerReflection
+```
+
+#### Participant Ledger API (Port 5011)
+
+Used for submitting commands and reading ledger state.
+
+Command
+
+```sh
+grpcurl -plaintext localhost:5011 list
+```
+
+Response
+
+```
+com.daml.ledger.api.v2.CommandCompletionService
+com.daml.ledger.api.v2.CommandService
+com.daml.ledger.api.v2.CommandSubmissionService
+com.daml.ledger.api.v2.EventQueryService
+com.daml.ledger.api.v2.PackageService
+com.daml.ledger.api.v2.StateService
+com.daml.ledger.api.v2.UpdateService
+com.daml.ledger.api.v2.VersionService
+com.daml.ledger.api.v2.admin.CommandInspectionService
+com.daml.ledger.api.v2.admin.IdentityProviderConfigService
+com.daml.ledger.api.v2.admin.MeteringReportService
+com.daml.ledger.api.v2.admin.PackageManagementService
+com.daml.ledger.api.v2.admin.ParticipantPruningService
+com.daml.ledger.api.v2.admin.PartyManagementService
+com.daml.ledger.api.v2.admin.UserManagementService
+com.daml.ledger.api.v2.testing.TimeService
+com.digitalasset.canton.admin.participant.v30.InteractivePrepareAndSubmitService
+grpc.health.v1.Health
+grpc.reflection.v1alpha.ServerReflection
+```
+
+#### Sequencer Admin API (Port 5002)
+
+Used for sequencer-level operations.
 
 - **Automated Multi-Party Onboarding**: Orchestrates the complete workflow for setting up decentralized party participation
 - **gRPC Integration**: Native Canton Admin and Ledger API integration using Protocol Buffers
@@ -122,7 +190,9 @@ ledger_api_host = "localhost"
 ledger_api_port = 5002
 # token = "your-oauth-token-here"  # Optional
 
-#### Ledger API
+#### Sequencer Public API (Port 5001)
+
+Used for sequencer client connections.
 
 Command
 
