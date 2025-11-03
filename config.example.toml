@@ -1,0 +1,18 @@
+# Example configuration file for Canton workflow automation
+# Copy this to config.toml and update with your values
+
+[connection]
+# Admin API endpoint
+admin_api_host = "localhost"
+admin_api_port = 5001
+
+# Ledger API endpoint
+ledger_api_host = "localhost"
+ledger_api_port = 5002
+
+# OAuth token (optional, if authentication is required)
+# token = "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIsImtpZCI6IjEifQ..."
+
+[topology]
+# The name of the synchronizer to use
+synchronizer = "global"
