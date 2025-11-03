@@ -1,8 +1,56 @@
 # Canton Decentralized Party Onboarding Automatization
 
-A Rust-based automation tool for multi-party decentralized namespace setup in Canton blockchain networks. This project streamlines the complex process of onboarding multiple parties to a Canton-based Bitcoin (CBTC) governance system by automating topology management, cryptographic key generation, and ledger operations.
+Canton workflow automation - porting Scala scripts to Rust for decentralized namespace setup and governance.
 
-## Key Features
+## Table of Contents
+
+- [Project Overview](#project-overview)
+- [Documentation](#documentation)
+- [Setup](#setup)
+  - [Clone Canton APIs](#clone-canton-apis)
+  - [Clone Google APIs](#clone-google-apis)
+  - [Configuration](#configuration)
+- [Usage](#usage)
+  - [Run All Steps in Sequence](#run-all-steps-in-sequence)
+  - [Run Individual Steps](#run-individual-steps)
+  - [Get Help](#get-help)
+- [Development](#development)
+  - [Run Tests](#run-tests)
+  - [Run Tests with Output](#run-tests-with-output)
+  - [Run Specific Test](#run-specific-test)
+- [Code Quality](#code-quality)
+  - [Coding Standards](#coding-standards)
+  - [Run Clippy (Strict Mode)](#run-clippy-strict-mode)
+  - [Auto-fix Clippy Issues](#auto-fix-clippy-issues)
+  - [Format Code](#format-code)
+  - [Check Formatting Without Modifying Files](#check-formatting-without-modifying-files)
+- [Reference](#reference)
+  - [List Services](#list-services)
+    - [Admin API](#admin-api)
+    - [Ledger API](#ledger-api)
+
+## Project Overview
+
+This project ports Canton Scala scripts to Rust, implementing a multi-party decentralized namespace setup for CBTC (Canton-based Bitcoin) governance. The workflow includes:
+
+1. **Step 1**: Upload DARs and generate cryptographic keys
+2. **Step 1a**: Create topology proposals (DNS, P2P, PTK)
+3. **Steps 2-3a**: Multi-party signing and submission of topology proposals
+4. **Steps 3b-5**: Prepare, sign, and execute ledger submissions
+
+For detailed implementation plans and progress, see [TODO.md](./TODO.md).
+
+## Documentation
+
+- **[TODO.md](./TODO.md)** - Detailed implementation plan, API mappings, and step-by-step breakdown
+- **[CODING-STANDARDS.md](./CODING-STANDARDS.md)** - Project coding standards and style guide
+- **[config.example.toml](./config.example.toml)** - Example configuration file
+
+## Setup
+
+### List Avaliable Services
+
+#### Admin API
 
 - **Automated Multi-Party Onboarding**: Orchestrates the complete workflow for setting up decentralized party participation
 - **Dynamic Participant Support**: Supports any number of participants (N ≥ 3), with automatic majority threshold calculation
@@ -102,7 +150,25 @@ cargo run -- -c test-configs/node-2.toml <command>  # Attestor 2
 cargo run -- -c test-configs/node-3.toml <command>  # Attestor 3
 ```
 
-### Creating Custom Configuration
+Response
+
+```
+com.digitalasset.canton.admin.health.v30.StatusService
+com.digitalasset.canton.admin.sequencer.v30.SequencerStatusService
+com.digitalasset.canton.connection.v30.ApiInfoService
+com.digitalasset.canton.crypto.admin.v30.VaultService
+com.digitalasset.canton.sequencer.admin.v30.SequencerAdministrationService
+com.digitalasset.canton.sequencer.admin.v30.SequencerPruningAdministrationService
+com.digitalasset.canton.topology.admin.v30.IdentityInitializationService
+com.digitalasset.canton.topology.admin.v30.TopologyAggregationService
+com.digitalasset.canton.topology.admin.v30.TopologyManagerReadService
+com.digitalasset.canton.topology.admin.v30.TopologyManagerWriteService
+grpc.reflection.v1alpha.ServerReflection
+```
+
+#### Ledger API
+
+Command
 
 1. **Generate Noise keypairs** for secure communication:
 ```sh
@@ -122,9 +188,7 @@ public_key = "<hex-encoded-public-key>"
 # ... add as many participants as needed (minimum 3 required)
 ```
 
-3. **Create node-X.toml** for each participant based on `node.example.toml`:
-```toml
-network_config = "network.toml"
+### Clone Canton APIs
 
 [node]
 node_id = "participant-1"
@@ -141,58 +205,78 @@ synchronizer = "global"
 # ledger_api_token = "your-jwt-token-here"
 ```
 
-See `test-configs/README.md` for detailed documentation.
+### Clone Google APIs
+
+```sh
+mkdir -p proto/googleapis
+git clone https://github.com/googleapis/googleapis.git proto/googleapis
+```
+
+## Configuration
+
+Create a configuration file based on the example:
+
+### Run All Steps in Sequence
+
+```sh
+cp config.example.toml config.toml
+```
+
+Edit `config.toml` with your Canton connection details:
+
+```toml
+[connection]
+admin_api_host = "localhost"
+admin_api_port = 5001
+ledger_api_host = "localhost"
+ledger_api_port = 5002
+# token = "your-oauth-token-here"  # Optional
+
+[topology]
+synchronizer = "global"
+```
 
 ## Run The App
 
 ### Run All Steps in Sequence
 
 ```sh
-cargo run --release -- -c test-configs/node-1.toml all
+cargo run --release -- -c config.toml all
 ```
 
 ### Run Individual Steps
 
 ```sh
-# Step 1: Upload DARs (automatically uploads all .dar files from dars/ directory)
-cargo run --release -- -c test-configs/node-1.toml upload-dars
+# Step 1: Upload DARs
+cargo run --release -- -c config.toml upload-dars
 
 # Step 1: Generate keys and export participant ID
-cargo run --release -- -c test-configs/node-1.toml generate-keys
+cargo run --release -- -c config.toml generate-keys
 
 # Step 1a: Create topology proposals
-cargo run --release -- -c test-configs/node-1.toml create-proposals
+cargo run --release -- -c config.toml create-proposals
 
 # Step 2: Sign DNS proposals
-cargo run --release -- -c test-configs/node-1.toml sign-dns-proposals
+cargo run --release -- -c config.toml sign-dns-proposals
 
 # Step 2a: Submit DNS proposals
-cargo run --release -- -c test-configs/node-1.toml submit-dns-proposals
+cargo run --release -- -c config.toml submit-dns-proposals
 
-# Step 3: Sign P2P proposals (Canton 3.4+: signing keys embedded in P2P)
-cargo run --release -- -c test-configs/node-1.toml sign-p2p-proposals
+# Step 3: Sign P2P and PTK proposals
+cargo run --release -- -c config.toml sign-p2p-ptk-proposals
 
 # Step 3a: Submit final proposals
-cargo run --release -- -c test-configs/node-1.toml submit-final-proposals
+cargo run --release -- -c config.toml submit-final-proposals
 
 # Step 3b: Prepare ledger submissions
-cargo run --release -- -c test-configs/node-1.toml prepare-submissions
+cargo run --release -- -c config.toml prepare-submissions
 
 # Step 4: Sign ledger submissions
-cargo run --release -- -c test-configs/node-1.toml sign-submissions
+cargo run --release -- -c config.toml sign-submissions
 
 # Step 5: Execute ledger submissions
-cargo run --release -- -c test-configs/node-1.toml execute-submissions
+cargo run --release -- -c config.toml execute-submissions
 ```
-
-### Generate Noise Protocol Keys
-
-```sh
-# Generate a keypair for secure node-to-node communication
-cargo run -- keygen -o keys/my-node.key
-```
-
-The public key will be displayed and should be added to `network.toml`.
 
 ### Get Help
 
