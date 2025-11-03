@@ -1,8 +1,56 @@
 # Canton gRPC Rust Test
 
-## List services
+Canton workflow automation - porting Scala scripts to Rust for decentralized namespace setup and governance.
 
-### Admin API
+## Table of Contents
+
+- [Project Overview](#project-overview)
+- [Documentation](#documentation)
+- [Setup](#setup)
+  - [Clone Canton APIs](#clone-canton-apis)
+  - [Clone Google APIs](#clone-google-apis)
+  - [Configuration](#configuration)
+- [Usage](#usage)
+  - [Run All Steps in Sequence](#run-all-steps-in-sequence)
+  - [Run Individual Steps](#run-individual-steps)
+  - [Get Help](#get-help)
+- [Development](#development)
+  - [Run Tests](#run-tests)
+  - [Run Tests with Output](#run-tests-with-output)
+  - [Run Specific Test](#run-specific-test)
+- [Code Quality](#code-quality)
+  - [Coding Standards](#coding-standards)
+  - [Run Clippy (Strict Mode)](#run-clippy-strict-mode)
+  - [Auto-fix Clippy Issues](#auto-fix-clippy-issues)
+  - [Format Code](#format-code)
+  - [Check Formatting Without Modifying Files](#check-formatting-without-modifying-files)
+- [Reference](#reference)
+  - [List Services](#list-services)
+    - [Admin API](#admin-api)
+    - [Ledger API](#ledger-api)
+
+## Project Overview
+
+This project ports Canton Scala scripts to Rust, implementing a multi-party decentralized namespace setup for CBTC (Canton-based Bitcoin) governance. The workflow includes:
+
+1. **Step 1**: Upload DARs and generate cryptographic keys
+2. **Step 1a**: Create topology proposals (DNS, P2P, PTK)
+3. **Steps 2-3a**: Multi-party signing and submission of topology proposals
+4. **Steps 3b-5**: Prepare, sign, and execute ledger submissions
+
+For detailed implementation plans and progress, see [TODO.md](./TODO.md).
+
+## Documentation
+
+- **[TODO.md](./TODO.md)** - Detailed implementation plan, API mappings, and step-by-step breakdown
+- **[CODING-STANDARDS.md](./CODING-STANDARDS.md)** - Project coding standards and style guide
+- **[config.example.toml](./config.example.toml)** - Example configuration file
+
+## Setup
+
+### List Avaliable Services
+
+#### Admin API
 
 Command
 
@@ -26,7 +74,7 @@ com.digitalasset.canton.topology.admin.v30.TopologyManagerWriteService
 grpc.reflection.v1alpha.ServerReflection
 ```
 
-### Ledger API
+#### Ledger API
 
 Command
 
@@ -45,7 +93,7 @@ grpc.health.v1.Health
 grpc.reflection.v1alpha.ServerReflection
 ```
 
-## Clone Canton APIs
+### Clone Canton APIs
 
 ```sh
 mkdir -p proto/canton
@@ -54,18 +102,127 @@ cp -r ../splice/canton/community/ledger-api/src/main/protobuf proto/canton
 cp -r ../splice/canton/community/admin-api/src/main/protobuf proto/canton
 ```
 
-## Clone Google APIs
+### Clone Google APIs
 
 ```sh
 mkdir -p proto/googleapis
 git clone https://github.com/googleapis/googleapis.git proto/googleapis
 ```
 
-## Run The App
+## Configuration
+
+Create a configuration file based on the example:
 
 ```sh
-cargo run --release -- \
-    --host-url http://localhost \
-    --ledger-api-port 5001 \
-    --admin-api-port 5002
+cp config.example.toml config.toml
+```
+
+Edit `config.toml` with your Canton connection details:
+
+```toml
+[connection]
+admin_api_host = "localhost"
+admin_api_port = 5001
+ledger_api_host = "localhost"
+ledger_api_port = 5002
+# token = "your-oauth-token-here"  # Optional
+
+[topology]
+synchronizer = "global"
+```
+
+## Run The App
+
+### Run All Steps in Sequence
+
+```sh
+cargo run --release -- -c config.toml all
+```
+
+### Run Individual Steps
+
+```sh
+# Step 1: Upload DARs
+cargo run --release -- -c config.toml upload-dars
+
+# Step 1: Generate keys and export participant ID
+cargo run --release -- -c config.toml generate-keys
+
+# Step 1a: Create topology proposals
+cargo run --release -- -c config.toml create-proposals
+
+# Step 2: Sign DNS proposals
+cargo run --release -- -c config.toml sign-dns-proposals
+
+# Step 2a: Submit DNS proposals
+cargo run --release -- -c config.toml submit-dns-proposals
+
+# Step 3: Sign P2P and PTK proposals
+cargo run --release -- -c config.toml sign-p2p-ptk-proposals
+
+# Step 3a: Submit final proposals
+cargo run --release -- -c config.toml submit-final-proposals
+
+# Step 3b: Prepare ledger submissions
+cargo run --release -- -c config.toml prepare-submissions
+
+# Step 4: Sign ledger submissions
+cargo run --release -- -c config.toml sign-submissions
+
+# Step 5: Execute ledger submissions
+cargo run --release -- -c config.toml execute-submissions
+```
+
+### Get Help
+
+```sh
+cargo run -- --help
+```
+
+## Development
+
+### Run Tests
+
+```sh
+cargo test
+```
+
+### Run Tests with Output
+
+```sh
+cargo test -- --nocapture
+```
+
+### Run Specific Test
+
+```sh
+cargo test test_name
+```
+
+## Code Quality
+
+### Run Clippy (Strict Mode)
+
+This project uses strict clippy settings. Run clippy to check for warnings:
+
+```sh
+cargo clippy --all-targets --all-features -- -D warnings
+```
+
+### Auto-fix Clippy Issues
+
+```sh
+cargo clippy --fix --all-targets --all-features -- -D warnings
+```
+
+### Format Code
+
+```sh
+cargo fmt
+```
+
+### Check Formatting Without Modifying Files
+
+```sh
+cargo fmt -- --check
 ```
