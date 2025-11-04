@@ -102,7 +102,7 @@ Attestors sign ledger submissions, coordinator executes them on the ledger.
    - Set threshold
    - Define owner namespaces
 7. Create Party-to-Participant (P2P) mapping proposal:
-   - Party ID: `cbtc-network@<computed-namespace>`
+   - Party ID: `cbtc-network::<computed-namespace>`
    - Map to all participant IDs with `Confirmation` permission
    - Set threshold
 8. Create Party-to-Key (PTK) mapping proposal:
@@ -459,26 +459,27 @@ Attestors sign ledger submissions, coordinator executes them on the ledger.
 - [x] Add gRPC client builders with authentication
 
 ### Phase 2: Step 1 Implementation
-- [ ] Implement `upload_dars()`: Step 1 - 00_UploadDars
-  - [ ] Connect to participant Admin API
-  - [ ] Upload DAR files via `UploadDar()` RPC
-- [ ] Implement `generate_keys()`: Step 1 - 01_GenerateKeys
-  - [ ] Generate namespace signing key
-  - [ ] Get synchronizer ID
-  - [ ] Propose namespace delegation
-  - [ ] Generate DAML signing key
-  - [ ] Export keys to `attestor-public-keys.bin`
-  - [ ] Export participant ID to `participant-id.bin`
+- [x] Implement `upload_dars()`: Step 1 - 00_UploadDars
+  - [x] Connect to participant Admin API
+  - [x] Upload DAR files via `UploadDar()` RPC
+- [x] Implement `generate_keys()`: Step 1 - 01_GenerateKeys
+  - [x] Generate namespace signing key
+  - [x] Get synchronizer ID
+  - [x] Propose namespace delegation
+  - [x] Generate DAML signing key
+  - [x] Export keys to `attestor-public-keys.bin`
+  - [x] Export participant ID to `participant-id.bin`
 
 ### Phase 3: Step 1a Implementation
-- [ ] Implement `create_proposals()`: Step 1a - 01a_CreateProposals
-  - [ ] Load and parse all attestor key files
-  - [ ] Load all participant ID files
-  - [ ] Calculate threshold
-  - [ ] Create DNS proposal
-  - [ ] Create P2P proposal
-  - [ ] Create PTK proposal
-  - [ ] Save proposals to files
+- [x] Implement `create_proposals()`: Step 1a - 01a_CreateProposals
+  - [x] Load and parse all attestor key files
+  - [x] Load all participant ID files
+  - [x] Calculate threshold
+  - [x] Create DNS proposal
+  - [x] Create P2P proposal
+  - [x] Create PTK proposal
+  - [x] Save proposals to files
+  - [x] Fixed: compute_decentralized_namespace to use length-prefixed hashing
 
 ### Phase 4: Steps 2 & 2a Implementation
 - [ ] Implement `sign_dns_proposals()`: Step 2 - 02_SignProposals

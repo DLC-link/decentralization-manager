@@ -1,5 +1,4 @@
 target/
 
 # Generated keys and configuration
-keys/
-config.toml
+out/
