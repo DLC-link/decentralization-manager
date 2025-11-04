@@ -4,7 +4,22 @@ use bytes::{Buf, BufMut, BytesMut};
 use prost::Message;
 use tokio::fs;
 
-use crate::error::Result;
+use crate::{
+    config::Config,
+    error::Result,
+    proto::com::digitalasset::canton::{
+        admin::participant::v30::{
+            GetSynchronizerIdRequest,
+            synchronizer_connectivity_service_client::SynchronizerConnectivityServiceClient,
+        },
+        crypto::v30::SigningPublicKey,
+    },
+};
+
+/// Multihash prefix for SHA-256 hashes in Canton
+/// - 0x12 = SHA-256 hash algorithm identifier
+/// - 0x20 = 32 bytes (length of SHA-256 output)
+pub const MULTIHASH_SHA256_PREFIX: &str = "1220";
 
 /// Read all protobuf messages from a file
 ///
@@ -137,6 +152,82 @@ where
     }
 
     anyhow::bail!("Condition not met after {max_attempts} attempts")
+}
+
+/// Compute fingerprint (hash) of a Canton SigningPublicKey
+///
+/// Canton uses multihash format for fingerprints:
+/// - Prefix "1220" indicates SHA-256 hash (0x12) with 32 bytes length (0x20)
+/// - Followed by the hex-encoded SHA-256 hash of the protobuf-serialized key
+///
+/// The fingerprint serves as the namespace identifier and unique key identifier in Canton.
+pub fn compute_fingerprint(key: &SigningPublicKey) -> String {
+    use sha2::{Digest, Sha256};
+    use x509_parser::prelude::*;
+
+    // Canton uses domain-separated hashing with a purpose ID prefix
+    // HashPurpose.PublicKeyFingerprint = 12
+    // For Curve25519 keys in X.509 format, Canton extracts the raw key bytes first
+    const PURPOSE_PUBLIC_KEY_FINGERPRINT: i32 = 12;
+
+    tracing::debug!(
+        "Computing fingerprint from {} bytes of X.509 key material",
+        key.public_key.len()
+    );
+
+    let mut hasher = Sha256::new();
+
+    // Add purpose ID as 4-byte big-endian integer (domain separation)
+    hasher.update(PURPOSE_PUBLIC_KEY_FINGERPRINT.to_be_bytes());
+
+    // Extract raw key bytes from X.509 SubjectPublicKeyInfo and add to hash
+    match SubjectPublicKeyInfo::from_der(&key.public_key) {
+        Ok((_, spki)) => {
+            // Get the BIT STRING containing the raw public key
+            let raw_bytes = spki.subject_public_key.data;
+            tracing::debug!(
+                "Extracted {} raw key bytes from X.509 structure",
+                raw_bytes.len()
+            );
+            hasher.update(raw_bytes.as_ref());
+        }
+        Err(e) => {
+            tracing::warn!("Failed to parse X.509 structure: {e}, falling back to full key bytes");
+            hasher.update(&key.public_key);
+        }
+    }
+
+    let hash_result = hasher.finalize();
+
+    let fingerprint = format!("{MULTIHASH_SHA256_PREFIX}{}", hex::encode(hash_result));
+    tracing::debug!("Computed fingerprint: {fingerprint}");
+
+    fingerprint
+}
+
+/// Get synchronizer ID from config
+///
+/// Queries the participant's synchronizer connectivity service to get the physical
+/// synchronizer ID for the configured synchronizer alias.
+pub async fn get_synchronizer_id(config: &Config) -> Result<String> {
+    let mut conn_client =
+        SynchronizerConnectivityServiceClient::connect(config.admin_api_url()).await?;
+
+    let response = conn_client
+        .get_synchronizer_id(tonic::Request::new(GetSynchronizerIdRequest {
+            synchronizer_alias: config.topology.synchronizer.clone(),
+        }))
+        .await?
+        .into_inner();
+
+    if response.physical_synchronizer_id.is_empty() {
+        anyhow::bail!(
+            "No synchronizer ID returned for synchronizer alias '{}'",
+            config.topology.synchronizer
+        );
+    }
+
+    Ok(response.physical_synchronizer_id)
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::Path;
 
 use crate::{config::Config, error::Result};
 
@@ -25,25 +25,23 @@ pub use step_4::sign_submissions;
 pub use step_5::execute_submissions;
 
 /// Run all steps in sequence
-pub async fn run_all_steps(config: &Config) -> Result {
+pub async fn run_all_steps(
+    config: &Config,
+    dars_dir: &Path,
+    keys_dir: &Path,
+    ids_dir: &Path,
+    out_dir: &Path,
+) -> Result {
     tracing::info!("Starting full workflow");
 
     // Step 1: Upload DARs and generate keys (run on each participant)
     tracing::info!("Step 1: Upload DARs and generate keys");
-    let dars_dir = PathBuf::from("./dars");
-    let keys_dir = PathBuf::from("./keys");
-
-    // Create keys directory if it doesn't exist
-    if !keys_dir.exists() {
-        tokio::fs::create_dir_all(&keys_dir).await?;
-    }
-
-    upload_dars(config, &dars_dir).await?;
-    generate_keys(config, &keys_dir).await?;
+    upload_dars(config, dars_dir).await?;
+    generate_keys(config, keys_dir, ids_dir).await?;
 
     // Step 1a: Create proposals (run once by coordinator)
     tracing::info!("Step 1a: Create proposals");
-    create_proposals().await?;
+    create_proposals(config, keys_dir, ids_dir, out_dir).await?;
 
     // Step 2: Sign DNS proposals (run on each attestor)
     tracing::info!("Step 2: Sign DNS proposals");

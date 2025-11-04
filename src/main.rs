@@ -2,17 +2,23 @@ mod cli;
 
 use std::path::PathBuf;
 
+use tracing_subscriber::{
+    filter::{EnvFilter, LevelFilter},
+    prelude::*,
+};
+
 use cli::{Cli, Commands, Parser};
 
 use grpc_test::{error::Result, steps};
 
 #[tokio::main]
 async fn main() -> Result {
-    // Initialize tracing
-    tracing_subscriber::fmt()
-        .with_target(false)
-        .with_thread_ids(false)
-        .with_level(true)
+    let filter = EnvFilter::builder()
+        .with_default_directive(LevelFilter::INFO.into())
+        .from_env_lossy();
+
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer().with_filter(filter))
         .init();
 
     let args = Cli::parse();
@@ -27,19 +33,31 @@ async fn main() -> Result {
 
     // Default paths
     let dars_dir = PathBuf::from("./dars");
-    let keys_dir = PathBuf::from("./keys");
+    let out_dir = PathBuf::from("./out");
+    let keys_dir = out_dir.join("keys");
+    let ids_dir = out_dir.join("ids");
 
-    // Create keys directory if it doesn't exist
+    // Create directories if they don't exist
+    if !out_dir.exists() {
+        tokio::fs::create_dir_all(&out_dir).await?;
+    }
     if !keys_dir.exists() {
         tokio::fs::create_dir_all(&keys_dir).await?;
+    }
+    if !ids_dir.exists() {
+        tokio::fs::create_dir_all(&ids_dir).await?;
     }
 
     // Execute the requested command
     match args.command {
-        Commands::All => steps::run_all_steps(&config).await?,
+        Commands::All => {
+            steps::run_all_steps(&config, &dars_dir, &keys_dir, &ids_dir, &out_dir).await?
+        }
         Commands::UploadDars => steps::upload_dars(&config, &dars_dir).await?,
-        Commands::GenerateKeys => steps::generate_keys(&config, &keys_dir).await?,
-        Commands::CreateProposals => steps::create_proposals().await?,
+        Commands::GenerateKeys => steps::generate_keys(&config, &keys_dir, &ids_dir).await?,
+        Commands::CreateProposals => {
+            steps::create_proposals(&config, &keys_dir, &ids_dir, &out_dir).await?
+        }
         Commands::SignDnsProposals => steps::sign_dns_proposals().await?,
         Commands::SubmitDnsProposals => steps::submit_dns_proposals().await?,
         Commands::SignP2pPtkProposals => steps::sign_p2p_ptk_proposals().await?,
