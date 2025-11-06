@@ -183,14 +183,6 @@ pub async fn create_proposals(
     let synchronizer_id = crate::utils::get_synchronizer_id(config).await?;
     tracing::debug!("Using synchronizer ID: {synchronizer_id}");
 
-    // Get the local participant's namespace key to sign the proposal with
-    // We use the first namespace key (participant's own key) for signing
-    let local_namespace_fingerprint = namespace_keys
-        .first()
-        .map(crate::utils::compute_fingerprint)
-        .ok_or_else(|| anyhow::anyhow!("No namespace keys available"))?;
-    tracing::debug!("Using local namespace key for signing: {local_namespace_fingerprint}");
-
     let mut topology_client =
         TopologyManagerWriteServiceClient::connect(config.admin_api_url()).await?;
 
@@ -211,7 +203,7 @@ pub async fn create_proposals(
         )),
         must_fully_authorize: false,
         force_changes: vec![],
-        signed_by: vec![local_namespace_fingerprint.clone()],
+        signed_by: vec![], // Auto-select appropriate signing keys
         store: Some(StoreId {
             store: Some(store_id::Store::Synchronizer(Synchronizer {
                 kind: Some(synchronizer::Kind::Id(synchronizer_id.clone())),
