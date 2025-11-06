@@ -113,8 +113,12 @@ pub async fn submit_dns_proposals(
         "Waiting for DNS to appear in topology for namespace {}...",
         namespace_def.decentralized_namespace
     );
-    wait_for_dns_in_topology(config, &synchronizer_id, &namespace_def.decentralized_namespace)
-        .await?;
+    wait_for_dns_in_topology(
+        config,
+        &synchronizer_id,
+        &namespace_def.decentralized_namespace,
+    )
+    .await?;
 
     tracing::info!("DNS proposal submitted and confirmed in topology successfully");
     Ok(())
@@ -155,10 +159,7 @@ async fn wait_for_dns_in_topology(
             .into_inner();
 
         if !response.results.is_empty() {
-            tracing::info!(
-                "DNS found in topology after {} attempt(s)",
-                attempt
-            );
+            tracing::info!("DNS found in topology after {attempt} attempt(s)");
             return Ok(());
         }
 
