@@ -1,8 +1,6 @@
 use std::path::Path;
 
 use ed25519_dalek::{Signer, SigningKey};
-use prost::Message;
-use tokio::fs;
 
 use crate::{
     config::Config,
@@ -42,10 +40,15 @@ const ED25519_PRIVATE_KEY_LENGTH: u8 = 0x20;
 /// # Arguments
 /// * `config` - Configuration with Admin API connection details
 /// * `out_dir` - Base output directory (usually ./out)
-pub async fn sign_submissions(config: &Config, out_dir: &Path) -> Result {
+/// * `ids_dir` - Directory containing participant ID files
+pub async fn sign_submissions(config: &Config, out_dir: &Path, ids_dir: &Path) -> Result {
     tracing::info!("Signing submissions...");
 
-    // Step 1: Find the DAML signing key
+    // Step 1: Get participant number
+    let participant_num = utils::get_participant_number(config, ids_dir).await?;
+    tracing::debug!("Determined participant number: {participant_num}");
+
+    // Step 2: Find the DAML signing key
     tracing::info!("Finding DAML signing key...");
     let mut vault_client = VaultServiceClient::connect(config.admin_api_url()).await?;
 
@@ -180,8 +183,9 @@ pub async fn sign_submissions(config: &Config, out_dir: &Path) -> Result {
     tracing::debug!("Generated 3 signatures");
 
     // Step 6: Create Signature protobuf messages
+    // Ed25519 signatures use CONCAT format (r || s in little-endian)
     let signature1 = Signature {
-        format: SignatureFormat::Raw as i32,
+        format: SignatureFormat::Concat as i32,
         signature: signature1_bytes.to_vec(),
         signed_by: key_fingerprint.clone(),
         signing_algorithm_spec: SigningAlgorithmSpec::Ed25519 as i32,
@@ -189,7 +193,7 @@ pub async fn sign_submissions(config: &Config, out_dir: &Path) -> Result {
     };
 
     let signature2 = Signature {
-        format: SignatureFormat::Raw as i32,
+        format: SignatureFormat::Concat as i32,
         signature: signature2_bytes.to_vec(),
         signed_by: key_fingerprint.clone(),
         signing_algorithm_spec: SigningAlgorithmSpec::Ed25519 as i32,
@@ -197,7 +201,7 @@ pub async fn sign_submissions(config: &Config, out_dir: &Path) -> Result {
     };
 
     let signature3 = Signature {
-        format: SignatureFormat::Raw as i32,
+        format: SignatureFormat::Concat as i32,
         signature: signature3_bytes.to_vec(),
         signed_by: key_fingerprint.clone(),
         signing_algorithm_spec: SigningAlgorithmSpec::Ed25519 as i32,
@@ -205,15 +209,14 @@ pub async fn sign_submissions(config: &Config, out_dir: &Path) -> Result {
     };
 
     // Step 7: Save signatures to file
-    let signatures_file = step_4_dir.join("submission-signatures.bin");
+    let step_5_dir = out_dir.join("step_5");
+    let signatures_dir = step_5_dir.join("signatures");
+    tokio::fs::create_dir_all(&signatures_dir).await?;
+
+    let signatures_file = signatures_dir.join(format!("submission-signatures-{}.bin", participant_num));
     tracing::info!("Saving signatures to {}", signatures_file.display());
 
-    let mut signature_buffer = Vec::new();
-    signature1.encode(&mut signature_buffer)?;
-    signature2.encode(&mut signature_buffer)?;
-    signature3.encode(&mut signature_buffer)?;
-
-    fs::write(&signatures_file, signature_buffer).await?;
+    utils::write_messages_to_file(&[signature1, signature2, signature3], &signatures_file).await?;
 
     tracing::info!("Signatures saved successfully");
     Ok(())
