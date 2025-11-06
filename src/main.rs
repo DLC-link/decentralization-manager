@@ -39,6 +39,9 @@ async fn main() -> Result {
     let step_2_dir = out_dir.join("step_2");
     let step_2a_dir = out_dir.join("step_2a");
     let step_2a_signed_dir = step_2a_dir.join("signed-proposals");
+    let step_3_dir = out_dir.join("step_3");
+    let step_3a_dir = out_dir.join("step_3a");
+    let step_3a_signed_dir = step_3a_dir.join("signed-proposals");
 
     // Create directories if they don't exist
     if !out_dir.exists() {
@@ -59,7 +62,7 @@ async fn main() -> Result {
         Commands::CreateProposals => steps::create_proposals(&config, &keys_dir, &ids_dir, &out_dir).await?,
         Commands::SignDnsProposals => steps::sign_dns_proposals(&config, &step_2_dir, &step_2a_signed_dir, &ids_dir).await?,
         Commands::SubmitDnsProposals => steps::submit_dns_proposals(&config, &step_2_dir, &step_2a_dir).await?,
-        Commands::SignP2pPtkProposals => steps::sign_p2p_ptk_proposals().await?,
+        Commands::SignP2pPtkProposals => steps::sign_p2p_ptk_proposals(&config, &step_3_dir, &step_3a_signed_dir, &ids_dir).await?,
         Commands::SubmitFinalProposals => steps::submit_final_proposals().await?,
         Commands::PrepareSubmissions => steps::prepare_submissions().await?,
         Commands::SignSubmissions => steps::sign_submissions().await?,

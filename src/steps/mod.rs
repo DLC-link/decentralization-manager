@@ -34,6 +34,14 @@ pub async fn run_all_steps(
 ) -> Result {
     tracing::info!("Starting full workflow");
 
+    // Construct all directory paths once
+    let step_2_dir = out_dir.join("step_2");
+    let step_2a_dir = out_dir.join("step_2a");
+    let step_2a_signed_dir = step_2a_dir.join("signed-proposals");
+    let step_3_dir = out_dir.join("step_3");
+    let step_3a_dir = out_dir.join("step_3a");
+    let step_3a_signed_dir = step_3a_dir.join("signed-proposals");
+
     // Step 1: Upload DARs and generate keys (run on each participant)
     tracing::info!("Step 1: Upload DARs and generate keys");
     upload_dars(config, dars_dir).await?;
@@ -45,19 +53,15 @@ pub async fn run_all_steps(
 
     // Step 2: Sign DNS proposals (run on each attestor)
     tracing::info!("Step 2: Sign DNS proposals");
-    let step_2_dir = out_dir.join("step_2");
-    let step_2a_signed_dir = out_dir.join("step_2a").join("signed-proposals");
     sign_dns_proposals(config, &step_2_dir, &step_2a_signed_dir, ids_dir).await?;
 
     // Step 2a: Submit DNS proposals (run once by coordinator)
     tracing::info!("Step 2a: Submit DNS proposals");
-    let step_2_dir = out_dir.join("step_2");
-    let step_2a_dir = out_dir.join("step_2a");
     submit_dns_proposals(config, &step_2_dir, &step_2a_dir).await?;
 
     // Step 3: Sign P2P/PTK proposals (run on each attestor)
     tracing::info!("Step 3: Sign P2P/PTK proposals");
-    sign_p2p_ptk_proposals().await?;
+    sign_p2p_ptk_proposals(config, &step_3_dir, &step_3a_signed_dir, ids_dir).await?;
 
     // Step 3a: Submit final proposals (run once by coordinator)
     tracing::info!("Step 3a: Submit final proposals");

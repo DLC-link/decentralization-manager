@@ -32,14 +32,9 @@ pub async fn sign_dns_proposals(
 ) -> Result {
     tracing::info!("Signing DNS proposal...");
 
-    // Step 1: Get current participant ID and find its number in the ids directory
-    let participant_id = utils::get_participant_id(config).await?;
-    // Add "PAR::" prefix to match the format stored in files (see step_1.rs export_participant_id)
-    let participant_id_with_prefix = format!("PAR::{participant_id}");
-    let participant_num = find_participant_number(ids_dir, &participant_id_with_prefix).await?;
-    tracing::debug!(
-        "Current participant ID: {participant_id}, determined number: {participant_num}"
-    );
+    // Step 1: Get participant number
+    let participant_num = utils::get_participant_number(config, ids_dir).await?;
+    tracing::debug!("Determined participant number: {participant_num}");
 
     // Step 2: Get synchronizer ID
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
@@ -85,42 +80,4 @@ pub async fn sign_dns_proposals(
 
     tracing::info!("DNS proposal signed successfully");
     Ok(())
-}
-
-/// Find which participant number corresponds to the current participant ID
-///
-/// Reads all participant-id-*.bin files and matches the current participant ID
-/// against them to determine which number this participant is.
-async fn find_participant_number(ids_dir: &Path, current_id: &str) -> Result<u32> {
-    let mut dir_entries = fs::read_dir(ids_dir).await?;
-    let mut id_files = Vec::new();
-
-    while let Some(entry) = dir_entries.next_entry().await? {
-        let file_name = entry.file_name();
-        let file_name_str = file_name.to_string_lossy();
-        if file_name_str.starts_with("participant-id") && file_name_str.ends_with(".bin") {
-            id_files.push(entry.path());
-        }
-    }
-
-    if id_files.is_empty() {
-        anyhow::bail!("No participant ID files found in {}", ids_dir.display());
-    }
-
-    id_files.sort();
-
-    // Read each file and match against current participant ID
-    for (idx, id_file) in id_files.iter().enumerate() {
-        let id_bytes = fs::read(id_file).await?;
-        let stored_id = String::from_utf8(id_bytes)?;
-
-        if stored_id == current_id {
-            return Ok((idx + 1) as u32);
-        }
-    }
-
-    anyhow::bail!(
-        "Current participant ID '{}' not found in ids directory",
-        current_id
-    )
 }
