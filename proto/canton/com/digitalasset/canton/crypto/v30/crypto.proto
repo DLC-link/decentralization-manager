@@ -170,7 +170,6 @@ enum SigningKeyUsage {
 }
 
 message SigningPublicKey {
-  // Previously public key id / fingerprint
   reserved 1;
 
   CryptoKeyFormat format = 2;
@@ -245,7 +244,6 @@ message RequiredSigningSpecs {
 }
 
 message EncryptionPublicKey {
-  // Previously public key id / fingerprint
   reserved 1;
 
   CryptoKeyFormat format = 2;
