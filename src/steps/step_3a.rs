@@ -1,10 +1,9 @@
-use std::path::Path;
-
 use tokio::{fs, time};
 
 use crate::{
     config::Config,
     consts::{TOPOLOGY_RETRY_DELAY_SECS, TOPOLOGY_RETRY_MAX_ATTEMPTS},
+    dirs::WorkflowDirs,
     error::Result,
     proto::com::digitalasset::canton::{
         protocol::v30::{DecentralizedNamespaceDefinition, SignedTopologyTransaction},
@@ -27,13 +26,8 @@ use crate::{
 ///
 /// # Arguments
 /// * `config` - Configuration with Canton connection details
-/// * `step_3_dir` - Directory containing p2p_proto.bin and ptk_proto.bin (usually ./out/step_3)
-/// * `step_3a_dir` - Directory containing signed proposals (usually ./out/step_3a)
-pub async fn submit_final_proposals(
-    config: &Config,
-    step_3_dir: &Path,
-    step_3a_dir: &Path,
-) -> Result {
+/// * `dirs` - WorkflowDirs containing all directory paths
+pub async fn submit_final_proposals(config: &Config, dirs: &WorkflowDirs) -> Result {
     tracing::info!("Submitting final proposals...");
 
     // Step 1: Get synchronizer ID
@@ -41,18 +35,18 @@ pub async fn submit_final_proposals(
     tracing::debug!("Using synchronizer ID: {synchronizer_id}");
 
     // Step 2: Read the original P2P and PTK proposals
-    let p2p_file = step_3_dir.join("p2p_proto.bin");
+    let p2p_file = dirs.p2p_ptk_proposals_dir.join("p2p_proto.bin");
     tracing::info!("Reading original P2P proposal from {}", p2p_file.display());
     let mut p2p_transaction: SignedTopologyTransaction =
         utils::read_first_message_from_file(&p2p_file).await?;
 
-    let ptk_file = step_3_dir.join("ptk_proto.bin");
+    let ptk_file = dirs.p2p_ptk_proposals_dir.join("ptk_proto.bin");
     tracing::info!("Reading original PTK proposal from {}", ptk_file.display());
     let mut ptk_transaction: SignedTopologyTransaction =
         utils::read_first_message_from_file(&ptk_file).await?;
 
     // Step 3: Discover and read all signed P2P/PTK proposals
-    let signed_proposals_dir = step_3a_dir.join("signed-proposals");
+    let signed_proposals_dir = &dirs.final_signed_dir;
     let mut signed_files = Vec::new();
     let mut dir_entries = fs::read_dir(&signed_proposals_dir).await?;
 
@@ -104,11 +98,7 @@ pub async fn submit_final_proposals(
     );
 
     // Step 5: Read namespace definition and construct party ID
-    let namespace_file = step_3a_dir
-        .parent()
-        .unwrap()
-        .join("step_2a")
-        .join("namespaceDef.bin");
+    let namespace_file = dirs.dns_submission_dir.join("namespaceDef.bin");
     tracing::info!(
         "Reading namespace definition from {}",
         namespace_file.display()

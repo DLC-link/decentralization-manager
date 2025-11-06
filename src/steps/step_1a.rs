@@ -1,9 +1,10 @@
-use std::{collections::HashSet, path::Path};
+use std::collections::HashSet;
 
 use tokio::fs;
 
 use crate::{
     config::Config,
+    dirs::WorkflowDirs,
     error::Result,
     proto::com::digitalasset::canton::{
         crypto::v30::SigningPublicKey,
@@ -39,21 +40,16 @@ use crate::{
 ///
 /// **Note**: If you encounter TOPOLOGY_NO_APPROPRIATE_SIGNING_KEY_IN_STORE errors,
 /// ensure the participant is properly connected to a synchronizer first.
-pub async fn create_proposals(
-    config: &Config,
-    keys_dir: &Path,
-    ids_dir: &Path,
-    out_dir: &Path,
-) -> Result {
+pub async fn create_proposals(config: &Config, dirs: &WorkflowDirs) -> Result {
     tracing::info!("Creating topology proposals...");
 
     // Step 1: Load all attestor key files
-    if !keys_dir.exists() {
+    if !dirs.keys_dir.exists() {
         anyhow::bail!("keys directory not found");
     }
 
     let mut key_file_paths = Vec::new();
-    let mut dir_entries = fs::read_dir(keys_dir).await?;
+    let mut dir_entries = fs::read_dir(&dirs.keys_dir).await?;
     while let Some(entry) = dir_entries.next_entry().await? {
         let file_name = entry.file_name();
         let file_name_str = file_name.to_string_lossy();
@@ -102,12 +98,12 @@ pub async fn create_proposals(
     tracing::info!("Extracted {} unique namespaces", namespaces.len());
 
     // Step 4: Load all participant ID files
-    if !ids_dir.exists() {
+    if !dirs.ids_dir.exists() {
         anyhow::bail!("ids directory not found");
     }
 
     let mut id_file_paths = Vec::new();
-    let mut dir_entries = fs::read_dir(ids_dir).await?;
+    let mut dir_entries = fs::read_dir(&dirs.ids_dir).await?;
     while let Some(entry) = dir_entries.next_entry().await? {
         let file_name = entry.file_name();
         let file_name_str = file_name.to_string_lossy();
@@ -274,27 +270,23 @@ pub async fn create_proposals(
         .ok_or_else(|| anyhow::anyhow!("No PTK transaction returned"))?;
 
     // Step 13: Save proposals to files
-    let step_2_dir = out_dir.join("step_2");
-    let step_3_dir = out_dir.join("step_3");
-    let step_2a_dir = out_dir.join("step_2a");
+    fs::create_dir_all(&dirs.dns_proposals_dir).await?;
+    fs::create_dir_all(&dirs.p2p_ptk_proposals_dir).await?;
+    fs::create_dir_all(&dirs.dns_submission_dir).await?;
 
-    fs::create_dir_all(&step_2_dir).await?;
-    fs::create_dir_all(&step_3_dir).await?;
-    fs::create_dir_all(&step_2a_dir).await?;
-
-    let dns_file = step_2_dir.join("dns_proto.bin");
+    let dns_file = dirs.dns_proposals_dir.join("dns_proto.bin");
     tracing::info!("Saving DNS proposal to {}", dns_file.display());
     utils::write_message_to_file(&dns_transaction, &dns_file).await?;
 
-    let p2p_file = step_3_dir.join("p2p_proto.bin");
+    let p2p_file = dirs.p2p_ptk_proposals_dir.join("p2p_proto.bin");
     tracing::info!("Saving P2P proposal to {}", p2p_file.display());
     utils::write_message_to_file(&p2p_transaction, &p2p_file).await?;
 
-    let ptk_file = step_3_dir.join("ptk_proto.bin");
+    let ptk_file = dirs.p2p_ptk_proposals_dir.join("ptk_proto.bin");
     tracing::info!("Saving PTK proposal to {}", ptk_file.display());
     utils::write_message_to_file(&ptk_transaction, &ptk_file).await?;
 
-    let namespace_file = step_2a_dir.join("namespaceDef.bin");
+    let namespace_file = dirs.dns_submission_dir.join("namespaceDef.bin");
     tracing::info!(
         "Saving namespace definition to {}",
         namespace_file.display()

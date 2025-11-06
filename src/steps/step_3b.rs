@@ -1,10 +1,9 @@
-use std::path::Path;
-
 use tokio::fs;
 
 use crate::{
     config::Config,
     consts::{TOPOLOGY_RETRY_DELAY_SECS, TOPOLOGY_RETRY_MAX_ATTEMPTS},
+    dirs::WorkflowDirs,
     error::Result,
     proto::com::{
         daml::ledger::api::v2::{
@@ -40,12 +39,12 @@ const DEFAULT_PAGE_SIZE: i32 = 1000;
 ///
 /// # Arguments
 /// * `config` - Configuration with Ledger API connection details
-/// * `out_dir` - Base output directory (usually ./out)
-pub async fn prepare_submissions(config: &Config, out_dir: &Path) -> Result {
+/// * `dirs` - WorkflowDirs containing all directory paths
+pub async fn prepare_submissions(config: &Config, dirs: &WorkflowDirs) -> Result {
     tracing::info!("Preparing submissions...");
 
     // Step 1: Construct decentralized registrar party ID from namespace definition
-    let namespace_file = out_dir.join("step_2a").join("namespaceDef.bin");
+    let namespace_file = dirs.dns_submission_dir.join("namespaceDef.bin");
     tracing::debug!(
         "Reading namespace definition from {}",
         namespace_file.display()
@@ -419,25 +418,25 @@ pub async fn prepare_submissions(config: &Config, out_dir: &Path) -> Result {
         .into_inner();
 
     // Step 9: Save prepared submissions to files
-    let step_4_dir = out_dir.join("step_4");
-    let subs_dir = step_4_dir.join("subs");
-    fs::create_dir_all(&subs_dir).await?;
+    let ledger_submissions_dir = dirs.workflow_dir.join("ledger-submissions");
+    let prepared_dir = ledger_submissions_dir.join("prepared");
+    fs::create_dir_all(&prepared_dir).await?;
 
-    let submission1_file = subs_dir.join("prepared-submission-1.bin");
+    let submission1_file = prepared_dir.join("prepared-submission-1.bin");
     tracing::debug!(
         "Saving prepared submission 1 to {}",
         submission1_file.display()
     );
     utils::write_messages_to_file(&[prepared_submission1], &submission1_file).await?;
 
-    let submission2_file = subs_dir.join("prepared-submission-2.bin");
+    let submission2_file = prepared_dir.join("prepared-submission-2.bin");
     tracing::debug!(
         "Saving prepared submission 2 to {}",
         submission2_file.display()
     );
     utils::write_messages_to_file(&[prepared_submission2], &submission2_file).await?;
 
-    let submission3_file = subs_dir.join("prepared-submission-3.bin");
+    let submission3_file = prepared_dir.join("prepared-submission-3.bin");
     tracing::debug!(
         "Saving prepared submission 3 to {}",
         submission3_file.display()
