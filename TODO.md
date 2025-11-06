@@ -487,11 +487,11 @@ Attestors sign ledger submissions, coordinator executes them on the ledger.
   - [x] Sign with participant's keys via Canton SignTransactions RPC
   - [x] Determine participant number by matching participant ID against ids directory
   - [x] Save signed proposal with unique filename
-- [ ] Implement `submit_dns_proposals()`: Step 2a - 02a_SubmitProposals
-  - [ ] Load all signed DNS proposals
-  - [ ] Aggregate signatures
-  - [ ] Submit to topology
-  - [ ] Wait for propagation
+- [x] Implement `submit_dns_proposals()`: Step 2a - 02a_SubmitProposals
+  - [x] Load all signed DNS proposals from step_2a/signed-proposals
+  - [x] Aggregate signatures from all attestors
+  - [x] Submit to topology via AddTransactions RPC
+  - [x] Poll and wait for DNS to appear in topology (with retry logic)
 
 ### Phase 5: Steps 3 & 3a Implementation
 - [ ] Implement `sign_p2p_ptk_proposals()`: Step 3 - 03_SignP2PPTKProposals
