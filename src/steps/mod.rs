@@ -45,7 +45,9 @@ pub async fn run_all_steps(
 
     // Step 2: Sign DNS proposals (run on each attestor)
     tracing::info!("Step 2: Sign DNS proposals");
-    sign_dns_proposals().await?;
+    let step_2_dir = out_dir.join("step_2");
+    let step_2a_signed_dir = out_dir.join("step_2a").join("signed-proposals");
+    sign_dns_proposals(config, &step_2_dir, &step_2a_signed_dir, ids_dir).await?;
 
     // Step 2a: Submit DNS proposals (run once by coordinator)
     tracing::info!("Step 2a: Submit DNS proposals");
