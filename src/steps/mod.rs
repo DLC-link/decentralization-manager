@@ -73,7 +73,7 @@ pub async fn run_all_steps(
 
     // Step 4: Sign submissions (run on each attestor)
     tracing::info!("Step 4: Sign submissions");
-    sign_submissions().await?;
+    sign_submissions(config, out_dir).await?;
 
     // Step 5: Execute submissions (run once by coordinator)
     tracing::info!("Step 5: Execute submissions");

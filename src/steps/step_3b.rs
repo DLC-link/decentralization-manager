@@ -1,32 +1,35 @@
 use std::path::Path;
 
-use prost::Message;
 use tokio::fs;
 
 use crate::{
     config::Config,
+    consts::{TOPOLOGY_RETRY_DELAY_SECS, TOPOLOGY_RETRY_MAX_ATTEMPTS},
     error::Result,
     proto::com::{
         daml::ledger::api::v2::{
-            Command, CreateCommand, GenMap, Identifier, Optional, Record, RecordField, Value,
             admin::{
-                CreateUserRequest, GrantUserRightsRequest, ListKnownPartiesRequest, ObjectMeta,
-                Right, User,
                 party_management_service_client::PartyManagementServiceClient,
                 right::{CanActAs, CanReadAs, Kind},
                 user_management_service_client::UserManagementServiceClient,
+                CreateUserRequest, GrantUserRightsRequest, ListKnownPartiesRequest, ObjectMeta,
+                Right, User,
             },
             command, gen_map,
             interactive::{
-                PrepareSubmissionRequest,
                 interactive_submission_service_client::InteractiveSubmissionServiceClient,
+                PrepareSubmissionRequest,
             },
-            value,
+            value, Command, CreateCommand, GenMap, Identifier, Optional, Record, RecordField,
+            Value,
         },
         digitalasset::canton::protocol::v30::DecentralizedNamespaceDefinition,
     },
     utils,
 };
+
+/// Default page size for listing operations (parties, keys, etc.)
+const DEFAULT_PAGE_SIZE: i32 = 1000;
 
 /// Prepare ledger submissions for governance contracts
 ///
@@ -58,15 +61,15 @@ pub async fn prepare_submissions(config: &Config, out_dir: &Path) -> Result {
     tracing::info!("Waiting for decentralized party to be visible in Ledger API...");
     let mut party_client = PartyManagementServiceClient::connect(config.ledger_api_url()).await?;
 
-    let max_attempts = 30;
-    let retry_delay = tokio::time::Duration::from_secs(2);
+    let max_attempts = TOPOLOGY_RETRY_MAX_ATTEMPTS;
+    let retry_delay = tokio::time::Duration::from_secs(TOPOLOGY_RETRY_DELAY_SECS);
 
     for attempt in 1..=max_attempts {
         let response = party_client
             .list_known_parties(tonic::Request::new(ListKnownPartiesRequest {
                 identity_provider_id: String::new(),
                 page_token: String::new(),
-                page_size: 1000,
+                page_size: DEFAULT_PAGE_SIZE,
             }))
             .await?
             .into_inner();
@@ -425,33 +428,21 @@ pub async fn prepare_submissions(config: &Config, out_dir: &Path) -> Result {
         "Saving prepared submission 1 to {}",
         submission1_file.display()
     );
-    let prepared_tx1 = prepared_submission1
-        .prepared_transaction
-        .ok_or_else(|| anyhow::anyhow!("No prepared transaction in response"))?;
-    let encoded1 = prepared_tx1.encode_to_vec();
-    utils::write_bytes_to_file(&encoded1, &submission1_file).await?;
+    utils::write_messages_to_file(&[prepared_submission1], &submission1_file).await?;
 
     let submission2_file = subs_dir.join("prepared-submission-2.bin");
     tracing::debug!(
         "Saving prepared submission 2 to {}",
         submission2_file.display()
     );
-    let prepared_tx2 = prepared_submission2
-        .prepared_transaction
-        .ok_or_else(|| anyhow::anyhow!("No prepared transaction in response"))?;
-    let encoded2 = prepared_tx2.encode_to_vec();
-    utils::write_bytes_to_file(&encoded2, &submission2_file).await?;
+    utils::write_messages_to_file(&[prepared_submission2], &submission2_file).await?;
 
     let submission3_file = subs_dir.join("prepared-submission-3.bin");
     tracing::debug!(
         "Saving prepared submission 3 to {}",
         submission3_file.display()
     );
-    let prepared_tx3 = prepared_submission3
-        .prepared_transaction
-        .ok_or_else(|| anyhow::anyhow!("No prepared transaction in response"))?;
-    let encoded3 = prepared_tx3.encode_to_vec();
-    utils::write_bytes_to_file(&encoded3, &submission3_file).await?;
+    utils::write_messages_to_file(&[prepared_submission3], &submission3_file).await?;
 
     tracing::info!("Submissions prepared successfully");
     Ok(())
