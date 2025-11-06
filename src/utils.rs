@@ -14,7 +14,8 @@ use crate::{
         },
         crypto::v30::SigningPublicKey,
         topology::admin::v30::{
-            GetIdRequest, identity_initialization_service_client::IdentityInitializationServiceClient,
+            GetIdRequest,
+            identity_initialization_service_client::IdentityInitializationServiceClient,
         },
     },
 };
@@ -249,6 +250,52 @@ pub async fn get_participant_id(config: &Config) -> Result<String> {
     }
 
     Ok(response.unique_identifier)
+}
+
+/// Find which participant number corresponds to the current participant ID
+///
+/// Reads all participant-id-*.bin files and matches the current participant ID
+/// against them to determine which number this participant is.
+///
+/// Note: The stored IDs in files have "PAR::" prefix, so current_id should match that format.
+pub async fn find_participant_number(ids_dir: &Path, current_id: &str) -> Result<u32> {
+    let mut dir_entries = fs::read_dir(ids_dir).await?;
+    let mut id_files = Vec::new();
+
+    while let Some(entry) = dir_entries.next_entry().await? {
+        let file_name = entry.file_name();
+        let file_name_str = file_name.to_string_lossy();
+        if file_name_str.starts_with("participant-id") && file_name_str.ends_with(".bin") {
+            id_files.push(entry.path());
+        }
+    }
+
+    if id_files.is_empty() {
+        anyhow::bail!("No participant ID files found in {}", ids_dir.display());
+    }
+
+    id_files.sort();
+
+    // Read each file and match against current participant ID
+    for (idx, id_file) in id_files.iter().enumerate() {
+        let id_bytes = fs::read(id_file).await?;
+        let stored_id = String::from_utf8(id_bytes)?;
+
+        if stored_id == current_id {
+            return Ok((idx + 1) as u32);
+        }
+    }
+
+    anyhow::bail!("Current participant ID '{current_id}' not found in ids directory")
+}
+
+/// Get participant number for current participant
+///
+/// Convenience function that gets the participant ID and finds its number.
+pub async fn get_participant_number(config: &Config, ids_dir: &Path) -> Result<u32> {
+    let participant_id = get_participant_id(config).await?;
+    let participant_id_with_prefix = format!("PAR::{participant_id}");
+    find_participant_number(ids_dir, &participant_id_with_prefix).await
 }
 
 #[cfg(test)]
