@@ -51,7 +51,9 @@ pub async fn run_all_steps(
 
     // Step 2a: Submit DNS proposals (run once by coordinator)
     tracing::info!("Step 2a: Submit DNS proposals");
-    submit_dns_proposals().await?;
+    let step_2_dir = out_dir.join("step_2");
+    let step_2a_dir = out_dir.join("step_2a");
+    submit_dns_proposals(config, &step_2_dir, &step_2a_dir).await?;
 
     // Step 3: Sign P2P/PTK proposals (run on each attestor)
     tracing::info!("Step 3: Sign P2P/PTK proposals");
