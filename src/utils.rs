@@ -13,6 +13,9 @@ use crate::{
             synchronizer_connectivity_service_client::SynchronizerConnectivityServiceClient,
         },
         crypto::v30::SigningPublicKey,
+        topology::admin::v30::{
+            GetIdRequest, identity_initialization_service_client::IdentityInitializationServiceClient,
+        },
     },
 };
 
@@ -228,6 +231,24 @@ pub async fn get_synchronizer_id(config: &Config) -> Result<String> {
     }
 
     Ok(response.physical_synchronizer_id)
+}
+
+/// Get participant ID from Canton
+///
+/// Queries the participant's identity initialization service to get the unique participant ID.
+pub async fn get_participant_id(config: &Config) -> Result<String> {
+    let mut id_client =
+        IdentityInitializationServiceClient::connect(config.admin_api_url()).await?;
+    let response = id_client
+        .get_id(tonic::Request::new(GetIdRequest {}))
+        .await?
+        .into_inner();
+
+    if response.unique_identifier.is_empty() {
+        anyhow::bail!("No participant ID returned");
+    }
+
+    Ok(response.unique_identifier)
 }
 
 #[cfg(test)]

@@ -482,10 +482,11 @@ Attestors sign ledger submissions, coordinator executes them on the ledger.
   - [x] Fixed: compute_decentralized_namespace to use length-prefixed hashing
 
 ### Phase 4: Steps 2 & 2a Implementation
-- [ ] Implement `sign_dns_proposals()`: Step 2 - 02_SignProposals
-  - [ ] Load DNS proposal
-  - [ ] Sign with participant's keys
-  - [ ] Save signed proposal
+- [x] Implement `sign_dns_proposals()`: Step 2 - 02_SignProposals
+  - [x] Load DNS proposal
+  - [x] Sign with participant's keys via Canton SignTransactions RPC
+  - [x] Determine participant number by matching participant ID against ids directory
+  - [x] Save signed proposal with unique filename
 - [ ] Implement `submit_dns_proposals()`: Step 2a - 02a_SubmitProposals
   - [ ] Load all signed DNS proposals
   - [ ] Aggregate signatures
