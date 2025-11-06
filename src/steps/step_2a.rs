@@ -4,6 +4,7 @@ use tokio::{fs, time};
 
 use crate::{
     config::Config,
+    consts::{TOPOLOGY_RETRY_DELAY_SECS, TOPOLOGY_RETRY_MAX_ATTEMPTS},
     error::Result,
     proto::com::digitalasset::canton::{
         protocol::v30::{DecentralizedNamespaceDefinition, SignedTopologyTransaction},
@@ -133,8 +134,8 @@ async fn wait_for_dns_in_topology(
     let mut topology_read_client =
         TopologyManagerReadServiceClient::connect(config.admin_api_url()).await?;
 
-    let max_attempts = 30;
-    let retry_delay = time::Duration::from_secs(2);
+    let max_attempts = TOPOLOGY_RETRY_MAX_ATTEMPTS;
+    let retry_delay = time::Duration::from_secs(TOPOLOGY_RETRY_DELAY_SECS);
 
     for attempt in 1..=max_attempts {
         let request = tonic::Request::new(ListDecentralizedNamespaceDefinitionRequest {

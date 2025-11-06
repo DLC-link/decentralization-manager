@@ -514,12 +514,13 @@ Attestors sign ledger submissions, coordinator executes them on the ledger.
   - [x] Fixed: Updated value.proto with correct field ordering (Party=7, ContractId=9, Record=14)
 
 ### Phase 7: Steps 4 & 5 Implementation
-- [ ] Implement `sign_submissions()`: Step 4 - 04_SignSubmissions
-  - [ ] Load prepared submissions
-  - [ ] Find and export DAML key
-  - [ ] Set up crypto (most complex part)
-  - [ ] Sign each submission hash
-  - [ ] Save signatures
+- [x] Implement `sign_submissions()`: Step 4 - 04_SignSubmissions
+  - [x] Load prepared submissions
+  - [x] Find and export DAML key
+  - [x] Set up crypto (manual DER parsing for Canton protocol v33)
+  - [x] Sign each submission hash with Ed25519
+  - [x] Save signatures
+  - [x] Fixed: Canton protocol version 33 compatibility - manual extraction of Ed25519 key from DER-encoded PKCS#8 format
 - [ ] Implement `execute_submissions()`: Step 5 - 05_ExecuteSubmissions
   - [ ] Load prepared submissions
   - [ ] Load all attestor signatures
