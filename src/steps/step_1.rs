@@ -19,9 +19,8 @@ use crate::{
             topology_mapping,
         },
         topology::admin::v30::{
-            AuthorizeRequest, GetIdRequest, StoreId, Synchronizer, authorize_request,
-            identity_initialization_service_client::IdentityInitializationServiceClient, store_id,
-            synchronizer, topology_manager_write_service_client::TopologyManagerWriteServiceClient,
+            AuthorizeRequest, StoreId, Synchronizer, authorize_request, store_id, synchronizer,
+            topology_manager_write_service_client::TopologyManagerWriteServiceClient,
         },
     },
     utils,
@@ -140,7 +139,7 @@ pub async fn generate_keys(config: &Config, keys_dir: &Path, ids_dir: &Path) -> 
     .await?;
 
     // Get participant ID and export keys
-    let participant_id = get_participant_id(config).await?;
+    let participant_id = crate::utils::get_participant_id(config).await?;
     let participant_num = extract_participant_number(&participant_id);
 
     export_keys(keys_dir, &namespace_key, &daml_key, participant_num).await?;
@@ -170,22 +169,6 @@ async fn generate_signing_key(
     response
         .public_key
         .ok_or_else(|| anyhow::anyhow!("No public key returned from VaultService"))
-}
-
-/// Helper: Get participant ID
-async fn get_participant_id(config: &Config) -> Result<String> {
-    let mut id_client =
-        IdentityInitializationServiceClient::connect(config.admin_api_url()).await?;
-    let response = id_client
-        .get_id(tonic::Request::new(GetIdRequest {}))
-        .await?
-        .into_inner();
-
-    if response.unique_identifier.is_empty() {
-        anyhow::bail!("No participant ID returned");
-    }
-
-    Ok(response.unique_identifier)
 }
 
 /// Helper: Extract participant number from ID (e.g., "participant1" -> 1)
