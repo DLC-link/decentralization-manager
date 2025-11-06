@@ -1,5 +1,6 @@
 pub mod config;
 pub mod consts;
+pub mod dirs;
 pub mod error;
 pub mod steps;
 pub mod utils;
@@ -41,24 +42,9 @@ pub mod proto {
         pub mod digitalasset {
             pub mod canton {
                 pub mod admin {
-                    pub mod crypto {
-                        pub mod v30 {
-                            tonic::include_proto!("com.digitalasset.canton.admin.crypto.v30");
-                        }
-                    }
-                    pub mod health {
-                        pub mod v30 {
-                            tonic::include_proto!("com.digitalasset.canton.admin.health.v30");
-                        }
-                    }
                     pub mod participant {
                         pub mod v30 {
                             tonic::include_proto!("com.digitalasset.canton.admin.participant.v30");
-                        }
-                    }
-                    pub mod pruning {
-                        pub mod v30 {
-                            tonic::include_proto!("com.digitalasset.canton.admin.pruning.v30");
                         }
                     }
                     pub mod sequencer {

@@ -12,7 +12,7 @@ pub struct WorkflowDirs {
     pub dns_proposals_dir: PathBuf,
     pub dns_submission_dir: PathBuf,
     pub dns_signed_dir: PathBuf,
-    pub p2p_proposals_dir: PathBuf,
+    pub p2p_ptk_proposals_dir: PathBuf,
     pub final_proposals_dir: PathBuf,
     pub final_signed_dir: PathBuf,
 }
@@ -32,7 +32,7 @@ impl WorkflowDirs {
             dns_proposals_dir: workflow_dir.join("dns-proposals"),
             dns_submission_dir: dns_submission_dir.clone(),
             dns_signed_dir: dns_submission_dir.join("signed-proposals"),
-            p2p_proposals_dir: workflow_dir.join("p2p-proposals"),
+            p2p_ptk_proposals_dir: workflow_dir.join("p2p-ptk-proposals"),
             final_proposals_dir: final_proposals_dir.clone(),
             final_signed_dir: final_proposals_dir.join("signed-proposals"),
         }

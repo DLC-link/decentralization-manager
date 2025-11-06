@@ -1,6 +1,4 @@
-use std::path::Path;
-
-use crate::{config::Config, error::Result};
+use crate::{config::Config, dirs::WorkflowDirs, error::Result};
 
 // Step modules
 pub mod step_1;
@@ -25,59 +23,45 @@ pub use step_4::sign_submissions;
 pub use step_5::execute_submissions;
 
 /// Run all steps in sequence
-pub async fn run_all_steps(
-    config: &Config,
-    dars_dir: &Path,
-    keys_dir: &Path,
-    ids_dir: &Path,
-    out_dir: &Path,
-) -> Result {
+pub async fn run_all_steps(config: &Config, dirs: &WorkflowDirs) -> Result {
     tracing::info!("Starting full workflow");
-
-    // Construct all directory paths once
-    let step_2_dir = out_dir.join("step_2");
-    let step_2a_dir = out_dir.join("step_2a");
-    let step_2a_signed_dir = step_2a_dir.join("signed-proposals");
-    let step_3_dir = out_dir.join("step_3");
-    let step_3a_dir = out_dir.join("step_3a");
-    let step_3a_signed_dir = step_3a_dir.join("signed-proposals");
 
     // Step 1: Upload DARs and generate keys (run on each participant)
     tracing::info!("Step 1: Upload DARs and generate keys");
-    upload_dars(config, dars_dir).await?;
-    generate_keys(config, keys_dir, ids_dir).await?;
+    upload_dars(config, dirs).await?;
+    generate_keys(config, dirs).await?;
 
     // Step 1a: Create proposals (run once by coordinator)
     tracing::info!("Step 1a: Create proposals");
-    create_proposals(config, keys_dir, ids_dir, out_dir).await?;
+    create_proposals(config, dirs).await?;
 
     // Step 2: Sign DNS proposals (run on each attestor)
     tracing::info!("Step 2: Sign DNS proposals");
-    sign_dns_proposals(config, &step_2_dir, &step_2a_signed_dir, ids_dir).await?;
+    sign_dns_proposals(config, dirs).await?;
 
     // Step 2a: Submit DNS proposals (run once by coordinator)
     tracing::info!("Step 2a: Submit DNS proposals");
-    submit_dns_proposals(config, &step_2_dir, &step_2a_dir).await?;
+    submit_dns_proposals(config, dirs).await?;
 
     // Step 3: Sign P2P/PTK proposals (run on each attestor)
     tracing::info!("Step 3: Sign P2P/PTK proposals");
-    sign_p2p_ptk_proposals(config, &step_3_dir, &step_3a_signed_dir, ids_dir).await?;
+    sign_p2p_ptk_proposals(config, dirs).await?;
 
     // Step 3a: Submit final proposals (run once by coordinator)
     tracing::info!("Step 3a: Submit final proposals");
-    submit_final_proposals(config, &step_3_dir, &step_3a_dir).await?;
+    submit_final_proposals(config, dirs).await?;
 
     // Step 3b: Prepare submissions (run once by coordinator)
     tracing::info!("Step 3b: Prepare submissions");
-    prepare_submissions(config, out_dir).await?;
+    prepare_submissions(config, dirs).await?;
 
     // Step 4: Sign submissions (run on each attestor)
     tracing::info!("Step 4: Sign submissions");
-    sign_submissions(config, out_dir, ids_dir).await?;
+    sign_submissions(config, dirs).await?;
 
     // Step 5: Execute submissions (run once by coordinator)
     tracing::info!("Step 5: Execute submissions");
-    execute_submissions(config, out_dir).await?;
+    execute_submissions(config, dirs).await?;
 
     tracing::info!("Full workflow completed successfully");
     Ok(())
