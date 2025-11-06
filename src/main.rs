@@ -82,8 +82,8 @@ async fn main() -> Result {
             steps::submit_final_proposals(&config, &step_3_dir, &step_3a_dir).await?
         }
         Commands::PrepareSubmissions => steps::prepare_submissions(&config, &out_dir).await?,
-        Commands::SignSubmissions => steps::sign_submissions(&config, &out_dir).await?,
-        Commands::ExecuteSubmissions => steps::execute_submissions().await?,
+        Commands::SignSubmissions => steps::sign_submissions(&config, &out_dir, &ids_dir).await?,
+        Commands::ExecuteSubmissions => steps::execute_submissions(&config, &out_dir).await?,
     }
 
     tracing::info!("Command completed successfully");

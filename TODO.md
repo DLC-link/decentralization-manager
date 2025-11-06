@@ -521,12 +521,13 @@ Attestors sign ledger submissions, coordinator executes them on the ledger.
   - [x] Sign each submission hash with Ed25519
   - [x] Save signatures
   - [x] Fixed: Canton protocol version 33 compatibility - manual extraction of Ed25519 key from DER-encoded PKCS#8 format
-- [ ] Implement `execute_submissions()`: Step 5 - 05_ExecuteSubmissions
-  - [ ] Load prepared submissions
-  - [ ] Load all attestor signatures
-  - [ ] Build signature map
-  - [ ] Execute each submission via RPC
-  - [ ] Wait for contracts in ACS
+- [x] Implement `execute_submissions()`: Step 5 - 05_ExecuteSubmissions
+  - [x] Load prepared submissions
+  - [x] Load all attestor signatures
+  - [x] Build signature map
+  - [x] Execute each submission via RPC
+  - [x] Wait for contracts in ACS
+  - [x] Fixed: Added proper EventFormat with WildcardFilter for ACS query
 
 ### Phase 8: Integration & Testing
 - [ ] Create end-to-end test with 3 mock participants
