@@ -4,7 +4,39 @@ pub mod steps;
 pub mod utils;
 
 pub mod proto {
+    pub mod google {
+        pub mod rpc {
+            tonic::include_proto!("google.rpc");
+        }
+    }
+
     pub mod com {
+        pub mod daml {
+            pub mod ledger {
+                pub mod api {
+                    pub mod v2 {
+                        tonic::include_proto!("com.daml.ledger.api.v2");
+
+                        pub mod admin {
+                            tonic::include_proto!("com.daml.ledger.api.v2.admin");
+                        }
+
+                        pub mod interactive {
+                            tonic::include_proto!("com.daml.ledger.api.v2.interactive");
+
+                            pub mod transaction {
+                                pub mod v1 {
+                                    tonic::include_proto!(
+                                        "com.daml.ledger.api.v2.interactive.transaction.v1"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         pub mod digitalasset {
             pub mod canton {
                 pub mod admin {
