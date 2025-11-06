@@ -67,7 +67,7 @@ async fn main() -> Result {
         Commands::SignDnsProposals => steps::sign_dns_proposals(&config, &step_2_dir, &step_2a_signed_dir, &ids_dir).await?,
         Commands::SubmitDnsProposals => steps::submit_dns_proposals(&config, &step_2_dir, &step_2a_dir).await?,
         Commands::SignP2pPtkProposals => steps::sign_p2p_ptk_proposals(&config, &step_3_dir, &step_3a_signed_dir, &ids_dir).await?,
-        Commands::SubmitFinalProposals => steps::submit_final_proposals().await?,
+        Commands::SubmitFinalProposals => steps::submit_final_proposals(&config, &step_3_dir, &step_3a_dir).await?,
         Commands::PrepareSubmissions => steps::prepare_submissions().await?,
         Commands::SignSubmissions => steps::sign_submissions().await?,
         Commands::ExecuteSubmissions => steps::execute_submissions().await?,
