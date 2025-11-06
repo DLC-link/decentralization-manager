@@ -4,6 +4,7 @@ use tokio::fs;
 
 use crate::{
     config::Config,
+    dirs::WorkflowDirs,
     error::Result,
     proto::com::digitalasset::canton::{
         admin::participant::v30::{
@@ -42,14 +43,14 @@ const PARTICIPANT_ID_PREFIX: &str = "PAR::";
 /// Corresponds to: 00_UploadDars.sc
 ///
 /// Uploads both CBTC and governance DAR files to the Canton participant.
-pub async fn upload_dars(config: &Config, dars_dir: &Path) -> Result {
-    tracing::info!("Uploading DARs from {}", dars_dir.display());
+pub async fn upload_dars(config: &Config, dirs: &WorkflowDirs) -> Result {
+    tracing::info!("Uploading DARs from {}", dirs.dars_dir.display());
 
     let mut client = PackageServiceClient::connect(config.admin_api_url()).await?;
 
     // Read both DAR files
-    let cbtc_dar_path = dars_dir.join(CBTC_DAR_FILENAME);
-    let gov_dar_path = dars_dir.join(GOVERNANCE_DAR_FILENAME);
+    let cbtc_dar_path = dirs.dars_dir.join(CBTC_DAR_FILENAME);
+    let gov_dar_path = dirs.dars_dir.join(GOVERNANCE_DAR_FILENAME);
 
     // Upload CBTC DAR
     tracing::debug!("Reading {}", cbtc_dar_path.display());
@@ -109,7 +110,7 @@ pub async fn upload_dars(config: &Config, dars_dir: &Path) -> Result {
 /// This function generates signing keys and exports them along with the participant ID.
 /// The namespace delegation step from the original Scala script is currently skipped
 /// and should be implemented separately using TopologyManagerWriteService.
-pub async fn generate_keys(config: &Config, keys_dir: &Path, ids_dir: &Path) -> Result {
+pub async fn generate_keys(config: &Config, dirs: &WorkflowDirs) -> Result {
     tracing::info!("Generating cryptographic keys...");
 
     let mut vault_client = VaultServiceClient::connect(config.admin_api_url()).await?;
@@ -142,8 +143,8 @@ pub async fn generate_keys(config: &Config, keys_dir: &Path, ids_dir: &Path) -> 
     let participant_id = crate::utils::get_participant_id(config).await?;
     let participant_num = extract_participant_number(&participant_id);
 
-    export_keys(keys_dir, &namespace_key, &daml_key, participant_num).await?;
-    export_participant_id(ids_dir, &participant_id, participant_num).await?;
+    export_keys(&dirs.keys_dir, &namespace_key, &daml_key, participant_num).await?;
+    export_participant_id(&dirs.ids_dir, &participant_id, participant_num).await?;
 
     tracing::info!("Keys and participant ID exported successfully");
 

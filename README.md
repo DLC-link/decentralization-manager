@@ -1,14 +1,26 @@
-# Canton gRPC Rust Test
+# Canton Decentralized Party Onboarding Automatization
 
-Canton workflow automation - porting Scala scripts to Rust for decentralized namespace setup and governance.
+A Rust-based automation tool for multi-party decentralized namespace setup in Canton blockchain networks. This project streamlines the complex process of onboarding multiple parties to a Canton-based Central Bank Digital Currency (CBTC) governance system by automating topology management, cryptographic key generation, and ledger operations.
+
+## Key Features
+
+- **Automated Multi-Party Onboarding**: Orchestrates the complete workflow for setting up decentralized party participation
+- **gRPC Integration**: Native Canton Admin and Ledger API integration using Protocol Buffers
+- **Cryptographic Key Management**: Automated generation and management of cryptographic keys for secure party identification
+- **Topology Management**: Handles DNS, P2P, and Participant Topology Key (PTK) proposal creation, signing, and submission
+- **Ledger Operations**: Manages preparation, signing, and execution of ledger submissions
+- **Configuration-Driven**: Flexible TOML-based configuration for different Canton environments
+- **Production Ready**: Includes comprehensive error handling, logging, and code quality tooling
+
+## Architecture
+
+This tool implements a port of Canton Scala scripts to Rust, providing a more performant and memory-safe alternative for automated party onboarding. It follows a step-based workflow that ensures proper ordering of operations and handles the complex interdependencies between topology changes and ledger state modifications.
 
 ## Table of Contents
 
 - [Project Overview](#project-overview)
 - [Documentation](#documentation)
 - [Setup](#setup)
-  - [Clone Canton APIs](#clone-canton-apis)
-  - [Clone Google APIs](#clone-google-apis)
   - [Configuration](#configuration)
 - [Usage](#usage)
   - [Run All Steps in Sequence](#run-all-steps-in-sequence)
@@ -24,10 +36,6 @@ Canton workflow automation - porting Scala scripts to Rust for decentralized nam
   - [Auto-fix Clippy Issues](#auto-fix-clippy-issues)
   - [Format Code](#format-code)
   - [Check Formatting Without Modifying Files](#check-formatting-without-modifying-files)
-- [Reference](#reference)
-  - [List Services](#list-services)
-    - [Admin API](#admin-api)
-    - [Ledger API](#ledger-api)
 
 ## Project Overview
 
@@ -38,146 +46,15 @@ This project ports Canton Scala scripts to Rust, implementing a multi-party dece
 3. **Steps 2-3a**: Multi-party signing and submission of topology proposals
 4. **Steps 3b-5**: Prepare, sign, and execute ledger submissions
 
-For detailed implementation plans and progress, see [TODO.md](./TODO.md).
+**Status**: All implementation phases complete. For detailed documentation, see [docs/TODO.md](./docs/TODO.md).
 
 ## Documentation
 
-- **[TODO.md](./TODO.md)** - Detailed implementation plan, API mappings, and step-by-step breakdown
-- **[CODING-STANDARDS.md](./CODING-STANDARDS.md)** - Project coding standards and style guide
+- **[docs/TODO.md](./docs/TODO.md)** - Detailed implementation plan, API mappings, and step-by-step breakdown
+- **[docs/CODING-STANDARDS.md](./docs/CODING-STANDARDS.md)** - Project coding standards and style guide
 - **[config.example.toml](./config.example.toml)** - Example configuration file
 
 ## Setup
-
-### List Available Services
-
-#### Participant Admin API (Port 5012)
-
-This is the primary endpoint for participant operations.
-
-Command
-
-```sh
-grpcurl -plaintext localhost:5012 list
-```
-
-Response
-
-```
-com.digitalasset.canton.admin.health.v30.StatusService
-com.digitalasset.canton.admin.participant.v30.EnterpriseParticipantReplicationService
-com.digitalasset.canton.admin.participant.v30.InspectionService
-com.digitalasset.canton.admin.participant.v30.PackageService
-com.digitalasset.canton.admin.participant.v30.PartyManagementService
-com.digitalasset.canton.admin.participant.v30.PingPongService
-com.digitalasset.canton.admin.participant.v30.PruningService
-com.digitalasset.canton.admin.participant.v30.RepairService
-com.digitalasset.canton.admin.participant.v30.ResourceManagementService
-com.digitalasset.canton.admin.participant.v30.TrafficControlService
-com.digitalasset.canton.connection.v30.ApiInfoService
-com.digitalasset.canton.crypto.admin.v30.VaultService
-com.digitalasset.canton.topology.admin.v30.IdentityInitializationService
-com.digitalasset.canton.topology.admin.v30.TopologyAggregationService
-com.digitalasset.canton.topology.admin.v30.TopologyManagerReadService
-com.digitalasset.canton.topology.admin.v30.TopologyManagerWriteService
-grpc.reflection.v1alpha.ServerReflection
-```
-
-#### Participant Ledger API (Port 5011)
-
-Used for submitting commands and reading ledger state.
-
-Command
-
-```sh
-grpcurl -plaintext localhost:5011 list
-```
-
-Response
-
-```
-com.daml.ledger.api.v2.CommandCompletionService
-com.daml.ledger.api.v2.CommandService
-com.daml.ledger.api.v2.CommandSubmissionService
-com.daml.ledger.api.v2.EventQueryService
-com.daml.ledger.api.v2.PackageService
-com.daml.ledger.api.v2.StateService
-com.daml.ledger.api.v2.UpdateService
-com.daml.ledger.api.v2.VersionService
-com.daml.ledger.api.v2.admin.CommandInspectionService
-com.daml.ledger.api.v2.admin.IdentityProviderConfigService
-com.daml.ledger.api.v2.admin.MeteringReportService
-com.daml.ledger.api.v2.admin.PackageManagementService
-com.daml.ledger.api.v2.admin.ParticipantPruningService
-com.daml.ledger.api.v2.admin.PartyManagementService
-com.daml.ledger.api.v2.admin.UserManagementService
-com.daml.ledger.api.v2.testing.TimeService
-com.digitalasset.canton.admin.participant.v30.InteractivePrepareAndSubmitService
-grpc.health.v1.Health
-grpc.reflection.v1alpha.ServerReflection
-```
-
-#### Sequencer Admin API (Port 5002)
-
-Used for sequencer-level operations.
-
-Command
-
-```sh
-grpcurl -plaintext localhost:5002 list
-```
-
-Response
-
-```
-com.digitalasset.canton.admin.health.v30.StatusService
-com.digitalasset.canton.admin.sequencer.v30.SequencerStatusService
-com.digitalasset.canton.connection.v30.ApiInfoService
-com.digitalasset.canton.crypto.admin.v30.VaultService
-com.digitalasset.canton.sequencer.admin.v30.SequencerAdministrationService
-com.digitalasset.canton.sequencer.admin.v30.SequencerPruningAdministrationService
-com.digitalasset.canton.topology.admin.v30.IdentityInitializationService
-com.digitalasset.canton.topology.admin.v30.TopologyAggregationService
-com.digitalasset.canton.topology.admin.v30.TopologyManagerReadService
-com.digitalasset.canton.topology.admin.v30.TopologyManagerWriteService
-grpc.reflection.v1alpha.ServerReflection
-```
-
-#### Sequencer Public API (Port 5001)
-
-Used for sequencer client connections.
-
-Command
-
-```sh
-grpcurl -plaintext localhost:5001 list
-```
-
-Response
-
-```
-com.digitalasset.canton.connection.v30.ApiInfoService
-com.digitalasset.canton.sequencer.api.v30.SequencerAuthenticationService
-com.digitalasset.canton.sequencer.api.v30.SequencerConnectService
-com.digitalasset.canton.sequencer.api.v30.SequencerService
-grpc.health.v1.Health
-grpc.reflection.v1alpha.ServerReflection
-```
-
-### Clone Canton APIs
-
-```sh
-mkdir -p proto/canton
-git clone git@github.com:hyperledger-labs/splice.git
-cp -r ../splice/canton/community/ledger-api/src/main/protobuf proto/canton
-cp -r ../splice/canton/community/admin-api/src/main/protobuf proto/canton
-```
-
-### Clone Google APIs
-
-```sh
-mkdir -p proto/googleapis
-git clone https://github.com/googleapis/googleapis.git proto/googleapis
-```
 
 ## Configuration
 

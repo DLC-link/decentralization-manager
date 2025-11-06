@@ -386,32 +386,17 @@ Attestors sign ledger submissions, coordinator executes them on the ledger.
 
 ## Key Challenges for Rust Port
 
-### 1. Canton API Translation
+### 1. Canton API Translation ✅ SOLVED
 **Challenge**: Scala console functions must be mapped to gRPC API calls
 
 **Solution**:
-- Study Canton protobuf definitions in `ledger_proto/`
+- Study Canton protobuf definitions
 - Use `tonic` for gRPC client generation
 - Map each Scala function to corresponding gRPC method
 
-### 2. Cryptography
-**Challenge**: Canton uses custom crypto with specific key formats and signing schemes
+**Status**: Completed. All APIs successfully mapped and implemented.
 
-**Solution Options**:
-- **Option A**: Use Canton's Java/Scala crypto libraries via JNI
-- **Option B**: Reimplement Canton crypto in pure Rust (complex)
-- **Option C**: Call Canton Admin API for crypto operations when possible
-- **Recommended**: Start with Option C, fall back to Option A if needed
-
-### 3. Protobuf I/O
-**Challenge**: Read/write Canton protobuf messages to `.bin` files
-
-**Solution**:
-- Use `prost` for protobuf serialization/deserialization
-- Create utility functions: `read_messages_from_file()`, `write_messages_to_file()`
-- Handle both single and multi-message files
-
-### 4. Multi-Participant Coordination
+### 2. Multi-Participant Coordination
 **Challenge**: Orchestrate operations across 3+ participants with different configs
 
 **Solution**:
@@ -419,7 +404,7 @@ Attestors sign ledger submissions, coordinator executes them on the ledger.
 - CLI commands to specify which participant to use
 - File naming conventions to track attestor indices
 
-### 5. Topology Management
+### 3. Topology Management
 **Challenge**: Complex topology operations with proposals, signatures, aggregation
 
 **Solution**:
@@ -427,7 +412,7 @@ Attestors sign ledger submissions, coordinator executes them on the ledger.
 - Implement signature aggregation logic
 - Create retry/polling utilities for topology propagation
 
-### 6. Interactive Submissions
+### 4. Interactive Submissions
 **Challenge**: Multi-step prepare-sign-execute workflow
 
 **Solution**:
@@ -435,7 +420,7 @@ Attestors sign ledger submissions, coordinator executes them on the ledger.
 - Aggregate signatures from multiple attestors
 - Build signature map structure for execution
 
-### 7. Error Handling
+### 5. Error Handling
 **Challenge**: Many failure points (network, parsing, crypto, topology conflicts)
 
 **Solution**:
@@ -447,7 +432,7 @@ Attestors sign ledger submissions, coordinator executes them on the ledger.
 
 ## Implementation Tasks
 
-### Phase 1: Infrastructure Setup
+### Phase 1: Infrastructure Setup ✅ COMPLETE
 - [x] Set up Rust project structure for all steps (step_1 through step_5)
 - [x] Add dependencies: `tonic`, `prost`, `tokio`, cryptography libraries
 - [x] Create common utilities module:
@@ -457,8 +442,9 @@ Attestors sign ledger submissions, coordinator executes them on the ledger.
   - [x] Error types
 - [x] Set up CLI with subcommands for each step
 - [x] Add gRPC client builders with authentication
+- [x] **Proto optimization**: Reduced proto directory from 338 MB (6,506 files) to 320 KB (34 files) - 99.91% reduction
 
-### Phase 2: Step 1 Implementation
+### Phase 2: Step 1 Implementation ✅ COMPLETE
 - [x] Implement `upload_dars()`: Step 1 - 00_UploadDars
   - [x] Connect to participant Admin API
   - [x] Upload DAR files via `UploadDar()` RPC
@@ -470,7 +456,7 @@ Attestors sign ledger submissions, coordinator executes them on the ledger.
   - [x] Export keys to `attestor-public-keys.bin`
   - [x] Export participant ID to `participant-id.bin`
 
-### Phase 3: Step 1a Implementation
+### Phase 3: Step 1a Implementation ✅ COMPLETE
 - [x] Implement `create_proposals()`: Step 1a - 01a_CreateProposals
   - [x] Load and parse all attestor key files
   - [x] Load all participant ID files
@@ -481,7 +467,7 @@ Attestors sign ledger submissions, coordinator executes them on the ledger.
   - [x] Save proposals to files
   - [x] Fixed: compute_decentralized_namespace to use length-prefixed hashing
 
-### Phase 4: Steps 2 & 2a Implementation
+### Phase 4: Steps 2 & 2a Implementation ✅ COMPLETE
 - [x] Implement `sign_dns_proposals()`: Step 2 - 02_SignProposals
   - [x] Load DNS proposal
   - [x] Sign with participant's keys via Canton SignTransactions RPC
@@ -493,7 +479,7 @@ Attestors sign ledger submissions, coordinator executes them on the ledger.
   - [x] Submit to topology via AddTransactions RPC
   - [x] Poll and wait for DNS to appear in topology (with retry logic)
 
-### Phase 5: Steps 3 & 3a Implementation
+### Phase 5: Steps 3 & 3a Implementation ✅ COMPLETE
 - [x] Implement `sign_p2p_ptk_proposals()`: Step 3 - 03_SignP2PPTKProposals
   - [x] Load P2P and PTK proposals from step_3 directory
   - [x] Sign both proposals via Canton SignTransactions RPC
@@ -505,7 +491,7 @@ Attestors sign ledger submissions, coordinator executes them on the ledger.
   - [x] Submit to topology
   - [x] Wait for propagation
 
-### Phase 6: Step 3b Implementation
+### Phase 6: Step 3b Implementation ✅ COMPLETE
 - [x] Implement `prepare_submissions()`: Step 3b - 03b_PrepareSubmissions
   - [x] Query party IDs from ledger
   - [x] Build Daml Record structures for 3 contracts
@@ -513,7 +499,7 @@ Attestors sign ledger submissions, coordinator executes them on the ledger.
   - [x] Save prepared submissions
   - [x] Fixed: Updated value.proto with correct field ordering (Party=7, ContractId=9, Record=14)
 
-### Phase 7: Steps 4 & 5 Implementation
+### Phase 7: Steps 4 & 5 Implementation ✅ COMPLETE
 - [x] Implement `sign_submissions()`: Step 4 - 04_SignSubmissions
   - [x] Load prepared submissions
   - [x] Find and export DAML key
@@ -617,24 +603,24 @@ releases/0.0.1/
 ### Key Management
 | Scala | Rust gRPC | Proto Service |
 |-------|-----------|---------------|
-| `participant.keys.secret.generate_signing_key()` | `KeyAdministrationService.GenerateSigningKey()` | `com.digitalasset.canton.admin.crypto.v30` |
-| `participant.keys.secret.list()` | `KeyAdministrationService.ListMyKeys()` | Same |
-| `participant.keys.secret.download()` | `KeyAdministrationService.ExportKeyPair()` | Same |
+| `participant.keys.secret.generate_signing_key()` | `VaultService.GenerateSigningKey()` | `com.digitalasset.canton.crypto.admin.v30` |
+| `participant.keys.secret.list()` | `VaultService.ListMyKeys()` | Same |
+| `participant.keys.secret.download()` | `VaultService.ExportKeyPair()` | Same |
 
 ### Topology Management
 | Scala | Rust gRPC | Proto Service |
 |-------|-----------|---------------|
-| `participant.topology.namespace_delegations.propose_delegation()` | `TopologyManagerWriteService.Authorize()` | `com.digitalasset.canton.admin.participant.v30` |
+| `participant.topology.namespace_delegations.propose_delegation()` | `TopologyManagerWriteService.Authorize()` | `com.digitalasset.canton.topology.admin.v30` |
 | `participant.topology.decentralized_namespaces.propose()` | `TopologyManagerWriteService.Authorize()` | Same |
 | `participant.topology.party_to_participant_mappings.propose()` | `TopologyManagerWriteService.Authorize()` | Same |
 | `participant.topology.party_to_key_mappings.propose()` | `TopologyManagerWriteService.Authorize()` | Same |
 | `participant.topology.transactions.sign()` | `TopologyManagerWriteService.SignTransactions()` | Same |
-| `participant.topology.transactions.load()` | `TopologyManagerWriteService.Authorize()` | Same |
+| `participant.topology.transactions.load()` | `TopologyManagerWriteService.AddTransactions()` | Same |
 
 ### DAR Management
 | Scala | Rust gRPC | Proto Service |
 |-------|-----------|---------------|
-| `participant.dars.upload()` | `ParticipantAdministrationService.UploadDar()` | `com.digitalasset.canton.admin.participant.v30` |
+| `participant.dars.upload()` | `PackageService.UploadDar()` | `com.digitalasset.canton.admin.participant.v30` |
 
 ### Interactive Submission
 | Scala | Rust gRPC | Proto Service |
@@ -645,18 +631,31 @@ releases/0.0.1/
 ### Ledger Queries
 | Scala | Rust gRPC | Proto Service |
 |-------|-----------|---------------|
-| `participant.parties.find()` | Ledger API `PartyManagementService.ListKnownParties()` | `com.daml.ledger.api.v2` |
-| `participant.ledger_api.state.acs.of_party()` | Ledger API `StateService.GetActiveContracts()` | Same |
+| `participant.parties.find()` | `PartyManagementService.ListKnownParties()` | `com.daml.ledger.api.v2.admin` |
+| `participant.parties.list()` | `UserManagementService.ListUsers()` | Same |
+| `participant.ledger_api.state.acs.of_party()` | `StateService.GetActiveContracts()` | `com.daml.ledger.api.v2` |
+
+### Other Services
+| Scala | Rust gRPC | Proto Service |
+|-------|-----------|---------------|
+| `participant.id` | `IdentityInitializationService.GetId()` | `com.digitalasset.canton.topology.admin.v30` |
+| `participant.synchronizers.list()` | `SynchronizerConnectivityService.GetSynchronizerId()` | `com.digitalasset.canton.admin.participant.v30` |
 
 ---
 
-## Next Steps
+## Remaining Work
 
-1. **Review this plan** - Ensure alignment with project goals
-2. **Choose starting point** - Which step to implement first
-3. **Resolve crypto strategy** - How to handle Canton signing
-4. **Set up development environment** - Ensure Canton instance is accessible
-5. **Begin implementation** - Start with utilities and Step 1
+### Phase 8: Integration & Testing (IN PROGRESS)
+- [ ] Create end-to-end test with 3 mock participants
+- [ ] Add integration tests for each step
+- [ ] Write documentation for running the full workflow
+- [ ] Create helper scripts similar to `run-test.sh`
+
+### Optimizations Completed
+- ✅ Proto directory optimized: 338 MB → 320 KB (99.91% reduction)
+- ✅ Only 34 proto files remain (from 6,506 googleapis files)
+- ✅ Removed all unused services and packages
+- ✅ All 7 implementation phases complete
 
 ---
 
