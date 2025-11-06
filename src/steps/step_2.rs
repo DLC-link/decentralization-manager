@@ -63,7 +63,10 @@ pub async fn sign_dns_proposals(
     });
 
     tracing::debug!("Calling SignTransactions RPC...");
-    let response = topology_client.sign_transactions(request).await?.into_inner();
+    let response = topology_client
+        .sign_transactions(request)
+        .await?
+        .into_inner();
 
     let signed_transaction = response
         .transactions

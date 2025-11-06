@@ -42,3 +42,14 @@ ONBOARDING -c configs/config-3.toml sign-p2p-ptk-proposals
 
 echo "submitting final P2P and PTK proposals"
 ONBOARDING -c configs/config-1.toml submit-final-proposals
+
+echo "preparing submissions"
+ONBOARDING -c configs/config-1.toml prepare-submissions
+
+echo "signing submissions from all attestors"
+ONBOARDING -c configs/config-1.toml sign-submissions
+ONBOARDING -c configs/config-2.toml sign-submissions
+ONBOARDING -c configs/config-3.toml sign-submissions
+
+echo "executing submissions"
+ONBOARDING -c configs/config-1.toml execute-submissions

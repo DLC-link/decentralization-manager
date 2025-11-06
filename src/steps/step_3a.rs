@@ -6,7 +6,7 @@ use crate::{
     config::Config,
     error::Result,
     proto::com::digitalasset::canton::{
-        protocol::v30::SignedTopologyTransaction,
+        protocol::v30::{DecentralizedNamespaceDefinition, SignedTopologyTransaction},
         topology::admin::v30::{
             AddTransactionsRequest, BaseQuery, ListPartyToKeyMappingRequest,
             ListPartyToParticipantRequest, StoreId, Synchronizer, base_query, store_id,
@@ -58,8 +58,7 @@ pub async fn submit_final_proposals(
     while let Some(entry) = dir_entries.next_entry().await? {
         let file_name = entry.file_name();
         let file_name_str = file_name.to_string_lossy();
-        if file_name_str.starts_with("signed-p2p-ptk-proposals")
-            && file_name_str.ends_with(".bin")
+        if file_name_str.starts_with("signed-p2p-ptk-proposals") && file_name_str.ends_with(".bin")
         {
             signed_files.push(entry.path());
         }
@@ -103,7 +102,23 @@ pub async fn submit_final_proposals(
         ptk_transaction.signatures.len()
     );
 
-    // Step 5: Submit P2P proposal first
+    // Step 5: Read namespace definition and construct party ID
+    let namespace_file = step_3a_dir
+        .parent()
+        .unwrap()
+        .join("step_2a")
+        .join("namespaceDef.bin");
+    tracing::info!(
+        "Reading namespace definition from {}",
+        namespace_file.display()
+    );
+    let namespace_def: DecentralizedNamespaceDefinition =
+        utils::read_first_message_from_file(&namespace_file).await?;
+
+    let party_id = format!("cbtc-network::{}", namespace_def.decentralized_namespace);
+    tracing::info!("Constructed party ID: {party_id}");
+
+    // Step 6: Submit P2P proposal first
     tracing::info!("Submitting aggregated P2P proposal...");
     let mut topology_write_client =
         TopologyManagerWriteServiceClient::connect(config.admin_api_url()).await?;
@@ -122,11 +137,11 @@ pub async fn submit_final_proposals(
     topology_write_client.add_transactions(request).await?;
     tracing::info!("P2P proposal submitted to topology");
 
-    // Step 6: Wait for P2P to appear in topology
+    // Step 7: Wait for P2P to appear in topology
     tracing::info!("Waiting for P2P to appear in topology...");
-    wait_for_p2p_in_topology(config, &synchronizer_id).await?;
+    wait_for_p2p_in_topology(config, &synchronizer_id, &party_id).await?;
 
-    // Step 7: Submit PTK proposal second
+    // Step 8: Submit PTK proposal second
     tracing::info!("Submitting aggregated PTK proposal...");
     let request = tonic::Request::new(AddTransactionsRequest {
         transactions: vec![ptk_transaction.clone()],
@@ -142,16 +157,20 @@ pub async fn submit_final_proposals(
     topology_write_client.add_transactions(request).await?;
     tracing::info!("PTK proposal submitted to topology");
 
-    // Step 8: Wait for PTK to appear in topology
+    // Step 9: Wait for PTK to appear in topology
     tracing::info!("Waiting for PTK to appear in topology...");
-    wait_for_ptk_in_topology(config, &synchronizer_id).await?;
+    wait_for_ptk_in_topology(config, &synchronizer_id, &party_id).await?;
 
     tracing::info!("Final proposals submitted and confirmed in topology successfully");
     Ok(())
 }
 
 /// Wait for P2P (PartyToParticipant) to appear in topology by polling
-async fn wait_for_p2p_in_topology(config: &Config, synchronizer_id: &str) -> Result {
+async fn wait_for_p2p_in_topology(
+    config: &Config,
+    synchronizer_id: &str,
+    party_id: &str,
+) -> Result {
     let mut topology_read_client =
         TopologyManagerReadServiceClient::connect(config.admin_api_url()).await?;
 
@@ -172,7 +191,7 @@ async fn wait_for_p2p_in_topology(config: &Config, synchronizer_id: &str) -> Res
                 filter_signed_key: String::new(),
                 protocol_version: None,
             }),
-            filter_party: String::new(),
+            filter_party: party_id.to_string(),
             filter_participant: String::new(),
         });
 
@@ -198,7 +217,11 @@ async fn wait_for_p2p_in_topology(config: &Config, synchronizer_id: &str) -> Res
 }
 
 /// Wait for PTK (PartyToKeyMapping) to appear in topology by polling
-async fn wait_for_ptk_in_topology(config: &Config, synchronizer_id: &str) -> Result {
+async fn wait_for_ptk_in_topology(
+    config: &Config,
+    synchronizer_id: &str,
+    party_id: &str,
+) -> Result {
     let mut topology_read_client =
         TopologyManagerReadServiceClient::connect(config.admin_api_url()).await?;
 
@@ -219,7 +242,7 @@ async fn wait_for_ptk_in_topology(config: &Config, synchronizer_id: &str) -> Res
                 filter_signed_key: String::new(),
                 protocol_version: None,
             }),
-            filter_party: String::new(),
+            filter_party: party_id.to_string(),
         });
 
         let response = topology_read_client

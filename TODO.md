@@ -506,11 +506,12 @@ Attestors sign ledger submissions, coordinator executes them on the ledger.
   - [x] Wait for propagation
 
 ### Phase 6: Step 3b Implementation
-- [ ] Implement `prepare_submissions()`: Step 3b - 03b_PrepareSubmissions
-  - [ ] Query party IDs from ledger
-  - [ ] Build Daml Record structures for 3 contracts
-  - [ ] Call `PrepareSubmission()` RPC for each
-  - [ ] Save prepared submissions
+- [x] Implement `prepare_submissions()`: Step 3b - 03b_PrepareSubmissions
+  - [x] Query party IDs from ledger
+  - [x] Build Daml Record structures for 3 contracts
+  - [x] Call `PrepareSubmission()` RPC for each
+  - [x] Save prepared submissions
+  - [x] Fixed: Updated value.proto with correct field ordering (Party=7, ContractId=9, Record=14)
 
 ### Phase 7: Steps 4 & 5 Implementation
 - [ ] Implement `sign_submissions()`: Step 4 - 04_SignSubmissions

@@ -71,7 +71,10 @@ pub async fn sign_p2p_ptk_proposals(
     });
 
     tracing::debug!("Calling SignTransactions RPC for P2P and PTK...");
-    let response = topology_client.sign_transactions(request).await?.into_inner();
+    let response = topology_client
+        .sign_transactions(request)
+        .await?
+        .into_inner();
 
     if response.transactions.len() != 2 {
         anyhow::bail!(
