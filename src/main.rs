@@ -62,7 +62,11 @@ async fn main() -> Result {
         Commands::CreateProposals => {
             steps::create_proposals(&config, &keys_dir, &ids_dir, &out_dir).await?
         }
-        Commands::SignDnsProposals => steps::sign_dns_proposals().await?,
+        Commands::SignDnsProposals => {
+            let step_2_dir = out_dir.join("step_2");
+            let step_2a_signed_dir = out_dir.join("step_2a").join("signed-proposals");
+            steps::sign_dns_proposals(&config, &step_2_dir, &step_2a_signed_dir, &ids_dir).await?
+        }
         Commands::SubmitDnsProposals => steps::submit_dns_proposals().await?,
         Commands::SignP2pPtkProposals => steps::sign_p2p_ptk_proposals().await?,
         Commands::SubmitFinalProposals => steps::submit_final_proposals().await?,
