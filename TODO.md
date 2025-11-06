@@ -499,11 +499,11 @@ Attestors sign ledger submissions, coordinator executes them on the ledger.
   - [x] Sign both proposals via Canton SignTransactions RPC
   - [x] Save both signed proposals to one file in step_3a/signed-proposals
   - [x] Determine participant number by matching participant ID
-- [ ] Implement `submit_final_proposals()`: Step 3a - 03a_SubmitFinalProposals
-  - [ ] Load all signed P2P/PTK proposals
-  - [ ] Aggregate signatures for both
-  - [ ] Submit to topology
-  - [ ] Wait for propagation
+- [x] Implement `submit_final_proposals()`: Step 3a - 03a_SubmitFinalProposals
+  - [x] Load all signed P2P/PTK proposals
+  - [x] Aggregate signatures for both
+  - [x] Submit to topology
+  - [x] Wait for propagation
 
 ### Phase 6: Step 3b Implementation
 - [ ] Implement `prepare_submissions()`: Step 3b - 03b_PrepareSubmissions

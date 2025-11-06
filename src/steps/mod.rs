@@ -65,7 +65,7 @@ pub async fn run_all_steps(
 
     // Step 3a: Submit final proposals (run once by coordinator)
     tracing::info!("Step 3a: Submit final proposals");
-    submit_final_proposals().await?;
+    submit_final_proposals(config, &step_3_dir, &step_3a_dir).await?;
 
     // Step 3b: Prepare submissions (run once by coordinator)
     tracing::info!("Step 3b: Prepare submissions");
