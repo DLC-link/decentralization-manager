@@ -1,10 +1,9 @@
-use std::path::Path;
-
 use tokio::{fs, time};
 
 use crate::{
     config::Config,
     consts::{TOPOLOGY_RETRY_DELAY_SECS, TOPOLOGY_RETRY_MAX_ATTEMPTS},
+    dirs::WorkflowDirs,
     error::Result,
     proto::com::digitalasset::canton::{
         protocol::v30::{DecentralizedNamespaceDefinition, SignedTopologyTransaction},
@@ -27,13 +26,8 @@ use crate::{
 ///
 /// # Arguments
 /// * `config` - Configuration with Canton connection details
-/// * `step_2_dir` - Directory containing dns_proto.bin (usually ./out/step_2)
-/// * `step_2a_dir` - Directory containing signed proposals and namespaceDef.bin (usually ./out/step_2a)
-pub async fn submit_dns_proposals(
-    config: &Config,
-    step_2_dir: &Path,
-    step_2a_dir: &Path,
-) -> Result {
+/// * `dirs` - WorkflowDirs containing all directory paths
+pub async fn submit_dns_proposals(config: &Config, dirs: &WorkflowDirs) -> Result {
     tracing::info!("Submitting DNS proposals...");
 
     // Step 1: Get synchronizer ID
@@ -41,13 +35,13 @@ pub async fn submit_dns_proposals(
     tracing::debug!("Using synchronizer ID: {synchronizer_id}");
 
     // Step 2: Read the original DNS proposal
-    let dns_file = step_2_dir.join("dns_proto.bin");
+    let dns_file = dirs.dns_proposals_dir.join("dns_proto.bin");
     tracing::info!("Reading original DNS proposal from {}", dns_file.display());
     let mut dns_transaction: SignedTopologyTransaction =
         utils::read_first_message_from_file(&dns_file).await?;
 
     // Step 3: Discover and read all signed DNS proposals
-    let signed_proposals_dir = step_2a_dir.join("signed-proposals");
+    let signed_proposals_dir = &dirs.dns_signed_dir;
     let mut signed_files = Vec::new();
     let mut dir_entries = fs::read_dir(&signed_proposals_dir).await?;
 
@@ -101,7 +95,7 @@ pub async fn submit_dns_proposals(
     tracing::info!("DNS proposal submitted to topology");
 
     // Step 6: Read namespace definition to get the namespace for polling
-    let namespace_def_file = step_2a_dir.join("namespaceDef.bin");
+    let namespace_def_file = dirs.dns_submission_dir.join("namespaceDef.bin");
     tracing::info!(
         "Reading namespace definition from {}",
         namespace_def_file.display()

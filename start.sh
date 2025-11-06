@@ -3,7 +3,7 @@
 set -eou pipefail
 
 echo "cleaning up old files"
-rm -rf out
+rm -rf workflow-data
 
 echo "building..."
 cargo build #--release

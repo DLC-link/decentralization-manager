@@ -1,9 +1,8 @@
-use std::path::Path;
-
 use ed25519_dalek::{Signer, SigningKey};
 
 use crate::{
     config::Config,
+    dirs::WorkflowDirs,
     error::Result,
     proto::com::{
         daml::ledger::api::v2::interactive::PrepareSubmissionResponse,
@@ -39,13 +38,12 @@ const ED25519_PRIVATE_KEY_LENGTH: u8 = 0x20;
 ///
 /// # Arguments
 /// * `config` - Configuration with Admin API connection details
-/// * `out_dir` - Base output directory (usually ./out)
-/// * `ids_dir` - Directory containing participant ID files
-pub async fn sign_submissions(config: &Config, out_dir: &Path, ids_dir: &Path) -> Result {
+/// * `dirs` - WorkflowDirs containing all directory paths
+pub async fn sign_submissions(config: &Config, dirs: &WorkflowDirs) -> Result {
     tracing::info!("Signing submissions...");
 
     // Step 1: Get participant number
-    let participant_num = utils::get_participant_number(config, ids_dir).await?;
+    let participant_num = utils::get_participant_number(config, &dirs.ids_dir).await?;
     tracing::debug!("Determined participant number: {participant_num}");
 
     // Step 2: Find the DAML signing key
@@ -106,17 +104,17 @@ pub async fn sign_submissions(config: &Config, out_dir: &Path, ids_dir: &Path) -
 
     // Step 2: Load the 3 prepared submissions
     tracing::info!("Loading prepared submissions...");
-    let step_4_dir = out_dir.join("step_4");
-    let submissions_dir = step_4_dir.join("subs");
+    let ledger_submissions_dir = dirs.workflow_dir.join("ledger-submissions");
+    let prepared_dir = ledger_submissions_dir.join("prepared");
 
     let prepared_sub1: PrepareSubmissionResponse =
-        utils::read_first_message_from_file(&submissions_dir.join("prepared-submission-1.bin"))
+        utils::read_first_message_from_file(&prepared_dir.join("prepared-submission-1.bin"))
             .await?;
     let prepared_sub2: PrepareSubmissionResponse =
-        utils::read_first_message_from_file(&submissions_dir.join("prepared-submission-2.bin"))
+        utils::read_first_message_from_file(&prepared_dir.join("prepared-submission-2.bin"))
             .await?;
     let prepared_sub3: PrepareSubmissionResponse =
-        utils::read_first_message_from_file(&submissions_dir.join("prepared-submission-3.bin"))
+        utils::read_first_message_from_file(&prepared_dir.join("prepared-submission-3.bin"))
             .await?;
 
     tracing::debug!("Loaded 3 prepared submissions");
@@ -209,8 +207,8 @@ pub async fn sign_submissions(config: &Config, out_dir: &Path, ids_dir: &Path) -
     };
 
     // Step 7: Save signatures to file
-    let step_5_dir = out_dir.join("step_5");
-    let signatures_dir = step_5_dir.join("signatures");
+    let execution_dir = dirs.workflow_dir.join("execution");
+    let signatures_dir = execution_dir.join("signatures");
     tokio::fs::create_dir_all(&signatures_dir).await?;
 
     let signatures_file = signatures_dir.join(format!("submission-signatures-{}.bin", participant_num));

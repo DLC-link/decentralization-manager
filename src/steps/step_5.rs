@@ -1,11 +1,10 @@
-use std::path::Path;
-
 use tokio::fs;
 use uuid::Uuid;
 
 use crate::{
     config::Config,
     consts::{TOPOLOGY_RETRY_DELAY_SECS, TOPOLOGY_RETRY_MAX_ATTEMPTS},
+    dirs::WorkflowDirs,
     error::Result,
     proto::com::{
         daml::ledger::api::v2::{
@@ -35,12 +34,12 @@ use crate::{
 ///
 /// # Arguments
 /// * `config` - Configuration with Ledger API connection details
-/// * `out_dir` - Base output directory (usually ./out)
-pub async fn execute_submissions(config: &Config, out_dir: &Path) -> Result {
+/// * `dirs` - WorkflowDirs containing all directory paths
+pub async fn execute_submissions(config: &Config, dirs: &WorkflowDirs) -> Result {
     tracing::info!("Executing submissions...");
 
     // Step 1: Get decentralized party ID from namespace definition
-    let namespace_file = out_dir.join("step_2a").join("namespaceDef.bin");
+    let namespace_file = dirs.dns_submission_dir.join("namespaceDef.bin");
     tracing::debug!(
         "Reading namespace definition from {}",
         namespace_file.display()
@@ -53,22 +52,22 @@ pub async fn execute_submissions(config: &Config, out_dir: &Path) -> Result {
 
     // Step 2: Load prepared submissions
     tracing::info!("Loading prepared submissions...");
-    let step_4_dir = out_dir.join("step_4");
-    let subs_dir = step_4_dir.join("subs");
+    let ledger_submissions_dir = dirs.workflow_dir.join("ledger-submissions");
+    let prepared_dir = ledger_submissions_dir.join("prepared");
 
     let prepared_sub1: PrepareSubmissionResponse =
-        utils::read_first_message_from_file(&subs_dir.join("prepared-submission-1.bin")).await?;
+        utils::read_first_message_from_file(&prepared_dir.join("prepared-submission-1.bin")).await?;
     let prepared_sub2: PrepareSubmissionResponse =
-        utils::read_first_message_from_file(&subs_dir.join("prepared-submission-2.bin")).await?;
+        utils::read_first_message_from_file(&prepared_dir.join("prepared-submission-2.bin")).await?;
     let prepared_sub3: PrepareSubmissionResponse =
-        utils::read_first_message_from_file(&subs_dir.join("prepared-submission-3.bin")).await?;
+        utils::read_first_message_from_file(&prepared_dir.join("prepared-submission-3.bin")).await?;
 
     tracing::debug!("Loaded 3 prepared submissions");
 
     // Step 3: Discover and load all signature files
     tracing::info!("Loading attestor signatures...");
-    let step_5_dir = out_dir.join("step_5");
-    let signatures_dir = step_5_dir.join("signatures");
+    let execution_dir = dirs.workflow_dir.join("execution");
+    let signatures_dir = execution_dir.join("signatures");
 
     // Discover all submission-signatures-*.bin files
     let mut signature_files = Vec::new();
