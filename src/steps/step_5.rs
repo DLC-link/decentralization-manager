@@ -1,8 +1,8 @@
+use crate::network_config::NodeConfig;
 use tokio::fs;
 use uuid::Uuid;
 
 use crate::{
-    config::Config,
     consts::{TOPOLOGY_RETRY_DELAY_SECS, TOPOLOGY_RETRY_MAX_ATTEMPTS},
     dirs::WorkflowDirs,
     error::Result,
@@ -35,7 +35,7 @@ use crate::{
 /// # Arguments
 /// * `config` - Configuration with Ledger API connection details
 /// * `dirs` - WorkflowDirs containing all directory paths
-pub async fn execute_submissions(config: &Config, dirs: &WorkflowDirs) -> Result {
+pub async fn execute_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
     tracing::info!("Executing submissions...");
 
     // Step 1: Get decentralized party ID from namespace definition

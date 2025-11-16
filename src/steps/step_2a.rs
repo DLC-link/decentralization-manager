@@ -1,7 +1,7 @@
+use crate::network_config::NodeConfig;
 use tokio::{fs, time};
 
 use crate::{
-    config::Config,
     consts::{TOPOLOGY_RETRY_DELAY_SECS, TOPOLOGY_RETRY_MAX_ATTEMPTS},
     dirs::WorkflowDirs,
     error::Result,
@@ -27,7 +27,7 @@ use crate::{
 /// # Arguments
 /// * `config` - Configuration with Canton connection details
 /// * `dirs` - WorkflowDirs containing all directory paths
-pub async fn submit_dns_proposals(config: &Config, dirs: &WorkflowDirs) -> Result {
+pub async fn submit_dns_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
     tracing::info!("Submitting DNS proposals...");
 
     // Step 1: Get synchronizer ID
@@ -121,7 +121,7 @@ pub async fn submit_dns_proposals(config: &Config, dirs: &WorkflowDirs) -> Resul
 
 /// Wait for DNS to appear in topology by polling
 async fn wait_for_dns_in_topology(
-    config: &Config,
+    config: &NodeConfig,
     synchronizer_id: &str,
     namespace: &str,
 ) -> Result {

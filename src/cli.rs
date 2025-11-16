@@ -21,6 +21,16 @@ pub enum Commands {
     /// Run all steps in sequence
     All,
 
+    /// Generate Noise protocol static keypair for secure communication
+    Keygen {
+        /// Output file path for the private key
+        #[arg(short, long, value_name = "FILE")]
+        output: PathBuf,
+    },
+
+    /// Start the node (as coordinator or attestor based on configuration)
+    Start,
+
     /// Step 1: Upload DARs
     UploadDars,
 
