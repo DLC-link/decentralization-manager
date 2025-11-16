@@ -21,4 +21,3 @@ admin_api_host = "localhost"
 admin_api_port = 5001
 ledger_api_host = "localhost"
 ledger_api_port = 5002
-token = "eyJ0eXAiOiJKV1QiLCJhbGc..."

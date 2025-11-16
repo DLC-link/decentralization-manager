@@ -7,7 +7,7 @@ use tokio::net::TcpListener;
 use crate::{
     config::{NetworkConfig, NodeConfig},
     noise::{Message, MessageType, NOISE_REQUEST_TIMEOUT, NoiseError, NoiseKeypair},
-    workflow::WorkflowState,
+    workflow_state::WorkflowState,
 };
 
 /// Coordinator server that accepts connections from attestors
@@ -34,7 +34,7 @@ impl NoiseServer {
         let mut peer_keys = HashMap::new();
         for participant in &network_config.participants {
             // Skip self
-            if participant.id == node_config.node.node_id {
+            if participant.id == node_config.node.participant_id {
                 continue;
             }
 
@@ -51,7 +51,7 @@ impl NoiseServer {
         let expected_attestors = network_config
             .participants
             .iter()
-            .filter(|p| p.id != node_config.node.node_id)
+            .filter(|p| p.id != node_config.node.participant_id)
             .map(|p| p.id.clone())
             .collect();
         let workflow_state = WorkflowState::new(expected_attestors);
@@ -76,8 +76,10 @@ impl NoiseServer {
             "{}:{}",
             self.node_config.node.listen_address,
             self.network_config
-                .get_participant(&self.node_config.node.node_id)
-                .ok_or_else(|| { NoiseError::UnknownPeer(self.node_config.node.node_id.clone()) })?
+                .get_participant(&self.node_config.node.participant_id)
+                .ok_or_else(|| {
+                    NoiseError::UnknownPeer(self.node_config.node.participant_id.clone())
+                })?
                 .port
         );
 
@@ -158,7 +160,7 @@ impl NoiseServer {
         // Parse message
         let message = Message::from_bytes(&body_bytes).map_err(|_| NoiseError::InvalidMessage)?;
 
-        tracing::debug!(
+        tracing::info!(
             "Received message type {:?} from {peer_id}",
             message.msg_type
         );
@@ -170,8 +172,9 @@ impl NoiseServer {
             MessageType::DnsSignature => {
                 self.handle_dns_signature(peer_id, message.payload).await?
             }
-            MessageType::P2pSignatures => {
-                self.handle_p2p_signatures(peer_id, message.payload).await?
+            MessageType::P2pPtkSignatures => {
+                self.handle_p2p_ptk_signatures(peer_id, message.payload)
+                    .await?
             }
             MessageType::SubmissionSignatures => {
                 self.handle_submission_signatures(peer_id, message.payload)
@@ -255,13 +258,13 @@ impl NoiseServer {
         Ok(Message::new_empty(MessageType::Ack))
     }
 
-    /// Handle P2P signatures from attestor
-    async fn handle_p2p_signatures(
+    /// Handle P2P/PTK signatures from attestor
+    async fn handle_p2p_ptk_signatures(
         &self,
         peer_id: String,
         payload: Vec<u8>,
     ) -> Result<Message, NoiseError> {
-        tracing::info!("Handling P2P signatures from {peer_id}");
+        tracing::info!("Handling P2P/PTK signatures from {peer_id}");
 
         // Store the signatures data
         self.workflow_state

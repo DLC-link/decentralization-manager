@@ -87,8 +87,8 @@ impl NoiseClient {
         // Derive PSK for this connection
         let psk = self.keypair.derive_psk(&self.coordinator_pub_key);
 
-        // Use our node_id as identity
-        let identity = self.node_config.node.node_id.as_bytes();
+        // Use our participant_id as identity
+        let identity = self.node_config.node.participant_id.as_bytes();
 
         // Create Noise initiator
         let initiator = tokio_noise::handshakes::nn_psk2::Initiator {
@@ -157,11 +157,14 @@ impl NoiseClient {
         Ok(())
     }
 
-    /// Send P2P signatures to coordinator
-    pub async fn send_p2p_signatures(&self, signatures_data: Vec<u8>) -> Result<(), NoiseError> {
-        tracing::info!("Sending P2P signatures to coordinator");
+    /// Send P2P/PTK signatures to coordinator
+    pub async fn send_p2p_ptk_signatures(
+        &self,
+        signatures_data: Vec<u8>,
+    ) -> Result<(), NoiseError> {
+        tracing::info!("Sending P2P/PTK signatures to coordinator");
 
-        let message = Message::new(MessageType::P2pSignatures, signatures_data);
+        let message = Message::new(MessageType::P2pPtkSignatures, signatures_data);
         let response = self.send_message(&message).await?;
 
         // Parse response
@@ -171,7 +174,7 @@ impl NoiseClient {
             return Err(NoiseError::InvalidMessage);
         }
 
-        tracing::info!("P2P signatures sent successfully");
+        tracing::info!("P2P/PTK signatures sent successfully");
         Ok(())
     }
 

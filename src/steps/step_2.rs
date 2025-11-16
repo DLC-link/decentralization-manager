@@ -1,7 +1,7 @@
-use crate::network_config::NodeConfig;
 use tokio::fs;
 
 use crate::{
+    config::NodeConfig,
     dirs::WorkflowDirs,
     error::Result,
     proto::com::digitalasset::canton::topology::admin::v30::{

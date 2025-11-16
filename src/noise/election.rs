@@ -32,10 +32,10 @@ pub struct ElectionResult {
 /// Returns an error if no participants are reachable (insufficient quorum)
 pub async fn run_election(
     network_config: &NetworkConfig,
-    my_node_id: &str,
+    my_participant_id: &str,
 ) -> Result<ElectionResult> {
     tracing::info!("Starting leader election (Bully algorithm)");
-    tracing::info!("My node ID: {my_node_id}");
+    tracing::info!("My participant ID: {my_participant_id}");
 
     // Step 1: Try designated coordinator first
     if let Some(designated) = try_get_designated_coordinator(network_config) {
@@ -49,7 +49,7 @@ pub async fn run_election(
                 "Designated coordinator {} is reachable, using it",
                 designated.id
             );
-            let is_me = designated.id == my_node_id;
+            let is_me = designated.id == my_participant_id;
             return Ok(ElectionResult {
                 coordinator: designated.clone(),
                 is_me,
@@ -74,9 +74,9 @@ pub async fn run_election(
         tracing::debug!("Checking candidate: {}", participant.id);
 
         // If this candidate is me, I'm the highest reachable → I become coordinator
-        if participant.id == my_node_id {
+        if participant.id == my_participant_id {
             tracing::info!(
-                "I ({my_node_id}) am the highest available ID, declaring myself coordinator"
+                "I ({my_participant_id}) am the highest available ID, declaring myself coordinator"
             );
             return Ok(ElectionResult {
                 coordinator: participant.clone(),
@@ -139,7 +139,7 @@ async fn is_participant_reachable(participant: &Participant) -> bool {
 mod tests {
     use super::*;
 
-    use crate::config::{CoordinatorStrategy, NetworkInfo, Timeouts};
+    use crate::config::{CoordinatorStrategy, NetworkInfo, SecurityConfig, Timeouts};
 
     fn create_test_network(coordinator_strategy: CoordinatorStrategy) -> NetworkConfig {
         NetworkConfig {
@@ -148,7 +148,6 @@ mod tests {
                 protocol_version: "1.0".to_string(),
                 port: 9000,
                 coordinator_strategy,
-                operator_party: None,
             },
             participants: vec![
                 Participant {
@@ -158,7 +157,6 @@ mod tests {
                     address: "10.0.1.101".to_string(),
                     port: 9000,
                     public_key: "abc123".to_string(),
-                    party: None,
                 },
                 Participant {
                     id: "attestor-2".to_string(),
@@ -167,7 +165,6 @@ mod tests {
                     address: "10.0.1.102".to_string(),
                     port: 9000,
                     public_key: "def456".to_string(),
-                    party: None,
                 },
                 Participant {
                     id: "attestor-3".to_string(),
@@ -176,10 +173,10 @@ mod tests {
                     address: "10.0.1.103".to_string(),
                     port: 9000,
                     public_key: "ghi789".to_string(),
-                    party: None,
                 },
             ],
             timeouts: Timeouts::default(),
+            security: SecurityConfig::default(),
         }
     }
 
@@ -194,7 +191,7 @@ mod tests {
 
     #[test]
     fn test_participant_sorting() {
-        let mut participants = [
+        let mut participants = vec![
             Participant {
                 id: "attestor-1".to_string(),
                 name: "".to_string(),
@@ -202,7 +199,6 @@ mod tests {
                 address: "".to_string(),
                 port: 0,
                 public_key: "".to_string(),
-                party: None,
             },
             Participant {
                 id: "attestor-3".to_string(),
@@ -211,7 +207,6 @@ mod tests {
                 address: "".to_string(),
                 port: 0,
                 public_key: "".to_string(),
-                party: None,
             },
             Participant {
                 id: "attestor-2".to_string(),
@@ -220,7 +215,6 @@ mod tests {
                 address: "".to_string(),
                 port: 0,
                 public_key: "".to_string(),
-                party: None,
             },
         ];
 

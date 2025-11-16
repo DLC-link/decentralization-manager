@@ -223,7 +223,6 @@ pub struct CantonConfig {
     pub admin_api_port: u16,
     pub ledger_api_host: String,
     pub ledger_api_port: u16,
-    pub token: Option<String>,
     #[serde(default = "default_synchronizer")]
     pub synchronizer: String,
 }
@@ -256,11 +255,6 @@ impl NodeConfig {
         )
     }
 
-    /// Get the authorization token if present
-    pub fn auth_token(&self) -> Option<&str> {
-        self.canton.token.as_deref()
-    }
-
     /// Get the synchronizer name
     pub fn synchronizer(&self) -> &str {
         &self.canton.synchronizer
@@ -272,7 +266,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_coordinator_strategy_explicit() {
+    fn test_coordinator_strategy_explicit() -> Result {
         let network = NetworkConfig {
             network: NetworkInfo {
                 name: "test".to_string(),
@@ -302,14 +296,15 @@ mod tests {
             security: SecurityConfig::default(),
         };
 
-        let coordinator = network.get_coordinator().unwrap();
+        let coordinator = network.get_coordinator()?;
         assert_eq!(coordinator.id, "node1");
-        assert!(network.is_coordinator("node1").unwrap());
-        assert!(!network.is_coordinator("node2").unwrap());
+        assert!(network.is_coordinator("node1")?);
+        assert!(!network.is_coordinator("node2")?);
+        Ok(())
     }
 
     #[test]
-    fn test_coordinator_strategy_first() {
+    fn test_coordinator_strategy_first() -> Result {
         let network = NetworkConfig {
             network: NetworkInfo {
                 name: "test".to_string(),
@@ -339,12 +334,13 @@ mod tests {
             security: SecurityConfig::default(),
         };
 
-        let coordinator = network.get_coordinator().unwrap();
+        let coordinator = network.get_coordinator()?;
         assert_eq!(coordinator.id, "node1");
+        Ok(())
     }
 
     #[test]
-    fn test_get_attestors() {
+    fn test_get_attestors() -> Result {
         let network = NetworkConfig {
             network: NetworkInfo {
                 name: "test".to_string(),
@@ -382,9 +378,10 @@ mod tests {
             security: SecurityConfig::default(),
         };
 
-        let attestors = network.get_attestors().unwrap();
+        let attestors = network.get_attestors()?;
         assert_eq!(attestors.len(), 2);
         assert_eq!(attestors[0].id, "node2");
         assert_eq!(attestors[1].id, "node3");
+        Ok(())
     }
 }

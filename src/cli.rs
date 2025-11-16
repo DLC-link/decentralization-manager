@@ -5,7 +5,7 @@ use clap::Subcommand;
 pub use clap::Parser;
 
 #[derive(Parser)]
-#[command(name = "grpc-test")]
+#[command(name = "dec-party-onboarding")]
 #[command(about = "Canton workflow automation - port of Scala scripts to Rust", long_about = None)]
 pub struct Cli {
     /// Path to configuration file (TOML)
