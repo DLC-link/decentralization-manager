@@ -1,4 +1,4 @@
-use crate::network_config::NodeConfig;
+use crate::config::NodeConfig;
 use tokio::fs;
 use uuid::Uuid;
 
@@ -77,12 +77,12 @@ pub async fn execute_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
     let mut entries = fs::read_dir(&signatures_dir).await?;
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
-        if path.is_file() {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name.starts_with("submission-signatures-") && name.ends_with(".bin") {
-                    signature_files.push(path);
-                }
-            }
+        if path.is_file()
+            && let Some(name) = path.file_name().and_then(|n| n.to_str())
+            && name.starts_with("submission-signatures-")
+            && name.ends_with(".bin")
+        {
+            signature_files.push(path);
         }
     }
 

@@ -1,9 +1,9 @@
-use crate::network_config::NodeConfig;
 use std::path::Path;
 
 use tokio::fs;
 
 use crate::{
+    config::NodeConfig,
     dirs::WorkflowDirs,
     error::Result,
     proto::com::digitalasset::canton::{
@@ -28,10 +28,6 @@ use crate::{
 };
 
 // Constants
-const CBTC_DAR_FILENAME: &str = "cbtc-1.0.0.dar";
-const GOVERNANCE_DAR_FILENAME: &str = "cbtc-governance-1.0.0.dar";
-const CBTC_DAR_DESCRIPTION: &str = "CBTC main application";
-const GOVERNANCE_DAR_DESCRIPTION: &str = "CBTC governance rules";
 const NAMESPACE_KEY_NAME: &str = "cbtc-network-namespace";
 const DAML_KEY_NAME: &str = "cbtc-network-daml-transactions";
 const ATTESTOR_KEYS_FILENAME_PREFIX: &str = "attestor-public-keys";
@@ -42,53 +38,65 @@ const PARTICIPANT_ID_PREFIX: &str = "PAR::";
 ///
 /// Corresponds to: 00_UploadDars.sc
 ///
-/// Uploads both CBTC and governance DAR files to the Canton participant.
+/// Scans the dars directory and uploads all .dar files found to the Canton participant.
 pub async fn upload_dars(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
     tracing::info!("Uploading DARs from {}", dirs.dars_dir.display());
 
     let mut client = PackageServiceClient::connect(config.admin_api_url()).await?;
 
-    // Read both DAR files
-    let cbtc_dar_path = dirs.dars_dir.join(CBTC_DAR_FILENAME);
-    let gov_dar_path = dirs.dars_dir.join(GOVERNANCE_DAR_FILENAME);
+    // Scan directory for all .dar files
+    let mut dar_entries = fs::read_dir(&dirs.dars_dir).await?;
+    let mut dar_files = Vec::new();
 
-    // Upload CBTC DAR
-    tracing::debug!("Reading {}", cbtc_dar_path.display());
-    let cbtc_dar_data = fs::read(&cbtc_dar_path).await?;
+    while let Some(entry) = dar_entries.next_entry().await? {
+        let path = entry.path();
 
-    let cbtc_request = tonic::Request::new(UploadDarRequest {
-        dars: vec![UploadDarData {
-            bytes: cbtc_dar_data,
-            description: Some(CBTC_DAR_DESCRIPTION.to_string()),
-            expected_main_package_id: None,
-        }],
-        vet_all_packages: true,
-        synchronize_vetting: true,
-        synchronizer_id: None, // Auto-detect if single synchronizer
-    });
+        // Check if file has .dar extension
+        if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("dar") {
+            dar_files.push(path);
+        }
+    }
 
-    tracing::debug!("Uploading CBTC DAR to Canton...");
-    client.upload_dar(cbtc_request).await?;
-    tracing::debug!("CBTC DAR uploaded successfully");
+    // Sort for consistent ordering
+    dar_files.sort();
 
-    // Upload governance DAR
-    tracing::debug!("Reading {}", gov_dar_path.display());
-    let gov_dar_data = fs::read(&gov_dar_path).await?;
+    if dar_files.is_empty() {
+        anyhow::bail!("No .dar files found in {}", dirs.dars_dir.display());
+    }
 
-    let gov_request = tonic::Request::new(UploadDarRequest {
-        dars: vec![UploadDarData {
-            bytes: gov_dar_data,
-            description: Some(GOVERNANCE_DAR_DESCRIPTION.to_string()),
-            expected_main_package_id: None,
-        }],
-        vet_all_packages: true,
-        synchronize_vetting: true,
-        synchronizer_id: None, // Auto-detect if single synchronizer
-    });
+    tracing::info!("Found {} DAR file(s) to upload", dar_files.len());
 
-    tracing::debug!("Uploading governance DAR to Canton...");
-    client.upload_dar(gov_request).await?;
-    tracing::debug!("Governance DAR uploaded successfully");
+    // Upload each DAR file
+    for dar_path in dar_files {
+        let filename = dar_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown");
+
+        tracing::debug!("Reading {}", dar_path.display());
+        let dar_data = fs::read(&dar_path).await?;
+
+        // Generate description from filename (remove .dar extension)
+        let description = filename
+            .strip_suffix(".dar")
+            .unwrap_or(filename)
+            .to_string();
+
+        let request = tonic::Request::new(UploadDarRequest {
+            dars: vec![UploadDarData {
+                bytes: dar_data,
+                description: Some(description.clone()),
+                expected_main_package_id: None,
+            }],
+            vet_all_packages: true,
+            synchronize_vetting: true,
+            synchronizer_id: None, // Auto-detect if single synchronizer
+        });
+
+        tracing::info!("Uploading {filename}...");
+        client.upload_dar(request).await?;
+        tracing::info!("Successfully uploaded {filename}");
+    }
 
     tracing::info!("All DARs uploaded successfully");
 
@@ -142,6 +150,7 @@ pub async fn generate_keys(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
     // Get participant ID and export keys
     let participant_id = crate::utils::get_participant_id(config).await?;
     let participant_num = extract_participant_number(&participant_id);
+    tracing::info!("Participant ID: {participant_id}, extracted number: {participant_num}");
 
     export_keys(&dirs.keys_dir, &namespace_key, &daml_key, participant_num).await?;
     export_participant_id(&dirs.ids_dir, &participant_id, participant_num).await?;

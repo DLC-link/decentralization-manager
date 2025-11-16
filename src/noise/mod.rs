@@ -1,3 +1,7 @@
+pub mod client;
+pub mod election;
+pub mod server;
+
 use std::{path::Path, time::Duration};
 
 use bytes::Bytes;
@@ -24,12 +28,14 @@ pub enum MessageType {
     SignSubmissions = 0x0005,
     StatusUpdate = 0x0006,
     Disconnect = 0x0007,
+    GetNextCommand = 0x0008,
 
     // Responses (0x0100 - 0x01FF)
     Ack = 0x0101,
     Data = 0x0102,
     Error = 0x0103,
     Ready = 0x0104,
+    Wait = 0x0105,
 
     // Data Transfers (0x0200 - 0x02FF)
     KeysUpload = 0x0201,
@@ -38,28 +44,34 @@ pub enum MessageType {
     SubmissionSignatures = 0x0204,
 }
 
-impl MessageType {
-    pub fn from_u16(value: u16) -> Option<Self> {
+impl TryFrom<u16> for MessageType {
+    type Error = anyhow::Error;
+
+    fn try_from(value: u16) -> std::result::Result<Self, anyhow::Error> {
         match value {
-            0x0001 => Some(Self::UploadDars),
-            0x0002 => Some(Self::GenerateKeys),
-            0x0003 => Some(Self::SignDns),
-            0x0004 => Some(Self::SignP2pPtk),
-            0x0005 => Some(Self::SignSubmissions),
-            0x0006 => Some(Self::StatusUpdate),
-            0x0007 => Some(Self::Disconnect),
-            0x0101 => Some(Self::Ack),
-            0x0102 => Some(Self::Data),
-            0x0103 => Some(Self::Error),
-            0x0104 => Some(Self::Ready),
-            0x0201 => Some(Self::KeysUpload),
-            0x0202 => Some(Self::DnsSignature),
-            0x0203 => Some(Self::P2pPtkSignatures),
-            0x0204 => Some(Self::SubmissionSignatures),
-            _ => None,
+            0x0001 => Ok(Self::UploadDars),
+            0x0002 => Ok(Self::GenerateKeys),
+            0x0003 => Ok(Self::SignDns),
+            0x0004 => Ok(Self::SignP2pPtk),
+            0x0005 => Ok(Self::SignSubmissions),
+            0x0006 => Ok(Self::StatusUpdate),
+            0x0007 => Ok(Self::Disconnect),
+            0x0008 => Ok(Self::GetNextCommand),
+            0x0101 => Ok(Self::Ack),
+            0x0102 => Ok(Self::Data),
+            0x0103 => Ok(Self::Error),
+            0x0104 => Ok(Self::Ready),
+            0x0105 => Ok(Self::Wait),
+            0x0201 => Ok(Self::KeysUpload),
+            0x0202 => Ok(Self::DnsSignature),
+            0x0203 => Ok(Self::P2pPtkSignatures),
+            0x0204 => Ok(Self::SubmissionSignatures),
+            _ => Err(anyhow::anyhow!("Unknown message type: 0x{value:04x}")),
         }
     }
+}
 
+impl MessageType {
     pub fn to_u16(self) -> u16 {
         self as u16
     }
@@ -113,8 +125,7 @@ impl Message {
 
         // Parse message type (2 bytes)
         let msg_type_value = u16::from_be_bytes([bytes[0], bytes[1]]);
-        let msg_type = MessageType::from_u16(msg_type_value)
-            .ok_or_else(|| anyhow::anyhow!("Unknown message type: 0x{msg_type_value:04x}"))?;
+        let msg_type = MessageType::try_from(msg_type_value)?;
 
         // Parse payload length (4 bytes)
         let payload_len = u32::from_be_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]) as usize;
@@ -181,6 +192,9 @@ pub enum NoiseError {
 
     #[error("Invalid message format")]
     InvalidMessage,
+
+    #[error("General error: {0}")]
+    Anyhow(#[from] anyhow::Error),
 }
 
 impl From<hyper_noise::ClientError> for NoiseError {
@@ -211,10 +225,10 @@ pub async fn send_noise_message(
     identity: &[u8],
     message: &Message,
 ) -> Result<Bytes, NoiseError> {
-    let socket_addr = format!("{}:{}", peer_address, peer_port);
+    let socket_addr = format!("{peer_address}:{peer_port}");
 
     // Create HTTP request with message payload
-    let uri = parse_flexible_uri(&format!("http://{}/message", socket_addr))?;
+    let uri = parse_flexible_uri(&format!("http://{socket_addr}/message"))?;
     let request_body = message.to_bytes();
 
     let request = Request::builder()
@@ -343,12 +357,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_message_type_conversion() {
+    fn test_message_type_conversion() -> Result {
         assert_eq!(MessageType::UploadDars.to_u16(), 0x0001);
-        assert_eq!(MessageType::from_u16(0x0001), Some(MessageType::UploadDars));
+        assert_eq!(MessageType::try_from(0x0001)?, MessageType::UploadDars);
         assert_eq!(MessageType::Ack.to_u16(), 0x0101);
-        assert_eq!(MessageType::from_u16(0x0101), Some(MessageType::Ack));
-        assert_eq!(MessageType::from_u16(0xFFFF), None);
+        assert_eq!(MessageType::try_from(0x0101)?, MessageType::Ack);
+        assert!(MessageType::try_from(0xFFFF).is_err());
+        Ok(())
     }
 
     #[test]
@@ -376,13 +391,14 @@ mod tests {
     }
 
     #[test]
-    fn test_message_roundtrip() {
+    fn test_message_roundtrip() -> Result {
         let original = Message::new(MessageType::StatusUpdate, b"test data".to_vec());
         let bytes = original.to_bytes();
-        let decoded = Message::from_bytes(&bytes).unwrap();
+        let decoded = Message::from_bytes(&bytes)?;
 
         assert_eq!(decoded.msg_type, original.msg_type);
         assert_eq!(decoded.payload, original.payload);
+        Ok(())
     }
 
     #[test]
@@ -403,15 +419,16 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_flexible_uri() {
+    fn test_parse_flexible_uri() -> Result {
         // With scheme
-        let uri1 = parse_flexible_uri("http://example.com:8080").unwrap();
+        let uri1 = parse_flexible_uri("http://example.com:8080")?;
         assert_eq!(uri1.host(), Some("example.com"));
         assert_eq!(uri1.port_u16(), Some(8080));
 
         // Without scheme
-        let uri2 = parse_flexible_uri("example.com:8080").unwrap();
+        let uri2 = parse_flexible_uri("example.com:8080")?;
         assert_eq!(uri2.host(), Some("example.com"));
         assert_eq!(uri2.port_u16(), Some(8080));
+        Ok(())
     }
 }

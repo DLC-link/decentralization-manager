@@ -1,4 +1,4 @@
-use crate::network_config::NodeConfig;
+use crate::config::NodeConfig;
 use ed25519_dalek::{Signer, SigningKey};
 
 use crate::{
