@@ -7,20 +7,20 @@ use crate::{
     error::Result,
     proto::com::{
         daml::ledger::api::v2::{
+            Command, CreateCommand, GenMap, Identifier, Optional, Record, RecordField, Value,
             admin::{
+                CreateUserRequest, GrantUserRightsRequest, ListKnownPartiesRequest, ObjectMeta,
+                Right, User,
                 party_management_service_client::PartyManagementServiceClient,
                 right::{CanActAs, CanReadAs, Kind},
                 user_management_service_client::UserManagementServiceClient,
-                CreateUserRequest, GrantUserRightsRequest, ListKnownPartiesRequest, ObjectMeta,
-                Right, User,
             },
             command, gen_map,
             interactive::{
-                interactive_submission_service_client::InteractiveSubmissionServiceClient,
                 PrepareSubmissionRequest,
+                interactive_submission_service_client::InteractiveSubmissionServiceClient,
             },
-            value, Command, CreateCommand, GenMap, Identifier, Optional, Record, RecordField,
-            Value,
+            value,
         },
         digitalasset::canton::protocol::v30::DecentralizedNamespaceDefinition,
     },

@@ -11,7 +11,7 @@ use crate::{
                 ExportKeyPairRequest, ListKeysFilters, ListMyKeysRequest,
                 vault_service_client::VaultServiceClient,
             },
-            v30::{public_key, Signature, SignatureFormat, SigningAlgorithmSpec},
+            v30::{Signature, SignatureFormat, SigningAlgorithmSpec, public_key},
         },
     },
     utils,
@@ -211,7 +211,8 @@ pub async fn sign_submissions(config: &Config, dirs: &WorkflowDirs) -> Result {
     let signatures_dir = execution_dir.join("signatures");
     tokio::fs::create_dir_all(&signatures_dir).await?;
 
-    let signatures_file = signatures_dir.join(format!("submission-signatures-{}.bin", participant_num));
+    let signatures_file =
+        signatures_dir.join(format!("submission-signatures-{}.bin", participant_num));
     tracing::info!("Saving signatures to {}", signatures_file.display());
 
     utils::write_messages_to_file(&[signature1, signature2, signature3], &signatures_file).await?;
