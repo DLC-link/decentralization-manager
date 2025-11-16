@@ -1,7 +1,7 @@
+use crate::network_config::NodeConfig;
 use tokio::{fs, time};
 
 use crate::{
-    config::Config,
     consts::{TOPOLOGY_RETRY_DELAY_SECS, TOPOLOGY_RETRY_MAX_ATTEMPTS},
     dirs::WorkflowDirs,
     error::Result,
@@ -27,7 +27,7 @@ use crate::{
 /// # Arguments
 /// * `config` - Configuration with Canton connection details
 /// * `dirs` - WorkflowDirs containing all directory paths
-pub async fn submit_final_proposals(config: &Config, dirs: &WorkflowDirs) -> Result {
+pub async fn submit_final_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
     tracing::info!("Submitting final proposals...");
 
     // Step 1: Get synchronizer ID
@@ -158,7 +158,7 @@ pub async fn submit_final_proposals(config: &Config, dirs: &WorkflowDirs) -> Res
 
 /// Wait for P2P (PartyToParticipant) to appear in topology by polling
 async fn wait_for_p2p_in_topology(
-    config: &Config,
+    config: &NodeConfig,
     synchronizer_id: &str,
     party_id: &str,
 ) -> Result {
@@ -209,7 +209,7 @@ async fn wait_for_p2p_in_topology(
 
 /// Wait for PTK (PartyToKeyMapping) to appear in topology by polling
 async fn wait_for_ptk_in_topology(
-    config: &Config,
+    config: &NodeConfig,
     synchronizer_id: &str,
     party_id: &str,
 ) -> Result {

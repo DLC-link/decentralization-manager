@@ -1,7 +1,7 @@
+use crate::network_config::NodeConfig;
 use tokio::fs;
 
 use crate::{
-    config::Config,
     consts::{TOPOLOGY_RETRY_DELAY_SECS, TOPOLOGY_RETRY_MAX_ATTEMPTS},
     dirs::WorkflowDirs,
     error::Result,
@@ -40,7 +40,7 @@ const DEFAULT_PAGE_SIZE: i32 = 1000;
 /// # Arguments
 /// * `config` - Configuration with Ledger API connection details
 /// * `dirs` - WorkflowDirs containing all directory paths
-pub async fn prepare_submissions(config: &Config, dirs: &WorkflowDirs) -> Result {
+pub async fn prepare_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
     tracing::info!("Preparing submissions...");
 
     // Step 1: Construct decentralized registrar party ID from namespace definition

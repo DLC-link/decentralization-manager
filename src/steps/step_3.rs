@@ -1,7 +1,7 @@
+use crate::network_config::NodeConfig;
 use tokio::fs;
 
 use crate::{
-    config::Config,
     dirs::WorkflowDirs,
     error::Result,
     proto::com::digitalasset::canton::{
@@ -24,7 +24,7 @@ use crate::{
 /// # Arguments
 /// * `config` - Configuration with Canton connection details
 /// * `dirs` - WorkflowDirs containing all directory paths
-pub async fn sign_p2p_ptk_proposals(config: &Config, dirs: &WorkflowDirs) -> Result {
+pub async fn sign_p2p_ptk_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
     tracing::info!("Signing P2P and PTK proposals...");
 
     // Step 1: Get participant number

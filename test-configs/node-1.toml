@@ -1,0 +1,15 @@
+# Node configuration for Participant 1 (Coordinator)
+
+network_config = "network.toml"
+
+[node]
+participant_id = "participant-1"
+static_key_file = "keys/participant-1.key"
+listen_address = "0.0.0.0"
+
+[canton]
+admin_api_host = "localhost"
+admin_api_port = 5012
+ledger_api_host = "localhost"
+ledger_api_port = 5011
+synchronizer = "global"

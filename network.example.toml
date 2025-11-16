@@ -1,0 +1,56 @@
+# Network-wide configuration shared by all participants
+[network]
+name = "cbtc-setup-network"
+protocol_version = "1.0"
+port = 9000
+# Options: "explicit", "first", "election"
+coordinator_strategy = "explicit"
+
+# Coordinator node
+[[participants]]
+id = "coordinator-node"
+name = "Coordinator Node"
+role = "coordinator"
+address = "10.0.1.100"
+port = 9000
+# Replace with actual public key from `cargo run -- keygen -o keys/coordinator.key`
+public_key = "02c0011d1a70123456789abcdef0123456789abcdef0123456789abcdef01234567"
+
+# Attestor 1
+[[participants]]
+id = "attestor-1"
+name = "Attestor 1"
+address = "10.0.1.101"
+port = 9000
+# Replace with actual public key from `cargo run -- keygen -o keys/attestor-1.key`
+public_key = "02a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456"
+
+# Attestor 2
+[[participants]]
+id = "attestor-2"
+name = "Attestor 2"
+address = "10.0.1.102"
+port = 9000
+# Replace with actual public key from `cargo run -- keygen -o keys/attestor-2.key`
+public_key = "02f6e5d4c3b2a1098765432109876543210fedcba098765432109876543210fed"
+
+# Attestor 3
+[[participants]]
+id = "attestor-3"
+name = "Attestor 3"
+address = "10.0.1.103"
+port = 9000
+# Replace with actual public key from `cargo run -- keygen -o keys/attestor-3.key`
+public_key = "021a2b3c4d5e6f098765432109876543210abcdef1234567890abcdef123456789"
+
+[timeouts]
+handshake_timeout_secs = 30
+message_timeout_secs = 120
+connection_retry_attempts = 3
+connection_retry_delay_secs = 5
+
+[security]
+# Require all participants to be present before starting
+require_all_participants = true
+# Minimum number of participants (threshold)
+minimum_participants = 3

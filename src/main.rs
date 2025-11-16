@@ -7,7 +7,7 @@ use tracing_subscriber::{
 
 use cli::{Cli, Commands, Parser};
 
-use grpc_test::{dirs::WorkflowDirs, error::Result, steps};
+use grpc_test::{dirs::WorkflowDirs, error::Result, network_config::NodeConfig, steps};
 
 use cli::{Cli, Commands, Parser};
 
@@ -25,10 +25,16 @@ async fn main() -> Result {
 
     let args = Cli::parse();
 
-    // Load configuration (required)
-    let config = if let Some(config_path) = &args.config {
+    // Handle keygen command early (doesn't require config)
+    if let Commands::Keygen { ref output } = args.command {
+        grpc_test::noise::generate_keypair(output).await?;
+        return Ok(());
+    }
+
+    // Load configuration (required for all other commands)
+    let node_config = if let Some(config_path) = &args.config {
         tracing::info!("Loading configuration from: {}", config_path.display());
-        grpc_test::config::Config::from_file(config_path).await?
+        NodeConfig::from_file(config_path).await?
     } else {
         anyhow::bail!("Configuration file is required. Use -c <config-file>");
     };
@@ -39,17 +45,21 @@ async fn main() -> Result {
 
     // Execute the requested command
     match args.command {
-        Commands::All => steps::run_all_steps(&config, &dirs).await?,
-        Commands::UploadDars => steps::upload_dars(&config, &dirs).await?,
-        Commands::GenerateKeys => steps::generate_keys(&config, &dirs).await?,
-        Commands::CreateProposals => steps::create_proposals(&config, &dirs).await?,
-        Commands::SignDnsProposals => steps::sign_dns_proposals(&config, &dirs).await?,
-        Commands::SubmitDnsProposals => steps::submit_dns_proposals(&config, &dirs).await?,
-        Commands::SignP2pPtkProposals => steps::sign_p2p_ptk_proposals(&config, &dirs).await?,
-        Commands::SubmitFinalProposals => steps::submit_final_proposals(&config, &dirs).await?,
-        Commands::PrepareSubmissions => steps::prepare_submissions(&config, &dirs).await?,
-        Commands::SignSubmissions => steps::sign_submissions(&config, &dirs).await?,
-        Commands::ExecuteSubmissions => steps::execute_submissions(&config, &dirs).await?,
+        Commands::Keygen { .. } => unreachable!("Keygen handled earlier"),
+        Commands::Start => unimplemented!("Start command not yet implemented"),
+        Commands::All => steps::run_all_steps(&node_config, &dirs).await?,
+        Commands::UploadDars => steps::upload_dars(&node_config, &dirs).await?,
+        Commands::GenerateKeys => steps::generate_keys(&node_config, &dirs).await?,
+        Commands::CreateProposals => steps::create_proposals(&node_config, &dirs).await?,
+        Commands::SignDnsProposals => steps::sign_dns_proposals(&node_config, &dirs).await?,
+        Commands::SubmitDnsProposals => steps::submit_dns_proposals(&node_config, &dirs).await?,
+        Commands::SignP2pPtkProposals => steps::sign_p2p_ptk_proposals(&node_config, &dirs).await?,
+        Commands::SubmitFinalProposals => {
+            steps::submit_final_proposals(&node_config, &dirs).await?
+        }
+        Commands::PrepareSubmissions => steps::prepare_submissions(&node_config, &dirs).await?,
+        Commands::SignSubmissions => steps::sign_submissions(&node_config, &dirs).await?,
+        Commands::ExecuteSubmissions => steps::execute_submissions(&node_config, &dirs).await?,
     }
 
     tracing::info!("Command completed successfully");
