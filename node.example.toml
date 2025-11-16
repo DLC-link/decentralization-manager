@@ -6,7 +6,7 @@ network_config = "network.toml"
 
 [node]
 # Must match one of the participant IDs in network.toml
-node_id = "attestor-1"
+participant_id = "attestor-1"
 
 # Path to this node's static private key
 # Generate with: cargo run -- keygen -o keys/my_static.key
@@ -21,7 +21,4 @@ admin_api_host = "localhost"
 admin_api_port = 5001
 ledger_api_host = "localhost"
 ledger_api_port = 5002
-
-# Optional: JWT token for Ledger API authentication
-# If not provided, requests will be sent without authentication
-# ledger_api_token = "your-jwt-token-here"
+token = "eyJ0eXAiOiJKV1QiLCJhbGc..."

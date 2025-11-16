@@ -1,9 +1,9 @@
+use crate::network_config::NodeConfig;
 use std::path::Path;
 
 use tokio::fs;
 
 use crate::{
-    config::Config,
     dirs::WorkflowDirs,
     error::Result,
     proto::com::digitalasset::canton::{
@@ -43,7 +43,7 @@ const PARTICIPANT_ID_PREFIX: &str = "PAR::";
 /// Corresponds to: 00_UploadDars.sc
 ///
 /// Uploads both CBTC and governance DAR files to the Canton participant.
-pub async fn upload_dars(config: &Config, dirs: &WorkflowDirs) -> Result {
+pub async fn upload_dars(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
     tracing::info!("Uploading DARs from {}", dirs.dars_dir.display());
 
     let mut client = PackageServiceClient::connect(config.admin_api_url()).await?;
@@ -110,7 +110,7 @@ pub async fn upload_dars(config: &Config, dirs: &WorkflowDirs) -> Result {
 /// This function generates signing keys and exports them along with the participant ID.
 /// The namespace delegation step from the original Scala script is currently skipped
 /// and should be implemented separately using TopologyManagerWriteService.
-pub async fn generate_keys(config: &Config, dirs: &WorkflowDirs) -> Result {
+pub async fn generate_keys(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
     tracing::info!("Generating cryptographic keys...");
 
     let mut vault_client = VaultServiceClient::connect(config.admin_api_url()).await?;
@@ -211,7 +211,7 @@ async fn export_participant_id(
 
 /// Propose namespace delegation for the generated namespace key
 async fn propose_namespace_delegation(
-    config: &Config,
+    config: &NodeConfig,
     namespace_key: &SigningPublicKey,
     namespace_fingerprint: &str,
 ) -> Result {

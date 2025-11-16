@@ -1,4 +1,4 @@
-use crate::{config::Config, dirs::WorkflowDirs, error::Result};
+use crate::{dirs::WorkflowDirs, error::Result, network_config::NodeConfig};
 
 // Step modules
 pub mod step_1;
@@ -23,7 +23,7 @@ pub use step_4::sign_submissions;
 pub use step_5::execute_submissions;
 
 /// Run all steps in sequence
-pub async fn run_all_steps(config: &Config, dirs: &WorkflowDirs) -> Result {
+pub async fn run_all_steps(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
     tracing::info!("Starting full workflow");
 
     // Step 1: Upload DARs and generate keys (run on each participant)

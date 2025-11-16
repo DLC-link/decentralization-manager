@@ -1,7 +1,7 @@
+use crate::network_config::NodeConfig;
 use ed25519_dalek::{Signer, SigningKey};
 
 use crate::{
-    config::Config,
     dirs::WorkflowDirs,
     error::Result,
     proto::com::{
@@ -39,7 +39,7 @@ const ED25519_PRIVATE_KEY_LENGTH: u8 = 0x20;
 /// # Arguments
 /// * `config` - Configuration with Admin API connection details
 /// * `dirs` - WorkflowDirs containing all directory paths
-pub async fn sign_submissions(config: &Config, dirs: &WorkflowDirs) -> Result {
+pub async fn sign_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
     tracing::info!("Signing submissions...");
 
     // Step 1: Get participant number
