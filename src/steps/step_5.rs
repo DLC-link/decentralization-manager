@@ -56,11 +56,14 @@ pub async fn execute_submissions(config: &Config, dirs: &WorkflowDirs) -> Result
     let prepared_dir = ledger_submissions_dir.join("prepared");
 
     let prepared_sub1: PrepareSubmissionResponse =
-        utils::read_first_message_from_file(&prepared_dir.join("prepared-submission-1.bin")).await?;
+        utils::read_first_message_from_file(&prepared_dir.join("prepared-submission-1.bin"))
+            .await?;
     let prepared_sub2: PrepareSubmissionResponse =
-        utils::read_first_message_from_file(&prepared_dir.join("prepared-submission-2.bin")).await?;
+        utils::read_first_message_from_file(&prepared_dir.join("prepared-submission-2.bin"))
+            .await?;
     let prepared_sub3: PrepareSubmissionResponse =
-        utils::read_first_message_from_file(&prepared_dir.join("prepared-submission-3.bin")).await?;
+        utils::read_first_message_from_file(&prepared_dir.join("prepared-submission-3.bin"))
+            .await?;
 
     tracing::debug!("Loaded 3 prepared submissions");
 
