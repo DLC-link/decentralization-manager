@@ -1,0 +1,15 @@
+# Node configuration for Participant 3
+
+network_config = "network.toml"
+
+[node]
+participant_id = "participant-3"
+static_key_file = "keys/participant-3.key"
+listen_address = "0.0.0.0"
+
+[canton]
+admin_api_host = "localhost"
+admin_api_port = 5016
+ledger_api_host = "localhost"
+ledger_api_port = 5015
+synchronizer = "global"

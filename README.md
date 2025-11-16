@@ -25,6 +25,7 @@ This tool implements a port of Canton Scala scripts to Rust, providing a more pe
 - [Usage](#usage)
   - [Run All Steps in Sequence](#run-all-steps-in-sequence)
   - [Run Individual Steps](#run-individual-steps)
+  - [Generate Noise Protocol Keys](#generate-noise-protocol-keys)
   - [Get Help](#get-help)
 - [Development](#development)
   - [Run Tests](#run-tests)
@@ -52,73 +53,119 @@ This project ports Canton Scala scripts to Rust, implementing a multi-party dece
 
 - **[docs/TODO.md](./docs/TODO.md)** - Detailed implementation plan, API mappings, and step-by-step breakdown
 - **[docs/CODING-STANDARDS.md](./docs/CODING-STANDARDS.md)** - Project coding standards and style guide
-- **[config.example.toml](./config.example.toml)** - Example configuration file
+- **[network.example.toml](./network.example.toml)** - Example network topology configuration
+- **[node.example.toml](./node.example.toml)** - Example node configuration
+- **[test-configs/](./test-configs/)** - Pre-configured test setup for 3 participants
 
 ## Setup
 
 ## Configuration
 
-Create a configuration file based on the example:
+This project uses a distributed configuration system for multi-party setups:
+
+- **Network Configuration** (`network.toml`): Shared topology with all participants and Noise protocol keys
+- **Node Configuration** (`node-X.toml`): Individual node settings with Canton connection details
+
+### Using Test Configurations
+
+Pre-configured test setups are available in `test-configs/`:
 
 ```sh
-cp config.example.toml config.toml
+# Run commands for different participants
+cargo run -- -c test-configs/node-1.toml <command>  # Coordinator
+cargo run -- -c test-configs/node-2.toml <command>  # Attestor 2
+cargo run -- -c test-configs/node-3.toml <command>  # Attestor 3
 ```
 
-Edit `config.toml` with your Canton connection details:
+### Creating Custom Configuration
 
+1. **Generate Noise keypairs** for secure communication:
+```sh
+cargo run -- keygen -o keys/participant-1.key
+```
+
+2. **Create network.toml** based on `network.example.toml`:
 ```toml
-[connection]
-admin_api_host = "localhost"
-admin_api_port = 5001
-ledger_api_host = "localhost"
-ledger_api_port = 5002
-# token = "your-oauth-token-here"  # Optional
+[network]
+name = "my-network"
+coordinator_strategy = "explicit"
 
-[topology]
+[[participants]]
+id = "participant-1"
+role = "coordinator"
+public_key = "<hex-encoded-public-key>"
+# ... more participants
+```
+
+3. **Create node-X.toml** for each participant based on `node.example.toml`:
+```toml
+network_config = "network.toml"
+
+[node]
+participant_id = "participant-1"
+static_key_file = "keys/participant-1.key"
+listen_address = "0.0.0.0"
+
+[canton]
+admin_api_host = "localhost"
+admin_api_port = 5012
+ledger_api_host = "localhost"
+ledger_api_port = 5011
 synchronizer = "global"
 ```
+
+See `test-configs/README.md` for detailed documentation.
 
 ## Run The App
 
 ### Run All Steps in Sequence
 
 ```sh
-cargo run --release -- -c config.toml all
+cargo run --release -- -c test-configs/node-1.toml all
 ```
 
 ### Run Individual Steps
 
 ```sh
 # Step 1: Upload DARs
-cargo run --release -- -c config.toml upload-dars
+cargo run --release -- -c test-configs/node-1.toml upload-dars
 
 # Step 1: Generate keys and export participant ID
-cargo run --release -- -c config.toml generate-keys
+cargo run --release -- -c test-configs/node-1.toml generate-keys
 
 # Step 1a: Create topology proposals
-cargo run --release -- -c config.toml create-proposals
+cargo run --release -- -c test-configs/node-1.toml create-proposals
 
 # Step 2: Sign DNS proposals
-cargo run --release -- -c config.toml sign-dns-proposals
+cargo run --release -- -c test-configs/node-1.toml sign-dns-proposals
 
 # Step 2a: Submit DNS proposals
-cargo run --release -- -c config.toml submit-dns-proposals
+cargo run --release -- -c test-configs/node-1.toml submit-dns-proposals
 
 # Step 3: Sign P2P and PTK proposals
-cargo run --release -- -c config.toml sign-p2p-ptk-proposals
+cargo run --release -- -c test-configs/node-1.toml sign-p2p-ptk-proposals
 
 # Step 3a: Submit final proposals
-cargo run --release -- -c config.toml submit-final-proposals
+cargo run --release -- -c test-configs/node-1.toml submit-final-proposals
 
 # Step 3b: Prepare ledger submissions
-cargo run --release -- -c config.toml prepare-submissions
+cargo run --release -- -c test-configs/node-1.toml prepare-submissions
 
 # Step 4: Sign ledger submissions
-cargo run --release -- -c config.toml sign-submissions
+cargo run --release -- -c test-configs/node-1.toml sign-submissions
 
 # Step 5: Execute ledger submissions
-cargo run --release -- -c config.toml execute-submissions
+cargo run --release -- -c test-configs/node-1.toml execute-submissions
 ```
+
+### Generate Noise Protocol Keys
+
+```sh
+# Generate a keypair for secure node-to-node communication
+cargo run -- keygen -o keys/my-node.key
+```
+
+The public key will be displayed and should be added to `network.toml`.
 
 ### Get Help
 

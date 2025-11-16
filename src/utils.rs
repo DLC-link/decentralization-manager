@@ -5,8 +5,8 @@ use prost::Message;
 use tokio::fs;
 
 use crate::{
-    config::Config,
     error::Result,
+    network_config::NodeConfig,
     proto::com::digitalasset::canton::{
         admin::participant::v30::{
             GetSynchronizerIdRequest,
@@ -213,13 +213,13 @@ pub fn compute_fingerprint(key: &SigningPublicKey) -> String {
 ///
 /// Queries the participant's synchronizer connectivity service to get the physical
 /// synchronizer ID for the configured synchronizer alias.
-pub async fn get_synchronizer_id(config: &Config) -> Result<String> {
+pub async fn get_synchronizer_id(config: &NodeConfig) -> Result<String> {
     let mut conn_client =
         SynchronizerConnectivityServiceClient::connect(config.admin_api_url()).await?;
 
     let response = conn_client
         .get_synchronizer_id(tonic::Request::new(GetSynchronizerIdRequest {
-            synchronizer_alias: config.topology.synchronizer.clone(),
+            synchronizer_alias: config.synchronizer().to_string(),
         }))
         .await?
         .into_inner();
@@ -227,7 +227,7 @@ pub async fn get_synchronizer_id(config: &Config) -> Result<String> {
     if response.physical_synchronizer_id.is_empty() {
         anyhow::bail!(
             "No synchronizer ID returned for synchronizer alias '{}'",
-            config.topology.synchronizer
+            config.synchronizer()
         );
     }
 
@@ -237,7 +237,7 @@ pub async fn get_synchronizer_id(config: &Config) -> Result<String> {
 /// Get participant ID from Canton
 ///
 /// Queries the participant's identity initialization service to get the unique participant ID.
-pub async fn get_participant_id(config: &Config) -> Result<String> {
+pub async fn get_participant_id(config: &NodeConfig) -> Result<String> {
     let mut id_client =
         IdentityInitializationServiceClient::connect(config.admin_api_url()).await?;
     let response = id_client
@@ -292,7 +292,7 @@ pub async fn find_participant_number(ids_dir: &Path, current_id: &str) -> Result
 /// Get participant number for current participant
 ///
 /// Convenience function that gets the participant ID and finds its number.
-pub async fn get_participant_number(config: &Config, ids_dir: &Path) -> Result<u32> {
+pub async fn get_participant_number(config: &NodeConfig, ids_dir: &Path) -> Result<u32> {
     let participant_id = get_participant_id(config).await?;
     let participant_id_with_prefix = format!("PAR::{participant_id}");
     find_participant_number(ids_dir, &participant_id_with_prefix).await

@@ -1,9 +1,9 @@
+use crate::network_config::NodeConfig;
 use std::collections::HashSet;
 
 use tokio::fs;
 
 use crate::{
-    config::Config,
     dirs::WorkflowDirs,
     error::Result,
     proto::com::digitalasset::canton::{
@@ -40,7 +40,7 @@ use crate::{
 ///
 /// **Note**: If you encounter TOPOLOGY_NO_APPROPRIATE_SIGNING_KEY_IN_STORE errors,
 /// ensure the participant is properly connected to a synchronizer first.
-pub async fn create_proposals(config: &Config, dirs: &WorkflowDirs) -> Result {
+pub async fn create_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
     tracing::info!("Creating topology proposals...");
 
     // Step 1: Load all attestor key files

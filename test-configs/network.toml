@@ -1,0 +1,41 @@
+# Network-wide configuration shared by all participants
+[network]
+name = "canton-onboarding-network"
+protocol_version = "1.0"
+port = 9000
+coordinator_strategy = "explicit"
+
+# Coordinator - Participant 1
+[[participants]]
+id = "participant-1"
+name = "Participant 1 (Coordinator)"
+role = "coordinator"
+address = "localhost"
+port = 9001
+public_key = "02e3c2ea404890f9ca6f7d583de67e3c0a2694a94aae3e5e60352217d720813605"
+
+# Attestor - Participant 2
+[[participants]]
+id = "participant-2"
+name = "Participant 2"
+address = "localhost"
+port = 9002
+public_key = "0298125730a5cd2dd9bc05f39d18b1ec19407bcf2138efdd1222b191c20ee6ba46"
+
+# Attestor - Participant 3
+[[participants]]
+id = "participant-3"
+name = "Participant 3"
+address = "localhost"
+port = 9003
+public_key = "02f0d4fdc8303d08417fcf08bca5131d603a6caff61a1565b263e1423811d1192e"
+
+[timeouts]
+handshake_timeout_secs = 30
+message_timeout_secs = 120
+connection_retry_attempts = 3
+connection_retry_delay_secs = 5
+
+[security]
+require_all_participants = true
+minimum_participants = 3
