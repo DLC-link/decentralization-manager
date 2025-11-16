@@ -5,8 +5,8 @@ use prost::Message;
 use tokio::fs;
 
 use crate::{
+    config::NodeConfig,
     error::Result,
-    network_config::NodeConfig,
     proto::com::digitalasset::canton::{
         admin::participant::v30::{
             GetSynchronizerIdRequest,
@@ -304,8 +304,8 @@ mod tests {
     use prost_types::Timestamp;
 
     #[tokio::test]
-    async fn test_write_and_read_single_message() {
-        let temp_dir = tempfile::tempdir().unwrap();
+    async fn test_write_and_read_single_message() -> Result {
+        let temp_dir = tempfile::tempdir()?;
         let file_path = temp_dir.path().join("test.bin");
 
         let message = Timestamp {
@@ -314,18 +314,19 @@ mod tests {
         };
 
         // Write
-        write_message_to_file(&message, &file_path).await.unwrap();
+        write_message_to_file(&message, &file_path).await?;
 
         // Read
-        let read_message: Timestamp = read_first_message_from_file(&file_path).await.unwrap();
+        let read_message: Timestamp = read_first_message_from_file(&file_path).await?;
 
         assert_eq!(message.seconds, read_message.seconds);
         assert_eq!(message.nanos, read_message.nanos);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_write_and_read_multiple_messages() {
-        let temp_dir = tempfile::tempdir().unwrap();
+    async fn test_write_and_read_multiple_messages() -> Result {
+        let temp_dir = tempfile::tempdir()?;
         let file_path = temp_dir.path().join("test_multiple.bin");
 
         let messages = vec![
@@ -344,15 +345,16 @@ mod tests {
         ];
 
         // Write
-        write_messages_to_file(&messages, &file_path).await.unwrap();
+        write_messages_to_file(&messages, &file_path).await?;
 
         // Read
-        let read_messages: Vec<Timestamp> = read_all_messages_from_file(&file_path).await.unwrap();
+        let read_messages: Vec<Timestamp> = read_all_messages_from_file(&file_path).await?;
 
         assert_eq!(messages.len(), read_messages.len());
         for (original, read) in messages.iter().zip(read_messages.iter()) {
             assert_eq!(original.seconds, read.seconds);
             assert_eq!(original.nanos, read.nanos);
         }
+        Ok(())
     }
 }

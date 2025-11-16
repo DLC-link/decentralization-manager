@@ -1,4 +1,4 @@
-use crate::{dirs::WorkflowDirs, error::Result, network_config::NodeConfig};
+use crate::{config::NodeConfig, dirs::WorkflowDirs, error::Result};
 
 // Step modules
 pub mod step_1;

@@ -4,6 +4,20 @@
 
 This document describes how peers (Coordinator and Attestors) communicate securely using the Noise Protocol Framework during the multi-party decentralized namespace setup process.
 
+**Implementation Details:**
+- **Noise Pattern**: NN_PSK2 (not XX)
+- **Cryptographic Curve**: secp256k1 (not Curve25519)
+- **Libraries**: `tokio-noise` and `hyper-noise` with `secp256k1`
+- **Authentication**: Pre-shared keys derived via ECDH from static keypairs
+
+## Visual Workflow
+
+![Multi-Party Decentralized Setup Workflow](flowchart.png)
+
+The diagram above illustrates the complete workflow with Noise Protocol communication between the coordinator and attestors. Red boxes indicate Noise protocol operations, blue boxes show coordinator commands, green boxes represent attestor responses, and pink boxes denote coordinator-only operations.
+
+The source Mermaid diagram is available at [`flowchart-with-comms.mmd`](flowchart-with-comms.mmd) and can be edited with tools like [Mermaid Live Editor](https://mermaid.live/).
+
 ## Table of Contents
 
 1. [Introduction to Noise Protocol](#introduction-to-noise-protocol)
@@ -44,29 +58,33 @@ In the multi-party Canton setup:
 ### Network Topology
 
 ```
-        Coordinator (Server)
+   Attestor-1 (Coordinator/Server Role)
               |
     +---------+---------+
-    |         |         |
-Attestor-1  Attestor-2  Attestor-3+
-(Client)    (Client)    (Client)
+    |                   |
+Attestor-2          Attestor-3+
+(Client)            (Client)
 ```
+
+**Note**: The coordinator is itself an attestor participant - it generates keys, signs proposals, and participates in the decentralized party setup just like other attestors. It additionally takes on the orchestration role by running as a server.
 
 ### Role Definitions
 
-**Coordinator (Server Role)**:
-- Listens on a TCP port
-- Accepts connections from attestors
-- Distributes proposals and commands
-- Aggregates signatures
-- Submits to Canton
+**Coordinator (Server + Attestor Role)**:
+- **Is an attestor**: Generates keys, signs proposals, participates in threshold signatures
+- **Acts as orchestrator**: Listens on a TCP port and accepts connections from other attestors
+- Distributes proposals and commands to other attestors
+- Aggregates signatures from all attestors (including itself)
+- Submits aggregated transactions to Canton
+- Can be any of the attestors based on coordinator selection strategy
 
-**Attestors (Client Role)**:
-- Connect to coordinator
+**Other Attestors (Client Role)**:
+- Connect to the coordinator
 - Authenticate using their static keys
 - Receive commands and data
 - Perform operations (signing, key generation)
 - Send results back to coordinator
+- Participate equally in the decentralized party setup
 
 ---
 
@@ -112,12 +130,27 @@ After setup completion:
 
 ## Handshake Process
 
-### Noise Pattern: `XX`
+### Noise Pattern: `NN_PSK2`
 
-We use the **Noise XX** pattern, which provides:
-- Mutual authentication
-- Identity hiding (keys not revealed until encrypted)
+We use the **Noise NN_PSK2** pattern, which provides:
+- Mutual authentication via pre-shared keys (PSK)
+- Forward secrecy through ephemeral key exchange
+- No identity transmission (identities established through PSK)
 - Two round trips
+
+#### How NN_PSK2 Works
+
+Unlike patterns that transmit static keys (like XX), NN_PSK2 uses a **pre-shared key (PSK)** that both parties compute independently from their static keypairs via ECDH. This PSK is mixed into the handshake to provide mutual authentication without transmitting identities.
+
+**PSK Derivation**:
+```rust
+// Each party has a secp256k1 static keypair
+let my_static_keypair = NoiseKeypair::from_file("my_key.priv")?;
+let peer_static_pubkey = load_peer_pubkey_from_config();
+
+// PSK is derived via ECDH(my_static_private, peer_static_public)
+let psk = my_static_keypair.derive_psk(&peer_static_pubkey)?;
+```
 
 #### Handshake Flow
 
@@ -126,14 +159,17 @@ Attestor                           Coordinator
    |                                    |
    |  -> e (ephemeral key)              |
    |                                    |
-   |  <- e, ee, s (ephem, static key)   |
-   |                                    |
-   |  -> s, se (static key, DH)         |
+   |  <- e, ee, psk (ephemeral + PSK)   |
    |                                    |
    [Handshake complete, transport mode]
 ```
 
 #### Step-by-Step
+
+**Pre-handshake**:
+- Both parties load their static secp256k1 keypairs
+- Both parties load peer's public key from configuration
+- Both parties derive the same PSK via ECDH
 
 **Message 1 (Attestor → Coordinator)**:
 ```
@@ -142,41 +178,39 @@ e: Attestor generates ephemeral keypair and sends public key
 
 **Message 2 (Coordinator → Attestor)**:
 ```
-e:  Coordinator sends ephemeral public key
-ee: Diffie-Hellman(AttestorEphemeral, CoordinatorEphemeral)
-s:  Coordinator sends encrypted static public key
+e:   Coordinator sends ephemeral public key
+ee:  Diffie-Hellman(AttestorEphemeral, CoordinatorEphemeral)
+psk: Mix pre-shared key into the handshake state (PSK2 indicates it's mixed at this point)
 ```
 
-**Message 3 (Attestor → Coordinator)**:
-```
-s:  Attestor sends encrypted static public key
-se: Diffie-Hellman(AttestorStatic, CoordinatorEphemeral)
-```
-
-After message 3, both parties have:
-- Verified each other's static public keys
-- Derived shared encryption keys
-- Established a secure channel
+After message 2, both parties have:
+- Established ephemeral Diffie-Hellman shared secret
+- Mixed in the PSK for mutual authentication
+- Derived shared transport encryption keys
+- Verified each other's identity (via PSK validation)
 
 ### Static Key Management
 
-Each party has a long-term static keypair:
+Each party has a long-term static **secp256k1** keypair:
 
 ```rust
 // Coordinator generates/loads static key
-let coordinator_static_key = KeyPair::from_file("coordinator_key.priv")?;
+let coordinator_static_key = NoiseKeypair::from_file("coordinator_key.priv")?;
+// Private key: 32 bytes (hex-encoded in file)
+// Public key: 33 bytes (compressed secp256k1 format)
 
 // Attestor generates/loads static key
-let attestor_static_key = KeyPair::from_file("attestor_key.priv")?;
+let attestor_static_key = NoiseKeypair::from_file("attestor_key.priv")?;
 
 // Public keys are distributed out-of-band
 // (e.g., during initial setup, via configuration files)
 ```
 
 **Trust Establishment**:
-- Attestors know coordinator's static public key (configured)
-- Coordinator maintains allowlist of attestor static public keys
-- Connections from unknown keys are rejected
+- Attestors know coordinator's static public key (configured in `network.toml`)
+- Coordinator maintains allowlist of attestor static public keys (from `network.toml`)
+- PSK derivation succeeds only if both parties have correct peer public keys
+- Connections from unknown keys are rejected during handshake
 
 ---
 
@@ -204,6 +238,7 @@ After handshake, all messages follow a structured protocol.
 | `DATA` | Sending requested data | Binary payload |
 | `ERROR` | Operation failed | Error message |
 | `READY` | Ready for next command | None |
+| `WAIT` | Waiting/processing | None |
 
 ### Data Transfer Messages
 
@@ -245,7 +280,7 @@ Encrypted Packet = Encrypt(MessageType || PayloadLength || Payload)
 
 ```rust
 pub enum MessageType {
-    // Commands (0x0000 - 0x00FF)
+    // Commands (0x0001 - 0x0007)
     UploadDars = 0x0001,
     GenerateKeys = 0x0002,
     SignDns = 0x0003,
@@ -254,13 +289,14 @@ pub enum MessageType {
     StatusUpdate = 0x0006,
     Disconnect = 0x0007,
 
-    // Responses (0x0100 - 0x01FF)
+    // Responses (0x0101 - 0x0105)
     Ack = 0x0101,
     Data = 0x0102,
     Error = 0x0103,
     Ready = 0x0104,
+    Wait = 0x0105,
 
-    // Data Transfers (0x0200 - 0x02FF)
+    // Data Transfers (0x0201 - 0x0204)
     KeysUpload = 0x0201,
     DnsSignature = 0x0202,
     P2pPtkSignatures = 0x0203,
@@ -331,142 +367,202 @@ pub enum MessageType {
 
 ## Implementation Details
 
-> **Note:** This section provides conceptual pseudocode and architectural patterns, not production-ready code. Actual implementation will require consulting specific library documentation.
+### Actual Implementation
 
-### Rust Implementation Options
+This project uses **`tokio-noise`** and **`hyper-noise`** libraries for Noise Protocol integration with async Tokio and HTTP/Hyper infrastructure.
 
-Several Rust crates provide Noise Protocol implementations with Tokio async support:
+**Libraries Used:**
+- **`tokio-noise`** - Provides async Noise protocol integration with Tokio
+- **`hyper-noise`** - Enables HTTP over Noise transport
+- **`hyper`** - HTTP server/client infrastructure
+- **`secp256k1`** - Elliptic curve cryptography for static keypairs
 
-**Available Libraries:**
-- **`snow`** - Low-level Noise protocol implementation, most widely used
-- **`tokio-noise`** - Wraps Tokio TcpStream with Noise encryption
-- **`snowstorm`** - Higher-level async streams/packets with Noise
-- **`hyper-noise`** - Integrates Noise protocol with HTTP/Hyper stack
-
-Choose based on your needs:
-- Direct TCP with full control → `snow` + manual Tokio integration
-- Simple encrypted TCP streams → `tokio-noise`
-- Packet-based async communication → `snowstorm`
-- HTTP over Noise → `hyper-noise`
-
-For this project, we'll use direct `snow` + Tokio for maximum flexibility.
-
-#### Implementation Pattern
+### Architecture
 
 **Core Components:**
 
 ```
-NoiseConnection
-├─ Tokio TcpStream (underlying transport)
-├─ Snow HandshakeState → TransportState (encryption)
-├─ Remote static key (for peer authentication)
-└─ Message framing (length-prefix protocol)
+NoiseServer (Coordinator)
+├─ Hyper HTTP server
+├─ tokio-noise integration for Noise NN_PSK2
+├─ secp256k1 static keypair
+└─ Peer allowlist (from network.toml)
+
+NoiseClient (Attestor)
+├─ Hyper HTTP client
+├─ tokio-noise for encrypted transport
+├─ secp256k1 static keypair
+└─ Coordinator peer public key
 ```
 
-**Coordinator (Server) - Accepting Connections:**
+### Key Structures and Functions
 
+**NoiseKeypair** (`src/noise/mod.rs`):
 ```rust
-// Pseudocode - conceptual flow
-async fn handshake_responder(&self, tcp_stream: TcpStream) -> Result<SecureConnection> {
-    // 1. Create Noise handshake state as responder
-    let handshake_state = create_responder_handshake("Noise_XX_25519_ChaChaPoly_BLAKE2s", my_static_key);
+pub struct NoiseKeypair {
+    private_key: SecretKey,        // 32-byte secp256k1 private key
+    public_key: PublicKey,         // 33-byte compressed public key
+}
 
-    // 2. Perform three-way handshake (read, write, read)
-    let (read_buf, write_buf) = exchange_handshake_messages(tcp_stream, handshake_state);
+impl NoiseKeypair {
+    // Generate new random keypair
+    pub fn generate() -> Self;
 
-    // 3. Transition to transport mode (encryption active)
-    let transport_state = handshake_state.into_transport_mode();
-    let remote_static_key = extract_remote_static_key(handshake_state);
+    // Load from file (hex-encoded private key)
+    pub fn from_file(path: &Path) -> Result<Self>;
 
-    // 4. Verify peer is in allowlist
-    if !allowlist.contains(remote_static_key) {
-        return Err("Unknown peer");
-    }
+    // Derive PSK via ECDH with peer's public key
+    pub fn derive_psk(&self, peer_public_key: &PublicKey) -> Result<[u8; 32]>;
 
-    Ok(SecureConnection { tcp_stream, transport_state, remote_static_key })
+    // Get public key bytes (33 bytes compressed)
+    pub fn public_key_bytes(&self) -> [u8; 33];
 }
 ```
 
-**Attestor (Client) - Initiating Connection:**
-
+**NoiseServer** (`src/noise/server.rs`):
 ```rust
-// Pseudocode - conceptual flow
-async fn connect_to_coordinator(&mut self, addr: &str) -> Result<()> {
-    // 1. Connect TCP
-    let tcp_stream = TcpStream::connect(addr).await?;
+pub struct NoiseServer {
+    static_keypair: NoiseKeypair,
+    allowed_peers: HashSet<PublicKey>,  // From network.toml
+    listener_addr: SocketAddr,
+}
 
-    // 2. Create Noise handshake state as initiator
-    let handshake_state = create_initiator_handshake(
-        "Noise_XX_25519_ChaChaPoly_BLAKE2s",
-        my_static_key,
-        coordinator_public_key
-    );
+impl NoiseServer {
+    pub fn new(
+        static_keypair: NoiseKeypair,
+        allowed_peers: Vec<PublicKey>,
+        listener_addr: SocketAddr,
+    ) -> Self;
 
-    // 3. Perform three-way handshake (write, read, write)
-    let (read_buf, write_buf) = exchange_handshake_messages(tcp_stream, handshake_state);
+    // Start listening and accepting connections
+    pub async fn listen(&self) -> Result<()>;
 
-    // 4. Transition to transport mode
-    let transport_state = handshake_state.into_transport_mode();
-    let remote_static_key = extract_remote_static_key(handshake_state);
-
-    // 5. Verify coordinator identity
-    if remote_static_key != coordinator_public_key {
-        return Err("Coordinator key mismatch");
-    }
-
-    self.connection = Some(SecureConnection { tcp_stream, transport_state, remote_static_key });
-    Ok(())
+    // Accept and handshake with a client
+    async fn accept_connection(&self) -> Result<(NoiseStream, PublicKey)>;
 }
 ```
 
-**Encrypted Communication:**
-
+**NoiseClient** (`src/noise/client.rs`):
 ```rust
-// Pseudocode - message framing over encrypted channel
-struct SecureConnection {
-    tcp_stream: TcpStream,
-    transport_state: TransportState,  // Handles encryption/decryption
-    remote_static_key: [u8; 32],
+pub struct NoiseClient {
+    static_keypair: NoiseKeypair,
+    coordinator_pubkey: PublicKey,
+    connection: Option<NoiseStream>,
 }
 
-impl SecureConnection {
-    async fn send_message(&mut self, msg: &Message) -> Result<()> {
-        // 1. Serialize message
-        let plaintext = msg.to_bytes();
+impl NoiseClient {
+    pub fn new(
+        static_keypair: NoiseKeypair,
+        coordinator_pubkey: PublicKey,
+    ) -> Self;
 
-        // 2. Encrypt with Noise transport
-        let ciphertext = transport_state.write_message(&plaintext);
+    // Connect to coordinator and perform handshake
+    pub async fn connect(&mut self, addr: &str) -> Result<()>;
 
-        // 3. Send length-prefixed
-        let len = ciphertext.len() as u32;
-        tcp_stream.write_all(&len.to_be_bytes()).await?;
-        tcp_stream.write_all(&ciphertext).await?;
-        Ok(())
+    // Send a message over encrypted channel
+    pub async fn send_message(&mut self, msg: Message) -> Result<()>;
+
+    // Receive next message
+    pub async fn receive_message(&mut self) -> Result<Message>;
+
+    // High-level data transfer methods
+    pub async fn upload_keys(&mut self, ...) -> Result<()>;
+    pub async fn send_dns_signature(&mut self, ...) -> Result<()>;
+    pub async fn send_p2p_ptk_signatures(&mut self, ...) -> Result<()>;
+    pub async fn send_submission_signatures(&mut self, ...) -> Result<()>;
+}
+```
+
+### Handshake Implementation Flow
+
+**Coordinator (Responder)**:
+```
+1. Load secp256k1 static keypair
+2. Derive PSK with each allowed peer's public key
+3. Start Hyper server with hyper-noise integration
+4. For each incoming connection:
+   a. Perform NN_PSK2 handshake as responder
+   b. Handshake validates peer via PSK
+   c. If successful, connection enters transport mode
+   d. Verify peer's public key is in allowlist
+   e. Accept connection and start message processing
+```
+
+**Attestor (Initiator)**:
+```
+1. Load secp256k1 static keypair
+2. Load coordinator's public key from network.toml
+3. Derive PSK with coordinator's public key
+4. Connect to coordinator via HTTP/Noise
+5. Perform NN_PSK2 handshake as initiator:
+   a. Send ephemeral public key
+   b. Receive ephemeral key + PSK mixing
+   c. Handshake validates coordinator via PSK
+6. Enter transport mode (encrypted channel established)
+7. Begin polling for commands
+```
+
+### Message Protocol
+
+**Message Structure** (`src/noise/mod.rs`):
+```rust
+pub struct Message {
+    pub message_type: MessageType,
+    pub payload: Vec<u8>,
+}
+
+impl Message {
+    // Encode to wire format
+    pub fn to_bytes(&self) -> Vec<u8> {
+        // [MessageType (2 bytes)] [PayloadLength (4 bytes)] [Payload]
     }
 
-    async fn receive_message(&mut self) -> Result<Message> {
-        // 1. Read length prefix
-        let len = tcp_stream.read_u32().await? as usize;
-
-        // 2. Read ciphertext
-        let mut ciphertext = vec![0u8; len];
-        tcp_stream.read_exact(&mut ciphertext).await?;
-
-        // 3. Decrypt with Noise transport
-        let plaintext = transport_state.read_message(&ciphertext)?;
-
-        // 4. Deserialize message
-        Message::from_bytes(&plaintext)
+    // Decode from wire format
+    pub fn from_bytes(data: &[u8]) -> Result<Self> {
+        // Parse header and payload
     }
 }
 ```
+
+**Sending/Receiving**:
+- Messages are serialized to wire format (type + length + payload)
+- Wire format bytes are encrypted by Noise transport (ChaChaPoly-1305)
+- Encrypted packets are sent over the underlying TCP/HTTP connection
+- `tokio-noise` and `hyper-noise` handle encryption/decryption transparently
+
+### Key Generation Command
+
+Users generate Noise keypairs via CLI:
+```bash
+cargo run -- keygen -o keys/my-node.key
+```
+
+This generates:
+- Private key: 32 bytes (saved hex-encoded to file)
+- Public key: 33 bytes compressed secp256k1 (printed to share with peers)
+
+### Security Properties
+
+**Authentication**:
+- PSK derivation via ECDH ensures only parties with correct keypairs can connect
+- No static keys transmitted over network (identity hiding)
+- Coordinator verifies each attestor's public key against allowlist
+
+**Encryption**:
+- All messages encrypted with ChaChaPoly-1305 AEAD cipher
+- Handshake establishes session keys from ephemeral DH + PSK
+
+**Forward Secrecy**:
+- Ephemeral keys used in each connection
+- Session keys independent of static keys
+- Past sessions remain secure if static keys later compromised
 
 **Key Points:**
-- Handshake establishes secure channel before any data transfer
-- Transport state handles all encryption/decryption transparently
-- Message framing uses length-prefix (4 bytes) + payload
-- Static keys authenticate both peers mutually
-- Each connection has independent session keys (forward secrecy)
+- NN_PSK2 pattern provides mutual authentication without identity transmission
+- secp256k1 used for static keypairs (compatible with Canton's key infrastructure)
+- PSK derived via ECDH ensures both parties have correct peer public keys
+- `tokio-noise` + `hyper-noise` provide high-level async integration
+- Message protocol implemented on top of Noise transport layer
 
 ### Configuration
 
@@ -492,28 +588,28 @@ name = "Coordinator Node"
 role = "coordinator"  # Only used if coordinator_strategy = "explicit"
 address = "10.0.1.100"
 port = 9000
-public_key = "c0011d1a70123456789abcdef..."  # Static Noise public key (hex)
+public_key = "02c0011d1a70123456789abcdef0123456789abcdef0123456789abcdef012345"  # 33-byte secp256k1 public key (hex)
 
 [[participants]]
 id = "attestor-1"
 name = "Attestor 1"
 address = "10.0.1.101"
 port = 9000
-public_key = "a1b2c3d4e5f6789012345678..."
+public_key = "03a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456"
 
 [[participants]]
 id = "attestor-2"
 name = "Attestor 2"
 address = "10.0.1.102"
 port = 9000
-public_key = "f6e5d4c3b2a1098765432109..."
+public_key = "02f6e5d4c3b2a1098765432109876543210fedcba098765432109876543210fed"
 
 [[participants]]
 id = "attestor-3"
 name = "Attestor 3"
 address = "10.0.1.103"
 port = 9000
-public_key = "1a2b3c4d5e6f098765432109..."
+public_key = "031a2b3c4d5e6f098765432109876543210abcdef1234567890abcdef123456789"
 
 [timeouts]
 handshake_timeout_secs = 30
@@ -551,7 +647,6 @@ admin_api_host = "localhost"
 admin_api_port = 5001
 ledger_api_host = "localhost"
 ledger_api_port = 5002
-token = "eyJ0eXAiOiJKV1QiLCJhbGc..."
 ```
 
 ### Coordinator Selection Strategies
@@ -693,21 +788,21 @@ Before the distributed setup can begin, participants must perform an initial boo
 
 #### Step 1: Generate Static Keypair
 
-Each participant generates their own Noise static keypair:
+Each participant generates their own Noise static keypair (secp256k1):
 
 ```bash
 # Each participant runs this command
-$ cargo run -- keygen --output keys/my_static.key
+$ cargo run -- keygen -o keys/my_static.key
 
-Generating Noise static keypair...
-Private key saved to: keys/my_static.key
-Public key (hex): a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456
+Generating secp256k1 static keypair...
+Private key saved to: keys/my_static.key (32 bytes, hex-encoded)
+Public key (hex): 02a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456
 
 ⚠️  Keep your private key secure! Never share it with anyone.
-💡  Share your public key with other participants to add to network.toml
+💡  Share your public key (33 bytes compressed) with other participants to add to network.toml
 ```
 
-The private key is stored securely, and the public key (hex-encoded) is displayed for sharing.
+The private key is stored securely (hex-encoded in the file), and the public key (33-byte compressed secp256k1 format, hex-encoded) is displayed for sharing with other participants.
 
 #### Step 2: Exchange Public Keys
 
@@ -721,9 +816,11 @@ Participants exchange their public keys through a **secure out-of-band channel**
 **Example Exchange (3 participants)**:
 
 ```
-Alice: My public key is: a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456
-Bob:   My public key is: f6e5d4c3b2a1098765432109876543210fedcba098765432109876543210fed
-Carol: My public key is: 1a2b3c4d5e6f098765432109876543210abcdef1234567890abcdef123456789
+Alice: My public key is: 02a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456
+Bob:   My public key is: 03f6e5d4c3b2a1098765432109876543210fedcba098765432109876543210fed
+Carol: My public key is: 021a2b3c4d5e6f098765432109876543210abcdef1234567890abcdef123456789
+
+(Note: Public keys are 33 bytes compressed secp256k1 format, starting with 02 or 03)
 
 Alice: I propose to be the coordinator since I have the most stable connection.
 Bob:   Agreed.
@@ -751,21 +848,21 @@ name = "Alice (Coordinator)"
 role = "coordinator"
 address = "10.0.1.100"
 port = 9000
-public_key = "a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456"
+public_key = "02a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456"
 
 [[participants]]
 id = "bob"
 name = "Bob"
 address = "10.0.1.101"
 port = 9000
-public_key = "f6e5d4c3b2a1098765432109876543210fedcba098765432109876543210fed"
+public_key = "03f6e5d4c3b2a1098765432109876543210fedcba098765432109876543210fed"
 
 [[participants]]
 id = "carol"
 name = "Carol"
 address = "10.0.1.102"
 port = 9000
-public_key = "1a2b3c4d5e6f098765432109876543210abcdef1234567890abcdef123456789"
+public_key = "021a2b3c4d5e6f098765432109876543210abcdef1234567890abcdef123456789"
 
 [timeouts]
 handshake_timeout_secs = 30
@@ -811,7 +908,6 @@ admin_api_host = "localhost"
 admin_api_port = 5001
 ledger_api_host = "localhost"
 ledger_api_port = 5002
-token = "eyJ0eXAiOiJKV1QiLCJhbGc..."
 
 # Bob
 $ cat node.toml
@@ -826,7 +922,6 @@ admin_api_host = "localhost"
 admin_api_port = 5011
 ledger_api_host = "localhost"
 ledger_api_port = 5012
-token = "eyJ0eXAiOiJKV1QiLCJhbGc..."
 
 # Carol - similar configuration
 ```
@@ -880,7 +975,7 @@ $ cargo run -- start
 [INFO] Starting as ATTESTOR
 [INFO] Connecting to coordinator at 10.0.1.100:9000
 [INFO] Connected to coordinator, ready for commands
-[INFO] Received command: UPLOAD_DARS
+[DEBUG] Received command: UPLOAD_DARS
 [INFO] Uploading DAR files...
 [INFO] Upload complete, sending ACK
 ...
@@ -1040,18 +1135,20 @@ Coordinator                          Attestor
 
 ## Summary
 
-The Noise Protocol provides a secure, authenticated communication channel between the coordinator and attestors during the multi-party Canton setup. Key benefits:
+The Noise Protocol Framework provides a secure, authenticated communication channel between the coordinator and attestors during the multi-party Canton setup. Key benefits:
 
-- ✅ **Strong security**: Mutual authentication, encryption, forward secrecy
-- ✅ **Simple implementation**: Well-defined protocol with good Rust libraries
-- ✅ **Low overhead**: Minimal performance impact
-- ✅ **Proven design**: Used in WireGuard, Lightning Network, and other systems
+- ✅ **Strong security**: Mutual authentication via PSK, encryption, forward secrecy
+- ✅ **Simple implementation**: Well-defined protocol with `tokio-noise` and `hyper-noise` libraries
+- ✅ **Low overhead**: Minimal performance impact with ChaChaPoly-1305 cipher
+- ✅ **Proven design**: Noise framework used in WireGuard, Lightning Network, and other systems
+- ✅ **Identity hiding**: NN_PSK2 pattern doesn't transmit static keys over the network
 - ✅ **Flexible**: Supports various network topologies and message patterns
 - ✅ **Distributed setup**: Each member runs the same program independently
 - ✅ **No central server**: Coordinator is just another peer with an orchestration role
 - ✅ **Configurable coordination**: Multiple strategies for coordinator selection
+- ✅ **secp256k1 compatibility**: Uses same curve as Canton's cryptographic infrastructure
 
-The protocol ensures that sensitive cryptographic material (keys, signatures, proposals) is transmitted securely between peers, and that all parties are who they claim to be.
+The protocol ensures that sensitive cryptographic material (keys, signatures, proposals) is transmitted securely between peers, and that all parties are who they claim to be through PSK-based mutual authentication.
 
 ### Key Design Decisions
 
@@ -1080,10 +1177,11 @@ The protocol ensures that sensitive cryptographic material (keys, signatures, pr
 - Each node can potentially be coordinator (with election strategy)
 
 **5. Zero Trust Model**
-- All connections authenticated via Noise static keys
+- All connections authenticated via Noise NN_PSK2 with PSK derived from static secp256k1 keys
 - No implicit trust based on IP addresses
+- No static keys transmitted over the network (identity hiding)
 - Public keys exchanged out-of-band before setup
-- Unknown peers rejected immediately
+- Unknown peers rejected immediately during handshake
 
 ### Deployment Workflow Summary
 
@@ -1125,13 +1223,17 @@ This architecture provides a secure, decentralized approach to the multi-party C
 ### Noise Protocol
 - [Noise Protocol Framework Specification](https://noiseprotocol.org/noise.html) - Official spec
 - [Noise Explorer - Protocol Analysis Tool](https://noiseexplorer.com/) - Security analysis
+- [Noise Pattern: NN_PSK2](https://noiseexplorer.com/patterns/NNpsk2/) - Specific pattern used in this project
 
-### Rust Implementations
+### Rust Implementations Used in This Project
+- [tokio-noise](https://crates.io/crates/tokio-noise) - Tokio async integration with Noise protocol (**used in this project**)
+- [hyper-noise](https://crates.io/crates/hyper-noise) - HTTP over Noise integration (**used in this project**)
+- [secp256k1](https://crates.io/crates/secp256k1) - Elliptic curve cryptography for static keypairs (**used in this project**)
+
+### Other Rust Noise Implementations
 - [snow](https://github.com/mcginty/snow) - Low-level Noise protocol implementation
-- [tokio-noise](https://crates.io/crates/tokio-noise) - Tokio TcpStream wrapper with Noise
 - [snowstorm](https://crates.io/crates/snowstorm) - Async streams/packets with Noise
-- [hyper-noise](https://crates.io/crates/hyper-noise) - HTTP over Noise integration
 
 ### Real-world Usage
-- [WireGuard Protocol](https://www.wireguard.com/protocol/) - VPN using Noise
-- [Lightning Network Bolt #8](https://github.com/lightning/bolts/blob/master/08-transport.md) - Bitcoin Lightning uses Noise
+- [WireGuard Protocol](https://www.wireguard.com/protocol/) - VPN using Noise IK pattern
+- [Lightning Network Bolt #8](https://github.com/lightning/bolts/blob/master/08-transport.md) - Bitcoin Lightning uses Noise XK pattern

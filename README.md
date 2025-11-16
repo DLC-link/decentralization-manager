@@ -1,20 +1,38 @@
 # Canton Decentralized Party Onboarding Automatization
 
-A Rust-based automation tool for multi-party decentralized namespace setup in Canton blockchain networks. This project streamlines the complex process of onboarding multiple parties to a Canton-based Central Bank Digital Currency (CBTC) governance system by automating topology management, cryptographic key generation, and ledger operations.
+A Rust-based automation tool for multi-party decentralized namespace setup in Canton blockchain networks. This project streamlines the complex process of onboarding multiple parties to a Canton-based Bitcoin (CBTC) governance system by automating topology management, cryptographic key generation, and ledger operations.
 
 ## Key Features
 
 - **Automated Multi-Party Onboarding**: Orchestrates the complete workflow for setting up decentralized party participation
+- **Secure Communication**: Noise Protocol Framework for encrypted, authenticated peer-to-peer communication
 - **gRPC Integration**: Native Canton Admin and Ledger API integration using Protocol Buffers
 - **Cryptographic Key Management**: Automated generation and management of cryptographic keys for secure party identification
 - **Topology Management**: Handles DNS, P2P, and Participant Topology Key (PTK) proposal creation, signing, and submission
 - **Ledger Operations**: Manages preparation, signing, and execution of ledger submissions
+- **Distributed Architecture**: Coordinator-attestor model with no single point of trust
 - **Configuration-Driven**: Flexible TOML-based configuration for different Canton environments
 - **Production Ready**: Includes comprehensive error handling, logging, and code quality tooling
 
 ## Architecture
 
 This tool implements a port of Canton Scala scripts to Rust, providing a more performant and memory-safe alternative for automated party onboarding. It follows a step-based workflow that ensures proper ordering of operations and handles the complex interdependencies between topology changes and ledger state modifications.
+
+### Communication Model
+
+All coordination between participants uses the **Noise Protocol Framework** for secure, encrypted communication:
+- **Coordinator** acts as server, orchestrating the workflow (is also an attestor)
+- **Attestors** connect as clients, executing commands and returning results
+- **Mutual Authentication** via static keypairs (secp256k1)
+- **Encrypted Channels** using ChaChaPoly-1305 AEAD cipher
+
+See the [Noise Protocol Communication Architecture](docs/NOISE_PROTOCOL_COMMUNICATION.md) for detailed information.
+
+### Visual Workflow
+
+![Multi-Party Decentralized Setup Workflow](docs/flowchart.png)
+
+The complete workflow diagram showing all phases, Noise protocol communications, and data flows between coordinator and attestors.
 
 ## Table of Contents
 
@@ -43,6 +61,7 @@ This tool implements a port of Canton Scala scripts to Rust, providing a more pe
 This project ports Canton Scala scripts to Rust, implementing a multi-party decentralized namespace setup for CBTC (Canton-based Bitcoin) governance. The workflow includes:
 
 1. **Step 1**: Upload DARs and generate cryptographic keys
+   - Automatically uploads all `.dar` files from the `dars/` directory
 2. **Step 1a**: Create topology proposals (DNS, P2P, PTK)
 3. **Steps 2-3a**: Multi-party signing and submission of topology proposals
 4. **Steps 3b-5**: Prepare, sign, and execute ledger submissions
@@ -51,6 +70,7 @@ This project ports Canton Scala scripts to Rust, implementing a multi-party dece
 
 ## Documentation
 
+- **[docs/NOISE_PROTOCOL_COMMUNICATION.md](./docs/NOISE_PROTOCOL_COMMUNICATION.md)** - Comprehensive guide to secure peer-to-peer communication architecture
 - **[docs/TODO.md](./docs/TODO.md)** - Detailed implementation plan, API mappings, and step-by-step breakdown
 - **[docs/CODING-STANDARDS.md](./docs/CODING-STANDARDS.md)** - Project coding standards and style guide
 - **[network.example.toml](./network.example.toml)** - Example network topology configuration
@@ -129,7 +149,7 @@ cargo run --release -- -c test-configs/node-1.toml all
 ### Run Individual Steps
 
 ```sh
-# Step 1: Upload DARs
+# Step 1: Upload DARs (automatically uploads all .dar files from dars/ directory)
 cargo run --release -- -c test-configs/node-1.toml upload-dars
 
 # Step 1: Generate keys and export participant ID

@@ -6,14 +6,15 @@ This directory contains test configuration files for running a 3-participant Can
 
 ```
 test-configs/
-├── keys/                      # Noise protocol static keypairs
-│   ├── participant-1.key     # Private key for Participant 1 (Coordinator)
-│   ├── participant-2.key     # Private key for Participant 2
-│   └── participant-3.key     # Private key for Participant 3
 ├── network.toml              # Shared network topology configuration
 ├── node-1.toml              # Node config for Participant 1 (Coordinator)
 ├── node-2.toml              # Node config for Participant 2
 └── node-3.toml              # Node config for Participant 3
+
+keys/                         # Noise protocol static keypairs (generated)
+├── participant-1.key         # Private key for Participant 1 (Coordinator)
+├── participant-2.key         # Private key for Participant 2
+└── participant-3.key         # Private key for Participant 3
 ```
 
 ## Network Topology
@@ -24,12 +25,37 @@ test-configs/
 
 All participants connect to `localhost` for testing.
 
+## Setup
+
+### First Time Setup: Generate Noise Keys
+
+Before running the nodes for the first time, you must generate Noise protocol keypairs:
+
+```bash
+# Create keys directory
+mkdir -p keys
+
+# Generate keypairs for all participants
+cargo run -- keygen -o keys/participant-1.key
+cargo run -- keygen -o keys/participant-2.key
+cargo run -- keygen -o keys/participant-3.key
+```
+
+Each `keygen` command will output the public key. You must update `test-configs/network.toml` with these public keys in the corresponding `[[participants]]` sections.
+
+**Example output:**
+```
+INFO  Public key (hex): 0352217b145e2f5434bd320309b59c02073a5d28d04d4c7b0b254e74b26a3f1950
+```
+
+Copy each public key to the `public_key` field in `network.toml` for the corresponding participant.
+
 ## Usage
 
 ### Running the Coordinator (Participant 1)
 
 ```bash
-cargo run -- start --config test-configs/node-1.toml
+cargo run -- -c test-configs/node-1.toml start
 ```
 
 ### Running Attestors (Participants 2 & 3)
@@ -38,10 +64,10 @@ In separate terminals:
 
 ```bash
 # Terminal 2
-cargo run -- start --config test-configs/node-2.toml
+cargo run -- -c test-configs/node-2.toml start
 
 # Terminal 3
-cargo run -- start --config test-configs/node-3.toml
+cargo run -- -c test-configs/node-3.toml start
 ```
 
 ### Running Individual Steps
@@ -50,19 +76,21 @@ For testing individual steps without Noise protocol:
 
 ```bash
 # Example: Upload DARs for Participant 1
-cargo run -- upload-dars --config test-configs/node-1.toml
+cargo run -- -c test-configs/node-1.toml upload-dars
 ```
 
 ## Security Notes
 
-⚠️ **Important**: These are test configurations with pre-generated keys.
+⚠️ **Important**:
 
-- **DO NOT use these keys in production**
 - The private keys in `keys/` directory should be kept secure
-- In production, each participant should generate their own keys using:
+- **DO NOT commit private keys to version control** (they are gitignored)
+- **DO NOT use these test keys in production**
+- In production, each participant should generate their own keys securely using:
   ```bash
   cargo run -- keygen -o path/to/private-key.key
   ```
+- Each participant should share only their public key with the coordinator to update `network.toml`
 
 ## Network Configuration
 

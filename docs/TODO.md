@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document outlines the plan to port Canton Scala scripts from `../canton/releases/0.0.1/` to Rust in the `grpc-test` repository. The Canton scripts implement a multi-party decentralized namespace setup for CBTC (Canton-based Bitcoin) governance.
+This document outlines the plan to port Canton Scala scripts from `../canton/releases/0.0.1/` to Rust in the `dec-party-onboarding` repository. The Canton scripts implement a multi-party decentralized namespace setup for CBTC (Canton-based Bitcoin) governance.
 
 ## Workflow Architecture
 
@@ -33,15 +33,17 @@ Attestors sign ledger submissions, coordinator executes them on the ledger.
 **Purpose**: Upload CBTC application DARs to Canton participant nodes
 
 **Operations**:
-- Upload `cbtc-1.0.0.dar` to participant
-- Upload `cbtc-governance-1.0.0.dar` to participant
+- Scan `dars/` directory for all `.dar` files
+- Sort files alphabetically for consistent ordering
+- Upload each DAR file to participant
+- Auto-generate description from filename (removes `.dar` extension)
 
 **Canton API**:
 - Scala: `participant.dars.upload(path)`
 - Rust: gRPC `ParticipantAdministrationService.UploadDar()`
 
 **Inputs**:
-- DAR files from `./dars/` directory
+- All `.dar` files from `./dars/` directory
 
 **Outputs**:
 - None (DARs registered in participant)
@@ -49,6 +51,8 @@ Attestors sign ledger submissions, coordinator executes them on the ledger.
 **Notes**:
 - Run on each attestor participant (3+ times with different configs)
 - Must complete before key generation
+- Implementation is generalized - works with any number of DAR files
+- Original hardcoded files: `cbtc-1.0.0.dar`, `cbtc-governance-1.0.0.dar`
 
 ---
 
@@ -301,7 +305,7 @@ Attestors sign ledger submissions, coordinator executes them on the ledger.
 - `../step_4/subs/prepared-submission-3.bin`: PrepareSubmissionResponse for withdraw rules
 
 **Notes**:
-- Run by coordinator with CoordinatorUser token
+- Run by coordinator
 - User must have `actAs` and `readAs` rights for decentralized party
 - Prepared submissions contain transaction hashes to be signed
 
@@ -378,7 +382,7 @@ Attestors sign ledger submissions, coordinator executes them on the ledger.
 - None (contracts created on ledger)
 
 **Notes**:
-- Run by coordinator with CoordinatorUser token
+- Run by coordinator
 - Final step completes the full setup
 - Can verify success by querying ACS for `CBTCGovernanceRules` contract
 
@@ -437,7 +441,7 @@ Attestors sign ledger submissions, coordinator executes them on the ledger.
 - [x] Add dependencies: `tonic`, `prost`, `tokio`, cryptography libraries
 - [x] Create common utilities module:
   - [x] Protobuf file I/O utilities
-  - [x] Configuration loading (connection strings, OAuth tokens)
+  - [x] Configuration loading
   - [x] Retry/polling utilities
   - [x] Error types
 - [x] Set up CLI with subcommands for each step
@@ -525,28 +529,81 @@ Attestors sign ledger submissions, coordinator executes them on the ledger.
 
 ## Configuration Requirements
 
-### Connection Configuration
-Each attestor needs a configuration file with:
-- Admin API endpoint (host:port)
-- Ledger API endpoint (host:port)
-- OAuth token or credentials
-- Synchronizer name ("global")
-- Participant name
+The project uses a modern two-file configuration system for distributed multi-party setups:
+
+### Network Configuration (`network.toml`)
+Shared network-wide configuration distributed to all participants:
+- Network metadata (name, protocol version, coordinator strategy)
+- All participants with their IDs, addresses, ports, and Noise public keys
+- Coordinator selection strategy (explicit, first, or election)
+- Timeout settings for handshakes and messages
+- Security requirements (minimum participants, require all flag)
 
 Example structure:
 ```toml
-[connection]
+[network]
+name = "cbtc-setup-network"
+protocol_version = "1.0"
+port = 9000
+coordinator_strategy = "explicit"
+
+[[participants]]
+id = "attestor-1"
+name = "Attestor 1"
+role = "coordinator"  # Only for explicit strategy
+address = "10.0.1.101"
+port = 9000
+public_key = "02a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456"
+
+[[participants]]
+id = "attestor-2"
+name = "Attestor 2"
+address = "10.0.1.102"
+port = 9000
+public_key = "02f6e5d4c3b2a1098765432109876543210fedcba098765432109876543210fed"
+
+[timeouts]
+handshake_timeout_secs = 30
+message_timeout_secs = 120
+connection_retry_attempts = 3
+connection_retry_delay_secs = 5
+
+[security]
+require_all_participants = true
+minimum_participants = 3
+```
+
+### Node Configuration (`node.toml`)
+Individual node-specific configuration for each participant:
+- Participant ID (must match one in network.toml)
+- Path to Noise protocol static private key
+- Listen address override
+- Reference to network config file
+- Canton connection details (admin API, ledger API)
+
+Example structure:
+```toml
+network_config = "network.toml"
+
+[node]
+participant_id = "attestor-1"
+static_key_file = "keys/attestor-1.key"
+listen_address = "0.0.0.0"
+
+[canton]
 admin_api_host = "localhost"
 admin_api_port = 5001
 ledger_api_host = "localhost"
 ledger_api_port = 5002
-token = "eyJ0eXAiOiJKV1QiLCJhbGc..."
-
-[topology]
 synchronizer = "global"
 ```
 
+See [NOISE_PROTOCOL_COMMUNICATION.md](NOISE_PROTOCOL_COMMUNICATION.md) for detailed configuration documentation and [test-configs/](../test-configs/) for working examples.
+
 ### File Organization
+
+**Note**: With the Noise protocol implementation, most file transfers happen automatically over encrypted channels between coordinator and attestors. The directory structure below describes the logical organization, but manual file copying is no longer required.
+
 Follow the same structure as Canton scripts:
 ```
 releases/0.0.1/
@@ -663,7 +720,6 @@ releases/0.0.1/
 
 - The coordinator role can be any of the attestors or a separate participant
 - All attestors must be online and accessible for the full workflow
-- OAuth tokens must be valid and have appropriate permissions
 - The workflow is idempotent in most steps (can be re-run safely)
 - Threshold must be majority (> 50%) for security
 - Step 4 is the most complex due to direct cryptographic operations

@@ -1,4 +1,4 @@
-use crate::network_config::NodeConfig;
+use crate::config::NodeConfig;
 use std::collections::HashSet;
 
 use tokio::fs;
