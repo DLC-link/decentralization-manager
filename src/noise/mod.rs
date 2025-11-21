@@ -24,7 +24,7 @@ pub enum MessageType {
     UploadDars = 0x0001,
     GenerateKeys = 0x0002,
     SignDns = 0x0003,
-    SignP2pPtk = 0x0004,
+    SignP2p = 0x0004,
     SignSubmissions = 0x0005,
     StatusUpdate = 0x0006,
     Disconnect = 0x0007,
@@ -40,7 +40,7 @@ pub enum MessageType {
     // Data Transfers (0x0200 - 0x02FF)
     KeysUpload = 0x0201,
     DnsSignature = 0x0202,
-    P2pPtkSignatures = 0x0203,
+    P2pSignatures = 0x0203,
     SubmissionSignatures = 0x0204,
 }
 
@@ -52,7 +52,7 @@ impl TryFrom<u16> for MessageType {
             0x0001 => Ok(Self::UploadDars),
             0x0002 => Ok(Self::GenerateKeys),
             0x0003 => Ok(Self::SignDns),
-            0x0004 => Ok(Self::SignP2pPtk),
+            0x0004 => Ok(Self::SignP2p),
             0x0005 => Ok(Self::SignSubmissions),
             0x0006 => Ok(Self::StatusUpdate),
             0x0007 => Ok(Self::Disconnect),
@@ -64,7 +64,7 @@ impl TryFrom<u16> for MessageType {
             0x0105 => Ok(Self::Wait),
             0x0201 => Ok(Self::KeysUpload),
             0x0202 => Ok(Self::DnsSignature),
-            0x0203 => Ok(Self::P2pPtkSignatures),
+            0x0203 => Ok(Self::P2pSignatures),
             0x0204 => Ok(Self::SubmissionSignatures),
             _ => Err(anyhow::anyhow!("Unknown message type: 0x{value:04x}")),
         }

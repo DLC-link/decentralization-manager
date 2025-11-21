@@ -172,9 +172,8 @@ impl NoiseServer {
             MessageType::DnsSignature => {
                 self.handle_dns_signature(peer_id, message.payload).await?
             }
-            MessageType::P2pPtkSignatures => {
-                self.handle_p2p_ptk_signatures(peer_id, message.payload)
-                    .await?
+            MessageType::P2pSignatures => {
+                self.handle_p2p_signatures(peer_id, message.payload).await?
             }
             MessageType::SubmissionSignatures => {
                 self.handle_submission_signatures(peer_id, message.payload)
@@ -258,13 +257,13 @@ impl NoiseServer {
         Ok(Message::new_empty(MessageType::Ack))
     }
 
-    /// Handle P2P/PTK signatures from attestor
-    async fn handle_p2p_ptk_signatures(
+    /// Handle P2P signatures from attestor
+    async fn handle_p2p_signatures(
         &self,
         peer_id: String,
         payload: Vec<u8>,
     ) -> Result<Message, NoiseError> {
-        tracing::info!("Handling P2P/PTK signatures from {peer_id}");
+        tracing::info!("Handling P2P signatures from {peer_id}");
 
         // Store the signatures data
         self.workflow_state

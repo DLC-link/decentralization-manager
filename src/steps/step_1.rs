@@ -3,7 +3,7 @@ use std::path::Path;
 use tokio::fs;
 
 use crate::{
-    config::NodeConfig,
+    config::{NetworkConfig, NodeConfig},
     dirs::WorkflowDirs,
     error::Result,
     participant_id::ParticipantId,
@@ -121,6 +121,17 @@ pub async fn upload_dars(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
 pub async fn generate_keys(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
     tracing::info!("Generating cryptographic keys...");
 
+    // Load network config to determine participant position
+    let network_config_path = if std::path::PathBuf::from(&config.network_config).is_absolute() {
+        std::path::PathBuf::from(&config.network_config)
+    } else {
+        // Resolve relative to test-configs directory
+        std::env::current_dir()?
+            .join("test-configs")
+            .join(&config.network_config)
+    };
+    let network_config = NetworkConfig::from_file(&network_config_path).await?;
+
     let mut vault_client = VaultServiceClient::connect(config.admin_api_url()).await?;
 
     // Generate namespace signing key
@@ -149,8 +160,10 @@ pub async fn generate_keys(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
 
     // Get participant ID and export keys
     let canton_participant_id = utils::get_participant_id(config).await?;
-    let participant_num = extract_participant_number(&config.node.participant_id);
-    tracing::info!("Participant ID: {canton_participant_id}, extracted number: {participant_num}");
+    let participant_num = get_participant_position(&config.node.participant_id, &network_config)?;
+    tracing::info!(
+        "Participant ID: {canton_participant_id}, participant number: {participant_num}"
+    );
 
     export_keys(&dirs.keys_dir, &namespace_key, &daml_key, participant_num).await?;
     export_participant_id(&dirs.ids_dir, &canton_participant_id, participant_num).await?;
@@ -182,11 +195,16 @@ async fn generate_signing_key(
 }
 
 /// Helper: Extract participant number from config participant ID (e.g., "participant-1" -> 1)
-fn extract_participant_number(config_participant_id: &str) -> u32 {
-    config_participant_id
-        .strip_prefix("participant-")
-        .and_then(|num_str| num_str.parse::<u32>().ok())
-        .unwrap_or(1)
+/// Get participant position (1-based index) from network config
+fn get_participant_position(participant_id: &str, network_config: &NetworkConfig) -> Result<u32> {
+    network_config
+        .participants
+        .iter()
+        .position(|p| p.id == participant_id)
+        .map(|pos| (pos + 1) as u32)
+        .ok_or_else(|| {
+            anyhow::anyhow!("Participant ID '{participant_id}' not found in network configuration")
+        })
 }
 
 /// Helper: Export keys to file

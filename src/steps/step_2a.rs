@@ -1,7 +1,7 @@
-use crate::config::NodeConfig;
 use tokio::{fs, time};
 
 use crate::{
+    config::NodeConfig,
     consts::{TOPOLOGY_RETRY_DELAY_SECS, TOPOLOGY_RETRY_MAX_ATTEMPTS},
     dirs::WorkflowDirs,
     error::Result,

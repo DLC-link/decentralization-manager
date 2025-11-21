@@ -22,8 +22,8 @@ pub enum WorkflowStep {
     SignDns,
     /// Coordinator submits DNS proposals
     SubmitDns,
-    /// Step 3: Sign P2P and PTK proposals
-    SignP2pPtk,
+    /// Step 3: Sign P2P proposals (Canton 3.4+: keys embedded in P2P)
+    SignP2p,
     /// Coordinator submits final proposals
     SubmitFinal,
     /// Coordinator prepares submissions
@@ -43,7 +43,7 @@ impl WorkflowStep {
             Self::UploadDars => Some(MessageType::UploadDars),
             Self::GenerateKeys => Some(MessageType::GenerateKeys),
             Self::SignDns => Some(MessageType::SignDns),
-            Self::SignP2pPtk => Some(MessageType::SignP2pPtk),
+            Self::SignP2p => Some(MessageType::SignP2p),
             Self::SignSubmissions => Some(MessageType::SignSubmissions),
             Self::Complete => Some(MessageType::Disconnect),
             // These steps are coordinator-only
@@ -64,8 +64,8 @@ impl WorkflowStep {
             Self::GenerateKeys => Some(Self::CreateProposals),
             Self::CreateProposals => Some(Self::SignDns),
             Self::SignDns => Some(Self::SubmitDns),
-            Self::SubmitDns => Some(Self::SignP2pPtk),
-            Self::SignP2pPtk => Some(Self::SubmitFinal),
+            Self::SubmitDns => Some(Self::SignP2p),
+            Self::SignP2p => Some(Self::SubmitFinal),
             Self::SubmitFinal => Some(Self::PrepareSubmissions),
             Self::PrepareSubmissions => Some(Self::SignSubmissions),
             Self::SignSubmissions => Some(Self::ExecuteSubmissions),
@@ -81,7 +81,7 @@ impl WorkflowStep {
             Self::UploadDars
                 | Self::GenerateKeys
                 | Self::SignDns
-                | Self::SignP2pPtk
+                | Self::SignP2p
                 | Self::SignSubmissions
         )
     }

@@ -15,6 +15,7 @@ use crate::{
                 user_management_service_client::UserManagementServiceClient,
             },
             interactive::interactive_submission_service_client::InteractiveSubmissionServiceClient,
+            state_service_client::StateServiceClient,
         },
         digitalasset::canton::{
             admin::participant::v30::{
@@ -244,6 +245,31 @@ pub async fn get_synchronizer_id(config: &NodeConfig) -> Result<String> {
     Ok(response.physical_synchronizer_id)
 }
 
+/// Extract synchronizer fingerprint from full synchronizer ID
+///
+/// Canton 3.4+ returns synchronizer IDs in format: `<alias>::<fingerprint>::<protocol-version>`
+/// For party allocation, we need the format `<alias>::<fingerprint>` (removing only the protocol version).
+///
+/// Example:
+/// - Input: `global-domain::122033d02b977e2b698d6a6397eb62e43f7bff34bc8fa814384c4a533d1162239df8::34-0`
+/// - Output: `global-domain::122033d02b977e2b698d6a6397eb62e43f7bff34bc8fa814384c4a533d1162239df8`
+pub fn extract_synchronizer_fingerprint(synchronizer_id: &str) -> Result<String> {
+    let parts: Vec<&str> = synchronizer_id.split("::").collect();
+
+    if parts.len() == 3 {
+        // Format: alias::fingerprint::version -> return alias::fingerprint
+        Ok(format!("{}::{}", parts[0], parts[1]))
+    } else if parts.len() == 2 {
+        // Already in alias::fingerprint format
+        Ok(synchronizer_id.to_string())
+    } else {
+        anyhow::bail!(
+            "Invalid synchronizer ID format '{}': expected format '<alias>::<fingerprint>::<version>' or '<alias>::<fingerprint>'",
+            synchronizer_id
+        )
+    }
+}
+
 /// Get participant ID from Canton
 ///
 /// Queries the participant's identity initialization service to get the unique participant ID.
@@ -309,62 +335,48 @@ pub async fn get_participant_number(config: &NodeConfig, ids_dir: &Path) -> Resu
     find_participant_number(ids_dir, &participant_id).await
 }
 
-/// Interceptor function that adds JWT authentication to gRPC requests
-pub fn auth_interceptor(
-    token: Option<String>,
-) -> impl Fn(tonic::Request<()>) -> std::result::Result<tonic::Request<()>, tonic::Status> + Clone {
-    move |mut req: tonic::Request<()>| {
-        if let Some(ref token) = token {
-            let bearer_token = format!("Bearer {token}");
-            let token_value = tonic::metadata::MetadataValue::try_from(&bearer_token)
-                .map_err(|e| tonic::Status::unauthenticated(format!("Invalid token: {e}")))?;
-            req.metadata_mut().insert("authorization", token_value);
+/// Macro to define authenticated gRPC client creator functions
+macro_rules! define_client_creator {
+    ($fn_name:ident, $client_type:ident) => {
+        pub async fn $fn_name(
+            config: &NodeConfig,
+        ) -> Result<
+            $client_type<
+                tonic::service::interceptor::InterceptedService<
+                    tonic::transport::Channel,
+                    impl Fn(
+                        tonic::Request<()>,
+                    ) -> std::result::Result<tonic::Request<()>, tonic::Status>
+                    + Clone,
+                >,
+            >,
+        > {
+            let channel = tonic::transport::Channel::from_shared(config.ledger_api_url())?
+                .connect()
+                .await?;
+
+            let token = config.canton.ledger_api_token.clone();
+            let interceptor = move |mut req: tonic::Request<()>| {
+                if let Some(ref token) = token {
+                    let bearer_token = format!("Bearer {token}");
+                    let token_value = tonic::metadata::MetadataValue::try_from(&bearer_token)
+                        .map_err(|e| {
+                            tonic::Status::unauthenticated(format!("Invalid token: {e}"))
+                        })?;
+                    req.metadata_mut().insert("authorization", token_value);
+                }
+                Ok(req)
+            };
+
+            Ok($client_type::with_interceptor(channel, interceptor))
         }
-        Ok(req)
-    }
+    };
 }
 
-/// Create an authenticated PartyManagementServiceClient
-pub async fn create_party_client(
-    config: &NodeConfig,
-) -> Result<PartyManagementServiceClient<tonic::service::interceptor::InterceptedService<tonic::transport::Channel, impl Fn(tonic::Request<()>) -> std::result::Result<tonic::Request<()>, tonic::Status> + Clone>>> {
-    let channel = tonic::transport::Channel::from_shared(config.ledger_api_url())?
-        .connect()
-        .await?;
-
-    Ok(PartyManagementServiceClient::with_interceptor(
-        channel,
-        auth_interceptor(config.canton.ledger_api_token.clone()),
-    ))
-}
-
-/// Create an authenticated UserManagementServiceClient
-pub async fn create_user_client(
-    config: &NodeConfig,
-) -> Result<UserManagementServiceClient<tonic::service::interceptor::InterceptedService<tonic::transport::Channel, impl Fn(tonic::Request<()>) -> std::result::Result<tonic::Request<()>, tonic::Status> + Clone>>> {
-    let channel = tonic::transport::Channel::from_shared(config.ledger_api_url())?
-        .connect()
-        .await?;
-
-    Ok(UserManagementServiceClient::with_interceptor(
-        channel,
-        auth_interceptor(config.canton.ledger_api_token.clone()),
-    ))
-}
-
-/// Create an authenticated InteractiveSubmissionServiceClient
-pub async fn create_submission_client(
-    config: &NodeConfig,
-) -> Result<InteractiveSubmissionServiceClient<tonic::service::interceptor::InterceptedService<tonic::transport::Channel, impl Fn(tonic::Request<()>) -> std::result::Result<tonic::Request<()>, tonic::Status> + Clone>>> {
-    let channel = tonic::transport::Channel::from_shared(config.ledger_api_url())?
-        .connect()
-        .await?;
-
-    Ok(InteractiveSubmissionServiceClient::with_interceptor(
-        channel,
-        auth_interceptor(config.canton.ledger_api_token.clone()),
-    ))
-}
+define_client_creator!(create_party_client, PartyManagementServiceClient);
+define_client_creator!(create_user_client, UserManagementServiceClient);
+define_client_creator!(create_submission_client, InteractiveSubmissionServiceClient);
+define_client_creator!(create_state_client, StateServiceClient);
 
 #[cfg(test)]
 mod tests {

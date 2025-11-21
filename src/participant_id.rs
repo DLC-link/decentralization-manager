@@ -35,7 +35,7 @@ impl Namespace {
 
     /// Get the namespace as a hex string
     pub fn to_hex(&self) -> String {
-        hex::encode(&self.0)
+        hex::encode(self.0)
     }
 
     /// Get a reference to the underlying byte array
@@ -101,20 +101,15 @@ impl ParticipantId {
         Self::parse(id_str)
     }
 
-    /// Convert to Canton's string format: `prefix::hex_encoded_namespace`
-    pub fn to_string(&self) -> String {
-        format!("{}::{}", self.prefix, self.namespace.to_hex())
-    }
-
     /// Convert to file storage format with "PAR::" prefix
     pub fn to_file_format(&self) -> String {
-        format!("PAR::{}", self.to_string())
+        format!("PAR::{self}")
     }
 }
 
 impl fmt::Display for ParticipantId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.to_string())
+        write!(f, "{}::{}", self.prefix, self.namespace.to_hex())
     }
 }
 

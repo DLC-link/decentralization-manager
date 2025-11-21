@@ -157,14 +157,11 @@ impl NoiseClient {
         Ok(())
     }
 
-    /// Send P2P/PTK signatures to coordinator
-    pub async fn send_p2p_ptk_signatures(
-        &self,
-        signatures_data: Vec<u8>,
-    ) -> Result<(), NoiseError> {
-        tracing::info!("Sending P2P/PTK signatures to coordinator");
+    /// Send P2P signatures to coordinator
+    pub async fn send_p2p_signatures(&self, signatures_data: Vec<u8>) -> Result<(), NoiseError> {
+        tracing::info!("Sending P2P signatures to coordinator");
 
-        let message = Message::new(MessageType::P2pPtkSignatures, signatures_data);
+        let message = Message::new(MessageType::P2pSignatures, signatures_data);
         let response = self.send_message(&message).await?;
 
         // Parse response
@@ -174,7 +171,7 @@ impl NoiseClient {
             return Err(NoiseError::InvalidMessage);
         }
 
-        tracing::info!("P2P/PTK signatures sent successfully");
+        tracing::info!("P2P signatures sent successfully");
         Ok(())
     }
 

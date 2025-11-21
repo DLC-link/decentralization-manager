@@ -1,7 +1,8 @@
-use crate::config::NodeConfig;
+use anyhow::Context;
 use tokio::fs;
 
 use crate::{
+    config::{NetworkConfig, NodeConfig},
     consts::{TOPOLOGY_RETRY_DELAY_SECS, TOPOLOGY_RETRY_MAX_ATTEMPTS},
     dirs::WorkflowDirs,
     error::Result,
@@ -9,8 +10,8 @@ use crate::{
         daml::ledger::api::v2::{
             Command, CreateCommand, GenMap, Identifier, Optional, Record, RecordField, Value,
             admin::{
-                CreateUserRequest, GrantUserRightsRequest, ListKnownPartiesRequest, ObjectMeta,
-                Right, User,
+                AllocatePartyRequest, CreateUserRequest, GrantUserRightsRequest,
+                ListKnownPartiesRequest, ObjectMeta, Right, User,
                 party_management_service_client::PartyManagementServiceClient,
                 right::{CanActAs, CanReadAs, Kind},
             },
@@ -91,32 +92,82 @@ pub async fn prepare_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
         }
     }
 
-    // Step 3: Look up other parties
+    // Step 3: Load network config and allocate parties for each participant
+    let network_config_path = if std::path::PathBuf::from(&config.network_config).is_absolute() {
+        std::path::PathBuf::from(&config.network_config)
+    } else {
+        // Resolve relative to test-configs directory
+        std::env::current_dir()?
+            .join("test-configs")
+            .join(&config.network_config)
+    };
+    let network_config = NetworkConfig::from_file(&network_config_path).await?;
 
-    // Look up attestor parties
-    let attestor1 = find_party(&mut party_client, "attestor-1").await?;
-    let attestor2 = find_party(&mut party_client, "attestor-2").await?;
-    let attestor3 = find_party(&mut party_client, "attestor-3").await?;
-    tracing::debug!("Found attestors: {attestor1}, {attestor2}, {attestor3}");
+    tracing::info!("Getting parties for participants...");
+    let mut participant_parties = Vec::new();
 
-    // Look up operator party
-    let operator = find_party(&mut party_client, "operator").await?;
-    tracing::debug!("Found operator: {operator}");
+    for participant in &network_config.participants {
+        let party = if let Some(party_id) = &participant.party {
+            // Use party from config
+            tracing::debug!("Using party from config for {}: {party_id}", participant.id);
+            party_id.clone()
+        } else {
+            // Fallback to allocating/finding party
+            tracing::debug!("Allocating/finding party for {}", participant.id);
+            allocate_or_find_party(
+                &mut party_client,
+                &participant.id,
+                &utils::get_synchronizer_id(config).await?,
+            )
+            .await?
+        };
+        tracing::debug!("Party for {}: {party}", participant.id);
+        participant_parties.push(party);
+    }
 
-    // Step 4: Create CoordinatorUser and grant rights
-    tracing::info!("Setting up CoordinatorUser...");
+    if participant_parties.len() < 3 {
+        anyhow::bail!(
+            "Expected at least 3 participants, found {}",
+            participant_parties.len()
+        );
+    }
+
+    let attestor1 = participant_parties[0].clone();
+    let attestor2 = participant_parties[1].clone();
+    let attestor3 = participant_parties[2].clone();
+    tracing::info!("Parties for participants: {attestor1}, {attestor2}, {attestor3}");
+
+    // Get operator party from config or allocate
+    let operator = if let Some(operator_party) = &network_config.network.operator_party {
+        tracing::debug!("Using operator party from config: {operator_party}");
+        operator_party.clone()
+    } else {
+        tracing::debug!("Allocating/finding operator party");
+        allocate_or_find_party(
+            &mut party_client,
+            "operator",
+            &utils::get_synchronizer_id(config).await?,
+        )
+        .await?
+    };
+    tracing::info!("Operator party: {operator}");
+
+    // Step 4: Create ledger-api-user and grant rights
+    // Note: User ID must match JWT token's "sub" claim
+    tracing::info!("Setting up ledger-api-user...");
     let mut user_client = utils::create_user_client(config).await?;
+    let user_id = "ledger-api-user";
 
     // Try to create user (may already exist)
     let create_user_result = user_client
         .create_user(tonic::Request::new(CreateUserRequest {
             user: Some(User {
-                id: "CoordinatorUser".to_string(),
+                id: user_id.to_string(),
                 primary_party: attestor1.clone(),
                 is_deactivated: false,
                 metadata: Some(ObjectMeta {
                     resource_version: String::new(),
-                    annotations: [("description".to_string(), "Coordinator User".to_string())]
+                    annotations: [("description".to_string(), "Ledger API User".to_string())]
                         .into_iter()
                         .collect(),
                 }),
@@ -138,18 +189,18 @@ pub async fn prepare_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
         .await;
 
     match create_user_result {
-        Ok(_) => tracing::info!("Created CoordinatorUser"),
+        Ok(_) => tracing::info!("Created {user_id}"),
         Err(e) if e.code() == tonic::Code::AlreadyExists => {
-            tracing::debug!("CoordinatorUser already exists");
+            tracing::debug!("{user_id} already exists");
         }
         Err(e) => return Err(e.into()),
     }
 
     // Grant rights for the decentralized registrar
-    tracing::info!("Granting rights to CoordinatorUser for decentralized party...");
+    tracing::info!("Granting rights to {user_id} for decentralized party...");
     user_client
         .grant_user_rights(tonic::Request::new(GrantUserRightsRequest {
-            user_id: "CoordinatorUser".to_string(),
+            user_id: user_id.to_string(),
             rights: vec![
                 Right {
                     kind: Some(Kind::CanActAs(CanActAs {
@@ -166,7 +217,7 @@ pub async fn prepare_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
         }))
         .await?;
 
-    tracing::info!("CoordinatorUser setup complete");
+    tracing::info!("{user_id} setup complete");
 
     // Step 5: Build common structures
     let threshold = 2i64;
@@ -284,7 +335,7 @@ pub async fn prepare_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
 
     let prepared_submission1 = submission_client
         .prepare_submission(tonic::Request::new(PrepareSubmissionRequest {
-            user_id: "CoordinatorUser".to_string(),
+            user_id: user_id.to_string(),
             command_id: "create-govR".to_string(),
             commands: vec![create_gov_rules_command],
             min_ledger_time: None,
@@ -341,7 +392,7 @@ pub async fn prepare_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
 
     let prepared_submission2 = submission_client
         .prepare_submission(tonic::Request::new(PrepareSubmissionRequest {
-            user_id: "CoordinatorUser".to_string(),
+            user_id: user_id.to_string(),
             command_id: "create-daR".to_string(),
             commands: vec![create_deposit_rules_command],
             min_ledger_time: None,
@@ -398,7 +449,7 @@ pub async fn prepare_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
 
     let prepared_submission3 = submission_client
         .prepare_submission(tonic::Request::new(PrepareSubmissionRequest {
-            user_id: "CoordinatorUser".to_string(),
+            user_id: user_id.to_string(),
             command_id: "create-waR".to_string(),
             commands: vec![create_withdraw_rules_command],
             min_ledger_time: None,
@@ -445,10 +496,11 @@ pub async fn prepare_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
     Ok(())
 }
 
-/// Find a party by party ID prefix
-async fn find_party<T>(
+/// Allocate a party with a given hint, or find if it already exists
+async fn allocate_or_find_party<T>(
     client: &mut PartyManagementServiceClient<T>,
-    party_prefix: &str,
+    party_id_hint: &str,
+    synchronizer_id: &str,
 ) -> Result<String>
 where
     T: tonic::client::GrpcService<tonic::body::Body> + Send,
@@ -458,20 +510,59 @@ where
         Into<Box<dyn std::error::Error + Send + Sync>> + Send,
     T::Future: Send,
 {
-    let response = client
+    // First try to find existing party with this hint
+    let list_response = client
         .list_known_parties(tonic::Request::new(ListKnownPartiesRequest {
             identity_provider_id: String::new(),
             page_token: String::new(),
-            page_size: 1000,
+            page_size: DEFAULT_PAGE_SIZE,
         }))
         .await?
         .into_inner();
 
-    for party_details in response.party_details {
-        if party_details.party.contains(party_prefix) {
+    // Check if party already exists (exact match or contains the hint)
+    for party_details in list_response.party_details {
+        if party_details.party.contains(party_id_hint) {
+            tracing::debug!("Found existing party: {}", party_details.party);
             return Ok(party_details.party);
         }
     }
 
-    anyhow::bail!("Party with prefix '{party_prefix}' not found")
+    // Party doesn't exist, allocate it
+    tracing::debug!("Allocating new party with hint: {party_id_hint}");
+
+    // Canton 3.4+ requires only the fingerprint portion of the synchronizer ID for party allocation
+    // Extract fingerprint from full ID format: alias::fingerprint::version -> fingerprint
+    let synchronizer_fingerprint = utils::extract_synchronizer_fingerprint(synchronizer_id)
+        .context("Failed to extract synchronizer fingerprint for party allocation")?;
+    tracing::debug!(
+        "Using synchronizer fingerprint for party allocation: {synchronizer_fingerprint}"
+    );
+
+    let allocate_response = client
+        .allocate_party(tonic::Request::new(AllocatePartyRequest {
+            party_id_hint: party_id_hint.to_string(),
+            local_metadata: Some(ObjectMeta {
+                resource_version: String::new(),
+                annotations: [(
+                    "description".to_string(),
+                    format!("Party for {party_id_hint}"),
+                )]
+                .into_iter()
+                .collect(),
+            }),
+            identity_provider_id: String::new(),
+            synchronizer_id: synchronizer_fingerprint,
+            user_id: String::new(),
+        }))
+        .await?
+        .into_inner();
+
+    let party_id = allocate_response
+        .party_details
+        .ok_or_else(|| anyhow::anyhow!("AllocateParty returned no party details"))?
+        .party;
+
+    tracing::debug!("Allocated new party: {party_id}");
+    Ok(party_id)
 }
