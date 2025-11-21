@@ -43,7 +43,7 @@ cargo build
 
 ONBOARDING() { ./target/debug/dec-party-onboarding "$@"; }
 
-export RUST_LOG="dec_party_onboarding=info"
+export RUST_LOG="dec_party_onboarding=debug"
 
 echo ""
 echo "Generating Noise protocol keys..."

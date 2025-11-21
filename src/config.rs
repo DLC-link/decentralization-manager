@@ -42,6 +42,9 @@ pub struct NetworkInfo {
     pub protocol_version: String,
     pub port: u16,
     pub coordinator_strategy: CoordinatorStrategy,
+    /// Operator party ID (optional, can be allocated dynamically if not provided)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operator_party: Option<String>,
 }
 
 /// Participant in the network
@@ -55,6 +58,9 @@ pub struct Participant {
     pub port: u16,
     /// Hex-encoded Noise static public key
     pub public_key: String,
+    /// Canton party ID (optional, can be allocated dynamically if not provided)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub party: Option<String>,
 }
 
 /// Timeout configuration
@@ -277,6 +283,7 @@ mod tests {
                 protocol_version: "1.0".to_string(),
                 port: 9000,
                 coordinator_strategy: CoordinatorStrategy::Explicit,
+                operator_party: None,
             },
             participants: vec![
                 Participant {
@@ -286,6 +293,7 @@ mod tests {
                     address: "10.0.1.1".to_string(),
                     port: 9000,
                     public_key: "abc123".to_string(),
+                    party: None,
                 },
                 Participant {
                     id: "node2".to_string(),
@@ -294,6 +302,7 @@ mod tests {
                     address: "10.0.1.2".to_string(),
                     port: 9000,
                     public_key: "def456".to_string(),
+                    party: None,
                 },
             ],
             timeouts: Timeouts::default(),
@@ -315,6 +324,7 @@ mod tests {
                 protocol_version: "1.0".to_string(),
                 port: 9000,
                 coordinator_strategy: CoordinatorStrategy::First,
+                operator_party: None,
             },
             participants: vec![
                 Participant {
@@ -324,6 +334,7 @@ mod tests {
                     address: "10.0.1.1".to_string(),
                     port: 9000,
                     public_key: "abc123".to_string(),
+                    party: None,
                 },
                 Participant {
                     id: "node2".to_string(),
@@ -332,6 +343,7 @@ mod tests {
                     address: "10.0.1.2".to_string(),
                     port: 9000,
                     public_key: "def456".to_string(),
+                    party: None,
                 },
             ],
             timeouts: Timeouts::default(),
@@ -351,6 +363,7 @@ mod tests {
                 protocol_version: "1.0".to_string(),
                 port: 9000,
                 coordinator_strategy: CoordinatorStrategy::First,
+                operator_party: None,
             },
             participants: vec![
                 Participant {
@@ -360,6 +373,7 @@ mod tests {
                     address: "10.0.1.1".to_string(),
                     port: 9000,
                     public_key: "abc123".to_string(),
+                    party: None,
                 },
                 Participant {
                     id: "node2".to_string(),
@@ -368,6 +382,7 @@ mod tests {
                     address: "10.0.1.2".to_string(),
                     port: 9000,
                     public_key: "def456".to_string(),
+                    party: None,
                 },
                 Participant {
                     id: "node3".to_string(),
@@ -376,6 +391,7 @@ mod tests {
                     address: "10.0.1.3".to_string(),
                     port: 9000,
                     public_key: "ghi789".to_string(),
+                    party: None,
                 },
             ],
             timeouts: Timeouts::default(),

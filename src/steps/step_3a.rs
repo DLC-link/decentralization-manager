@@ -1,7 +1,7 @@
-use crate::config::NodeConfig;
 use tokio::{fs, time};
 
 use crate::{
+    config::NodeConfig,
     consts::{TOPOLOGY_RETRY_DELAY_SECS, TOPOLOGY_RETRY_MAX_ATTEMPTS},
     dirs::WorkflowDirs,
     error::Result,
@@ -21,8 +21,8 @@ use crate::{
 ///
 /// Corresponds to: 03a_SubmitFinalProposals.sc
 ///
-/// **Canton 3.4+**: PTK (PartyToKeyMapping) is deprecated. This function only submits P2P proposals
-/// which now contain embedded signing keys.
+/// **Canton 3.4+**: Submits P2P proposals with embedded signing keys
+/// (replaces the separate PartyToKeyMapping transactions from Canton 3.3).
 ///
 /// This step must be run once by the coordinator after all attestors have signed the P2P proposals.
 /// It aggregates all signatures and submits the fully-signed proposal to Canton.
@@ -31,15 +31,15 @@ use crate::{
 /// * `config` - Configuration with Canton connection details
 /// * `dirs` - WorkflowDirs containing all directory paths
 pub async fn submit_final_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
-    tracing::info!("Submitting P2P proposal (Canton 3.4+: PTK deprecated, keys in P2P)...");
+    tracing::info!("Submitting P2P proposal with embedded signing keys (Canton 3.4+)...");
 
     // Step 1: Get synchronizer ID
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
     tracing::debug!("Using synchronizer ID: {synchronizer_id}");
 
     // Step 2: Read the original P2P proposal
-    // Canton 3.4+: PTK deprecated, only P2P proposal exists
-    let p2p_file = dirs.p2p_ptk_proposals_dir.join("p2p_proto.bin");
+    // Canton 3.4+: Signing keys embedded in P2P mappings
+    let p2p_file = dirs.p2p_proposals_dir.join("p2p_proto.bin");
     tracing::info!("Reading original P2P proposal from {}", p2p_file.display());
     let mut p2p_transaction: SignedTopologyTransaction =
         utils::read_first_message_from_file(&p2p_file).await?;
@@ -61,7 +61,7 @@ pub async fn submit_final_proposals(config: &NodeConfig, dirs: &WorkflowDirs) ->
     tracing::info!("Found {} signed P2P proposal files", signed_files.len());
 
     // Step 4: Aggregate signatures for P2P
-    // Canton 3.4+: Each file contains only 1 transaction (P2P only, PTK deprecated)
+    // Canton 3.4+: Each file contains 1 transaction (P2P with embedded signing keys)
     for signed_file in &signed_files {
         tracing::info!("Reading signatures from {}", signed_file.display());
         let signed_transactions: Vec<SignedTopologyTransaction> =
@@ -98,8 +98,8 @@ pub async fn submit_final_proposals(config: &NodeConfig, dirs: &WorkflowDirs) ->
     let party_id = format!("cbtc-network::{}", namespace_def.decentralized_namespace);
     tracing::info!("Constructed party ID: {party_id}");
 
-    // Step 6: Submit P2P proposal
-    // Canton 3.4+: PTK deprecated, only submit P2P proposal
+    // Step 6: Submit P2P proposal with embedded signing keys
+    // Canton 3.4+: Signing keys are now part of P2P proposal
     tracing::info!("Submitting aggregated P2P proposal...");
     let mut topology_write_client =
         TopologyManagerWriteServiceClient::connect(config.admin_api_url()).await?;
@@ -118,20 +118,53 @@ pub async fn submit_final_proposals(config: &NodeConfig, dirs: &WorkflowDirs) ->
     topology_write_client.add_transactions(request).await?;
     tracing::info!("P2P proposal submitted to topology");
 
-    // Step 7: Wait for P2P to appear in topology
+    // Step 7: Wait for P2P to appear in topology and become effective
     tracing::info!("Waiting for P2P to appear in topology...");
-    wait_for_p2p_in_topology(config, &synchronizer_id, &party_id).await?;
+    let effective_time = wait_for_p2p_in_topology(config, &synchronizer_id, &party_id).await?;
 
     tracing::info!("P2P proposal submitted and confirmed in topology successfully");
+
+    // Step 8: Wait for topology to become effective
+    // Canton topology changes have an "effective time" = sequencing time + topology change delay (ε)
+    // We must wait until this effective time has passed before submitting transactions,
+    // otherwise the mediator will reject them because its topology snapshot hasn't reached
+    // the effective time yet.
+    let now = std::time::SystemTime::now();
+    let effective_system_time = std::time::UNIX_EPOCH
+        + std::time::Duration::from_secs(effective_time.seconds as u64)
+        + std::time::Duration::from_nanos(effective_time.nanos as u64);
+
+    if let Ok(wait_duration) = effective_system_time.duration_since(now) {
+        tracing::info!(
+            "P2P mapping will become effective in {wait_duration:?}. Waiting for topology effective time..."
+        );
+        tokio::time::sleep(wait_duration).await;
+        tracing::info!("Topology is now effective");
+    } else {
+        tracing::info!("P2P mapping is already effective");
+    }
+
+    // Step 9: Additional wait for topology propagation
+    // Canton 3.4: Even after topology becomes effective, the sequencer's topology state
+    // needs time to propagate and update its "known until" timestamp. Without this wait,
+    // transactions may be rejected with LOCAL_VERDICT_TIMEOUT because the sequencer's
+    // topology knowledge lags behind the effective time.
+    // We wait 60 seconds to ensure Canton has fully propagated the topology updates.
+    let propagation_delay = time::Duration::from_secs(60);
+    tracing::info!("Waiting {propagation_delay:?} for Canton to propagate topology updates...");
+    time::sleep(propagation_delay).await;
+    tracing::info!("Topology propagation wait complete");
+
     Ok(())
 }
 
 /// Wait for P2P (PartyToParticipant) to appear in topology by polling
+/// Returns the effective time (valid_from) when the P2P mapping becomes active
 async fn wait_for_p2p_in_topology(
     config: &NodeConfig,
     synchronizer_id: &str,
     party_id: &str,
-) -> Result {
+) -> Result<prost_types::Timestamp> {
     let mut topology_read_client =
         TopologyManagerReadServiceClient::connect(config.admin_api_url()).await?;
 
@@ -161,9 +194,22 @@ async fn wait_for_p2p_in_topology(
             .await?
             .into_inner();
 
-        if !response.results.is_empty() {
+        if let Some(result) = response.results.first() {
             tracing::info!("P2P found in topology after {attempt} attempt(s)");
-            return Ok(());
+
+            // Extract the effective time (valid_from) from the topology result
+            if let Some(context) = &result.context {
+                if let Some(valid_from) = &context.valid_from {
+                    let seconds = valid_from.seconds;
+                    let nanos = valid_from.nanos;
+                    tracing::debug!("P2P mapping effective time: {seconds}.{nanos:09}s");
+                    return Ok(*valid_from);
+                } else {
+                    anyhow::bail!("P2P mapping found but has no valid_from timestamp");
+                }
+            } else {
+                anyhow::bail!("P2P mapping found but has no context");
+            }
         }
 
         if attempt < max_attempts {
@@ -176,4 +222,3 @@ async fn wait_for_p2p_in_topology(
 
     anyhow::bail!("P2P did not appear in topology after {max_attempts} attempts")
 }
-

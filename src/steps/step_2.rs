@@ -4,9 +4,12 @@ use crate::{
     config::NodeConfig,
     dirs::WorkflowDirs,
     error::Result,
-    proto::com::digitalasset::canton::topology::admin::v30::{
-        SignTransactionsRequest, StoreId, Synchronizer, store_id, synchronizer,
-        topology_manager_write_service_client::TopologyManagerWriteServiceClient,
+    proto::com::digitalasset::canton::{
+        protocol::v30::SignedTopologyTransaction,
+        topology::admin::v30::{
+            SignTransactionsRequest, StoreId, Synchronizer, store_id, synchronizer,
+            topology_manager_write_service_client::TopologyManagerWriteServiceClient,
+        },
     },
     utils,
 };
@@ -36,7 +39,7 @@ pub async fn sign_dns_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Res
     let dns_file = dirs.dns_proposals_dir.join("dns_proto.bin");
     tracing::info!("Reading DNS proposal from {}", dns_file.display());
 
-    let dns_transaction: crate::proto::com::digitalasset::canton::protocol::v30::SignedTopologyTransaction =
+    let dns_transaction: SignedTopologyTransaction =
         utils::read_first_message_from_file(&dns_file).await?;
 
     // Step 3: Sign the transaction using Canton's TopologyManagerWriteService

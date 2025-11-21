@@ -1,14 +1,14 @@
 mod cli;
 
+use std::{path::PathBuf, sync::Arc};
+
+use anyhow::Context;
 use tracing_subscriber::{
     filter::{EnvFilter, LevelFilter},
     prelude::*,
 };
 
-use std::{path::PathBuf, sync::Arc};
-
 use cli::{Cli, Commands, Parser};
-
 use dec_party_onboarding::{
     config::{CoordinatorStrategy, NetworkConfig, NodeConfig},
     dirs::WorkflowDirs,
@@ -60,7 +60,7 @@ async fn main() -> Result {
         Commands::CreateProposals => steps::create_proposals(&node_config, &dirs).await?,
         Commands::SignDnsProposals => steps::sign_dns_proposals(&node_config, &dirs).await?,
         Commands::SubmitDnsProposals => steps::submit_dns_proposals(&node_config, &dirs).await?,
-        Commands::SignP2pPtkProposals => steps::sign_p2p_ptk_proposals(&node_config, &dirs).await?,
+        Commands::SignP2pProposals => steps::sign_p2p_proposals(&node_config, &dirs).await?,
         Commands::SubmitFinalProposals => {
             steps::submit_final_proposals(&node_config, &dirs).await?
         }
@@ -275,19 +275,19 @@ async fn run_coordinator_workflow(
                 }
                 workflow_state.advance_step().await;
             }
-            WorkflowStep::SignP2pPtk => {
+            WorkflowStep::SignP2p => {
                 // Attestors are signing, wait for them
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             }
             WorkflowStep::SubmitFinal => {
                 tracing::info!("Coordinator executing: Submit final proposals");
 
-                // Save collected P2P/PTK signatures to files
+                // Save collected P2P signatures to files
                 let attestor_data = workflow_state.get_all_attestor_data().await;
                 for (attestor_id, signatures_data) in attestor_data {
                     let file_path = dirs
                         .final_signed_dir
-                        .join(format!("signed-p2p-ptk-proposals-{attestor_id}.bin"));
+                        .join(format!("signed-p2p-proposals-{attestor_id}.bin"));
                     tokio::fs::write(&file_path, signatures_data).await?;
                 }
                 workflow_state.clear_attestor_data().await;
@@ -307,7 +307,13 @@ async fn run_coordinator_workflow(
                 workflow_state.advance_step().await;
             }
             WorkflowStep::SignSubmissions => {
-                // Attestors are signing, wait for them
+                // Coordinator also needs to sign since it has keys in P2P mapping
+                tracing::info!("Coordinator executing: Sign submissions");
+                steps::sign_submissions(&node_config, &dirs)
+                    .await
+                    .context("Failed to sign submissions")?;
+
+                // Attestors are also signing, wait for them
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             }
             WorkflowStep::ExecuteSubmissions => {
@@ -374,7 +380,9 @@ async fn start_attestor(node_config: NodeConfig, network_config: NetworkConfig) 
                     tracing::error!(
                         "Failed to communicate with coordinator after 3 attempts. Aborting."
                     );
-                    anyhow::bail!("Attestor failed: persistent communication errors with coordinator");
+                    anyhow::bail!(
+                        "Attestor failed: persistent communication errors with coordinator"
+                    );
                 }
 
                 tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
@@ -442,12 +450,12 @@ async fn start_attestor(node_config: NodeConfig, network_config: NetworkConfig) 
                     Err(e) => Err(e),
                 }
             }
-            MessageType::SignP2pPtk => {
-                tracing::info!("Executing: Sign P2P proposals (Canton 3.4+: PTK deprecated)");
-                match steps::sign_p2p_ptk_proposals(&node_config, &dirs).await {
+            MessageType::SignP2p => {
+                tracing::info!("Executing: Sign P2P proposals");
+                match steps::sign_p2p_proposals(&node_config, &dirs).await {
                     Ok(_) => {
                         // Send P2P signatures to coordinator
-                        match send_p2p_ptk_signatures_to_coordinator(&client, &dirs).await {
+                        match send_p2p_signatures_to_coordinator(&client, &dirs).await {
                             Ok(_) => Ok(()),
                             Err(e) => {
                                 tracing::error!(
@@ -544,11 +552,8 @@ async fn send_dns_signature_to_coordinator(client: &NoiseClient, dirs: &Workflow
 }
 
 /// Send P2P signatures to coordinator
-/// Canton 3.4+: PTK deprecated, only P2P proposals
-async fn send_p2p_ptk_signatures_to_coordinator(
-    client: &NoiseClient,
-    dirs: &WorkflowDirs,
-) -> Result {
+/// Canton 3.4+: Signing keys embedded in P2P mappings
+async fn send_p2p_signatures_to_coordinator(client: &NoiseClient, dirs: &WorkflowDirs) -> Result {
     // Find the signed P2P proposals file
     let signed_proposals_dir = &dirs.final_signed_dir;
     let mut entries = tokio::fs::read_dir(signed_proposals_dir).await?;
@@ -562,7 +567,7 @@ async fn send_p2p_ptk_signatures_to_coordinator(
             .unwrap_or(false)
         {
             let signatures_data = tokio::fs::read(&path).await?;
-            client.send_p2p_ptk_signatures(signatures_data).await?;
+            client.send_p2p_signatures(signatures_data).await?;
             return Ok(());
         }
     }
