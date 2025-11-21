@@ -48,7 +48,7 @@ pub async fn sign_dns_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Res
         signed_by: vec![], // Auto-select appropriate signing keys
         store: Some(StoreId {
             store: Some(store_id::Store::Synchronizer(Synchronizer {
-                kind: Some(synchronizer::Kind::Id(synchronizer_id)),
+                kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id)),
             })),
         }),
         force_flags: vec![],
