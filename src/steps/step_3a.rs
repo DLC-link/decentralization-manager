@@ -8,9 +8,9 @@ use crate::{
     proto::com::digitalasset::canton::{
         protocol::v30::{DecentralizedNamespaceDefinition, SignedTopologyTransaction},
         topology::admin::v30::{
-            AddTransactionsRequest, BaseQuery, ListPartyToKeyMappingRequest,
-            ListPartyToParticipantRequest, StoreId, Synchronizer, base_query, store_id,
-            synchronizer, topology_manager_read_service_client::TopologyManagerReadServiceClient,
+            AddTransactionsRequest, BaseQuery, ListPartyToParticipantRequest, StoreId,
+            Synchronizer, base_query, store_id, synchronizer,
+            topology_manager_read_service_client::TopologyManagerReadServiceClient,
             topology_manager_write_service_client::TopologyManagerWriteServiceClient,
         },
     },
@@ -37,18 +37,14 @@ pub async fn submit_final_proposals(config: &NodeConfig, dirs: &WorkflowDirs) ->
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
     tracing::debug!("Using synchronizer ID: {synchronizer_id}");
 
-    // Step 2: Read the original P2P and PTK proposals
+    // Step 2: Read the original P2P proposal
+    // Canton 3.4+: PTK deprecated, only P2P proposal exists
     let p2p_file = dirs.p2p_ptk_proposals_dir.join("p2p_proto.bin");
     tracing::info!("Reading original P2P proposal from {}", p2p_file.display());
     let mut p2p_transaction: SignedTopologyTransaction =
         utils::read_first_message_from_file(&p2p_file).await?;
 
-    let ptk_file = dirs.p2p_ptk_proposals_dir.join("ptk_proto.bin");
-    tracing::info!("Reading original PTK proposal from {}", ptk_file.display());
-    let mut ptk_transaction: SignedTopologyTransaction =
-        utils::read_first_message_from_file(&ptk_file).await?;
-
-    // Step 3: Discover and read all signed P2P/PTK proposals
+    // Step 3: Discover and read all signed P2P proposals
     let signed_proposals_dir = &dirs.final_signed_dir;
     let mut signed_files = Vec::new();
     let mut dir_entries = fs::read_dir(&signed_proposals_dir).await?;
@@ -56,48 +52,38 @@ pub async fn submit_final_proposals(config: &NodeConfig, dirs: &WorkflowDirs) ->
     while let Some(entry) = dir_entries.next_entry().await? {
         let file_name = entry.file_name();
         let file_name_str = file_name.to_string_lossy();
-        if file_name_str.starts_with("signed-p2p-ptk-proposals") && file_name_str.ends_with(".bin")
-        {
+        if file_name_str.starts_with("signed-p2p-proposals") && file_name_str.ends_with(".bin") {
             signed_files.push(entry.path());
         }
     }
 
     signed_files.sort();
-    tracing::info!("Found {} signed P2P/PTK proposal files", signed_files.len());
+    tracing::info!("Found {} signed P2P proposal files", signed_files.len());
 
-    // Step 4: Aggregate signatures separately for P2P and PTK
-    // Each file contains 2 messages: P2P first, PTK second
+    // Step 4: Aggregate signatures for P2P
+    // Canton 3.4+: Each file contains only 1 transaction (P2P only, PTK deprecated)
     for signed_file in &signed_files {
         tracing::info!("Reading signatures from {}", signed_file.display());
         let signed_transactions: Vec<SignedTopologyTransaction> =
             utils::read_all_messages_from_file(signed_file).await?;
 
-        if signed_transactions.len() != 2 {
+        if signed_transactions.len() != 1 {
             anyhow::bail!(
-                "Expected 2 transactions in {}, got {}",
+                "Expected 1 transaction in {}, got {}",
                 signed_file.display(),
                 signed_transactions.len()
             );
         }
 
-        // First transaction is P2P
+        // Aggregate P2P signatures
         p2p_transaction
             .signatures
             .extend(signed_transactions[0].signatures.clone());
-
-        // Second transaction is PTK
-        ptk_transaction
-            .signatures
-            .extend(signed_transactions[1].signatures.clone());
     }
 
     tracing::info!(
         "Aggregated P2P proposal has {} signature(s)",
         p2p_transaction.signatures.len()
-    );
-    tracing::info!(
-        "Aggregated PTK proposal has {} signature(s)",
-        ptk_transaction.signatures.len()
     );
 
     // Step 5: Read namespace definition and construct party ID
@@ -112,7 +98,8 @@ pub async fn submit_final_proposals(config: &NodeConfig, dirs: &WorkflowDirs) ->
     let party_id = format!("cbtc-network::{}", namespace_def.decentralized_namespace);
     tracing::info!("Constructed party ID: {party_id}");
 
-    // Step 6: Submit P2P proposal first
+    // Step 6: Submit P2P proposal
+    // Canton 3.4+: PTK deprecated, only submit P2P proposal
     tracing::info!("Submitting aggregated P2P proposal...");
     let mut topology_write_client =
         TopologyManagerWriteServiceClient::connect(config.admin_api_url()).await?;
@@ -135,27 +122,7 @@ pub async fn submit_final_proposals(config: &NodeConfig, dirs: &WorkflowDirs) ->
     tracing::info!("Waiting for P2P to appear in topology...");
     wait_for_p2p_in_topology(config, &synchronizer_id, &party_id).await?;
 
-    // Step 8: Submit PTK proposal second
-    tracing::info!("Submitting aggregated PTK proposal...");
-    let request = tonic::Request::new(AddTransactionsRequest {
-        transactions: vec![ptk_transaction.clone()],
-        force_changes: vec![],
-        store: Some(StoreId {
-            store: Some(store_id::Store::Synchronizer(Synchronizer {
-                kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.clone())),
-            })),
-        }),
-        wait_to_become_effective: None,
-    });
-
-    topology_write_client.add_transactions(request).await?;
-    tracing::info!("PTK proposal submitted to topology");
-
-    // Step 9: Wait for PTK to appear in topology
-    tracing::info!("Waiting for PTK to appear in topology...");
-    wait_for_ptk_in_topology(config, &synchronizer_id, &party_id).await?;
-
-    tracing::info!("Final proposals submitted and confirmed in topology successfully");
+    tracing::info!("P2P proposal submitted and confirmed in topology successfully");
     Ok(())
 }
 
@@ -210,52 +177,3 @@ async fn wait_for_p2p_in_topology(
     anyhow::bail!("P2P did not appear in topology after {max_attempts} attempts")
 }
 
-/// Wait for PTK (PartyToKeyMapping) to appear in topology by polling
-async fn wait_for_ptk_in_topology(
-    config: &NodeConfig,
-    synchronizer_id: &str,
-    party_id: &str,
-) -> Result {
-    let mut topology_read_client =
-        TopologyManagerReadServiceClient::connect(config.admin_api_url()).await?;
-
-    let max_attempts = TOPOLOGY_RETRY_MAX_ATTEMPTS;
-    let retry_delay = time::Duration::from_secs(TOPOLOGY_RETRY_DELAY_SECS);
-
-    for attempt in 1..=max_attempts {
-        let request = tonic::Request::new(ListPartyToKeyMappingRequest {
-            base_query: Some(BaseQuery {
-                store: Some(StoreId {
-                    store: Some(store_id::Store::Synchronizer(Synchronizer {
-                        kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.to_string())),
-                    })),
-                }),
-                proposals: false,
-                operation: 0, // TOPOLOGY_CHANGE_OP_UNSPECIFIED
-                time_query: Some(base_query::TimeQuery::HeadState(())),
-                filter_signed_key: String::new(),
-                protocol_version: None,
-            }),
-            filter_party: party_id.to_string(),
-        });
-
-        let response = topology_read_client
-            .list_party_to_key_mapping(request)
-            .await?
-            .into_inner();
-
-        if !response.results.is_empty() {
-            tracing::info!("PTK found in topology after {attempt} attempt(s)");
-            return Ok(());
-        }
-
-        if attempt < max_attempts {
-            tracing::debug!(
-                "PTK not yet in topology, attempt {attempt}/{max_attempts}, retrying in {retry_delay:?}..."
-            );
-            time::sleep(retry_delay).await;
-        }
-    }
-
-    anyhow::bail!("PTK did not appear in topology after {max_attempts} attempts")
-}
