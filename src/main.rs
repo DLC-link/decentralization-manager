@@ -447,15 +447,15 @@ async fn start_attestor(node_config: NodeConfig, network_config: NetworkConfig) 
                 }
             }
             MessageType::SignP2pPtk => {
-                tracing::info!("Executing: Sign P2P/PTK proposals");
+                tracing::info!("Executing: Sign P2P proposals (Canton 3.4+: PTK deprecated)");
                 match steps::sign_p2p_ptk_proposals(&node_config, &dirs).await {
                     Ok(_) => {
-                        // Send P2P/PTK signatures to coordinator
+                        // Send P2P signatures to coordinator
                         match send_p2p_ptk_signatures_to_coordinator(&client, &dirs).await {
                             Ok(_) => Ok(()),
                             Err(e) => {
                                 tracing::error!(
-                                    "Failed to send P2P/PTK signatures to coordinator: {e}"
+                                    "Failed to send P2P signatures to coordinator: {e}"
                                 );
                                 Err(e)
                             }
@@ -547,12 +547,13 @@ async fn send_dns_signature_to_coordinator(client: &NoiseClient, dirs: &Workflow
     anyhow::bail!("Signed DNS proposal file not found")
 }
 
-/// Send P2P/PTK signatures to coordinator
+/// Send P2P signatures to coordinator
+/// Canton 3.4+: PTK deprecated, only P2P proposals
 async fn send_p2p_ptk_signatures_to_coordinator(
     client: &NoiseClient,
     dirs: &WorkflowDirs,
 ) -> Result {
-    // Find the signed P2P/PTK proposals file
+    // Find the signed P2P proposals file
     let signed_proposals_dir = &dirs.final_signed_dir;
     let mut entries = tokio::fs::read_dir(signed_proposals_dir).await?;
 
@@ -561,7 +562,7 @@ async fn send_p2p_ptk_signatures_to_coordinator(
         if path
             .file_name()
             .and_then(|n| n.to_str())
-            .map(|n| n.starts_with("signed-p2p-ptk-proposals"))
+            .map(|n| n.starts_with("signed-p2p-proposals"))
             .unwrap_or(false)
         {
             let signatures_data = tokio::fs::read(&path).await?;
@@ -570,7 +571,7 @@ async fn send_p2p_ptk_signatures_to_coordinator(
         }
     }
 
-    anyhow::bail!("Signed P2P/PTK proposals file not found")
+    anyhow::bail!("Signed P2P proposals file not found")
 }
 
 /// Send submission signatures to coordinator
