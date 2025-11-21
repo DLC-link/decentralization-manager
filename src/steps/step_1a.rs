@@ -164,6 +164,7 @@ pub async fn create_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
                 onboarding: None,
             })
             .collect(),
+        party_signing_keys: None, // No party signing keys for this mapping
     };
 
     // Step 10: Create PartyToKeyMapping
