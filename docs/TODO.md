@@ -4,6 +4,16 @@
 
 This document outlines the plan to port Canton Scala scripts from `../canton/releases/0.0.1/` to Rust in the `dec-party-onboarding` repository. The Canton scripts implement a multi-party decentralized namespace setup for CBTC (Canton-based Bitcoin) governance.
 
+## ⚠️ Canton 3.4+ Important Changes
+
+**PartyToKeyMapping (PTK) Deprecated**: Starting with Canton 3.4, the `PartyToKeyMapping` topology mapping is deprecated. Signing keys are now included directly in the `PartyToParticipant` mapping via the `party_signing_keys` field.
+
+**Impact on Implementation**:
+- Step 1a now creates only DNS and P2P proposals (not PTK)
+- P2P mapping includes `SigningKeysWithThreshold` with party signing keys
+- Steps 3/3a still sign and submit P2P proposals, but no separate PTK proposal
+- The command names retain "ptk" for backwards compatibility but don't create PTK files
+
 ## Workflow Architecture
 
 The workflow implements a multi-attestor (3+ participants) decentralized party setup with threshold signatures. The process has 5 main phases:
@@ -109,9 +119,9 @@ Attestors sign ledger submissions, coordinator executes them on the ledger.
    - Party ID: `cbtc-network::<computed-namespace>`
    - Map to all participant IDs with `Confirmation` permission
    - Set threshold
-8. Create Party-to-Key (PTK) mapping proposal:
-   - Map party to all DAML keys
-   - Set threshold
+   - **Canton 3.4+**: Include signing keys via `party_signing_keys` field (`SigningKeysWithThreshold`)
+8. ~~Create Party-to-Key (PTK) mapping proposal~~ **[DEPRECATED in Canton 3.4+]**
+   - PTK functionality moved into P2P mapping (step 7 above)
 9. Save proposals to files
 
 **Canton API**:
@@ -128,8 +138,8 @@ Attestors sign ledger submissions, coordinator executes them on the ledger.
 
 **Outputs**:
 - `../step_2/dns_proto.bin`: DNS proposal (SignedTopologyTransaction)
-- `../step_3/p2p_proto.bin`: P2P proposal (SignedTopologyTransaction)
-- `../step_3/ptk_proto.bin`: PTK proposal (SignedTopologyTransaction)
+- `../step_3/p2p_proto.bin`: P2P proposal with embedded keys (SignedTopologyTransaction)
+- ~~`../step_3/ptk_proto.bin`~~: **[DEPRECATED]** PTK no longer created in Canton 3.4+
 - `../step_2a/namespaceDef.bin`: Namespace definition (for verification)
 
 **Notes**:

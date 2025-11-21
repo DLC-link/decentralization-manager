@@ -160,7 +160,7 @@ impl NoiseServer {
         // Parse message
         let message = Message::from_bytes(&body_bytes).map_err(|_| NoiseError::InvalidMessage)?;
 
-        tracing::info!(
+        tracing::debug!(
             "Received message type {:?} from {peer_id}",
             message.msg_type
         );
