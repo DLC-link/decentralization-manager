@@ -3,6 +3,7 @@ pub mod consts;
 pub mod dirs;
 pub mod error;
 pub mod noise;
+pub mod participant_id;
 pub mod steps;
 pub mod utils;
 pub mod workflow_state;

@@ -6,6 +6,7 @@ use crate::{
     config::NodeConfig,
     dirs::WorkflowDirs,
     error::Result,
+    participant_id::ParticipantId,
     proto::com::digitalasset::canton::{
         crypto::v30::{SigningKeysWithThreshold, SigningPublicKey},
         protocol::v30::{
@@ -121,9 +122,9 @@ pub async fn create_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
 
     let mut participant_ids = Vec::new();
     for id_file in &id_file_paths {
-        let id_bytes = fs::read(id_file).await?;
-        let id = String::from_utf8(id_bytes)?;
-        participant_ids.push(id);
+        let file_content = fs::read_to_string(id_file).await?;
+        let participant_id = ParticipantId::parse_from_file(&file_content)?;
+        participant_ids.push(participant_id);
     }
 
     // Step 5: Calculate threshold (majority)
@@ -160,7 +161,7 @@ pub async fn create_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
         participants: participant_ids
             .iter()
             .map(|pid| HostingParticipant {
-                participant_uid: pid.clone(),
+                participant_uid: pid.to_string(),
                 permission: enums::ParticipantPermission::Confirmation as i32,
                 onboarding: None,
             })

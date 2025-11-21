@@ -35,7 +35,7 @@ impl Namespace {
 
     /// Get the namespace as a hex string
     pub fn to_hex(&self) -> String {
-        hex::encode(self.0)
+        hex::encode(&self.0)
     }
 
     /// Get a reference to the underlying byte array
@@ -55,34 +55,34 @@ impl fmt::Display for Namespace {
     }
 }
 
-/// Represents a Canton ID with prefix and namespace
+/// Represents a Canton participant ID with prefix and namespace
 ///
-/// Canton IDs have the format: `{prefix}::{hex_encoded_namespace}`
+/// Canton participant IDs have the format: `{prefix}::{hex_encoded_namespace}`
 /// Examples:
 /// - `participant::1220c4010d6883f367...`
 /// - `sv::1220034c3a6a9454...`
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CantonId {
+pub struct ParticipantId {
     /// The prefix (e.g., "participant", "sv")
     pub prefix: String,
     /// The namespace (multihash-encoded identifier)
     pub namespace: Namespace,
 }
 
-impl CantonId {
-    /// Create a new Canton ID from prefix and namespace
+impl ParticipantId {
+    /// Create a new ParticipantId from prefix and namespace
     pub fn new(prefix: String, namespace: Namespace) -> Self {
         Self { prefix, namespace }
     }
 
-    /// Parse a Canton ID from Canton's string format
+    /// Parse a ParticipantId from Canton's string format
     ///
     /// Expected format: `prefix::hex_encoded_namespace`
     /// Example: `participant::1220c4010d6883f367...`
     pub fn parse(s: &str) -> Result<Self> {
         let parts: Vec<&str> = s.split("::").collect();
         if parts.len() != 2 {
-            anyhow::bail!("Invalid Canton ID format: expected 'prefix::namespace', got '{s}'");
+            anyhow::bail!("Invalid participant ID format: expected 'prefix::namespace', got '{s}'");
         }
 
         let prefix = parts[0].to_string();
@@ -91,7 +91,7 @@ impl CantonId {
         Ok(Self { prefix, namespace })
     }
 
-    /// Parse a Canton ID from file content (strips "PAR::" prefix if present)
+    /// Parse a ParticipantId from file content (strips "PAR::" prefix if present)
     pub fn parse_from_file(content: &str) -> Result<Self> {
         let trimmed = content.trim();
         let id_str = match trimmed.strip_prefix("PAR::") {
@@ -101,15 +101,20 @@ impl CantonId {
         Self::parse(id_str)
     }
 
+    /// Convert to Canton's string format: `prefix::hex_encoded_namespace`
+    pub fn to_string(&self) -> String {
+        format!("{}::{}", self.prefix, self.namespace.to_hex())
+    }
+
     /// Convert to file storage format with "PAR::" prefix
     pub fn to_file_format(&self) -> String {
-        format!("PAR::{self}")
+        format!("PAR::{}", self.to_string())
     }
 }
 
-impl fmt::Display for CantonId {
+impl fmt::Display for ParticipantId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}::{}", self.prefix, self.namespace.to_hex())
+        write!(f, "{}", self.to_string())
     }
 }
 
@@ -137,7 +142,7 @@ mod tests {
 
     #[test]
     fn test_parse() -> Result {
-        let id = CantonId::parse(
+        let id = ParticipantId::parse(
             "participant::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
         )?;
         assert_eq!(id.prefix, "participant");
@@ -150,7 +155,7 @@ mod tests {
 
     #[test]
     fn test_parse_from_file() -> Result {
-        let id = CantonId::parse_from_file(
+        let id = ParticipantId::parse_from_file(
             "PAR::participant::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
         )?;
         assert_eq!(id.prefix, "participant");
@@ -162,7 +167,7 @@ mod tests {
         let ns = Namespace::from_hex(
             "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
         )?;
-        let id = CantonId::new("participant".to_string(), ns);
+        let id = ParticipantId::new("participant".to_string(), ns);
         assert_eq!(
             id.to_file_format(),
             "PAR::participant::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892"
@@ -174,7 +179,7 @@ mod tests {
     fn test_roundtrip() -> Result {
         let original =
             "participant::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
-        let id = CantonId::parse(original)?;
+        let id = ParticipantId::parse(original)?;
         assert_eq!(id.to_string(), original);
         Ok(())
     }
