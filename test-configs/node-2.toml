@@ -9,7 +9,7 @@ listen_address = "0.0.0.0"
 
 [canton]
 admin_api_host = "localhost"
-admin_api_port = 5014
+admin_api_port = 3902
 ledger_api_host = "localhost"
-ledger_api_port = 5013
+ledger_api_port = 3901
 synchronizer = "global"
