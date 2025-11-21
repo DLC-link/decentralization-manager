@@ -6,6 +6,7 @@ use crate::{
     config::NodeConfig,
     dirs::WorkflowDirs,
     error::Result,
+    participant_id::ParticipantId,
     proto::com::digitalasset::canton::{
         admin::participant::v30::{
             UploadDarRequest, package_service_client::PackageServiceClient,
@@ -32,7 +33,6 @@ const NAMESPACE_KEY_NAME: &str = "cbtc-network-namespace";
 const DAML_KEY_NAME: &str = "cbtc-network-daml-transactions";
 const ATTESTOR_KEYS_FILENAME_PREFIX: &str = "attestor-public-keys";
 const PARTICIPANT_ID_FILENAME_PREFIX: &str = "participant-id";
-const PARTICIPANT_ID_PREFIX: &str = "PAR::";
 
 /// Upload DAR files to the participant
 ///
@@ -148,12 +148,12 @@ pub async fn generate_keys(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
     .await?;
 
     // Get participant ID and export keys
-    let participant_id = crate::utils::get_participant_id(config).await?;
-    let participant_num = extract_participant_number(&participant_id);
-    tracing::info!("Participant ID: {participant_id}, extracted number: {participant_num}");
+    let canton_participant_id = utils::get_participant_id(config).await?;
+    let participant_num = extract_participant_number(&config.node.participant_id);
+    tracing::info!("Participant ID: {canton_participant_id}, extracted number: {participant_num}");
 
     export_keys(&dirs.keys_dir, &namespace_key, &daml_key, participant_num).await?;
-    export_participant_id(&dirs.ids_dir, &participant_id, participant_num).await?;
+    export_participant_id(&dirs.ids_dir, &canton_participant_id, participant_num).await?;
 
     tracing::info!("Keys and participant ID exported successfully");
 
@@ -181,12 +181,10 @@ async fn generate_signing_key(
         .ok_or_else(|| anyhow::anyhow!("No public key returned from VaultService"))
 }
 
-/// Helper: Extract participant number from ID (e.g., "participant1" -> 1)
-fn extract_participant_number(participant_id: &str) -> u32 {
-    participant_id
-        .split("::")
-        .next()
-        .and_then(|name| name.strip_prefix("participant"))
+/// Helper: Extract participant number from config participant ID (e.g., "participant-1" -> 1)
+fn extract_participant_number(config_participant_id: &str) -> u32 {
+    config_participant_id
+        .strip_prefix("participant-")
         .and_then(|num_str| num_str.parse::<u32>().ok())
         .unwrap_or(1)
 }
@@ -207,14 +205,14 @@ async fn export_keys(
 /// Helper: Export participant ID to file
 async fn export_participant_id(
     ids_dir: &Path,
-    participant_id: &str,
+    canton_participant_id: &str,
     participant_num: u32,
 ) -> Result {
-    let id_with_prefix = format!("{PARTICIPANT_ID_PREFIX}{participant_id}");
+    let participant_id = ParticipantId::parse(canton_participant_id)?;
     let filename = format!("{PARTICIPANT_ID_FILENAME_PREFIX}-{participant_num}.bin");
     let output_path = ids_dir.join(&filename);
     tracing::debug!("Exporting participant ID to {}", output_path.display());
-    fs::write(&output_path, id_with_prefix.as_bytes()).await?;
+    fs::write(&output_path, participant_id.to_file_format().as_bytes()).await?;
     Ok(())
 }
 

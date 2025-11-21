@@ -7,6 +7,7 @@ use tokio::fs;
 use crate::{
     config::NodeConfig,
     error::Result,
+    participant_id::ParticipantId,
     proto::com::digitalasset::canton::{
         admin::participant::v30::{
             GetSynchronizerIdRequest,
@@ -256,9 +257,7 @@ pub async fn get_participant_id(config: &NodeConfig) -> Result<String> {
 ///
 /// Reads all participant-id-*.bin files and matches the current participant ID
 /// against them to determine which number this participant is.
-///
-/// Note: The stored IDs in files have "PAR::" prefix, so current_id should match that format.
-pub async fn find_participant_number(ids_dir: &Path, current_id: &str) -> Result<u32> {
+pub async fn find_participant_number(ids_dir: &Path, current_participant_id: &ParticipantId) -> Result<u32> {
     let mut dir_entries = fs::read_dir(ids_dir).await?;
     let mut id_files = Vec::new();
 
@@ -278,24 +277,24 @@ pub async fn find_participant_number(ids_dir: &Path, current_id: &str) -> Result
 
     // Read each file and match against current participant ID
     for (idx, id_file) in id_files.iter().enumerate() {
-        let id_bytes = fs::read(id_file).await?;
-        let stored_id = String::from_utf8(id_bytes)?;
+        let file_content = fs::read_to_string(id_file).await?;
+        let stored_id = ParticipantId::parse_from_file(&file_content)?;
 
-        if stored_id == current_id {
+        if &stored_id == current_participant_id {
             return Ok((idx + 1) as u32);
         }
     }
 
-    anyhow::bail!("Current participant ID '{current_id}' not found in ids directory")
+    anyhow::bail!("Current participant ID '{current_participant_id}' not found in ids directory")
 }
 
 /// Get participant number for current participant
 ///
 /// Convenience function that gets the participant ID and finds its number.
 pub async fn get_participant_number(config: &NodeConfig, ids_dir: &Path) -> Result<u32> {
-    let participant_id = get_participant_id(config).await?;
-    let participant_id_with_prefix = format!("PAR::{participant_id}");
-    find_participant_number(ids_dir, &participant_id_with_prefix).await
+    let canton_participant_id = get_participant_id(config).await?;
+    let participant_id = ParticipantId::parse(&canton_participant_id)?;
+    find_participant_number(ids_dir, &participant_id).await
 }
 
 #[cfg(test)]
