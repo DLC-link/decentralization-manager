@@ -8,15 +8,24 @@ use crate::{
     config::NodeConfig,
     error::Result,
     participant_id::ParticipantId,
-    proto::com::digitalasset::canton::{
-        admin::participant::v30::{
-            GetSynchronizerIdRequest,
-            synchronizer_connectivity_service_client::SynchronizerConnectivityServiceClient,
+    proto::com::{
+        daml::ledger::api::v2::{
+            admin::{
+                party_management_service_client::PartyManagementServiceClient,
+                user_management_service_client::UserManagementServiceClient,
+            },
+            interactive::interactive_submission_service_client::InteractiveSubmissionServiceClient,
         },
-        crypto::v30::SigningPublicKey,
-        topology::admin::v30::{
-            GetIdRequest,
-            identity_initialization_service_client::IdentityInitializationServiceClient,
+        digitalasset::canton::{
+            admin::participant::v30::{
+                GetSynchronizerIdRequest,
+                synchronizer_connectivity_service_client::SynchronizerConnectivityServiceClient,
+            },
+            crypto::v30::SigningPublicKey,
+            topology::admin::v30::{
+                GetIdRequest,
+                identity_initialization_service_client::IdentityInitializationServiceClient,
+            },
         },
     },
 };
@@ -257,7 +266,10 @@ pub async fn get_participant_id(config: &NodeConfig) -> Result<String> {
 ///
 /// Reads all participant-id-*.bin files and matches the current participant ID
 /// against them to determine which number this participant is.
-pub async fn find_participant_number(ids_dir: &Path, current_participant_id: &ParticipantId) -> Result<u32> {
+pub async fn find_participant_number(
+    ids_dir: &Path,
+    current_participant_id: &ParticipantId,
+) -> Result<u32> {
     let mut dir_entries = fs::read_dir(ids_dir).await?;
     let mut id_files = Vec::new();
 
@@ -295,6 +307,63 @@ pub async fn get_participant_number(config: &NodeConfig, ids_dir: &Path) -> Resu
     let canton_participant_id = get_participant_id(config).await?;
     let participant_id = ParticipantId::parse(&canton_participant_id)?;
     find_participant_number(ids_dir, &participant_id).await
+}
+
+/// Interceptor function that adds JWT authentication to gRPC requests
+pub fn auth_interceptor(
+    token: Option<String>,
+) -> impl Fn(tonic::Request<()>) -> std::result::Result<tonic::Request<()>, tonic::Status> + Clone {
+    move |mut req: tonic::Request<()>| {
+        if let Some(ref token) = token {
+            let bearer_token = format!("Bearer {token}");
+            let token_value = tonic::metadata::MetadataValue::try_from(&bearer_token)
+                .map_err(|e| tonic::Status::unauthenticated(format!("Invalid token: {e}")))?;
+            req.metadata_mut().insert("authorization", token_value);
+        }
+        Ok(req)
+    }
+}
+
+/// Create an authenticated PartyManagementServiceClient
+pub async fn create_party_client(
+    config: &NodeConfig,
+) -> Result<PartyManagementServiceClient<tonic::service::interceptor::InterceptedService<tonic::transport::Channel, impl Fn(tonic::Request<()>) -> std::result::Result<tonic::Request<()>, tonic::Status> + Clone>>> {
+    let channel = tonic::transport::Channel::from_shared(config.ledger_api_url())?
+        .connect()
+        .await?;
+
+    Ok(PartyManagementServiceClient::with_interceptor(
+        channel,
+        auth_interceptor(config.canton.ledger_api_token.clone()),
+    ))
+}
+
+/// Create an authenticated UserManagementServiceClient
+pub async fn create_user_client(
+    config: &NodeConfig,
+) -> Result<UserManagementServiceClient<tonic::service::interceptor::InterceptedService<tonic::transport::Channel, impl Fn(tonic::Request<()>) -> std::result::Result<tonic::Request<()>, tonic::Status> + Clone>>> {
+    let channel = tonic::transport::Channel::from_shared(config.ledger_api_url())?
+        .connect()
+        .await?;
+
+    Ok(UserManagementServiceClient::with_interceptor(
+        channel,
+        auth_interceptor(config.canton.ledger_api_token.clone()),
+    ))
+}
+
+/// Create an authenticated InteractiveSubmissionServiceClient
+pub async fn create_submission_client(
+    config: &NodeConfig,
+) -> Result<InteractiveSubmissionServiceClient<tonic::service::interceptor::InterceptedService<tonic::transport::Channel, impl Fn(tonic::Request<()>) -> std::result::Result<tonic::Request<()>, tonic::Status> + Clone>>> {
+    let channel = tonic::transport::Channel::from_shared(config.ledger_api_url())?
+        .connect()
+        .await?;
+
+    Ok(InteractiveSubmissionServiceClient::with_interceptor(
+        channel,
+        auth_interceptor(config.canton.ledger_api_token.clone()),
+    ))
 }
 
 #[cfg(test)]

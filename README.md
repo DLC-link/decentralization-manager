@@ -134,6 +134,8 @@ admin_api_port = 5012
 ledger_api_host = "localhost"
 ledger_api_port = 5011
 synchronizer = "global"
+# Optional: JWT token for Ledger API authentication
+# ledger_api_token = "your-jwt-token-here"
 ```
 
 See `test-configs/README.md` for detailed documentation.

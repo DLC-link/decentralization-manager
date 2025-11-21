@@ -647,6 +647,8 @@ admin_api_host = "localhost"
 admin_api_port = 5001
 ledger_api_host = "localhost"
 ledger_api_port = 5002
+# Optional: JWT token for Ledger API authentication
+# ledger_api_token = "your-jwt-token-here"
 ```
 
 ### Coordinator Selection Strategies
@@ -908,6 +910,8 @@ admin_api_host = "localhost"
 admin_api_port = 5001
 ledger_api_host = "localhost"
 ledger_api_port = 5002
+# Optional: JWT token for Ledger API authentication
+# ledger_api_token = "your-jwt-token-here"
 
 # Bob
 $ cat node.toml
@@ -922,6 +926,8 @@ admin_api_host = "localhost"
 admin_api_port = 5011
 ledger_api_host = "localhost"
 ledger_api_port = 5012
+# Optional: JWT token for Ledger API authentication
+# ledger_api_token = "your-jwt-token-here"
 
 # Carol - similar configuration
 ```
