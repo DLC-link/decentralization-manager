@@ -122,7 +122,7 @@ pub async fn submit_final_proposals(config: &NodeConfig, dirs: &WorkflowDirs) ->
         force_changes: vec![],
         store: Some(StoreId {
             store: Some(store_id::Store::Synchronizer(Synchronizer {
-                kind: Some(synchronizer::Kind::Id(synchronizer_id.clone())),
+                kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.clone())),
             })),
         }),
         wait_to_become_effective: None,
@@ -142,7 +142,7 @@ pub async fn submit_final_proposals(config: &NodeConfig, dirs: &WorkflowDirs) ->
         force_changes: vec![],
         store: Some(StoreId {
             store: Some(store_id::Store::Synchronizer(Synchronizer {
-                kind: Some(synchronizer::Kind::Id(synchronizer_id.clone())),
+                kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.clone())),
             })),
         }),
         wait_to_become_effective: None,
@@ -176,7 +176,7 @@ async fn wait_for_p2p_in_topology(
             base_query: Some(BaseQuery {
                 store: Some(StoreId {
                     store: Some(store_id::Store::Synchronizer(Synchronizer {
-                        kind: Some(synchronizer::Kind::Id(synchronizer_id.to_string())),
+                        kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.to_string())),
                     })),
                 }),
                 proposals: false,
@@ -227,7 +227,7 @@ async fn wait_for_ptk_in_topology(
             base_query: Some(BaseQuery {
                 store: Some(StoreId {
                     store: Some(store_id::Store::Synchronizer(Synchronizer {
-                        kind: Some(synchronizer::Kind::Id(synchronizer_id.to_string())),
+                        kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.to_string())),
                     })),
                 }),
                 proposals: false,
