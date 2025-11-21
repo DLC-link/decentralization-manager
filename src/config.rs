@@ -225,6 +225,10 @@ pub struct CantonConfig {
     pub ledger_api_port: u16,
     #[serde(default = "default_synchronizer")]
     pub synchronizer: String,
+    /// Optional JWT token for Ledger API authentication
+    /// If not provided, requests will be sent without authentication
+    #[serde(default)]
+    pub ledger_api_token: Option<String>,
 }
 
 fn default_synchronizer() -> String {

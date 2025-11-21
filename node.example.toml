@@ -21,3 +21,7 @@ admin_api_host = "localhost"
 admin_api_port = 5001
 ledger_api_host = "localhost"
 ledger_api_port = 5002
+
+# Optional: JWT token for Ledger API authentication
+# If not provided, requests will be sent without authentication
+# ledger_api_token = "your-jwt-token-here"
