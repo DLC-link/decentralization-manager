@@ -43,8 +43,9 @@ pub async fn run_all_steps(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
     tracing::info!("Step 2a: Submit DNS proposals");
     submit_dns_proposals(config, dirs).await?;
 
-    // Step 3: Sign P2P/PTK proposals (run on each attestor)
-    tracing::info!("Step 3: Sign P2P/PTK proposals");
+    // Step 3: Sign P2P proposals (run on each attestor)
+    // Canton 3.4+: PTK deprecated, signing keys now in P2P mapping
+    tracing::info!("Step 3: Sign P2P proposals");
     sign_p2p_ptk_proposals(config, dirs).await?;
 
     // Step 3a: Submit final proposals (run once by coordinator)

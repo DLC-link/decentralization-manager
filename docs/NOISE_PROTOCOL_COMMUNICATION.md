@@ -225,7 +225,7 @@ After handshake, all messages follow a structured protocol.
 | `UPLOAD_DARS` | Instruct attestor to upload DAR files | None |
 | `GENERATE_KEYS` | Instruct attestor to generate keys | None |
 | `SIGN_DNS` | Instruct attestor to sign DNS proposal | `dns_proto.bin` |
-| `SIGN_P2P_PTK` | Instruct attestor to sign P2P/PTK proposals | `p2p_proto.bin`, `ptk_proto.bin` |
+| `SIGN_P2P_PTK` | Instruct attestor to sign P2P proposals (Canton 3.4+: PTK deprecated) | `p2p_proto.bin` |
 | `SIGN_SUBMISSIONS` | Instruct attestor to sign ledger submissions | `prepared-submission-*.bin` (3 files) |
 | `STATUS_UPDATE` | Inform attestors of progress | Status string |
 | `DISCONNECT` | Graceful shutdown | None |
@@ -246,7 +246,7 @@ After handshake, all messages follow a structured protocol.
 |---------|-----------|-------------|
 | `KEYS_UPLOAD` | Attestor → Coordinator | `attestor-public-keys.bin` + `participant-id.bin` |
 | `DNS_SIGNATURE` | Attestor → Coordinator | `signed-dns-proposal.bin` |
-| `P2P_PTK_SIGNATURES` | Attestor → Coordinator | `signed-p2p-ptk-proposals.bin` |
+| `P2P_PTK_SIGNATURES` | Attestor → Coordinator | `signed-p2p-ptk-proposals.bin` (Canton 3.4+: only P2P signatures) |
 | `SUBMISSION_SIGNATURES` | Attestor → Coordinator | `submission-signatures.bin` |
 
 ---

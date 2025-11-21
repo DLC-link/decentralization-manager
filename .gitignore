@@ -4,3 +4,5 @@ target/
 keys/
 logs/
 workflow-data/
+
+.DS_Store
