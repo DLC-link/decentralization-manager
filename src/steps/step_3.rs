@@ -14,18 +14,21 @@ use crate::{
     utils,
 };
 
-/// Sign P2P and PTK proposals with attestor's key
+/// Sign P2P proposals with attestor's key
 ///
 /// Corresponds to: 03_SignP2PPTKProposals.sc
 ///
+/// **Canton 3.4+**: PTK (PartyToKeyMapping) is deprecated. Signing keys are now embedded in the P2P mapping.
+/// This function signs the P2P proposal which contains both participant and key information.
+///
 /// This step must be run by each attestor participant (except the coordinator who created the proposals).
-/// Each attestor signs both the P2P and PTK proposals with their namespace key.
+/// Each attestor signs the P2P proposal with their namespace key.
 ///
 /// # Arguments
 /// * `config` - Configuration with Canton connection details
 /// * `dirs` - WorkflowDirs containing all directory paths
 pub async fn sign_p2p_ptk_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
-    tracing::info!("Signing P2P and PTK proposals...");
+    tracing::info!("Signing P2P proposals (Canton 3.4+: PTK deprecated, keys in P2P)...");
 
     // Step 1: Get participant number
     let participant_num = utils::get_participant_number(config, &dirs.ids_dir).await?;

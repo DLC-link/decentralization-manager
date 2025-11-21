@@ -8,7 +8,7 @@ A Rust-based automation tool for multi-party decentralized namespace setup in Ca
 - **Secure Communication**: Noise Protocol Framework for encrypted, authenticated peer-to-peer communication
 - **gRPC Integration**: Native Canton Admin and Ledger API integration using Protocol Buffers
 - **Cryptographic Key Management**: Automated generation and management of cryptographic keys for secure party identification
-- **Topology Management**: Handles DNS, P2P, and Participant Topology Key (PTK) proposal creation, signing, and submission
+- **Topology Management**: Handles DNS and P2P proposal creation, signing, and submission (Canton 3.4+: PTK deprecated, keys now in P2P)
 - **Ledger Operations**: Manages preparation, signing, and execution of ledger submissions
 - **Distributed Architecture**: Coordinator-attestor model with no single point of trust
 - **Configuration-Driven**: Flexible TOML-based configuration for different Canton environments
@@ -62,9 +62,11 @@ This project ports Canton Scala scripts to Rust, implementing a multi-party dece
 
 1. **Step 1**: Upload DARs and generate cryptographic keys
    - Automatically uploads all `.dar` files from the `dars/` directory
-2. **Step 1a**: Create topology proposals (DNS, P2P, PTK)
+2. **Step 1a**: Create topology proposals (DNS, P2P with embedded keys - Canton 3.4+)
 3. **Steps 2-3a**: Multi-party signing and submission of topology proposals
 4. **Steps 3b-5**: Prepare, sign, and execute ledger submissions
+
+**Note**: Starting with Canton 3.4, `PartyToKeyMapping` (PTK) is deprecated. Signing keys are now included directly in the `PartyToParticipant` (P2P) mapping.
 
 **Status**: All implementation phases complete. For detailed documentation, see [docs/TODO.md](./docs/TODO.md).
 
@@ -162,7 +164,7 @@ cargo run --release -- -c test-configs/node-1.toml sign-dns-proposals
 # Step 2a: Submit DNS proposals
 cargo run --release -- -c test-configs/node-1.toml submit-dns-proposals
 
-# Step 3: Sign P2P and PTK proposals
+# Step 3: Sign P2P proposals (Canton 3.4+: PTK deprecated, keys in P2P)
 cargo run --release -- -c test-configs/node-1.toml sign-p2p-ptk-proposals
 
 # Step 3a: Submit final proposals

@@ -36,7 +36,7 @@ flowchart TD
 
     Collect1 --> Phase2[Phase 2: Proposal Creation]
 
-    Phase2 --> Step1a[Coordinator: Create Proposals<br/>DNS, P2P, PTK proposals]
+    Phase2 --> Step1a[Coordinator: Create Proposals<br/>DNS, P2P proposals<br/>(Canton 3.4+: keys in P2P)]
 
     Step1a --> Dist1[Coordinator distributes via Noise:<br/>dns_proto.bin to all attestors]
 
@@ -58,21 +58,21 @@ flowchart TD
 
     Step2a --> Notify1[Coordinator broadcasts via Noise:<br/>STATUS: DNS submitted successfully]
 
-    Notify1 --> Dist2[Coordinator distributes via Noise:<br/>p2p_proto.bin + ptk_proto.bin]
+    Notify1 --> Dist2[Coordinator distributes via Noise:<br/>p2p_proto.bin<br/>(Canton 3.4+: PTK deprecated)]
 
-    Dist2 --> Step3A[Attestor 1: Sign P2P/PTK Proposals]
-    Dist2 --> Step3B[Attestor 2: Sign P2P/PTK Proposals]
-    Dist2 --> Step3C[Attestor 3+: Sign P2P/PTK Proposals]
+    Dist2 --> Step3A[Attestor 1: Sign P2P Proposals]
+    Dist2 --> Step3B[Attestor 2: Sign P2P Proposals]
+    Dist2 --> Step3C[Attestor 3+: Sign P2P Proposals]
 
     Step3A --> Send3A[Attestor 1 sends via Noise:<br/>signed-p2p-ptk-proposals-1.bin]
     Step3B --> Send3B[Attestor 2 sends via Noise:<br/>signed-p2p-ptk-proposals-2.bin]
     Step3C --> Send3C[Attestor 3+ sends via Noise:<br/>signed-p2p-ptk-proposals-3.bin]
 
-    Send3A --> Collect3{Coordinator receives<br/>all P2P/PTK signatures via Noise}
+    Send3A --> Collect3{Coordinator receives<br/>all P2P signatures via Noise}
     Send3B --> Collect3
     Send3C --> Collect3
 
-    Collect3 --> Step3a[Coordinator: Submit Final Proposals<br/>Aggregate & submit P2P + PTK<br/>Wait for propagation]
+    Collect3 --> Step3a[Coordinator: Submit Final Proposals<br/>Aggregate & submit P2P<br/>Wait for propagation]
 
     Step3a --> Notify2[Coordinator broadcasts via Noise:<br/>STATUS: Topology fully configured]
 
