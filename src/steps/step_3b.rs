@@ -13,13 +13,9 @@ use crate::{
                 Right, User,
                 party_management_service_client::PartyManagementServiceClient,
                 right::{CanActAs, CanReadAs, Kind},
-                user_management_service_client::UserManagementServiceClient,
             },
             command, gen_map,
-            interactive::{
-                PrepareSubmissionRequest,
-                interactive_submission_service_client::InteractiveSubmissionServiceClient,
-            },
+            interactive::PrepareSubmissionRequest,
             value,
         },
         digitalasset::canton::protocol::v30::DecentralizedNamespaceDefinition,
@@ -58,7 +54,7 @@ pub async fn prepare_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
 
     // Step 2: Wait for party to be visible in Ledger API
     tracing::info!("Waiting for decentralized party to be visible in Ledger API...");
-    let mut party_client = PartyManagementServiceClient::connect(config.ledger_api_url()).await?;
+    let mut party_client = utils::create_party_client(config).await?;
 
     let max_attempts = TOPOLOGY_RETRY_MAX_ATTEMPTS;
     let retry_delay = tokio::time::Duration::from_secs(TOPOLOGY_RETRY_DELAY_SECS);
@@ -109,7 +105,7 @@ pub async fn prepare_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
 
     // Step 4: Create CoordinatorUser and grant rights
     tracing::info!("Setting up CoordinatorUser...");
-    let mut user_client = UserManagementServiceClient::connect(config.ledger_api_url()).await?;
+    let mut user_client = utils::create_user_client(config).await?;
 
     // Try to create user (may already exist)
     let create_user_result = user_client
@@ -284,8 +280,7 @@ pub async fn prepare_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
         })),
     };
 
-    let mut submission_client =
-        InteractiveSubmissionServiceClient::connect(config.ledger_api_url()).await?;
+    let mut submission_client = utils::create_submission_client(config).await?;
 
     let prepared_submission1 = submission_client
         .prepare_submission(tonic::Request::new(PrepareSubmissionRequest {
@@ -451,10 +446,18 @@ pub async fn prepare_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
 }
 
 /// Find a party by party ID prefix
-async fn find_party(
-    client: &mut PartyManagementServiceClient<tonic::transport::Channel>,
+async fn find_party<T>(
+    client: &mut PartyManagementServiceClient<T>,
     party_prefix: &str,
-) -> Result<String> {
+) -> Result<String>
+where
+    T: tonic::client::GrpcService<tonic::body::Body> + Send,
+    T::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+    T::ResponseBody: tonic::codegen::Body<Data = tonic::codegen::Bytes> + Send + 'static,
+    <T::ResponseBody as tonic::codegen::Body>::Error:
+        Into<Box<dyn std::error::Error + Send + Sync>> + Send,
+    T::Future: Send,
+{
     let response = client
         .list_known_parties(tonic::Request::new(ListKnownPartiesRequest {
             identity_provider_id: String::new(),
