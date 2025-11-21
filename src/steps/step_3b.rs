@@ -301,6 +301,7 @@ pub async fn prepare_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
             package_id_selection_preference: vec![],
             verbose_hashing: false,
             prefetch_contract_keys: vec![],
+            estimate_traffic_cost: None,
         }))
         .await?
         .into_inner();
@@ -357,6 +358,7 @@ pub async fn prepare_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
             package_id_selection_preference: vec![],
             verbose_hashing: false,
             prefetch_contract_keys: vec![],
+            estimate_traffic_cost: None,
         }))
         .await?
         .into_inner();
@@ -413,6 +415,7 @@ pub async fn prepare_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
             package_id_selection_preference: vec![],
             verbose_hashing: false,
             prefetch_contract_keys: vec![],
+            estimate_traffic_cost: None,
         }))
         .await?
         .into_inner();
