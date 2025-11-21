@@ -20,7 +20,7 @@ use crate::{
             topology_mapping,
         },
         topology::admin::v30::{
-            AuthorizeRequest, StoreId, Synchronizer, authorize_request, store_id, synchronizer,
+            AuthorizeRequest, StoreId, authorize_request, store_id,
             topology_manager_write_service_client::TopologyManagerWriteServiceClient,
         },
     },
@@ -226,8 +226,6 @@ async fn propose_namespace_delegation(
 ) -> Result {
     tracing::debug!("Proposing namespace delegation for {namespace_fingerprint}");
 
-    let synchronizer_id = crate::utils::get_synchronizer_id(config).await?;
-
     let namespace_delegation = NamespaceDelegation {
         // fingerprint of the root key defining the namespace
         namespace: namespace_fingerprint.to_string(),
@@ -268,9 +266,7 @@ async fn propose_namespace_delegation(
         force_changes: vec![],
         signed_by: vec![],
         store: Some(StoreId {
-            store: Some(store_id::Store::Synchronizer(Synchronizer {
-                kind: Some(synchronizer::Kind::Id(synchronizer_id)),
-            })),
+            store: Some(store_id::Store::Authorized(store_id::Authorized {})),
         }),
         wait_to_become_effective: None,
     });

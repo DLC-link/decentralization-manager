@@ -17,18 +17,21 @@ use crate::{
     utils,
 };
 
-/// Aggregate and submit P2P and PTK proposals
+/// Aggregate and submit P2P proposals
 ///
 /// Corresponds to: 03a_SubmitFinalProposals.sc
 ///
-/// This step must be run once by the coordinator after all attestors have signed the P2P and PTK proposals.
-/// It aggregates all signatures and submits the fully-signed proposals to Canton.
+/// **Canton 3.4+**: PTK (PartyToKeyMapping) is deprecated. This function only submits P2P proposals
+/// which now contain embedded signing keys.
+///
+/// This step must be run once by the coordinator after all attestors have signed the P2P proposals.
+/// It aggregates all signatures and submits the fully-signed proposal to Canton.
 ///
 /// # Arguments
 /// * `config` - Configuration with Canton connection details
 /// * `dirs` - WorkflowDirs containing all directory paths
 pub async fn submit_final_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
-    tracing::info!("Submitting final proposals...");
+    tracing::info!("Submitting P2P proposal (Canton 3.4+: PTK deprecated, keys in P2P)...");
 
     // Step 1: Get synchronizer ID
     let synchronizer_id = utils::get_synchronizer_id(config).await?;

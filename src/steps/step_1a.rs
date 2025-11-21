@@ -1,16 +1,16 @@
-use crate::config::NodeConfig;
 use std::collections::HashSet;
 
 use tokio::fs;
 
 use crate::{
+    config::NodeConfig,
     dirs::WorkflowDirs,
     error::Result,
     proto::com::digitalasset::canton::{
-        crypto::v30::SigningPublicKey,
+        crypto::v30::{SigningKeysWithThreshold, SigningPublicKey},
         protocol::v30::{
-            DecentralizedNamespaceDefinition, PartyToKeyMapping, PartyToParticipant,
-            TopologyMapping, enums, party_to_participant::HostingParticipant, topology_mapping,
+            DecentralizedNamespaceDefinition, PartyToParticipant, TopologyMapping, enums,
+            party_to_participant::HostingParticipant, topology_mapping,
         },
         topology::admin::v30::{
             AuthorizeRequest, ForceFlag, StoreId, Synchronizer, authorize_request, store_id,
@@ -91,7 +91,7 @@ pub async fn create_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
     // A namespace in Canton is the fingerprint (hash) of the public key
     let mut namespaces = HashSet::new();
     for key in &namespace_keys {
-        let namespace = crate::utils::compute_fingerprint(key);
+        let namespace = utils::compute_fingerprint(key);
         namespaces.insert(namespace);
     }
 
@@ -153,6 +153,7 @@ pub async fn create_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
     tracing::info!("Party ID: {party_id}");
 
     // Step 9: Create PartyToParticipant mapping
+    // Canton 3.4: PartyToParticipant now includes signing keys (PartyToKeyMapping is deprecated)
     let p2p_mapping = PartyToParticipant {
         party: party_id.clone(),
         threshold,
@@ -164,20 +165,16 @@ pub async fn create_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
                 onboarding: None,
             })
             .collect(),
-        party_signing_keys: None, // No party signing keys for this mapping
-    };
-
-    // Step 10: Create PartyToKeyMapping
-    let ptk_mapping = PartyToKeyMapping {
-        party: party_id.clone(),
-        threshold,
-        signing_keys: daml_keys,
+        party_signing_keys: Some(SigningKeysWithThreshold {
+            keys: daml_keys,
+            threshold,
+        }),
     };
 
     // Step 11: Get synchronizer ID for multi-party proposals
     // Multi-party proposals MUST use the Synchronizer store so Canton can look up
     // all the keys that were registered via namespace delegations in step_1
-    let synchronizer_id = crate::utils::get_synchronizer_id(config).await?;
+    let synchronizer_id = utils::get_synchronizer_id(config).await?;
     tracing::debug!("Using synchronizer ID: {synchronizer_id}");
 
     let mut topology_client =
@@ -203,7 +200,7 @@ pub async fn create_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
         signed_by: vec![], // Auto-select appropriate signing keys
         store: Some(StoreId {
             store: Some(store_id::Store::Synchronizer(Synchronizer {
-                kind: Some(synchronizer::Kind::Id(synchronizer_id.clone())),
+                kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.clone())),
             })),
         }),
         wait_to_become_effective: None,
@@ -231,7 +228,7 @@ pub async fn create_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
         signed_by: vec![],
         store: Some(StoreId {
             store: Some(store_id::Store::Synchronizer(Synchronizer {
-                kind: Some(synchronizer::Kind::Id(synchronizer_id.clone())),
+                kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.clone())),
             })),
         }),
         wait_to_become_effective: None,
@@ -242,33 +239,8 @@ pub async fn create_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
         .transaction
         .ok_or_else(|| anyhow::anyhow!("No P2P transaction returned"))?;
 
-    // Create PTK proposal
-    tracing::info!("Creating PTK proposal...");
-    let ptk_request = tonic::Request::new(AuthorizeRequest {
-        r#type: Some(authorize_request::Type::Proposal(
-            authorize_request::Proposal {
-                change: enums::TopologyChangeOp::AddReplace as i32,
-                serial: 1,
-                mapping: Some(TopologyMapping {
-                    mapping: Some(topology_mapping::Mapping::PartyToKeyMapping(ptk_mapping)),
-                }),
-            },
-        )),
-        must_fully_authorize: false,
-        force_changes: vec![ForceFlag::AllowUnvalidatedSigningKeys as i32],
-        signed_by: vec![],
-        store: Some(StoreId {
-            store: Some(store_id::Store::Synchronizer(Synchronizer {
-                kind: Some(synchronizer::Kind::Id(synchronizer_id.clone())),
-            })),
-        }),
-        wait_to_become_effective: None,
-    });
-
-    let ptk_response = topology_client.authorize(ptk_request).await?.into_inner();
-    let ptk_transaction = ptk_response
-        .transaction
-        .ok_or_else(|| anyhow::anyhow!("No PTK transaction returned"))?;
+    // Note: PartyToKeyMapping (PTK) is deprecated in Canton 3.4+
+    // Signing keys are now included directly in the PartyToParticipant mapping above
 
     // Step 13: Save proposals to files
     fs::create_dir_all(&dirs.dns_proposals_dir).await?;
@@ -283,9 +255,7 @@ pub async fn create_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
     tracing::info!("Saving P2P proposal to {}", p2p_file.display());
     utils::write_message_to_file(&p2p_transaction, &p2p_file).await?;
 
-    let ptk_file = dirs.p2p_ptk_proposals_dir.join("ptk_proto.bin");
-    tracing::info!("Saving PTK proposal to {}", ptk_file.display());
-    utils::write_message_to_file(&ptk_transaction, &ptk_file).await?;
+    // PTK proposal removed - deprecated in Canton 3.4+
 
     let namespace_file = dirs.dns_submission_dir.join("namespaceDef.bin");
     tracing::info!(
@@ -343,7 +313,7 @@ fn compute_decentralized_namespace(namespaces: &HashSet<String>) -> String {
     // Return multihash format: prefix + hex-encoded hash
     format!(
         "{}{}",
-        crate::utils::MULTIHASH_SHA256_PREFIX,
+        utils::MULTIHASH_SHA256_PREFIX,
         hex::encode(hash_result)
     )
 }
