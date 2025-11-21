@@ -13,7 +13,6 @@ use crate::{
             interactive::{
                 ExecuteSubmissionRequest, PartySignatures, PrepareSubmissionResponse,
                 SinglePartySignatures,
-                interactive_submission_service_client::InteractiveSubmissionServiceClient,
             },
             state_service_client::StateServiceClient,
         },
@@ -119,8 +118,7 @@ pub async fn execute_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
     tracing::info!("Loaded signatures from {} attestors", all_signatures.len());
 
     // Step 4: Execute each submission
-    let mut submission_client =
-        InteractiveSubmissionServiceClient::connect(config.ledger_api_url()).await?;
+    let mut submission_client = utils::create_submission_client(config).await?;
 
     let prepared_submissions = vec![
         ("create-govR", prepared_sub1),

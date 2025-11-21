@@ -606,6 +606,8 @@ admin_api_port = 5001
 ledger_api_host = "localhost"
 ledger_api_port = 5002
 synchronizer = "global"
+# Optional: JWT token for Ledger API authentication
+# ledger_api_token = "your-jwt-token-here"
 ```
 
 See [NOISE_PROTOCOL_COMMUNICATION.md](NOISE_PROTOCOL_COMMUNICATION.md) for detailed configuration documentation and [test-configs/](../test-configs/) for working examples.
