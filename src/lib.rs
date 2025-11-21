@@ -84,6 +84,9 @@ pub mod proto {
                         }
                     }
                 }
+                pub mod v30 {
+                    tonic::include_proto!("com.digitalasset.canton.v30");
+                }
             }
         }
     }
