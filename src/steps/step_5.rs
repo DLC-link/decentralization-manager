@@ -1,8 +1,8 @@
-use crate::config::NodeConfig;
 use tokio::fs;
 use uuid::Uuid;
 
 use crate::{
+    config::NodeConfig,
     consts::{TOPOLOGY_RETRY_DELAY_SECS, TOPOLOGY_RETRY_MAX_ATTEMPTS},
     dirs::WorkflowDirs,
     error::Result,
@@ -14,7 +14,6 @@ use crate::{
                 ExecuteSubmissionRequest, PartySignatures, PrepareSubmissionResponse,
                 SinglePartySignatures,
             },
-            state_service_client::StateServiceClient,
         },
         digitalasset::canton::{
             crypto::v30::Signature as CantonSignature,
@@ -120,7 +119,7 @@ pub async fn execute_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
     // Step 4: Execute each submission
     let mut submission_client = utils::create_submission_client(config).await?;
 
-    let prepared_submissions = vec![
+    let prepared_submissions = [
         ("create-govR", prepared_sub1),
         ("create-daR", prepared_sub2),
         ("create-waR", prepared_sub3),
@@ -152,6 +151,16 @@ pub async fn execute_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
             idx + 1
         );
 
+        // Debug: Log fingerprints being used in signatures
+        for (sig_idx, sig) in signatures_for_submission.iter().enumerate() {
+            tracing::debug!(
+                "Signature {} for submission {}: signed_by={}",
+                sig_idx + 1,
+                idx + 1,
+                sig.signed_by
+            );
+        }
+
         // Build PartySignatures
         let party_signatures = PartySignatures {
             signatures: vec![SinglePartySignatures {
@@ -164,12 +173,13 @@ pub async fn execute_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
         let submission_id = Uuid::new_v4().to_string();
 
         // Execute the submission
+        // Note: User ID must match JWT token's "sub" claim
         let execute_request = ExecuteSubmissionRequest {
             prepared_transaction: prepared_response.prepared_transaction.clone(),
             party_signatures: Some(party_signatures),
             deduplication_period: None, // Use default
             submission_id,
-            user_id: "CoordinatorUser".to_string(),
+            user_id: "ledger-api-user".to_string(),
             hashing_scheme_version: prepared_response.hashing_scheme_version,
             min_ledger_time: None,
         };
@@ -183,7 +193,7 @@ pub async fn execute_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
 
     // Step 5: Wait for contracts to appear in ACS
     tracing::info!("Waiting for contracts to appear in ledger...");
-    let mut state_client = StateServiceClient::connect(config.ledger_api_url()).await?;
+    let mut state_client = utils::create_state_client(config).await?;
 
     let max_attempts = TOPOLOGY_RETRY_MAX_ATTEMPTS;
     let retry_delay = tokio::time::Duration::from_secs(TOPOLOGY_RETRY_DELAY_SECS);
@@ -197,19 +207,26 @@ pub async fn execute_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
             .offset;
 
         // Query ACS for the decentralized party
+        // Filter by the specific party rather than "any party" to avoid permission issues
+        let mut filters_by_party = std::collections::HashMap::new();
+        filters_by_party.insert(
+            decentralized_party.clone(),
+            Filters {
+                cumulative: vec![CumulativeFilter {
+                    identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
+                        WildcardFilter {
+                            include_created_event_blob: false,
+                        },
+                    )),
+                }],
+            },
+        );
+
         let acs_request = GetActiveContractsRequest {
             active_at_offset: ledger_end,
             event_format: Some(EventFormat {
-                filters_by_party: std::collections::HashMap::new(),
-                filters_for_any_party: Some(Filters {
-                    cumulative: vec![CumulativeFilter {
-                        identifier_filter: Some(
-                            cumulative_filter::IdentifierFilter::WildcardFilter(WildcardFilter {
-                                include_created_event_blob: false,
-                            }),
-                        ),
-                    }],
-                }),
+                filters_by_party,
+                filters_for_any_party: None,
                 verbose: false,
             }),
         };

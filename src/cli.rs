@@ -46,8 +46,8 @@ pub enum Commands {
     /// Step 2a: Submit DNS proposals
     SubmitDnsProposals,
 
-    /// Step 3: Sign P2P and PTK proposals
-    SignP2pPtkProposals,
+    /// Step 3: Sign P2P proposals (Canton 3.4+: keys embedded in P2P)
+    SignP2pProposals,
 
     /// Step 3a: Submit final proposals
     SubmitFinalProposals,

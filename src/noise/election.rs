@@ -148,6 +148,7 @@ mod tests {
                 protocol_version: "1.0".to_string(),
                 port: 9000,
                 coordinator_strategy,
+                operator_party: None,
             },
             participants: vec![
                 Participant {
@@ -157,6 +158,7 @@ mod tests {
                     address: "10.0.1.101".to_string(),
                     port: 9000,
                     public_key: "abc123".to_string(),
+                    party: None,
                 },
                 Participant {
                     id: "attestor-2".to_string(),
@@ -165,6 +167,7 @@ mod tests {
                     address: "10.0.1.102".to_string(),
                     port: 9000,
                     public_key: "def456".to_string(),
+                    party: None,
                 },
                 Participant {
                     id: "attestor-3".to_string(),
@@ -173,6 +176,7 @@ mod tests {
                     address: "10.0.1.103".to_string(),
                     port: 9000,
                     public_key: "ghi789".to_string(),
+                    party: None,
                 },
             ],
             timeouts: Timeouts::default(),
@@ -191,7 +195,7 @@ mod tests {
 
     #[test]
     fn test_participant_sorting() {
-        let mut participants = vec![
+        let mut participants = [
             Participant {
                 id: "attestor-1".to_string(),
                 name: "".to_string(),
@@ -199,6 +203,7 @@ mod tests {
                 address: "".to_string(),
                 port: 0,
                 public_key: "".to_string(),
+                party: None,
             },
             Participant {
                 id: "attestor-3".to_string(),
@@ -207,6 +212,7 @@ mod tests {
                 address: "".to_string(),
                 port: 0,
                 public_key: "".to_string(),
+                party: None,
             },
             Participant {
                 id: "attestor-2".to_string(),
@@ -215,6 +221,7 @@ mod tests {
                 address: "".to_string(),
                 port: 0,
                 public_key: "".to_string(),
+                party: None,
             },
         ];
 
