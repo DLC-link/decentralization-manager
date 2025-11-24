@@ -580,7 +580,6 @@ connection_retry_delay_secs = 5
 
 [security]
 require_all_participants = true
-minimum_participants = 3
 ```
 
 ### Node Configuration (`node.toml`)
@@ -596,7 +595,7 @@ Example structure:
 network_config = "network.toml"
 
 [node]
-participant_id = "attestor-1"
+node_id = "attestor-1"
 static_key_file = "keys/attestor-1.key"
 listen_address = "0.0.0.0"
 

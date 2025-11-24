@@ -3,7 +3,7 @@
 network_config = "network.toml"
 
 [node]
-participant_id = "sv"
+node_id = "sv"
 static_key_file = "keys/participant-3.key"
 listen_address = "0.0.0.0"
 

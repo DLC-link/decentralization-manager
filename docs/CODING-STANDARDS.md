@@ -30,51 +30,7 @@ Where:
 - `<scope>` is the scope of the change (e.g., `api`, `ui`, `core`, `utils`)
 - `<subject>` is a brief description of the change
 
-## Rust
-
-### Cargo.toml
-
-#### Release Profile
-
-The release profile should be configured as follows:
-
-```toml
-[profile.release]
-opt-level = 3
-strip = "debuginfo"
-codegen-units = 1
-lto = true
-panic = "unwind"
-```
-
-#### Dependencies
-
-All dependencies and their features must be in **strict alphabetical order**:
-
-```toml
-[dependencies]
-anyhow = { version = "1.0.98" }
-bytes = { version = "1.9.0" }
-clap = { version = "4.5.43", features = ["derive", "env", "string"] }
-tokio = { version = "1.48.0", features = ["fs", "macros", "rt-multi-thread"] }
-```
-
-Features within each dependency must also be alphabetical:
-- ✓ `features = ["derive", "env", "string"]`
-- ✗ `features = ["string", "derive", "env"]`
-
-**Format:**
-```toml
-[dependencies]
-anyhow = { version = "0.69.420", features = ["useless-feature", "tokio"] }
-```
-
-**Adding New Dependencies:**
-
-Before adding a new dependency:
-1. Explain what it will be used for
-2. Ensure no existing dependency provides the same functionality
-3. Add it in alphabetical order with features alphabetically ordered
+## Rust Code Organization
 
 ### Module and Use Statement Order
 
@@ -194,6 +150,8 @@ let map = std::collections::HashMap::new();
 - Proto-generated enum variants like `store_id::Store::Synchronizer()` can be used inline
 - When a full path provides clarity in a specific context
 
+## Rust Code Style
+
 ### Format Strings
 
 Use inline values in format strings instead of positional arguments:
@@ -225,46 +183,119 @@ let participant_id = &participant.id;
 tracing::info!("Checking {participant_id}");  // Should just use participant.id directly
 ```
 
-### Standard Crates
+### Line Length
+
+Keep lines under 100 characters when reasonable. Use Rust's trailing comma feature for better diffs:
+
+```rust
+let config = Config {
+    admin_api_host: "localhost".to_string(),
+    admin_api_port: 5001,
+    ledger_api_host: "localhost".to_string(),
+    ledger_api_port: 5002,
+    ledger_api_token: None,  // Trailing comma
+};
+```
+
+### Documentation
+
+Document public APIs with doc comments:
+
+```rust
+/// Load configuration from a TOML file
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be read or parsed
+pub async fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
+    // ...
+}
+```
+
+## Cargo.toml
+
+### Release Profile
+
+The release profile should be configured as follows:
+
+```toml
+[profile.release]
+opt-level = 3
+strip = "debuginfo"
+codegen-units = 1
+lto = true
+panic = "unwind"
+```
+
+### Dependencies
+
+All dependencies and their features must be in **strict alphabetical order**:
+
+```toml
+[dependencies]
+anyhow = { version = "1.0.98" }
+bytes = { version = "1.9.0" }
+clap = { version = "4.5.43", features = ["derive", "env", "string"] }
+tokio = { version = "1.48.0", features = ["fs", "macros", "rt-multi-thread"] }
+```
+
+Features within each dependency must also be alphabetical:
+- ✓ `features = ["derive", "env", "string"]`
+- ✗ `features = ["string", "derive", "env"]`
+
+**Format:**
+```toml
+[dependencies]
+anyhow = { version = "0.69.420", features = ["useless-feature", "tokio"] }
+```
+
+**Adding New Dependencies:**
+
+Before adding a new dependency:
+1. Explain what it will be used for
+2. Ensure no existing dependency provides the same functionality
+3. Add it in alphabetical order with features alphabetically ordered
+
+## Standard Crates
 
 The following crates should be used for their respective purposes:
 
-#### CLI and Configuration
+### CLI and Configuration
 - **`clap`** - Command-line argument parsing and environment variable handling
   - Use with `derive` feature for declarative CLI definitions
   - Use `env` feature for reading configuration from environment variables
 
-#### Logging and Observability
+### Logging and Observability
 - **`tracing`** - Structured logging and instrumentation
 - **`tracing-subscriber`** - Collecting and formatting tracing data
 
-#### Error Handling
+### Error Handling
 - **`anyhow`** - General application errors and error propagation
 - **`thiserror`** - Defining custom error types with specific variants
 
-#### Enums
+### Enums
 - **`strum`** - Enum utilities and macros
   - Use `EnumString` for parsing strings into enums
   - Use `Display` for converting enums to strings
   - Use `EnumIter` for iterating over enum variants
 
-#### Database
+### Database
 - **`sqlx`** - Async SQL database access
   - Compile-time checked queries
   - Support for PostgreSQL, MySQL, SQLite
 
-#### Protocol Buffers and gRPC
+### Protocol Buffers and gRPC
 - **`tonic`** - gRPC client and server implementation
 - **`prost`** - Protocol Buffers encoding/decoding (typically used with tonic)
 
-#### Async Runtime
+### Async Runtime
 - **`tokio`** - Async runtime for I/O operations
   - Use `rt-multi-thread` feature for multi-threaded runtime
   - Use `macros` feature for `#[tokio::main]` and `#[tokio::test]`
 
 When a new crate is needed, prefer using these standard crates over alternatives to maintain consistency across the codebase.
 
-### Error Handling
+## Error Handling
 
 - Use `anyhow::Result` for general application errors and error propagation
 - Use `thiserror` for custom error types with specific variants
@@ -278,7 +309,7 @@ pub async fn load_file(path: &Path) -> Result<String> {
 }
 ```
 
-#### Custom Errors
+### Custom Errors
 
 When creating custom error types, use `thiserror`:
 
@@ -295,7 +326,7 @@ pub enum ConfigError {
 }
 ```
 
-### Logging
+## Logging
 
 Use `tracing` for all logging instead of `println!` or `eprintln!`:
 
@@ -310,7 +341,7 @@ println!("Starting process for user {}", user_id);
 eprintln!("Error: {}", error);
 ```
 
-#### Log Levels
+### Log Levels
 
 - **`trace`** - Very detailed debugging information
 - **`debug`** - General debugging information
@@ -318,38 +349,7 @@ eprintln!("Error: {}", error);
 - **`warn`** - Warning about potential issues
 - **`error`** - Error conditions
 
-### Code Style
-
-#### Line Length
-
-Keep lines under 100 characters when reasonable. Use Rust's trailing comma feature for better diffs:
-
-```rust
-let config = Config {
-    admin_api_host: "localhost".to_string(),
-    admin_api_port: 5001,
-    ledger_api_host: "localhost".to_string(),
-    ledger_api_port: 5002,
-    ledger_api_token: None,  // Trailing comma
-};
-```
-
-#### Documentation
-
-Document public APIs with doc comments:
-
-```rust
-/// Load configuration from a TOML file
-///
-/// # Errors
-///
-/// Returns an error if the file cannot be read or parsed
-pub async fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
-    // ...
-}
-```
-
-#### Testing
+## Testing
 
 Write tests for utility functions and important logic:
 
@@ -372,7 +372,7 @@ mod tests {
 }
 ```
 
-#### Database Testing
+### Database Testing
 
 For tests that require database access, use the `#[sqlx::test]` macro with a migrator. This macro automatically:
 - Creates a new isolated database for each test
@@ -539,7 +539,7 @@ mod tests {
 4. **Context for errors**: Use `.context()` to add helpful error messages
 5. **Compile-time checking**: Use `query!()` and `query_as!()` macros for type safety
 
-### Code Quality Tools
+## Code Quality Tools
 
 Run these commands before committing:
 
@@ -554,7 +554,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 ```
 
-#### CI Requirements
+### CI Requirements
 
 All pull requests must:
 - Pass `cargo fmt -- --check`
