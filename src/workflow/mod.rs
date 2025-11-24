@@ -7,6 +7,10 @@ use anyhow::Context;
 
 use crate::{
     config::{CoordinatorStrategy, NetworkConfig, NodeConfig},
+    consts::{
+        ATTESTOR_KEYS_PREFIX, EXECUTION_DIR, SIGNATURES_DIR, SIGNED_DNS_PROPOSAL_PREFIX,
+        SIGNED_P2P_PROPOSALS_PREFIX, SUBMISSION_SIGNATURES_PREFIX,
+    },
     dirs::WorkflowDirs,
     error::Result,
     noise::{MessageType, client::NoiseClient, election, server::NoiseServer},
@@ -38,7 +42,7 @@ pub async fn start_node(node_config: NodeConfig) -> Result {
             // Run leader election
             tracing::info!("Running leader election (Bully algorithm)");
             let election_result =
-                election::run_election(&network_config, &node_config.node.participant_id).await?;
+                election::run_election(&network_config, &node_config.node.node_id).await?;
 
             tracing::info!(
                 "Election complete: {} is the coordinator",
@@ -49,7 +53,7 @@ pub async fn start_node(node_config: NodeConfig) -> Result {
         }
         _ => {
             // Use static coordinator determination (explicit or first)
-            network_config.is_coordinator(&node_config.node.participant_id)?
+            network_config.is_coordinator(&node_config.node.node_id)?
         }
     };
 
@@ -196,7 +200,7 @@ async fn run_coordinator_workflow(
                 for (attestor_id, signature_data) in attestor_data {
                     let file_path = dirs
                         .dns_signed_dir
-                        .join(format!("signed-dns-proposal-{attestor_id}.bin"));
+                        .join(format!("{SIGNED_DNS_PROPOSAL_PREFIX}-{attestor_id}.bin"));
                     tokio::fs::write(&file_path, signature_data).await?;
                 }
                 workflow_state.clear_attestor_data().await;
@@ -219,7 +223,7 @@ async fn run_coordinator_workflow(
                 for (attestor_id, signatures_data) in attestor_data {
                     let file_path = dirs
                         .final_signed_dir
-                        .join(format!("signed-p2p-proposals-{attestor_id}.bin"));
+                        .join(format!("{SIGNED_P2P_PROPOSALS_PREFIX}-{attestor_id}.bin"));
                     tokio::fs::write(&file_path, signatures_data).await?;
                 }
                 workflow_state.clear_attestor_data().await;
@@ -256,7 +260,7 @@ async fn run_coordinator_workflow(
                 for (attestor_id, signatures_data) in attestor_data {
                     let file_path = dirs
                         .workflow_dir
-                        .join(format!("submission-signatures-{attestor_id}.bin"));
+                        .join(format!("{SUBMISSION_SIGNATURES_PREFIX}-{attestor_id}.bin"));
                     tokio::fs::write(&file_path, signatures_data).await?;
                 }
                 workflow_state.clear_attestor_data().await;
@@ -403,7 +407,7 @@ async fn send_keys_to_coordinator(client: &NoiseClient, dirs: &WorkflowDirs) -> 
         if path
             .file_name()
             .and_then(|n| n.to_str())
-            .map(|n| n.starts_with("attestor-public-keys-"))
+            .map(|n| n.starts_with(ATTESTOR_KEYS_PREFIX))
             .unwrap_or(false)
         {
             let keys_data = tokio::fs::read(&path).await?;
@@ -429,7 +433,7 @@ async fn send_dns_signature_to_coordinator(client: &NoiseClient, dirs: &Workflow
         if path
             .file_name()
             .and_then(|n| n.to_str())
-            .map(|n| n.starts_with("signed-dns-proposal"))
+            .map(|n| n.starts_with(SIGNED_DNS_PROPOSAL_PREFIX))
             .unwrap_or(false)
         {
             let signature_data = tokio::fs::read(&path).await?;
@@ -453,7 +457,7 @@ async fn send_p2p_signatures_to_coordinator(client: &NoiseClient, dirs: &Workflo
         if path
             .file_name()
             .and_then(|n| n.to_str())
-            .map(|n| n.starts_with("signed-p2p-proposals"))
+            .map(|n| n.starts_with(SIGNED_P2P_PROPOSALS_PREFIX))
             .unwrap_or(false)
         {
             let signatures_data = tokio::fs::read(&path).await?;
@@ -471,7 +475,7 @@ async fn send_submission_signatures_to_coordinator(
     dirs: &WorkflowDirs,
 ) -> Result {
     // Find the submission signatures file in the execution/signatures directory
-    let signatures_dir = dirs.workflow_dir.join("execution").join("signatures");
+    let signatures_dir = dirs.workflow_dir.join(EXECUTION_DIR).join(SIGNATURES_DIR);
     let mut entries = tokio::fs::read_dir(&signatures_dir).await?;
 
     while let Some(entry) = entries.next_entry().await? {
@@ -479,7 +483,7 @@ async fn send_submission_signatures_to_coordinator(
         if path
             .file_name()
             .and_then(|n| n.to_str())
-            .map(|n| n.starts_with("submission-signatures-") && n.ends_with(".bin"))
+            .map(|n| n.starts_with(SUBMISSION_SIGNATURES_PREFIX) && n.ends_with(".bin"))
             .unwrap_or(false)
         {
             let signatures_data = tokio::fs::read(&path).await?;

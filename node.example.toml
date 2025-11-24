@@ -6,7 +6,7 @@ network_config = "network.toml"
 
 [node]
 # Must match one of the participant IDs in network.toml
-participant_id = "attestor-1"
+node_id = "attestor-1"
 
 # Path to this node's static private key
 # Generate with: cargo run -- keygen -o keys/my_static.key

@@ -7,7 +7,7 @@ use tokio::fs;
 use crate::{
     config::NodeConfig,
     error::Result,
-    participant_id::ParticipantId,
+    participant_id::CantonId,
     proto::com::{
         daml::ledger::api::v2::{
             admin::{
@@ -273,7 +273,7 @@ pub fn extract_synchronizer_fingerprint(synchronizer_id: &str) -> Result<String>
 /// Get participant ID from Canton
 ///
 /// Queries the participant's identity initialization service to get the unique participant ID.
-pub async fn get_participant_id(config: &NodeConfig) -> Result<String> {
+pub async fn get_participant_id(config: &NodeConfig) -> Result<CantonId> {
     let mut id_client =
         IdentityInitializationServiceClient::connect(config.admin_api_url()).await?;
     let response = id_client
@@ -285,7 +285,7 @@ pub async fn get_participant_id(config: &NodeConfig) -> Result<String> {
         anyhow::bail!("No participant ID returned");
     }
 
-    Ok(response.unique_identifier)
+    CantonId::parse(&response.unique_identifier)
 }
 
 /// Find which participant number corresponds to the current participant ID
@@ -294,7 +294,7 @@ pub async fn get_participant_id(config: &NodeConfig) -> Result<String> {
 /// against them to determine which number this participant is.
 pub async fn find_participant_number(
     ids_dir: &Path,
-    current_participant_id: &ParticipantId,
+    current_participant_id: &CantonId,
 ) -> Result<u32> {
     let mut dir_entries = fs::read_dir(ids_dir).await?;
     let mut id_files = Vec::new();
@@ -316,7 +316,7 @@ pub async fn find_participant_number(
     // Read each file and match against current participant ID
     for (idx, id_file) in id_files.iter().enumerate() {
         let file_content = fs::read_to_string(id_file).await?;
-        let stored_id = ParticipantId::parse_from_file(&file_content)?;
+        let stored_id = CantonId::parse_from_file(&file_content)?;
 
         if &stored_id == current_participant_id {
             return Ok((idx + 1) as u32);
@@ -330,8 +330,7 @@ pub async fn find_participant_number(
 ///
 /// Convenience function that gets the participant ID and finds its number.
 pub async fn get_participant_number(config: &NodeConfig, ids_dir: &Path) -> Result<u32> {
-    let canton_participant_id = get_participant_id(config).await?;
-    let participant_id = ParticipantId::parse(&canton_participant_id)?;
+    let participant_id = get_participant_id(config).await?;
     find_participant_number(ids_dir, &participant_id).await
 }
 

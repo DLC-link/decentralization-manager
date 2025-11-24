@@ -87,8 +87,8 @@ impl NoiseClient {
         // Derive PSK for this connection
         let psk = self.keypair.derive_psk(&self.coordinator_pub_key);
 
-        // Use our participant_id as identity
-        let identity = self.node_config.node.participant_id.as_bytes();
+        // Use our node_id as identity
+        let identity = self.node_config.node.node_id.as_bytes();
 
         // Create Noise initiator
         let initiator = tokio_noise::handshakes::nn_psk2::Initiator {

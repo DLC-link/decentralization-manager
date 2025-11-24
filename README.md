@@ -5,6 +5,7 @@ A Rust-based automation tool for multi-party decentralized namespace setup in Ca
 ## Key Features
 
 - **Automated Multi-Party Onboarding**: Orchestrates the complete workflow for setting up decentralized party participation
+- **Dynamic Participant Support**: Supports any number of participants (N ≥ 3), with automatic majority threshold calculation
 - **Secure Communication**: Noise Protocol Framework for encrypted, authenticated peer-to-peer communication
 - **gRPC Integration**: Native Canton Admin and Ledger API integration using Protocol Buffers
 - **Cryptographic Key Management**: Automated generation and management of cryptographic keys for secure party identification
@@ -77,7 +78,7 @@ This project ports Canton Scala scripts to Rust, implementing a multi-party dece
 - **[docs/CODING-STANDARDS.md](./docs/CODING-STANDARDS.md)** - Project coding standards and style guide
 - **[network.example.toml](./network.example.toml)** - Example network topology configuration
 - **[node.example.toml](./node.example.toml)** - Example node configuration
-- **[test-configs/](./test-configs/)** - Pre-configured test setup for 3 participants
+- **[test-configs/](./test-configs/)** - Pre-configured test setup (default: 3 participants, easily adjustable)
 
 ## Setup
 
@@ -116,7 +117,7 @@ coordinator_strategy = "explicit"
 id = "participant-1"
 role = "coordinator"
 public_key = "<hex-encoded-public-key>"
-# ... more participants
+# ... add as many participants as needed (minimum 3 required)
 ```
 
 3. **Create node-X.toml** for each participant based on `node.example.toml`:
@@ -124,7 +125,7 @@ public_key = "<hex-encoded-public-key>"
 network_config = "network.toml"
 
 [node]
-participant_id = "participant-1"
+node_id = "participant-1"
 static_key_file = "keys/participant-1.key"
 listen_address = "0.0.0.0"
 

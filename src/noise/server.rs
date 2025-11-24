@@ -34,7 +34,7 @@ impl NoiseServer {
         let mut peer_keys = HashMap::new();
         for participant in &network_config.participants {
             // Skip self
-            if participant.id == node_config.node.participant_id {
+            if participant.id == node_config.node.node_id {
                 continue;
             }
 
@@ -51,7 +51,7 @@ impl NoiseServer {
         let expected_attestors = network_config
             .participants
             .iter()
-            .filter(|p| p.id != node_config.node.participant_id)
+            .filter(|p| p.id != node_config.node.node_id)
             .map(|p| p.id.clone())
             .collect();
         let workflow_state = WorkflowState::new(expected_attestors);
@@ -76,10 +76,8 @@ impl NoiseServer {
             "{}:{}",
             self.node_config.node.listen_address,
             self.network_config
-                .get_participant(&self.node_config.node.participant_id)
-                .ok_or_else(|| {
-                    NoiseError::UnknownPeer(self.node_config.node.participant_id.clone())
-                })?
+                .get_participant(&self.node_config.node.node_id)
+                .ok_or_else(|| { NoiseError::UnknownPeer(self.node_config.node.node_id.clone()) })?
                 .port
         );
 
