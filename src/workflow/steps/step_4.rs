@@ -1,26 +1,25 @@
 use ed25519_dalek::{Signer, SigningKey};
 
-use canton_proto_rs::com::{
-    daml::ledger::api::v2::interactive::PrepareSubmissionResponse,
-    digitalasset::canton::crypto::{
-        admin::v30::{
-            ExportKeyPairRequest, ListKeysFilters, ListMyKeysRequest,
-            vault_service_client::VaultServiceClient,
-        },
-        v30::{Signature, SignatureFormat, SigningAlgorithmSpec, SigningPublicKey},
-    },
-};
-
 use crate::{
     config::NodeConfig,
-    consts::{
-        CANTON_PROTOCOL_VERSION, EXECUTION_DIR, LEDGER_SUBMISSIONS_DIR, PREPARED_DIR,
-        PREPARED_SUBMISSION_PREFIX, SIGNATURES_DIR, SUBMISSION_SIGNATURES_PREFIX,
-    },
     dirs::WorkflowDirs,
     error::Result,
+    proto::com::{
+        daml::ledger::api::v2::interactive::PrepareSubmissionResponse,
+        digitalasset::canton::crypto::{
+            admin::v30::{
+                ExportKeyPairRequest, ListKeysFilters, ListMyKeysRequest,
+                vault_service_client::VaultServiceClient,
+            },
+            v30::{Signature, SignatureFormat, SigningAlgorithmSpec, SigningPublicKey},
+        },
+    },
     utils,
 };
+
+/// Canton protocol version for key export operations
+/// This Canton instance requires protocol version 34
+const CANTON_PROTOCOL_VERSION: i32 = 34;
 
 /// DER OCTET STRING tag
 const DER_OCTET_STRING_TAG: u8 = 0x04;
@@ -106,43 +105,22 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
         keys_response.private_keys_metadata.len()
     );
 
-    // Step 3: Dynamically load all prepared submissions
+    // Step 3: Load the 3 prepared submissions
     tracing::info!("Loading prepared submissions...");
-    let ledger_submissions_dir = dirs.workflow_dir.join(LEDGER_SUBMISSIONS_DIR);
-    let prepared_dir = ledger_submissions_dir.join(PREPARED_DIR);
+    let ledger_submissions_dir = dirs.workflow_dir.join("ledger-submissions");
+    let prepared_dir = ledger_submissions_dir.join("prepared");
 
-    // Discover all prepared-submission-*.bin files
-    let mut submission_files = Vec::new();
-    let mut entries = tokio::fs::read_dir(&prepared_dir).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        let path = entry.path();
-        if path.is_file()
-            && let Some(name) = path.file_name().and_then(|n| n.to_str())
-            && name.starts_with(PREPARED_SUBMISSION_PREFIX)
-            && name.ends_with(".bin")
-        {
-            submission_files.push(path);
-        }
-    }
+    let prepared_sub1: PrepareSubmissionResponse =
+        utils::read_first_message_from_file(&prepared_dir.join("prepared-submission-1.bin"))
+            .await?;
+    let prepared_sub2: PrepareSubmissionResponse =
+        utils::read_first_message_from_file(&prepared_dir.join("prepared-submission-2.bin"))
+            .await?;
+    let prepared_sub3: PrepareSubmissionResponse =
+        utils::read_first_message_from_file(&prepared_dir.join("prepared-submission-3.bin"))
+            .await?;
 
-    submission_files.sort();
-
-    if submission_files.is_empty() {
-        anyhow::bail!(
-            "No prepared submission files found in {}",
-            prepared_dir.display()
-        );
-    }
-
-    // Load all prepared submissions
-    let mut prepared_submissions: Vec<PrepareSubmissionResponse> = Vec::new();
-    for submission_file in &submission_files {
-        let prepared_sub: PrepareSubmissionResponse =
-            utils::read_first_message_from_file(submission_file).await?;
-        prepared_submissions.push(prepared_sub);
-    }
-
-    tracing::debug!("Loaded {} prepared submissions", prepared_submissions.len());
+    tracing::debug!("Loaded 3 prepared submissions");
 
     // Step 4: Export the private key
     tracing::info!("Exporting private key from Canton...");
@@ -176,8 +154,10 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
         let chunk_end = (chunk_start + 32).min(dump_len);
         let chunk = &exported_key_data[chunk_start..chunk_end];
         tracing::debug!(
-            "  [{chunk_start:03}-{:03}]: {chunk:02x?}",
+            "  [{:03}-{:03}]: {:02x?}",
+            chunk_start,
             chunk_end - 1,
+            chunk
         );
     }
 
@@ -291,80 +271,128 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
     tracing::info!("Successfully verified Ed25519 private key");
 
     // Step 7: Sign transaction hashes with verified key
-    tracing::info!(
-        "Signing {} transaction hashes...",
-        prepared_submissions.len()
+    tracing::info!("Signing transaction hashes...");
+    tracing::debug!(
+        "Transaction hash 1: {:02x?}",
+        &prepared_sub1.prepared_transaction_hash
     );
-
+    tracing::debug!(
+        "Transaction hash 2: {:02x?}",
+        &prepared_sub2.prepared_transaction_hash
+    );
+    tracing::debug!(
+        "Transaction hash 3: {:02x?}",
+        &prepared_sub3.prepared_transaction_hash
+    );
     let signing_key = SigningKey::from_bytes(&key_bytes);
+
+    // Sign each prepared transaction hash
+    let signature1_bytes = signing_key
+        .sign(&prepared_sub1.prepared_transaction_hash)
+        .to_bytes();
+    let signature2_bytes = signing_key
+        .sign(&prepared_sub2.prepared_transaction_hash)
+        .to_bytes();
+    let signature3_bytes = signing_key
+        .sign(&prepared_sub3.prepared_transaction_hash)
+        .to_bytes();
+
+    tracing::debug!("Generated 3 signatures");
+    tracing::debug!(
+        "Signature 1 (first 32 bytes): {:02x?}",
+        &signature1_bytes[..32]
+    );
+    tracing::debug!(
+        "Signature 2 (first 32 bytes): {:02x?}",
+        &signature2_bytes[..32]
+    );
+    tracing::debug!(
+        "Signature 3 (first 32 bytes): {:02x?}",
+        &signature3_bytes[..32]
+    );
 
     // Verify the signatures locally before sending to Canton
     use ed25519_dalek::{Signature as DalekSignature, Verifier};
+
     let verifying_key = signing_key.verifying_key();
     let verifying_key_bytes = verifying_key.to_bytes();
 
-    tracing::debug!("Verifying key (raw 32 bytes): {:02x?}", &verifying_key_bytes);
+    tracing::debug!(
+        "Verifying key (raw 32 bytes): {:02x?}",
+        &verifying_key_bytes
+    );
     tracing::debug!(
         "Expected Canton key (raw): {:02x?}",
         &expected_raw_public_key[..32.min(expected_raw_public_key.len())]
     );
     tracing::debug!("Key fingerprint used in signatures: {key_fingerprint}");
 
-    // Sign each prepared transaction hash and create Signature protobuf messages
-    let mut signatures: Vec<Signature> = Vec::new();
-
-    for (idx, prepared_sub) in prepared_submissions.iter().enumerate() {
-        tracing::debug!(
-            "Transaction hash {}: {:02x?}",
-            idx + 1,
-            &prepared_sub.prepared_transaction_hash
-        );
-
-        let signature_bytes = signing_key
-            .sign(&prepared_sub.prepared_transaction_hash)
-            .to_bytes();
-
-        tracing::debug!(
-            "Signature {} (first 32 bytes): {:02x?}",
-            idx + 1,
-            &signature_bytes[..32]
-        );
-
-        // Verify locally
-        let sig = DalekSignature::from_bytes(&signature_bytes);
-        if verifying_key
-            .verify(&prepared_sub.prepared_transaction_hash, &sig)
-            .is_ok()
-        {
-            tracing::info!("✓ Signature {} verified locally", idx + 1);
-        } else {
-            tracing::error!("✗ Signature {} failed local verification!", idx + 1);
-        }
-
-        // Create Signature protobuf message
-        // Ed25519 signatures use CONCAT format (r || s in little-endian)
-        signatures.push(Signature {
-            format: SignatureFormat::Concat as i32,
-            signature: signature_bytes.to_vec(),
-            signed_by: key_fingerprint.clone(),
-            signing_algorithm_spec: SigningAlgorithmSpec::Ed25519 as i32,
-            signature_delegation: None,
-        });
+    let sig1 = DalekSignature::from_bytes(&signature1_bytes);
+    if verifying_key
+        .verify(&prepared_sub1.prepared_transaction_hash, &sig1)
+        .is_ok()
+    {
+        tracing::info!("✓ Signature 1 verified locally");
+    } else {
+        tracing::error!("✗ Signature 1 failed local verification!");
     }
 
-    tracing::debug!("Generated {} signatures", signatures.len());
+    let sig2 = DalekSignature::from_bytes(&signature2_bytes);
+    if verifying_key
+        .verify(&prepared_sub2.prepared_transaction_hash, &sig2)
+        .is_ok()
+    {
+        tracing::info!("✓ Signature 2 verified locally");
+    } else {
+        tracing::error!("✗ Signature 2 failed local verification!");
+    }
 
-    // Step 8: Save signatures to file
-    let execution_dir = dirs.workflow_dir.join(EXECUTION_DIR);
-    let signatures_dir = execution_dir.join(SIGNATURES_DIR);
+    let sig3 = DalekSignature::from_bytes(&signature3_bytes);
+    if verifying_key
+        .verify(&prepared_sub3.prepared_transaction_hash, &sig3)
+        .is_ok()
+    {
+        tracing::info!("✓ Signature 3 verified locally");
+    } else {
+        tracing::error!("✗ Signature 3 failed local verification!");
+    }
+
+    // Step 8: Create Signature protobuf messages
+    // Ed25519 signatures use CONCAT format (r || s in little-endian)
+    let signature1 = Signature {
+        format: SignatureFormat::Concat as i32,
+        signature: signature1_bytes.to_vec(),
+        signed_by: key_fingerprint.clone(),
+        signing_algorithm_spec: SigningAlgorithmSpec::Ed25519 as i32,
+        signature_delegation: None,
+    };
+
+    let signature2 = Signature {
+        format: SignatureFormat::Concat as i32,
+        signature: signature2_bytes.to_vec(),
+        signed_by: key_fingerprint.clone(),
+        signing_algorithm_spec: SigningAlgorithmSpec::Ed25519 as i32,
+        signature_delegation: None,
+    };
+
+    let signature3 = Signature {
+        format: SignatureFormat::Concat as i32,
+        signature: signature3_bytes.to_vec(),
+        signed_by: key_fingerprint.clone(),
+        signing_algorithm_spec: SigningAlgorithmSpec::Ed25519 as i32,
+        signature_delegation: None,
+    };
+
+    // Step 9: Save signatures to file
+    let execution_dir = dirs.workflow_dir.join("execution");
+    let signatures_dir = execution_dir.join("signatures");
     tokio::fs::create_dir_all(&signatures_dir).await?;
 
-    let signatures_file = signatures_dir.join(format!(
-        "{SUBMISSION_SIGNATURES_PREFIX}-{participant_num}.bin"
-    ));
+    let signatures_file =
+        signatures_dir.join(format!("submission-signatures-{participant_num}.bin"));
     tracing::info!("Saving signatures to {}", signatures_file.display());
 
-    utils::write_messages_to_file(&signatures, &signatures_file).await?;
+    utils::write_messages_to_file(&[signature1, signature2, signature3], &signatures_file).await?;
 
     tracing::info!("Signatures saved successfully");
     Ok(())

@@ -2,33 +2,37 @@ use std::path::{Path, PathBuf};
 
 use tokio::fs;
 
-use canton_proto_rs::com::digitalasset::canton::{
-    admin::participant::v30::{
-        UploadDarRequest, package_service_client::PackageServiceClient,
-        upload_dar_request::UploadDarData,
-    },
-    crypto::{
-        admin::v30::{GenerateSigningKeyRequest, vault_service_client::VaultServiceClient},
-        v30::{SigningKeySpec, SigningKeyUsage, SigningPublicKey},
-    },
-    protocol::v30::{
-        NamespaceDelegation, TopologyMapping, enums::TopologyChangeOp, namespace_delegation,
-        topology_mapping,
-    },
-    topology::admin::v30::{
-        AuthorizeRequest, StoreId, authorize_request, store_id,
-        topology_manager_write_service_client::TopologyManagerWriteServiceClient,
-    },
-};
-
 use crate::{
     config::{NetworkConfig, NodeConfig},
-    consts::{ATTESTOR_KEYS_PREFIX, DAML_KEY_NAME, NAMESPACE_KEY_NAME, PARTICIPANT_ID_PREFIX},
     dirs::WorkflowDirs,
     error::Result,
-    participant_id::CantonId,
-    utils::{compute_fingerprint, get_participant_id, write_messages_to_file},
+    participant_id::ParticipantId,
+    proto::com::digitalasset::canton::{
+        admin::participant::v30::{
+            UploadDarRequest, package_service_client::PackageServiceClient,
+            upload_dar_request::UploadDarData,
+        },
+        crypto::{
+            admin::v30::{GenerateSigningKeyRequest, vault_service_client::VaultServiceClient},
+            v30::{SigningKeySpec, SigningKeyUsage, SigningPublicKey},
+        },
+        protocol::v30::{
+            NamespaceDelegation, TopologyMapping, enums::TopologyChangeOp, namespace_delegation,
+            topology_mapping,
+        },
+        topology::admin::v30::{
+            AuthorizeRequest, StoreId, authorize_request, store_id,
+            topology_manager_write_service_client::TopologyManagerWriteServiceClient,
+        },
+    },
+    utils,
 };
+
+// Constants
+const NAMESPACE_KEY_NAME: &str = "cbtc-network-namespace";
+const DAML_KEY_NAME: &str = "cbtc-network-daml-transactions";
+const ATTESTOR_KEYS_FILENAME_PREFIX: &str = "attestor-public-keys";
+const PARTICIPANT_ID_FILENAME_PREFIX: &str = "participant-id";
 
 /// Upload DAR files to the participant
 ///
@@ -139,7 +143,7 @@ pub async fn generate_keys(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
     )
     .await?;
 
-    let namespace_fingerprint = compute_fingerprint(&namespace_key);
+    let namespace_fingerprint = crate::utils::compute_fingerprint(&namespace_key);
     tracing::debug!("Namespace key fingerprint: {namespace_fingerprint}");
 
     // Propose namespace delegation
@@ -155,8 +159,8 @@ pub async fn generate_keys(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
     .await?;
 
     // Get participant ID and export keys
-    let canton_participant_id = get_participant_id(config).await?;
-    let participant_num = get_participant_position(&config.node.node_id, &network_config)?;
+    let canton_participant_id = utils::get_participant_id(config).await?;
+    let participant_num = get_participant_position(&config.node.participant_id, &network_config)?;
     tracing::info!(
         "Participant ID: {canton_participant_id}, participant number: {participant_num}"
     );
@@ -190,14 +194,17 @@ async fn generate_signing_key(
         .ok_or_else(|| anyhow::anyhow!("No public key returned from VaultService"))
 }
 
-/// Helper: Get participant position (1-based index) from network config
-fn get_participant_position(node_id: &str, network_config: &NetworkConfig) -> Result<u32> {
+/// Helper: Extract participant number from config participant ID (e.g., "participant-1" -> 1)
+/// Get participant position (1-based index) from network config
+fn get_participant_position(participant_id: &str, network_config: &NetworkConfig) -> Result<u32> {
     network_config
         .participants
         .iter()
-        .position(|p| p.id == node_id)
+        .position(|p| p.id == participant_id)
         .map(|pos| (pos + 1) as u32)
-        .ok_or_else(|| anyhow::anyhow!("Node ID '{node_id}' not found in network configuration"))
+        .ok_or_else(|| {
+            anyhow::anyhow!("Participant ID '{participant_id}' not found in network configuration")
+        })
 }
 
 /// Helper: Export keys to file
@@ -207,19 +214,20 @@ async fn export_keys(
     daml_key: &SigningPublicKey,
     participant_num: u32,
 ) -> Result {
-    let filename = format!("{ATTESTOR_KEYS_PREFIX}-{participant_num}.bin");
+    let filename = format!("{ATTESTOR_KEYS_FILENAME_PREFIX}-{participant_num}.bin");
     let output_path = keys_dir.join(&filename);
     tracing::debug!("Exporting keys to {}", output_path.display());
-    write_messages_to_file(&[namespace_key.clone(), daml_key.clone()], &output_path).await
+    utils::write_messages_to_file(&[namespace_key.clone(), daml_key.clone()], &output_path).await
 }
 
 /// Helper: Export participant ID to file
 async fn export_participant_id(
     ids_dir: &Path,
-    participant_id: &CantonId,
+    canton_participant_id: &str,
     participant_num: u32,
 ) -> Result {
-    let filename = format!("{PARTICIPANT_ID_PREFIX}-{participant_num}.bin");
+    let participant_id = ParticipantId::parse(canton_participant_id)?;
+    let filename = format!("{PARTICIPANT_ID_FILENAME_PREFIX}-{participant_num}.bin");
     let output_path = ids_dir.join(&filename);
     tracing::debug!("Exporting participant ID to {}", output_path.display());
     fs::write(&output_path, participant_id.to_file_format().as_bytes()).await?;

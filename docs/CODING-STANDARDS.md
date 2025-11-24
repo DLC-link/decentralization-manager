@@ -160,6 +160,40 @@ pub use clap::Parser;
 use crate::{error::Result, utils};
 ```
 
+### Namespace Resolution
+
+Always use `use` statements for long namespace paths (3+ segments) instead of resolving them inline. This improves code readability and makes it easier to refactor.
+
+```rust
+// Good
+use crate::proto::com::digitalasset::canton::crypto::v30::SigningPublicKey;
+
+fn get_key() -> Result<SigningPublicKey> {
+    // ...
+}
+
+// Bad
+fn get_key() -> Result<crate::proto::com::digitalasset::canton::crypto::v30::SigningPublicKey> {
+    // ...
+}
+```
+
+```rust
+// Good
+use std::collections::HashMap;
+
+let map = HashMap::new();
+
+// Bad
+let map = std::collections::HashMap::new();
+```
+
+**Exceptions:**
+
+- Short paths (1-2 segments) like `std::env::current_dir()` are acceptable
+- Proto-generated enum variants like `store_id::Store::Synchronizer()` can be used inline
+- When a full path provides clarity in a specific context
+
 ### Format Strings
 
 Use inline values in format strings instead of positional arguments:
