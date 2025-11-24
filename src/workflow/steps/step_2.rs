@@ -2,7 +2,6 @@ use tokio::fs;
 
 use crate::{
     config::NodeConfig,
-    consts::{DNS_PROTO_FILENAME, SIGNED_DNS_PROPOSAL_PREFIX},
     dirs::WorkflowDirs,
     error::Result,
     proto::com::digitalasset::canton::{
@@ -36,14 +35,14 @@ pub async fn sign_dns_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Res
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
     tracing::debug!("Using synchronizer ID: {synchronizer_id}");
 
-    // Step 3: Read the DNS proposal from disk
-    let dns_file = dirs.dns_proposals_dir.join(DNS_PROTO_FILENAME);
+    // Step 2: Read the DNS proposal from disk
+    let dns_file = dirs.dns_proposals_dir.join("dns_proto.bin");
     tracing::info!("Reading DNS proposal from {}", dns_file.display());
 
     let dns_transaction: SignedTopologyTransaction =
         utils::read_first_message_from_file(&dns_file).await?;
 
-    // Step 4: Sign the transaction using Canton's TopologyManagerWriteService
+    // Step 3: Sign the transaction using Canton's TopologyManagerWriteService
     let mut topology_client =
         TopologyManagerWriteServiceClient::connect(config.admin_api_url()).await?;
 
@@ -70,11 +69,11 @@ pub async fn sign_dns_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Res
         .next()
         .ok_or_else(|| anyhow::anyhow!("No signed transaction returned"))?;
 
-    // Step 5: Save the signed transaction to disk
+    // Step 4: Save the signed transaction to disk
     fs::create_dir_all(&dirs.dns_signed_dir).await?;
-    let output_file = dirs.dns_signed_dir.join(format!(
-        "{SIGNED_DNS_PROPOSAL_PREFIX}-{participant_num}.bin"
-    ));
+    let output_file = dirs
+        .dns_signed_dir
+        .join(format!("signed-dns-proposal-{participant_num}.bin"));
     tracing::info!("Saving signed DNS proposal to {}", output_file.display());
 
     utils::write_message_to_file(&signed_transaction, &output_file).await?;

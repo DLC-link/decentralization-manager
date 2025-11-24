@@ -3,16 +3,7 @@ use tokio::fs;
 
 use crate::{
     config::{NetworkConfig, NodeConfig},
-    consts::{
-        CBTC_DEPOSIT_ACCOUNT_MODULE, CBTC_DEPOSIT_ACCOUNT_RULES_ENTITY, CBTC_GOVERNANCE_MODULE,
-        CBTC_GOVERNANCE_PACKAGE_ID, CBTC_GOVERNANCE_RULES_ENTITY, CBTC_INSTRUMENT_ID,
-        CBTC_PACKAGE_ID, CBTC_WITHDRAW_ACCOUNT_MODULE, CBTC_WITHDRAW_ACCOUNT_RULES_ENTITY,
-        CREATE_DEPOSIT_ACCOUNT_RULES_COMMAND_ID, CREATE_GOVERNANCE_RULES_COMMAND_ID,
-        CREATE_WITHDRAW_ACCOUNT_RULES_COMMAND_ID, LEDGER_API_USER_ID, LEDGER_SUBMISSIONS_DIR,
-        MIN_PARTICIPANTS, NAMESPACE_DEF_FILENAME, OPERATOR_PARTY_HINT, PARTY_ID_PREFIX,
-        PREPARED_DIR, PREPARED_SUBMISSION_PREFIX, TOPOLOGY_RETRY_DELAY_SECS,
-        TOPOLOGY_RETRY_MAX_ATTEMPTS,
-    },
+    consts::{TOPOLOGY_RETRY_DELAY_SECS, TOPOLOGY_RETRY_MAX_ATTEMPTS},
     dirs::WorkflowDirs,
     error::Result,
     proto::com::{
@@ -50,7 +41,7 @@ pub async fn prepare_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
     tracing::info!("Preparing submissions...");
 
     // Step 1: Construct decentralized registrar party ID from namespace definition
-    let namespace_file = dirs.dns_submission_dir.join(NAMESPACE_DEF_FILENAME);
+    let namespace_file = dirs.dns_submission_dir.join("namespaceDef.bin");
     tracing::debug!(
         "Reading namespace definition from {}",
         namespace_file.display()
@@ -58,10 +49,8 @@ pub async fn prepare_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
     let namespace_def: DecentralizedNamespaceDefinition =
         utils::read_first_message_from_file(&namespace_file).await?;
 
-    let decentralized_registrar = format!(
-        "{PARTY_ID_PREFIX}::{}",
-        namespace_def.decentralized_namespace
-    );
+    let decentralized_registrar =
+        format!("cbtc-network::{}", namespace_def.decentralized_namespace);
     tracing::debug!("Constructed decentralized registrar: {decentralized_registrar}");
 
     // Step 2: Wait for party to be visible in Ledger API
@@ -136,19 +125,17 @@ pub async fn prepare_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
         participant_parties.push(party);
     }
 
-    // Check minimum participants requirement
-    if participant_parties.len() < MIN_PARTICIPANTS {
+    if participant_parties.len() < 3 {
         anyhow::bail!(
-            "Expected at least {MIN_PARTICIPANTS} participants, found {}",
+            "Expected at least 3 participants, found {}",
             participant_parties.len()
         );
     }
 
-    tracing::info!(
-        "Parties for {} participants: {}",
-        participant_parties.len(),
-        participant_parties.join(", ")
-    );
+    let attestor1 = participant_parties[0].clone();
+    let attestor2 = participant_parties[1].clone();
+    let attestor3 = participant_parties[2].clone();
+    tracing::info!("Parties for participants: {attestor1}, {attestor2}, {attestor3}");
 
     // Get operator party from config or allocate
     let operator = if let Some(operator_party) = &network_config.network.operator_party {
@@ -158,7 +145,7 @@ pub async fn prepare_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
         tracing::debug!("Allocating/finding operator party");
         allocate_or_find_party(
             &mut party_client,
-            OPERATOR_PARTY_HINT,
+            "operator",
             &utils::get_synchronizer_id(config).await?,
         )
         .await?
@@ -167,21 +154,16 @@ pub async fn prepare_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
 
     // Step 4: Create ledger-api-user and grant rights
     // Note: User ID must match JWT token's "sub" claim
-    tracing::info!("Setting up {LEDGER_API_USER_ID}...");
+    tracing::info!("Setting up ledger-api-user...");
     let mut user_client = utils::create_user_client(config).await?;
-    let user_id = LEDGER_API_USER_ID;
+    let user_id = "ledger-api-user";
 
-    // Try to create user (may already exist) - use first participant as primary party
-    let primary_party = participant_parties
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("No participants available for user creation"))?
-        .clone();
-
+    // Try to create user (may already exist)
     let create_user_result = user_client
         .create_user(tonic::Request::new(CreateUserRequest {
             user: Some(User {
                 id: user_id.to_string(),
-                primary_party: primary_party.clone(),
+                primary_party: attestor1.clone(),
                 is_deactivated: false,
                 metadata: Some(ObjectMeta {
                     resource_version: String::new(),
@@ -194,12 +176,12 @@ pub async fn prepare_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
             rights: vec![
                 Right {
                     kind: Some(Kind::CanActAs(CanActAs {
-                        party: primary_party.clone(),
+                        party: attestor1.clone(),
                     })),
                 },
                 Right {
                     kind: Some(Kind::CanReadAs(CanReadAs {
-                        party: primary_party.clone(),
+                        party: attestor1.clone(),
                     })),
                 },
             ],
@@ -238,7 +220,7 @@ pub async fn prepare_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
     tracing::info!("{user_id} setup complete");
 
     // Step 5: Build common structures
-    let threshold = network_config.governance_threshold() as i64;
+    let threshold = 2i64;
 
     // Instrument record (InstrumentId with admin and id fields)
     let instrument = Record {
@@ -253,7 +235,7 @@ pub async fn prepare_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
             RecordField {
                 label: String::new(),
                 value: Some(Value {
-                    sum: Some(value::Sum::Text(CBTC_INSTRUMENT_ID.to_string())),
+                    sum: Some(value::Sum::Text("CBTC".to_string())),
                 }),
             },
         ],
@@ -264,25 +246,36 @@ pub async fn prepare_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
     };
 
     // Step 6: Prepare submission 1 - CBTCGovernanceRules
-    tracing::info!("Preparing submission 1: {CBTC_GOVERNANCE_RULES_ENTITY}");
+    tracing::info!("Preparing submission 1: CBTCGovernanceRules");
 
     let gov_template_id = Identifier {
-        package_id: CBTC_GOVERNANCE_PACKAGE_ID.to_string(),
-        module_name: CBTC_GOVERNANCE_MODULE.to_string(),
-        entity_name: CBTC_GOVERNANCE_RULES_ENTITY.to_string(),
+        package_id: "#cbtc-governance".to_string(),
+        module_name: "CBTC.Governance".to_string(),
+        entity_name: "CBTCGovernanceRules".to_string(),
     };
 
-    // Build attestors GenMap (representing Set Party in Daml) - dynamically from all participant parties
+    // Build attestors GenMap (representing Set Party in Daml)
     let attestors_map = GenMap {
-        entries: participant_parties
-            .iter()
-            .map(|party| gen_map::Entry {
+        entries: vec![
+            gen_map::Entry {
                 key: Some(Value {
-                    sum: Some(value::Sum::Party(party.clone())),
+                    sum: Some(value::Sum::Party(attestor1.clone())),
                 }),
                 value: Some(unit.clone()),
-            })
-            .collect(),
+            },
+            gen_map::Entry {
+                key: Some(Value {
+                    sum: Some(value::Sum::Party(attestor2.clone())),
+                }),
+                value: Some(unit.clone()),
+            },
+            gen_map::Entry {
+                key: Some(Value {
+                    sum: Some(value::Sum::Party(attestor3.clone())),
+                }),
+                value: Some(unit.clone()),
+            },
+        ],
     };
 
     let create_gov_rules_command = Command {
@@ -343,7 +336,7 @@ pub async fn prepare_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
     let prepared_submission1 = submission_client
         .prepare_submission(tonic::Request::new(PrepareSubmissionRequest {
             user_id: user_id.to_string(),
-            command_id: CREATE_GOVERNANCE_RULES_COMMAND_ID.to_string(),
+            command_id: "create-govR".to_string(),
             commands: vec![create_gov_rules_command],
             min_ledger_time: None,
             max_record_time: None,
@@ -360,12 +353,12 @@ pub async fn prepare_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
         .into_inner();
 
     // Step 7: Prepare submission 2 - CBTCDepositAccountRules
-    tracing::info!("Preparing submission 2: {CBTC_DEPOSIT_ACCOUNT_RULES_ENTITY}");
+    tracing::info!("Preparing submission 2: CBTCDepositAccountRules");
 
     let deposit_template_id = Identifier {
-        package_id: CBTC_PACKAGE_ID.to_string(),
-        module_name: CBTC_DEPOSIT_ACCOUNT_MODULE.to_string(),
-        entity_name: CBTC_DEPOSIT_ACCOUNT_RULES_ENTITY.to_string(),
+        package_id: "#cbtc".to_string(),
+        module_name: "CBTC.DepositAccount".to_string(),
+        entity_name: "CBTCDepositAccountRules".to_string(),
     };
 
     let create_deposit_rules_command = Command {
@@ -400,7 +393,7 @@ pub async fn prepare_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
     let prepared_submission2 = submission_client
         .prepare_submission(tonic::Request::new(PrepareSubmissionRequest {
             user_id: user_id.to_string(),
-            command_id: CREATE_DEPOSIT_ACCOUNT_RULES_COMMAND_ID.to_string(),
+            command_id: "create-daR".to_string(),
             commands: vec![create_deposit_rules_command],
             min_ledger_time: None,
             max_record_time: None,
@@ -417,12 +410,12 @@ pub async fn prepare_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
         .into_inner();
 
     // Step 8: Prepare submission 3 - CBTCWithdrawAccountRules
-    tracing::info!("Preparing submission 3: {CBTC_WITHDRAW_ACCOUNT_RULES_ENTITY}");
+    tracing::info!("Preparing submission 3: CBTCWithdrawAccountRules");
 
     let withdraw_template_id = Identifier {
-        package_id: CBTC_PACKAGE_ID.to_string(),
-        module_name: CBTC_WITHDRAW_ACCOUNT_MODULE.to_string(),
-        entity_name: CBTC_WITHDRAW_ACCOUNT_RULES_ENTITY.to_string(),
+        package_id: "#cbtc".to_string(),
+        module_name: "CBTC.WithdrawAccount".to_string(),
+        entity_name: "CBTCWithdrawAccountRules".to_string(),
     };
 
     let create_withdraw_rules_command = Command {
@@ -457,7 +450,7 @@ pub async fn prepare_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
     let prepared_submission3 = submission_client
         .prepare_submission(tonic::Request::new(PrepareSubmissionRequest {
             user_id: user_id.to_string(),
-            command_id: CREATE_WITHDRAW_ACCOUNT_RULES_COMMAND_ID.to_string(),
+            command_id: "create-waR".to_string(),
             commands: vec![create_withdraw_rules_command],
             min_ledger_time: None,
             max_record_time: None,
@@ -474,29 +467,32 @@ pub async fn prepare_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
         .into_inner();
 
     // Step 9: Save prepared submissions to files
-    let ledger_submissions_dir = dirs.workflow_dir.join(LEDGER_SUBMISSIONS_DIR);
-    let prepared_dir = ledger_submissions_dir.join(PREPARED_DIR);
+    let ledger_submissions_dir = dirs.workflow_dir.join("ledger-submissions");
+    let prepared_dir = ledger_submissions_dir.join("prepared");
     fs::create_dir_all(&prepared_dir).await?;
 
-    let prepared_submissions = [
-        (CREATE_GOVERNANCE_RULES_COMMAND_ID, prepared_submission1),
-        (CREATE_DEPOSIT_ACCOUNT_RULES_COMMAND_ID, prepared_submission2),
-        (CREATE_WITHDRAW_ACCOUNT_RULES_COMMAND_ID, prepared_submission3),
-    ];
+    let submission1_file = prepared_dir.join("prepared-submission-1.bin");
+    tracing::debug!(
+        "Saving prepared submission 1 to {}",
+        submission1_file.display()
+    );
+    utils::write_messages_to_file(&[prepared_submission1], &submission1_file).await?;
 
-    let num_submissions = prepared_submissions.len();
-    for (idx, (command_id, prepared_submission)) in prepared_submissions.into_iter().enumerate() {
-        let submission_file =
-            prepared_dir.join(format!("{PREPARED_SUBMISSION_PREFIX}-{}.bin", idx + 1));
-        tracing::debug!(
-            "Saving prepared submission {} ({command_id}) to {}",
-            idx + 1,
-            submission_file.display()
-        );
-        utils::write_messages_to_file(&[prepared_submission], &submission_file).await?;
-    }
+    let submission2_file = prepared_dir.join("prepared-submission-2.bin");
+    tracing::debug!(
+        "Saving prepared submission 2 to {}",
+        submission2_file.display()
+    );
+    utils::write_messages_to_file(&[prepared_submission2], &submission2_file).await?;
 
-    tracing::info!("{num_submissions} submissions prepared successfully");
+    let submission3_file = prepared_dir.join("prepared-submission-3.bin");
+    tracing::debug!(
+        "Saving prepared submission 3 to {}",
+        submission3_file.display()
+    );
+    utils::write_messages_to_file(&[prepared_submission3], &submission3_file).await?;
+
+    tracing::info!("Submissions prepared successfully");
     Ok(())
 }
 

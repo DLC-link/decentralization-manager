@@ -4,13 +4,9 @@ use tokio::fs;
 
 use crate::{
     config::NodeConfig,
-    consts::{
-        ATTESTOR_KEYS_PREFIX, DNS_PROTO_FILENAME, NAMESPACE_DEF_FILENAME, P2P_PROTO_FILENAME,
-        PARTICIPANT_ID_PREFIX, PARTY_ID_PREFIX,
-    },
     dirs::WorkflowDirs,
     error::Result,
-    participant_id::CantonId,
+    participant_id::ParticipantId,
     proto::com::digitalasset::canton::{
         crypto::v30::{SigningKeysWithThreshold, SigningPublicKey},
         protocol::v30::{
@@ -57,7 +53,7 @@ pub async fn create_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
     while let Some(entry) = dir_entries.next_entry().await? {
         let file_name = entry.file_name();
         let file_name_str = file_name.to_string_lossy();
-        if file_name_str.starts_with(ATTESTOR_KEYS_PREFIX) && file_name_str.ends_with(".bin") {
+        if file_name_str.starts_with("attestor-public-keys") && file_name_str.ends_with(".bin") {
             key_file_paths.push(entry.path());
         }
     }
@@ -118,7 +114,7 @@ pub async fn create_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
     while let Some(entry) = dir_entries.next_entry().await? {
         let file_name = entry.file_name();
         let file_name_str = file_name.to_string_lossy();
-        if file_name_str.starts_with(PARTICIPANT_ID_PREFIX) && file_name_str.ends_with(".bin") {
+        if file_name_str.starts_with("participant-id") && file_name_str.ends_with(".bin") {
             id_file_paths.push(entry.path());
         }
     }
@@ -133,7 +129,7 @@ pub async fn create_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
     let mut participant_ids = Vec::new();
     for id_file in &id_file_paths {
         let file_content = fs::read_to_string(id_file).await?;
-        let participant_id = CantonId::parse_from_file(&file_content)?;
+        let participant_id = ParticipantId::parse_from_file(&file_content)?;
         participant_ids.push(participant_id);
     }
 
@@ -160,7 +156,7 @@ pub async fn create_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
     };
 
     // Step 8: Create Party ID
-    let party_id = format!("{PARTY_ID_PREFIX}::{decentralized_namespace}");
+    let party_id = format!("cbtc-network::{decentralized_namespace}");
     tracing::info!("Party ID: {party_id}");
 
     // Step 9: Create PartyToParticipant mapping
@@ -259,17 +255,17 @@ pub async fn create_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
     fs::create_dir_all(&dirs.p2p_proposals_dir).await?;
     fs::create_dir_all(&dirs.dns_submission_dir).await?;
 
-    let dns_file = dirs.dns_proposals_dir.join(DNS_PROTO_FILENAME);
+    let dns_file = dirs.dns_proposals_dir.join("dns_proto.bin");
     tracing::info!("Saving DNS proposal to {}", dns_file.display());
     utils::write_message_to_file(&dns_transaction, &dns_file).await?;
 
-    let p2p_file = dirs.p2p_proposals_dir.join(P2P_PROTO_FILENAME);
+    let p2p_file = dirs.p2p_proposals_dir.join("p2p_proto.bin");
     tracing::info!("Saving P2P proposal to {}", p2p_file.display());
     utils::write_message_to_file(&p2p_transaction, &p2p_file).await?;
 
     // Canton 3.4+: Signing keys now embedded in P2P proposal above (no separate transaction)
 
-    let namespace_file = dirs.dns_submission_dir.join(NAMESPACE_DEF_FILENAME);
+    let namespace_file = dirs.dns_submission_dir.join("namespaceDef.bin");
     tracing::info!(
         "Saving namespace definition to {}",
         namespace_file.display()

@@ -2,7 +2,6 @@ use tokio::fs;
 
 use crate::{
     config::NodeConfig,
-    consts::{P2P_PROTO_FILENAME, SIGNED_P2P_PROPOSALS_PREFIX},
     dirs::WorkflowDirs,
     error::Result,
     proto::com::digitalasset::canton::{
@@ -40,7 +39,7 @@ pub async fn sign_p2p_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Res
     tracing::debug!("Using synchronizer ID: {synchronizer_id}");
 
     // Step 3: Read the P2P proposal from disk
-    let p2p_file = dirs.p2p_proposals_dir.join(P2P_PROTO_FILENAME);
+    let p2p_file = dirs.p2p_proposals_dir.join("p2p_proto.bin");
     tracing::info!("Reading P2P proposal from {}", p2p_file.display());
     let p2p_transaction: SignedTopologyTransaction =
         utils::read_first_message_from_file(&p2p_file).await?;
@@ -76,9 +75,9 @@ pub async fn sign_p2p_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Res
 
     // Step 5: Save signed transaction to file
     fs::create_dir_all(&dirs.final_signed_dir).await?;
-    let output_file = dirs.final_signed_dir.join(format!(
-        "{SIGNED_P2P_PROPOSALS_PREFIX}-{participant_num}.bin"
-    ));
+    let output_file = dirs
+        .final_signed_dir
+        .join(format!("signed-p2p-proposals-{participant_num}.bin"));
     tracing::info!("Saving signed P2P proposal to {}", output_file.display());
 
     utils::write_messages_to_file(&response.transactions, &output_file).await?;

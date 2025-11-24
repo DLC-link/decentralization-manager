@@ -3,11 +3,7 @@ use uuid::Uuid;
 
 use crate::{
     config::NodeConfig,
-    consts::{
-        EXECUTION_DIR, LEDGER_API_USER_ID, LEDGER_SUBMISSIONS_DIR, NAMESPACE_DEF_FILENAME,
-        PARTY_ID_PREFIX, PREPARED_DIR, PREPARED_SUBMISSION_PREFIX, SIGNATURES_DIR,
-        SUBMISSION_SIGNATURES_PREFIX, TOPOLOGY_RETRY_DELAY_SECS, TOPOLOGY_RETRY_MAX_ATTEMPTS,
-    },
+    consts::{TOPOLOGY_RETRY_DELAY_SECS, TOPOLOGY_RETRY_MAX_ATTEMPTS},
     dirs::WorkflowDirs,
     error::Result,
     proto::com::{
@@ -15,8 +11,8 @@ use crate::{
             CumulativeFilter, EventFormat, Filters, GetActiveContractsRequest, GetLedgerEndRequest,
             Signature, WildcardFilter, cumulative_filter,
             interactive::{
-                ExecuteSubmissionAndWaitForTransactionRequest, PartySignatures,
-                PrepareSubmissionResponse, SinglePartySignatures,
+                ExecuteSubmissionRequest, PartySignatures, PrepareSubmissionResponse,
+                SinglePartySignatures,
             },
         },
         digitalasset::canton::{
@@ -41,7 +37,7 @@ pub async fn execute_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
     tracing::info!("Executing submissions...");
 
     // Step 1: Get decentralized party ID from namespace definition
-    let namespace_file = dirs.dns_submission_dir.join(NAMESPACE_DEF_FILENAME);
+    let namespace_file = dirs.dns_submission_dir.join("namespaceDef.bin");
     tracing::debug!(
         "Reading namespace definition from {}",
         namespace_file.display()
@@ -49,55 +45,30 @@ pub async fn execute_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
     let namespace_def: DecentralizedNamespaceDefinition =
         utils::read_first_message_from_file(&namespace_file).await?;
 
-    let decentralized_party = format!(
-        "{PARTY_ID_PREFIX}::{}",
-        namespace_def.decentralized_namespace
-    );
+    let decentralized_party = format!("cbtc-network::{}", namespace_def.decentralized_namespace);
     tracing::debug!("Decentralized party: {decentralized_party}");
 
-    // Step 2: Dynamically load all prepared submissions
+    // Step 2: Load prepared submissions
     tracing::info!("Loading prepared submissions...");
-    let ledger_submissions_dir = dirs.workflow_dir.join(LEDGER_SUBMISSIONS_DIR);
-    let prepared_dir = ledger_submissions_dir.join(PREPARED_DIR);
+    let ledger_submissions_dir = dirs.workflow_dir.join("ledger-submissions");
+    let prepared_dir = ledger_submissions_dir.join("prepared");
 
-    // Discover all prepared-submission-*.bin files
-    let mut submission_files = Vec::new();
-    let mut entries = fs::read_dir(&prepared_dir).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        let path = entry.path();
-        if path.is_file()
-            && let Some(name) = path.file_name().and_then(|n| n.to_str())
-            && name.starts_with(PREPARED_SUBMISSION_PREFIX)
-            && name.ends_with(".bin")
-        {
-            submission_files.push(path);
-        }
-    }
+    let prepared_sub1: PrepareSubmissionResponse =
+        utils::read_first_message_from_file(&prepared_dir.join("prepared-submission-1.bin"))
+            .await?;
+    let prepared_sub2: PrepareSubmissionResponse =
+        utils::read_first_message_from_file(&prepared_dir.join("prepared-submission-2.bin"))
+            .await?;
+    let prepared_sub3: PrepareSubmissionResponse =
+        utils::read_first_message_from_file(&prepared_dir.join("prepared-submission-3.bin"))
+            .await?;
 
-    submission_files.sort();
-
-    if submission_files.is_empty() {
-        anyhow::bail!(
-            "No prepared submission files found in {}",
-            prepared_dir.display()
-        );
-    }
-
-    // Load all prepared submissions
-    let mut prepared_submissions: Vec<PrepareSubmissionResponse> = Vec::new();
-    for submission_file in &submission_files {
-        let prepared_sub: PrepareSubmissionResponse =
-            utils::read_first_message_from_file(submission_file).await?;
-        prepared_submissions.push(prepared_sub);
-    }
-
-    let num_submissions = prepared_submissions.len();
-    tracing::debug!("Loaded {num_submissions} prepared submissions");
+    tracing::debug!("Loaded 3 prepared submissions");
 
     // Step 3: Discover and load all signature files
     tracing::info!("Loading attestor signatures...");
-    let execution_dir = dirs.workflow_dir.join(EXECUTION_DIR);
-    let signatures_dir = execution_dir.join(SIGNATURES_DIR);
+    let execution_dir = dirs.workflow_dir.join("execution");
+    let signatures_dir = execution_dir.join("signatures");
 
     // Discover all submission-signatures-*.bin files
     let mut signature_files = Vec::new();
@@ -106,7 +77,7 @@ pub async fn execute_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
         let path = entry.path();
         if path.is_file()
             && let Some(name) = path.file_name().and_then(|n| n.to_str())
-            && name.starts_with(SUBMISSION_SIGNATURES_PREFIX)
+            && name.starts_with("submission-signatures-")
             && name.ends_with(".bin")
         {
             signature_files.push(path);
@@ -120,7 +91,7 @@ pub async fn execute_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
         anyhow::bail!("No signature files found in {}", signatures_dir.display());
     }
 
-    // Load all signatures (one per submission per attestor)
+    // Load all signatures (3 per file, one for each submission)
     let mut all_signatures: Vec<Vec<CantonSignature>> = Vec::new();
 
     for sig_file in &signature_files {
@@ -128,9 +99,9 @@ pub async fn execute_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
 
         let sigs: Vec<CantonSignature> = utils::read_all_messages_from_file(sig_file).await?;
 
-        if sigs.len() != num_submissions {
+        if sigs.len() != 3 {
             anyhow::bail!(
-                "Expected {num_submissions} signatures in {}, but found {}",
+                "Expected 3 signatures in {}, but found {}",
                 sig_file.display(),
                 sigs.len()
             );
@@ -138,7 +109,7 @@ pub async fn execute_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
 
         all_signatures.push(sigs);
         tracing::debug!(
-            "Loaded {num_submissions} signatures from {}",
+            "Loaded 3 signatures from {}",
             sig_file.file_name().unwrap().to_string_lossy()
         );
     }
@@ -148,8 +119,14 @@ pub async fn execute_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
     // Step 4: Execute each submission
     let mut submission_client = utils::create_submission_client(config).await?;
 
-    for (idx, prepared_response) in prepared_submissions.iter().enumerate() {
-        tracing::info!("Executing submission {}...", idx + 1);
+    let prepared_submissions = [
+        ("create-govR", prepared_sub1),
+        ("create-daR", prepared_sub2),
+        ("create-waR", prepared_sub3),
+    ];
+
+    for (idx, (command_id, prepared_response)) in prepared_submissions.iter().enumerate() {
+        tracing::info!("Executing submission {} ({command_id})...", idx + 1);
 
         // Collect signatures for this submission from all attestors
         let mut signatures_for_submission = Vec::new();
@@ -197,19 +174,18 @@ pub async fn execute_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
 
         // Execute the submission
         // Note: User ID must match JWT token's "sub" claim
-        let execute_request = ExecuteSubmissionAndWaitForTransactionRequest {
+        let execute_request = ExecuteSubmissionRequest {
             prepared_transaction: prepared_response.prepared_transaction.clone(),
             party_signatures: Some(party_signatures),
             deduplication_period: None, // Use default
             submission_id,
-            user_id: LEDGER_API_USER_ID.to_string(),
+            user_id: "ledger-api-user".to_string(),
             hashing_scheme_version: prepared_response.hashing_scheme_version,
             min_ledger_time: None,
-            transaction_format: None,
         };
 
         submission_client
-            .execute_submission_and_wait_for_transaction(tonic::Request::new(execute_request))
+            .execute_submission(tonic::Request::new(execute_request))
             .await?;
 
         tracing::info!("Submission {} executed successfully", idx + 1);
@@ -271,8 +247,8 @@ pub async fn execute_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
             "Found {contract_count} contracts for party {decentralized_party} (attempt {attempt}/{max_attempts})",
         );
 
-        // We expect at least as many contracts as submissions
-        if contract_count >= num_submissions {
+        // We expect at least 3 contracts (GovernanceRules, DepositAccountRules, WithdrawAccountRules)
+        if contract_count >= 3 {
             tracing::info!(
                 "All contracts successfully created! Found {contract_count} contracts after {attempt} attempt(s)"
             );
@@ -284,7 +260,7 @@ pub async fn execute_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
             tokio::time::sleep(retry_delay).await;
         } else {
             anyhow::bail!(
-                "Contracts not visible in ACS after {max_attempts} attempts. Found only {contract_count} contracts, expected at least {num_submissions}"
+                "Contracts not visible in ACS after {max_attempts} attempts. Found only {contract_count} contracts, expected at least 3"
             );
         }
     }
