@@ -620,8 +620,6 @@ connection_retry_delay_secs = 5
 [security]
 # Require all participants to be present before starting
 require_all_participants = true
-# Minimum number of participants (threshold)
-minimum_participants = 3
 ```
 
 **Individual Node Configuration (`node.toml`)**:
@@ -630,7 +628,7 @@ minimum_participants = 3
 # This identifies who they are in the network
 [node]
 # Must match one of the IDs in network.toml
-participant_id = "attestor-1"
+node_id = "attestor-1"
 
 # Path to this node's static private key
 static_key_file = "keys/attestor-1_static.key"
@@ -874,7 +872,6 @@ connection_retry_delay_secs = 5
 
 [security]
 require_all_participants = true
-minimum_participants = 3
 ```
 
 #### Step 4: Distribute Network Configuration
@@ -900,7 +897,7 @@ Each participant creates their own `node.toml`:
 # Alice (coordinator)
 $ cat node.toml
 [node]
-participant_id = "alice"
+node_id = "alice"
 static_key_file = "keys/my_static.key"
 listen_address = "0.0.0.0"
 network_config = "network.toml"
@@ -916,7 +913,7 @@ ledger_api_port = 5002
 # Bob
 $ cat node.toml
 [node]
-participant_id = "bob"
+node_id = "bob"
 static_key_file = "keys/my_static.key"
 listen_address = "0.0.0.0"
 network_config = "network.toml"
@@ -949,7 +946,7 @@ Now all participants are ready to run the distributed setup!
 # Participant 1 (Coordinator - 10.0.1.100)
 $ cat node.toml
 [node]
-participant_id = "coordinator-node"
+node_id = "coordinator-node"
 static_key_file = "keys/coordinator_static.key"
 network_config = "network.toml"
 
@@ -970,7 +967,7 @@ $ cargo run -- start
 # Participant 2 (Attestor 1 - 10.0.1.101)
 $ cat node.toml
 [node]
-participant_id = "attestor-1"
+node_id = "attestor-1"
 static_key_file = "keys/attestor-1_static.key"
 network_config = "network.toml"
 

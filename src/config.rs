@@ -31,8 +31,6 @@ pub struct NetworkConfig {
     pub participants: Vec<Participant>,
     #[serde(default)]
     pub timeouts: Timeouts,
-    #[serde(default)]
-    pub security: SecurityConfig,
 }
 
 /// Basic network information
@@ -100,37 +98,18 @@ impl Default for Timeouts {
     }
 }
 
-/// Security configuration
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct SecurityConfig {
-    #[serde(default = "default_require_all")]
-    pub require_all_participants: bool,
-    #[serde(default = "default_minimum_participants")]
-    pub minimum_participants: usize,
-}
-
-fn default_require_all() -> bool {
-    true
-}
-fn default_minimum_participants() -> usize {
-    3
-}
-
-impl Default for SecurityConfig {
-    fn default() -> Self {
-        Self {
-            require_all_participants: default_require_all(),
-            minimum_participants: default_minimum_participants(),
-        }
-    }
-}
-
 impl NetworkConfig {
     /// Load network configuration from a TOML file
     pub async fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = tokio::fs::read_to_string(path.as_ref()).await?;
         let config: NetworkConfig = toml::from_str(&content)?;
         Ok(config)
+    }
+
+    /// Get the governance threshold for multi-sig operations
+    /// Returns majority threshold: (n/2 + 1)
+    pub fn governance_threshold(&self) -> u32 {
+        ((self.participants.len() / 2) + 1) as u32
     }
 
     /// Get participant by ID
@@ -174,10 +153,10 @@ impl NetworkConfig {
         }
     }
 
-    /// Check if a participant ID is the coordinator
-    pub fn is_coordinator(&self, participant_id: &str) -> Result<bool> {
+    /// Check if a node ID is the coordinator
+    pub fn is_coordinator(&self, node_id: &str) -> Result<bool> {
         let coordinator = self.get_coordinator()?;
-        Ok(coordinator.id == participant_id)
+        Ok(coordinator.id == node_id)
     }
 
     /// Get all attestors (non-coordinator participants)
@@ -211,7 +190,7 @@ pub struct NodeConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct NodeInfo {
     /// Must match one of the participant IDs in network.toml
-    pub participant_id: String,
+    pub node_id: String,
     /// Path to this node's static private key
     pub static_key_file: String,
     #[serde(default = "default_listen_address")]
@@ -306,7 +285,6 @@ mod tests {
                 },
             ],
             timeouts: Timeouts::default(),
-            security: SecurityConfig::default(),
         };
 
         let coordinator = network.get_coordinator()?;
@@ -347,7 +325,6 @@ mod tests {
                 },
             ],
             timeouts: Timeouts::default(),
-            security: SecurityConfig::default(),
         };
 
         let coordinator = network.get_coordinator()?;
@@ -395,7 +372,6 @@ mod tests {
                 },
             ],
             timeouts: Timeouts::default(),
-            security: SecurityConfig::default(),
         };
 
         let attestors = network.get_attestors()?;

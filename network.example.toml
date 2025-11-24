@@ -48,9 +48,3 @@ handshake_timeout_secs = 30
 message_timeout_secs = 120
 connection_retry_attempts = 3
 connection_retry_delay_secs = 5
-
-[security]
-# Require all participants to be present before starting
-require_all_participants = true
-# Minimum number of participants (threshold)
-minimum_participants = 3

@@ -4,5 +4,5 @@
 - remove party from a dec party?
 - moving protos to a separate crate?
 - move away from cbtc-centric workflow to a more generalized one
-  - change hard-coded values to configuration files
-  - use dynamic number of participants
+  - hard-coded contracts
+  - hard-coded submissions

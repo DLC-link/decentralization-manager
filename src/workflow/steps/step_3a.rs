@@ -2,7 +2,10 @@ use tokio::{fs, time};
 
 use crate::{
     config::NodeConfig,
-    consts::{TOPOLOGY_RETRY_DELAY_SECS, TOPOLOGY_RETRY_MAX_ATTEMPTS},
+    consts::{
+        NAMESPACE_DEF_FILENAME, P2P_PROTO_FILENAME, PARTY_ID_PREFIX, SIGNED_P2P_PROPOSALS_PREFIX,
+        TOPOLOGY_PROPAGATION_DELAY_SECS, TOPOLOGY_RETRY_DELAY_SECS, TOPOLOGY_RETRY_MAX_ATTEMPTS,
+    },
     dirs::WorkflowDirs,
     error::Result,
     proto::com::digitalasset::canton::{
@@ -39,7 +42,7 @@ pub async fn submit_final_proposals(config: &NodeConfig, dirs: &WorkflowDirs) ->
 
     // Step 2: Read the original P2P proposal
     // Canton 3.4+: Signing keys embedded in P2P mappings
-    let p2p_file = dirs.p2p_proposals_dir.join("p2p_proto.bin");
+    let p2p_file = dirs.p2p_proposals_dir.join(P2P_PROTO_FILENAME);
     tracing::info!("Reading original P2P proposal from {}", p2p_file.display());
     let mut p2p_transaction: SignedTopologyTransaction =
         utils::read_first_message_from_file(&p2p_file).await?;
@@ -52,7 +55,8 @@ pub async fn submit_final_proposals(config: &NodeConfig, dirs: &WorkflowDirs) ->
     while let Some(entry) = dir_entries.next_entry().await? {
         let file_name = entry.file_name();
         let file_name_str = file_name.to_string_lossy();
-        if file_name_str.starts_with("signed-p2p-proposals") && file_name_str.ends_with(".bin") {
+        if file_name_str.starts_with(SIGNED_P2P_PROPOSALS_PREFIX) && file_name_str.ends_with(".bin")
+        {
             signed_files.push(entry.path());
         }
     }
@@ -87,7 +91,7 @@ pub async fn submit_final_proposals(config: &NodeConfig, dirs: &WorkflowDirs) ->
     );
 
     // Step 5: Read namespace definition and construct party ID
-    let namespace_file = dirs.dns_submission_dir.join("namespaceDef.bin");
+    let namespace_file = dirs.dns_submission_dir.join(NAMESPACE_DEF_FILENAME);
     tracing::info!(
         "Reading namespace definition from {}",
         namespace_file.display()
@@ -95,7 +99,10 @@ pub async fn submit_final_proposals(config: &NodeConfig, dirs: &WorkflowDirs) ->
     let namespace_def: DecentralizedNamespaceDefinition =
         utils::read_first_message_from_file(&namespace_file).await?;
 
-    let party_id = format!("cbtc-network::{}", namespace_def.decentralized_namespace);
+    let party_id = format!(
+        "{PARTY_ID_PREFIX}::{}",
+        namespace_def.decentralized_namespace
+    );
     tracing::info!("Constructed party ID: {party_id}");
 
     // Step 6: Submit P2P proposal with embedded signing keys
@@ -149,8 +156,7 @@ pub async fn submit_final_proposals(config: &NodeConfig, dirs: &WorkflowDirs) ->
     // needs time to propagate and update its "known until" timestamp. Without this wait,
     // transactions may be rejected with LOCAL_VERDICT_TIMEOUT because the sequencer's
     // topology knowledge lags behind the effective time.
-    // We wait 60 seconds to ensure Canton has fully propagated the topology updates.
-    let propagation_delay = time::Duration::from_secs(60);
+    let propagation_delay = time::Duration::from_secs(TOPOLOGY_PROPAGATION_DELAY_SECS);
     tracing::info!("Waiting {propagation_delay:?} for Canton to propagate topology updates...");
     time::sleep(propagation_delay).await;
     tracing::info!("Topology propagation wait complete");
@@ -200,9 +206,11 @@ async fn wait_for_p2p_in_topology(
             // Extract the effective time (valid_from) from the topology result
             if let Some(context) = &result.context {
                 if let Some(valid_from) = &context.valid_from {
-                    let seconds = valid_from.seconds;
-                    let nanos = valid_from.nanos;
-                    tracing::debug!("P2P mapping effective time: {seconds}.{nanos:09}s");
+                    tracing::debug!(
+                        "P2P mapping effective time: {}.{:09}s",
+                        valid_from.seconds,
+                        valid_from.nanos
+                    );
                     return Ok(*valid_from);
                 } else {
                     anyhow::bail!("P2P mapping found but has no valid_from timestamp");
