@@ -18,9 +18,6 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Run all steps in sequence
-    All,
-
     /// Generate Noise protocol static keypair for secure communication
     Keygen {
         /// Output file path for the private key

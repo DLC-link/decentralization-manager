@@ -4,9 +4,8 @@ pub mod dirs;
 pub mod error;
 pub mod noise;
 pub mod participant_id;
-pub mod steps;
 pub mod utils;
-pub mod workflow_state;
+pub mod workflow;
 
 #[allow(clippy::doc_lazy_continuation)]
 #[allow(clippy::large_enum_variant)]

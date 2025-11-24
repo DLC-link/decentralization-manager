@@ -9,7 +9,7 @@ use crate::{
     proto::com::{
         daml::ledger::api::v2::{
             CumulativeFilter, EventFormat, Filters, GetActiveContractsRequest, GetLedgerEndRequest,
-            WildcardFilter, cumulative_filter,
+            Signature, WildcardFilter, cumulative_filter,
             interactive::{
                 ExecuteSubmissionRequest, PartySignatures, PrepareSubmissionResponse,
                 SinglePartySignatures,
@@ -135,7 +135,7 @@ pub async fn execute_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
 
             // Convert Canton Signature to Ledger API Signature
             // The Ledger API Signature doesn't have signature_delegation field
-            let ledger_sig = crate::proto::com::daml::ledger::api::v2::Signature {
+            let ledger_sig = Signature {
                 format: canton_sig.format,
                 signature: canton_sig.signature.clone(),
                 signed_by: canton_sig.signed_by.clone(),

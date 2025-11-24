@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use tokio::fs;
 
@@ -122,8 +122,8 @@ pub async fn generate_keys(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
     tracing::info!("Generating cryptographic keys...");
 
     // Load network config to determine participant position
-    let network_config_path = if std::path::PathBuf::from(&config.network_config).is_absolute() {
-        std::path::PathBuf::from(&config.network_config)
+    let network_config_path = if PathBuf::from(&config.network_config).is_absolute() {
+        PathBuf::from(&config.network_config)
     } else {
         // Resolve relative to test-configs directory
         std::env::current_dir()?
@@ -178,7 +178,7 @@ async fn generate_signing_key(
     vault_client: &mut VaultServiceClient<tonic::transport::Channel>,
     name: &str,
     usage: Vec<i32>,
-) -> Result<crate::proto::com::digitalasset::canton::crypto::v30::SigningPublicKey> {
+) -> Result<SigningPublicKey> {
     let request = tonic::Request::new(GenerateSigningKeyRequest {
         key_spec: SigningKeySpec::EcCurve25519 as i32,
         name: name.to_string(),
