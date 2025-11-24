@@ -7,7 +7,7 @@ use tokio::net::TcpListener;
 use crate::{
     config::{NetworkConfig, NodeConfig},
     noise::{Message, MessageType, NOISE_REQUEST_TIMEOUT, NoiseError, NoiseKeypair},
-    workflow_state::WorkflowState,
+    workflow::WorkflowState,
 };
 
 /// Coordinator server that accepts connections from attestors
