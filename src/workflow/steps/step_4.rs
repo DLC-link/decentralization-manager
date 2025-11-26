@@ -1,5 +1,16 @@
 use ed25519_dalek::{Signer, SigningKey};
 
+use canton_proto_rs::com::{
+    daml::ledger::api::v2::interactive::PrepareSubmissionResponse,
+    digitalasset::canton::crypto::{
+        admin::v30::{
+            ExportKeyPairRequest, ListKeysFilters, ListMyKeysRequest,
+            vault_service_client::VaultServiceClient,
+        },
+        v30::{Signature, SignatureFormat, SigningAlgorithmSpec, SigningPublicKey},
+    },
+};
+
 use crate::{
     config::NodeConfig,
     consts::{
@@ -8,16 +19,6 @@ use crate::{
     },
     dirs::WorkflowDirs,
     error::Result,
-    proto::com::{
-        daml::ledger::api::v2::interactive::PrepareSubmissionResponse,
-        digitalasset::canton::crypto::{
-            admin::v30::{
-                ExportKeyPairRequest, ListKeysFilters, ListMyKeysRequest,
-                vault_service_client::VaultServiceClient,
-            },
-            v30::{Signature, SignatureFormat, SigningAlgorithmSpec, SigningPublicKey},
-        },
-    },
     utils,
 };
 
