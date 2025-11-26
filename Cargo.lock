@@ -256,6 +256,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d71b6127be86fdcfddb610f7182ac57211d4b18a3e9c82eb2d17662f2227ad6a"
 
 [[package]]
+name = "canton-proto-rs"
+version = "3.4.0"
+source = "git+ssh://git@github.com/DLC-link/canton-proto-rs?branch=3.4.0#72294a916a25b12782ffd14e4bca91c795362807"
+dependencies = [
+ "prost",
+ "prost-types",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+ "walkdir",
+]
+
+[[package]]
 name = "cc"
 version = "1.2.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -426,6 +439,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
+ "canton-proto-rs",
  "clap",
  "ed25519-dalek",
  "hex",
@@ -447,11 +461,9 @@ dependencies = [
  "toml",
  "tonic",
  "tonic-prost",
- "tonic-prost-build",
  "tracing",
  "tracing-subscriber",
  "uuid",
- "walkdir",
  "x509-parser",
 ]
 

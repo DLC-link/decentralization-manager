@@ -1,17 +1,18 @@
 use tokio::fs;
 
+use canton_proto_rs::com::digitalasset::canton::{
+    protocol::v30::SignedTopologyTransaction,
+    topology::admin::v30::{
+        SignTransactionsRequest, StoreId, Synchronizer, store_id, synchronizer,
+        topology_manager_write_service_client::TopologyManagerWriteServiceClient,
+    },
+};
+
 use crate::{
     config::NodeConfig,
     consts::{P2P_PROTO_FILENAME, SIGNED_P2P_PROPOSALS_PREFIX},
     dirs::WorkflowDirs,
     error::Result,
-    proto::com::digitalasset::canton::{
-        protocol::v30::SignedTopologyTransaction,
-        topology::admin::v30::{
-            SignTransactionsRequest, StoreId, Synchronizer, store_id, synchronizer,
-            topology_manager_write_service_client::TopologyManagerWriteServiceClient,
-        },
-    },
     utils,
 };
 
