@@ -39,6 +39,9 @@ async fn main() -> Result {
         anyhow::bail!("Configuration file is required. Use -c <config-file>");
     };
 
+    // Load network configuration
+    let network_config = node_config.load_network_config().await?;
+
     // Initialize directory paths
     let dirs = WorkflowDirs::new();
     dirs.create_required_dirs().await?;
@@ -50,17 +53,25 @@ async fn main() -> Result {
             workflow::start_node(node_config).await?;
         }
         Commands::UploadDars => steps::upload_dars(&node_config, &dirs).await?,
-        Commands::GenerateKeys => steps::generate_keys(&node_config, &dirs).await?,
-        Commands::CreateProposals => steps::create_proposals(&node_config, &dirs).await?,
+        Commands::GenerateKeys => {
+            steps::generate_keys(&node_config, &dirs, &network_config).await?
+        }
+        Commands::CreateProposals => {
+            steps::create_proposals(&node_config, &dirs, &network_config).await?
+        }
         Commands::SignDnsProposals => steps::sign_dns_proposals(&node_config, &dirs).await?,
         Commands::SubmitDnsProposals => steps::submit_dns_proposals(&node_config, &dirs).await?,
         Commands::SignP2pProposals => steps::sign_p2p_proposals(&node_config, &dirs).await?,
         Commands::SubmitFinalProposals => {
-            steps::submit_final_proposals(&node_config, &dirs).await?
+            steps::submit_final_proposals(&node_config, &dirs, &network_config).await?
         }
-        Commands::PrepareSubmissions => steps::prepare_submissions(&node_config, &dirs).await?,
+        Commands::PrepareSubmissions => {
+            steps::prepare_submissions(&node_config, &dirs, &network_config).await?
+        }
         Commands::SignSubmissions => steps::sign_submissions(&node_config, &dirs).await?,
-        Commands::ExecuteSubmissions => steps::execute_submissions(&node_config, &dirs).await?,
+        Commands::ExecuteSubmissions => {
+            steps::execute_submissions(&node_config, &dirs, &network_config).await?
+        }
     }
 
     tracing::info!("Command completed successfully");

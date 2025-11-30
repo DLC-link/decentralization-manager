@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::Path};
+use std::{collections::HashMap, path::{Path, PathBuf}};
 
 use serde::{Deserialize, Serialize};
 
@@ -31,6 +31,75 @@ pub struct NetworkConfig {
     pub participants: Vec<Participant>,
     #[serde(default)]
     pub timeouts: Timeouts,
+    /// Application-specific configuration (contracts, party prefixes, etc.)
+    pub application: ApplicationConfig,
+}
+
+/// Application-specific configuration for the decentralized party
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ApplicationConfig {
+    /// Party ID prefix used for constructing decentralized party identifiers
+    /// Format: "{party_id_prefix}::<namespace>"
+    pub party_id_prefix: String,
+    /// Name prefix for namespace signing keys
+    pub namespace_key_name: String,
+    /// Name prefix for DAML transaction signing keys
+    pub daml_key_name: String,
+    /// Party hint for operator party allocation
+    #[serde(default = "default_operator_party_hint")]
+    pub operator_party_hint: String,
+    /// Contract definitions to create after decentralized party setup
+    #[serde(default)]
+    pub contracts: Vec<ContractDefinition>,
+}
+
+fn default_operator_party_hint() -> String {
+    "operator".to_string()
+}
+
+/// Definition of a Daml contract to create on the ledger
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ContractDefinition {
+    /// Unique identifier for this contract (used as command ID)
+    pub id: String,
+    /// Human-readable name for logging
+    pub name: String,
+    /// Package ID (can use # prefix for symbolic lookup)
+    pub package_id: String,
+    /// Module name (e.g., "CBTC.Governance")
+    pub module_name: String,
+    /// Entity/template name (e.g., "CBTCGovernanceRules")
+    pub entity_name: String,
+    /// Record fields for the create command
+    pub fields: Vec<FieldDefinition>,
+}
+
+/// Definition of a field value in a Daml record
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum FieldDefinition {
+    /// The decentralized party ID
+    DecentralizedParty,
+    /// The operator party ID
+    OperatorParty,
+    /// A specific participant's party ID (0-indexed)
+    ParticipantParty { index: usize },
+    /// Static text value
+    Text { value: String },
+    /// Integer value
+    Int64 { value: i64 },
+    /// Boolean value
+    Bool { value: bool },
+    /// The instrument record (admin party + instrument id)
+    Instrument { id: String },
+    /// Set of all participant parties (as GenMap<Party, Unit>)
+    AttestorsSet,
+    /// Optional wrapper around another field
+    Optional { inner: Box<FieldDefinition> },
+    /// Nested record with fields
+    Record { fields: Vec<FieldDefinition> },
+    /// Governance threshold (calculated from participant count)
+    GovernanceThreshold,
 }
 
 /// Basic network information
@@ -214,6 +283,9 @@ pub struct CantonConfig {
     /// If not provided, requests will be sent without authentication
     #[serde(default)]
     pub ledger_api_token: Option<String>,
+    /// Ledger API user ID for submission operations
+    /// Must match the JWT token's "sub" claim
+    pub ledger_api_user_id: String,
 }
 
 fn default_synchronizer() -> String {
@@ -248,11 +320,33 @@ impl NodeConfig {
     pub fn synchronizer(&self) -> &str {
         &self.canton.synchronizer
     }
+
+    /// Load the associated network configuration
+    pub async fn load_network_config(&self) -> Result<NetworkConfig> {
+        let network_config_path = if PathBuf::from(&self.network_config).is_absolute() {
+            PathBuf::from(&self.network_config)
+        } else {
+            std::env::current_dir()?
+                .join("test-configs")
+                .join(&self.network_config)
+        };
+        NetworkConfig::from_file(&network_config_path).await
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_application_config() -> ApplicationConfig {
+        ApplicationConfig {
+            party_id_prefix: "test-network".to_string(),
+            namespace_key_name: "test-namespace".to_string(),
+            daml_key_name: "test-daml".to_string(),
+            operator_party_hint: "operator".to_string(),
+            contracts: vec![],
+        }
+    }
 
     #[test]
     fn test_coordinator_strategy_explicit() -> Result {
@@ -285,6 +379,7 @@ mod tests {
                 },
             ],
             timeouts: Timeouts::default(),
+            application: test_application_config(),
         };
 
         let coordinator = network.get_coordinator()?;
@@ -325,6 +420,7 @@ mod tests {
                 },
             ],
             timeouts: Timeouts::default(),
+            application: test_application_config(),
         };
 
         let coordinator = network.get_coordinator()?;
@@ -372,6 +468,7 @@ mod tests {
                 },
             ],
             timeouts: Timeouts::default(),
+            application: test_application_config(),
         };
 
         let attestors = network.get_attestors()?;

@@ -1,4 +1,3 @@
-// Step modules
 pub mod step_1;
 pub mod step_1a;
 pub mod step_2;
@@ -9,7 +8,6 @@ pub mod step_3b;
 pub mod step_4;
 pub mod step_5;
 
-// Re-export step functions
 pub use step_1::{generate_keys, upload_dars};
 pub use step_1a::create_proposals;
 pub use step_2::sign_dns_proposals;

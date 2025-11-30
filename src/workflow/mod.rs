@@ -1,7 +1,7 @@
 pub mod state;
 pub mod steps;
 
-use std::{collections::HashSet, path::PathBuf, sync::Arc};
+use std::{collections::HashSet, sync::Arc};
 
 use anyhow::Context;
 
@@ -21,20 +21,8 @@ pub use state::WorkflowState;
 /// Start the node as either coordinator or attestor
 pub async fn start_node(node_config: NodeConfig) -> Result {
     // Load network config
-    let network_config_path = if PathBuf::from(&node_config.network_config).is_absolute() {
-        PathBuf::from(&node_config.network_config)
-    } else {
-        // Resolve relative to config directory (test-configs/)
-        std::env::current_dir()?
-            .join("test-configs")
-            .join(&node_config.network_config)
-    };
-
-    tracing::info!(
-        "Loading network config from: {}",
-        network_config_path.display()
-    );
-    let network_config = NetworkConfig::from_file(&network_config_path).await?;
+    tracing::info!("Loading network config...");
+    let network_config = node_config.load_network_config().await?;
 
     // Determine if we're the coordinator
     let is_coordinator = match network_config.network.coordinator_strategy {
@@ -70,7 +58,7 @@ pub async fn start_node(node_config: NodeConfig) -> Result {
 async fn start_coordinator(node_config: NodeConfig, network_config: NetworkConfig) -> Result {
     tracing::info!("Initializing Noise server...");
 
-    let server = NoiseServer::new(node_config.clone(), network_config).await?;
+    let server = NoiseServer::new(node_config.clone(), network_config.clone()).await?;
     let server = Arc::new(server);
 
     // Initialize directory paths
@@ -82,10 +70,11 @@ async fn start_coordinator(node_config: NodeConfig, network_config: NetworkConfi
     // Spawn coordinator workflow task
     let workflow_state = server.get_workflow_state();
     let node_config_clone = node_config.clone();
+    let network_config_clone = network_config.clone();
     let dirs_clone = dirs.clone();
     let workflow_handle = tokio::spawn(async move {
         tracing::info!("Coordinator workflow task started");
-        match run_coordinator_workflow(workflow_state, node_config_clone, dirs_clone).await {
+        match run_coordinator_workflow(workflow_state, node_config_clone, network_config_clone, dirs_clone).await {
             Ok(_) => {
                 tracing::info!("Coordinator workflow task completed successfully");
                 Ok(())
@@ -127,6 +116,7 @@ async fn start_coordinator(node_config: NodeConfig, network_config: NetworkConfi
 async fn run_coordinator_workflow(
     workflow_state: Arc<WorkflowState>,
     node_config: NodeConfig,
+    network_config: NetworkConfig,
     dirs: WorkflowDirs,
 ) -> Result {
     use state::WorkflowStep;
@@ -162,7 +152,8 @@ async fn run_coordinator_workflow(
                 // Coordinator must also generate keys (only once)
                 if !coordinator_completed_steps.contains(&WorkflowStep::GenerateKeys) {
                     tracing::info!("Coordinator executing: Generate keys");
-                    if let Err(e) = steps::generate_keys(&node_config, &dirs).await {
+                    if let Err(e) = steps::generate_keys(&node_config, &dirs, &network_config).await
+                    {
                         tracing::error!("Coordinator failed to generate keys: {e}");
                         tracing::error!("Error details: {e:?}");
                         return Err(e);
@@ -182,7 +173,8 @@ async fn run_coordinator_workflow(
             }
             WorkflowStep::CreateProposals => {
                 tracing::info!("Coordinator executing: Create proposals");
-                if let Err(e) = steps::create_proposals(&node_config, &dirs).await {
+                if let Err(e) = steps::create_proposals(&node_config, &dirs, &network_config).await
+                {
                     tracing::error!("Failed to create proposals: {e}");
                     return Err(e);
                 }
@@ -228,7 +220,9 @@ async fn run_coordinator_workflow(
                 }
                 workflow_state.clear_attestor_data().await;
 
-                if let Err(e) = steps::submit_final_proposals(&node_config, &dirs).await {
+                if let Err(e) =
+                    steps::submit_final_proposals(&node_config, &dirs, &network_config).await
+                {
                     tracing::error!("Failed to submit final proposals: {e}");
                     return Err(e);
                 }
@@ -236,7 +230,9 @@ async fn run_coordinator_workflow(
             }
             WorkflowStep::PrepareSubmissions => {
                 tracing::info!("Coordinator executing: Prepare submissions");
-                if let Err(e) = steps::prepare_submissions(&node_config, &dirs).await {
+                if let Err(e) =
+                    steps::prepare_submissions(&node_config, &dirs, &network_config).await
+                {
                     tracing::error!("Failed to prepare submissions: {e}");
                     return Err(e);
                 }
@@ -265,7 +261,9 @@ async fn run_coordinator_workflow(
                 }
                 workflow_state.clear_attestor_data().await;
 
-                if let Err(e) = steps::execute_submissions(&node_config, &dirs).await {
+                if let Err(e) =
+                    steps::execute_submissions(&node_config, &dirs, &network_config).await
+                {
                     tracing::error!("Failed to execute submissions: {e}");
                     return Err(e);
                 }
@@ -289,7 +287,7 @@ async fn run_coordinator_workflow(
 async fn start_attestor(node_config: NodeConfig, network_config: NetworkConfig) -> Result {
     tracing::info!("Initializing Noise client...");
 
-    let client = NoiseClient::new(node_config.clone(), network_config).await?;
+    let client = NoiseClient::new(node_config.clone(), network_config.clone()).await?;
 
     // Initialize directory paths
     let dirs = WorkflowDirs::new();
@@ -349,7 +347,7 @@ async fn start_attestor(node_config: NodeConfig, network_config: NetworkConfig) 
             }
             MessageType::GenerateKeys => {
                 tracing::info!("Executing: Generate keys");
-                if let Err(e) = steps::generate_keys(&node_config, &dirs).await {
+                if let Err(e) = steps::generate_keys(&node_config, &dirs, &network_config).await {
                     tracing::error!("Step execution failed: {e}");
                     continue;
                 }

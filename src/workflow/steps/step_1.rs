@@ -1,10 +1,10 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use tokio::fs;
 
 use crate::{
     config::{NetworkConfig, NodeConfig},
-    consts::{ATTESTOR_KEYS_PREFIX, DAML_KEY_NAME, NAMESPACE_KEY_NAME, PARTICIPANT_ID_PREFIX},
+    consts::{ATTESTOR_KEYS_PREFIX, PARTICIPANT_ID_PREFIX},
     dirs::WorkflowDirs,
     error::Result,
     participant_id::CantonId,
@@ -113,27 +113,23 @@ pub async fn upload_dars(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
 /// This function generates signing keys and exports them along with the participant ID.
 /// The namespace delegation step from the original Scala script is currently skipped
 /// and should be implemented separately using TopologyManagerWriteService.
-pub async fn generate_keys(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
+pub async fn generate_keys(
+    config: &NodeConfig,
+    dirs: &WorkflowDirs,
+    network_config: &NetworkConfig,
+) -> Result {
     tracing::info!("Generating cryptographic keys...");
-
-    // Load network config to determine participant position
-    let network_config_path = if PathBuf::from(&config.network_config).is_absolute() {
-        PathBuf::from(&config.network_config)
-    } else {
-        // Resolve relative to test-configs directory
-        std::env::current_dir()?
-            .join("test-configs")
-            .join(&config.network_config)
-    };
-    let network_config = NetworkConfig::from_file(&network_config_path).await?;
 
     let mut vault_client = VaultServiceClient::connect(config.admin_api_url()).await?;
 
+    let namespace_key_name = &network_config.application.namespace_key_name;
+    let daml_key_name = &network_config.application.daml_key_name;
+
     // Generate namespace signing key
-    tracing::debug!("Generating namespace signing key with name '{NAMESPACE_KEY_NAME}'");
+    tracing::debug!("Generating namespace signing key with name '{namespace_key_name}'");
     let namespace_key = generate_signing_key(
         &mut vault_client,
-        NAMESPACE_KEY_NAME,
+        namespace_key_name,
         vec![SigningKeyUsage::Namespace as i32],
     )
     .await?;
@@ -145,10 +141,10 @@ pub async fn generate_keys(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
     propose_namespace_delegation(config, &namespace_key, &namespace_fingerprint).await?;
 
     // Generate DAML signing key for transactions
-    tracing::debug!("Generating DAML signing key with name '{DAML_KEY_NAME}'");
+    tracing::debug!("Generating DAML signing key with name '{daml_key_name}'");
     let daml_key = generate_signing_key(
         &mut vault_client,
-        DAML_KEY_NAME,
+        daml_key_name,
         vec![SigningKeyUsage::Protocol as i32],
     )
     .await?;

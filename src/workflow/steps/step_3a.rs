@@ -1,9 +1,9 @@
 use tokio::{fs, time};
 
 use crate::{
-    config::NodeConfig,
+    config::{NetworkConfig, NodeConfig},
     consts::{
-        NAMESPACE_DEF_FILENAME, P2P_PROTO_FILENAME, PARTY_ID_PREFIX, SIGNED_P2P_PROPOSALS_PREFIX,
+        NAMESPACE_DEF_FILENAME, P2P_PROTO_FILENAME, SIGNED_P2P_PROPOSALS_PREFIX,
         TOPOLOGY_PROPAGATION_DELAY_SECS, TOPOLOGY_RETRY_DELAY_SECS, TOPOLOGY_RETRY_MAX_ATTEMPTS,
     },
     dirs::WorkflowDirs,
@@ -33,8 +33,15 @@ use crate::{
 /// # Arguments
 /// * `config` - Configuration with Canton connection details
 /// * `dirs` - WorkflowDirs containing all directory paths
-pub async fn submit_final_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
+/// * `network_config` - Network configuration with application settings
+pub async fn submit_final_proposals(
+    config: &NodeConfig,
+    dirs: &WorkflowDirs,
+    network_config: &NetworkConfig,
+) -> Result {
     tracing::info!("Submitting P2P proposal with embedded signing keys (Canton 3.4+)...");
+
+    let party_id_prefix = &network_config.application.party_id_prefix;
 
     // Step 1: Get synchronizer ID
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
@@ -100,7 +107,7 @@ pub async fn submit_final_proposals(config: &NodeConfig, dirs: &WorkflowDirs) ->
         utils::read_first_message_from_file(&namespace_file).await?;
 
     let party_id = format!(
-        "{PARTY_ID_PREFIX}::{}",
+        "{party_id_prefix}::{}",
         namespace_def.decentralized_namespace
     );
     tracing::info!("Constructed party ID: {party_id}");

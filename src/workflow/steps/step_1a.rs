@@ -3,10 +3,10 @@ use std::collections::HashSet;
 use tokio::fs;
 
 use crate::{
-    config::NodeConfig,
+    config::{NetworkConfig, NodeConfig},
     consts::{
         ATTESTOR_KEYS_PREFIX, DNS_PROTO_FILENAME, NAMESPACE_DEF_FILENAME, P2P_PROTO_FILENAME,
-        PARTICIPANT_ID_PREFIX, PARTY_ID_PREFIX,
+        PARTICIPANT_ID_PREFIX,
     },
     dirs::WorkflowDirs,
     error::Result,
@@ -44,8 +44,14 @@ use crate::{
 ///
 /// **Note**: If you encounter TOPOLOGY_NO_APPROPRIATE_SIGNING_KEY_IN_STORE errors,
 /// ensure the participant is properly connected to a synchronizer first.
-pub async fn create_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
+pub async fn create_proposals(
+    config: &NodeConfig,
+    dirs: &WorkflowDirs,
+    network_config: &NetworkConfig,
+) -> Result {
     tracing::info!("Creating topology proposals...");
+
+    let party_id_prefix = &network_config.application.party_id_prefix;
 
     // Step 1: Load all attestor key files
     if !dirs.keys_dir.exists() {
@@ -160,7 +166,7 @@ pub async fn create_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
     };
 
     // Step 8: Create Party ID
-    let party_id = format!("{PARTY_ID_PREFIX}::{decentralized_namespace}");
+    let party_id = format!("{party_id_prefix}::{decentralized_namespace}");
     tracing::info!("Party ID: {party_id}");
 
     // Step 9: Create PartyToParticipant mapping

@@ -2,11 +2,11 @@ use tokio::fs;
 use uuid::Uuid;
 
 use crate::{
-    config::NodeConfig,
+    config::{NetworkConfig, NodeConfig},
     consts::{
-        EXECUTION_DIR, LEDGER_API_USER_ID, LEDGER_SUBMISSIONS_DIR, NAMESPACE_DEF_FILENAME,
-        PARTY_ID_PREFIX, PREPARED_DIR, PREPARED_SUBMISSION_PREFIX, SIGNATURES_DIR,
-        SUBMISSION_SIGNATURES_PREFIX, TOPOLOGY_RETRY_DELAY_SECS, TOPOLOGY_RETRY_MAX_ATTEMPTS,
+        EXECUTION_DIR, LEDGER_SUBMISSIONS_DIR, NAMESPACE_DEF_FILENAME, PREPARED_DIR,
+        PREPARED_SUBMISSION_PREFIX, SIGNATURES_DIR, SUBMISSION_SIGNATURES_PREFIX,
+        TOPOLOGY_RETRY_DELAY_SECS, TOPOLOGY_RETRY_MAX_ATTEMPTS,
     },
     dirs::WorkflowDirs,
     error::Result,
@@ -37,8 +37,16 @@ use crate::{
 /// # Arguments
 /// * `config` - Configuration with Ledger API connection details
 /// * `dirs` - WorkflowDirs containing all directory paths
-pub async fn execute_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
+/// * `network_config` - Network configuration with application settings
+pub async fn execute_submissions(
+    config: &NodeConfig,
+    dirs: &WorkflowDirs,
+    network_config: &NetworkConfig,
+) -> Result {
     tracing::info!("Executing submissions...");
+
+    let party_id_prefix = &network_config.application.party_id_prefix;
+    let user_id = &config.canton.ledger_api_user_id;
 
     // Step 1: Get decentralized party ID from namespace definition
     let namespace_file = dirs.dns_submission_dir.join(NAMESPACE_DEF_FILENAME);
@@ -50,7 +58,7 @@ pub async fn execute_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
         utils::read_first_message_from_file(&namespace_file).await?;
 
     let decentralized_party = format!(
-        "{PARTY_ID_PREFIX}::{}",
+        "{party_id_prefix}::{}",
         namespace_def.decentralized_namespace
     );
     tracing::debug!("Decentralized party: {decentralized_party}");
@@ -202,7 +210,7 @@ pub async fn execute_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
             party_signatures: Some(party_signatures),
             deduplication_period: None, // Use default
             submission_id,
-            user_id: LEDGER_API_USER_ID.to_string(),
+            user_id: user_id.to_string(),
             hashing_scheme_version: prepared_response.hashing_scheme_version,
             min_ledger_time: None,
             transaction_format: None,
