@@ -1,4 +1,4 @@
-use tokio::{fs, time};
+use tokio::time;
 
 use canton_proto_rs::com::digitalasset::canton::{
     protocol::v30::{DecentralizedNamespaceDefinition, SignedTopologyTransaction},
@@ -48,20 +48,9 @@ pub async fn submit_dns_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> R
     let mut dns_transaction: SignedTopologyTransaction =
         utils::read_first_message_from_file(&dns_file).await?;
 
-    let signed_proposals_dir = &dirs.dns_signed_dir;
-    let mut signed_files = Vec::new();
-    let mut dir_entries = fs::read_dir(&signed_proposals_dir).await?;
-
-    while let Some(entry) = dir_entries.next_entry().await? {
-        let file_name = entry.file_name();
-        let file_name_str = file_name.to_string_lossy();
-        if file_name_str.starts_with(SIGNED_DNS_PROPOSAL_PREFIX) && file_name_str.ends_with(".bin")
-        {
-            signed_files.push(entry.path());
-        }
-    }
-
-    signed_files.sort();
+    let signed_files =
+        utils::find_files_by_pattern(&dirs.dns_signed_dir, SIGNED_DNS_PROPOSAL_PREFIX, ".bin")
+            .await?;
     tracing::info!("Found {} signed DNS proposal files", signed_files.len());
 
     for signed_file in &signed_files {
@@ -204,20 +193,9 @@ pub async fn submit_final_proposals(
     let mut p2p_transaction: SignedTopologyTransaction =
         utils::read_first_message_from_file(&p2p_file).await?;
 
-    let signed_proposals_dir = &dirs.final_signed_dir;
-    let mut signed_files = Vec::new();
-    let mut dir_entries = fs::read_dir(&signed_proposals_dir).await?;
-
-    while let Some(entry) = dir_entries.next_entry().await? {
-        let file_name = entry.file_name();
-        let file_name_str = file_name.to_string_lossy();
-        if file_name_str.starts_with(SIGNED_P2P_PROPOSALS_PREFIX) && file_name_str.ends_with(".bin")
-        {
-            signed_files.push(entry.path());
-        }
-    }
-
-    signed_files.sort();
+    let signed_files =
+        utils::find_files_by_pattern(&dirs.final_signed_dir, SIGNED_P2P_PROPOSALS_PREFIX, ".bin")
+            .await?;
     tracing::info!("Found {} signed P2P proposal files", signed_files.len());
 
     for signed_file in &signed_files {

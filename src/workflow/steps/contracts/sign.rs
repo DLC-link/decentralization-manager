@@ -111,20 +111,8 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
     let prepared_dir = ledger_submissions_dir.join(PREPARED_DIR);
 
     // Discover all prepared-submission-*.bin files
-    let mut submission_files = Vec::new();
-    let mut entries = tokio::fs::read_dir(&prepared_dir).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        let path = entry.path();
-        if path.is_file()
-            && let Some(name) = path.file_name().and_then(|n| n.to_str())
-            && name.starts_with(PREPARED_SUBMISSION_PREFIX)
-            && name.ends_with(".bin")
-        {
-            submission_files.push(path);
-        }
-    }
-
-    submission_files.sort();
+    let submission_files =
+        utils::find_files_by_pattern(&prepared_dir, PREPARED_SUBMISSION_PREFIX, ".bin").await?;
 
     if submission_files.is_empty() {
         anyhow::bail!(

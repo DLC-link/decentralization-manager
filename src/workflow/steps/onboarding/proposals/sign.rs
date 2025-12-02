@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use tokio::fs;
 
 use crate::{
@@ -18,14 +20,16 @@ use crate::{
     utils,
 };
 
-/// Sign DNS proposal with attestor's key
-///
-/// Corresponds to: 02_SignProposals.sc
-///
-/// This step must be run by each attestor participant (except the coordinator who created the proposal).
-/// Each attestor signs the DNS proposal with their namespace key.
-pub async fn sign_dns_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
-    tracing::info!("Signing DNS proposal...");
+/// Sign a topology proposal and save the signed transaction
+async fn sign_proposal(
+    config: &NodeConfig,
+    dirs: &WorkflowDirs,
+    input_file: &Path,
+    output_dir: &Path,
+    output_prefix: &str,
+    proposal_type: &str,
+) -> Result {
+    tracing::info!("Signing {proposal_type} proposal...");
 
     let participant_num = utils::get_participant_number(config, &dirs.ids_dir).await?;
     tracing::debug!("Determined participant number: {participant_num}");
@@ -33,17 +37,19 @@ pub async fn sign_dns_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Res
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
     tracing::debug!("Using synchronizer ID: {synchronizer_id}");
 
-    let dns_file = dirs.dns_proposals_dir.join(DNS_PROTO_FILENAME);
-    tracing::info!("Reading DNS proposal from {}", dns_file.display());
+    tracing::info!(
+        "Reading {proposal_type} proposal from {}",
+        input_file.display()
+    );
 
-    let dns_transaction: SignedTopologyTransaction =
-        utils::read_first_message_from_file(&dns_file).await?;
+    let transaction: SignedTopologyTransaction =
+        utils::read_first_message_from_file(input_file).await?;
 
     let mut topology_client =
         TopologyManagerWriteServiceClient::connect(config.admin_api_url()).await?;
 
     let request = tonic::Request::new(SignTransactionsRequest {
-        transactions: vec![dns_transaction],
+        transactions: vec![transaction],
         signed_by: vec![],
         store: Some(StoreId {
             store: Some(store_id::Store::Synchronizer(Synchronizer {
@@ -53,28 +59,45 @@ pub async fn sign_dns_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Res
         force_flags: vec![],
     });
 
-    tracing::debug!("Calling SignTransactions RPC...");
+    tracing::debug!("Calling SignTransactions RPC for {proposal_type}...");
     let response = topology_client
         .sign_transactions(request)
         .await?
         .into_inner();
 
-    let signed_transaction = response
-        .transactions
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("No signed transaction returned"))?;
+    if response.transactions.is_empty() {
+        anyhow::bail!("No signed transaction returned for {proposal_type}");
+    }
 
-    fs::create_dir_all(&dirs.dns_signed_dir).await?;
-    let output_file = dirs.dns_signed_dir.join(format!(
-        "{SIGNED_DNS_PROPOSAL_PREFIX}-{participant_num}.bin"
-    ));
-    tracing::info!("Saving signed DNS proposal to {}", output_file.display());
+    fs::create_dir_all(output_dir).await?;
+    let output_file = output_dir.join(format!("{output_prefix}-{participant_num}.bin"));
+    tracing::info!(
+        "Saving signed {proposal_type} proposal to {}",
+        output_file.display()
+    );
 
-    utils::write_message_to_file(&signed_transaction, &output_file).await?;
+    utils::write_messages_to_file(&response.transactions, &output_file).await?;
 
-    tracing::info!("DNS proposal signed successfully");
+    tracing::info!("{proposal_type} proposal signed successfully");
     Ok(())
+}
+
+/// Sign DNS proposal with attestor's key
+///
+/// Corresponds to: 02_SignProposals.sc
+///
+/// This step must be run by each attestor participant (except the coordinator who created the proposal).
+/// Each attestor signs the DNS proposal with their namespace key.
+pub async fn sign_dns_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
+    sign_proposal(
+        config,
+        dirs,
+        &dirs.dns_proposals_dir.join(DNS_PROTO_FILENAME),
+        &dirs.dns_signed_dir,
+        SIGNED_DNS_PROPOSAL_PREFIX,
+        "DNS",
+    )
+    .await
 }
 
 /// Sign P2P proposals with attestor's key
@@ -87,54 +110,13 @@ pub async fn sign_dns_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Res
 /// This step must be run by each attestor participant (except the coordinator who created the proposals).
 /// Each attestor signs the P2P proposal with their namespace key.
 pub async fn sign_p2p_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
-    tracing::info!("Signing P2P proposals...");
-
-    let participant_num = utils::get_participant_number(config, &dirs.ids_dir).await?;
-    tracing::debug!("Determined participant number: {participant_num}");
-
-    let synchronizer_id = utils::get_synchronizer_id(config).await?;
-    tracing::debug!("Using synchronizer ID: {synchronizer_id}");
-
-    let p2p_file = dirs.p2p_proposals_dir.join(P2P_PROTO_FILENAME);
-    tracing::info!("Reading P2P proposal from {}", p2p_file.display());
-    let p2p_transaction: SignedTopologyTransaction =
-        utils::read_first_message_from_file(&p2p_file).await?;
-
-    let mut topology_client =
-        TopologyManagerWriteServiceClient::connect(config.admin_api_url()).await?;
-
-    let request = tonic::Request::new(SignTransactionsRequest {
-        transactions: vec![p2p_transaction],
-        signed_by: vec![],
-        store: Some(StoreId {
-            store: Some(store_id::Store::Synchronizer(Synchronizer {
-                kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id)),
-            })),
-        }),
-        force_flags: vec![],
-    });
-
-    tracing::debug!("Calling SignTransactions RPC for P2P...");
-    let response = topology_client
-        .sign_transactions(request)
-        .await?
-        .into_inner();
-
-    if response.transactions.len() != 1 {
-        anyhow::bail!(
-            "Expected 1 signed transaction, got {}",
-            response.transactions.len()
-        );
-    }
-
-    fs::create_dir_all(&dirs.final_signed_dir).await?;
-    let output_file = dirs.final_signed_dir.join(format!(
-        "{SIGNED_P2P_PROPOSALS_PREFIX}-{participant_num}.bin"
-    ));
-    tracing::info!("Saving signed P2P proposal to {}", output_file.display());
-
-    utils::write_messages_to_file(&response.transactions, &output_file).await?;
-
-    tracing::info!("P2P proposal signed successfully");
-    Ok(())
+    sign_proposal(
+        config,
+        dirs,
+        &dirs.p2p_proposals_dir.join(P2P_PROTO_FILENAME),
+        &dirs.final_signed_dir,
+        SIGNED_P2P_PROPOSALS_PREFIX,
+        "P2P",
+    )
+    .await
 }

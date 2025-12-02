@@ -1,4 +1,3 @@
-use tokio::fs;
 use uuid::Uuid;
 
 use canton_proto_rs::com::{
@@ -83,20 +82,8 @@ pub async fn execute_submissions(
     let prepared_dir = ledger_submissions_dir.join(PREPARED_DIR);
 
     // Discover all prepared-submission-*.bin files
-    let mut submission_files = Vec::new();
-    let mut entries = fs::read_dir(&prepared_dir).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        let path = entry.path();
-        if path.is_file()
-            && let Some(name) = path.file_name().and_then(|n| n.to_str())
-            && name.starts_with(PREPARED_SUBMISSION_PREFIX)
-            && name.ends_with(".bin")
-        {
-            submission_files.push(path);
-        }
-    }
-
-    submission_files.sort();
+    let submission_files =
+        utils::find_files_by_pattern(&prepared_dir, PREPARED_SUBMISSION_PREFIX, ".bin").await?;
 
     if submission_files.is_empty() {
         anyhow::bail!(
@@ -122,20 +109,8 @@ pub async fn execute_submissions(
     let signatures_dir = execution_dir.join(SIGNATURES_DIR);
 
     // Discover all submission-signatures-*.bin files
-    let mut signature_files = Vec::new();
-    let mut entries = fs::read_dir(&signatures_dir).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        let path = entry.path();
-        if path.is_file()
-            && let Some(name) = path.file_name().and_then(|n| n.to_str())
-            && name.starts_with(SUBMISSION_SIGNATURES_PREFIX)
-            && name.ends_with(".bin")
-        {
-            signature_files.push(path);
-        }
-    }
-
-    signature_files.sort();
+    let signature_files =
+        utils::find_files_by_pattern(&signatures_dir, SUBMISSION_SIGNATURES_PREFIX, ".bin").await?;
     tracing::debug!("Found {} signature files", signature_files.len());
 
     if signature_files.is_empty() {

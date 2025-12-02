@@ -14,6 +14,7 @@ use crate::{
     dirs::WorkflowDirs,
     error::Result,
     noise::{MessageType, client::NoiseClient, election, server::NoiseServer},
+    utils,
 };
 
 pub use state::WorkflowState;
@@ -402,76 +403,60 @@ async fn start_attestor(node_config: NodeConfig, network_config: NetworkConfig) 
     Ok(())
 }
 
-/// Send generated keys to coordinator
-async fn send_keys_to_coordinator(client: &NoiseClient, dirs: &WorkflowDirs) -> Result {
-    // Find the attestor public keys file in the keys directory
-    let mut entries = tokio::fs::read_dir(&dirs.keys_dir).await?;
+/// Find and read the first file matching prefix/suffix pattern
+async fn find_and_read_file(
+    dir: &std::path::Path,
+    prefix: &str,
+    suffix: &str,
+    error_msg: &str,
+) -> Result<Vec<u8>> {
+    let files = utils::find_files_by_pattern(dir, prefix, suffix).await?;
 
-    while let Some(entry) = entries.next_entry().await? {
-        let path = entry.path();
-        if path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(|n| n.starts_with(ATTESTOR_KEYS_PREFIX))
-            .unwrap_or(false)
-        {
-            let keys_data = tokio::fs::read(&path).await?;
-            client.upload_keys(keys_data).await?;
-            return Ok(());
-        }
+    if let Some(path) = files.first() {
+        let data = tokio::fs::read(path).await?;
+        return Ok(data);
     }
 
-    anyhow::bail!(
-        "Attestor public keys file not found in {}",
-        dirs.keys_dir.display()
+    anyhow::bail!("{} in {}", error_msg, dir.display())
+}
+
+/// Send generated keys to coordinator
+async fn send_keys_to_coordinator(client: &NoiseClient, dirs: &WorkflowDirs) -> Result {
+    let data = find_and_read_file(
+        &dirs.keys_dir,
+        ATTESTOR_KEYS_PREFIX,
+        ".bin",
+        "Attestor public keys file not found",
     )
+    .await?;
+    client.upload_keys(data).await?;
+    Ok(())
 }
 
 /// Send DNS signature to coordinator
 async fn send_dns_signature_to_coordinator(client: &NoiseClient, dirs: &WorkflowDirs) -> Result {
-    // Find the signed DNS proposal file
-    let signed_proposals_dir = &dirs.dns_signed_dir;
-    let mut entries = tokio::fs::read_dir(signed_proposals_dir).await?;
-
-    while let Some(entry) = entries.next_entry().await? {
-        let path = entry.path();
-        if path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(|n| n.starts_with(SIGNED_DNS_PROPOSAL_PREFIX))
-            .unwrap_or(false)
-        {
-            let signature_data = tokio::fs::read(&path).await?;
-            client.send_dns_signature(signature_data).await?;
-            return Ok(());
-        }
-    }
-
-    anyhow::bail!("Signed DNS proposal file not found")
+    let data = find_and_read_file(
+        &dirs.dns_signed_dir,
+        SIGNED_DNS_PROPOSAL_PREFIX,
+        ".bin",
+        "Signed DNS proposal file not found",
+    )
+    .await?;
+    client.send_dns_signature(data).await?;
+    Ok(())
 }
 
 /// Send P2P signatures to coordinator
-/// Canton 3.4+: Signing keys embedded in P2P mappings
 async fn send_p2p_signatures_to_coordinator(client: &NoiseClient, dirs: &WorkflowDirs) -> Result {
-    // Find the signed P2P proposals file
-    let signed_proposals_dir = &dirs.final_signed_dir;
-    let mut entries = tokio::fs::read_dir(signed_proposals_dir).await?;
-
-    while let Some(entry) = entries.next_entry().await? {
-        let path = entry.path();
-        if path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(|n| n.starts_with(SIGNED_P2P_PROPOSALS_PREFIX))
-            .unwrap_or(false)
-        {
-            let signatures_data = tokio::fs::read(&path).await?;
-            client.send_p2p_signatures(signatures_data).await?;
-            return Ok(());
-        }
-    }
-
-    anyhow::bail!("Signed P2P proposals file not found")
+    let data = find_and_read_file(
+        &dirs.final_signed_dir,
+        SIGNED_P2P_PROPOSALS_PREFIX,
+        ".bin",
+        "Signed P2P proposals file not found",
+    )
+    .await?;
+    client.send_p2p_signatures(data).await?;
+    Ok(())
 }
 
 /// Send submission signatures to coordinator
@@ -479,26 +464,14 @@ async fn send_submission_signatures_to_coordinator(
     client: &NoiseClient,
     dirs: &WorkflowDirs,
 ) -> Result {
-    // Find the submission signatures file in the execution/signatures directory
     let signatures_dir = dirs.workflow_dir.join(EXECUTION_DIR).join(SIGNATURES_DIR);
-    let mut entries = tokio::fs::read_dir(&signatures_dir).await?;
-
-    while let Some(entry) = entries.next_entry().await? {
-        let path = entry.path();
-        if path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(|n| n.starts_with(SUBMISSION_SIGNATURES_PREFIX) && n.ends_with(".bin"))
-            .unwrap_or(false)
-        {
-            let signatures_data = tokio::fs::read(&path).await?;
-            client.send_submission_signatures(signatures_data).await?;
-            return Ok(());
-        }
-    }
-
-    anyhow::bail!(
-        "Submission signatures file not found in {}",
-        signatures_dir.display()
+    let data = find_and_read_file(
+        &signatures_dir,
+        SUBMISSION_SIGNATURES_PREFIX,
+        ".bin",
+        "Submission signatures file not found",
     )
+    .await?;
+    client.send_submission_signatures(data).await?;
+    Ok(())
 }

@@ -128,6 +128,34 @@ pub async fn read_bytes_from_file(path: impl AsRef<Path>) -> Result<Vec<u8>> {
     Ok(data)
 }
 
+/// Find files in a directory matching a prefix and suffix pattern
+///
+/// Returns a sorted list of file paths that match `{prefix}*{suffix}`.
+/// Commonly used for discovering attestor keys, signed proposals, etc.
+pub async fn find_files_by_pattern(
+    dir: impl AsRef<Path>,
+    prefix: &str,
+    suffix: &str,
+) -> Result<Vec<std::path::PathBuf>> {
+    let dir = dir.as_ref();
+    let mut entries = fs::read_dir(dir).await?;
+    let mut files = Vec::new();
+
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        if path.is_file()
+            && let Some(name) = path.file_name().and_then(|n| n.to_str())
+            && name.starts_with(prefix)
+            && name.ends_with(suffix)
+        {
+            files.push(path);
+        }
+    }
+
+    files.sort();
+    Ok(files)
+}
+
 /// Write raw bytes to a file
 pub async fn write_bytes_to_file(data: &[u8], path: impl AsRef<Path>) -> Result<()> {
     fs::write(path.as_ref(), data).await?;
@@ -296,22 +324,11 @@ pub async fn find_participant_number(
     ids_dir: &Path,
     current_participant_id: &CantonId,
 ) -> Result<u32> {
-    let mut dir_entries = fs::read_dir(ids_dir).await?;
-    let mut id_files = Vec::new();
-
-    while let Some(entry) = dir_entries.next_entry().await? {
-        let file_name = entry.file_name();
-        let file_name_str = file_name.to_string_lossy();
-        if file_name_str.starts_with("participant-id") && file_name_str.ends_with(".bin") {
-            id_files.push(entry.path());
-        }
-    }
+    let id_files = find_files_by_pattern(ids_dir, "participant-id", ".bin").await?;
 
     if id_files.is_empty() {
         anyhow::bail!("No participant ID files found in {}", ids_dir.display());
     }
-
-    id_files.sort();
 
     // Read each file and match against current participant ID
     for (idx, id_file) in id_files.iter().enumerate() {
