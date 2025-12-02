@@ -7,38 +7,32 @@ use tokio::net::TcpListener;
 use crate::{
     config::{NetworkConfig, NodeConfig},
     noise::{Message, MessageType, NOISE_REQUEST_TIMEOUT, NoiseError, NoiseKeypair},
-    workflow::WorkflowState,
+    workflow::{WorkflowState, state::WorkflowStep},
 };
 
 /// Coordinator server that accepts connections from attestors
-pub struct NoiseServer {
+pub struct NoiseServer<S: WorkflowStep + 'static> {
     node_config: Arc<NodeConfig>,
     network_config: Arc<NetworkConfig>,
     keypair: Arc<NoiseKeypair>,
-    /// Map of participant_id -> public_key for PSK derivation
     peer_keys: HashMap<String, PublicKey>,
-    /// Workflow state tracking
-    workflow_state: Arc<WorkflowState>,
+    workflow_state: Arc<WorkflowState<S>>,
 }
 
-impl NoiseServer {
-    /// Create a new Noise server
+impl<S: WorkflowStep + 'static> NoiseServer<S> {
     pub async fn new(
         node_config: NodeConfig,
         network_config: NetworkConfig,
+        initial_step: S,
     ) -> Result<Self, NoiseError> {
-        // Load keypair
         let keypair = NoiseKeypair::from_file(&node_config.node.static_key_file).await?;
 
-        // Build peer keys map
         let mut peer_keys = HashMap::new();
         for participant in &network_config.participants {
-            // Skip self
             if participant.id == node_config.node.node_id {
                 continue;
             }
 
-            // Parse public key from hex
             let pub_key_bytes =
                 hex::decode(&participant.public_key).map_err(|_| NoiseError::InvalidMessage)?;
             let pub_key =
@@ -47,14 +41,13 @@ impl NoiseServer {
             peer_keys.insert(participant.id.clone(), pub_key);
         }
 
-        // Create workflow state with expected attestor IDs
-        let expected_attestors = network_config
+        let expected_attestors: Vec<String> = network_config
             .participants
             .iter()
             .filter(|p| p.id != node_config.node.node_id)
             .map(|p| p.id.clone())
             .collect();
-        let workflow_state = WorkflowState::new(expected_attestors);
+        let workflow_state = WorkflowState::new(initial_step, expected_attestors);
 
         Ok(Self {
             node_config: Arc::new(node_config),
@@ -65,8 +58,7 @@ impl NoiseServer {
         })
     }
 
-    /// Get the workflow state (for coordinator workflow task)
-    pub fn get_workflow_state(&self) -> Arc<WorkflowState> {
+    pub fn get_workflow_state(&self) -> Arc<WorkflowState<S>> {
         self.workflow_state.clone()
     }
 

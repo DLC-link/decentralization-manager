@@ -13,7 +13,7 @@ name = "Participant 1 (Coordinator)"
 role = "coordinator"
 address = "localhost"
 port = 9001
-public_key = "02c3e59d9e5d2a88c8a3aa11eda40cda777d128fd659db49982c06166195e6f039" # participant-1
+public_key = "02d4d7bf47a16e593681a9ec08fad01cedc9fd7e6b77c490400a5af3c704f8159e" # participant-1
 
 # Attestor - Participant 2
 [[participants]]
@@ -21,7 +21,7 @@ id = "app-provider"
 name = "Participant 2"
 address = "localhost"
 port = 9002
-public_key = "034b6179022f5c2dfeb0c8cc3902223413bdd27a5145595cb9a72000c0f5d0e425" # participant-2
+public_key = "030795ca01ba3e4566eec4e4e52f6702c32b8a1d4747c553166502fcc587a83a42" # participant-2
 
 # Attestor - Participant 3
 [[participants]]
@@ -29,7 +29,7 @@ id = "sv"
 name = "Participant 3"
 address = "localhost"
 port = 9003
-public_key = "02829a9e9e31b628d30a69f1c904a7b3be9e950c65683130ae55ae67fe8a3a41d2" # participant-3
+public_key = "025a26dbf693141ba0c803ed6c33d8769c7f8a1b4f51c70f04b829a7db63303738" # participant-3
 
 [timeouts]
 handshake_timeout_secs = 30

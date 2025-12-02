@@ -17,85 +17,137 @@ use crate::{
     utils,
 };
 
-pub use state::WorkflowState;
+pub use state::{ContractsStep, OnboardingStep, WorkflowState};
 
-/// Start the node as either coordinator or attestor
-pub async fn start_node(node_config: NodeConfig) -> Result {
-    // Load network config
-    tracing::info!("Loading network config...");
-    let network_config = node_config.load_network_config().await?;
+#[derive(Debug, Clone, Copy)]
+pub enum WorkflowType {
+    Onboarding,
+    Contracts,
+}
 
-    // Determine if we're the coordinator
-    let is_coordinator = match network_config.network.coordinator_strategy {
+async fn determine_coordinator(
+    node_config: &NodeConfig,
+    network_config: &NetworkConfig,
+) -> Result<bool> {
+    match network_config.network.coordinator_strategy {
         CoordinatorStrategy::Election => {
-            // Run leader election
             tracing::info!("Running leader election (Bully algorithm)");
             let election_result =
-                election::run_election(&network_config, &node_config.node.node_id).await?;
+                election::run_election(network_config, &node_config.node.node_id).await?;
 
             tracing::info!(
                 "Election complete: {} is the coordinator",
                 election_result.coordinator.id
             );
 
-            election_result.is_me
+            Ok(election_result.is_me)
         }
-        _ => {
-            // Use static coordinator determination (explicit or first)
-            network_config.is_coordinator(&node_config.node.node_id)?
-        }
+        _ => network_config.is_coordinator(&node_config.node.node_id),
+    }
+}
+
+pub async fn start_node(node_config: NodeConfig, workflow_type: WorkflowType) -> Result {
+    tracing::info!("Loading network config...");
+    let network_config = node_config.load_network_config().await?;
+
+    let is_coordinator = determine_coordinator(&node_config, &network_config).await?;
+    let role = if is_coordinator {
+        "COORDINATOR"
+    } else {
+        "ATTESTOR"
     };
+    tracing::info!("Starting {workflow_type:?} workflow as {role}");
 
     if is_coordinator {
-        tracing::info!("Starting as COORDINATOR");
-        start_coordinator(node_config, network_config).await
+        match workflow_type {
+            WorkflowType::Onboarding => {
+                start_onboarding_coordinator(node_config, network_config).await
+            }
+            WorkflowType::Contracts => {
+                start_contracts_coordinator(node_config, network_config).await
+            }
+        }
     } else {
-        tracing::info!("Starting as ATTESTOR");
         start_attestor(node_config, network_config).await
     }
 }
 
-/// Start node in coordinator mode (server)
-async fn start_coordinator(node_config: NodeConfig, network_config: NetworkConfig) -> Result {
+async fn start_onboarding_coordinator(
+    node_config: NodeConfig,
+    network_config: NetworkConfig,
+) -> Result {
     tracing::info!("Initializing Noise server...");
 
-    let server = NoiseServer::new(node_config.clone(), network_config.clone()).await?;
+    let server = NoiseServer::new(
+        node_config.clone(),
+        network_config.clone(),
+        OnboardingStep::WaitingForAttestors,
+    )
+    .await?;
     let server = Arc::new(server);
 
-    // Initialize directory paths
     let dirs = WorkflowDirs::new();
     dirs.create_required_dirs().await?;
 
     tracing::info!("Noise server initialized, listening for connections");
 
-    // Spawn coordinator workflow task
     let workflow_state = server.get_workflow_state();
     let node_config_clone = node_config.clone();
     let network_config_clone = network_config.clone();
     let dirs_clone = dirs.clone();
     let workflow_handle = tokio::spawn(async move {
-        tracing::info!("Coordinator workflow task started");
-        match run_coordinator_workflow(
+        run_onboarding_workflow(
             workflow_state,
             node_config_clone,
             network_config_clone,
             dirs_clone,
         )
         .await
-        {
-            Ok(_) => {
-                tracing::info!("Coordinator workflow task completed successfully");
-                Ok(())
-            }
-            Err(e) => {
-                tracing::error!("Coordinator workflow task failed: {e}");
-                tracing::error!("Error details: {e:?}");
-                Err(e)
-            }
-        }
     });
 
-    // Start server and workflow concurrently
+    run_server_with_workflow(server, workflow_handle).await
+}
+
+async fn start_contracts_coordinator(
+    node_config: NodeConfig,
+    network_config: NetworkConfig,
+) -> Result {
+    tracing::info!("Initializing Noise server...");
+
+    let server = NoiseServer::new(
+        node_config.clone(),
+        network_config.clone(),
+        ContractsStep::WaitingForAttestors,
+    )
+    .await?;
+    let server = Arc::new(server);
+
+    let dirs = WorkflowDirs::new();
+    dirs.create_required_dirs().await?;
+
+    tracing::info!("Noise server initialized, listening for connections");
+
+    let workflow_state = server.get_workflow_state();
+    let node_config_clone = node_config.clone();
+    let network_config_clone = network_config.clone();
+    let dirs_clone = dirs.clone();
+    let workflow_handle = tokio::spawn(async move {
+        run_contracts_workflow(
+            workflow_state,
+            node_config_clone,
+            network_config_clone,
+            dirs_clone,
+        )
+        .await
+    });
+
+    run_server_with_workflow(server, workflow_handle).await
+}
+
+async fn run_server_with_workflow<S: state::WorkflowStep + 'static>(
+    server: Arc<NoiseServer<S>>,
+    workflow_handle: tokio::task::JoinHandle<Result>,
+) -> Result {
     tokio::select! {
         result = server.start() => {
             result?;
@@ -106,7 +158,7 @@ async fn start_coordinator(node_config: NodeConfig, network_config: NetworkConfi
                     tracing::info!("Workflow completed successfully, shutting down");
                 }
                 Ok(Err(e)) => {
-                    tracing::error!("Workflow failed, shutting down coordinator");
+                    tracing::error!("Workflow failed: {e}");
                     anyhow::bail!("Coordinator workflow failed: {e}");
                 }
                 Err(e) => {
@@ -116,178 +168,149 @@ async fn start_coordinator(node_config: NodeConfig, network_config: NetworkConfi
             }
         }
     }
-
     Ok(())
 }
 
-/// Run the coordinator workflow, executing coordinator-only steps
-async fn run_coordinator_workflow(
-    workflow_state: Arc<WorkflowState>,
+async fn run_onboarding_workflow(
+    workflow_state: Arc<WorkflowState<OnboardingStep>>,
     node_config: NodeConfig,
     network_config: NetworkConfig,
     dirs: WorkflowDirs,
 ) -> Result {
-    use state::WorkflowStep;
-
-    // Track which steps the coordinator has already executed
     let mut coordinator_completed_steps = HashSet::new();
 
     loop {
         let current_step = workflow_state.current_step().await;
 
         match current_step {
-            WorkflowStep::WaitingForAttestors => {
-                // Wait for all attestors to connect
+            OnboardingStep::WaitingForAttestors => {
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             }
-            WorkflowStep::UploadDars => {
-                // Coordinator must also upload DARs (only once)
-                if !coordinator_completed_steps.contains(&WorkflowStep::UploadDars) {
-                    tracing::info!("Coordinator executing: Upload DARs");
-                    if let Err(e) = steps::upload_dars(&node_config, &dirs).await {
-                        tracing::error!("Coordinator failed to upload DARs: {e}");
-                        tracing::error!("Error details: {e:?}");
-                        return Err(e);
-                    }
-                    tracing::info!("Coordinator successfully uploaded DARs");
-                    coordinator_completed_steps.insert(WorkflowStep::UploadDars);
-                }
-                // Now wait for attestors to complete
-                tracing::debug!("Coordinator waiting for attestors to complete UploadDars");
-                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-            }
-            WorkflowStep::GenerateKeys => {
-                // Coordinator must also generate keys (only once)
-                if !coordinator_completed_steps.contains(&WorkflowStep::GenerateKeys) {
+            OnboardingStep::GenerateKeys => {
+                if !coordinator_completed_steps.contains(&OnboardingStep::GenerateKeys) {
                     tracing::info!("Coordinator executing: Generate keys");
-                    if let Err(e) = steps::generate_keys(&node_config, &dirs, &network_config).await
-                    {
-                        tracing::error!("Coordinator failed to generate keys: {e}");
-                        tracing::error!("Error details: {e:?}");
-                        return Err(e);
-                    }
-                    tracing::info!("Coordinator successfully generated keys");
-                    coordinator_completed_steps.insert(WorkflowStep::GenerateKeys);
+                    steps::generate_keys(&node_config, &dirs, &network_config).await?;
+                    coordinator_completed_steps.insert(OnboardingStep::GenerateKeys);
 
-                    // Wait for Canton to process namespace delegation proposals
                     tracing::info!(
                         "Waiting 3 seconds for Canton to process namespace delegations..."
                     );
                     tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
                 }
-                // Now wait for attestors to complete
-                tracing::debug!("Coordinator waiting for attestors to complete GenerateKeys");
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             }
-            WorkflowStep::CreateProposals => {
+            OnboardingStep::CreateProposals => {
                 tracing::info!("Coordinator executing: Create proposals");
-                if let Err(e) = steps::create_proposals(&node_config, &dirs, &network_config).await
-                {
-                    tracing::error!("Failed to create proposals: {e}");
-                    return Err(e);
-                }
+                steps::create_proposals(&node_config, &dirs, &network_config).await?;
                 workflow_state.advance_step().await;
             }
-            WorkflowStep::SignDns => {
-                // Attestors are signing, wait for them
+            OnboardingStep::SignDns => {
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             }
-            WorkflowStep::SubmitDns => {
+            OnboardingStep::SubmitDns => {
                 tracing::info!("Coordinator executing: Submit DNS proposals");
-
-                // Save collected DNS signatures to files
-                let attestor_data = workflow_state.get_all_attestor_data().await;
-                for (attestor_id, signature_data) in attestor_data {
-                    let file_path = dirs
-                        .dns_signed_dir
-                        .join(format!("{SIGNED_DNS_PROPOSAL_PREFIX}-{attestor_id}.bin"));
-                    tokio::fs::write(&file_path, signature_data).await?;
-                }
-                workflow_state.clear_attestor_data().await;
-
-                if let Err(e) = steps::submit_dns_proposals(&node_config, &dirs).await {
-                    tracing::error!("Failed to submit DNS proposals: {e}");
-                    return Err(e);
-                }
+                save_attestor_data(
+                    &workflow_state,
+                    &dirs.dns_signed_dir,
+                    SIGNED_DNS_PROPOSAL_PREFIX,
+                )
+                .await?;
+                steps::submit_dns_proposals(&node_config, &dirs).await?;
                 workflow_state.advance_step().await;
             }
-            WorkflowStep::SignP2p => {
-                // Attestors are signing, wait for them
+            OnboardingStep::SignP2p => {
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             }
-            WorkflowStep::SubmitFinal => {
+            OnboardingStep::SubmitFinal => {
                 tracing::info!("Coordinator executing: Submit final proposals");
-
-                // Save collected P2P signatures to files
-                let attestor_data = workflow_state.get_all_attestor_data().await;
-                for (attestor_id, signatures_data) in attestor_data {
-                    let file_path = dirs
-                        .final_signed_dir
-                        .join(format!("{SIGNED_P2P_PROPOSALS_PREFIX}-{attestor_id}.bin"));
-                    tokio::fs::write(&file_path, signatures_data).await?;
-                }
-                workflow_state.clear_attestor_data().await;
-
-                if let Err(e) =
-                    steps::submit_final_proposals(&node_config, &dirs, &network_config).await
-                {
-                    tracing::error!("Failed to submit final proposals: {e}");
-                    return Err(e);
-                }
+                save_attestor_data(
+                    &workflow_state,
+                    &dirs.final_signed_dir,
+                    SIGNED_P2P_PROPOSALS_PREFIX,
+                )
+                .await?;
+                steps::submit_final_proposals(&node_config, &dirs, &network_config).await?;
                 workflow_state.advance_step().await;
             }
-            WorkflowStep::PrepareSubmissions => {
-                tracing::info!("Coordinator executing: Prepare submissions");
-                if let Err(e) =
-                    steps::prepare_submissions(&node_config, &dirs, &network_config).await
-                {
-                    tracing::error!("Failed to prepare submissions: {e}");
-                    return Err(e);
-                }
-                workflow_state.advance_step().await;
-            }
-            WorkflowStep::SignSubmissions => {
-                // Coordinator also needs to sign since it has keys in P2P mapping
-                tracing::info!("Coordinator executing: Sign submissions");
-                steps::sign_submissions(&node_config, &dirs)
-                    .await
-                    .context("Failed to sign submissions")?;
-
-                // Attestors are also signing, wait for them
-                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-            }
-            WorkflowStep::ExecuteSubmissions => {
-                tracing::info!("Coordinator executing: Execute submissions");
-
-                // Save collected submission signatures to files
-                let attestor_data = workflow_state.get_all_attestor_data().await;
-                for (attestor_id, signatures_data) in attestor_data {
-                    let file_path = dirs
-                        .workflow_dir
-                        .join(format!("{SUBMISSION_SIGNATURES_PREFIX}-{attestor_id}.bin"));
-                    tokio::fs::write(&file_path, signatures_data).await?;
-                }
-                workflow_state.clear_attestor_data().await;
-
-                if let Err(e) =
-                    steps::execute_submissions(&node_config, &dirs, &network_config).await
-                {
-                    tracing::error!("Failed to execute submissions: {e}");
-                    return Err(e);
-                }
-                workflow_state.advance_step().await;
-            }
-            WorkflowStep::Complete => {
-                tracing::info!("Coordinator workflow complete!");
-                tracing::info!("Waiting for attestors to receive disconnect command...");
-                // Give attestors time to poll and receive the Disconnect command
-                // before we shut down the server
+            OnboardingStep::Complete => {
+                tracing::info!("Onboarding workflow complete!");
                 tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                 break;
             }
         }
     }
 
+    Ok(())
+}
+
+async fn run_contracts_workflow(
+    workflow_state: Arc<WorkflowState<ContractsStep>>,
+    node_config: NodeConfig,
+    network_config: NetworkConfig,
+    dirs: WorkflowDirs,
+) -> Result {
+    let mut coordinator_completed_steps = HashSet::new();
+
+    loop {
+        let current_step = workflow_state.current_step().await;
+
+        match current_step {
+            ContractsStep::WaitingForAttestors => {
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            }
+            ContractsStep::UploadDars => {
+                if !coordinator_completed_steps.contains(&ContractsStep::UploadDars) {
+                    tracing::info!("Coordinator executing: Upload DARs");
+                    steps::upload_dars(&node_config, &dirs).await?;
+                    coordinator_completed_steps.insert(ContractsStep::UploadDars);
+                }
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            }
+            ContractsStep::PrepareSubmissions => {
+                tracing::info!("Coordinator executing: Prepare submissions");
+                steps::prepare_submissions(&node_config, &dirs, &network_config).await?;
+                workflow_state.advance_step().await;
+            }
+            ContractsStep::SignSubmissions => {
+                tracing::info!("Coordinator executing: Sign submissions");
+                steps::sign_submissions(&node_config, &dirs)
+                    .await
+                    .context("Failed to sign submissions")?;
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            }
+            ContractsStep::ExecuteSubmissions => {
+                tracing::info!("Coordinator executing: Execute submissions");
+                save_attestor_data(
+                    &workflow_state,
+                    &dirs.workflow_dir,
+                    SUBMISSION_SIGNATURES_PREFIX,
+                )
+                .await?;
+                steps::execute_submissions(&node_config, &dirs, &network_config).await?;
+                workflow_state.advance_step().await;
+            }
+            ContractsStep::Complete => {
+                tracing::info!("Contracts workflow complete!");
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn save_attestor_data<S: state::WorkflowStep + 'static>(
+    workflow_state: &WorkflowState<S>,
+    dir: &std::path::Path,
+    prefix: &str,
+) -> Result<()> {
+    let attestor_data = workflow_state.get_all_attestor_data().await;
+    for (attestor_id, data) in attestor_data {
+        let file_path = dir.join(format!("{prefix}-{attestor_id}.bin"));
+        tokio::fs::write(&file_path, data).await?;
+    }
+    workflow_state.clear_attestor_data().await;
     Ok(())
 }
 

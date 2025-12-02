@@ -6,12 +6,7 @@ use tracing_subscriber::{
 };
 
 use cli::{Cli, Commands, Parser};
-use dec_party_onboarding::{
-    config::NodeConfig,
-    dirs::WorkflowDirs,
-    error::Result,
-    workflow::{self, steps},
-};
+use dec_party_onboarding::{config::NodeConfig, error::Result, workflow};
 
 #[tokio::main]
 async fn main() -> Result {
@@ -25,52 +20,25 @@ async fn main() -> Result {
 
     let args = Cli::parse();
 
-    // Handle keygen command early (doesn't require config)
-    if let Commands::Keygen { ref output } = args.command {
-        dec_party_onboarding::noise::generate_keypair(output).await?;
-        return Ok(());
-    }
-
-    // Load configuration (required for all other commands)
-    let node_config = if let Some(config_path) = &args.config {
-        tracing::info!("Loading configuration from: {}", config_path.display());
-        NodeConfig::from_file(config_path).await?
-    } else {
-        anyhow::bail!("Configuration file is required. Use -c <config-file>");
-    };
-
-    // Load network configuration
-    let network_config = node_config.load_network_config().await?;
-
-    // Initialize directory paths
-    let dirs = WorkflowDirs::new();
-    dirs.create_required_dirs().await?;
-
-    // Execute the requested command
     match args.command {
-        Commands::Keygen { .. } => unreachable!("Keygen handled earlier"),
-        Commands::Start => {
-            workflow::start_node(node_config).await?;
+        Commands::Keygen { ref output } => {
+            dec_party_onboarding::noise::generate_keypair(output).await?;
         }
-        Commands::UploadDars => steps::upload_dars(&node_config, &dirs).await?,
-        Commands::GenerateKeys => {
-            steps::generate_keys(&node_config, &dirs, &network_config).await?
-        }
-        Commands::CreateProposals => {
-            steps::create_proposals(&node_config, &dirs, &network_config).await?
-        }
-        Commands::SignDnsProposals => steps::sign_dns_proposals(&node_config, &dirs).await?,
-        Commands::SubmitDnsProposals => steps::submit_dns_proposals(&node_config, &dirs).await?,
-        Commands::SignP2pProposals => steps::sign_p2p_proposals(&node_config, &dirs).await?,
-        Commands::SubmitFinalProposals => {
-            steps::submit_final_proposals(&node_config, &dirs, &network_config).await?
-        }
-        Commands::PrepareSubmissions => {
-            steps::prepare_submissions(&node_config, &dirs, &network_config).await?
-        }
-        Commands::SignSubmissions => steps::sign_submissions(&node_config, &dirs).await?,
-        Commands::ExecuteSubmissions => {
-            steps::execute_submissions(&node_config, &dirs, &network_config).await?
+        Commands::Onboarding | Commands::Contracts => {
+            let node_config = args.config.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("Configuration file is required. Use -c <config-file>")
+            })?;
+
+            tracing::info!("Loading configuration from: {}", node_config.display());
+            let config = NodeConfig::from_file(node_config).await?;
+
+            let workflow_type = match args.command {
+                Commands::Onboarding => workflow::WorkflowType::Onboarding,
+                Commands::Contracts => workflow::WorkflowType::Contracts,
+                _ => unreachable!(),
+            };
+
+            workflow::start_node(config, workflow_type).await?;
         }
     }
 
