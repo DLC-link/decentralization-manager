@@ -74,7 +74,14 @@ async fn start_coordinator(node_config: NodeConfig, network_config: NetworkConfi
     let dirs_clone = dirs.clone();
     let workflow_handle = tokio::spawn(async move {
         tracing::info!("Coordinator workflow task started");
-        match run_coordinator_workflow(workflow_state, node_config_clone, network_config_clone, dirs_clone).await {
+        match run_coordinator_workflow(
+            workflow_state,
+            node_config_clone,
+            network_config_clone,
+            dirs_clone,
+        )
+        .await
+        {
             Ok(_) => {
                 tracing::info!("Coordinator workflow task completed successfully");
                 Ok(())

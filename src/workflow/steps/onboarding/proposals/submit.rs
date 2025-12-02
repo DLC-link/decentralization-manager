@@ -1,10 +1,21 @@
 use tokio::{fs, time};
 
+use canton_proto_rs::com::digitalasset::canton::{
+    protocol::v30::{DecentralizedNamespaceDefinition, SignedTopologyTransaction},
+    topology::admin::v30::{
+        AddTransactionsRequest, BaseQuery, ListDecentralizedNamespaceDefinitionRequest,
+        ListPartyToParticipantRequest, StoreId, Synchronizer, base_query, store_id, synchronizer,
+        topology_manager_read_service_client::TopologyManagerReadServiceClient,
+        topology_manager_write_service_client::TopologyManagerWriteServiceClient,
+    },
+};
+
 use crate::{
     config::{NetworkConfig, NodeConfig},
     consts::{
-        NAMESPACE_DEF_FILENAME, P2P_PROTO_FILENAME, SIGNED_P2P_PROPOSALS_PREFIX,
-        TOPOLOGY_PROPAGATION_DELAY_SECS, TOPOLOGY_RETRY_DELAY_SECS, TOPOLOGY_RETRY_MAX_ATTEMPTS,
+        DNS_PROTO_FILENAME, NAMESPACE_DEF_FILENAME, P2P_PROTO_FILENAME, SIGNED_DNS_PROPOSAL_PREFIX,
+        SIGNED_P2P_PROPOSALS_PREFIX, TOPOLOGY_PROPAGATION_DELAY_SECS, TOPOLOGY_RETRY_DELAY_SECS,
+        TOPOLOGY_RETRY_MAX_ATTEMPTS,
     },
     dirs::WorkflowDirs,
     error::Result,
@@ -20,6 +31,153 @@ use crate::{
     utils,
 };
 
+/// Aggregate and submit DNS proposals
+///
+/// Corresponds to: 02a_SubmitProposals.sc
+///
+/// This step must be run once by the coordinator after all attestors have signed the DNS proposal.
+/// It aggregates all signatures and submits the fully-signed proposal to Canton.
+pub async fn submit_dns_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
+    tracing::info!("Submitting DNS proposals...");
+
+    let synchronizer_id = utils::get_synchronizer_id(config).await?;
+    tracing::debug!("Using synchronizer ID: {synchronizer_id}");
+
+    let dns_file = dirs.dns_proposals_dir.join(DNS_PROTO_FILENAME);
+    tracing::info!("Reading original DNS proposal from {}", dns_file.display());
+    let mut dns_transaction: SignedTopologyTransaction =
+        utils::read_first_message_from_file(&dns_file).await?;
+
+    let signed_proposals_dir = &dirs.dns_signed_dir;
+    let mut signed_files = Vec::new();
+    let mut dir_entries = fs::read_dir(&signed_proposals_dir).await?;
+
+    while let Some(entry) = dir_entries.next_entry().await? {
+        let file_name = entry.file_name();
+        let file_name_str = file_name.to_string_lossy();
+        if file_name_str.starts_with(SIGNED_DNS_PROPOSAL_PREFIX) && file_name_str.ends_with(".bin")
+        {
+            signed_files.push(entry.path());
+        }
+    }
+
+    signed_files.sort();
+    tracing::info!("Found {} signed DNS proposal files", signed_files.len());
+
+    for signed_file in &signed_files {
+        tracing::info!("Reading signatures from {}", signed_file.display());
+        let signed_transactions: Vec<SignedTopologyTransaction> =
+            utils::read_all_messages_from_file(signed_file).await?;
+
+        for signed_tx in signed_transactions {
+            dns_transaction
+                .signatures
+                .extend(signed_tx.signatures.clone());
+        }
+    }
+
+    tracing::info!(
+        "Aggregated DNS proposal has {} signature(s)",
+        dns_transaction.signatures.len()
+    );
+
+    tracing::info!("Submitting aggregated DNS proposal...");
+    let mut topology_write_client =
+        TopologyManagerWriteServiceClient::connect(config.admin_api_url()).await?;
+
+    let request = tonic::Request::new(AddTransactionsRequest {
+        transactions: vec![dns_transaction],
+        force_changes: vec![],
+        store: Some(StoreId {
+            store: Some(store_id::Store::Synchronizer(Synchronizer {
+                kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.clone())),
+            })),
+        }),
+        wait_to_become_effective: None,
+    });
+
+    topology_write_client.add_transactions(request).await?;
+    tracing::info!("DNS proposal submitted to topology");
+
+    let namespace_def_file = dirs.dns_submission_dir.join(NAMESPACE_DEF_FILENAME);
+    tracing::info!(
+        "Reading namespace definition from {}",
+        namespace_def_file.display()
+    );
+    let namespace_def: DecentralizedNamespaceDefinition =
+        utils::read_first_message_from_file(&namespace_def_file).await?;
+
+    tracing::info!(
+        "Waiting for DNS to appear in topology for namespace {}...",
+        namespace_def.decentralized_namespace
+    );
+    wait_for_dns_in_topology(
+        config,
+        &synchronizer_id,
+        &namespace_def.decentralized_namespace,
+    )
+    .await?;
+
+    tracing::info!("DNS proposal submitted and confirmed in topology successfully");
+    Ok(())
+}
+
+/// Wait for DNS to appear in topology by polling
+async fn wait_for_dns_in_topology(
+    config: &NodeConfig,
+    synchronizer_id: &str,
+    namespace: &str,
+) -> Result {
+    let mut topology_read_client =
+        TopologyManagerReadServiceClient::connect(config.admin_api_url()).await?;
+
+    let max_attempts = TOPOLOGY_RETRY_MAX_ATTEMPTS;
+    let retry_delay = time::Duration::from_secs(TOPOLOGY_RETRY_DELAY_SECS);
+
+    for attempt in 1..=max_attempts {
+        let request = tonic::Request::new(ListDecentralizedNamespaceDefinitionRequest {
+            base_query: Some(BaseQuery {
+                store: Some(StoreId {
+                    store: Some(store_id::Store::Synchronizer(Synchronizer {
+                        kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.to_string())),
+                    })),
+                }),
+                proposals: false,
+                operation: 0,
+                time_query: Some(base_query::TimeQuery::HeadState(())),
+                filter_signed_key: String::new(),
+                protocol_version: None,
+            }),
+            filter_namespace: namespace.to_string(),
+        });
+
+        let response = topology_read_client
+            .list_decentralized_namespace_definition(request)
+            .await?
+            .into_inner();
+
+        if !response.results.is_empty() {
+            tracing::info!("DNS found in topology after {attempt} attempt(s)");
+            return Ok(());
+        }
+
+        if attempt < max_attempts {
+            tracing::debug!(
+                "DNS not yet in topology, attempt {}/{}, retrying in {:?}...",
+                attempt,
+                max_attempts,
+                retry_delay
+            );
+            time::sleep(retry_delay).await;
+        }
+    }
+
+    anyhow::bail!(
+        "DNS did not appear in topology after {} attempts",
+        max_attempts
+    )
+}
+
 /// Aggregate and submit P2P proposals
 ///
 /// Corresponds to: 03a_SubmitFinalProposals.sc
@@ -29,11 +187,6 @@ use crate::{
 ///
 /// This step must be run once by the coordinator after all attestors have signed the P2P proposals.
 /// It aggregates all signatures and submits the fully-signed proposal to Canton.
-///
-/// # Arguments
-/// * `config` - Configuration with Canton connection details
-/// * `dirs` - WorkflowDirs containing all directory paths
-/// * `network_config` - Network configuration with application settings
 pub async fn submit_final_proposals(
     config: &NodeConfig,
     dirs: &WorkflowDirs,
@@ -43,18 +196,14 @@ pub async fn submit_final_proposals(
 
     let party_id_prefix = &network_config.application.party_id_prefix;
 
-    // Step 1: Get synchronizer ID
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
     tracing::debug!("Using synchronizer ID: {synchronizer_id}");
 
-    // Step 2: Read the original P2P proposal
-    // Canton 3.4+: Signing keys embedded in P2P mappings
     let p2p_file = dirs.p2p_proposals_dir.join(P2P_PROTO_FILENAME);
     tracing::info!("Reading original P2P proposal from {}", p2p_file.display());
     let mut p2p_transaction: SignedTopologyTransaction =
         utils::read_first_message_from_file(&p2p_file).await?;
 
-    // Step 3: Discover and read all signed P2P proposals
     let signed_proposals_dir = &dirs.final_signed_dir;
     let mut signed_files = Vec::new();
     let mut dir_entries = fs::read_dir(&signed_proposals_dir).await?;
@@ -71,8 +220,6 @@ pub async fn submit_final_proposals(
     signed_files.sort();
     tracing::info!("Found {} signed P2P proposal files", signed_files.len());
 
-    // Step 4: Aggregate signatures for P2P
-    // Canton 3.4+: Each file contains 1 transaction (P2P with embedded signing keys)
     for signed_file in &signed_files {
         tracing::info!("Reading signatures from {}", signed_file.display());
         let signed_transactions: Vec<SignedTopologyTransaction> =
@@ -86,7 +233,6 @@ pub async fn submit_final_proposals(
             );
         }
 
-        // Aggregate P2P signatures
         p2p_transaction
             .signatures
             .extend(signed_transactions[0].signatures.clone());
@@ -97,7 +243,6 @@ pub async fn submit_final_proposals(
         p2p_transaction.signatures.len()
     );
 
-    // Step 5: Read namespace definition and construct party ID
     let namespace_file = dirs.dns_submission_dir.join(NAMESPACE_DEF_FILENAME);
     tracing::info!(
         "Reading namespace definition from {}",
@@ -112,8 +257,6 @@ pub async fn submit_final_proposals(
     );
     tracing::info!("Constructed party ID: {party_id}");
 
-    // Step 6: Submit P2P proposal with embedded signing keys
-    // Canton 3.4+: Signing keys are now part of P2P proposal
     tracing::info!("Submitting aggregated P2P proposal...");
     let mut topology_write_client =
         TopologyManagerWriteServiceClient::connect(config.admin_api_url()).await?;
@@ -132,17 +275,11 @@ pub async fn submit_final_proposals(
     topology_write_client.add_transactions(request).await?;
     tracing::info!("P2P proposal submitted to topology");
 
-    // Step 7: Wait for P2P to appear in topology and become effective
     tracing::info!("Waiting for P2P to appear in topology...");
     let effective_time = wait_for_p2p_in_topology(config, &synchronizer_id, &party_id).await?;
 
     tracing::info!("P2P proposal submitted and confirmed in topology successfully");
 
-    // Step 8: Wait for topology to become effective
-    // Canton topology changes have an "effective time" = sequencing time + topology change delay (ε)
-    // We must wait until this effective time has passed before submitting transactions,
-    // otherwise the mediator will reject them because its topology snapshot hasn't reached
-    // the effective time yet.
     let now = std::time::SystemTime::now();
     let effective_system_time = std::time::UNIX_EPOCH
         + std::time::Duration::from_secs(effective_time.seconds as u64)
@@ -158,11 +295,6 @@ pub async fn submit_final_proposals(
         tracing::info!("P2P mapping is already effective");
     }
 
-    // Step 9: Additional wait for topology propagation
-    // Canton 3.4: Even after topology becomes effective, the sequencer's topology state
-    // needs time to propagate and update its "known until" timestamp. Without this wait,
-    // transactions may be rejected with LOCAL_VERDICT_TIMEOUT because the sequencer's
-    // topology knowledge lags behind the effective time.
     let propagation_delay = time::Duration::from_secs(TOPOLOGY_PROPAGATION_DELAY_SECS);
     tracing::info!("Waiting {propagation_delay:?} for Canton to propagate topology updates...");
     time::sleep(propagation_delay).await;
@@ -193,7 +325,7 @@ async fn wait_for_p2p_in_topology(
                     })),
                 }),
                 proposals: false,
-                operation: 0, // TOPOLOGY_CHANGE_OP_UNSPECIFIED
+                operation: 0,
                 time_query: Some(base_query::TimeQuery::HeadState(())),
                 filter_signed_key: String::new(),
                 protocol_version: None,
@@ -210,7 +342,6 @@ async fn wait_for_p2p_in_topology(
         if let Some(result) = response.results.first() {
             tracing::info!("P2P found in topology after {attempt} attempt(s)");
 
-            // Extract the effective time (valid_from) from the topology result
             if let Some(context) = &result.context {
                 if let Some(valid_from) = &context.valid_from {
                     tracing::debug!(

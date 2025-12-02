@@ -1,6 +1,20 @@
 use tokio::fs;
 use uuid::Uuid;
 
+use canton_proto_rs::com::{
+    daml::ledger::api::v2::{
+        CumulativeFilter, EventFormat, Filters, GetActiveContractsRequest, GetLedgerEndRequest,
+        Signature, WildcardFilter, cumulative_filter,
+        interactive::{
+            ExecuteSubmissionAndWaitForTransactionRequest, PartySignatures,
+            PrepareSubmissionResponse, SinglePartySignatures,
+        },
+    },
+    digitalasset::canton::{
+        crypto::v30::Signature as CantonSignature, protocol::v30::DecentralizedNamespaceDefinition,
+    },
+};
+
 use crate::{
     config::{NetworkConfig, NodeConfig},
     consts::{

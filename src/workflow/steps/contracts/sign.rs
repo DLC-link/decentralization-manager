@@ -174,10 +174,7 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
     for chunk_start in (0..dump_len).step_by(32) {
         let chunk_end = (chunk_start + 32).min(dump_len);
         let chunk = &exported_key_data[chunk_start..chunk_end];
-        tracing::debug!(
-            "  [{chunk_start:03}-{:03}]: {chunk:02x?}",
-            chunk_end - 1,
-        );
+        tracing::debug!("  [{chunk_start:03}-{:03}]: {chunk:02x?}", chunk_end - 1,);
     }
 
     // Strategy: Try ALL possible 32-byte sequences and test each one
@@ -302,7 +299,10 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
     let verifying_key = signing_key.verifying_key();
     let verifying_key_bytes = verifying_key.to_bytes();
 
-    tracing::debug!("Verifying key (raw 32 bytes): {:02x?}", &verifying_key_bytes);
+    tracing::debug!(
+        "Verifying key (raw 32 bytes): {:02x?}",
+        &verifying_key_bytes
+    );
     tracing::debug!(
         "Expected Canton key (raw): {:02x?}",
         &expected_raw_public_key[..32.min(expected_raw_public_key.len())]
