@@ -13,10 +13,6 @@ use dec_party_onboarding::{
     workflow::{self, steps},
 };
 
-use cli::{Cli, Commands, Parser};
-
-use grpc_test::{dirs::WorkflowDirs, error::Result, steps};
-
 #[tokio::main]
 async fn main() -> Result {
     let filter = EnvFilter::builder()
