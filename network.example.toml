@@ -48,3 +48,37 @@ handshake_timeout_secs = 30
 message_timeout_secs = 120
 connection_retry_attempts = 3
 connection_retry_delay_secs = 5
+
+# Application-specific configuration
+[application]
+# Party ID prefix used for constructing decentralized party identifiers
+# Format: "{party_id_prefix}::<namespace>"
+party_id_prefix = "cbtc-network"
+
+# Name prefix for namespace signing keys
+namespace_key_name = "cbtc-network-namespace"
+
+# Name prefix for DAML transaction signing keys
+daml_key_name = "cbtc-network-daml-transactions"
+
+# Party hint for operator party allocation (default: "operator")
+operator_party_hint = "operator"
+
+# Optional: Operator party ID (if not provided, will be allocated dynamically)
+# operator_party = "DSO::1220..."
+
+# Contract definitions to create after decentralized party setup
+# Example contract definition:
+# [[application.contracts]]
+# id = "create-govR"
+# name = "CBTCGovernanceRules"
+# package_id = "#cbtc-governance"
+# module_name = "CBTC.Governance"
+# entity_name = "CBTCGovernanceRules"
+# fields = [
+#     { type = "decentralized_party" },
+#     { type = "operator_party" },
+#     { type = "instrument", id = "CBTC" },
+#     { type = "record", fields = [{ type = "attestors_set" }] },
+#     { type = "optional", inner = { type = "governance_threshold" } },
+# ]

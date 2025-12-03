@@ -1,167 +1,230 @@
 flowchart TD
-    Start([Start: Multi-Party Decentralized Setup]) --> NoiseSetup[Noise Protocol: Peer Discovery & Handshake]
+    Start([Start]) --> ChooseWorkflow{Choose Workflow}
 
-    NoiseSetup --> Connect1[Coordinator establishes<br/>Noise channel with Attestor 1]
-    NoiseSetup --> Connect2[Coordinator establishes<br/>Noise channel with Attestor 2]
-    NoiseSetup --> Connect3[Coordinator establishes<br/>Noise channel with Attestor 3+]
+    ChooseWorkflow -->|onboarding| OnboardingStart[Onboarding Workflow:<br/>Create Decentralized Party]
+    ChooseWorkflow -->|contracts| ContractsStart[Contracts Workflow:<br/>Deploy Governance Contracts]
 
-    Connect1 --> AuthPeers{All Peers<br/>Authenticated?}
-    Connect2 --> AuthPeers
-    Connect3 --> AuthPeers
+    %% ==================== ONBOARDING WORKFLOW ====================
 
-    AuthPeers -->|Yes| Phase1[Phase 1: Setup & Key Generation]
-    AuthPeers -->|No| NoiseSetup
+    OnboardingStart --> OB_NoiseSetup[Noise Protocol: Peer Discovery & Handshake]
 
-    Phase1 --> Cmd1[Coordinator broadcasts via Noise:<br/>COMMAND: Upload DARs]
+    OB_NoiseSetup --> OB_Connect1[Coordinator establishes<br/>Noise channel with Attestor 1]
+    OB_NoiseSetup --> OB_Connect2[Coordinator establishes<br/>Noise channel with Attestor 2]
+    OB_NoiseSetup --> OB_ConnectN[Coordinator establishes<br/>Noise channel with Attestor N]
 
-    Cmd1 --> Step1_0A[Attestor 1: Upload DARs<br/>Send ACK to Coordinator]
-    Cmd1 --> Step1_0B[Attestor 2: Upload DARs<br/>Send ACK to Coordinator]
-    Cmd1 --> Step1_0C[Attestor 3+: Upload DARs<br/>Send ACK to Coordinator]
+    OB_Connect1 --> OB_AuthPeers{All Peers<br/>Authenticated?}
+    OB_Connect2 --> OB_AuthPeers
+    OB_ConnectN --> OB_AuthPeers
 
-    Step1_0A --> Cmd2[Coordinator receives all ACKs<br/>Broadcasts via Noise:<br/>COMMAND: Generate Keys]
-    Step1_0B --> Cmd2
-    Step1_0C --> Cmd2
+    OB_AuthPeers -->|Yes| OB_Phase1[Phase 1: Key Generation]
+    OB_AuthPeers -->|No| OB_NoiseSetup
 
-    Cmd2 --> Step1_1A[Attestor 1: Generate Keys<br/>Output: keys + participant ID]
-    Cmd2 --> Step1_1B[Attestor 2: Generate Keys<br/>Output: keys + participant ID]
-    Cmd2 --> Step1_1C[Attestor 3+: Generate Keys<br/>Output: keys + participant ID]
+    %% Phase 1: Generate Keys
+    OB_Phase1 --> OB_Cmd1[Coordinator broadcasts via Noise:<br/>COMMAND: GenerateKeys]
 
-    Step1_1A --> Send1A[Attestor 1 sends via Noise:<br/>attestor-public-keys.bin<br/>participant-id.bin]
-    Step1_1B --> Send1B[Attestor 2 sends via Noise:<br/>attestor-public-keys.bin<br/>participant-id.bin]
-    Step1_1C --> Send1C[Attestor 3+ sends via Noise:<br/>attestor-public-keys.bin<br/>participant-id.bin]
+    OB_Cmd1 --> OB_GenKeys1[Attestor 1: Generate Keys<br/>namespace + DAML keys]
+    OB_Cmd1 --> OB_GenKeys2[Attestor 2: Generate Keys<br/>namespace + DAML keys]
+    OB_Cmd1 --> OB_GenKeysN[Attestor N: Generate Keys<br/>namespace + DAML keys]
 
-    Send1A --> Collect1{Coordinator receives<br/>all keys & IDs via Noise}
-    Send1B --> Collect1
-    Send1C --> Collect1
+    OB_GenKeys1 --> OB_SendKeys1[Attestor 1 sends via Noise:<br/>attestor-public-keys.bin<br/>participant-id.bin]
+    OB_GenKeys2 --> OB_SendKeys2[Attestor 2 sends via Noise:<br/>attestor-public-keys.bin<br/>participant-id.bin]
+    OB_GenKeysN --> OB_SendKeysN[Attestor N sends via Noise:<br/>attestor-public-keys.bin<br/>participant-id.bin]
 
-    Collect1 --> Phase2[Phase 2: Proposal Creation]
+    OB_SendKeys1 --> OB_CollectKeys{Coordinator receives<br/>all keys via Noise}
+    OB_SendKeys2 --> OB_CollectKeys
+    OB_SendKeysN --> OB_CollectKeys
 
-    Phase2 --> Step1a[Coordinator: Create Proposals<br/>DNS, P2P proposals<br/>(Canton 3.4+: keys in P2P)]
+    %% Phase 2: Create Proposals (Coordinator only)
+    OB_CollectKeys --> OB_Phase2[Phase 2: Proposal Creation]
+    OB_Phase2 --> OB_CreateProposals[Coordinator: Create Proposals<br/>DNS + P2P proposals<br/>Canton 3.4+: keys embedded in P2P]
 
-    Step1a --> Dist1[Coordinator distributes via Noise:<br/>dns_proto.bin to all attestors]
+    %% Phase 3: Sign DNS
+    OB_CreateProposals --> OB_Phase3[Phase 3: DNS Signing]
+    OB_Phase3 --> OB_DistDns[Coordinator distributes via Noise:<br/>dns_proto.bin to all attestors]
 
-    Dist1 --> Phase3[Phase 3: Topology Signing & Submission]
+    OB_DistDns --> OB_SignDns1[Attestor 1: Sign DNS Proposal]
+    OB_DistDns --> OB_SignDns2[Attestor 2: Sign DNS Proposal]
+    OB_DistDns --> OB_SignDnsN[Attestor N: Sign DNS Proposal]
 
-    Phase3 --> Step2A[Attestor 1: Sign DNS Proposal]
-    Phase3 --> Step2B[Attestor 2: Sign DNS Proposal]
-    Phase3 --> Step2C[Attestor 3+: Sign DNS Proposal]
+    OB_SignDns1 --> OB_SendDns1[Attestor 1 sends via Noise:<br/>signed-dns-proposal.bin]
+    OB_SignDns2 --> OB_SendDns2[Attestor 2 sends via Noise:<br/>signed-dns-proposal.bin]
+    OB_SignDnsN --> OB_SendDnsN[Attestor N sends via Noise:<br/>signed-dns-proposal.bin]
 
-    Step2A --> Send2A[Attestor 1 sends via Noise:<br/>signed-dns-proposal-1.bin]
-    Step2B --> Send2B[Attestor 2 sends via Noise:<br/>signed-dns-proposal-2.bin]
-    Step2C --> Send2C[Attestor 3+ sends via Noise:<br/>signed-dns-proposal-3.bin]
+    OB_SendDns1 --> OB_CollectDns{Coordinator receives<br/>all DNS signatures}
+    OB_SendDns2 --> OB_CollectDns
+    OB_SendDnsN --> OB_CollectDns
 
-    Send2A --> Collect2{Coordinator receives<br/>all DNS signatures via Noise}
-    Send2B --> Collect2
-    Send2C --> Collect2
+    %% Submit DNS (Coordinator only)
+    OB_CollectDns --> OB_SubmitDns[Coordinator: Submit DNS Proposal<br/>Aggregate & submit to Canton]
 
-    Collect2 --> Step2a[Coordinator: Submit DNS Proposal<br/>Aggregate & submit to Canton<br/>Wait for propagation]
+    %% Phase 4: Sign P2P
+    OB_SubmitDns --> OB_Phase4[Phase 4: P2P Signing]
+    OB_Phase4 --> OB_DistP2p[Coordinator distributes via Noise:<br/>p2p_proto.bin to all attestors]
 
-    Step2a --> Notify1[Coordinator broadcasts via Noise:<br/>STATUS: DNS submitted successfully]
+    OB_DistP2p --> OB_SignP2p1[Attestor 1: Sign P2P Proposals]
+    OB_DistP2p --> OB_SignP2p2[Attestor 2: Sign P2P Proposals]
+    OB_DistP2p --> OB_SignP2pN[Attestor N: Sign P2P Proposals]
 
-    Notify1 --> Dist2[Coordinator distributes via Noise:<br/>p2p_proto.bin<br/>(Canton 3.4+: PTK deprecated)]
+    OB_SignP2p1 --> OB_SendP2p1[Attestor 1 sends via Noise:<br/>signed-p2p-proposals.bin]
+    OB_SignP2p2 --> OB_SendP2p2[Attestor 2 sends via Noise:<br/>signed-p2p-proposals.bin]
+    OB_SignP2pN --> OB_SendP2pN[Attestor N sends via Noise:<br/>signed-p2p-proposals.bin]
 
-    Dist2 --> Step3A[Attestor 1: Sign P2P Proposals]
-    Dist2 --> Step3B[Attestor 2: Sign P2P Proposals]
-    Dist2 --> Step3C[Attestor 3+: Sign P2P Proposals]
+    OB_SendP2p1 --> OB_CollectP2p{Coordinator receives<br/>all P2P signatures}
+    OB_SendP2p2 --> OB_CollectP2p
+    OB_SendP2pN --> OB_CollectP2p
 
-    Step3A --> Send3A[Attestor 1 sends via Noise:<br/>signed-p2p-ptk-proposals-1.bin]
-    Step3B --> Send3B[Attestor 2 sends via Noise:<br/>signed-p2p-ptk-proposals-2.bin]
-    Step3C --> Send3C[Attestor 3+ sends via Noise:<br/>signed-p2p-ptk-proposals-3.bin]
+    %% Submit Final (Coordinator only)
+    OB_CollectP2p --> OB_SubmitFinal[Coordinator: Submit Final Proposals<br/>Aggregate & submit P2P to Canton]
 
-    Send3A --> Collect3{Coordinator receives<br/>all P2P signatures via Noise}
-    Send3B --> Collect3
-    Send3C --> Collect3
+    OB_SubmitFinal --> OB_Disconnect[Coordinator broadcasts:<br/>DISCONNECT]
+    OB_Disconnect --> OB_Complete([Onboarding Complete:<br/>Decentralized Party Created])
 
-    Collect3 --> Step3a[Coordinator: Submit Final Proposals<br/>Aggregate & submit P2P<br/>Wait for propagation]
+    %% ==================== CONTRACTS WORKFLOW ====================
 
-    Step3a --> Notify2[Coordinator broadcasts via Noise:<br/>STATUS: Topology fully configured]
+    ContractsStart --> CT_NoiseSetup[Noise Protocol: Peer Discovery & Handshake]
 
-    Notify2 --> Phase4[Phase 4: Ledger Submission Preparation]
+    CT_NoiseSetup --> CT_Connect1[Coordinator establishes<br/>Noise channel with Attestor 1]
+    CT_NoiseSetup --> CT_Connect2[Coordinator establishes<br/>Noise channel with Attestor 2]
+    CT_NoiseSetup --> CT_ConnectN[Coordinator establishes<br/>Noise channel with Attestor N]
 
-    Phase4 --> Step3b[Coordinator: Prepare Submissions<br/>3 prepared submissions:<br/>1. CBTCGovernanceRules<br/>2. CBTCDepositAccountRules<br/>3. CBTCWithdrawAccountRules]
+    CT_Connect1 --> CT_AuthPeers{All Peers<br/>Authenticated?}
+    CT_Connect2 --> CT_AuthPeers
+    CT_ConnectN --> CT_AuthPeers
 
-    Step3b --> Dist3[Coordinator distributes via Noise:<br/>prepared-submission-1/2/3.bin]
+    CT_AuthPeers -->|Yes| CT_Phase1[Phase 1: DAR Upload]
+    CT_AuthPeers -->|No| CT_NoiseSetup
 
-    Dist3 --> Phase5[Phase 5: Ledger Signing & Execution]
+    %% Phase 1: Upload DARs
+    CT_Phase1 --> CT_Cmd1[Coordinator broadcasts via Noise:<br/>COMMAND: UploadDars]
 
-    Phase5 --> Step4A[Attestor 1: Sign Submissions<br/>Sign 3 submission hashes]
-    Phase5 --> Step4B[Attestor 2: Sign Submissions<br/>Sign 3 submission hashes]
-    Phase5 --> Step4C[Attestor 3+: Sign Submissions<br/>Sign 3 submission hashes]
+    CT_Cmd1 --> CT_Upload1[Attestor 1: Upload DARs<br/>from dars/ directory]
+    CT_Cmd1 --> CT_Upload2[Attestor 2: Upload DARs<br/>from dars/ directory]
+    CT_Cmd1 --> CT_UploadN[Attestor N: Upload DARs<br/>from dars/ directory]
 
-    Step4A --> Send4A[Attestor 1 sends via Noise:<br/>submission-signatures-1.bin]
-    Step4B --> Send4B[Attestor 2 sends via Noise:<br/>submission-signatures-2.bin]
-    Step4C --> Send4C[Attestor 3+ sends via Noise:<br/>submission-signatures-3.bin]
+    CT_Upload1 --> CT_Ack1[Attestor 1 sends via Noise:<br/>ACK]
+    CT_Upload2 --> CT_Ack2[Attestor 2 sends via Noise:<br/>ACK]
+    CT_UploadN --> CT_AckN[Attestor N sends via Noise:<br/>ACK]
 
-    Send4A --> Collect4{Coordinator receives<br/>all submission signatures via Noise}
-    Send4B --> Collect4
-    Send4C --> Collect4
+    CT_Ack1 --> CT_CollectAcks{Coordinator receives<br/>all ACKs}
+    CT_Ack2 --> CT_CollectAcks
+    CT_AckN --> CT_CollectAcks
 
-    Collect4 --> Step5[Coordinator: Execute Submissions<br/>Aggregate signatures & execute<br/>Wait for contracts in ACS]
+    %% Phase 2: Prepare Submissions (Coordinator only)
+    CT_CollectAcks --> CT_Phase2[Phase 2: Submission Preparation]
+    CT_Phase2 --> CT_PrepareSubmissions[Coordinator: Prepare Submissions<br/>Allocate parties & create users<br/>Build contract commands]
 
-    Step5 --> Notify3[Coordinator broadcasts via Noise:<br/>STATUS: Setup complete!<br/>Decentralized party configured]
+    %% Phase 3: Sign Submissions
+    CT_PrepareSubmissions --> CT_Phase3[Phase 3: Submission Signing]
+    CT_Phase3 --> CT_DistSub[Coordinator distributes via Noise:<br/>prepared-submission-*.bin]
 
-    Notify3 --> Disconnect[Noise Protocol: Secure disconnect<br/>All channels closed]
+    CT_DistSub --> CT_SignSub1[Attestor 1: Sign Submissions]
+    CT_DistSub --> CT_SignSub2[Attestor 2: Sign Submissions]
+    CT_DistSub --> CT_SignSubN[Attestor N: Sign Submissions]
 
-    Disconnect --> Complete([Complete: Decentralized Party<br/>Fully Configured])
+    CT_SignSub1 --> CT_SendSig1[Attestor 1 sends via Noise:<br/>submission-signatures.bin]
+    CT_SignSub2 --> CT_SendSig2[Attestor 2 sends via Noise:<br/>submission-signatures.bin]
+    CT_SignSubN --> CT_SendSigN[Attestor N sends via Noise:<br/>submission-signatures.bin]
 
-    style NoiseSetup fill:#ff9999,stroke:#cc0000,stroke-width:3px,color:#000
-    style Connect1 fill:#ffcccc,color:#000
-    style Connect2 fill:#ffcccc,color:#000
-    style Connect3 fill:#ffcccc,color:#000
-    style AuthPeers fill:#ff9999,color:#000
-    style Disconnect fill:#ff9999,stroke:#cc0000,stroke-width:3px,color:#000
+    CT_SendSig1 --> CT_CollectSigs{Coordinator receives<br/>all signatures}
+    CT_SendSig2 --> CT_CollectSigs
+    CT_SendSigN --> CT_CollectSigs
 
-    style Cmd1 fill:#99ccff,stroke:#0066cc,stroke-width:2px,color:#000
-    style Cmd2 fill:#99ccff,stroke:#0066cc,stroke-width:2px,color:#000
-    style Dist1 fill:#99ccff,stroke:#0066cc,stroke-width:2px,color:#000
-    style Notify1 fill:#99ccff,stroke:#0066cc,stroke-width:2px,color:#000
-    style Dist2 fill:#99ccff,stroke:#0066cc,stroke-width:2px,color:#000
-    style Notify2 fill:#99ccff,stroke:#0066cc,stroke-width:2px,color:#000
-    style Dist3 fill:#99ccff,stroke:#0066cc,stroke-width:2px,color:#000
-    style Notify3 fill:#99ccff,stroke:#0066cc,stroke-width:2px,color:#000
+    %% Phase 4: Execute Submissions (Coordinator only)
+    CT_CollectSigs --> CT_Phase4[Phase 4: Execution]
+    CT_Phase4 --> CT_Execute[Coordinator: Execute Submissions<br/>Aggregate signatures & submit<br/>to Ledger API]
 
-    style Send1A fill:#ccffcc,stroke:#009900,stroke-width:2px,color:#000
-    style Send1B fill:#ccffcc,stroke:#009900,stroke-width:2px,color:#000
-    style Send1C fill:#ccffcc,stroke:#009900,stroke-width:2px,color:#000
-    style Send2A fill:#ccffcc,stroke:#009900,stroke-width:2px,color:#000
-    style Send2B fill:#ccffcc,stroke:#009900,stroke-width:2px,color:#000
-    style Send2C fill:#ccffcc,stroke:#009900,stroke-width:2px,color:#000
-    style Send3A fill:#ccffcc,stroke:#009900,stroke-width:2px,color:#000
-    style Send3B fill:#ccffcc,stroke:#009900,stroke-width:2px,color:#000
-    style Send3C fill:#ccffcc,stroke:#009900,stroke-width:2px,color:#000
-    style Send4A fill:#ccffcc,stroke:#009900,stroke-width:2px,color:#000
-    style Send4B fill:#ccffcc,stroke:#009900,stroke-width:2px,color:#000
-    style Send4C fill:#ccffcc,stroke:#009900,stroke-width:2px,color:#000
+    CT_Execute --> CT_Disconnect[Coordinator broadcasts:<br/>DISCONNECT]
+    CT_Disconnect --> CT_Complete([Contracts Complete:<br/>Governance Contracts Deployed])
 
-    style Step1_0A fill:#e1f5ff,color:#000
-    style Step1_0B fill:#e1f5ff,color:#000
-    style Step1_0C fill:#e1f5ff,color:#000
-    style Step1_1A fill:#e1f5ff,color:#000
-    style Step1_1B fill:#e1f5ff,color:#000
-    style Step1_1C fill:#e1f5ff,color:#000
-    style Step2A fill:#e1f5ff,color:#000
-    style Step2B fill:#e1f5ff,color:#000
-    style Step2C fill:#e1f5ff,color:#000
-    style Step3A fill:#e1f5ff,color:#000
-    style Step3B fill:#e1f5ff,color:#000
-    style Step3C fill:#e1f5ff,color:#000
-    style Step4A fill:#e1f5ff,color:#000
-    style Step4B fill:#e1f5ff,color:#000
-    style Step4C fill:#e1f5ff,color:#000
+    %% ==================== STYLING ====================
 
-    style Step1a fill:#ffe1f5,color:#000
-    style Step2a fill:#ffe1f5,color:#000
-    style Step3a fill:#ffe1f5,color:#000
-    style Step3b fill:#ffe1f5,color:#000
-    style Step5 fill:#ffe1f5,color:#000
+    %% Noise Protocol nodes (red)
+    style OB_NoiseSetup fill:#ff9999,stroke:#cc0000,stroke-width:3px,color:#000
+    style OB_Connect1 fill:#ffcccc,color:#000
+    style OB_Connect2 fill:#ffcccc,color:#000
+    style OB_ConnectN fill:#ffcccc,color:#000
+    style OB_AuthPeers fill:#ff9999,color:#000
+    style OB_Disconnect fill:#ff9999,stroke:#cc0000,stroke-width:3px,color:#000
 
-    style Collect1 fill:#fff4e1,color:#000
-    style Collect2 fill:#fff4e1,color:#000
-    style Collect3 fill:#fff4e1,color:#000
-    style Collect4 fill:#fff4e1,color:#000
+    style CT_NoiseSetup fill:#ff9999,stroke:#cc0000,stroke-width:3px,color:#000
+    style CT_Connect1 fill:#ffcccc,color:#000
+    style CT_Connect2 fill:#ffcccc,color:#000
+    style CT_ConnectN fill:#ffcccc,color:#000
+    style CT_AuthPeers fill:#ff9999,color:#000
+    style CT_Disconnect fill:#ff9999,stroke:#cc0000,stroke-width:3px,color:#000
 
-    style Phase1 fill:#d4edda,color:#000
-    style Phase2 fill:#d4edda,color:#000
-    style Phase3 fill:#d4edda,color:#000
-    style Phase4 fill:#d4edda,color:#000
-    style Phase5 fill:#d4edda,color:#000
+    %% Coordinator commands/distributions (blue)
+    style OB_Cmd1 fill:#99ccff,stroke:#0066cc,stroke-width:2px,color:#000
+    style OB_DistDns fill:#99ccff,stroke:#0066cc,stroke-width:2px,color:#000
+    style OB_DistP2p fill:#99ccff,stroke:#0066cc,stroke-width:2px,color:#000
+
+    style CT_Cmd1 fill:#99ccff,stroke:#0066cc,stroke-width:2px,color:#000
+    style CT_DistSub fill:#99ccff,stroke:#0066cc,stroke-width:2px,color:#000
+
+    %% Attestor responses (green)
+    style OB_SendKeys1 fill:#ccffcc,stroke:#009900,stroke-width:2px,color:#000
+    style OB_SendKeys2 fill:#ccffcc,stroke:#009900,stroke-width:2px,color:#000
+    style OB_SendKeysN fill:#ccffcc,stroke:#009900,stroke-width:2px,color:#000
+    style OB_SendDns1 fill:#ccffcc,stroke:#009900,stroke-width:2px,color:#000
+    style OB_SendDns2 fill:#ccffcc,stroke:#009900,stroke-width:2px,color:#000
+    style OB_SendDnsN fill:#ccffcc,stroke:#009900,stroke-width:2px,color:#000
+    style OB_SendP2p1 fill:#ccffcc,stroke:#009900,stroke-width:2px,color:#000
+    style OB_SendP2p2 fill:#ccffcc,stroke:#009900,stroke-width:2px,color:#000
+    style OB_SendP2pN fill:#ccffcc,stroke:#009900,stroke-width:2px,color:#000
+
+    style CT_Ack1 fill:#ccffcc,stroke:#009900,stroke-width:2px,color:#000
+    style CT_Ack2 fill:#ccffcc,stroke:#009900,stroke-width:2px,color:#000
+    style CT_AckN fill:#ccffcc,stroke:#009900,stroke-width:2px,color:#000
+    style CT_SendSig1 fill:#ccffcc,stroke:#009900,stroke-width:2px,color:#000
+    style CT_SendSig2 fill:#ccffcc,stroke:#009900,stroke-width:2px,color:#000
+    style CT_SendSigN fill:#ccffcc,stroke:#009900,stroke-width:2px,color:#000
+
+    %% Attestor operations (light blue)
+    style OB_GenKeys1 fill:#e1f5ff,color:#000
+    style OB_GenKeys2 fill:#e1f5ff,color:#000
+    style OB_GenKeysN fill:#e1f5ff,color:#000
+    style OB_SignDns1 fill:#e1f5ff,color:#000
+    style OB_SignDns2 fill:#e1f5ff,color:#000
+    style OB_SignDnsN fill:#e1f5ff,color:#000
+    style OB_SignP2p1 fill:#e1f5ff,color:#000
+    style OB_SignP2p2 fill:#e1f5ff,color:#000
+    style OB_SignP2pN fill:#e1f5ff,color:#000
+
+    style CT_Upload1 fill:#e1f5ff,color:#000
+    style CT_Upload2 fill:#e1f5ff,color:#000
+    style CT_UploadN fill:#e1f5ff,color:#000
+    style CT_SignSub1 fill:#e1f5ff,color:#000
+    style CT_SignSub2 fill:#e1f5ff,color:#000
+    style CT_SignSubN fill:#e1f5ff,color:#000
+
+    %% Coordinator-only operations (pink)
+    style OB_CreateProposals fill:#ffe1f5,color:#000
+    style OB_SubmitDns fill:#ffe1f5,color:#000
+    style OB_SubmitFinal fill:#ffe1f5,color:#000
+
+    style CT_PrepareSubmissions fill:#ffe1f5,color:#000
+    style CT_Execute fill:#ffe1f5,color:#000
+
+    %% Collection points (yellow)
+    style OB_CollectKeys fill:#fff4e1,color:#000
+    style OB_CollectDns fill:#fff4e1,color:#000
+    style OB_CollectP2p fill:#fff4e1,color:#000
+
+    style CT_CollectAcks fill:#fff4e1,color:#000
+    style CT_CollectSigs fill:#fff4e1,color:#000
+
+    %% Phase headers (green)
+    style OB_Phase1 fill:#d4edda,color:#000
+    style OB_Phase2 fill:#d4edda,color:#000
+    style OB_Phase3 fill:#d4edda,color:#000
+    style OB_Phase4 fill:#d4edda,color:#000
+
+    style CT_Phase1 fill:#d4edda,color:#000
+    style CT_Phase2 fill:#d4edda,color:#000
+    style CT_Phase3 fill:#d4edda,color:#000
+    style CT_Phase4 fill:#d4edda,color:#000
+
+    %% Workflow start nodes (purple)
+    style OnboardingStart fill:#e6ccff,stroke:#9933ff,stroke-width:2px,color:#000
+    style ContractsStart fill:#e6ccff,stroke:#9933ff,stroke-width:2px,color:#000
+    style ChooseWorkflow fill:#e6ccff,stroke:#9933ff,stroke-width:2px,color:#000
