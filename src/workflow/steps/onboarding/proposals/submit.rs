@@ -19,15 +19,6 @@ use crate::{
     },
     dirs::WorkflowDirs,
     error::Result,
-    proto::com::digitalasset::canton::{
-        protocol::v30::{DecentralizedNamespaceDefinition, SignedTopologyTransaction},
-        topology::admin::v30::{
-            AddTransactionsRequest, BaseQuery, ListPartyToParticipantRequest, StoreId,
-            Synchronizer, base_query, store_id, synchronizer,
-            topology_manager_read_service_client::TopologyManagerReadServiceClient,
-            topology_manager_write_service_client::TopologyManagerWriteServiceClient,
-        },
-    },
     utils,
 };
 

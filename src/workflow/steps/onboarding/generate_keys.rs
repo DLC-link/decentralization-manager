@@ -23,24 +23,6 @@ use crate::{
     dirs::WorkflowDirs,
     error::Result,
     participant_id::CantonId,
-    proto::com::digitalasset::canton::{
-        admin::participant::v30::{
-            UploadDarRequest, package_service_client::PackageServiceClient,
-            upload_dar_request::UploadDarData,
-        },
-        crypto::{
-            admin::v30::{GenerateSigningKeyRequest, vault_service_client::VaultServiceClient},
-            v30::{SigningKeySpec, SigningKeyUsage, SigningPublicKey},
-        },
-        protocol::v30::{
-            NamespaceDelegation, TopologyMapping, enums::TopologyChangeOp, namespace_delegation,
-            topology_mapping,
-        },
-        topology::admin::v30::{
-            AuthorizeRequest, StoreId, authorize_request, store_id,
-            topology_manager_write_service_client::TopologyManagerWriteServiceClient,
-        },
-    },
     utils::{compute_fingerprint, get_participant_id, write_messages_to_file},
 };
 

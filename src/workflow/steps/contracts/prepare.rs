@@ -1,6 +1,22 @@
 use anyhow::Context;
 use tokio::fs;
 
+use canton_proto_rs::com::{
+    daml::ledger::api::v2::{
+        Command, CreateCommand, GenMap, Identifier, Optional, Record, RecordField, Value,
+        admin::{
+            AllocatePartyRequest, CreateUserRequest, GrantUserRightsRequest,
+            ListKnownPartiesRequest, ObjectMeta, Right, User,
+            party_management_service_client::PartyManagementServiceClient,
+            right::{CanActAs, CanReadAs, Kind},
+        },
+        command, gen_map,
+        interactive::PrepareSubmissionRequest,
+        value,
+    },
+    digitalasset::canton::protocol::v30::DecentralizedNamespaceDefinition,
+};
+
 use crate::{
     config::{FieldDefinition, NetworkConfig, NodeConfig},
     consts::{
@@ -9,21 +25,6 @@ use crate::{
     },
     dirs::WorkflowDirs,
     error::Result,
-    proto::com::{
-        daml::ledger::api::v2::{
-            Command, CreateCommand, GenMap, Identifier, Optional, Record, RecordField, Value,
-            admin::{
-                AllocatePartyRequest, CreateUserRequest, GrantUserRightsRequest,
-                ListKnownPartiesRequest, ObjectMeta, Right, User,
-                party_management_service_client::PartyManagementServiceClient,
-                right::{CanActAs, CanReadAs, Kind},
-            },
-            command, gen_map,
-            interactive::PrepareSubmissionRequest,
-            value,
-        },
-        digitalasset::canton::protocol::v30::DecentralizedNamespaceDefinition,
-    },
     utils,
 };
 

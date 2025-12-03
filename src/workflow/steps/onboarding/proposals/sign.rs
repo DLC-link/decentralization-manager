@@ -2,6 +2,14 @@ use std::path::Path;
 
 use tokio::fs;
 
+use canton_proto_rs::com::digitalasset::canton::{
+    protocol::v30::SignedTopologyTransaction,
+    topology::admin::v30::{
+        SignTransactionsRequest, StoreId, Synchronizer, store_id, synchronizer,
+        topology_manager_write_service_client::TopologyManagerWriteServiceClient,
+    },
+};
+
 use crate::{
     config::NodeConfig,
     consts::{
@@ -10,13 +18,6 @@ use crate::{
     },
     dirs::WorkflowDirs,
     error::Result,
-    proto::com::digitalasset::canton::{
-        protocol::v30::SignedTopologyTransaction,
-        topology::admin::v30::{
-            SignTransactionsRequest, StoreId, Synchronizer, store_id, synchronizer,
-            topology_manager_write_service_client::TopologyManagerWriteServiceClient,
-        },
-    },
     utils,
 };
 

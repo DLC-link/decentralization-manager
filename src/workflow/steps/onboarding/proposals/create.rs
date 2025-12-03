@@ -2,6 +2,18 @@ use std::collections::HashSet;
 
 use tokio::fs;
 
+use canton_proto_rs::com::digitalasset::canton::{
+    crypto::v30::{SigningKeysWithThreshold, SigningPublicKey},
+    protocol::v30::{
+        DecentralizedNamespaceDefinition, PartyToParticipant, TopologyMapping, enums,
+        party_to_participant::HostingParticipant, topology_mapping,
+    },
+    topology::admin::v30::{
+        AuthorizeRequest, ForceFlag, StoreId, authorize_request, store_id,
+        topology_manager_write_service_client::TopologyManagerWriteServiceClient,
+    },
+};
+
 use crate::{
     config::{NetworkConfig, NodeConfig},
     consts::{
@@ -11,17 +23,6 @@ use crate::{
     dirs::WorkflowDirs,
     error::Result,
     participant_id::CantonId,
-    proto::com::digitalasset::canton::{
-        crypto::v30::{SigningKeysWithThreshold, SigningPublicKey},
-        protocol::v30::{
-            DecentralizedNamespaceDefinition, PartyToParticipant, TopologyMapping, enums,
-            party_to_participant::HostingParticipant, topology_mapping,
-        },
-        topology::admin::v30::{
-            AuthorizeRequest, ForceFlag, StoreId, authorize_request, store_id,
-            topology_manager_write_service_client::TopologyManagerWriteServiceClient,
-        },
-    },
     utils,
 };
 
