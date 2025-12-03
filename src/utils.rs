@@ -4,32 +4,29 @@ use bytes::{Buf, BufMut, BytesMut};
 use prost::Message;
 use tokio::fs;
 
-use crate::{
-    config::NodeConfig,
-    error::Result,
-    participant_id::CantonId,
-    proto::com::{
-        daml::ledger::api::v2::{
-            admin::{
-                party_management_service_client::PartyManagementServiceClient,
-                user_management_service_client::UserManagementServiceClient,
-            },
-            interactive::interactive_submission_service_client::InteractiveSubmissionServiceClient,
-            state_service_client::StateServiceClient,
+use canton_proto_rs::com::{
+    daml::ledger::api::v2::{
+        admin::{
+            party_management_service_client::PartyManagementServiceClient,
+            user_management_service_client::UserManagementServiceClient,
         },
-        digitalasset::canton::{
-            admin::participant::v30::{
-                GetSynchronizerIdRequest,
-                synchronizer_connectivity_service_client::SynchronizerConnectivityServiceClient,
-            },
-            crypto::v30::SigningPublicKey,
-            topology::admin::v30::{
-                GetIdRequest,
-                identity_initialization_service_client::IdentityInitializationServiceClient,
-            },
+        interactive::interactive_submission_service_client::InteractiveSubmissionServiceClient,
+        state_service_client::StateServiceClient,
+    },
+    digitalasset::canton::{
+        admin::participant::v30::{
+            GetSynchronizerIdRequest,
+            synchronizer_connectivity_service_client::SynchronizerConnectivityServiceClient,
+        },
+        crypto::v30::SigningPublicKey,
+        topology::admin::v30::{
+            GetIdRequest,
+            identity_initialization_service_client::IdentityInitializationServiceClient,
         },
     },
 };
+
+use crate::{config::NodeConfig, error::Result, participant_id::CantonId};
 
 /// Multihash prefix for SHA-256 hashes in Canton
 /// - 0x12 = SHA-256 hash algorithm identifier
