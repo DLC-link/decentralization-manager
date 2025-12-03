@@ -5,7 +5,7 @@ use clap::Subcommand;
 pub use clap::Parser;
 
 #[derive(Parser)]
-#[command(name = "grpc-test")]
+#[command(name = "dec-party-onboarding")]
 #[command(about = "Canton workflow automation - port of Scala scripts to Rust", long_about = None)]
 pub struct Cli {
     /// Path to configuration file (TOML)
@@ -18,8 +18,15 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Run all steps in sequence
-    All,
+    /// Generate Noise protocol static keypair for secure communication
+    Keygen {
+        /// Output file path for the private key
+        #[arg(short, long, value_name = "FILE")]
+        output: PathBuf,
+    },
+
+    /// Start the node (as coordinator or attestor based on configuration)
+    Start,
 
     /// Step 1: Upload DARs
     UploadDars,
@@ -36,8 +43,8 @@ pub enum Commands {
     /// Step 2a: Submit DNS proposals
     SubmitDnsProposals,
 
-    /// Step 3: Sign P2P and PTK proposals
-    SignP2pPtkProposals,
+    /// Step 3: Sign P2P proposals (Canton 3.4+: keys embedded in P2P)
+    SignP2pProposals,
 
     /// Step 3a: Submit final proposals
     SubmitFinalProposals,

@@ -1,11 +1,13 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use tokio::fs;
 
 use crate::{
-    config::Config,
+    config::{NetworkConfig, NodeConfig},
+    consts::{ATTESTOR_KEYS_PREFIX, DAML_KEY_NAME, NAMESPACE_KEY_NAME, PARTICIPANT_ID_PREFIX},
     dirs::WorkflowDirs,
     error::Result,
+    participant_id::CantonId,
     proto::com::digitalasset::canton::{
         admin::participant::v30::{
             UploadDarRequest, package_service_client::PackageServiceClient,
@@ -20,75 +22,76 @@ use crate::{
             topology_mapping,
         },
         topology::admin::v30::{
-            AuthorizeRequest, StoreId, Synchronizer, authorize_request, store_id, synchronizer,
+            AuthorizeRequest, StoreId, authorize_request, store_id,
             topology_manager_write_service_client::TopologyManagerWriteServiceClient,
         },
     },
-    utils,
+    utils::{compute_fingerprint, get_participant_id, write_messages_to_file},
 };
-
-// Constants
-const CBTC_DAR_FILENAME: &str = "cbtc-1.0.0.dar";
-const GOVERNANCE_DAR_FILENAME: &str = "cbtc-governance-1.0.0.dar";
-const CBTC_DAR_DESCRIPTION: &str = "CBTC main application";
-const GOVERNANCE_DAR_DESCRIPTION: &str = "CBTC governance rules";
-const NAMESPACE_KEY_NAME: &str = "cbtc-network-namespace";
-const DAML_KEY_NAME: &str = "cbtc-network-daml-transactions";
-const ATTESTOR_KEYS_FILENAME_PREFIX: &str = "attestor-public-keys";
-const PARTICIPANT_ID_FILENAME_PREFIX: &str = "participant-id";
-const PARTICIPANT_ID_PREFIX: &str = "PAR::";
 
 /// Upload DAR files to the participant
 ///
 /// Corresponds to: 00_UploadDars.sc
 ///
-/// Uploads both CBTC and governance DAR files to the Canton participant.
-pub async fn upload_dars(config: &Config, dirs: &WorkflowDirs) -> Result {
+/// Scans the dars directory and uploads all .dar files found to the Canton participant.
+pub async fn upload_dars(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
     tracing::info!("Uploading DARs from {}", dirs.dars_dir.display());
 
     let mut client = PackageServiceClient::connect(config.admin_api_url()).await?;
 
-    // Read both DAR files
-    let cbtc_dar_path = dirs.dars_dir.join(CBTC_DAR_FILENAME);
-    let gov_dar_path = dirs.dars_dir.join(GOVERNANCE_DAR_FILENAME);
+    // Scan directory for all .dar files
+    let mut dar_entries = fs::read_dir(&dirs.dars_dir).await?;
+    let mut dar_files = Vec::new();
 
-    // Upload CBTC DAR
-    tracing::debug!("Reading {}", cbtc_dar_path.display());
-    let cbtc_dar_data = fs::read(&cbtc_dar_path).await?;
+    while let Some(entry) = dar_entries.next_entry().await? {
+        let path = entry.path();
 
-    let cbtc_request = tonic::Request::new(UploadDarRequest {
-        dars: vec![UploadDarData {
-            bytes: cbtc_dar_data,
-            description: Some(CBTC_DAR_DESCRIPTION.to_string()),
-            expected_main_package_id: None,
-        }],
-        vet_all_packages: true,
-        synchronize_vetting: true,
-        synchronizer_id: None, // Auto-detect if single synchronizer
-    });
+        // Check if file has .dar extension
+        if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("dar") {
+            dar_files.push(path);
+        }
+    }
 
-    tracing::debug!("Uploading CBTC DAR to Canton...");
-    client.upload_dar(cbtc_request).await?;
-    tracing::debug!("CBTC DAR uploaded successfully");
+    // Sort for consistent ordering
+    dar_files.sort();
 
-    // Upload governance DAR
-    tracing::debug!("Reading {}", gov_dar_path.display());
-    let gov_dar_data = fs::read(&gov_dar_path).await?;
+    if dar_files.is_empty() {
+        anyhow::bail!("No .dar files found in {}", dirs.dars_dir.display());
+    }
 
-    let gov_request = tonic::Request::new(UploadDarRequest {
-        dars: vec![UploadDarData {
-            bytes: gov_dar_data,
-            description: Some(GOVERNANCE_DAR_DESCRIPTION.to_string()),
-            expected_main_package_id: None,
-        }],
-        vet_all_packages: true,
-        synchronize_vetting: true,
-        synchronizer_id: None, // Auto-detect if single synchronizer
-    });
+    tracing::info!("Found {} DAR file(s) to upload", dar_files.len());
 
-    tracing::debug!("Uploading governance DAR to Canton...");
-    client.upload_dar(gov_request).await?;
-    tracing::debug!("Governance DAR uploaded successfully");
+    // Upload each DAR file
+    for dar_path in dar_files {
+        let filename = dar_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown");
+
+        tracing::debug!("Reading {}", dar_path.display());
+        let dar_data = fs::read(&dar_path).await?;
+
+        // Generate description from filename (remove .dar extension)
+        let description = filename
+            .strip_suffix(".dar")
+            .unwrap_or(filename)
+            .to_string();
+
+        let request = tonic::Request::new(UploadDarRequest {
+            dars: vec![UploadDarData {
+                bytes: dar_data,
+                description: Some(description.clone()),
+                expected_main_package_id: None,
+            }],
+            vet_all_packages: true,
+            synchronize_vetting: true,
+            synchronizer_id: None, // Auto-detect if single synchronizer
+        });
+
+        tracing::info!("Uploading {filename}...");
+        client.upload_dar(request).await?;
+        tracing::info!("Successfully uploaded {filename}");
+    }
 
     tracing::info!("All DARs uploaded successfully");
 
@@ -110,8 +113,19 @@ pub async fn upload_dars(config: &Config, dirs: &WorkflowDirs) -> Result {
 /// This function generates signing keys and exports them along with the participant ID.
 /// The namespace delegation step from the original Scala script is currently skipped
 /// and should be implemented separately using TopologyManagerWriteService.
-pub async fn generate_keys(config: &Config, dirs: &WorkflowDirs) -> Result {
+pub async fn generate_keys(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
     tracing::info!("Generating cryptographic keys...");
+
+    // Load network config to determine participant position
+    let network_config_path = if PathBuf::from(&config.network_config).is_absolute() {
+        PathBuf::from(&config.network_config)
+    } else {
+        // Resolve relative to test-configs directory
+        std::env::current_dir()?
+            .join("test-configs")
+            .join(&config.network_config)
+    };
+    let network_config = NetworkConfig::from_file(&network_config_path).await?;
 
     let mut vault_client = VaultServiceClient::connect(config.admin_api_url()).await?;
 
@@ -124,7 +138,7 @@ pub async fn generate_keys(config: &Config, dirs: &WorkflowDirs) -> Result {
     )
     .await?;
 
-    let namespace_fingerprint = crate::utils::compute_fingerprint(&namespace_key);
+    let namespace_fingerprint = compute_fingerprint(&namespace_key);
     tracing::debug!("Namespace key fingerprint: {namespace_fingerprint}");
 
     // Propose namespace delegation
@@ -140,11 +154,14 @@ pub async fn generate_keys(config: &Config, dirs: &WorkflowDirs) -> Result {
     .await?;
 
     // Get participant ID and export keys
-    let participant_id = crate::utils::get_participant_id(config).await?;
-    let participant_num = extract_participant_number(&participant_id);
+    let canton_participant_id = get_participant_id(config).await?;
+    let participant_num = get_participant_position(&config.node.node_id, &network_config)?;
+    tracing::info!(
+        "Participant ID: {canton_participant_id}, participant number: {participant_num}"
+    );
 
     export_keys(&dirs.keys_dir, &namespace_key, &daml_key, participant_num).await?;
-    export_participant_id(&dirs.ids_dir, &participant_id, participant_num).await?;
+    export_participant_id(&dirs.ids_dir, &canton_participant_id, participant_num).await?;
 
     tracing::info!("Keys and participant ID exported successfully");
 
@@ -156,7 +173,7 @@ async fn generate_signing_key(
     vault_client: &mut VaultServiceClient<tonic::transport::Channel>,
     name: &str,
     usage: Vec<i32>,
-) -> Result<crate::proto::com::digitalasset::canton::crypto::v30::SigningPublicKey> {
+) -> Result<SigningPublicKey> {
     let request = tonic::Request::new(GenerateSigningKeyRequest {
         key_spec: SigningKeySpec::EcCurve25519 as i32,
         name: name.to_string(),
@@ -172,14 +189,14 @@ async fn generate_signing_key(
         .ok_or_else(|| anyhow::anyhow!("No public key returned from VaultService"))
 }
 
-/// Helper: Extract participant number from ID (e.g., "participant1" -> 1)
-fn extract_participant_number(participant_id: &str) -> u32 {
-    participant_id
-        .split("::")
-        .next()
-        .and_then(|name| name.strip_prefix("participant"))
-        .and_then(|num_str| num_str.parse::<u32>().ok())
-        .unwrap_or(1)
+/// Helper: Get participant position (1-based index) from network config
+fn get_participant_position(node_id: &str, network_config: &NetworkConfig) -> Result<u32> {
+    network_config
+        .participants
+        .iter()
+        .position(|p| p.id == node_id)
+        .map(|pos| (pos + 1) as u32)
+        .ok_or_else(|| anyhow::anyhow!("Node ID '{node_id}' not found in network configuration"))
 }
 
 /// Helper: Export keys to file
@@ -189,35 +206,32 @@ async fn export_keys(
     daml_key: &SigningPublicKey,
     participant_num: u32,
 ) -> Result {
-    let filename = format!("{ATTESTOR_KEYS_FILENAME_PREFIX}-{participant_num}.bin");
+    let filename = format!("{ATTESTOR_KEYS_PREFIX}-{participant_num}.bin");
     let output_path = keys_dir.join(&filename);
     tracing::debug!("Exporting keys to {}", output_path.display());
-    utils::write_messages_to_file(&[namespace_key.clone(), daml_key.clone()], &output_path).await
+    write_messages_to_file(&[namespace_key.clone(), daml_key.clone()], &output_path).await
 }
 
 /// Helper: Export participant ID to file
 async fn export_participant_id(
     ids_dir: &Path,
-    participant_id: &str,
+    participant_id: &CantonId,
     participant_num: u32,
 ) -> Result {
-    let id_with_prefix = format!("{PARTICIPANT_ID_PREFIX}{participant_id}");
-    let filename = format!("{PARTICIPANT_ID_FILENAME_PREFIX}-{participant_num}.bin");
+    let filename = format!("{PARTICIPANT_ID_PREFIX}-{participant_num}.bin");
     let output_path = ids_dir.join(&filename);
     tracing::debug!("Exporting participant ID to {}", output_path.display());
-    fs::write(&output_path, id_with_prefix.as_bytes()).await?;
+    fs::write(&output_path, participant_id.to_file_format().as_bytes()).await?;
     Ok(())
 }
 
 /// Propose namespace delegation for the generated namespace key
 async fn propose_namespace_delegation(
-    config: &Config,
+    config: &NodeConfig,
     namespace_key: &SigningPublicKey,
     namespace_fingerprint: &str,
 ) -> Result {
     tracing::debug!("Proposing namespace delegation for {namespace_fingerprint}");
-
-    let synchronizer_id = crate::utils::get_synchronizer_id(config).await?;
 
     let namespace_delegation = NamespaceDelegation {
         // fingerprint of the root key defining the namespace
@@ -259,9 +273,7 @@ async fn propose_namespace_delegation(
         force_changes: vec![],
         signed_by: vec![],
         store: Some(StoreId {
-            store: Some(store_id::Store::Synchronizer(Synchronizer {
-                kind: Some(synchronizer::Kind::Id(synchronizer_id)),
-            })),
+            store: Some(store_id::Store::Authorized(store_id::Authorized {})),
         }),
         wait_to_become_effective: None,
     });
