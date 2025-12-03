@@ -139,7 +139,17 @@ async fn is_participant_reachable(participant: &Participant) -> bool {
 mod tests {
     use super::*;
 
-    use crate::config::{CoordinatorStrategy, NetworkInfo, Timeouts};
+    use crate::config::{ApplicationConfig, CoordinatorStrategy, NetworkInfo, Timeouts};
+
+    fn test_application_config() -> ApplicationConfig {
+        ApplicationConfig {
+            party_id_prefix: "test-network".to_string(),
+            namespace_key_name: "test-namespace".to_string(),
+            daml_key_name: "test-daml".to_string(),
+            operator_party_hint: "operator".to_string(),
+            contracts: vec![],
+        }
+    }
 
     fn create_test_network(coordinator_strategy: CoordinatorStrategy) -> NetworkConfig {
         NetworkConfig {
@@ -180,6 +190,7 @@ mod tests {
                 },
             ],
             timeouts: Timeouts::default(),
+            application: test_application_config(),
         }
     }
 

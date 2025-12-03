@@ -1,12 +1,8 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use tokio::fs;
 
 use canton_proto_rs::com::digitalasset::canton::{
-    admin::participant::v30::{
-        UploadDarRequest, package_service_client::PackageServiceClient,
-        upload_dar_request::UploadDarData,
-    },
     crypto::{
         admin::v30::{GenerateSigningKeyRequest, vault_service_client::VaultServiceClient},
         v30::{SigningKeySpec, SigningKeyUsage, SigningPublicKey},
@@ -23,81 +19,12 @@ use canton_proto_rs::com::digitalasset::canton::{
 
 use crate::{
     config::{NetworkConfig, NodeConfig},
-    consts::{ATTESTOR_KEYS_PREFIX, DAML_KEY_NAME, NAMESPACE_KEY_NAME, PARTICIPANT_ID_PREFIX},
+    consts::{ATTESTOR_KEYS_PREFIX, PARTICIPANT_ID_PREFIX},
     dirs::WorkflowDirs,
     error::Result,
     participant_id::CantonId,
     utils::{compute_fingerprint, get_participant_id, write_messages_to_file},
 };
-
-/// Upload DAR files to the participant
-///
-/// Corresponds to: 00_UploadDars.sc
-///
-/// Scans the dars directory and uploads all .dar files found to the Canton participant.
-pub async fn upload_dars(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
-    tracing::info!("Uploading DARs from {}", dirs.dars_dir.display());
-
-    let mut client = PackageServiceClient::connect(config.admin_api_url()).await?;
-
-    // Scan directory for all .dar files
-    let mut dar_entries = fs::read_dir(&dirs.dars_dir).await?;
-    let mut dar_files = Vec::new();
-
-    while let Some(entry) = dar_entries.next_entry().await? {
-        let path = entry.path();
-
-        // Check if file has .dar extension
-        if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("dar") {
-            dar_files.push(path);
-        }
-    }
-
-    // Sort for consistent ordering
-    dar_files.sort();
-
-    if dar_files.is_empty() {
-        anyhow::bail!("No .dar files found in {}", dirs.dars_dir.display());
-    }
-
-    tracing::info!("Found {} DAR file(s) to upload", dar_files.len());
-
-    // Upload each DAR file
-    for dar_path in dar_files {
-        let filename = dar_path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("unknown");
-
-        tracing::debug!("Reading {}", dar_path.display());
-        let dar_data = fs::read(&dar_path).await?;
-
-        // Generate description from filename (remove .dar extension)
-        let description = filename
-            .strip_suffix(".dar")
-            .unwrap_or(filename)
-            .to_string();
-
-        let request = tonic::Request::new(UploadDarRequest {
-            dars: vec![UploadDarData {
-                bytes: dar_data,
-                description: Some(description.clone()),
-                expected_main_package_id: None,
-            }],
-            vet_all_packages: true,
-            synchronize_vetting: true,
-            synchronizer_id: None, // Auto-detect if single synchronizer
-        });
-
-        tracing::info!("Uploading {filename}...");
-        client.upload_dar(request).await?;
-        tracing::info!("Successfully uploaded {filename}");
-    }
-
-    tracing::info!("All DARs uploaded successfully");
-
-    Ok(())
-}
 
 /// Generate cryptographic keys and export participant ID
 ///
@@ -114,27 +41,23 @@ pub async fn upload_dars(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
 /// This function generates signing keys and exports them along with the participant ID.
 /// The namespace delegation step from the original Scala script is currently skipped
 /// and should be implemented separately using TopologyManagerWriteService.
-pub async fn generate_keys(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
+pub async fn generate_keys(
+    config: &NodeConfig,
+    dirs: &WorkflowDirs,
+    network_config: &NetworkConfig,
+) -> Result {
     tracing::info!("Generating cryptographic keys...");
-
-    // Load network config to determine participant position
-    let network_config_path = if PathBuf::from(&config.network_config).is_absolute() {
-        PathBuf::from(&config.network_config)
-    } else {
-        // Resolve relative to test-configs directory
-        std::env::current_dir()?
-            .join("test-configs")
-            .join(&config.network_config)
-    };
-    let network_config = NetworkConfig::from_file(&network_config_path).await?;
 
     let mut vault_client = VaultServiceClient::connect(config.admin_api_url()).await?;
 
+    let namespace_key_name = &network_config.application.namespace_key_name;
+    let daml_key_name = &network_config.application.daml_key_name;
+
     // Generate namespace signing key
-    tracing::debug!("Generating namespace signing key with name '{NAMESPACE_KEY_NAME}'");
+    tracing::debug!("Generating namespace signing key with name '{namespace_key_name}'");
     let namespace_key = generate_signing_key(
         &mut vault_client,
-        NAMESPACE_KEY_NAME,
+        namespace_key_name,
         vec![SigningKeyUsage::Namespace as i32],
     )
     .await?;
@@ -146,17 +69,17 @@ pub async fn generate_keys(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
     propose_namespace_delegation(config, &namespace_key, &namespace_fingerprint).await?;
 
     // Generate DAML signing key for transactions
-    tracing::debug!("Generating DAML signing key with name '{DAML_KEY_NAME}'");
+    tracing::debug!("Generating DAML signing key with name '{daml_key_name}'");
     let daml_key = generate_signing_key(
         &mut vault_client,
-        DAML_KEY_NAME,
+        daml_key_name,
         vec![SigningKeyUsage::Protocol as i32],
     )
     .await?;
 
     // Get participant ID and export keys
     let canton_participant_id = get_participant_id(config).await?;
-    let participant_num = get_participant_position(&config.node.node_id, &network_config)?;
+    let participant_num = get_participant_position(&config.node.node_id, network_config)?;
     tracing::info!(
         "Participant ID: {canton_participant_id}, participant number: {participant_num}"
     );

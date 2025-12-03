@@ -1,4 +1,3 @@
-use tokio::fs;
 use uuid::Uuid;
 
 use canton_proto_rs::com::{
@@ -11,17 +10,16 @@ use canton_proto_rs::com::{
         },
     },
     digitalasset::canton::{
-        crypto::v30::Signature as CantonSignature,
-        protocol::v30::DecentralizedNamespaceDefinition,
+        crypto::v30::Signature as CantonSignature, protocol::v30::DecentralizedNamespaceDefinition,
     },
 };
 
 use crate::{
-    config::NodeConfig,
+    config::{NetworkConfig, NodeConfig},
     consts::{
-        EXECUTION_DIR, LEDGER_API_USER_ID, LEDGER_SUBMISSIONS_DIR, NAMESPACE_DEF_FILENAME,
-        PARTY_ID_PREFIX, PREPARED_DIR, PREPARED_SUBMISSION_PREFIX, SIGNATURES_DIR,
-        SUBMISSION_SIGNATURES_PREFIX, TOPOLOGY_RETRY_DELAY_SECS, TOPOLOGY_RETRY_MAX_ATTEMPTS,
+        EXECUTION_DIR, LEDGER_SUBMISSIONS_DIR, NAMESPACE_DEF_FILENAME, PREPARED_DIR,
+        PREPARED_SUBMISSION_PREFIX, SIGNATURES_DIR, SUBMISSION_SIGNATURES_PREFIX,
+        TOPOLOGY_RETRY_DELAY_SECS, TOPOLOGY_RETRY_MAX_ATTEMPTS,
     },
     dirs::WorkflowDirs,
     error::Result,
@@ -38,8 +36,16 @@ use crate::{
 /// # Arguments
 /// * `config` - Configuration with Ledger API connection details
 /// * `dirs` - WorkflowDirs containing all directory paths
-pub async fn execute_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
+/// * `network_config` - Network configuration with application settings
+pub async fn execute_submissions(
+    config: &NodeConfig,
+    dirs: &WorkflowDirs,
+    network_config: &NetworkConfig,
+) -> Result {
     tracing::info!("Executing submissions...");
+
+    let party_id_prefix = &network_config.application.party_id_prefix;
+    let user_id = &config.canton.ledger_api_user_id;
 
     // Step 1: Get decentralized party ID from namespace definition
     let namespace_file = dirs.dns_submission_dir.join(NAMESPACE_DEF_FILENAME);
@@ -51,7 +57,7 @@ pub async fn execute_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
         utils::read_first_message_from_file(&namespace_file).await?;
 
     let decentralized_party = format!(
-        "{PARTY_ID_PREFIX}::{}",
+        "{party_id_prefix}::{}",
         namespace_def.decentralized_namespace
     );
     tracing::debug!("Decentralized party: {decentralized_party}");
@@ -62,20 +68,8 @@ pub async fn execute_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
     let prepared_dir = ledger_submissions_dir.join(PREPARED_DIR);
 
     // Discover all prepared-submission-*.bin files
-    let mut submission_files = Vec::new();
-    let mut entries = fs::read_dir(&prepared_dir).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        let path = entry.path();
-        if path.is_file()
-            && let Some(name) = path.file_name().and_then(|n| n.to_str())
-            && name.starts_with(PREPARED_SUBMISSION_PREFIX)
-            && name.ends_with(".bin")
-        {
-            submission_files.push(path);
-        }
-    }
-
-    submission_files.sort();
+    let submission_files =
+        utils::find_files_by_pattern(&prepared_dir, PREPARED_SUBMISSION_PREFIX, ".bin").await?;
 
     if submission_files.is_empty() {
         anyhow::bail!(
@@ -101,20 +95,8 @@ pub async fn execute_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
     let signatures_dir = execution_dir.join(SIGNATURES_DIR);
 
     // Discover all submission-signatures-*.bin files
-    let mut signature_files = Vec::new();
-    let mut entries = fs::read_dir(&signatures_dir).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        let path = entry.path();
-        if path.is_file()
-            && let Some(name) = path.file_name().and_then(|n| n.to_str())
-            && name.starts_with(SUBMISSION_SIGNATURES_PREFIX)
-            && name.ends_with(".bin")
-        {
-            signature_files.push(path);
-        }
-    }
-
-    signature_files.sort();
+    let signature_files =
+        utils::find_files_by_pattern(&signatures_dir, SUBMISSION_SIGNATURES_PREFIX, ".bin").await?;
     tracing::debug!("Found {} signature files", signature_files.len());
 
     if signature_files.is_empty() {
@@ -203,7 +185,7 @@ pub async fn execute_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Re
             party_signatures: Some(party_signatures),
             deduplication_period: None, // Use default
             submission_id,
-            user_id: LEDGER_API_USER_ID.to_string(),
+            user_id: user_id.to_string(),
             hashing_scheme_version: prepared_response.hashing_scheme_version,
             min_ledger_time: None,
             transaction_format: None,
