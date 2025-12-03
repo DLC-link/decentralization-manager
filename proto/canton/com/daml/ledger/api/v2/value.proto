@@ -1,156 +1,194 @@
+// Copyright (c) 2024 Digital Asset (Switzerland) GmbH and/or its affiliates.
+// All rights reserved. SPDX-License-Identifier: Apache-2.0
+
 syntax = "proto3";
 
 package com.daml.ledger.api.v2;
 
 import "google/protobuf/empty.proto";
 
-// ==============================
-// Identifier & naming utilities
-// ==============================
+option csharp_namespace = "Com.Daml.Ledger.Api.V2";
+option java_outer_classname = "ValueOuterClass";
+option java_package = "com.daml.ledger.api.v2";
+
+// Encodes values that the ledger accepts as command arguments and emits as
+// contract arguments.
 //
-// NOTE: Protobuf cannot enforce regex/length constraints;
-// the following are API-level contracts:
+// The values encoding use different classes of non-empty strings as
+// identifiers. Those classes are defined as follows:
+// - NameStrings are strings with length <= 1000 that match the regexp
+// ``[A-Za-z\$_][A-Za-z0-9\$_]*``.
+// - PackageIdStrings are strings with length <= 64 that match the regexp
+// ``[A-Za-z0-9\-_ ]+``.
+// - PartyIdStrings are strings with length <= 255 that match the regexp
+// ``[A-Za-z0-9:\-_ ]+``.
+// - LedgerStrings are strings with length <= 255 that match the regexp
+// ``[A-Za-z0-9#:\-_/ ]+``.
+// - ApplicationIdStrings are strings with length <= 255 that match the regexp
+// ``[A-Za-z0-9#:\-_/ @\|]+``.
 //
-// - NameString:          len <= 1000, matches [A-Za-z$_][A-Za-z0-9$_]*
-// - PackageIdString:     len <= 64,  matches [A-Za-z0-9\\-_ ]+
-// - PartyIdString:       len <= 255, matches [A-Za-z0-9:\\-_ ]+
-// - LedgerString:        len <= 255, matches [A-Za-z0-9#:\\-_/ ]+
-// - ApplicationIdString: len <= 255, matches [A-Za-z0-9#:\\-_/ @\\|]+
-
-message Identifier {
-  // The package/module/entity path of a type.
-  // package_id: PackageIdString
-  string package_id  = 1;
-
-  // module_name: NameString
-  string module_name = 2;
-
-  // entity_name: NameString
-  string entity_name = 3;
-}
-
-// ==============================
-// Value and constituent types
-// ==============================
-
 message Value {
-  // Encodes values accepted as command arguments and emitted as contract arguments.
   oneof sum {
-    Record                 record       = 1;
-    Variant                variant      = 2;
+    // This value is used for example for choices that don't take any arguments.
+    google.protobuf.Empty unit = 1;
 
-    // Identifier of an on-ledger contract. Must be a valid LedgerString.
-    // Commands referencing an unknown or archived contract ID will fail.
-    string                 contract_id  = 3;
+    // True or false.
+    bool bool = 2;
 
-    List                   list         = 4;
+    sint64 int64 = 3 [ jstype = JS_STRING ];
 
-    // Signed 64-bit integer.
-    sint64                 int64        = 5;
+    // Days since the unix epoch. Can go backwards. Limited from
+    // 0001-01-01 to 9999-12-31, also to be compatible with
+    // https://www.ietf.org/rfc/rfc3339.txt
+    int32 date = 4;
 
-    // Decimal with precision 38 and scale 0..37.
-    // Must match: [+-]?\\d{1,38}(\\.\\d{0,37})?
-    // and be representable without loss of precision.
-    string                 numeric      = 6;
+    // Microseconds since the UNIX epoch. Can go backwards. Fixed
+    // since the vast majority of values will be greater than
+    // 2^28, since currently the number of microseconds since the
+    // epoch is greater than that. Range: 0001-01-01T00:00:00Z to
+    // 9999-12-31T23:59:59.999999Z, so that we can convert to/from
+    // https://www.ietf.org/rfc/rfc3339.txt
+    sfixed64 timestamp = 5 [ jstype = JS_STRING ];
 
-    // UTF-8 string.
-    string                 text         = 7;
+    // A Numeric, that is a decimal value with precision 38 (at most 38
+    // significant digits) and a scale between 0 and 37 (significant digits on
+    // the right of the decimal point). The field has to match the regex
+    //   [+-]?\d{1,38}(.\d{0,37})?
+    // and should be representable by a Numeric without loss of precision.
+    string numeric = 6;
 
-    // Microseconds since UNIX epoch; can go backwards.
-    // Range: 0001-01-01T00:00:00Z to 9999-12-31T23:59:59.999999Z
-    // (compatible with RFC 3339 conversions).
-    sfixed64               timestamp    = 8;
+    // An agent operating on the ledger.
+    // Must be a valid PartyIdString.
+    string party = 7;
 
-    // An agent operating on the ledger. Must be a valid PartyIdString.
-    string                 party        = 9;
+    // A string.
+    string text = 8;
 
-    bool                   bool         = 10;
+    // Identifier of an on-ledger contract. Commands which reference an unknown
+    // or already archived contract ID will fail. Must be a valid LedgerString.
+    string contract_id = 9;
 
-    // Used e.g. for choices without arguments.
-    google.protobuf.Empty  unit         = 11;
+    // The Optional type, None or Some
+    Optional optional = 10;
 
-    // Days since UNIX epoch; can go backwards.
-    // Limited to 0001-01-01 .. 9999-12-31 (RFC 3339 compatible range).
-    int32                  date         = 12;
+    // Represents a homogeneous list of values.
+    List list = 11;
 
-    // Optional value (None or Some). See Optional message below.
-    Optional               optional     = 13;
+    // The TextMap type
+    TextMap text_map = 12;
 
-    // Text-key map (see Map). Keys are Text; entries are in ascending key order.
-    Map                    map          = 14;
+    // The GenMap type
+    GenMap gen_map = 13;
 
-    // Enum value (see Enum).
-    Enum                   enum         = 15;
+    Record record = 14;
 
-    // General map with arbitrary Value keys (see GenMap).
-    GenMap                 gen_map      = 16;
+    Variant variant = 15;
+
+    // The Enum type
+    Enum enum = 16;
   }
 }
 
-// A record value consisting of named fields, optionally identified by type.
+// Contains nested values.
 message Record {
-  // Optional type ID of the record.
+  // Omitted from the transaction stream when verbose streaming is not enabled.
+  // Optional when submitting commands.
   Identifier record_id = 1;
 
+  // The nested values of the record.
+  // Required
   repeated RecordField fields = 2;
 }
 
+// A named nested value within a record.
 message RecordField {
-  // Optional field label (NameString). May be empty if positional only.
+  // When reading a transaction stream, it's omitted if verbose streaming is not
+  // enabled. When submitting a commmand, it's optional:
+  //   - if all keys within a single record are present, the order in which
+  //   fields appear does not matter. however, each key must appear exactly
+  //   once.
+  //   - if any of the keys within a single record are omitted, the order of
+  //   fields MUST match the order of declaration in the Daml template.
+  // Must be a valid NameString
   string label = 1;
 
-  // Field value.
-  Value  value = 2;
+  // A nested value of a record.
+  // Required
+  Value value = 2;
 }
 
-// A variant (sum) carrying a constructor name and a single payload value.
+// Unique identifier of an entity.
+message Identifier {
+  // The identifier of the Daml package that contains the entity.
+  // Must be a valid PackageIdString.
+  // Required
+  string package_id = 1;
+
+  // The dot-separated module name of the identifier.
+  // Required
+  string module_name = 2;
+
+  // The dot-separated name of the entity (e.g. record, template, ...) within
+  // the module. Required
+  string entity_name = 3;
+}
+
+// A value with alternative representations.
 message Variant {
-  // Optional type ID of the variant.
+  // Omitted from the transaction stream when verbose streaming is not enabled.
+  // Optional when submitting commands.
   Identifier variant_id = 1;
 
-  // Constructor name (NameString).
+  // Determines which of the Variant's alternatives is encoded in this message.
+  // Must be a valid NameString.
+  // Required
   string constructor = 2;
 
-  // Constructor argument.
-  Value  value = 3;
+  // The value encoded within the Variant.
+  // Required
+  Value value = 3;
 }
 
-// Homogeneous list of values.
+// A value with finite set of alternative representations.
+message Enum {
+  // Omitted from the transaction stream when verbose streaming is not enabled.
+  // Optional when submitting commands.
+  Identifier enum_id = 1;
+
+  // Determines which of the Variant's alternatives is encoded in this message.
+  // Must be a valid NameString.
+  // Required
+  string constructor = 2;
+}
+
+// A homogenous collection of values.
 message List {
+  // The elements must all be of the same concrete value type.
+  // Optional
   repeated Value elements = 1;
 }
 
-// Optional value: when 'value' is unset/absent => None; if set => Some(value).
-// (In JSON/gRPC, omitting the field encodes None.)
+// Corresponds to Java's Optional type, Scala's Option, and Haskell's Maybe.
+// The reason why we need to wrap this in an additional ``message`` is that we
+// need to be able to encode the ``None`` case in the ``Value`` oneof.
 message Optional {
-  Value value = 1; // present => Some(value)
+  Value value = 1; // optional
 }
 
-// Text-key map. Keys are strings (Text), unique and sorted ascending.
-// Encoded as an ordered list of entries.
-message Map {
+message TextMap {
   message Entry {
-    string key = 1; // Text key
-    Value  value = 2;
+    string key = 1;
+    Value value = 2;
   }
+
   repeated Entry entries = 1;
 }
 
-// Enum value identified by its type and chosen constructor.
-message Enum {
-  // Optional type ID of the enum.
-  Identifier enum_id = 1;
-
-  // Constructor (NameString).
-  string constructor = 2;
-}
-
-// General map with arbitrary Value keys. Encoded as an ordered list of entries.
-// Implementations may impose determinism/sorting constraints for equality.
 message GenMap {
   message Entry {
     Value key = 1;
     Value value = 2;
   }
+
   repeated Entry entries = 1;
 }
