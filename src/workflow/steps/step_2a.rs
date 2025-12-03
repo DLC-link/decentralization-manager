@@ -1,8 +1,11 @@
 use tokio::{fs, time};
 
 use crate::{
-    config::Config,
-    consts::{TOPOLOGY_RETRY_DELAY_SECS, TOPOLOGY_RETRY_MAX_ATTEMPTS},
+    config::NodeConfig,
+    consts::{
+        DNS_PROTO_FILENAME, NAMESPACE_DEF_FILENAME, SIGNED_DNS_PROPOSAL_PREFIX,
+        TOPOLOGY_RETRY_DELAY_SECS, TOPOLOGY_RETRY_MAX_ATTEMPTS,
+    },
     dirs::WorkflowDirs,
     error::Result,
     proto::com::digitalasset::canton::{
@@ -27,7 +30,7 @@ use crate::{
 /// # Arguments
 /// * `config` - Configuration with Canton connection details
 /// * `dirs` - WorkflowDirs containing all directory paths
-pub async fn submit_dns_proposals(config: &Config, dirs: &WorkflowDirs) -> Result {
+pub async fn submit_dns_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
     tracing::info!("Submitting DNS proposals...");
 
     // Step 1: Get synchronizer ID
@@ -35,7 +38,7 @@ pub async fn submit_dns_proposals(config: &Config, dirs: &WorkflowDirs) -> Resul
     tracing::debug!("Using synchronizer ID: {synchronizer_id}");
 
     // Step 2: Read the original DNS proposal
-    let dns_file = dirs.dns_proposals_dir.join("dns_proto.bin");
+    let dns_file = dirs.dns_proposals_dir.join(DNS_PROTO_FILENAME);
     tracing::info!("Reading original DNS proposal from {}", dns_file.display());
     let mut dns_transaction: SignedTopologyTransaction =
         utils::read_first_message_from_file(&dns_file).await?;
@@ -48,7 +51,8 @@ pub async fn submit_dns_proposals(config: &Config, dirs: &WorkflowDirs) -> Resul
     while let Some(entry) = dir_entries.next_entry().await? {
         let file_name = entry.file_name();
         let file_name_str = file_name.to_string_lossy();
-        if file_name_str.starts_with("signed-dns-proposal") && file_name_str.ends_with(".bin") {
+        if file_name_str.starts_with(SIGNED_DNS_PROPOSAL_PREFIX) && file_name_str.ends_with(".bin")
+        {
             signed_files.push(entry.path());
         }
     }
@@ -85,7 +89,7 @@ pub async fn submit_dns_proposals(config: &Config, dirs: &WorkflowDirs) -> Resul
         force_changes: vec![],
         store: Some(StoreId {
             store: Some(store_id::Store::Synchronizer(Synchronizer {
-                kind: Some(synchronizer::Kind::Id(synchronizer_id.clone())),
+                kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.clone())),
             })),
         }),
         wait_to_become_effective: None,
@@ -95,7 +99,7 @@ pub async fn submit_dns_proposals(config: &Config, dirs: &WorkflowDirs) -> Resul
     tracing::info!("DNS proposal submitted to topology");
 
     // Step 6: Read namespace definition to get the namespace for polling
-    let namespace_def_file = dirs.dns_submission_dir.join("namespaceDef.bin");
+    let namespace_def_file = dirs.dns_submission_dir.join(NAMESPACE_DEF_FILENAME);
     tracing::info!(
         "Reading namespace definition from {}",
         namespace_def_file.display()
@@ -121,7 +125,7 @@ pub async fn submit_dns_proposals(config: &Config, dirs: &WorkflowDirs) -> Resul
 
 /// Wait for DNS to appear in topology by polling
 async fn wait_for_dns_in_topology(
-    config: &Config,
+    config: &NodeConfig,
     synchronizer_id: &str,
     namespace: &str,
 ) -> Result {
@@ -136,7 +140,7 @@ async fn wait_for_dns_in_topology(
             base_query: Some(BaseQuery {
                 store: Some(StoreId {
                     store: Some(store_id::Store::Synchronizer(Synchronizer {
-                        kind: Some(synchronizer::Kind::Id(synchronizer_id.to_string())),
+                        kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.to_string())),
                     })),
                 }),
                 proposals: false,

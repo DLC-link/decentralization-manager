@@ -1,0 +1,434 @@
+pub mod client;
+pub mod election;
+pub mod server;
+
+use std::{path::Path, time::Duration};
+
+use bytes::Bytes;
+use http::Uri;
+use hyper::{Body, Request, Response, StatusCode};
+use secp256k1::{PublicKey, Secp256k1, SecretKey};
+use serde::{Deserialize, Serialize};
+use tokio::net::TcpStream;
+
+use crate::error::Result;
+
+/// Timeout for Noise protocol operations
+pub const NOISE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Message types for the Noise protocol communication
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u16)]
+pub enum MessageType {
+    // Commands (0x0000 - 0x00FF)
+    UploadDars = 0x0001,
+    GenerateKeys = 0x0002,
+    SignDns = 0x0003,
+    SignP2p = 0x0004,
+    SignSubmissions = 0x0005,
+    StatusUpdate = 0x0006,
+    Disconnect = 0x0007,
+    GetNextCommand = 0x0008,
+
+    // Responses (0x0100 - 0x01FF)
+    Ack = 0x0101,
+    Data = 0x0102,
+    Error = 0x0103,
+    Ready = 0x0104,
+    Wait = 0x0105,
+
+    // Data Transfers (0x0200 - 0x02FF)
+    KeysUpload = 0x0201,
+    DnsSignature = 0x0202,
+    P2pSignatures = 0x0203,
+    SubmissionSignatures = 0x0204,
+}
+
+impl TryFrom<u16> for MessageType {
+    type Error = anyhow::Error;
+
+    fn try_from(value: u16) -> std::result::Result<Self, anyhow::Error> {
+        match value {
+            0x0001 => Ok(Self::UploadDars),
+            0x0002 => Ok(Self::GenerateKeys),
+            0x0003 => Ok(Self::SignDns),
+            0x0004 => Ok(Self::SignP2p),
+            0x0005 => Ok(Self::SignSubmissions),
+            0x0006 => Ok(Self::StatusUpdate),
+            0x0007 => Ok(Self::Disconnect),
+            0x0008 => Ok(Self::GetNextCommand),
+            0x0101 => Ok(Self::Ack),
+            0x0102 => Ok(Self::Data),
+            0x0103 => Ok(Self::Error),
+            0x0104 => Ok(Self::Ready),
+            0x0105 => Ok(Self::Wait),
+            0x0201 => Ok(Self::KeysUpload),
+            0x0202 => Ok(Self::DnsSignature),
+            0x0203 => Ok(Self::P2pSignatures),
+            0x0204 => Ok(Self::SubmissionSignatures),
+            _ => Err(anyhow::anyhow!("Unknown message type: 0x{value:04x}")),
+        }
+    }
+}
+
+impl MessageType {
+    pub fn to_u16(self) -> u16 {
+        self as u16
+    }
+}
+
+/// Message structure for Noise protocol communication
+#[derive(Debug, Clone)]
+pub struct Message {
+    pub msg_type: MessageType,
+    pub payload: Vec<u8>,
+}
+
+impl Message {
+    pub fn new(msg_type: MessageType, payload: Vec<u8>) -> Self {
+        Self { msg_type, payload }
+    }
+
+    /// Create a message with no payload
+    pub fn new_empty(msg_type: MessageType) -> Self {
+        Self {
+            msg_type,
+            payload: Vec::new(),
+        }
+    }
+
+    /// Encode message to wire format:
+    /// [MessageType (2 bytes)] [PayloadLength (4 bytes)] [Payload (variable)]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+
+        // Message type (2 bytes, big-endian)
+        bytes.extend_from_slice(&self.msg_type.to_u16().to_be_bytes());
+
+        // Payload length (4 bytes, big-endian)
+        bytes.extend_from_slice(&(self.payload.len() as u32).to_be_bytes());
+
+        // Payload
+        bytes.extend_from_slice(&self.payload);
+
+        bytes
+    }
+
+    /// Decode message from wire format
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() < 6 {
+            anyhow::bail!(
+                "Message too short: expected at least 6 bytes, got {}",
+                bytes.len()
+            );
+        }
+
+        // Parse message type (2 bytes)
+        let msg_type_value = u16::from_be_bytes([bytes[0], bytes[1]]);
+        let msg_type = MessageType::try_from(msg_type_value)?;
+
+        // Parse payload length (4 bytes)
+        let payload_len = u32::from_be_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]) as usize;
+
+        // Check if we have enough bytes for the payload
+        if bytes.len() < 6 + payload_len {
+            anyhow::bail!(
+                "Message payload truncated: expected {payload_len} bytes, got {}",
+                bytes.len() - 6
+            );
+        }
+
+        // Extract payload
+        let payload = bytes[6..6 + payload_len].to_vec();
+
+        Ok(Self { msg_type, payload })
+    }
+}
+
+/// Noise protocol errors
+#[derive(Debug, thiserror::Error)]
+pub enum NoiseError {
+    #[error("Noise protocol error: {0}")]
+    Noise(#[from] tokio_noise::NoiseError),
+
+    #[error("Hyper error: {0}")]
+    Hyper(#[from] hyper::Error),
+
+    #[error("HTTP error: {0}")]
+    Http(#[from] http::Error),
+
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("JSON serialization error: {0}")]
+    JsonSerialization(#[from] serde_json::Error),
+
+    #[error("Bad status code: {0}")]
+    BadStatusCode(StatusCode),
+
+    #[error("Invalid URI: {0}")]
+    InvalidUri(#[from] http::uri::InvalidUri),
+
+    #[error("URI parsing error: {0}")]
+    UriParsingError(String),
+
+    #[error("Request timeout")]
+    RequestTimeout,
+
+    #[error("TCP connection timeout: {0}")]
+    TcpConnectionTimeout(String),
+
+    #[error("TCP connection failed: {0}")]
+    TcpConnectionFailed(String),
+
+    #[error("Handshake failed")]
+    HandshakeFailed,
+
+    #[error("Unknown peer: {0}")]
+    UnknownPeer(String),
+
+    #[error("Decryption error")]
+    DecryptionError,
+
+    #[error("Invalid message format")]
+    InvalidMessage,
+
+    #[error("General error: {0}")]
+    Anyhow(#[from] anyhow::Error),
+}
+
+impl From<hyper_noise::ClientError> for NoiseError {
+    fn from(e: hyper_noise::ClientError) -> Self {
+        match e {
+            hyper_noise::ClientError::Hyper(hyper_err) => NoiseError::Hyper(hyper_err),
+            hyper_noise::ClientError::Noise(noise_err) => NoiseError::Noise(noise_err),
+            hyper_noise::ClientError::RequestTimeout => NoiseError::RequestTimeout,
+        }
+    }
+}
+
+/// Helper function to parse flexible URIs (with or without scheme)
+pub fn parse_flexible_uri(uri_str: &str) -> Result<Uri, http::uri::InvalidUri> {
+    let url = match uri_str.find("://") {
+        None => format!("http://{uri_str}"),
+        Some(_) => uri_str.to_string(),
+    };
+
+    url.parse::<Uri>()
+}
+
+/// Send a message to a peer using Noise protocol
+pub async fn send_noise_message(
+    peer_address: &str,
+    peer_port: u16,
+    psk: &[u8; 32],
+    identity: &[u8],
+    message: &Message,
+) -> Result<Bytes, NoiseError> {
+    let socket_addr = format!("{peer_address}:{peer_port}");
+
+    // Create HTTP request with message payload
+    let uri = parse_flexible_uri(&format!("http://{socket_addr}/message"))?;
+    let request_body = message.to_bytes();
+
+    let request = Request::builder()
+        .uri(uri)
+        .method("POST")
+        .body(Body::from(request_body))?;
+
+    // Connect with timeout
+    let tcp_stream =
+        match tokio::time::timeout(NOISE_REQUEST_TIMEOUT, TcpStream::connect(&socket_addr)).await {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(e)) => {
+                return Err(NoiseError::TcpConnectionFailed(format!(
+                    "Failed to connect to {socket_addr}: {e}"
+                )));
+            }
+            Err(_) => return Err(NoiseError::TcpConnectionTimeout(socket_addr.to_string())),
+        };
+
+    // Create Noise initiator
+    let initiator = tokio_noise::handshakes::nn_psk2::Initiator { psk, identity };
+
+    // Send request over Noise-encrypted channel
+    let mut response = hyper_noise::client::send_request(
+        tcp_stream,
+        initiator,
+        request,
+        Some(NOISE_REQUEST_TIMEOUT),
+    )
+    .await?;
+
+    // Check response status
+    if response.status() != StatusCode::OK {
+        return Err(NoiseError::BadStatusCode(response.status()));
+    }
+
+    // Read response body
+    let resp_body_bytes = hyper::body::to_bytes(response.body_mut()).await?;
+    Ok(resp_body_bytes)
+}
+
+/// Handle incoming Noise message on the server side
+pub async fn handle_noise_message(request: Request<Body>) -> Result<Response<Body>, NoiseError> {
+    // Read request body
+    let body_bytes = hyper::body::to_bytes(request.into_body()).await?;
+
+    // Parse message
+    let _message = Message::from_bytes(&body_bytes).map_err(|_| NoiseError::InvalidMessage)?;
+
+    // TODO: Process message based on type
+    // For now, just acknowledge
+    let response_message = Message::new_empty(MessageType::Ack);
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .body(Body::from(response_message.to_bytes()))?)
+}
+
+/// Static keypair for Noise protocol authentication
+#[derive(Debug, Clone)]
+pub struct NoiseKeypair {
+    pub secret_key: SecretKey,
+    pub public_key: PublicKey,
+}
+
+impl NoiseKeypair {
+    /// Generate a new random keypair
+    pub fn generate() -> Self {
+        let secp = Secp256k1::new();
+        let (secret_key, public_key) = secp.generate_keypair(&mut rand::thread_rng());
+        Self {
+            secret_key,
+            public_key,
+        }
+    }
+
+    /// Load keypair from a file (expects hex-encoded secret key)
+    pub async fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let content = tokio::fs::read_to_string(path).await?;
+        let secret_key_hex = content.trim();
+        let secret_key_bytes = hex::decode(secret_key_hex)?;
+        let secret_key = SecretKey::from_slice(&secret_key_bytes)?;
+        let secp = Secp256k1::new();
+        let public_key = PublicKey::from_secret_key(&secp, &secret_key);
+
+        Ok(Self {
+            secret_key,
+            public_key,
+        })
+    }
+
+    /// Save the private key to a file (hex-encoded)
+    pub async fn save_to_file<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+        let secret_key_hex = hex::encode(self.secret_key.secret_bytes());
+        tokio::fs::write(path, secret_key_hex).await?;
+        Ok(())
+    }
+
+    /// Get the public key as hex string
+    pub fn public_key_hex(&self) -> String {
+        hex::encode(self.public_key.serialize())
+    }
+
+    /// Derive a pre-shared key (PSK) from a peer's public key using ECDH
+    pub fn derive_psk(&self, peer_public_key: &PublicKey) -> [u8; 32] {
+        secp256k1::ecdh::SharedSecret::new(peer_public_key, &self.secret_key).secret_bytes()
+    }
+}
+
+/// Generate a new Noise static keypair and save to file
+pub async fn generate_keypair<P: AsRef<Path>>(output_path: P) -> Result<NoiseKeypair> {
+    let keypair = NoiseKeypair::generate();
+    keypair.save_to_file(&output_path).await?;
+
+    tracing::info!("Generated Noise static keypair");
+    tracing::info!("Private key saved to: {}", output_path.as_ref().display());
+    tracing::info!("Public key (hex): {}", keypair.public_key_hex());
+    tracing::warn!("⚠️  Keep your private key secure! Never share it with anyone.");
+    tracing::info!("💡 Share your public key with other participants to add to network.toml");
+
+    Ok(keypair)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_message_type_conversion() -> Result {
+        assert_eq!(MessageType::UploadDars.to_u16(), 0x0001);
+        assert_eq!(MessageType::try_from(0x0001)?, MessageType::UploadDars);
+        assert_eq!(MessageType::Ack.to_u16(), 0x0101);
+        assert_eq!(MessageType::try_from(0x0101)?, MessageType::Ack);
+        assert!(MessageType::try_from(0xFFFF).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn test_message_encoding_empty() {
+        let msg = Message::new_empty(MessageType::UploadDars);
+        let bytes = msg.to_bytes();
+
+        // Should be 6 bytes: 2 for type, 4 for length (0)
+        assert_eq!(bytes.len(), 6);
+        assert_eq!(bytes[0..2], [0x00, 0x01]); // Type
+        assert_eq!(bytes[2..6], [0x00, 0x00, 0x00, 0x00]); // Length
+    }
+
+    #[test]
+    fn test_message_encoding_with_payload() {
+        let payload = vec![0x01, 0x02, 0x03, 0x04];
+        let msg = Message::new(MessageType::Data, payload.clone());
+        let bytes = msg.to_bytes();
+
+        // Should be 10 bytes: 2 for type, 4 for length, 4 for payload
+        assert_eq!(bytes.len(), 10);
+        assert_eq!(bytes[0..2], [0x01, 0x02]); // Type (Data = 0x0102)
+        assert_eq!(bytes[2..6], [0x00, 0x00, 0x00, 0x04]); // Length (4)
+        assert_eq!(bytes[6..10], payload[..]); // Payload
+    }
+
+    #[test]
+    fn test_message_roundtrip() -> Result {
+        let original = Message::new(MessageType::StatusUpdate, b"test data".to_vec());
+        let bytes = original.to_bytes();
+        let decoded = Message::from_bytes(&bytes)?;
+
+        assert_eq!(decoded.msg_type, original.msg_type);
+        assert_eq!(decoded.payload, original.payload);
+        Ok(())
+    }
+
+    #[test]
+    fn test_message_decoding_too_short() {
+        let bytes = vec![0x00, 0x01]; // Only 2 bytes, need at least 6
+        let result = Message::from_bytes(&bytes);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_message_decoding_truncated_payload() {
+        let mut bytes = vec![0x00, 0x01]; // Type
+        bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x0A]); // Length = 10
+        bytes.extend_from_slice(&[0x01, 0x02]); // Only 2 bytes of payload
+
+        let result = Message::from_bytes(&bytes);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_flexible_uri() -> Result {
+        // With scheme
+        let uri1 = parse_flexible_uri("http://example.com:8080")?;
+        assert_eq!(uri1.host(), Some("example.com"));
+        assert_eq!(uri1.port_u16(), Some(8080));
+
+        // Without scheme
+        let uri2 = parse_flexible_uri("example.com:8080")?;
+        assert_eq!(uri2.host(), Some("example.com"));
+        assert_eq!(uri2.port_u16(), Some(8080));
+        Ok(())
+    }
+}

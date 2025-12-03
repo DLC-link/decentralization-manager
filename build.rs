@@ -16,7 +16,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     for p in &protos {
-        println!("cargo:rerun-if-changed={}", p);
+        println!("cargo:rerun-if-changed={p}");
     }
 
     println!("cargo:rerun-if-changed=build.rs");

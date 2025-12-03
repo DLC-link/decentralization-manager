@@ -3,18 +3,23 @@ use std::collections::HashSet;
 use tokio::fs;
 
 use crate::{
-    config::Config,
+    config::NodeConfig,
+    consts::{
+        ATTESTOR_KEYS_PREFIX, DNS_PROTO_FILENAME, NAMESPACE_DEF_FILENAME, P2P_PROTO_FILENAME,
+        PARTICIPANT_ID_PREFIX, PARTY_ID_PREFIX,
+    },
     dirs::WorkflowDirs,
     error::Result,
+    participant_id::CantonId,
     proto::com::digitalasset::canton::{
-        crypto::v30::SigningPublicKey,
+        crypto::v30::{SigningKeysWithThreshold, SigningPublicKey},
         protocol::v30::{
-            DecentralizedNamespaceDefinition, PartyToKeyMapping, PartyToParticipant,
-            TopologyMapping, enums, party_to_participant::HostingParticipant, topology_mapping,
+            DecentralizedNamespaceDefinition, PartyToParticipant, TopologyMapping, enums,
+            party_to_participant::HostingParticipant, topology_mapping,
         },
         topology::admin::v30::{
-            AuthorizeRequest, ForceFlag, StoreId, Synchronizer, authorize_request, store_id,
-            synchronizer, topology_manager_write_service_client::TopologyManagerWriteServiceClient,
+            AuthorizeRequest, ForceFlag, StoreId, authorize_request, store_id,
+            topology_manager_write_service_client::TopologyManagerWriteServiceClient,
         },
     },
     utils,
@@ -32,15 +37,14 @@ use crate::{
 /// This step:
 /// 1. Loads all attestor key files from keys_dir
 /// 2. Loads all participant ID files from ids_dir
-/// 3. Creates three topology proposals:
+/// 3. Creates two topology proposals:
 ///    - Decentralized Namespace Definition (DNS)
-///    - Party-to-Participant mapping (P2P)
-///    - Party-to-Key mapping (PTK)
+///    - Party-to-Participant mapping (P2P) with embedded signing keys (Canton 3.4+)
 /// 4. Saves proposals to output files
 ///
 /// **Note**: If you encounter TOPOLOGY_NO_APPROPRIATE_SIGNING_KEY_IN_STORE errors,
 /// ensure the participant is properly connected to a synchronizer first.
-pub async fn create_proposals(config: &Config, dirs: &WorkflowDirs) -> Result {
+pub async fn create_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
     tracing::info!("Creating topology proposals...");
 
     // Step 1: Load all attestor key files
@@ -53,7 +57,7 @@ pub async fn create_proposals(config: &Config, dirs: &WorkflowDirs) -> Result {
     while let Some(entry) = dir_entries.next_entry().await? {
         let file_name = entry.file_name();
         let file_name_str = file_name.to_string_lossy();
-        if file_name_str.starts_with("attestor-public-keys") && file_name_str.ends_with(".bin") {
+        if file_name_str.starts_with(ATTESTOR_KEYS_PREFIX) && file_name_str.ends_with(".bin") {
             key_file_paths.push(entry.path());
         }
     }
@@ -85,13 +89,20 @@ pub async fn create_proposals(config: &Config, dirs: &WorkflowDirs) -> Result {
         // First key is namespace key, second is DAML key
         namespace_keys.push(keys[0].clone());
         daml_keys.push(keys[1].clone());
+
+        // Debug: Log fingerprints of keys being added to P2P mapping
+        let daml_key_fp = utils::compute_fingerprint(&keys[1]);
+        tracing::debug!(
+            "DAML key from {} has fingerprint: {daml_key_fp}",
+            key_file.display()
+        );
     }
 
     // Step 3: Extract namespaces from namespace keys
     // A namespace in Canton is the fingerprint (hash) of the public key
     let mut namespaces = HashSet::new();
     for key in &namespace_keys {
-        let namespace = crate::utils::compute_fingerprint(key);
+        let namespace = utils::compute_fingerprint(key);
         namespaces.insert(namespace);
     }
 
@@ -107,7 +118,7 @@ pub async fn create_proposals(config: &Config, dirs: &WorkflowDirs) -> Result {
     while let Some(entry) = dir_entries.next_entry().await? {
         let file_name = entry.file_name();
         let file_name_str = file_name.to_string_lossy();
-        if file_name_str.starts_with("participant-id") && file_name_str.ends_with(".bin") {
+        if file_name_str.starts_with(PARTICIPANT_ID_PREFIX) && file_name_str.ends_with(".bin") {
             id_file_paths.push(entry.path());
         }
     }
@@ -121,9 +132,9 @@ pub async fn create_proposals(config: &Config, dirs: &WorkflowDirs) -> Result {
 
     let mut participant_ids = Vec::new();
     for id_file in &id_file_paths {
-        let id_bytes = fs::read(id_file).await?;
-        let id = String::from_utf8(id_bytes)?;
-        participant_ids.push(id);
+        let file_content = fs::read_to_string(id_file).await?;
+        let participant_id = CantonId::parse_from_file(&file_content)?;
+        participant_ids.push(participant_id);
     }
 
     // Step 5: Calculate threshold (majority)
@@ -149,40 +160,43 @@ pub async fn create_proposals(config: &Config, dirs: &WorkflowDirs) -> Result {
     };
 
     // Step 8: Create Party ID
-    let party_id = format!("cbtc-network::{decentralized_namespace}");
+    let party_id = format!("{PARTY_ID_PREFIX}::{decentralized_namespace}");
     tracing::info!("Party ID: {party_id}");
 
     // Step 9: Create PartyToParticipant mapping
+    // Canton 3.4: PartyToParticipant now includes signing keys (PartyToKeyMapping is deprecated)
     let p2p_mapping = PartyToParticipant {
         party: party_id.clone(),
         threshold,
         participants: participant_ids
             .iter()
             .map(|pid| HostingParticipant {
-                participant_uid: pid.clone(),
+                participant_uid: pid.to_string(),
                 permission: enums::ParticipantPermission::Confirmation as i32,
                 onboarding: None,
             })
             .collect(),
+        party_signing_keys: Some(SigningKeysWithThreshold {
+            keys: daml_keys.clone(),
+            threshold,
+        }),
     };
 
-    // Step 10: Create PartyToKeyMapping
-    let ptk_mapping = PartyToKeyMapping {
-        party: party_id.clone(),
-        threshold,
-        signing_keys: daml_keys,
-    };
-
-    // Step 11: Get synchronizer ID for multi-party proposals
-    // Multi-party proposals MUST use the Synchronizer store so Canton can look up
-    // all the keys that were registered via namespace delegations in step_1
-    let synchronizer_id = crate::utils::get_synchronizer_id(config).await?;
-    tracing::debug!("Using synchronizer ID: {synchronizer_id}");
+    // Debug: Log all DAML key fingerprints being added to P2P mapping
+    tracing::info!(
+        "Adding {} DAML signing keys to P2P mapping:",
+        daml_keys.len()
+    );
+    for (idx, key) in daml_keys.iter().enumerate() {
+        let fp = utils::compute_fingerprint(key);
+        tracing::info!("  Key {}: fingerprint={fp}", idx + 1);
+    }
 
     let mut topology_client =
         TopologyManagerWriteServiceClient::connect(config.admin_api_url()).await?;
 
-    // Create DNS proposal
+    // Create DNS proposal in Authorized store
+    // The coordinator creates this proposal locally, which will later be shared with attestors
     tracing::info!("Creating DNS proposal...");
 
     let dns_request = tonic::Request::new(AuthorizeRequest {
@@ -198,12 +212,10 @@ pub async fn create_proposals(config: &Config, dirs: &WorkflowDirs) -> Result {
             },
         )),
         must_fully_authorize: false,
-        force_changes: vec![],
-        signed_by: vec![], // Auto-select appropriate signing keys
+        force_changes: vec![ForceFlag::AllowUnvalidatedSigningKeys as i32],
+        signed_by: vec![], // Auto-select appropriate signing keys from Authorized store
         store: Some(StoreId {
-            store: Some(store_id::Store::Synchronizer(Synchronizer {
-                kind: Some(synchronizer::Kind::Id(synchronizer_id.clone())),
-            })),
+            store: Some(store_id::Store::Authorized(store_id::Authorized {})),
         }),
         wait_to_become_effective: None,
     });
@@ -213,7 +225,7 @@ pub async fn create_proposals(config: &Config, dirs: &WorkflowDirs) -> Result {
         .transaction
         .ok_or_else(|| anyhow::anyhow!("No DNS transaction returned"))?;
 
-    // Create P2P proposal
+    // Create P2P proposal in Authorized store
     tracing::info!("Creating P2P proposal...");
     let p2p_request = tonic::Request::new(AuthorizeRequest {
         r#type: Some(authorize_request::Type::Proposal(
@@ -229,9 +241,7 @@ pub async fn create_proposals(config: &Config, dirs: &WorkflowDirs) -> Result {
         force_changes: vec![ForceFlag::AllowUnvalidatedSigningKeys as i32],
         signed_by: vec![],
         store: Some(StoreId {
-            store: Some(store_id::Store::Synchronizer(Synchronizer {
-                kind: Some(synchronizer::Kind::Id(synchronizer_id.clone())),
-            })),
+            store: Some(store_id::Store::Authorized(store_id::Authorized {})),
         }),
         wait_to_become_effective: None,
     });
@@ -241,52 +251,25 @@ pub async fn create_proposals(config: &Config, dirs: &WorkflowDirs) -> Result {
         .transaction
         .ok_or_else(|| anyhow::anyhow!("No P2P transaction returned"))?;
 
-    // Create PTK proposal
-    tracing::info!("Creating PTK proposal...");
-    let ptk_request = tonic::Request::new(AuthorizeRequest {
-        r#type: Some(authorize_request::Type::Proposal(
-            authorize_request::Proposal {
-                change: enums::TopologyChangeOp::AddReplace as i32,
-                serial: 1,
-                mapping: Some(TopologyMapping {
-                    mapping: Some(topology_mapping::Mapping::PartyToKeyMapping(ptk_mapping)),
-                }),
-            },
-        )),
-        must_fully_authorize: false,
-        force_changes: vec![ForceFlag::AllowUnvalidatedSigningKeys as i32],
-        signed_by: vec![],
-        store: Some(StoreId {
-            store: Some(store_id::Store::Synchronizer(Synchronizer {
-                kind: Some(synchronizer::Kind::Id(synchronizer_id.clone())),
-            })),
-        }),
-        wait_to_become_effective: None,
-    });
-
-    let ptk_response = topology_client.authorize(ptk_request).await?.into_inner();
-    let ptk_transaction = ptk_response
-        .transaction
-        .ok_or_else(|| anyhow::anyhow!("No PTK transaction returned"))?;
+    // Note: Canton 3.4+ - Signing keys are now included directly in the PartyToParticipant mapping above
+    // No separate PartyToKeyMapping transaction needed
 
     // Step 13: Save proposals to files
     fs::create_dir_all(&dirs.dns_proposals_dir).await?;
-    fs::create_dir_all(&dirs.p2p_ptk_proposals_dir).await?;
+    fs::create_dir_all(&dirs.p2p_proposals_dir).await?;
     fs::create_dir_all(&dirs.dns_submission_dir).await?;
 
-    let dns_file = dirs.dns_proposals_dir.join("dns_proto.bin");
+    let dns_file = dirs.dns_proposals_dir.join(DNS_PROTO_FILENAME);
     tracing::info!("Saving DNS proposal to {}", dns_file.display());
     utils::write_message_to_file(&dns_transaction, &dns_file).await?;
 
-    let p2p_file = dirs.p2p_ptk_proposals_dir.join("p2p_proto.bin");
+    let p2p_file = dirs.p2p_proposals_dir.join(P2P_PROTO_FILENAME);
     tracing::info!("Saving P2P proposal to {}", p2p_file.display());
     utils::write_message_to_file(&p2p_transaction, &p2p_file).await?;
 
-    let ptk_file = dirs.p2p_ptk_proposals_dir.join("ptk_proto.bin");
-    tracing::info!("Saving PTK proposal to {}", ptk_file.display());
-    utils::write_message_to_file(&ptk_transaction, &ptk_file).await?;
+    // Canton 3.4+: Signing keys now embedded in P2P proposal above (no separate transaction)
 
-    let namespace_file = dirs.dns_submission_dir.join("namespaceDef.bin");
+    let namespace_file = dirs.dns_submission_dir.join(NAMESPACE_DEF_FILENAME);
     tracing::info!(
         "Saving namespace definition to {}",
         namespace_file.display()
@@ -342,7 +325,7 @@ fn compute_decentralized_namespace(namespaces: &HashSet<String>) -> String {
     // Return multihash format: prefix + hex-encoded hash
     format!(
         "{}{}",
-        crate::utils::MULTIHASH_SHA256_PREFIX,
+        utils::MULTIHASH_SHA256_PREFIX,
         hex::encode(hash_result)
     )
 }
