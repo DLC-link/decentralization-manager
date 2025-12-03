@@ -6,7 +6,7 @@ pub use clap::Parser;
 
 #[derive(Parser)]
 #[command(name = "dec-party-onboarding")]
-#[command(about = "Canton workflow automation - port of Scala scripts to Rust", long_about = None)]
+#[command(about = "Canton decentralized party onboarding workflow automation", long_about = None)]
 pub struct Cli {
     /// Path to configuration file (TOML)
     #[arg(short, long, value_name = "FILE")]
@@ -25,36 +25,9 @@ pub enum Commands {
         output: PathBuf,
     },
 
-    /// Start the node (as coordinator or attestor based on configuration)
-    Start,
+    /// Run the onboarding workflow (create decentralized party)
+    Onboarding,
 
-    /// Step 1: Upload DARs
-    UploadDars,
-
-    /// Step 1: Generate keys and export participant ID
-    GenerateKeys,
-
-    /// Step 1a: Create topology proposals
-    CreateProposals,
-
-    /// Step 2: Sign DNS proposals
-    SignDnsProposals,
-
-    /// Step 2a: Submit DNS proposals
-    SubmitDnsProposals,
-
-    /// Step 3: Sign P2P proposals (Canton 3.4+: keys embedded in P2P)
-    SignP2pProposals,
-
-    /// Step 3a: Submit final proposals
-    SubmitFinalProposals,
-
-    /// Step 3b: Prepare ledger submissions
-    PrepareSubmissions,
-
-    /// Step 4: Sign ledger submissions
-    SignSubmissions,
-
-    /// Step 5: Execute ledger submissions
-    ExecuteSubmissions,
+    /// Run the contracts workflow (upload DARs and create contracts)
+    Contracts,
 }

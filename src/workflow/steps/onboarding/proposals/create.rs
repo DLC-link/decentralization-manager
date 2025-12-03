@@ -15,10 +15,10 @@ use canton_proto_rs::com::digitalasset::canton::{
 };
 
 use crate::{
-    config::NodeConfig,
+    config::{NetworkConfig, NodeConfig},
     consts::{
         ATTESTOR_KEYS_PREFIX, DNS_PROTO_FILENAME, NAMESPACE_DEF_FILENAME, P2P_PROTO_FILENAME,
-        PARTICIPANT_ID_PREFIX, PARTY_ID_PREFIX,
+        PARTICIPANT_ID_PREFIX,
     },
     dirs::WorkflowDirs,
     error::Result,
@@ -45,24 +45,22 @@ use crate::{
 ///
 /// **Note**: If you encounter TOPOLOGY_NO_APPROPRIATE_SIGNING_KEY_IN_STORE errors,
 /// ensure the participant is properly connected to a synchronizer first.
-pub async fn create_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
+pub async fn create_proposals(
+    config: &NodeConfig,
+    dirs: &WorkflowDirs,
+    network_config: &NetworkConfig,
+) -> Result {
     tracing::info!("Creating topology proposals...");
+
+    let party_id_prefix = &network_config.application.party_id_prefix;
 
     // Step 1: Load all attestor key files
     if !dirs.keys_dir.exists() {
         anyhow::bail!("keys directory not found");
     }
 
-    let mut key_file_paths = Vec::new();
-    let mut dir_entries = fs::read_dir(&dirs.keys_dir).await?;
-    while let Some(entry) = dir_entries.next_entry().await? {
-        let file_name = entry.file_name();
-        let file_name_str = file_name.to_string_lossy();
-        if file_name_str.starts_with(ATTESTOR_KEYS_PREFIX) && file_name_str.ends_with(".bin") {
-            key_file_paths.push(entry.path());
-        }
-    }
-    key_file_paths.sort();
+    let key_file_paths =
+        utils::find_files_by_pattern(&dirs.keys_dir, ATTESTOR_KEYS_PREFIX, ".bin").await?;
 
     tracing::info!("Found {} attestor key files", key_file_paths.len());
 
@@ -114,16 +112,8 @@ pub async fn create_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
         anyhow::bail!("ids directory not found");
     }
 
-    let mut id_file_paths = Vec::new();
-    let mut dir_entries = fs::read_dir(&dirs.ids_dir).await?;
-    while let Some(entry) = dir_entries.next_entry().await? {
-        let file_name = entry.file_name();
-        let file_name_str = file_name.to_string_lossy();
-        if file_name_str.starts_with(PARTICIPANT_ID_PREFIX) && file_name_str.ends_with(".bin") {
-            id_file_paths.push(entry.path());
-        }
-    }
-    id_file_paths.sort();
+    let id_file_paths =
+        utils::find_files_by_pattern(&dirs.ids_dir, PARTICIPANT_ID_PREFIX, ".bin").await?;
 
     tracing::info!("Found {} participant ID files", id_file_paths.len());
 
@@ -161,7 +151,7 @@ pub async fn create_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
     };
 
     // Step 8: Create Party ID
-    let party_id = format!("{PARTY_ID_PREFIX}::{decentralized_namespace}");
+    let party_id = format!("{party_id_prefix}::{decentralized_namespace}");
     tracing::info!("Party ID: {party_id}");
 
     // Step 9: Create PartyToParticipant mapping

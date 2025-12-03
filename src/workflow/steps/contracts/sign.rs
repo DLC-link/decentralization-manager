@@ -112,20 +112,8 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
     let prepared_dir = ledger_submissions_dir.join(PREPARED_DIR);
 
     // Discover all prepared-submission-*.bin files
-    let mut submission_files = Vec::new();
-    let mut entries = tokio::fs::read_dir(&prepared_dir).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        let path = entry.path();
-        if path.is_file()
-            && let Some(name) = path.file_name().and_then(|n| n.to_str())
-            && name.starts_with(PREPARED_SUBMISSION_PREFIX)
-            && name.ends_with(".bin")
-        {
-            submission_files.push(path);
-        }
-    }
-
-    submission_files.sort();
+    let submission_files =
+        utils::find_files_by_pattern(&prepared_dir, PREPARED_SUBMISSION_PREFIX, ".bin").await?;
 
     if submission_files.is_empty() {
         anyhow::bail!(
@@ -175,10 +163,7 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
     for chunk_start in (0..dump_len).step_by(32) {
         let chunk_end = (chunk_start + 32).min(dump_len);
         let chunk = &exported_key_data[chunk_start..chunk_end];
-        tracing::debug!(
-            "  [{chunk_start:03}-{:03}]: {chunk:02x?}",
-            chunk_end - 1,
-        );
+        tracing::debug!("  [{chunk_start:03}-{:03}]: {chunk:02x?}", chunk_end - 1,);
     }
 
     // Strategy: Try ALL possible 32-byte sequences and test each one
@@ -303,7 +288,10 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
     let verifying_key = signing_key.verifying_key();
     let verifying_key_bytes = verifying_key.to_bytes();
 
-    tracing::debug!("Verifying key (raw 32 bytes): {:02x?}", &verifying_key_bytes);
+    tracing::debug!(
+        "Verifying key (raw 32 bytes): {:02x?}",
+        &verifying_key_bytes
+    );
     tracing::debug!(
         "Expected Canton key (raw): {:02x?}",
         &expected_raw_public_key[..32.min(expected_raw_public_key.len())]

@@ -12,7 +12,7 @@ This document describes how peers (Coordinator and Attestors) communicate secure
 
 ## Visual Workflow
 
-![Multi-Party Decentralized Setup Workflow](flowchart.png)
+[![](https://mermaid.ink/img/pako:eNq1Wntv2zYQ_yqEihXpFqex7Dws7AHX3qNoqxh1hmJLjEGWaFuILAmS3DZL8913FEWKpGhLSjT_k4i--91Dd8c70g-GG3nYsIxVEH1xN06SoevpbYjgM8_g6egm_7N4hXq9n9FkE0Up_hQld4T8gT4i9vx4G1JOmYxwfovCZeQknh-uv6Er_n-OfVM-cyjrx2Xy-udJgp0Moyl2cZglTuD_iz00A5b7xV5BbkRI3Sz9hibsXyqGPypSpjgOonv0e_QZJ6ETurhkXDCLvvsO_aT5oCv7zdX44_St_Tv6dPXx3W_vrz5pCRmOYnru1Ks3_9iRn-I5znbxTf4vmiVRFrlRYKEZxgma-qlL1LtHL9EfTuilG-cOc-UkAAYJNoTYzfpgdkQEOlmUIJxmzjLw0w1Oc9OpMHjtQBugL362QeMsAyqg7S_q0c0no5sN0O0no9uib5gnGPp4l22IV9OHcRDk_qWAZB3izHch5rxfHlV-s8KvUtgaCk7D1_Io_QtDfMLqbOOkuH-T_0F9C73DEIg4xImT-VG42MNtR99kxwlhyqEKGEwwS1WpQO7orScHyDKJHM91UkiSz76DcglFLl59-DC2pyUugZXcDFgMF2jI1_2bMpoUhXLM0NniNHYg435A0_GH9-iOYu5HNEtEsxtEu0S02yByTGYrw53j0FONRyksVlzqFN_34h0EttsjyCdLP8y_jKE8-K4fO2HW8z2yvFBFmqpI0Tv_j0hbFSm6ryuRXCh3ZVkYggASjaw9iGGbwA7hfy4KgwNZTYSUijxWEE0NYoXI1hIpmQZhWGxTULPjKHWCFB2JukVhcP9KKBUciqHnOOYNh2M4FFcqA5SUq5XL5WLFRK4qRbc6ew5hPDNnKJbWJ-D_KESDk-EPFvUd3i6x58F264eEflGxe2Chub8OEUCWxskKSQYObjgf0YLwwi6omDZgLLDhZdNQMgl5sJb4yx2EkxpjXpj-E5Mtk0QQyiJEYoAFnpStBTAPY1ADHuVCxezizlvUsMtVqTW7XIJ07GVoFvqKaajor8_CFBix1wNH9dirlxOcmaIg15eUpsi2glxfOfYjS6kq-qNIL1g6XB-Ifwm8k-0SnD6qeGYVTyWxdSQ8R-a75dbPcjH1xUCMiJxPiXxLhGNRQVuW9TrBa5LnL1FKaSD4aTZXU3ZYBBfkc2kNEygl6_CGc5BioU_WoZisMzNumqyxGbdIVgAW0wUeNclKlORlZ1HDr8nWVvyadFX5pdgnKouxr5hwMPbBVzz202paEWsU6MYJWw9tK9CNM1YHLeWP6JIiCWDpcMoSH-9LWdEPJZ5KYutI1JT9DeQHDZJWjIucM2fUpi2FlHdiTeYSA6vZK-MLKefSoWNP-16Mtm_nkyvb_nVyLQV1wVq6YxsHOMNH4iTOFtmMXBnBiw7DW7yqG5JBheuP48n1vNmMLI_t9Nzh-pkjsgTAIDsbkQ-hP39EPoTexYgseIKhtxqRBVsr_CqFraHgNJoRGVbVEXk6_oj-jAMI9MUeTjIeS07TjccUgqCVSgrDMVH5CcMxRZ06wj5WIDFUSiHvYYIuOdwqibbIA5DXsI9CIQSy-8UBNHlHey6avL81RON4hX38Pbt39ZvdePJuoQCYAkD9lqYBsAWA-o2LApTxBFqXmZbXe1iq6SkBI30UIUwNhPi9rf2-Ol_OEgxzMqbbSZrCRLh_xJTRmAB1xCyRCnBxzuT0nJvKF8TL25xGP-rUIIhIpUD5lA-N4Evk0ql0l7KK8mbnBx5ih7bwz3ZLivf-eVMQUqpbUVAyXBg9BcPlppbTMk7S-wF146aWquD1Ui6h973U-pSYTATRAB41_axgyaKGW9PNtuDW9LIyN-dnynIASCNYa9DJlg4p2zeh3xRMUbAbtLKNsW0Fu0EvewC7RC-8oGQyLNUUi0onK5itAVNpbC1Ndd779St2IVxblg6CJmWQMA9SxGq1GDKGQqRcIjR6KG1w6RDeEecU0BG_x94aOrzx7K3oegZZ5uuTOmKJtfQq64jLSyO5IdbdFiF6k9SkJZ5f__WeXBod6oOBV-50URh54J4jKDPFK0uz-wArdygrPwisF6vVCD7HUK-iO2y9cN1T-BSPvS--l22sQfz1GFDh9byA7xRA3hEyOBc-teRmO3K7IXnZ3knG7aUXXuiTvSFCyh14Bw4WW-4GLhA77FbkdkPyVg6WM-aZDoYgF9OV7f-v-VZLS9Yy2GE15vPOlYofjVx3teLiT0_Pz8FcSbx5KNrZuWx3aOR44Mlo6svsyFChC3imavDW-PYJFTuGd0QKE9RyHKqvqbzEoUKJSC6FoI5Gaqgc9G55hdMtnt0hXn4k3Smc2S1cl8bmh3mdwpndwj3DWLVOkrmwA93YfNgZlN0RFO9nO4Uzu4V79vsUy1cUFz-2gPoV-OtNhnR7Db_kp5Jxf3UGhXNv4PEL-lbkdkNyfgnYitxsR95GGaECNCQ325EfUEYJEXb81ABeOGtqQ203pOYDcytysx15rWPk_qpHxj0p5GM_vKs0Vso1PmvxiJADr4rfJLahp7caezkUqzUHPQ2ECcNijaDcW_kITE6I4sgPYao7usdBEH2peEn4JQeDXQ1x_9DUw697WzGUvaSGodL4l4d_DYQoM3-NFH6ysMGOR6YFfcdXHKNTMG-IPc_Zb2Nx1NiCeNCGeLifWI2txlqXB6QtiAdtiGu1hjfBf_Wa5tdkxdlAvEviQNm-lN-cFhXjXOr9R6PBgD_W78XyFV0XiPIveZ-MaBwb68T3DCtLdvjY2OJk65BH44FIuzWyDd7iW8OCfz28cnZBdmvcho_AFjvh31G0ZZxJtFtvDGsFBRCedrEHJXHqO-vEKUmgHcHJJNqFmWGd5QiG9WB8NSzzbHBiDs7Ny7OBeW6ORufmsXFvWL3R2cnl5ag_PD03L0YXZ_3Lx2Pj31xo_-T89PRiMLroXwwvB2fm6eDYwJ4PNfsD_X12_jPtx_8AiXAdKQ?type=png)](https://mermaid.live/edit#pako:eNq1Wntv2zYQ_yqEihXpFqex7Dws7AHX3qNoqxh1hmJLjEGWaFuILAmS3DZL8913FEWKpGhLSjT_k4i--91Dd8c70g-GG3nYsIxVEH1xN06SoevpbYjgM8_g6egm_7N4hXq9n9FkE0Up_hQld4T8gT4i9vx4G1JOmYxwfovCZeQknh-uv6Er_n-OfVM-cyjrx2Xy-udJgp0Moyl2cZglTuD_iz00A5b7xV5BbkRI3Sz9hibsXyqGPypSpjgOonv0e_QZJ6ETurhkXDCLvvsO_aT5oCv7zdX44_St_Tv6dPXx3W_vrz5pCRmOYnru1Ks3_9iRn-I5znbxTf4vmiVRFrlRYKEZxgma-qlL1LtHL9EfTuilG-cOc-UkAAYJNoTYzfpgdkQEOlmUIJxmzjLw0w1Oc9OpMHjtQBugL362QeMsAyqg7S_q0c0no5sN0O0no9uib5gnGPp4l22IV9OHcRDk_qWAZB3izHch5rxfHlV-s8KvUtgaCk7D1_Io_QtDfMLqbOOkuH-T_0F9C73DEIg4xImT-VG42MNtR99kxwlhyqEKGEwwS1WpQO7orScHyDKJHM91UkiSz76DcglFLl59-DC2pyUugZXcDFgMF2jI1_2bMpoUhXLM0NniNHYg435A0_GH9-iOYu5HNEtEsxtEu0S02yByTGYrw53j0FONRyksVlzqFN_34h0EttsjyCdLP8y_jKE8-K4fO2HW8z2yvFBFmqpI0Tv_j0hbFSm6ryuRXCh3ZVkYggASjaw9iGGbwA7hfy4KgwNZTYSUijxWEE0NYoXI1hIpmQZhWGxTULPjKHWCFB2JukVhcP9KKBUciqHnOOYNh2M4FFcqA5SUq5XL5WLFRK4qRbc6ew5hPDNnKJbWJ-D_KESDk-EPFvUd3i6x58F264eEflGxe2Chub8OEUCWxskKSQYObjgf0YLwwi6omDZgLLDhZdNQMgl5sJb4yx2EkxpjXpj-E5Mtk0QQyiJEYoAFnpStBTAPY1ADHuVCxezizlvUsMtVqTW7XIJ07GVoFvqKaajor8_CFBix1wNH9dirlxOcmaIg15eUpsi2glxfOfYjS6kq-qNIL1g6XB-Ifwm8k-0SnD6qeGYVTyWxdSQ8R-a75dbPcjH1xUCMiJxPiXxLhGNRQVuW9TrBa5LnL1FKaSD4aTZXU3ZYBBfkc2kNEygl6_CGc5BioU_WoZisMzNumqyxGbdIVgAW0wUeNclKlORlZ1HDr8nWVvyadFX5pdgnKouxr5hwMPbBVzz202paEWsU6MYJWw9tK9CNM1YHLeWP6JIiCWDpcMoSH-9LWdEPJZ5KYutI1JT9DeQHDZJWjIucM2fUpi2FlHdiTeYSA6vZK-MLKefSoWNP-16Mtm_nkyvb_nVyLQV1wVq6YxsHOMNH4iTOFtmMXBnBiw7DW7yqG5JBheuP48n1vNmMLI_t9Nzh-pkjsgTAIDsbkQ-hP39EPoTexYgseIKhtxqRBVsr_CqFraHgNJoRGVbVEXk6_oj-jAMI9MUeTjIeS07TjccUgqCVSgrDMVH5CcMxRZ06wj5WIDFUSiHvYYIuOdwqibbIA5DXsI9CIQSy-8UBNHlHey6avL81RON4hX38Pbt39ZvdePJuoQCYAkD9lqYBsAWA-o2LApTxBFqXmZbXe1iq6SkBI30UIUwNhPi9rf2-Ol_OEgxzMqbbSZrCRLh_xJTRmAB1xCyRCnBxzuT0nJvKF8TL25xGP-rUIIhIpUD5lA-N4Evk0ql0l7KK8mbnBx5ih7bwz3ZLivf-eVMQUqpbUVAyXBg9BcPlppbTMk7S-wF146aWquD1Ui6h973U-pSYTATRAB41_axgyaKGW9PNtuDW9LIyN-dnynIASCNYa9DJlg4p2zeh3xRMUbAbtLKNsW0Fu0EvewC7RC-8oGQyLNUUi0onK5itAVNpbC1Ndd779St2IVxblg6CJmWQMA9SxGq1GDKGQqRcIjR6KG1w6RDeEecU0BG_x94aOrzx7K3oegZZ5uuTOmKJtfQq64jLSyO5IdbdFiF6k9SkJZ5f__WeXBod6oOBV-50URh54J4jKDPFK0uz-wArdygrPwisF6vVCD7HUK-iO2y9cN1T-BSPvS--l22sQfz1GFDh9byA7xRA3hEyOBc-teRmO3K7IXnZ3knG7aUXXuiTvSFCyh14Bw4WW-4GLhA77FbkdkPyVg6WM-aZDoYgF9OV7f-v-VZLS9Yy2GE15vPOlYofjVx3teLiT0_Pz8FcSbx5KNrZuWx3aOR44Mlo6svsyFChC3imavDW-PYJFTuGd0QKE9RyHKqvqbzEoUKJSC6FoI5Gaqgc9G55hdMtnt0hXn4k3Smc2S1cl8bmh3mdwpndwj3DWLVOkrmwA93YfNgZlN0RFO9nO4Uzu4V79vsUy1cUFz-2gPoV-OtNhnR7Db_kp5Jxf3UGhXNv4PEL-lbkdkNyfgnYitxsR95GGaECNCQ325EfUEYJEXb81ABeOGtqQ203pOYDcytysx15rWPk_qpHxj0p5GM_vKs0Vso1PmvxiJADr4rfJLahp7caezkUqzUHPQ2ECcNijaDcW_kITE6I4sgPYao7usdBEH2peEn4JQeDXQ1x_9DUw697WzGUvaSGodL4l4d_DYQoM3-NFH6ysMGOR6YFfcdXHKNTMG-IPc_Zb2Nx1NiCeNCGeLifWI2txlqXB6QtiAdtiGu1hjfBf_Wa5tdkxdlAvEviQNm-lN-cFhXjXOr9R6PBgD_W78XyFV0XiPIveZ-MaBwb68T3DCtLdvjY2OJk65BH44FIuzWyDd7iW8OCfz28cnZBdmvcho_AFjvh31G0ZZxJtFtvDGsFBRCedrEHJXHqO-vEKUmgHcHJJNqFmWGd5QiG9WB8NSzzbHBiDs7Ny7OBeW6ORufmsXFvWL3R2cnl5ag_PD03L0YXZ_3Lx2Pj31xo_-T89PRiMLroXwwvB2fm6eDYwJ4PNfsD_X12_jPtx_8AiXAdKQ)
 
 The diagram above illustrates the complete workflow with Noise Protocol communication between the coordinator and attestors. Red boxes indicate Noise protocol operations, blue boxes show coordinator commands, green boxes represent attestor responses, and pink boxes denote coordinator-only operations.
 
@@ -617,15 +617,31 @@ message_timeout_secs = 120
 connection_retry_attempts = 3
 connection_retry_delay_secs = 5
 
-[security]
-# Require all participants to be present before starting
-require_all_participants = true
+# Application-specific configuration (required)
+[application]
+party_id_prefix = "cbtc-network"
+namespace_key_name = "cbtc-network-namespace"
+daml_key_name = "cbtc-network-daml-transactions"
+operator_party_hint = "operator"
+
+# Contract definitions (optional)
+# [[application.contracts]]
+# id = "create-govR"
+# name = "CBTCGovernanceRules"
+# package_id = "#cbtc-governance"
+# module_name = "CBTC.Governance"
+# entity_name = "CBTCGovernanceRules"
+# fields = [...]
 ```
 
 **Individual Node Configuration (`node.toml`)**:
 ```toml
 # Each participant has their own node configuration
 # This identifies who they are in the network
+
+# Path to shared network configuration
+network_config = "network.toml"
+
 [node]
 # Must match one of the IDs in network.toml
 node_id = "attestor-1"
@@ -636,15 +652,16 @@ static_key_file = "keys/attestor-1_static.key"
 # Override listen address (default: 0.0.0.0)
 listen_address = "0.0.0.0"
 
-# Path to shared network configuration
-network_config = "network.toml"
-
 [canton]
 # Canton participant configuration
 admin_api_host = "localhost"
 admin_api_port = 5001
 ledger_api_host = "localhost"
 ledger_api_port = 5002
+# Synchronizer name (default: "global")
+synchronizer = "global"
+# Ledger API user ID for submission operations (required)
+ledger_api_user_id = "ledger-api-user"
 # Optional: JWT token for Ledger API authentication
 # ledger_api_token = "your-jwt-token-here"
 ```
@@ -752,17 +769,17 @@ Result: Deterministic coordinator selection
 Each participant runs the same program binary with their own `node.toml`:
 
 ```bash
-# On node 1 (10.0.1.100)
-$ cargo run -- --config node.toml start
+# On node 1 (10.0.1.100) - Run onboarding workflow
+$ cargo run -- -c node.toml onboarding
 
 # On node 2 (10.0.1.101)
-$ cargo run -- --config node.toml start
+$ cargo run -- -c node.toml onboarding
 
 # On node 3 (10.0.1.102)
-$ cargo run -- --config node.toml start
+$ cargo run -- -c node.toml onboarding
 
 # On node 4 (10.0.1.103)
-$ cargo run -- --config node.toml start
+$ cargo run -- -c node.toml onboarding
 ```
 
 **Startup Sequence:**
@@ -779,7 +796,7 @@ Startup Flow:
 5. Branch:
    - If coordinator: Start listening, wait for attestors
    - If attestor: Connect to coordinator
-6. Begin protocol execution
+6. Begin workflow execution (onboarding or contracts)
 ```
 
 ### Initial Setup: Key Generation and Exchange
@@ -870,8 +887,11 @@ message_timeout_secs = 120
 connection_retry_attempts = 3
 connection_retry_delay_secs = 5
 
-[security]
-require_all_participants = true
+[application]
+party_id_prefix = "cbtc-network"
+namespace_key_name = "cbtc-network-namespace"
+daml_key_name = "cbtc-network-daml-transactions"
+operator_party_hint = "operator"
 ```
 
 #### Step 4: Distribute Network Configuration
@@ -896,34 +916,38 @@ Each participant creates their own `node.toml`:
 ```bash
 # Alice (coordinator)
 $ cat node.toml
+network_config = "network.toml"
+
 [node]
 node_id = "alice"
 static_key_file = "keys/my_static.key"
 listen_address = "0.0.0.0"
-network_config = "network.toml"
 
 [canton]
 admin_api_host = "localhost"
 admin_api_port = 5001
 ledger_api_host = "localhost"
 ledger_api_port = 5002
-# Optional: JWT token for Ledger API authentication
+synchronizer = "global"
+ledger_api_user_id = "ledger-api-user"
 # ledger_api_token = "your-jwt-token-here"
 
 # Bob
 $ cat node.toml
+network_config = "network.toml"
+
 [node]
 node_id = "bob"
 static_key_file = "keys/my_static.key"
 listen_address = "0.0.0.0"
-network_config = "network.toml"
 
 [canton]
 admin_api_host = "localhost"
 admin_api_port = 5011
 ledger_api_host = "localhost"
 ledger_api_port = 5012
-# Optional: JWT token for Ledger API authentication
+synchronizer = "global"
+ledger_api_user_id = "ledger-api-user"
 # ledger_api_token = "your-jwt-token-here"
 
 # Carol - similar configuration
@@ -950,7 +974,7 @@ node_id = "coordinator-node"
 static_key_file = "keys/coordinator_static.key"
 network_config = "network.toml"
 
-$ cargo run -- start
+$ cargo run -- -c node.toml onboarding
 [INFO] I am: coordinator-node
 [INFO] Coordinator: coordinator-node
 [INFO] My role: COORDINATOR
@@ -960,8 +984,8 @@ $ cargo run -- start
 [INFO] Attestor connected: attestor-1 (10.0.1.101)
 [INFO] Attestor connected: attestor-2 (10.0.1.102)
 [INFO] Attestor connected: attestor-3 (10.0.1.103)
-[INFO] All attestors connected, starting setup protocol
-[INFO] Broadcasting command: UPLOAD_DARS
+[INFO] All attestors connected, starting onboarding workflow
+[INFO] Broadcasting command: GENERATE_KEYS
 ...
 
 # Participant 2 (Attestor 1 - 10.0.1.101)
@@ -971,16 +995,16 @@ node_id = "attestor-1"
 static_key_file = "keys/attestor-1_static.key"
 network_config = "network.toml"
 
-$ cargo run -- start
+$ cargo run -- -c node.toml onboarding
 [INFO] I am: attestor-1
 [INFO] Coordinator: coordinator-node
 [INFO] My role: ATTESTOR
 [INFO] Starting as ATTESTOR
 [INFO] Connecting to coordinator at 10.0.1.100:9000
 [INFO] Connected to coordinator, ready for commands
-[DEBUG] Received command: UPLOAD_DARS
-[INFO] Uploading DAR files...
-[INFO] Upload complete, sending ACK
+[DEBUG] Received command: GENERATE_KEYS
+[INFO] Generating cryptographic keys...
+[INFO] Keys generated, sending to coordinator
 ...
 
 # Participant 3 (Attestor 2 - 10.0.1.102) and 4 (Attestor 3 - 10.0.1.103)
@@ -1190,26 +1214,25 @@ The protocol ensures that sensitive cryptographic material (keys, signatures, pr
 
 ```
 1. Initial Setup (One-time, Out-of-Band)
-   ├─ Each participant generates Noise keypair
+   ├─ Each participant generates Noise keypair: cargo run -- keygen -o keys/my.key
    ├─ Public keys exchanged securely (Signal, in-person, etc.)
    ├─ Coordinator creates network.toml with all participants
    ├─ network.toml distributed to all participants
    └─ Each participant creates their node.toml
 
-2. Runtime (Each Setup Session)
-   ├─ All participants start program: cargo run -- start
+2. Onboarding Workflow (Run once to create decentralized party)
+   ├─ All participants start: cargo run -- -c node.toml onboarding
    ├─ Program reads configs and determines role
-   ├─ Coordinator starts listening
-   ├─ Attestors connect to coordinator
+   ├─ Coordinator starts listening, attestors connect
    ├─ Mutual authentication via Noise handshake
-   ├─ Coordinator waits for all attestors
-   └─ Setup protocol begins
+   ├─ Workflow: GenerateKeys → CreateProposals → SignDns → SubmitDns → SignP2p → SubmitFinal
+   └─ Decentralized party namespace created
 
-3. Protocol Execution
-   ├─ Coordinator sends commands via encrypted channel
-   ├─ Attestors execute and respond
-   ├─ Files (keys, signatures) transferred over Noise
-   └─ Continue until setup complete
+3. Contracts Workflow (Run after onboarding to deploy contracts)
+   ├─ All participants start: cargo run -- -c node.toml contracts
+   ├─ Coordinator orchestrates workflow
+   ├─ Workflow: UploadDars → PrepareSubmissions → SignSubmissions → ExecuteSubmissions
+   └─ Governance contracts deployed to ledger
 
 4. Shutdown
    ├─ Coordinator sends DISCONNECT command

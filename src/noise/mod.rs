@@ -6,7 +6,7 @@ use std::{path::Path, time::Duration};
 
 use bytes::Bytes;
 use http::Uri;
-use hyper::{Body, Request, Response, StatusCode};
+use hyper::{Body, Request, StatusCode};
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpStream;
@@ -268,23 +268,6 @@ pub async fn send_noise_message(
     // Read response body
     let resp_body_bytes = hyper::body::to_bytes(response.body_mut()).await?;
     Ok(resp_body_bytes)
-}
-
-/// Handle incoming Noise message on the server side
-pub async fn handle_noise_message(request: Request<Body>) -> Result<Response<Body>, NoiseError> {
-    // Read request body
-    let body_bytes = hyper::body::to_bytes(request.into_body()).await?;
-
-    // Parse message
-    let _message = Message::from_bytes(&body_bytes).map_err(|_| NoiseError::InvalidMessage)?;
-
-    // TODO: Process message based on type
-    // For now, just acknowledge
-    let response_message = Message::new_empty(MessageType::Ack);
-
-    Ok(Response::builder()
-        .status(StatusCode::OK)
-        .body(Body::from(response_message.to_bytes()))?)
 }
 
 /// Static keypair for Noise protocol authentication

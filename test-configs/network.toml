@@ -13,7 +13,7 @@ name = "Participant 1 (Coordinator)"
 role = "coordinator"
 address = "localhost"
 port = 9001
-public_key = "02f6392c8992d6c0b9f6851652eb7b6aab3a54b06f3270415ad90db86c406fba80" # participant-1
+public_key = "02d4d7bf47a16e593681a9ec08fad01cedc9fd7e6b77c490400a5af3c704f8159e" # participant-1
 
 # Attestor - Participant 2
 [[participants]]
@@ -21,7 +21,7 @@ id = "app-provider"
 name = "Participant 2"
 address = "localhost"
 port = 9002
-public_key = "02b2337e83e92cd6dea519ca76c21a58262dcff424e56a9787ae56bcb9ba3b1660" # participant-2
+public_key = "030795ca01ba3e4566eec4e4e52f6702c32b8a1d4747c553166502fcc587a83a42" # participant-2
 
 # Attestor - Participant 3
 [[participants]]
@@ -29,10 +29,56 @@ id = "sv"
 name = "Participant 3"
 address = "localhost"
 port = 9003
-public_key = "0352ec4d52bb730d84bd1e034cf0f48f1b88cc806294e11ea3c8e025db0728046c" # participant-3
+public_key = "025a26dbf693141ba0c803ed6c33d8769c7f8a1b4f51c70f04b829a7db63303738" # participant-3
 
 [timeouts]
 handshake_timeout_secs = 30
 message_timeout_secs = 120
 connection_retry_attempts = 3
 connection_retry_delay_secs = 5
+
+# Application-specific configuration
+[application]
+party_id_prefix = "cbtc-network"
+namespace_key_name = "cbtc-network-namespace"
+daml_key_name = "cbtc-network-daml-transactions"
+operator_party_hint = "operator"
+
+# Contract definitions for governance setup
+[[application.contracts]]
+id = "create-govR"
+name = "CBTCGovernanceRules"
+package_id = "#cbtc-governance"
+module_name = "CBTC.Governance"
+entity_name = "CBTCGovernanceRules"
+fields = [
+    { type = "decentralized_party" },
+    { type = "operator_party" },
+    { type = "instrument", id = "CBTC" },
+    { type = "record", fields = [{ type = "attestors_set" }] },
+    { type = "optional", inner = { type = "governance_threshold" } },
+]
+
+[[application.contracts]]
+id = "create-daR"
+name = "CBTCDepositAccountRules"
+package_id = "#cbtc"
+module_name = "CBTC.DepositAccount"
+entity_name = "CBTCDepositAccountRules"
+fields = [
+    { type = "decentralized_party" },
+    { type = "operator_party" },
+    { type = "instrument", id = "CBTC" },
+]
+
+[[application.contracts]]
+id = "create-waR"
+name = "CBTCWithdrawAccountRules"
+package_id = "#cbtc"
+module_name = "CBTC.WithdrawAccount"
+entity_name = "CBTCWithdrawAccountRules"
+fields = [
+    { type = "decentralized_party" },
+    { type = "operator_party" },
+    { type = "instrument", id = "CBTC" },
+]

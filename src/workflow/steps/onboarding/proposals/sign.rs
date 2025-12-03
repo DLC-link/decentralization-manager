@@ -1,0 +1,123 @@
+use std::path::Path;
+
+use tokio::fs;
+
+use canton_proto_rs::com::digitalasset::canton::{
+    protocol::v30::SignedTopologyTransaction,
+    topology::admin::v30::{
+        SignTransactionsRequest, StoreId, Synchronizer, store_id, synchronizer,
+        topology_manager_write_service_client::TopologyManagerWriteServiceClient,
+    },
+};
+
+use crate::{
+    config::NodeConfig,
+    consts::{
+        DNS_PROTO_FILENAME, P2P_PROTO_FILENAME, SIGNED_DNS_PROPOSAL_PREFIX,
+        SIGNED_P2P_PROPOSALS_PREFIX,
+    },
+    dirs::WorkflowDirs,
+    error::Result,
+    utils,
+};
+
+/// Sign a topology proposal and save the signed transaction
+async fn sign_proposal(
+    config: &NodeConfig,
+    dirs: &WorkflowDirs,
+    input_file: &Path,
+    output_dir: &Path,
+    output_prefix: &str,
+    proposal_type: &str,
+) -> Result {
+    tracing::info!("Signing {proposal_type} proposal...");
+
+    let participant_num = utils::get_participant_number(config, &dirs.ids_dir).await?;
+    tracing::debug!("Determined participant number: {participant_num}");
+
+    let synchronizer_id = utils::get_synchronizer_id(config).await?;
+    tracing::debug!("Using synchronizer ID: {synchronizer_id}");
+
+    tracing::info!(
+        "Reading {proposal_type} proposal from {}",
+        input_file.display()
+    );
+
+    let transaction: SignedTopologyTransaction =
+        utils::read_first_message_from_file(input_file).await?;
+
+    let mut topology_client =
+        TopologyManagerWriteServiceClient::connect(config.admin_api_url()).await?;
+
+    let request = tonic::Request::new(SignTransactionsRequest {
+        transactions: vec![transaction],
+        signed_by: vec![],
+        store: Some(StoreId {
+            store: Some(store_id::Store::Synchronizer(Synchronizer {
+                kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id)),
+            })),
+        }),
+        force_flags: vec![],
+    });
+
+    tracing::debug!("Calling SignTransactions RPC for {proposal_type}...");
+    let response = topology_client
+        .sign_transactions(request)
+        .await?
+        .into_inner();
+
+    if response.transactions.is_empty() {
+        anyhow::bail!("No signed transaction returned for {proposal_type}");
+    }
+
+    fs::create_dir_all(output_dir).await?;
+    let output_file = output_dir.join(format!("{output_prefix}-{participant_num}.bin"));
+    tracing::info!(
+        "Saving signed {proposal_type} proposal to {}",
+        output_file.display()
+    );
+
+    utils::write_messages_to_file(&response.transactions, &output_file).await?;
+
+    tracing::info!("{proposal_type} proposal signed successfully");
+    Ok(())
+}
+
+/// Sign DNS proposal with attestor's key
+///
+/// Corresponds to: 02_SignProposals.sc
+///
+/// This step must be run by each attestor participant (except the coordinator who created the proposal).
+/// Each attestor signs the DNS proposal with their namespace key.
+pub async fn sign_dns_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
+    sign_proposal(
+        config,
+        dirs,
+        &dirs.dns_proposals_dir.join(DNS_PROTO_FILENAME),
+        &dirs.dns_signed_dir,
+        SIGNED_DNS_PROPOSAL_PREFIX,
+        "DNS",
+    )
+    .await
+}
+
+/// Sign P2P proposals with attestor's key
+///
+/// Corresponds to: 03_SignP2PProposals.sc
+///
+/// **Canton 3.4+**: Signing keys are now embedded in the P2P mapping.
+/// This function signs the P2P proposal which contains both participant and key information.
+///
+/// This step must be run by each attestor participant (except the coordinator who created the proposals).
+/// Each attestor signs the P2P proposal with their namespace key.
+pub async fn sign_p2p_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
+    sign_proposal(
+        config,
+        dirs,
+        &dirs.p2p_proposals_dir.join(P2P_PROTO_FILENAME),
+        &dirs.final_signed_dir,
+        SIGNED_P2P_PROPOSALS_PREFIX,
+        "P2P",
+    )
+    .await
+}
