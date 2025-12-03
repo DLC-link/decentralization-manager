@@ -1,2 +1,4 @@
-proto/googleapis/
 target/
+
+# Generated keys and configuration
+workflow-data/
