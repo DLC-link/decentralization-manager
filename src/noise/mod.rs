@@ -217,6 +217,13 @@ pub fn parse_flexible_uri(uri_str: &str) -> Result<Uri, http::uri::InvalidUri> {
     url.parse::<Uri>()
 }
 
+/// Parse a hex-encoded public key string into a PublicKey
+pub fn parse_public_key(hex_str: &str) -> Result<PublicKey, NoiseError> {
+    let pub_key_bytes = hex::decode(hex_str).map_err(|_| NoiseError::InvalidMessage)?;
+    let pub_key = PublicKey::from_slice(&pub_key_bytes).map_err(|_| NoiseError::InvalidMessage)?;
+    Ok(pub_key)
+}
+
 /// Send a message to a peer using Noise protocol
 pub async fn send_noise_message(
     peer_address: &str,

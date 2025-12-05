@@ -8,7 +8,8 @@ use tokio::net::TcpStream;
 use crate::{
     config::{NetworkConfig, NodeConfig, Participant},
     noise::{
-        Message, MessageType, NOISE_REQUEST_TIMEOUT, NoiseError, NoiseKeypair, parse_flexible_uri,
+        parse_flexible_uri, parse_public_key, Message, MessageType, NoiseError, NoiseKeypair,
+        NOISE_REQUEST_TIMEOUT,
     },
 };
 
@@ -38,10 +39,7 @@ impl NoiseClient {
             .clone();
 
         // Parse coordinator's public key
-        let pub_key_bytes =
-            hex::decode(&coordinator.public_key).map_err(|_| NoiseError::InvalidMessage)?;
-        let coordinator_pub_key =
-            PublicKey::from_slice(&pub_key_bytes).map_err(|_| NoiseError::InvalidMessage)?;
+        let coordinator_pub_key = parse_public_key(&coordinator.public_key)?;
 
         Ok(Self {
             node_config: Arc::new(node_config),
@@ -121,11 +119,16 @@ impl NoiseClient {
         Ok(resp_body_bytes)
     }
 
-    /// Upload keys to coordinator
-    pub async fn upload_keys(&self, keys_data: Vec<u8>) -> Result<(), NoiseError> {
-        tracing::info!("Uploading keys to coordinator");
+    /// Helper method to send a message and verify Ack response
+    async fn send_and_verify_ack(
+        &self,
+        msg_type: MessageType,
+        payload: Vec<u8>,
+        action: &str,
+    ) -> Result<(), NoiseError> {
+        tracing::info!("{action}");
 
-        let message = Message::new(MessageType::KeysUpload, keys_data);
+        let message = Message::new(msg_type, payload);
         let response = self.send_message(&message).await?;
 
         // Parse response
@@ -135,44 +138,34 @@ impl NoiseClient {
             return Err(NoiseError::InvalidMessage);
         }
 
-        tracing::info!("Keys uploaded successfully");
+        tracing::info!("{action} completed successfully");
         Ok(())
+    }
+
+    /// Upload keys to coordinator
+    pub async fn upload_keys(&self, keys_data: Vec<u8>) -> Result<(), NoiseError> {
+        self.send_and_verify_ack(MessageType::KeysUpload, keys_data, "Uploading keys to coordinator")
+            .await
     }
 
     /// Send DNS signature to coordinator
     pub async fn send_dns_signature(&self, signature_data: Vec<u8>) -> Result<(), NoiseError> {
-        tracing::info!("Sending DNS signature to coordinator");
-
-        let message = Message::new(MessageType::DnsSignature, signature_data);
-        let response = self.send_message(&message).await?;
-
-        // Parse response
-        let resp_msg = Message::from_bytes(&response).map_err(|_| NoiseError::InvalidMessage)?;
-
-        if resp_msg.msg_type != MessageType::Ack {
-            return Err(NoiseError::InvalidMessage);
-        }
-
-        tracing::info!("DNS signature sent successfully");
-        Ok(())
+        self.send_and_verify_ack(
+            MessageType::DnsSignature,
+            signature_data,
+            "Sending DNS signature to coordinator",
+        )
+        .await
     }
 
     /// Send P2P signatures to coordinator
     pub async fn send_p2p_signatures(&self, signatures_data: Vec<u8>) -> Result<(), NoiseError> {
-        tracing::info!("Sending P2P signatures to coordinator");
-
-        let message = Message::new(MessageType::P2pSignatures, signatures_data);
-        let response = self.send_message(&message).await?;
-
-        // Parse response
-        let resp_msg = Message::from_bytes(&response).map_err(|_| NoiseError::InvalidMessage)?;
-
-        if resp_msg.msg_type != MessageType::Ack {
-            return Err(NoiseError::InvalidMessage);
-        }
-
-        tracing::info!("P2P signatures sent successfully");
-        Ok(())
+        self.send_and_verify_ack(
+            MessageType::P2pSignatures,
+            signatures_data,
+            "Sending P2P signatures to coordinator",
+        )
+        .await
     }
 
     /// Send submission signatures to coordinator
@@ -180,38 +173,22 @@ impl NoiseClient {
         &self,
         signatures_data: Vec<u8>,
     ) -> Result<(), NoiseError> {
-        tracing::info!("Sending submission signatures to coordinator");
-
-        let message = Message::new(MessageType::SubmissionSignatures, signatures_data);
-        let response = self.send_message(&message).await?;
-
-        // Parse response
-        let resp_msg = Message::from_bytes(&response).map_err(|_| NoiseError::InvalidMessage)?;
-
-        if resp_msg.msg_type != MessageType::Ack {
-            return Err(NoiseError::InvalidMessage);
-        }
-
-        tracing::info!("Submission signatures sent successfully");
-        Ok(())
+        self.send_and_verify_ack(
+            MessageType::SubmissionSignatures,
+            signatures_data,
+            "Sending submission signatures to coordinator",
+        )
+        .await
     }
 
     /// Send status update to coordinator
     pub async fn send_status(&self, status_data: Vec<u8>) -> Result<(), NoiseError> {
-        tracing::info!("Sending status update to coordinator");
-
-        let message = Message::new(MessageType::StatusUpdate, status_data);
-        let response = self.send_message(&message).await?;
-
-        // Parse response
-        let resp_msg = Message::from_bytes(&response).map_err(|_| NoiseError::InvalidMessage)?;
-
-        if resp_msg.msg_type != MessageType::Ack {
-            return Err(NoiseError::InvalidMessage);
-        }
-
-        tracing::info!("Status update sent successfully");
-        Ok(())
+        self.send_and_verify_ack(
+            MessageType::StatusUpdate,
+            status_data,
+            "Sending status update to coordinator",
+        )
+        .await
     }
 
     /// Poll coordinator for next command

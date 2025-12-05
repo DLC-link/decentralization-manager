@@ -6,8 +6,8 @@ use tokio::net::TcpListener;
 
 use crate::{
     config::{NetworkConfig, NodeConfig},
-    noise::{Message, MessageType, NOISE_REQUEST_TIMEOUT, NoiseError, NoiseKeypair},
-    workflow::{WorkflowState, state::WorkflowStep},
+    noise::{parse_public_key, Message, MessageType, NoiseError, NoiseKeypair, NOISE_REQUEST_TIMEOUT},
+    workflow::{state::WorkflowStep, WorkflowState},
 };
 
 /// Coordinator server that accepts connections from attestors
@@ -33,11 +33,7 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                 continue;
             }
 
-            let pub_key_bytes =
-                hex::decode(&participant.public_key).map_err(|_| NoiseError::InvalidMessage)?;
-            let pub_key =
-                PublicKey::from_slice(&pub_key_bytes).map_err(|_| NoiseError::InvalidMessage)?;
-
+            let pub_key = parse_public_key(&participant.public_key)?;
             peer_keys.insert(participant.id.clone(), pub_key);
         }
 
