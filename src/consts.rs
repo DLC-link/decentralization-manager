@@ -32,6 +32,9 @@ pub const SIGNED_P2P_PROPOSALS_PREFIX: &str = "signed-p2p-proposals";
 /// Prefix for submission signature files
 pub const SUBMISSION_SIGNATURES_PREFIX: &str = "submission-signatures";
 
+/// Prefix for signed kick proposal files
+pub const SIGNED_KICK_PROPOSALS_PREFIX: &str = "signed-kick-proposals";
+
 // File names
 /// Namespace definition file name
 pub const NAMESPACE_DEF_FILENAME: &str = "namespace_def.bin";

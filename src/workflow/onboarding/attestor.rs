@@ -1,11 +1,12 @@
 use crate::{
     consts::{ATTESTOR_KEYS_PREFIX, SIGNED_DNS_PROPOSAL_PREFIX, SIGNED_P2P_PROPOSALS_PREFIX},
-    dirs::WorkflowDirs,
     error::Result,
     noise::client::NoiseClient,
 };
 
-pub async fn send_keys_to_coordinator(client: &NoiseClient, dirs: &WorkflowDirs) -> Result {
+use super::OnboardingDirs;
+
+pub async fn send_keys_to_coordinator(client: &NoiseClient, dirs: &OnboardingDirs) -> Result {
     let data = crate::workflow::find_and_read_file(
         &dirs.keys_dir,
         ATTESTOR_KEYS_PREFIX,
@@ -19,7 +20,7 @@ pub async fn send_keys_to_coordinator(client: &NoiseClient, dirs: &WorkflowDirs)
 
 pub async fn send_dns_signature_to_coordinator(
     client: &NoiseClient,
-    dirs: &WorkflowDirs,
+    dirs: &OnboardingDirs,
 ) -> Result {
     let data = crate::workflow::find_and_read_file(
         &dirs.dns_signed_dir,
@@ -34,7 +35,7 @@ pub async fn send_dns_signature_to_coordinator(
 
 pub async fn send_p2p_signatures_to_coordinator(
     client: &NoiseClient,
-    dirs: &WorkflowDirs,
+    dirs: &OnboardingDirs,
 ) -> Result {
     let data = crate::workflow::find_and_read_file(
         &dirs.final_signed_dir,

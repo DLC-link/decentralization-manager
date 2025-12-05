@@ -21,9 +21,9 @@ use crate::{
         PREPARED_SUBMISSION_PREFIX, SIGNATURES_DIR, SUBMISSION_SIGNATURES_PREFIX,
         TOPOLOGY_RETRY_DELAY_SECS, TOPOLOGY_RETRY_MAX_ATTEMPTS,
     },
-    dirs::WorkflowDirs,
     error::Result,
     utils,
+    workflow::contracts::ContractsDirs,
 };
 
 /// Execute signed ledger submissions
@@ -39,7 +39,7 @@ use crate::{
 /// * `network_config` - Network configuration with application settings
 pub async fn execute_submissions(
     config: &NodeConfig,
-    dirs: &WorkflowDirs,
+    dirs: &ContractsDirs,
     network_config: &NetworkConfig,
 ) -> Result {
     tracing::info!("Executing submissions...");

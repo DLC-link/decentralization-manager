@@ -289,8 +289,7 @@ pub fn extract_synchronizer_fingerprint(synchronizer_id: &str) -> Result<String>
         Ok(synchronizer_id.to_string())
     } else {
         anyhow::bail!(
-            "Invalid synchronizer ID format '{}': expected format '<alias>::<fingerprint>::<version>' or '<alias>::<fingerprint>'",
-            synchronizer_id
+            "Invalid synchronizer ID format '{synchronizer_id}': expected format '<alias>::<fingerprint>::<version>' or '<alias>::<fingerprint>'"
         )
     }
 }

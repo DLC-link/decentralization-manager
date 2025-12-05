@@ -16,15 +16,15 @@ use crate::{
         DNS_PROTO_FILENAME, P2P_PROTO_FILENAME, SIGNED_DNS_PROPOSAL_PREFIX,
         SIGNED_P2P_PROPOSALS_PREFIX,
     },
-    dirs::WorkflowDirs,
     error::Result,
     utils,
+    workflow::onboarding::OnboardingDirs,
 };
 
 /// Sign a topology proposal and save the signed transaction
 async fn sign_proposal(
     config: &NodeConfig,
-    dirs: &WorkflowDirs,
+    dirs: &OnboardingDirs,
     input_file: &Path,
     output_dir: &Path,
     output_prefix: &str,
@@ -89,7 +89,7 @@ async fn sign_proposal(
 ///
 /// This step must be run by each attestor participant (except the coordinator who created the proposal).
 /// Each attestor signs the DNS proposal with their namespace key.
-pub async fn sign_dns_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
+pub async fn sign_dns_proposals(config: &NodeConfig, dirs: &OnboardingDirs) -> Result {
     sign_proposal(
         config,
         dirs,
@@ -110,7 +110,7 @@ pub async fn sign_dns_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Res
 ///
 /// This step must be run by each attestor participant (except the coordinator who created the proposals).
 /// Each attestor signs the P2P proposal with their namespace key.
-pub async fn sign_p2p_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
+pub async fn sign_p2p_proposals(config: &NodeConfig, dirs: &OnboardingDirs) -> Result {
     sign_proposal(
         config,
         dirs,

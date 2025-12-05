@@ -23,9 +23,9 @@ use crate::{
         LEDGER_SUBMISSIONS_DIR, MIN_PARTICIPANTS, NAMESPACE_DEF_FILENAME, PREPARED_DIR,
         PREPARED_SUBMISSION_PREFIX, TOPOLOGY_RETRY_DELAY_SECS, TOPOLOGY_RETRY_MAX_ATTEMPTS,
     },
-    dirs::WorkflowDirs,
     error::Result,
     utils,
+    workflow::contracts::ContractsDirs,
 };
 
 /// Default page size for listing operations (parties, keys, etc.)
@@ -44,7 +44,7 @@ const DEFAULT_PAGE_SIZE: i32 = 1000;
 /// * `network_config` - Network configuration with application settings
 pub async fn prepare_submissions(
     config: &NodeConfig,
-    dirs: &WorkflowDirs,
+    dirs: &ContractsDirs,
     network_config: &NetworkConfig,
 ) -> Result {
     tracing::info!("Preparing submissions...");

@@ -3,15 +3,14 @@ use std::{collections::HashSet, sync::Arc};
 use crate::{
     config::{NetworkConfig, NodeConfig},
     consts::{SIGNED_DNS_PROPOSAL_PREFIX, SIGNED_P2P_PROPOSALS_PREFIX},
-    dirs::WorkflowDirs,
     error::Result,
     noise::server::NoiseServer,
     workflow::state::WorkflowState,
 };
 
 use super::{
+    OnboardingDirs, OnboardingStep,
     steps::{create_proposals, generate_keys, submit_dns_proposals, submit_final_proposals},
-    OnboardingStep,
 };
 
 pub async fn start_coordinator(
@@ -28,8 +27,8 @@ pub async fn start_coordinator(
     .await?;
     let server = Arc::new(server);
 
-    let dirs = WorkflowDirs::new();
-    dirs.create_required_dirs().await?;
+    let dirs = OnboardingDirs::new();
+    dirs.create_dirs().await?;
 
     tracing::info!("Noise server initialized, listening for connections");
 
@@ -54,7 +53,7 @@ async fn run_workflow(
     workflow_state: Arc<WorkflowState<OnboardingStep>>,
     node_config: NodeConfig,
     network_config: NetworkConfig,
-    dirs: WorkflowDirs,
+    dirs: OnboardingDirs,
 ) -> Result {
     let mut coordinator_completed_steps = HashSet::new();
 

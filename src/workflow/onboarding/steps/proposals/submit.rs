@@ -17,9 +17,9 @@ use crate::{
         SIGNED_P2P_PROPOSALS_PREFIX, TOPOLOGY_PROPAGATION_DELAY_SECS, TOPOLOGY_RETRY_DELAY_SECS,
         TOPOLOGY_RETRY_MAX_ATTEMPTS,
     },
-    dirs::WorkflowDirs,
     error::Result,
     utils,
+    workflow::onboarding::OnboardingDirs,
 };
 
 /// Aggregate and submit DNS proposals
@@ -28,7 +28,7 @@ use crate::{
 ///
 /// This step must be run once by the coordinator after all attestors have signed the DNS proposal.
 /// It aggregates all signatures and submits the fully-signed proposal to Canton.
-pub async fn submit_dns_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
+pub async fn submit_dns_proposals(config: &NodeConfig, dirs: &OnboardingDirs) -> Result {
     tracing::info!("Submitting DNS proposals...");
 
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
@@ -143,19 +143,13 @@ async fn wait_for_dns_in_topology(
 
         if attempt < max_attempts {
             tracing::debug!(
-                "DNS not yet in topology, attempt {}/{}, retrying in {:?}...",
-                attempt,
-                max_attempts,
-                retry_delay
+                "DNS not yet in topology, attempt {attempt}/{max_attempts}, retrying in {retry_delay:?}..."
             );
             time::sleep(retry_delay).await;
         }
     }
 
-    anyhow::bail!(
-        "DNS did not appear in topology after {} attempts",
-        max_attempts
-    )
+    anyhow::bail!("DNS did not appear in topology after {max_attempts} attempts")
 }
 
 /// Aggregate and submit P2P proposals
@@ -169,7 +163,7 @@ async fn wait_for_dns_in_topology(
 /// It aggregates all signatures and submits the fully-signed proposal to Canton.
 pub async fn submit_final_proposals(
     config: &NodeConfig,
-    dirs: &WorkflowDirs,
+    dirs: &OnboardingDirs,
     network_config: &NetworkConfig,
 ) -> Result {
     tracing::info!("Submitting P2P proposal with embedded signing keys (Canton 3.4+)...");

@@ -1,7 +1,9 @@
 pub mod attestor;
 pub mod coordinator;
+pub mod dirs;
 pub mod steps;
 
+pub use dirs::OnboardingDirs;
 pub use steps::{
     create_proposals, generate_keys, sign_dns_proposals, sign_p2p_proposals, submit_dns_proposals,
     submit_final_proposals,
@@ -10,7 +12,7 @@ pub use steps::{
 use crate::{noise::MessageType, workflow::state::WorkflowStep};
 
 /// Onboarding workflow steps (decentralized party creation)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum OnboardingStep {
     /// Waiting for all attestors to connect
     WaitingForAttestors,
@@ -58,10 +60,10 @@ impl WorkflowStep for OnboardingStep {
     }
 
     fn requires_attestors(&self) -> bool {
-        matches!(self, Self::GenerateKeys | Self::SignDns | Self::SignP2p)
+        *self == Self::GenerateKeys || *self == Self::SignDns || *self == Self::SignP2p
     }
 
     fn is_waiting_for_attestors(&self) -> bool {
-        matches!(self, Self::WaitingForAttestors)
+        *self == Self::WaitingForAttestors
     }
 }

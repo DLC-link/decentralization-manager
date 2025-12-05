@@ -1,4 +1,5 @@
 pub mod contracts;
+pub mod kick;
 pub mod onboarding;
 pub mod state;
 
@@ -6,20 +7,21 @@ use std::sync::Arc;
 
 use crate::{
     config::{CoordinatorStrategy, NetworkConfig, NodeConfig},
-    dirs::WorkflowDirs,
     error::Result,
     noise::{MessageType, client::NoiseClient, election, server::NoiseServer},
     utils,
 };
 
 pub use contracts::ContractsStep;
+pub use kick::{KickConfig, KickStep};
 pub use onboarding::OnboardingStep;
 pub use state::WorkflowState;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum WorkflowType {
     Onboarding,
     Contracts,
+    Kick,
 }
 
 async fn determine_coordinator(
@@ -43,7 +45,11 @@ async fn determine_coordinator(
     }
 }
 
-pub async fn start_node(node_config: NodeConfig, workflow_type: WorkflowType) -> Result {
+pub async fn start_node(
+    node_config: NodeConfig,
+    workflow_type: WorkflowType,
+    kick_config: Option<KickConfig>,
+) -> Result {
     tracing::info!("Loading network config...");
     let network_config = node_config.load_network_config().await?;
 
@@ -62,6 +68,11 @@ pub async fn start_node(node_config: NodeConfig, workflow_type: WorkflowType) ->
             }
             WorkflowType::Contracts => {
                 contracts::coordinator::start_coordinator(node_config, network_config).await
+            }
+            WorkflowType::Kick => {
+                let config = kick_config
+                    .ok_or_else(|| anyhow::anyhow!("KickConfig is required for Kick workflow"))?;
+                kick::coordinator::start_coordinator(node_config, network_config, config).await
             }
         }
     } else {
@@ -116,9 +127,15 @@ async fn start_attestor(node_config: NodeConfig, network_config: NetworkConfig) 
 
     let client = NoiseClient::new(node_config.clone(), network_config.clone()).await?;
 
-    // Initialize directory paths
-    let dirs = WorkflowDirs::new();
-    dirs.create_required_dirs().await?;
+    // Initialize directory paths for all workflows
+    let onboarding_dirs = onboarding::OnboardingDirs::new();
+    onboarding_dirs.create_dirs().await?;
+
+    let contracts_dirs = contracts::ContractsDirs::new();
+    contracts_dirs.create_dirs().await?;
+
+    let kick_dirs = kick::KickDirs::new();
+    kick_dirs.create_dirs().await?;
 
     tracing::info!("Noise client initialized, entering command polling loop");
 
@@ -164,7 +181,7 @@ async fn start_attestor(node_config: NodeConfig, network_config: NetworkConfig) 
             }
             MessageType::UploadDars => {
                 tracing::info!("Executing: Upload DARs");
-                if let Err(e) = contracts::upload_dars(&node_config, &dirs).await {
+                if let Err(e) = contracts::upload_dars(&node_config, &contracts_dirs).await {
                     tracing::error!("Step execution failed: {e}");
                     continue;
                 }
@@ -175,51 +192,74 @@ async fn start_attestor(node_config: NodeConfig, network_config: NetworkConfig) 
             MessageType::GenerateKeys => {
                 tracing::info!("Executing: Generate keys");
                 if let Err(e) =
-                    onboarding::generate_keys(&node_config, &dirs, &network_config).await
+                    onboarding::generate_keys(&node_config, &onboarding_dirs, &network_config).await
                 {
                     tracing::error!("Step execution failed: {e}");
                     continue;
                 }
-                if let Err(e) = onboarding::attestor::send_keys_to_coordinator(&client, &dirs).await
+                if let Err(e) =
+                    onboarding::attestor::send_keys_to_coordinator(&client, &onboarding_dirs).await
                 {
                     tracing::error!("Failed to send keys to coordinator: {e}");
                 }
             }
             MessageType::SignDns => {
                 tracing::info!("Executing: Sign DNS proposal");
-                if let Err(e) = onboarding::sign_dns_proposals(&node_config, &dirs).await {
+                if let Err(e) = onboarding::sign_dns_proposals(&node_config, &onboarding_dirs).await
+                {
                     tracing::error!("Step execution failed: {e}");
                     continue;
                 }
-                if let Err(e) =
-                    onboarding::attestor::send_dns_signature_to_coordinator(&client, &dirs).await
+                if let Err(e) = onboarding::attestor::send_dns_signature_to_coordinator(
+                    &client,
+                    &onboarding_dirs,
+                )
+                .await
                 {
                     tracing::error!("Failed to send DNS signature to coordinator: {e}");
                 }
             }
             MessageType::SignP2p => {
                 tracing::info!("Executing: Sign P2P proposals");
-                if let Err(e) = onboarding::sign_p2p_proposals(&node_config, &dirs).await {
+                if let Err(e) = onboarding::sign_p2p_proposals(&node_config, &onboarding_dirs).await
+                {
                     tracing::error!("Step execution failed: {e}");
                     continue;
                 }
-                if let Err(e) =
-                    onboarding::attestor::send_p2p_signatures_to_coordinator(&client, &dirs).await
+                if let Err(e) = onboarding::attestor::send_p2p_signatures_to_coordinator(
+                    &client,
+                    &onboarding_dirs,
+                )
+                .await
                 {
                     tracing::error!("Failed to send P2P signatures to coordinator: {e}");
                 }
             }
             MessageType::SignSubmissions => {
                 tracing::info!("Executing: Sign submissions");
-                if let Err(e) = contracts::sign_submissions(&node_config, &dirs).await {
+                if let Err(e) = contracts::sign_submissions(&node_config, &contracts_dirs).await {
+                    tracing::error!("Step execution failed: {e}");
+                    continue;
+                }
+                if let Err(e) = contracts::attestor::send_submission_signatures_to_coordinator(
+                    &client,
+                    &contracts_dirs,
+                )
+                .await
+                {
+                    tracing::error!("Failed to send submission signatures to coordinator: {e}");
+                }
+            }
+            MessageType::SignKick => {
+                tracing::info!("Executing: Sign kick proposals");
+                if let Err(e) = kick::sign_proposals(&node_config, &kick_dirs).await {
                     tracing::error!("Step execution failed: {e}");
                     continue;
                 }
                 if let Err(e) =
-                    contracts::attestor::send_submission_signatures_to_coordinator(&client, &dirs)
-                        .await
+                    kick::attestor::send_kick_signatures_to_coordinator(&client, &kick_dirs).await
                 {
-                    tracing::error!("Failed to send submission signatures to coordinator: {e}");
+                    tracing::error!("Failed to send kick signatures to coordinator: {e}");
                 }
             }
             _ => {

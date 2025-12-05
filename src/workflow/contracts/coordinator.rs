@@ -5,15 +5,14 @@ use anyhow::Context;
 use crate::{
     config::{NetworkConfig, NodeConfig},
     consts::SUBMISSION_SIGNATURES_PREFIX,
-    dirs::WorkflowDirs,
     error::Result,
     noise::server::NoiseServer,
     workflow::state::WorkflowState,
 };
 
 use super::{
+    ContractsDirs, ContractsStep,
     steps::{execute_submissions, prepare_submissions, sign_submissions, upload_dars},
-    ContractsStep,
 };
 
 pub async fn start_coordinator(
@@ -30,8 +29,8 @@ pub async fn start_coordinator(
     .await?;
     let server = Arc::new(server);
 
-    let dirs = WorkflowDirs::new();
-    dirs.create_required_dirs().await?;
+    let dirs = ContractsDirs::new();
+    dirs.create_dirs().await?;
 
     tracing::info!("Noise server initialized, listening for connections");
 
@@ -56,7 +55,7 @@ async fn run_workflow(
     workflow_state: Arc<WorkflowState<ContractsStep>>,
     node_config: NodeConfig,
     network_config: NetworkConfig,
-    dirs: WorkflowDirs,
+    dirs: ContractsDirs,
 ) -> Result {
     let mut coordinator_completed_steps = HashSet::new();
 

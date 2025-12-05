@@ -20,10 +20,10 @@ use canton_proto_rs::com::digitalasset::canton::{
 use crate::{
     config::{NetworkConfig, NodeConfig},
     consts::{ATTESTOR_KEYS_PREFIX, PARTICIPANT_ID_PREFIX},
-    dirs::WorkflowDirs,
     error::Result,
     participant_id::CantonId,
     utils::{compute_fingerprint, get_participant_id, write_messages_to_file},
+    workflow::onboarding::OnboardingDirs,
 };
 
 /// Generate cryptographic keys and export participant ID
@@ -43,7 +43,7 @@ use crate::{
 /// and should be implemented separately using TopologyManagerWriteService.
 pub async fn generate_keys(
     config: &NodeConfig,
-    dirs: &WorkflowDirs,
+    dirs: &OnboardingDirs,
     network_config: &NetworkConfig,
 ) -> Result {
     tracing::info!("Generating cryptographic keys...");

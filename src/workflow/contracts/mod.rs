@@ -1,13 +1,15 @@
 pub mod attestor;
 pub mod coordinator;
+pub mod dirs;
 pub mod steps;
 
+pub use dirs::ContractsDirs;
 pub use steps::{execute_submissions, prepare_submissions, sign_submissions, upload_dars};
 
 use crate::{noise::MessageType, workflow::state::WorkflowStep};
 
 /// Contracts workflow steps (DAR upload and contract creation)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ContractsStep {
     /// Waiting for all attestors to connect
     WaitingForAttestors,
@@ -45,10 +47,10 @@ impl WorkflowStep for ContractsStep {
     }
 
     fn requires_attestors(&self) -> bool {
-        matches!(self, Self::UploadDars | Self::SignSubmissions)
+        *self == Self::UploadDars || *self == Self::SignSubmissions
     }
 
     fn is_waiting_for_attestors(&self) -> bool {
-        matches!(self, Self::WaitingForAttestors)
+        *self == Self::WaitingForAttestors
     }
 }

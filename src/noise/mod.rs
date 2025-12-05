@@ -17,7 +17,7 @@ use crate::error::Result;
 pub const NOISE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Message types for the Noise protocol communication
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[repr(u16)]
 pub enum MessageType {
     // Commands (0x0000 - 0x00FF)
@@ -29,6 +29,7 @@ pub enum MessageType {
     StatusUpdate = 0x0006,
     Disconnect = 0x0007,
     GetNextCommand = 0x0008,
+    SignKick = 0x0009,
 
     // Responses (0x0100 - 0x01FF)
     Ack = 0x0101,
@@ -42,6 +43,7 @@ pub enum MessageType {
     DnsSignature = 0x0202,
     P2pSignatures = 0x0203,
     SubmissionSignatures = 0x0204,
+    KickSignatures = 0x0205,
 }
 
 impl TryFrom<u16> for MessageType {
@@ -57,6 +59,7 @@ impl TryFrom<u16> for MessageType {
             0x0006 => Ok(Self::StatusUpdate),
             0x0007 => Ok(Self::Disconnect),
             0x0008 => Ok(Self::GetNextCommand),
+            0x0009 => Ok(Self::SignKick),
             0x0101 => Ok(Self::Ack),
             0x0102 => Ok(Self::Data),
             0x0103 => Ok(Self::Error),
@@ -66,6 +69,7 @@ impl TryFrom<u16> for MessageType {
             0x0202 => Ok(Self::DnsSignature),
             0x0203 => Ok(Self::P2pSignatures),
             0x0204 => Ok(Self::SubmissionSignatures),
+            0x0205 => Ok(Self::KickSignatures),
             _ => Err(anyhow::anyhow!("Unknown message type: 0x{value:04x}")),
         }
     }
@@ -78,7 +82,7 @@ impl MessageType {
 }
 
 /// Message structure for Noise protocol communication
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct Message {
     pub msg_type: MessageType,
     pub payload: Vec<u8>,
@@ -278,7 +282,7 @@ pub async fn send_noise_message(
 }
 
 /// Static keypair for Noise protocol authentication
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct NoiseKeypair {
     pub secret_key: SecretKey,
     pub public_key: PublicKey,

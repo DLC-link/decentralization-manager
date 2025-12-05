@@ -1,5 +1,8 @@
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+use serde_big_array::BigArray;
+
 use crate::error::Result;
 
 /// Length of a namespace: 2 bytes multihash prefix + 32 bytes SHA-256 hash
@@ -10,8 +13,8 @@ pub const NAMESPACE_LENGTH: usize = 34;
 /// Canton namespaces are multihash-encoded SHA-256 hashes:
 /// - First 2 bytes: multihash prefix (0x1220 for SHA-256)
 /// - Next 32 bytes: SHA-256 hash
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Namespace([u8; NAMESPACE_LENGTH]);
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Namespace(#[serde(with = "BigArray")] [u8; NAMESPACE_LENGTH]);
 
 impl Namespace {
     /// Create a new Namespace from a fixed-length array
@@ -61,7 +64,7 @@ impl fmt::Display for Namespace {
 /// Examples:
 /// - `participant::1220c4010d6883f367...`
 /// - `sv::1220034c3a6a9454...`
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CantonId {
     /// The prefix (e.g., "participant", "sv")
     pub prefix: String,
@@ -110,6 +113,14 @@ impl CantonId {
 impl fmt::Display for CantonId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}::{}", self.prefix, self.namespace.to_hex())
+    }
+}
+
+impl std::str::FromStr for CantonId {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        Self::parse(s)
     }
 }
 

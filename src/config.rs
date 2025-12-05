@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::Result;
 
 /// Coordinator selection strategy
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CoordinatorStrategy {
     /// Explicitly designated coordinator (via role field)
@@ -20,7 +20,7 @@ pub enum CoordinatorStrategy {
 }
 
 /// Role of a participant in the network
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ParticipantRole {
     Coordinator,
@@ -28,7 +28,7 @@ pub enum ParticipantRole {
 }
 
 /// Network-wide configuration shared by all participants
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct NetworkConfig {
     pub network: NetworkInfo,
     pub participants: Vec<Participant>,
@@ -39,7 +39,7 @@ pub struct NetworkConfig {
 }
 
 /// Application-specific configuration for the decentralized party
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ApplicationConfig {
     /// Party ID prefix used for constructing decentralized party identifiers
     /// Format: "{party_id_prefix}::<namespace>"
@@ -61,7 +61,7 @@ fn default_operator_party_hint() -> String {
 }
 
 /// Definition of a Daml contract to create on the ledger
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ContractDefinition {
     /// Unique identifier for this contract (used as command ID)
     pub id: String,
@@ -78,7 +78,7 @@ pub struct ContractDefinition {
 }
 
 /// Definition of a field value in a Daml record
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum FieldDefinition {
     /// The decentralized party ID
@@ -106,7 +106,7 @@ pub enum FieldDefinition {
 }
 
 /// Basic network information
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct NetworkInfo {
     pub name: String,
     pub protocol_version: String,
@@ -118,7 +118,7 @@ pub struct NetworkInfo {
 }
 
 /// Participant in the network
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Participant {
     pub id: String,
     pub name: String,
@@ -134,7 +134,7 @@ pub struct Participant {
 }
 
 /// Timeout configuration
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Timeouts {
     #[serde(default = "default_handshake_timeout")]
     pub handshake_timeout_secs: u64,
@@ -251,7 +251,7 @@ impl NetworkConfig {
 }
 
 /// Individual node configuration
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct NodeConfig {
     pub node: NodeInfo,
     pub network_config: String,
@@ -259,7 +259,7 @@ pub struct NodeConfig {
 }
 
 /// Node-specific information
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct NodeInfo {
     /// Must match one of the participant IDs in network.toml
     pub node_id: String,
@@ -274,7 +274,7 @@ fn default_listen_address() -> String {
 }
 
 /// Canton participant configuration
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CantonConfig {
     pub admin_api_host: String,
     pub admin_api_port: u16,

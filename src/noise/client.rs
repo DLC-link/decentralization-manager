@@ -181,6 +181,15 @@ impl NoiseClient {
         .await
     }
 
+    pub async fn send_kick_signatures(&self, signatures_data: Vec<u8>) -> Result<(), NoiseError> {
+        self.send_and_verify_ack(
+            MessageType::KickSignatures,
+            signatures_data,
+            "Sending kick signatures to coordinator",
+        )
+        .await
+    }
+
     /// Send status update to coordinator
     pub async fn send_status(&self, status_data: Vec<u8>) -> Result<(), NoiseError> {
         self.send_and_verify_ack(

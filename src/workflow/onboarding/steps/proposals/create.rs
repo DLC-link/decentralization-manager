@@ -20,10 +20,10 @@ use crate::{
         ATTESTOR_KEYS_PREFIX, DNS_PROTO_FILENAME, NAMESPACE_DEF_FILENAME, P2P_PROTO_FILENAME,
         PARTICIPANT_ID_PREFIX,
     },
-    dirs::WorkflowDirs,
     error::Result,
     participant_id::CantonId,
     utils,
+    workflow::onboarding::OnboardingDirs,
 };
 
 /// Create topology proposals for decentralized namespace
@@ -47,7 +47,7 @@ use crate::{
 /// ensure the participant is properly connected to a synchronizer first.
 pub async fn create_proposals(
     config: &NodeConfig,
-    dirs: &WorkflowDirs,
+    dirs: &OnboardingDirs,
     network_config: &NetworkConfig,
 ) -> Result {
     tracing::info!("Creating topology proposals...");

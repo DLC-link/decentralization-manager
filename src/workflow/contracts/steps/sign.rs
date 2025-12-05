@@ -17,9 +17,9 @@ use crate::{
         CANTON_PROTOCOL_VERSION, EXECUTION_DIR, LEDGER_SUBMISSIONS_DIR, PREPARED_DIR,
         PREPARED_SUBMISSION_PREFIX, SIGNATURES_DIR, SUBMISSION_SIGNATURES_PREFIX,
     },
-    dirs::WorkflowDirs,
     error::Result,
     utils,
+    workflow::contracts::ContractsDirs,
 };
 
 /// DER OCTET STRING tag
@@ -38,7 +38,7 @@ const ED25519_PRIVATE_KEY_LENGTH: u8 = 0x20;
 /// # Arguments
 /// * `config` - Configuration with Admin API connection details
 /// * `dirs` - WorkflowDirs containing all directory paths
-pub async fn sign_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
+pub async fn sign_submissions(config: &NodeConfig, dirs: &ContractsDirs) -> Result {
     tracing::info!("Signing submissions...");
 
     // Step 1: Get participant number
@@ -324,9 +324,9 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
             .verify(&prepared_sub.prepared_transaction_hash, &sig)
             .is_ok()
         {
-            tracing::info!("✓ Signature {} verified locally", idx + 1);
+            tracing::info!("✅ Signature {} verified locally", idx + 1);
         } else {
-            tracing::error!("✗ Signature {} failed local verification!", idx + 1);
+            tracing::error!("❌ Signature {} failed local verification!", idx + 1);
         }
 
         // Create Signature protobuf message

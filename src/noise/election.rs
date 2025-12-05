@@ -8,7 +8,7 @@ use crate::{
 };
 
 /// Election result containing the elected coordinator
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct ElectionResult {
     /// The participant that was elected as coordinator
     pub coordinator: Participant,

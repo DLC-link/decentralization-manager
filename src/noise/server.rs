@@ -165,6 +165,9 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                 self.handle_submission_signatures(peer_id, message.payload)
                     .await?
             }
+            MessageType::KickSignatures => {
+                self.handle_kick_signatures(peer_id, message.payload).await?
+            }
             MessageType::StatusUpdate => {
                 self.handle_status_update(peer_id, message.payload).await?
             }
@@ -276,6 +279,23 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
             .await;
 
         // Mark attestor as completed for this step
+        self.workflow_state.attestor_completed(peer_id).await;
+
+        Ok(Message::new_empty(MessageType::Ack))
+    }
+
+    /// Handle kick signatures from attestor
+    async fn handle_kick_signatures(
+        &self,
+        peer_id: String,
+        payload: Vec<u8>,
+    ) -> Result<Message, NoiseError> {
+        tracing::info!("Handling kick signatures from {peer_id}");
+
+        self.workflow_state
+            .store_attestor_data(peer_id.clone(), payload)
+            .await;
+
         self.workflow_state.attestor_completed(peer_id).await;
 
         Ok(Message::new_empty(MessageType::Ack))
