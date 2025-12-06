@@ -1,6 +1,6 @@
 use canton_proto_rs::com::digitalasset::canton::topology::admin::v30::{
-    BaseQuery, ListDecentralizedNamespaceDefinitionRequest, ListPartyToParticipantRequest,
-    StoreId, Synchronizer, base_query, store_id, synchronizer,
+    BaseQuery, ListDecentralizedNamespaceDefinitionRequest, ListPartyToParticipantRequest, StoreId,
+    Synchronizer, base_query, store_id, synchronizer,
     topology_manager_read_service_client::TopologyManagerReadServiceClient,
 };
 
@@ -70,9 +70,9 @@ pub async fn export_state(
         .ok_or_else(|| anyhow::anyhow!("Namespace definition missing from response"))?;
 
     tracing::info!(
-        "Found namespace with {} owners, threshold {}",
-        namespace_def.owners.len(),
-        namespace_def.threshold
+        "Found namespace with {count} owners, threshold {threshold}",
+        count = namespace_def.owners.len(),
+        threshold = namespace_def.threshold
     );
     tracing::debug!("DNS owners:");
     for (i, owner) in namespace_def.owners.iter().enumerate() {
@@ -81,16 +81,16 @@ pub async fn export_state(
 
     if namespace_def.owners.len() < 2 {
         anyhow::bail!(
-            "Cannot kick from namespace with only {} owner(s)",
-            namespace_def.owners.len()
+            "Cannot kick from namespace with only {count} owner(s)",
+            count = namespace_def.owners.len()
         );
     }
 
     // Save namespace definition
     let namespace_file = dirs.kick_config_dir.join(NAMESPACE_DEF_FILENAME);
     tracing::info!(
-        "Saving namespace definition to {}",
-        namespace_file.display()
+        "Saving namespace definition to {path}",
+        path = namespace_file.display()
     );
     utils::write_message_to_file(namespace_def, &namespace_file).await?;
 
@@ -127,74 +127,34 @@ pub async fn export_state(
         .and_then(|r| r.item.as_ref())
         .ok_or_else(|| anyhow::anyhow!("No P2P mapping found for party {party_id}"))?;
 
-    let kick_participant_str = kick_config.participant_ids[0].to_string();
-    tracing::info!("Participant to kick: {kick_participant_str}");
+    let kick_participant = &kick_config.participant_id;
+    tracing::info!("Participant to kick: {kick_participant}");
 
     if !p2p_mapping
         .participants
         .iter()
-        .any(|p| p.participant_uid == kick_participant_str)
+        .any(|p| p.participant_uid == kick_participant.to_string())
     {
-        anyhow::bail!("Participant {kick_participant_str} not in P2P mapping");
+        anyhow::bail!("Participant {kick_participant} not in P2P mapping");
     }
 
-    // Load participant-to-namespace mapping from onboarding
-    let mapping_file = dirs
-        .kick_config_dir
-        .parent()
-        .unwrap()
-        .join("participant-namespace-mapping.txt");
+    // Use the namespace fingerprint provided as parameter
+    let kick_target_hex = &kick_config.namespace_fingerprint;
 
     tracing::info!(
-        "Loading participant-namespace mapping from {}",
-        mapping_file.display()
+        "Using provided namespace fingerprint for participant {kick_participant}: {kick_target_hex}"
     );
 
-    let namespace_key_fp = if mapping_file.exists() {
-        let mapping_content = tokio::fs::read_to_string(&mapping_file).await?;
-        let mut found_namespace = None;
-
-        for line in mapping_content.lines() {
-            if let Some((participant, namespace)) = line.split_once('=') {
-                if participant.trim() == kick_participant_str {
-                    found_namespace = Some(namespace.trim().to_string());
-                    tracing::info!(
-                        "Found mapping: {kick_participant_str} -> {namespace}",
-                        namespace = namespace.trim()
-                    );
-                    break;
-                }
-            }
-        }
-
-        found_namespace.ok_or_else(|| {
-            anyhow::anyhow!(
-                "No namespace mapping found for participant {kick_participant_str} in {mapping_file:?}"
-            )
-        })?
-    } else {
+    // Verify that the namespace fingerprint is in the DNS owners list
+    if !namespace_def.owners.contains(kick_target_hex) {
         anyhow::bail!(
-            "Participant-namespace mapping file not found: {}. \
-             This file is created during onboarding. Please re-run onboarding workflow.",
-            mapping_file.display()
-        )
-    };
-
-    tracing::info!("Using namespace fingerprint {namespace_key_fp} for participant {kick_participant_str}");
-
-    // Verify the namespace is in DNS owners
-    if !namespace_def.owners.contains(&namespace_key_fp) {
-        anyhow::bail!(
-            "Namespace fingerprint {namespace_key_fp} for participant {kick_participant_str} \
-             is not in DNS owners: {:?}",
+            "Namespace fingerprint {kick_target_hex} is not in the DNS owners list. Available owners: {:?}",
             namespace_def.owners
         );
     }
 
-    let kick_target_hex = namespace_key_fp;
-
     tracing::info!(
-        "Successfully mapped participant {kick_participant_str} to DNS owner {kick_target_hex}"
+        "Successfully mapped participant {kick_participant} to DNS owner {kick_target_hex}"
     );
 
     // Save kick target
@@ -203,10 +163,10 @@ pub async fn export_state(
 
     // Save kick participant ID
     let kick_participant_file = dirs.kick_config_dir.join("kick-participant-id");
-    tokio::fs::write(&kick_participant_file, format!("{kick_participant_str}\n")).await?;
+    tokio::fs::write(&kick_participant_file, format!("{kick_participant}\n")).await?;
 
     // Calculate new threshold (majority of remaining members)
-    let remaining_members = namespace_def.owners.len() - kick_config.participant_ids.len();
+    let remaining_members = namespace_def.owners.len() - 1;
     let new_threshold = remaining_members.div_ceil(2).max(1) as i32;
 
     tracing::info!("Remaining members after kick: {remaining_members}");
@@ -217,8 +177,8 @@ pub async fn export_state(
     tokio::fs::write(&threshold_file, format!("{new_threshold}\n")).await?;
 
     tracing::info!(
-        "State exported successfully to {}",
-        dirs.kick_config_dir.display()
+        "State exported successfully to {path}",
+        path = dirs.kick_config_dir.display()
     );
     Ok(())
 }

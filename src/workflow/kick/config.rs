@@ -7,20 +7,28 @@ use crate::participant_id::CantonId;
 /// Configuration for kick workflow
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct KickConfig {
-    /// Decentralized party ID to remove participants from
+    /// Decentralized party ID to remove participant from
     pub decentralized_party_id: CantonId,
 
-    /// Participant IDs to kick
-    pub participant_ids: Vec<CantonId>,
+    /// Participant ID to kick
+    pub participant_id: CantonId,
+
+    /// Namespace fingerprint (DNS owner key) to remove
+    pub namespace_fingerprint: String,
 
     _p: PhantomData<()>,
 }
 
 impl KickConfig {
-    pub fn new(decentralized_party_id: CantonId, participant_ids: Vec<CantonId>) -> Self {
+    pub fn new(
+        decentralized_party_id: CantonId,
+        participant_id: CantonId,
+        namespace_fingerprint: String,
+    ) -> Self {
         Self {
             decentralized_party_id,
-            participant_ids,
+            participant_id,
+            namespace_fingerprint,
             _p: PhantomData,
         }
     }

@@ -2,7 +2,7 @@ pub mod client;
 pub mod election;
 pub mod server;
 
-use std::{path::Path, time::Duration};
+use std::{marker::PhantomData, path::Path, time::Duration};
 
 use bytes::Bytes;
 use http::Uri;
@@ -10,6 +10,7 @@ use hyper::{Body, Request, StatusCode};
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpStream;
+use tokio_noise::handshakes::nn_psk2::Initiator;
 
 use crate::error::Result;
 
@@ -86,11 +87,16 @@ impl MessageType {
 pub struct Message {
     pub msg_type: MessageType,
     pub payload: Vec<u8>,
+    _p: PhantomData<()>,
 }
 
 impl Message {
     pub fn new(msg_type: MessageType, payload: Vec<u8>) -> Self {
-        Self { msg_type, payload }
+        Self {
+            msg_type,
+            payload,
+            _p: PhantomData,
+        }
     }
 
     /// Create a message with no payload
@@ -98,6 +104,7 @@ impl Message {
         Self {
             msg_type,
             payload: Vec::new(),
+            _p: PhantomData,
         }
     }
 
@@ -122,8 +129,8 @@ impl Message {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         if bytes.len() < 6 {
             anyhow::bail!(
-                "Message too short: expected at least 6 bytes, got {}",
-                bytes.len()
+                "Message too short: expected at least 6 bytes, got {count}",
+                count = bytes.len()
             );
         }
 
@@ -137,15 +144,19 @@ impl Message {
         // Check if we have enough bytes for the payload
         if bytes.len() < 6 + payload_len {
             anyhow::bail!(
-                "Message payload truncated: expected {payload_len} bytes, got {}",
-                bytes.len() - 6
+                "Message payload truncated: expected {payload_len} bytes, got {count}",
+                count = bytes.len() - 6
             );
         }
 
         // Extract payload
         let payload = bytes[6..6 + payload_len].to_vec();
 
-        Ok(Self { msg_type, payload })
+        Ok(Self {
+            msg_type,
+            payload,
+            _p: PhantomData,
+        })
     }
 }
 
@@ -260,7 +271,7 @@ pub async fn send_noise_message(
         };
 
     // Create Noise initiator
-    let initiator = tokio_noise::handshakes::nn_psk2::Initiator { psk, identity };
+    let initiator = Initiator { psk, identity };
 
     // Send request over Noise-encrypted channel
     let mut response = hyper_noise::client::send_request(
@@ -338,8 +349,11 @@ pub async fn generate_keypair<P: AsRef<Path>>(output_path: P) -> Result<NoiseKey
     keypair.save_to_file(&output_path).await?;
 
     tracing::info!("Generated Noise static keypair");
-    tracing::info!("Private key saved to: {}", output_path.as_ref().display());
-    tracing::info!("Public key (hex): {}", keypair.public_key_hex());
+    tracing::info!(
+        "Private key saved to: {path}",
+        path = output_path.as_ref().display()
+    );
+    tracing::info!("Public key (hex): {key}", key = keypair.public_key_hex());
     tracing::warn!("⚠️  Keep your private key secure! Never share it with anyone.");
     tracing::info!("💡 Share your public key with other participants to add to network.toml");
 

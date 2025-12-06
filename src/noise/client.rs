@@ -1,15 +1,16 @@
-use std::sync::Arc;
+use std::{marker::PhantomData, sync::Arc};
 
 use bytes::Bytes;
 use hyper::{Body, Request};
 use secp256k1::PublicKey;
 use tokio::net::TcpStream;
+use tokio_noise::handshakes::nn_psk2::Initiator;
 
 use crate::{
     config::{NetworkConfig, NodeConfig, Participant},
     noise::{
-        parse_flexible_uri, parse_public_key, Message, MessageType, NoiseError, NoiseKeypair,
-        NOISE_REQUEST_TIMEOUT,
+        Message, MessageType, NOISE_REQUEST_TIMEOUT, NoiseError, NoiseKeypair, parse_flexible_uri,
+        parse_public_key,
     },
 };
 
@@ -21,6 +22,7 @@ pub struct NoiseClient {
     keypair: Arc<NoiseKeypair>,
     coordinator: Participant,
     coordinator_pub_key: PublicKey,
+    _p: PhantomData<()>,
 }
 
 impl NoiseClient {
@@ -47,12 +49,17 @@ impl NoiseClient {
             keypair: Arc::new(keypair),
             coordinator,
             coordinator_pub_key,
+            _p: PhantomData,
         })
     }
 
     /// Send a message to the coordinator
     pub async fn send_message(&self, message: &Message) -> Result<Bytes, NoiseError> {
-        let socket_addr = format!("{}:{}", self.coordinator.address, self.coordinator.port);
+        let socket_addr = format!(
+            "{address}:{port}",
+            address = self.coordinator.address,
+            port = self.coordinator.port
+        );
 
         tracing::debug!(
             "Sending message type {:?} to coordinator at {socket_addr}",
@@ -89,7 +96,7 @@ impl NoiseClient {
         let identity = self.node_config.node.node_id.as_bytes();
 
         // Create Noise initiator
-        let initiator = tokio_noise::handshakes::nn_psk2::Initiator {
+        let initiator = Initiator {
             psk: &psk,
             identity,
         };
@@ -112,8 +119,8 @@ impl NoiseClient {
         let resp_body_bytes = hyper::body::to_bytes(response.body_mut()).await?;
 
         tracing::debug!(
-            "Received response from coordinator: {} bytes",
-            resp_body_bytes.len()
+            "Received response from coordinator: {count} bytes",
+            count = resp_body_bytes.len()
         );
 
         Ok(resp_body_bytes)
@@ -144,8 +151,12 @@ impl NoiseClient {
 
     /// Upload keys to coordinator
     pub async fn upload_keys(&self, keys_data: Vec<u8>) -> Result<(), NoiseError> {
-        self.send_and_verify_ack(MessageType::KeysUpload, keys_data, "Uploading keys to coordinator")
-            .await
+        self.send_and_verify_ack(
+            MessageType::KeysUpload,
+            keys_data,
+            "Uploading keys to coordinator",
+        )
+        .await
     }
 
     /// Send DNS signature to coordinator

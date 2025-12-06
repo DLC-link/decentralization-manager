@@ -22,7 +22,7 @@ use crate::{
     },
     error::Result,
     participant_id::CantonId,
-    utils,
+    utils::{self, MULTIHASH_SHA256_PREFIX},
     workflow::onboarding::OnboardingDirs,
 };
 
@@ -62,7 +62,10 @@ pub async fn create_proposals(
     let key_file_paths =
         utils::find_files_by_pattern(&dirs.keys_dir, ATTESTOR_KEYS_PREFIX, ".bin").await?;
 
-    tracing::info!("Found {} attestor key files", key_file_paths.len());
+    tracing::info!(
+        "Found {count} attestor key files",
+        count = key_file_paths.len()
+    );
 
     if key_file_paths.is_empty() {
         anyhow::bail!("No attestor key files found in ./keys/");
@@ -73,15 +76,15 @@ pub async fn create_proposals(
     let mut daml_keys = Vec::new();
 
     for key_file in &key_file_paths {
-        tracing::info!("Loading keys from {}", key_file.display());
+        tracing::info!("Loading keys from {path}", path = key_file.display());
 
         let keys: Vec<SigningPublicKey> = utils::read_all_messages_from_file(key_file).await?;
 
         if keys.len() != 2 {
             anyhow::bail!(
-                "Expected exactly 2 keys in {}, but found {}",
-                key_file.display(),
-                keys.len()
+                "Expected exactly 2 keys in {path}, but found {count}",
+                path = key_file.display(),
+                count = keys.len()
             );
         }
 
@@ -92,8 +95,8 @@ pub async fn create_proposals(
         // Debug: Log fingerprints of keys being added to P2P mapping
         let daml_key_fp = utils::compute_fingerprint(&keys[1]);
         tracing::debug!(
-            "DAML key from {} has fingerprint: {daml_key_fp}",
-            key_file.display()
+            "DAML key from {path} has fingerprint: {daml_key_fp}",
+            path = key_file.display()
         );
     }
 
@@ -105,7 +108,10 @@ pub async fn create_proposals(
         namespaces.insert(namespace);
     }
 
-    tracing::info!("Extracted {} unique namespaces", namespaces.len());
+    tracing::info!(
+        "Extracted {count} unique namespaces",
+        count = namespaces.len()
+    );
 
     // Step 4: Load all participant ID files
     if !dirs.ids_dir.exists() {
@@ -115,7 +121,10 @@ pub async fn create_proposals(
     let id_file_paths =
         utils::find_files_by_pattern(&dirs.ids_dir, PARTICIPANT_ID_PREFIX, ".bin").await?;
 
-    tracing::info!("Found {} participant ID files", id_file_paths.len());
+    tracing::info!(
+        "Found {count} participant ID files",
+        count = id_file_paths.len()
+    );
 
     if id_file_paths.is_empty() {
         anyhow::bail!("No participant ID files found in ./ids/");
@@ -128,11 +137,20 @@ pub async fn create_proposals(
         participant_ids.push(participant_id);
     }
 
+    // Validate that namespace owners match participant count
+    if namespaces.len() != participant_ids.len() {
+        anyhow::bail!(
+            "Mismatch: found {namespace_count} namespace owners but {participant_count} participants. Each participant must generate exactly one namespace key.",
+            namespace_count = namespaces.len(),
+            participant_count = participant_ids.len()
+        );
+    }
+
     // Step 5: Calculate threshold (majority)
     let threshold = namespaces.len().div_ceil(2).max(1) as u32;
     tracing::info!(
-        "Using threshold {threshold} for {} participants",
-        namespaces.len()
+        "Using threshold {threshold} for {count} participants",
+        count = namespaces.len()
     );
 
     // Step 6: Compute decentralized namespace
@@ -175,12 +193,12 @@ pub async fn create_proposals(
 
     // Debug: Log all DAML key fingerprints being added to P2P mapping
     tracing::info!(
-        "Adding {} DAML signing keys to P2P mapping:",
-        daml_keys.len()
+        "Adding {count} DAML signing keys to P2P mapping:",
+        count = daml_keys.len()
     );
     for (idx, key) in daml_keys.iter().enumerate() {
         let fp = utils::compute_fingerprint(key);
-        tracing::info!("  Key {}: fingerprint={fp}", idx + 1);
+        tracing::info!("  Key {index}: fingerprint={fp}", index = idx + 1);
     }
 
     let mut topology_client =
@@ -251,19 +269,19 @@ pub async fn create_proposals(
     fs::create_dir_all(&dirs.dns_submission_dir).await?;
 
     let dns_file = dirs.dns_proposals_dir.join(DNS_PROTO_FILENAME);
-    tracing::info!("Saving DNS proposal to {}", dns_file.display());
+    tracing::info!("Saving DNS proposal to {path}", path = dns_file.display());
     utils::write_message_to_file(&dns_transaction, &dns_file).await?;
 
     let p2p_file = dirs.p2p_proposals_dir.join(P2P_PROTO_FILENAME);
-    tracing::info!("Saving P2P proposal to {}", p2p_file.display());
+    tracing::info!("Saving P2P proposal to {path}", path = p2p_file.display());
     utils::write_message_to_file(&p2p_transaction, &p2p_file).await?;
 
     // Canton 3.4+: Signing keys now embedded in P2P proposal above (no separate transaction)
 
     let namespace_file = dirs.dns_submission_dir.join(NAMESPACE_DEF_FILENAME);
     tracing::info!(
-        "Saving namespace definition to {}",
-        namespace_file.display()
+        "Saving namespace definition to {path}",
+        path = namespace_file.display()
     );
     utils::write_message_to_file(&namespace_def, &namespace_file).await?;
 
@@ -315,8 +333,7 @@ fn compute_decentralized_namespace(namespaces: &HashSet<String>) -> String {
 
     // Return multihash format: prefix + hex-encoded hash
     format!(
-        "{}{}",
-        utils::MULTIHASH_SHA256_PREFIX,
-        hex::encode(hash_result)
+        "{MULTIHASH_SHA256_PREFIX}{hash}",
+        hash = hex::encode(hash_result)
     )
 }

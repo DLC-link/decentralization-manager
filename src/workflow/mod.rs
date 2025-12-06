@@ -35,8 +35,8 @@ async fn determine_coordinator(
                 election::run_election(network_config, &node_config.node.node_id).await?;
 
             tracing::info!(
-                "Election complete: {} is the coordinator",
-                election_result.coordinator.id
+                "Election complete: {id} is the coordinator",
+                id = election_result.coordinator.id
             );
 
             Ok(election_result.is_me)
@@ -286,5 +286,5 @@ pub async fn find_and_read_file(
         return Ok(data);
     }
 
-    anyhow::bail!("{error_msg} in {}", dir.display())
+    anyhow::bail!("{error_msg} in {path}", path = dir.display())
 }

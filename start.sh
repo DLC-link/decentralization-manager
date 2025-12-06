@@ -5,6 +5,7 @@ set -eou pipefail
 WORKFLOW="${1:-onboarding}"
 PARTY_ID="${2:-}"
 PARTICIPANT_ID="${3:-}"
+NAMESPACE_FP="${4:-}"
 NUM_PARTICIPANTS=3
 PORTS=(9001 9002 9003)
 LOG_DIR="logs"
@@ -71,39 +72,31 @@ for i in $(seq 1 $NUM_PARTICIPANTS); do
 done
 rm -f test-configs/network.toml.bak
 
-# If kick workflow, determine party and participant to kick
+# If kick workflow, validate required parameters
 if [ "$WORKFLOW" = "kick" ]; then
-    if [ -z "$PARTY_ID" ] || [ -z "$PARTICIPANT_ID" ]; then
+    if [ -z "$PARTY_ID" ] || [ -z "$PARTICIPANT_ID" ] || [ -z "$NAMESPACE_FP" ]; then
+        echo "Error: Kick workflow requires all three parameters"
         echo ""
-        echo "Querying topology for decentralized parties..."
-
-        # Query parties and extract the last party with participants
-        QUERY_OUTPUT=$(ONBOARDING -c test-configs/node-1.toml query-parties 2>&1)
-
-        # Extract the last party that has participants
-        # Looking for pattern: "Party ID: cbtc-network::<namespace>"
-        PARTY_ID=$(echo "$QUERY_OUTPUT" | grep -o "Party ID: cbtc-network::[0-9a-f]*" | tail -1 | sed 's/Party ID: //')
-
-        # Get all participants for this party (looking after "Participants (N):")
-        # Extract lines that look like "      [0] participant::..." or "      [0] sv::..."
-        PARTICIPANT_ID=$(echo "$QUERY_OUTPUT" | \
-            awk "/Party ID: ${PARTY_ID//:/\\:}/"'{flag=1} flag && /Participants \([0-9]+\):/{flag=2; next} flag==2 && /^\s+\[[0-9]+\]/{print $2} flag==2 && /^$/{flag=0}' | \
-            tail -1)
-
-        if [ -z "$PARTY_ID" ] || [ -z "$PARTICIPANT_ID" ]; then
-            echo "Error: Could not find a suitable party and participant to kick"
-            echo "Please provide them manually:"
-            echo "  ./start.sh kick <party-id> <participant-id>"
-            exit 1
-        fi
-
+        echo "Usage: ./start.sh kick <party-id> <participant-id> <namespace-fingerprint>"
         echo ""
-        echo "Auto-detected kick configuration:"
-        echo "  Party ID:        $PARTY_ID"
-        echo "  Participant ID:  $PARTICIPANT_ID"
+        echo "Example:"
+        echo "  ./start.sh kick \\"
+        echo "    'cbtc-network::1220abc...' \\"
+        echo "    'participant::1220def...' \\"
+        echo "    '1220ghi...'"
+        echo ""
+        echo "Tip: Run './target/debug/dec-party-onboarding -c test-configs/node-1.toml query-parties'"
+        echo "     to see available parties, participants, and namespace fingerprints"
+        exit 1
     fi
 
-    KICK_ARGS="--decentralized-party-id $PARTY_ID --participant-id $PARTICIPANT_ID"
+    echo ""
+    echo "Kick configuration:"
+    echo "  Party ID:              $PARTY_ID"
+    echo "  Participant ID:        $PARTICIPANT_ID"
+    echo "  Namespace Fingerprint: $NAMESPACE_FP"
+
+    KICK_ARGS="--decentralized-party-id $PARTY_ID --participant-id $PARTICIPANT_ID --namespace-fingerprint $NAMESPACE_FP"
 fi
 
 echo ""

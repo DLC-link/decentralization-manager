@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, marker::PhantomData};
 
 use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
@@ -27,8 +27,8 @@ impl Namespace {
         let bytes = hex::decode(hex_str)?;
         if bytes.len() != NAMESPACE_LENGTH {
             anyhow::bail!(
-                "Invalid namespace length: expected {NAMESPACE_LENGTH} bytes, got {}",
-                bytes.len()
+                "Invalid namespace length: expected {NAMESPACE_LENGTH} bytes, got {count}",
+                count = bytes.len()
             );
         }
         let mut arr = [0u8; NAMESPACE_LENGTH];
@@ -64,18 +64,42 @@ impl fmt::Display for Namespace {
 /// Examples:
 /// - `participant::1220c4010d6883f367...`
 /// - `sv::1220034c3a6a9454...`
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CantonId {
     /// The prefix (e.g., "participant", "sv")
     pub prefix: String,
     /// The namespace (multihash-encoded identifier)
     pub namespace: Namespace,
+    _p: PhantomData<()>,
+}
+
+impl serde::Serialize for CantonId {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for CantonId {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Self::parse(&s).map_err(serde::de::Error::custom)
+    }
 }
 
 impl CantonId {
     /// Create a new Canton ID from prefix and namespace
     pub fn new(prefix: String, namespace: Namespace) -> Self {
-        Self { prefix, namespace }
+        Self {
+            prefix,
+            namespace,
+            _p: PhantomData,
+        }
     }
 
     /// Parse a Canton ID from Canton's string format
@@ -91,7 +115,11 @@ impl CantonId {
         let prefix = parts[0].to_string();
         let namespace = Namespace::from_hex(parts[1])?;
 
-        Ok(Self { prefix, namespace })
+        Ok(Self {
+            prefix,
+            namespace,
+            _p: PhantomData,
+        })
     }
 
     /// Parse a Canton ID from file content (strips "PAR::" prefix if present)
@@ -112,7 +140,12 @@ impl CantonId {
 
 impl fmt::Display for CantonId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}::{}", self.prefix, self.namespace.to_hex())
+        write!(
+            f,
+            "{prefix}::{namespace}",
+            prefix = self.prefix,
+            namespace = self.namespace.to_hex()
+        )
     }
 }
 

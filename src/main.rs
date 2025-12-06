@@ -24,12 +24,17 @@ async fn main() -> Result {
         Commands::Keygen { ref output } => {
             dec_party_onboarding::noise::generate_keypair(output).await?;
         }
-        Commands::QueryParties { ref party_id_prefix } => {
+        Commands::QueryParties {
+            ref party_id_prefix,
+        } => {
             let node_config = args.config.as_ref().ok_or_else(|| {
                 anyhow::anyhow!("Configuration file is required. Use -c <config-file>")
             })?;
 
-            tracing::info!("Loading configuration from: {}", node_config.display());
+            tracing::info!(
+                "Loading configuration from: {path}",
+                path = node_config.display()
+            );
             let config = NodeConfig::from_file(node_config).await?;
 
             dec_party_onboarding::query_parties::query_parties(&config, party_id_prefix).await?;
@@ -39,7 +44,10 @@ async fn main() -> Result {
                 anyhow::anyhow!("Configuration file is required. Use -c <config-file>")
             })?;
 
-            tracing::info!("Loading configuration from: {}", node_config.display());
+            tracing::info!(
+                "Loading configuration from: {path}",
+                path = node_config.display()
+            );
             let config = NodeConfig::from_file(node_config).await?;
 
             match args.command {
@@ -52,13 +60,13 @@ async fn main() -> Result {
                 Commands::Kick {
                     decentralized_party_id,
                     participant_id,
+                    namespace_fingerprint,
                 } => {
-                    if participant_id.is_empty() {
-                        anyhow::bail!("At least one --participant-id must be specified");
-                    }
-
-                    let kick_config =
-                        workflow::KickConfig::new(decentralized_party_id, participant_id);
+                    let kick_config = workflow::KickConfig::new(
+                        decentralized_party_id,
+                        participant_id,
+                        namespace_fingerprint,
+                    );
                     workflow::start_node(config, workflow::WorkflowType::Kick, Some(kick_config))
                         .await?;
                 }

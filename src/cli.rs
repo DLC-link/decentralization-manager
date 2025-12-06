@@ -33,15 +33,19 @@ pub enum Commands {
     /// Run the contracts workflow (upload DARs and create contracts)
     Contracts,
 
-    /// Run the kick workflow (remove participants from decentralized party)
+    /// Run the kick workflow (remove participant from decentralized party)
     Kick {
-        /// Decentralized party ID to remove participants from
+        /// Decentralized party ID to remove participant from
         #[arg(long, value_name = "PARTY_ID")]
         decentralized_party_id: CantonId,
 
-        /// Participant IDs to kick (can be specified multiple times)
+        /// Participant ID to kick
         #[arg(long, value_name = "PARTICIPANT_ID")]
-        participant_id: Vec<CantonId>,
+        participant_id: CantonId,
+
+        /// Namespace fingerprint (DNS owner key) to remove
+        #[arg(long, value_name = "NAMESPACE_FP")]
+        namespace_fingerprint: String,
     },
 
     /// Query decentralized parties from Canton topology

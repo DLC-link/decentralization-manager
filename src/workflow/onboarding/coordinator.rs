@@ -13,16 +13,14 @@ use super::{
     steps::{create_proposals, generate_keys, submit_dns_proposals, submit_final_proposals},
 };
 
-pub async fn start_coordinator(
-    node_config: NodeConfig,
-    network_config: NetworkConfig,
-) -> Result {
+pub async fn start_coordinator(node_config: NodeConfig, network_config: NetworkConfig) -> Result {
     tracing::info!("Initializing Noise server...");
 
     let server = NoiseServer::new(
         node_config.clone(),
         network_config.clone(),
         OnboardingStep::WaitingForAttestors,
+        None, // No excluded participants
     )
     .await?;
     let server = Arc::new(server);

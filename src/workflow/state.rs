@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    marker::PhantomData,
     sync::Arc,
 };
 
@@ -29,6 +30,7 @@ pub struct WorkflowState<S> {
     completed_attestors: RwLock<HashSet<String>>,
     /// Data received from attestors (e.g., keys, signatures)
     attestor_data: RwLock<HashMap<String, Vec<u8>>>,
+    _p: PhantomData<()>,
 }
 
 impl<S: WorkflowStep + 'static> WorkflowState<S> {
@@ -39,6 +41,7 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
             connected_attestors: RwLock::new(HashSet::new()),
             completed_attestors: RwLock::new(HashSet::new()),
             attestor_data: RwLock::new(HashMap::new()),
+            _p: PhantomData,
         })
     }
 

@@ -38,13 +38,19 @@ pub async fn submit_kick(
 
     // Read original DNS proposal
     let dns_file = dirs.kick_proposals_dir.join("dns_kick_proto.bin");
-    tracing::info!("Reading original DNS proposal from {}", dns_file.display());
+    tracing::info!(
+        "Reading original DNS proposal from {path}",
+        path = dns_file.display()
+    );
     let mut dns_transaction: SignedTopologyTransaction =
         utils::read_first_message_from_file(&dns_file).await?;
 
     // Read original P2P proposal
     let p2p_file = dirs.kick_proposals_dir.join("p2p_kick_proto.bin");
-    tracing::info!("Reading original P2P proposal from {}", p2p_file.display());
+    tracing::info!(
+        "Reading original P2P proposal from {path}",
+        path = p2p_file.display()
+    );
     let mut p2p_transaction: SignedTopologyTransaction =
         utils::read_first_message_from_file(&p2p_file).await?;
 
@@ -52,19 +58,25 @@ pub async fn submit_kick(
     let signed_files =
         utils::find_files_by_pattern(&dirs.kick_signed_dir, SIGNED_KICK_PROPOSALS_PREFIX, ".bin")
             .await?;
-    tracing::info!("Found {} signed proposal file(s)", signed_files.len());
+    tracing::info!(
+        "Found {count} signed proposal file(s)",
+        count = signed_files.len()
+    );
 
     // Aggregate signatures from all files
     for signed_file in &signed_files {
-        tracing::info!("Reading signatures from {}", signed_file.display());
+        tracing::info!(
+            "Reading signatures from {path}",
+            path = signed_file.display()
+        );
         let signed_transactions: Vec<SignedTopologyTransaction> =
             utils::read_all_messages_from_file(signed_file).await?;
 
         if signed_transactions.len() != 2 {
             anyhow::bail!(
-                "Expected 2 transactions in {}, got {}",
-                signed_file.display(),
-                signed_transactions.len()
+                "Expected 2 transactions in {path}, got {count}",
+                path = signed_file.display(),
+                count = signed_transactions.len()
             );
         }
 
@@ -78,19 +90,19 @@ pub async fn submit_kick(
     }
 
     tracing::info!(
-        "Final DNS proposal has {} signature(s)",
-        dns_transaction.signatures.len()
+        "Final DNS proposal has {count} signature(s)",
+        count = dns_transaction.signatures.len()
     );
     tracing::info!(
-        "Final P2P proposal has {} signature(s)",
-        p2p_transaction.signatures.len()
+        "Final P2P proposal has {count} signature(s)",
+        count = p2p_transaction.signatures.len()
     );
 
     // Read new namespace definition for validation
     let new_namespace_file = dirs.kick_proposals_dir.join("newNamespaceDef.bin");
     tracing::info!(
-        "Reading new namespace definition from {}",
-        new_namespace_file.display()
+        "Reading new namespace definition from {path}",
+        path = new_namespace_file.display()
     );
     let new_namespace_def: DecentralizedNamespaceDefinition =
         utils::read_first_message_from_file(&new_namespace_file).await?;
@@ -124,8 +136,12 @@ pub async fn submit_kick(
 
     // Wait for DNS to propagate
     tracing::info!("Waiting for DNS kick to appear in topology...");
-    wait_for_dns_in_topology(config, &synchronizer_id, &new_namespace_def.decentralized_namespace)
-        .await?;
+    wait_for_dns_in_topology(
+        config,
+        &synchronizer_id,
+        &new_namespace_def.decentralized_namespace,
+    )
+    .await?;
     tracing::info!("DNS kick confirmed in topology");
 
     // Submit P2P proposal

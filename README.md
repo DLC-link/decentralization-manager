@@ -5,7 +5,7 @@ A Rust-based automation tool for multi-party decentralized namespace setup in Ca
 ## Key Features
 
 - **Automated Multi-Party Onboarding**: Orchestrates the complete workflow for setting up decentralized party participation
-- **Dynamic Participant Support**: Supports any number of participants (N >= 3), with automatic majority threshold calculation
+- **Dynamic Participant Support**: Supports any number of participants (N >= 2 for onboarding/kick, N >= 3 for contract operations), with automatic majority threshold calculation
 - **Secure Communication**: Noise Protocol Framework for encrypted, authenticated peer-to-peer communication
 - **gRPC Integration**: Native Canton Admin and Ledger API integration using Protocol Buffers
 - **Cryptographic Key Management**: Automated generation and management of cryptographic keys for secure party identification
@@ -41,7 +41,7 @@ See the [Noise Protocol Communication Architecture](docs/NOISE_PROTOCOL_COMMUNIC
 
 ## Project Overview
 
-This project ports Canton Scala scripts to Rust, implementing a multi-party decentralized namespace setup for CBTC (Canton-based Bitcoin) governance. The tool provides two main workflows:
+This project ports Canton Scala scripts to Rust, implementing a multi-party decentralized namespace setup for CBTC (Canton-based Bitcoin) governance. The tool provides multiple workflows and commands:
 
 ### Onboarding Workflow
 Creates the decentralized party namespace:
@@ -59,9 +59,45 @@ Sets up governance contracts:
 
 **Canton 3.4 Change**: The separate `PartyToKeyMapping` transaction has been deprecated. Signing keys are now embedded directly in the `PartyToParticipant` (P2P) mapping.
 
+### Query Parties Command
+A standalone command to inspect decentralized parties in Canton topology:
+- Lists all decentralized namespaces with owners and thresholds
+- Shows party-to-participant (P2P) mappings
+- Identifies which namespace owner belongs to the current participant
+- Useful for verifying onboarding results and finding participant IDs for kick operations
+
+Example:
+```bash
+cargo run -- -c test-configs/node-1.toml query-parties --party-id-prefix cbtc-network
+```
+
+### Kick Workflow
+Removes a participant from a decentralized party:
+1. Export current namespace state and verify participant to remove
+2. Create topology proposals (updated DNS with reduced threshold, removed P2P mapping)
+3. Remaining members sign the kick proposals
+4. Submit kick proposals to Canton
+
+**Requirements:**
+- Minimum 2 remaining participants after kick
+- All remaining participants must run the workflow simultaneously
+- Requires the decentralized party ID, participant ID, and namespace fingerprint to kick
+
+Example:
+```bash
+# Use query-parties to find the participant ID and namespace fingerprint
+cargo run -- -c test-configs/node-1.toml query-parties --party-id-prefix cbtc-network
+
+# Run kick workflow (all remaining participants)
+cargo run -- -c test-configs/node-1.toml kick \
+  --decentralized-party-id "cbtc-network::1220..." \
+  --participant-id "participant::1220..." \
+  --namespace-fingerprint "1220..."
+```
+
 ## CLI Commands
 
-The application provides three commands:
+The application provides the following commands:
 
 ```bash
 # Generate a Noise protocol keypair for secure communication
@@ -72,6 +108,15 @@ cargo run -- -c <config_file> onboarding
 
 # Run the contracts workflow (upload DARs and create contracts)
 cargo run -- -c <config_file> contracts
+
+# Query decentralized parties from Canton topology
+cargo run -- -c <config_file> query-parties --party-id-prefix <prefix>
+
+# Run the kick workflow (remove participant from decentralized party)
+cargo run -- -c <config_file> kick \
+  --decentralized-party-id <party_id> \
+  --participant-id <participant_id> \
+  --namespace-fingerprint <namespace_fp>
 ```
 
 ### Get Help
@@ -81,6 +126,8 @@ cargo run -- --help
 cargo run -- keygen --help
 cargo run -- onboarding --help
 cargo run -- contracts --help
+cargo run -- query-parties --help
+cargo run -- kick --help
 ```
 
 ## Workflows
@@ -146,6 +193,7 @@ role = "coordinator"
 address = "10.0.1.100"
 port = 9001
 public_key = "<hex-encoded-public-key-from-keygen>"
+canton_id = "participant::1220..."  # Canton participant ID
 
 [[participants]]
 id = "participant-2"
@@ -153,6 +201,7 @@ name = "Participant 2"
 address = "10.0.1.101"
 port = 9002
 public_key = "<hex-encoded-public-key-from-keygen>"
+canton_id = "participant::1220..."  # Canton participant ID
 
 # Add more participants as needed (minimum 3 required)
 

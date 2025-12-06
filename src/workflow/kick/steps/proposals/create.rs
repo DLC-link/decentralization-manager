@@ -37,22 +37,25 @@ pub async fn create_proposals(
     // Read current namespace definition
     let namespace_file = dirs.kick_config_dir.join(NAMESPACE_DEF_FILENAME);
     tracing::info!(
-        "Reading current namespace definition from {}",
-        namespace_file.display()
+        "Reading current namespace definition from {path}",
+        path = namespace_file.display()
     );
     let current_namespace_def: DecentralizedNamespaceDefinition =
         utils::read_first_message_from_file(&namespace_file).await?;
 
     tracing::info!(
-        "Current namespace: {}, threshold: {}, owners: {}",
-        current_namespace_def.decentralized_namespace,
-        current_namespace_def.threshold,
-        current_namespace_def.owners.len()
+        "Current namespace: {namespace}, threshold: {threshold}, owners: {owners_count}",
+        namespace = current_namespace_def.decentralized_namespace,
+        threshold = current_namespace_def.threshold,
+        owners_count = current_namespace_def.owners.len()
     );
 
     // Read kick target
     let kick_target_file = dirs.kick_config_dir.join("kick-target");
-    let kick_target = fs::read_to_string(&kick_target_file).await?.trim().to_string();
+    let kick_target = fs::read_to_string(&kick_target_file)
+        .await?
+        .trim()
+        .to_string();
     tracing::info!("Kick target: {kick_target}");
 
     // Read new threshold
@@ -76,7 +79,7 @@ pub async fn create_proposals(
         anyhow::bail!("Cannot remove all owners from decentralized namespace");
     }
 
-    tracing::info!("New owners count: {}", new_owners.len());
+    tracing::info!("New owners count: {count}", count = new_owners.len());
 
     // Create new namespace definition (keeping the same namespace hash)
     let new_namespace_def = DecentralizedNamespaceDefinition {
@@ -86,10 +89,10 @@ pub async fn create_proposals(
     };
 
     // Get party ID
-    let party_id_prefix = &network_config.application.party_id_prefix;
     let party_id = format!(
-        "{party_id_prefix}::{}",
-        current_namespace_def.decentralized_namespace
+        "{party_id_prefix}::{namespace}",
+        party_id_prefix = network_config.application.party_id_prefix,
+        namespace = current_namespace_def.decentralized_namespace
     );
     tracing::info!("Party ID: {party_id}");
 
@@ -101,19 +104,22 @@ pub async fn create_proposals(
     let current_p2p = get_current_p2p_mapping(config, &synchronizer_id, &party_id).await?;
 
     tracing::info!(
-        "Current P2P mapping has {} participant(s)",
-        current_p2p.participants.len()
+        "Current P2P mapping has {count} participant(s)",
+        count = current_p2p.participants.len()
     );
 
     // Create new P2P mapping without kicked participant
-    let kick_participant_str = kick_config.participant_ids[0].to_string();
+    let kick_participant_str = kick_config.participant_id.to_string();
     let new_participants: Vec<_> = current_p2p
         .participants
         .into_iter()
         .filter(|p| p.participant_uid != kick_participant_str)
         .collect();
 
-    tracing::info!("New P2P mapping will have {} participant(s)", new_participants.len());
+    tracing::info!(
+        "New P2P mapping will have {count} participant(s)",
+        count = new_participants.len()
+    );
 
     if new_participants.is_empty() {
         anyhow::bail!("Cannot remove all participants from party mapping");
@@ -138,11 +144,9 @@ pub async fn create_proposals(
                 change: enums::TopologyChangeOp::AddReplace as i32,
                 serial: 0,
                 mapping: Some(TopologyMapping {
-                    mapping: Some(
-                        topology_mapping::Mapping::DecentralizedNamespaceDefinition(
-                            new_namespace_def.clone(),
-                        ),
-                    ),
+                    mapping: Some(topology_mapping::Mapping::DecentralizedNamespaceDefinition(
+                        new_namespace_def.clone(),
+                    )),
                 }),
             },
         )),
@@ -194,18 +198,24 @@ pub async fn create_proposals(
     fs::create_dir_all(&dirs.kick_proposals_dir).await?;
 
     let dns_file = dirs.kick_proposals_dir.join("dns_kick_proto.bin");
-    tracing::info!("Saving DNS kick proposal to {}", dns_file.display());
+    tracing::info!(
+        "Saving DNS kick proposal to {path}",
+        path = dns_file.display()
+    );
     utils::write_message_to_file(&dns_transaction, &dns_file).await?;
 
     let p2p_file = dirs.kick_proposals_dir.join("p2p_kick_proto.bin");
-    tracing::info!("Saving P2P kick proposal to {}", p2p_file.display());
+    tracing::info!(
+        "Saving P2P kick proposal to {path}",
+        path = p2p_file.display()
+    );
     utils::write_message_to_file(&p2p_transaction, &p2p_file).await?;
 
     // Save new namespace definition
     let new_namespace_file = dirs.kick_proposals_dir.join("newNamespaceDef.bin");
     tracing::info!(
-        "Saving new namespace definition to {}",
-        new_namespace_file.display()
+        "Saving new namespace definition to {path}",
+        path = new_namespace_file.display()
     );
     utils::write_message_to_file(&new_namespace_def, &new_namespace_file).await?;
 

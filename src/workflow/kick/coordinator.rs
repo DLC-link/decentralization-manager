@@ -19,10 +19,14 @@ pub async fn start_coordinator(
 ) -> Result {
     tracing::info!("Initializing Noise server...");
 
+    // Exclude the participant being kicked from attestors
+    let excluded_participants = vec![kick_config.participant_id.to_string()];
+
     let server = NoiseServer::new(
         node_config.clone(),
         network_config.clone(),
         KickStep::WaitingForAttestors,
+        Some(excluded_participants),
     )
     .await?;
 
@@ -53,7 +57,8 @@ pub async fn start_coordinator(
                     KickStep::ExportState => {
                         if !coordinator_completed_steps.contains(&KickStep::ExportState) {
                             tracing::info!("Coordinator executing: Export state");
-                            export_state(&node_config, &dirs, &network_config, &kick_config).await?;
+                            export_state(&node_config, &dirs, &network_config, &kick_config)
+                                .await?;
                             coordinator_completed_steps.insert(KickStep::ExportState);
                             workflow_state.advance_step().await;
                         }
@@ -61,7 +66,8 @@ pub async fn start_coordinator(
                     }
                     KickStep::CreateProposals => {
                         tracing::info!("Coordinator executing: Create proposals");
-                        create_proposals(&node_config, &dirs, &network_config, &kick_config).await?;
+                        create_proposals(&node_config, &dirs, &network_config, &kick_config)
+                            .await?;
                         workflow_state.advance_step().await;
                     }
                     KickStep::SignProposals => {
@@ -80,6 +86,8 @@ pub async fn start_coordinator(
                     }
                     KickStep::Complete => {
                         tracing::info!("Kick workflow complete!");
+                        tracing::debug!("Waiting for attestors to receive Disconnect command...");
+                        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                         break;
                     }
                 }

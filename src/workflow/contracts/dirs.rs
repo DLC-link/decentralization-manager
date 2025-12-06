@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{marker::PhantomData, path::PathBuf};
 
 use crate::error::Result;
 
@@ -10,6 +10,7 @@ pub struct ContractsDirs {
     pub dns_submission_dir: PathBuf,
     pub ids_dir: PathBuf,
     pub keys_dir: PathBuf,
+    _p: PhantomData<()>,
 }
 
 impl ContractsDirs {
@@ -24,6 +25,7 @@ impl ContractsDirs {
             dns_submission_dir,
             ids_dir: workflow_dir.join("participant-ids"),
             keys_dir: workflow_dir.join("participant-keys"),
+            _p: PhantomData,
         }
     }
 

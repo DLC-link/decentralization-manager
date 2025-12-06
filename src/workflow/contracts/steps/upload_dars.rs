@@ -13,7 +13,7 @@ use crate::{config::NodeConfig, error::Result, workflow::contracts::ContractsDir
 ///
 /// Scans the dars directory and uploads all .dar files found to the Canton participant.
 pub async fn upload_dars(config: &NodeConfig, dirs: &ContractsDirs) -> Result {
-    tracing::info!("Uploading DARs from {}", dirs.dars_dir.display());
+    tracing::info!("Uploading DARs from {path}", path = dirs.dars_dir.display());
 
     let mut client = PackageServiceClient::connect(config.admin_api_url()).await?;
 
@@ -34,10 +34,16 @@ pub async fn upload_dars(config: &NodeConfig, dirs: &ContractsDirs) -> Result {
     dar_files.sort();
 
     if dar_files.is_empty() {
-        anyhow::bail!("No .dar files found in {}", dirs.dars_dir.display());
+        anyhow::bail!(
+            "No .dar files found in {path}",
+            path = dirs.dars_dir.display()
+        );
     }
 
-    tracing::info!("Found {} DAR file(s) to upload", dar_files.len());
+    tracing::info!(
+        "Found {count} DAR file(s) to upload",
+        count = dar_files.len()
+    );
 
     // Upload each DAR file
     for dar_path in dar_files {
@@ -46,7 +52,7 @@ pub async fn upload_dars(config: &NodeConfig, dirs: &ContractsDirs) -> Result {
             .and_then(|s| s.to_str())
             .unwrap_or("unknown");
 
-        tracing::debug!("Reading {}", dar_path.display());
+        tracing::debug!("Reading {path}", path = dar_path.display());
         let dar_data = fs::read(&dar_path).await?;
 
         // Generate description from filename (remove .dar extension)

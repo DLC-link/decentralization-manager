@@ -50,15 +50,15 @@ pub async fn execute_submissions(
     // Step 1: Get decentralized party ID from namespace definition
     let namespace_file = dirs.dns_submission_dir.join(NAMESPACE_DEF_FILENAME);
     tracing::debug!(
-        "Reading namespace definition from {}",
-        namespace_file.display()
+        "Reading namespace definition from {path}",
+        path = namespace_file.display()
     );
     let namespace_def: DecentralizedNamespaceDefinition =
         utils::read_first_message_from_file(&namespace_file).await?;
 
     let decentralized_party = format!(
-        "{party_id_prefix}::{}",
-        namespace_def.decentralized_namespace
+        "{party_id_prefix}::{namespace}",
+        namespace = namespace_def.decentralized_namespace
     );
     tracing::debug!("Decentralized party: {decentralized_party}");
 
@@ -73,8 +73,8 @@ pub async fn execute_submissions(
 
     if submission_files.is_empty() {
         anyhow::bail!(
-            "No prepared submission files found in {}",
-            prepared_dir.display()
+            "No prepared submission files found in {path}",
+            path = prepared_dir.display()
         );
     }
 
@@ -97,42 +97,51 @@ pub async fn execute_submissions(
     // Discover all submission-signatures-*.bin files
     let signature_files =
         utils::find_files_by_pattern(&signatures_dir, SUBMISSION_SIGNATURES_PREFIX, ".bin").await?;
-    tracing::debug!("Found {} signature files", signature_files.len());
+    tracing::debug!(
+        "Found {count} signature files",
+        count = signature_files.len()
+    );
 
     if signature_files.is_empty() {
-        anyhow::bail!("No signature files found in {}", signatures_dir.display());
+        anyhow::bail!(
+            "No signature files found in {path}",
+            path = signatures_dir.display()
+        );
     }
 
     // Load all signatures (one per submission per attestor)
     let mut all_signatures: Vec<Vec<CantonSignature>> = Vec::new();
 
     for sig_file in &signature_files {
-        tracing::debug!("Loading signatures from {}", sig_file.display());
+        tracing::debug!("Loading signatures from {path}", path = sig_file.display());
 
         let sigs: Vec<CantonSignature> = utils::read_all_messages_from_file(sig_file).await?;
 
         if sigs.len() != num_submissions {
             anyhow::bail!(
-                "Expected {num_submissions} signatures in {}, but found {}",
-                sig_file.display(),
-                sigs.len()
+                "Expected {num_submissions} signatures in {path}, but found {count}",
+                path = sig_file.display(),
+                count = sigs.len()
             );
         }
 
         all_signatures.push(sigs);
         tracing::debug!(
-            "Loaded {num_submissions} signatures from {}",
-            sig_file.file_name().unwrap().to_string_lossy()
+            "Loaded {num_submissions} signatures from {path}",
+            path = sig_file.file_name().unwrap().to_string_lossy()
         );
     }
 
-    tracing::info!("Loaded signatures from {} attestors", all_signatures.len());
+    tracing::info!(
+        "Loaded signatures from {count} attestors",
+        count = all_signatures.len()
+    );
 
     // Step 4: Execute each submission
     let mut submission_client = utils::create_submission_client(config).await?;
 
     for (idx, prepared_response) in prepared_submissions.iter().enumerate() {
-        tracing::info!("Executing submission {}...", idx + 1);
+        tracing::info!("Executing submission {index}...", index = idx + 1);
 
         // Collect signatures for this submission from all attestors
         let mut signatures_for_submission = Vec::new();
@@ -152,18 +161,18 @@ pub async fn execute_submissions(
         }
 
         tracing::debug!(
-            "Collected {} signatures for submission {}",
-            signatures_for_submission.len(),
-            idx + 1
+            "Collected {count} signatures for submission {idx}",
+            count = signatures_for_submission.len(),
+            idx = idx + 1
         );
 
         // Debug: Log fingerprints being used in signatures
         for (sig_idx, sig) in signatures_for_submission.iter().enumerate() {
             tracing::debug!(
-                "Signature {} for submission {}: signed_by={}",
-                sig_idx + 1,
-                idx + 1,
-                sig.signed_by
+                "Signature {sig_idx} for submission {idx}: signed_by={signature}",
+                sig_idx = sig_idx + 1,
+                idx = idx + 1,
+                signature = sig.signed_by
             );
         }
 
@@ -195,7 +204,7 @@ pub async fn execute_submissions(
             .execute_submission_and_wait_for_transaction(tonic::Request::new(execute_request))
             .await?;
 
-        tracing::info!("Submission {} executed successfully", idx + 1);
+        tracing::info!("Submission {index} executed successfully", index = idx + 1);
     }
 
     // Step 5: Wait for contracts to appear in ACS

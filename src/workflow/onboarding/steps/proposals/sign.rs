@@ -39,8 +39,8 @@ async fn sign_proposal(
     tracing::debug!("Using synchronizer ID: {synchronizer_id}");
 
     tracing::info!(
-        "Reading {proposal_type} proposal from {}",
-        input_file.display()
+        "Reading {proposal_type} proposal from {path}",
+        path = input_file.display()
     );
 
     let transaction: SignedTopologyTransaction =
@@ -73,8 +73,8 @@ async fn sign_proposal(
     fs::create_dir_all(output_dir).await?;
     let output_file = output_dir.join(format!("{output_prefix}-{participant_num}.bin"));
     tracing::info!(
-        "Saving signed {proposal_type} proposal to {}",
-        output_file.display()
+        "Saving signed {proposal_type} proposal to {path}",
+        path = output_file.display()
     );
 
     utils::write_messages_to_file(&response.transactions, &output_file).await?;

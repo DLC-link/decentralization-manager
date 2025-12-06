@@ -35,17 +35,26 @@ pub async fn submit_dns_proposals(config: &NodeConfig, dirs: &OnboardingDirs) ->
     tracing::debug!("Using synchronizer ID: {synchronizer_id}");
 
     let dns_file = dirs.dns_proposals_dir.join(DNS_PROTO_FILENAME);
-    tracing::info!("Reading original DNS proposal from {}", dns_file.display());
+    tracing::info!(
+        "Reading original DNS proposal from {path}",
+        path = dns_file.display()
+    );
     let mut dns_transaction: SignedTopologyTransaction =
         utils::read_first_message_from_file(&dns_file).await?;
 
     let signed_files =
         utils::find_files_by_pattern(&dirs.dns_signed_dir, SIGNED_DNS_PROPOSAL_PREFIX, ".bin")
             .await?;
-    tracing::info!("Found {} signed DNS proposal files", signed_files.len());
+    tracing::info!(
+        "Found {count} signed DNS proposal files",
+        count = signed_files.len()
+    );
 
     for signed_file in &signed_files {
-        tracing::info!("Reading signatures from {}", signed_file.display());
+        tracing::info!(
+            "Reading signatures from {path}",
+            path = signed_file.display()
+        );
         let signed_transactions: Vec<SignedTopologyTransaction> =
             utils::read_all_messages_from_file(signed_file).await?;
 
@@ -57,8 +66,8 @@ pub async fn submit_dns_proposals(config: &NodeConfig, dirs: &OnboardingDirs) ->
     }
 
     tracing::info!(
-        "Aggregated DNS proposal has {} signature(s)",
-        dns_transaction.signatures.len()
+        "Aggregated DNS proposal has {count} signature(s)",
+        count = dns_transaction.signatures.len()
     );
 
     tracing::info!("Submitting aggregated DNS proposal...");
@@ -81,15 +90,15 @@ pub async fn submit_dns_proposals(config: &NodeConfig, dirs: &OnboardingDirs) ->
 
     let namespace_def_file = dirs.dns_submission_dir.join(NAMESPACE_DEF_FILENAME);
     tracing::info!(
-        "Reading namespace definition from {}",
-        namespace_def_file.display()
+        "Reading namespace definition from {path}",
+        path = namespace_def_file.display()
     );
     let namespace_def: DecentralizedNamespaceDefinition =
         utils::read_first_message_from_file(&namespace_def_file).await?;
 
     tracing::info!(
-        "Waiting for DNS to appear in topology for namespace {}...",
-        namespace_def.decentralized_namespace
+        "Waiting for DNS to appear in topology for namespace {namespace}...",
+        namespace = namespace_def.decentralized_namespace
     );
     wait_for_dns_in_topology(
         config,
@@ -174,25 +183,34 @@ pub async fn submit_final_proposals(
     tracing::debug!("Using synchronizer ID: {synchronizer_id}");
 
     let p2p_file = dirs.p2p_proposals_dir.join(P2P_PROTO_FILENAME);
-    tracing::info!("Reading original P2P proposal from {}", p2p_file.display());
+    tracing::info!(
+        "Reading original P2P proposal from {path}",
+        path = p2p_file.display()
+    );
     let mut p2p_transaction: SignedTopologyTransaction =
         utils::read_first_message_from_file(&p2p_file).await?;
 
     let signed_files =
         utils::find_files_by_pattern(&dirs.final_signed_dir, SIGNED_P2P_PROPOSALS_PREFIX, ".bin")
             .await?;
-    tracing::info!("Found {} signed P2P proposal files", signed_files.len());
+    tracing::info!(
+        "Found {count} signed P2P proposal files",
+        count = signed_files.len()
+    );
 
     for signed_file in &signed_files {
-        tracing::info!("Reading signatures from {}", signed_file.display());
+        tracing::info!(
+            "Reading signatures from {path}",
+            path = signed_file.display()
+        );
         let signed_transactions: Vec<SignedTopologyTransaction> =
             utils::read_all_messages_from_file(signed_file).await?;
 
         if signed_transactions.len() != 1 {
             anyhow::bail!(
-                "Expected 1 transaction in {}, got {}",
-                signed_file.display(),
-                signed_transactions.len()
+                "Expected 1 transaction in {path}, got {count}",
+                path = signed_file.display(),
+                count = signed_transactions.len()
             );
         }
 
@@ -202,21 +220,21 @@ pub async fn submit_final_proposals(
     }
 
     tracing::info!(
-        "Aggregated P2P proposal has {} signature(s)",
-        p2p_transaction.signatures.len()
+        "Aggregated P2P proposal has {count} signature(s)",
+        count = p2p_transaction.signatures.len()
     );
 
     let namespace_file = dirs.dns_submission_dir.join(NAMESPACE_DEF_FILENAME);
     tracing::info!(
-        "Reading namespace definition from {}",
-        namespace_file.display()
+        "Reading namespace definition from {path}",
+        path = namespace_file.display()
     );
     let namespace_def: DecentralizedNamespaceDefinition =
         utils::read_first_message_from_file(&namespace_file).await?;
 
     let party_id = format!(
-        "{party_id_prefix}::{}",
-        namespace_def.decentralized_namespace
+        "{party_id_prefix}::{namespace}",
+        namespace = namespace_def.decentralized_namespace
     );
     tracing::info!("Constructed party ID: {party_id}");
 
@@ -308,9 +326,9 @@ async fn wait_for_p2p_in_topology(
             if let Some(context) = &result.context {
                 if let Some(valid_from) = &context.valid_from {
                     tracing::debug!(
-                        "P2P mapping effective time: {}.{:09}s",
-                        valid_from.seconds,
-                        valid_from.nanos
+                        "P2P mapping effective time: {seconds}.{nanos:09}s",
+                        seconds = valid_from.seconds,
+                        nanos = valid_from.nanos
                     );
                     return Ok(*valid_from);
                 } else {

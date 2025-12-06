@@ -306,16 +306,18 @@ impl NodeConfig {
     /// Get the full Admin API URL
     pub fn admin_api_url(&self) -> String {
         format!(
-            "http://{}:{}",
-            self.canton.admin_api_host, self.canton.admin_api_port
+            "http://{host}:{port}",
+            host = self.canton.admin_api_host,
+            port = self.canton.admin_api_port
         )
     }
 
     /// Get the full Ledger API URL
     pub fn ledger_api_url(&self) -> String {
         format!(
-            "http://{}:{}",
-            self.canton.ledger_api_host, self.canton.ledger_api_port
+            "http://{host}:{port}",
+            host = self.canton.ledger_api_host,
+            port = self.canton.ledger_api_port
         )
     }
 
@@ -475,7 +477,7 @@ mod tests {
         };
 
         let attestors = network.get_attestors()?;
-        assert_eq!(attestors.len(), 2);
+        assert_eq!(attestors.len(), 2, "Expected 2 attestors in test config");
         assert_eq!(attestors[0].id, "node2");
         assert_eq!(attestors[1].id, "node3");
         Ok(())

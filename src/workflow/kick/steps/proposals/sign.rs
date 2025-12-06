@@ -29,13 +29,19 @@ pub async fn sign_proposals(config: &NodeConfig, dirs: &KickDirs) -> Result {
 
     // Read DNS kick proposal
     let dns_file = dirs.kick_proposals_dir.join("dns_kick_proto.bin");
-    tracing::info!("Reading DNS kick proposal from {}", dns_file.display());
+    tracing::info!(
+        "Reading DNS kick proposal from {path}",
+        path = dns_file.display()
+    );
     let dns_transaction: SignedTopologyTransaction =
         utils::read_first_message_from_file(&dns_file).await?;
 
     // Read P2P kick proposal
     let p2p_file = dirs.kick_proposals_dir.join("p2p_kick_proto.bin");
-    tracing::info!("Reading P2P kick proposal from {}", p2p_file.display());
+    tracing::info!(
+        "Reading P2P kick proposal from {path}",
+        path = p2p_file.display()
+    );
     let p2p_transaction: SignedTopologyTransaction =
         utils::read_first_message_from_file(&p2p_file).await?;
 
@@ -62,17 +68,20 @@ pub async fn sign_proposals(config: &NodeConfig, dirs: &KickDirs) -> Result {
 
     if response.transactions.len() != 2 {
         anyhow::bail!(
-            "Expected 2 signed transactions (DNS and P2P), got {}",
-            response.transactions.len()
+            "Expected 2 signed transactions (DNS and P2P), got {count}",
+            count = response.transactions.len()
         );
     }
 
     // Save signed proposals
     fs::create_dir_all(&dirs.kick_signed_dir).await?;
-    let output_file = dirs
-        .kick_signed_dir
-        .join(format!("{SIGNED_KICK_PROPOSALS_PREFIX}-{participant_num}.bin"));
-    tracing::info!("Saving signed kick proposals to {}", output_file.display());
+    let output_file = dirs.kick_signed_dir.join(format!(
+        "{SIGNED_KICK_PROPOSALS_PREFIX}-{participant_num}.bin"
+    ));
+    tracing::info!(
+        "Saving signed kick proposals to {path}",
+        path = output_file.display()
+    );
 
     utils::write_messages_to_file(&response.transactions, &output_file).await?;
 

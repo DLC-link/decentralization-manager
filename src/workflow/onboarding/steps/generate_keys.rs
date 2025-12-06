@@ -132,7 +132,7 @@ async fn export_keys(
 ) -> Result {
     let filename = format!("{ATTESTOR_KEYS_PREFIX}-{participant_num}.bin");
     let output_path = keys_dir.join(&filename);
-    tracing::debug!("Exporting keys to {}", output_path.display());
+    tracing::debug!("Exporting keys to {path}", path = output_path.display());
     write_messages_to_file(&[namespace_key.clone(), daml_key.clone()], &output_path).await
 }
 
@@ -144,7 +144,10 @@ async fn export_participant_id(
 ) -> Result {
     let filename = format!("{PARTICIPANT_ID_PREFIX}-{participant_num}.bin");
     let output_path = ids_dir.join(&filename);
-    tracing::debug!("Exporting participant ID to {}", output_path.display());
+    tracing::debug!(
+        "Exporting participant ID to {path}",
+        path = output_path.display()
+    );
     fs::write(&output_path, participant_id.to_file_format().as_bytes()).await?;
     Ok(())
 }

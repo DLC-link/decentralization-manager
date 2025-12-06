@@ -40,14 +40,14 @@ pub async fn run_election(
     // Step 1: Try designated coordinator first
     if let Some(designated) = try_get_designated_coordinator(network_config) {
         tracing::info!(
-            "Attempting to connect to designated coordinator: {}",
-            designated.id
+            "Attempting to connect to designated coordinator: {id}",
+            id = designated.id
         );
 
         if is_participant_reachable(designated).await {
             tracing::info!(
-                "Designated coordinator {} is reachable, using it",
-                designated.id
+                "Designated coordinator {id} is reachable, using it",
+                id = designated.id
             );
             let is_me = designated.id == my_node_id;
             return Ok(ElectionResult {
@@ -57,8 +57,8 @@ pub async fn run_election(
         }
 
         tracing::warn!(
-            "Designated coordinator {} is unreachable, proceeding with election",
-            designated.id
+            "Designated coordinator {id} is unreachable, proceeding with election",
+            id = designated.id
         );
     }
 
@@ -71,7 +71,7 @@ pub async fn run_election(
 
     // Step 3: Iterate from highest to lowest ID
     for participant in &participants {
-        tracing::debug!("Checking candidate: {}", participant.id);
+        tracing::debug!("Checking candidate: {id}", id = participant.id);
 
         // If this candidate is me, I'm the highest reachable → I become coordinator
         if participant.id == my_node_id {
@@ -87,8 +87,8 @@ pub async fn run_election(
         // Try connecting to this higher-priority candidate
         if is_participant_reachable(participant).await {
             tracing::info!(
-                "Participant {} is reachable and has higher priority, accepting as coordinator",
-                participant.id
+                "Participant {id} is reachable and has higher priority, accepting as coordinator",
+                id = participant.id
             );
             return Ok(ElectionResult {
                 coordinator: participant.clone(),
@@ -96,7 +96,10 @@ pub async fn run_election(
             });
         }
 
-        tracing::debug!("Participant {} is unreachable, trying next", participant.id);
+        tracing::debug!(
+            "Participant {id} is unreachable, trying next",
+            id = participant.id
+        );
     }
 
     // Should never reach here if participants list is not empty
@@ -115,7 +118,11 @@ fn try_get_designated_coordinator(network_config: &NetworkConfig) -> Option<&Par
 ///
 /// Returns true if a TCP connection can be established within the timeout period
 async fn is_participant_reachable(participant: &Participant) -> bool {
-    let address = format!("{}:{}", participant.address, participant.port);
+    let address = format!(
+        "{addr}:{port}",
+        addr = participant.address,
+        port = participant.port
+    );
     tracing::debug!("Attempting TCP connection to {address}");
 
     // Try to connect with short timeout (3 seconds)
@@ -139,7 +146,10 @@ async fn is_participant_reachable(participant: &Participant) -> bool {
 mod tests {
     use super::*;
 
-    use crate::config::{ApplicationConfig, CoordinatorStrategy, NetworkInfo, Timeouts};
+    use crate::{
+        config::{ApplicationConfig, CoordinatorStrategy, NetworkInfo, Timeouts},
+        error::Result,
+    };
 
     fn test_application_config() -> ApplicationConfig {
         ApplicationConfig {
@@ -151,8 +161,8 @@ mod tests {
         }
     }
 
-    fn create_test_network(coordinator_strategy: CoordinatorStrategy) -> NetworkConfig {
-        NetworkConfig {
+    fn create_test_network(coordinator_strategy: CoordinatorStrategy) -> Result<NetworkConfig> {
+        Ok(NetworkConfig {
             network: NetworkInfo {
                 name: "test-network".to_string(),
                 protocol_version: "1.0".to_string(),
@@ -191,20 +201,21 @@ mod tests {
             ],
             timeouts: Timeouts::default(),
             application: test_application_config(),
-        }
+        })
     }
 
     #[test]
-    fn test_designated_coordinator_selection() {
-        let network = create_test_network(CoordinatorStrategy::Explicit);
+    fn test_designated_coordinator_selection() -> Result {
+        let network = create_test_network(CoordinatorStrategy::Explicit)?;
         let designated = try_get_designated_coordinator(&network);
 
         assert!(designated.is_some());
         assert_eq!(designated.unwrap().id, "attestor-1");
+        Ok(())
     }
 
     #[test]
-    fn test_participant_sorting() {
+    fn test_participant_sorting() -> Result {
         let mut participants = [
             Participant {
                 id: "attestor-1".to_string(),
@@ -240,5 +251,6 @@ mod tests {
         assert_eq!(participants[0].id, "attestor-3");
         assert_eq!(participants[1].id, "attestor-2");
         assert_eq!(participants[2].id, "attestor-1");
+        Ok(())
     }
 }
