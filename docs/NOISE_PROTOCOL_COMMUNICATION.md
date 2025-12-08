@@ -225,7 +225,7 @@ After handshake, all messages follow a structured protocol.
 | `UPLOAD_DARS` | Instruct attestor to upload DAR files | None |
 | `GENERATE_KEYS` | Instruct attestor to generate keys | None |
 | `SIGN_DNS` | Instruct attestor to sign DNS proposal | `dns_proto.bin` |
-| `SIGN_P2P_PTK` | Instruct attestor to sign P2P proposals (Canton 3.4+: PTK deprecated) | `p2p_proto.bin` |
+| `SIGN_P2P` | Instruct attestor to sign P2P proposals | `p2p_proto.bin` |
 | `SIGN_SUBMISSIONS` | Instruct attestor to sign ledger submissions | `prepared-submission-*.bin` (3 files) |
 | `SIGN_KICK` | Instruct attestor to sign kick proposals | `kick_dns_proto.bin`, `kick_p2p_proto.bin` |
 | `STATUS_UPDATE` | Inform attestors of progress | Status string |
@@ -247,7 +247,7 @@ After handshake, all messages follow a structured protocol.
 |---------|-----------|-------------|
 | `KEYS_UPLOAD` | Attestor → Coordinator | `attestor-public-keys.bin` + `participant-id.bin` |
 | `DNS_SIGNATURE` | Attestor → Coordinator | `signed-dns-proposal.bin` |
-| `P2P_PTK_SIGNATURES` | Attestor → Coordinator | `signed-p2p-ptk-proposals.bin` (Canton 3.4+: only P2P signatures) |
+| `P2P_SIGNATURES` | Attestor → Coordinator | `signed-p2p-proposals.bin` |
 | `SUBMISSION_SIGNATURES` | Attestor → Coordinator | `submission-signatures.bin` |
 | `KICK_SIGNATURES` | Attestor → Coordinator | `signed-kick-proposals.bin` (DNS and P2P kick proposals) |
 
@@ -286,7 +286,7 @@ pub enum MessageType {
     UploadDars = 0x0001,
     GenerateKeys = 0x0002,
     SignDns = 0x0003,
-    SignP2pPtk = 0x0004,
+    SignP2p = 0x0004,
     SignSubmissions = 0x0005,
     StatusUpdate = 0x0006,
     Disconnect = 0x0007,
@@ -303,7 +303,7 @@ pub enum MessageType {
     // Data Transfers (0x0201 - 0x0205)
     KeysUpload = 0x0201,
     DnsSignature = 0x0202,
-    P2pPtkSignatures = 0x0203,
+    P2pSignatures = 0x0203,
     SubmissionSignatures = 0x0204,
     KickSignatures = 0x0205,
 }
@@ -405,22 +405,22 @@ NoiseClient (Attestor)
 **NoiseKeypair** (`src/noise/mod.rs`):
 ```rust
 pub struct NoiseKeypair {
-    private_key: SecretKey,        // 32-byte secp256k1 private key
-    public_key: PublicKey,         // 33-byte compressed public key
+    pub secret_key: SecretKey,     // 32-byte secp256k1 secret key
+    pub public_key: PublicKey,     // 33-byte compressed public key
 }
 
 impl NoiseKeypair {
     // Generate new random keypair
     pub fn generate() -> Self;
 
-    // Load from file (hex-encoded private key)
-    pub fn from_file(path: &Path) -> Result<Self>;
+    // Load from file (hex-encoded secret key)
+    pub async fn from_file<P: AsRef<Path>>(path: P) -> Result<Self>;
 
     // Derive PSK via ECDH with peer's public key
-    pub fn derive_psk(&self, peer_public_key: &PublicKey) -> Result<[u8; 32]>;
+    pub fn derive_psk(&self, peer_public_key: &PublicKey) -> [u8; 32];
 
-    // Get public key bytes (33 bytes compressed)
-    pub fn public_key_bytes(&self) -> [u8; 33];
+    // Get public key as hex string
+    pub fn public_key_hex(&self) -> String;
 }
 ```
 
@@ -473,7 +473,7 @@ impl NoiseClient {
     // High-level data transfer methods
     pub async fn upload_keys(&mut self, ...) -> Result<()>;
     pub async fn send_dns_signature(&mut self, ...) -> Result<()>;
-    pub async fn send_p2p_ptk_signatures(&mut self, ...) -> Result<()>;
+    pub async fn send_p2p_signatures(&mut self, ...) -> Result<()>;
     pub async fn send_submission_signatures(&mut self, ...) -> Result<()>;
 }
 ```

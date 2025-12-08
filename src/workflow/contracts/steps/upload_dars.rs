@@ -9,8 +9,6 @@ use crate::{config::NodeConfig, error::Result, workflow::contracts::ContractsDir
 
 /// Upload DAR files to the participant
 ///
-/// Corresponds to: 00_UploadDars.sc
-///
 /// Scans the dars directory and uploads all .dar files found to the Canton participant.
 pub async fn upload_dars(config: &NodeConfig, dirs: &ContractsDirs) -> Result {
     tracing::info!("Uploading DARs from {path}", path = dirs.dars_dir.display());

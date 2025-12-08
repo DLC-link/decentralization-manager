@@ -30,8 +30,6 @@ const ED25519_PRIVATE_KEY_LENGTH: u8 = 0x20;
 
 /// Sign prepared ledger submissions with DAML key
 ///
-/// Corresponds to: 04_SignSubmissions.sc
-///
 /// This step must be run by each attestor participant to sign the prepared submissions.
 /// Each attestor signs with their DAML signing key.
 ///

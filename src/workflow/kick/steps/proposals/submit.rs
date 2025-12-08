@@ -23,8 +23,6 @@ use crate::{
 
 /// Submit kick to synchronizer
 ///
-/// Corresponds to: 03_SubmitKick.sc
-///
 /// Coordinator aggregates signatures and submits the kick
 pub async fn submit_kick(
     config: &NodeConfig,

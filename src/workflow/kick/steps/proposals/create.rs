@@ -21,8 +21,6 @@ use crate::{
 
 /// Create kick proposals
 ///
-/// Corresponds to: 01_CoordinatorPropose.sc
-///
 /// This step creates:
 /// - DNS proposal to update namespace (remove kicked owner)
 /// - P2P proposal to remove participant from mapping

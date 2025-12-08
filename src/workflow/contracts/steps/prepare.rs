@@ -33,8 +33,6 @@ const DEFAULT_PAGE_SIZE: i32 = 1000;
 
 /// Prepare ledger submissions for governance contracts
 ///
-/// Corresponds to: 03b_PrepareSubmissions.sc
-///
 /// This step must be run once by the coordinator with appropriate Ledger API credentials.
 /// It prepares interactive submissions for creating the governance contracts.
 ///
