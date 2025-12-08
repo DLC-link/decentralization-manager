@@ -4,5 +4,6 @@ pub mod error;
 pub mod noise;
 pub mod participant_id;
 pub mod query_parties;
+pub mod server;
 pub mod utils;
 pub mod workflow;

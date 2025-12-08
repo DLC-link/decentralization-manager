@@ -81,10 +81,7 @@ pub async fn read_first_message_from_file<M: Message + Default>(
 /// Write multiple protobuf messages to a file
 ///
 /// Each message is prefixed with a varint indicating its length, matching Canton's format.
-pub async fn write_messages_to_file<M: Message>(
-    messages: &[M],
-    path: impl AsRef<Path>,
-) -> Result<()> {
+pub async fn write_messages_to_file<M: Message>(messages: &[M], path: impl AsRef<Path>) -> Result {
     let mut buffer = BytesMut::new();
 
     for message in messages {
@@ -104,7 +101,7 @@ pub async fn write_messages_to_file<M: Message>(
 }
 
 /// Write a single protobuf message to a file
-pub async fn write_message_to_file<M: Message>(message: &M, path: impl AsRef<Path>) -> Result<()> {
+pub async fn write_message_to_file<M: Message>(message: &M, path: impl AsRef<Path>) -> Result {
     let mut buffer = BytesMut::new();
     let encoded = message.encode_to_vec();
     let len = encoded.len();
@@ -154,7 +151,7 @@ pub async fn find_files_by_pattern(
 }
 
 /// Write raw bytes to a file
-pub async fn write_bytes_to_file(data: &[u8], path: impl AsRef<Path>) -> Result<()> {
+pub async fn write_bytes_to_file(data: &[u8], path: impl AsRef<Path>) -> Result {
     fs::write(path.as_ref(), data).await?;
     Ok(())
 }
@@ -166,7 +163,7 @@ pub async fn retry_until_true<F, Fut>(
     mut check: F,
     max_attempts: usize,
     delay: std::time::Duration,
-) -> Result<()>
+) -> Result
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<bool>>,
