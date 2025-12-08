@@ -2,10 +2,9 @@ use std::path::PathBuf;
 
 use crate::error::Result;
 
-/// Holds all workflow directory paths
-#[derive(Debug, Clone)]
-pub struct WorkflowDirs {
-    pub dars_dir: PathBuf,
+/// Onboarding workflow directory structure
+#[derive(Clone, Debug)]
+pub struct OnboardingDirs {
     pub workflow_dir: PathBuf,
     pub keys_dir: PathBuf,
     pub ids_dir: PathBuf,
@@ -17,15 +16,14 @@ pub struct WorkflowDirs {
     pub final_signed_dir: PathBuf,
 }
 
-impl WorkflowDirs {
-    /// Create new WorkflowDirs with default paths
+impl OnboardingDirs {
+    /// Create new OnboardingDirs with default paths
     pub fn new() -> Self {
         let workflow_dir = PathBuf::from("./workflow-data");
         let dns_submission_dir = workflow_dir.join("dns-submission");
         let final_proposals_dir = workflow_dir.join("final-proposals-submission");
 
         Self {
-            dars_dir: PathBuf::from("./dars"),
             workflow_dir: workflow_dir.clone(),
             keys_dir: workflow_dir.join("participant-keys"),
             ids_dir: workflow_dir.join("participant-ids"),
@@ -39,21 +37,15 @@ impl WorkflowDirs {
     }
 
     /// Create required directories that don't exist
-    pub async fn create_required_dirs(&self) -> Result {
-        if !self.workflow_dir.exists() {
-            tokio::fs::create_dir_all(&self.workflow_dir).await?;
-        }
-        if !self.keys_dir.exists() {
-            tokio::fs::create_dir_all(&self.keys_dir).await?;
-        }
-        if !self.ids_dir.exists() {
-            tokio::fs::create_dir_all(&self.ids_dir).await?;
-        }
+    pub async fn create_dirs(&self) -> Result {
+        tokio::fs::create_dir_all(&self.workflow_dir).await?;
+        tokio::fs::create_dir_all(&self.keys_dir).await?;
+        tokio::fs::create_dir_all(&self.ids_dir).await?;
         Ok(())
     }
 }
 
-impl Default for WorkflowDirs {
+impl Default for OnboardingDirs {
     fn default() -> Self {
         Self::new()
     }

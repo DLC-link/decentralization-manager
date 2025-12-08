@@ -1,12 +1,15 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::{HashMap, HashSet}, marker::PhantomData, sync::Arc};
 
 use hyper::{Body, Request, Response, StatusCode};
 use secp256k1::PublicKey;
 use tokio::net::TcpListener;
+use tokio_noise::handshakes::nn_psk2::Responder;
 
 use crate::{
     config::{NetworkConfig, NodeConfig},
-    noise::{Message, MessageType, NOISE_REQUEST_TIMEOUT, NoiseError, NoiseKeypair},
+    noise::{
+        Message, MessageType, NOISE_REQUEST_TIMEOUT, NoiseError, NoiseKeypair, parse_public_key,
+    },
     workflow::{WorkflowState, state::WorkflowStep},
 };
 
@@ -17,36 +20,61 @@ pub struct NoiseServer<S: WorkflowStep + 'static> {
     keypair: Arc<NoiseKeypair>,
     peer_keys: HashMap<String, PublicKey>,
     workflow_state: Arc<WorkflowState<S>>,
+    _p: PhantomData<S>,
 }
 
 impl<S: WorkflowStep + 'static> NoiseServer<S> {
+    /// Create a new Noise server
+    ///
+    /// # Arguments
+    /// * `node_config` - Node configuration
+    /// * `network_config` - Network configuration
+    /// * `initial_step` - Initial workflow step
+    /// * `exclude_participants` - Optional list of participant IDs to exclude from attestors (e.g., participants being kicked)
     pub async fn new(
         node_config: NodeConfig,
         network_config: NetworkConfig,
         initial_step: S,
+        exclude_participants: Option<Vec<String>>,
     ) -> Result<Self, NoiseError> {
         let keypair = NoiseKeypair::from_file(&node_config.node.static_key_file).await?;
 
+        let excluded: HashSet<String> = exclude_participants
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+
         let mut peer_keys = HashMap::new();
         for participant in &network_config.participants {
-            if participant.id == node_config.node.node_id {
+            if participant.id == node_config.node.node_id || excluded.contains(&participant.id) {
                 continue;
             }
 
-            let pub_key_bytes =
-                hex::decode(&participant.public_key).map_err(|_| NoiseError::InvalidMessage)?;
-            let pub_key =
-                PublicKey::from_slice(&pub_key_bytes).map_err(|_| NoiseError::InvalidMessage)?;
-
+            let pub_key = parse_public_key(&participant.public_key)?;
             peer_keys.insert(participant.id.clone(), pub_key);
         }
 
         let expected_attestors: Vec<String> = network_config
             .participants
             .iter()
-            .filter(|p| p.id != node_config.node.node_id)
+            .filter(|p| p.id != node_config.node.node_id && !excluded.contains(&p.id))
             .map(|p| p.id.clone())
             .collect();
+
+        if !excluded.is_empty() {
+            tracing::info!(
+                "Excluding {count} participant(s) from attestors: {participants}",
+                count = excluded.len(),
+                participants = excluded.iter().cloned().collect::<Vec<_>>().join(", ")
+            );
+        }
+
+        tracing::info!(
+            "Expected {count} attestor(s): {attestors}",
+            count = expected_attestors.len(),
+            attestors = expected_attestors.join(", ")
+        );
+
         let workflow_state = WorkflowState::new(initial_step, expected_attestors);
 
         Ok(Self {
@@ -55,6 +83,7 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
             keypair: Arc::new(keypair),
             peer_keys,
             workflow_state,
+            _p: PhantomData,
         })
     }
 
@@ -65,9 +94,10 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
     /// Start the server and listen for connections
     pub async fn start(self: Arc<Self>) -> Result<(), NoiseError> {
         let listen_addr = format!(
-            "{}:{}",
-            self.node_config.node.listen_address,
-            self.network_config
+            "{host}:{port}",
+            host = self.node_config.node.listen_address,
+            port = self
+                .network_config
                 .get_participant(&self.node_config.node.node_id)
                 .ok_or_else(|| { NoiseError::UnknownPeer(self.node_config.node.node_id.clone()) })?
                 .port
@@ -88,17 +118,15 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                 let peer_keys = peer_keys.clone();
 
                 // Create PSK derivation function
-                tokio_noise::handshakes::nn_psk2::Responder::new(
-                    move |identity: &[u8]| -> Option<[u8; 32]> {
-                        // Identity is the participant_id
-                        let peer_id = std::str::from_utf8(identity).ok()?;
-                        let peer_pub_key = peer_keys.get(peer_id)?;
+                Responder::new(move |identity: &[u8]| -> Option<[u8; 32]> {
+                    // Identity is the participant_id
+                    let peer_id = std::str::from_utf8(identity).ok()?;
+                    let peer_pub_key = peer_keys.get(peer_id)?;
 
-                        // Derive PSK using ECDH
-                        let psk = secp256k1::ecdh::SharedSecret::new(peer_pub_key, &secret_key);
-                        Some(psk.secret_bytes())
-                    },
-                )
+                    // Derive PSK using ECDH
+                    let psk = secp256k1::ecdh::SharedSecret::new(peer_pub_key, &secret_key);
+                    Some(psk.secret_bytes())
+                })
             }
         };
 
@@ -167,6 +195,10 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
             }
             MessageType::SubmissionSignatures => {
                 self.handle_submission_signatures(peer_id, message.payload)
+                    .await?
+            }
+            MessageType::KickSignatures => {
+                self.handle_kick_signatures(peer_id, message.payload)
                     .await?
             }
             MessageType::StatusUpdate => {
@@ -280,6 +312,23 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
             .await;
 
         // Mark attestor as completed for this step
+        self.workflow_state.attestor_completed(peer_id).await;
+
+        Ok(Message::new_empty(MessageType::Ack))
+    }
+
+    /// Handle kick signatures from attestor
+    async fn handle_kick_signatures(
+        &self,
+        peer_id: String,
+        payload: Vec<u8>,
+    ) -> Result<Message, NoiseError> {
+        tracing::info!("Handling kick signatures from {peer_id}");
+
+        self.workflow_state
+            .store_attestor_data(peer_id.clone(), payload)
+            .await;
+
         self.workflow_state.attestor_completed(peer_id).await;
 
         Ok(Message::new_empty(MessageType::Ack))

@@ -24,21 +24,54 @@ async fn main() -> Result {
         Commands::Keygen { ref output } => {
             dec_party_onboarding::noise::generate_keypair(output).await?;
         }
-        Commands::Onboarding | Commands::Contracts => {
+        Commands::QueryParties {
+            ref party_id_prefix,
+        } => {
             let node_config = args.config.as_ref().ok_or_else(|| {
                 anyhow::anyhow!("Configuration file is required. Use -c <config-file>")
             })?;
 
-            tracing::info!("Loading configuration from: {}", node_config.display());
+            tracing::info!(
+                "Loading configuration from: {path}",
+                path = node_config.display()
+            );
             let config = NodeConfig::from_file(node_config).await?;
 
-            let workflow_type = match args.command {
-                Commands::Onboarding => workflow::WorkflowType::Onboarding,
-                Commands::Contracts => workflow::WorkflowType::Contracts,
-                _ => unreachable!(),
-            };
+            dec_party_onboarding::query_parties::query_parties(&config, party_id_prefix).await?;
+        }
+        Commands::Onboarding | Commands::Contracts | Commands::Kick { .. } => {
+            let node_config = args.config.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("Configuration file is required. Use -c <config-file>")
+            })?;
 
-            workflow::start_node(config, workflow_type).await?;
+            tracing::info!(
+                "Loading configuration from: {path}",
+                path = node_config.display()
+            );
+            let config = NodeConfig::from_file(node_config).await?;
+
+            match args.command {
+                Commands::Onboarding => {
+                    workflow::start_node(config, workflow::WorkflowType::Onboarding, None).await?;
+                }
+                Commands::Contracts => {
+                    workflow::start_node(config, workflow::WorkflowType::Contracts, None).await?;
+                }
+                Commands::Kick {
+                    decentralized_party_id,
+                    participant_id,
+                    namespace_fingerprint,
+                } => {
+                    let kick_config = workflow::KickConfig::new(
+                        decentralized_party_id,
+                        participant_id,
+                        namespace_fingerprint,
+                    );
+                    workflow::start_node(config, workflow::WorkflowType::Kick, Some(kick_config))
+                        .await?;
+                }
+                _ => unreachable!(),
+            }
         }
     }
 

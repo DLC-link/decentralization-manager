@@ -1,5 +1,9 @@
-/// Minimum number of participants required for the workflow
-pub const MIN_PARTICIPANTS: usize = 3;
+/// Minimum number of participants required for onboarding and kick workflows
+pub const MIN_PARTICIPANTS: usize = 2;
+
+/// Minimum number of participants required for contract workflows
+/// Requires higher threshold for financial operations
+pub const MIN_PARTICIPANTS_CONTRACTS: usize = 3;
 
 /// Maximum number of retry attempts for topology propagation checks
 pub const TOPOLOGY_RETRY_MAX_ATTEMPTS: usize = 30;
@@ -31,6 +35,9 @@ pub const SIGNED_P2P_PROPOSALS_PREFIX: &str = "signed-p2p-proposals";
 
 /// Prefix for submission signature files
 pub const SUBMISSION_SIGNATURES_PREFIX: &str = "submission-signatures";
+
+/// Prefix for signed kick proposal files
+pub const SIGNED_KICK_PROPOSALS_PREFIX: &str = "signed-kick-proposals";
 
 // File names
 /// Namespace definition file name

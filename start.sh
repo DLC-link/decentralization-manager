@@ -3,6 +3,9 @@
 set -eou pipefail
 
 WORKFLOW="${1:-onboarding}"
+PARTY_ID="${2:-}"
+PARTICIPANT_ID="${3:-}"
+NAMESPACE_FP="${4:-}"
 NUM_PARTICIPANTS=3
 PORTS=(9001 9002 9003)
 LOG_DIR="logs"
@@ -69,6 +72,33 @@ for i in $(seq 1 $NUM_PARTICIPANTS); do
 done
 rm -f test-configs/network.toml.bak
 
+# If kick workflow, validate required parameters
+if [ "$WORKFLOW" = "kick" ]; then
+    if [ -z "$PARTY_ID" ] || [ -z "$PARTICIPANT_ID" ] || [ -z "$NAMESPACE_FP" ]; then
+        echo "Error: Kick workflow requires all three parameters"
+        echo ""
+        echo "Usage: ./start.sh kick <party-id> <participant-id> <namespace-fingerprint>"
+        echo ""
+        echo "Example:"
+        echo "  ./start.sh kick \\"
+        echo "    'cbtc-network::1220abc...' \\"
+        echo "    'participant::1220def...' \\"
+        echo "    '1220ghi...'"
+        echo ""
+        echo "Tip: Run './target/debug/dec-party-onboarding -c test-configs/node-1.toml query-parties'"
+        echo "     to see available parties, participants, and namespace fingerprints"
+        exit 1
+    fi
+
+    echo ""
+    echo "Kick configuration:"
+    echo "  Party ID:              $PARTY_ID"
+    echo "  Participant ID:        $PARTICIPANT_ID"
+    echo "  Namespace Fingerprint: $NAMESPACE_FP"
+
+    KICK_ARGS="--decentralized-party-id $PARTY_ID --participant-id $PARTICIPANT_ID --namespace-fingerprint $NAMESPACE_FP"
+fi
+
 echo ""
 echo "Starting ${WORKFLOW} workflow..."
 echo "Logs will be written to ${LOG_DIR}/"
@@ -76,7 +106,13 @@ echo ""
 
 for i in $(seq 1 $NUM_PARTICIPANTS); do
     echo "[${i}/${NUM_PARTICIPANTS}] Starting Participant ${i}..."
-    ONBOARDING -c "test-configs/node-${i}.toml" "$WORKFLOW" > "${LOG_DIR}/participant-${i}.log" 2>&1 &
+
+    if [ "$WORKFLOW" = "kick" ]; then
+        ONBOARDING -c "test-configs/node-${i}.toml" kick $KICK_ARGS > "${LOG_DIR}/participant-${i}.log" 2>&1 &
+    else
+        ONBOARDING -c "test-configs/node-${i}.toml" "$WORKFLOW" > "${LOG_DIR}/participant-${i}.log" 2>&1 &
+    fi
+
     PIDS+=($!)
     echo "       PID: ${PIDS[$i-1]}, Log: ${LOG_DIR}/participant-${i}.log"
     [ "$i" -eq 1 ] && sleep 2

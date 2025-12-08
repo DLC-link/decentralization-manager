@@ -227,6 +227,7 @@ After handshake, all messages follow a structured protocol.
 | `SIGN_DNS` | Instruct attestor to sign DNS proposal | `dns_proto.bin` |
 | `SIGN_P2P_PTK` | Instruct attestor to sign P2P proposals (Canton 3.4+: PTK deprecated) | `p2p_proto.bin` |
 | `SIGN_SUBMISSIONS` | Instruct attestor to sign ledger submissions | `prepared-submission-*.bin` (3 files) |
+| `SIGN_KICK` | Instruct attestor to sign kick proposals | `kick_dns_proto.bin`, `kick_p2p_proto.bin` |
 | `STATUS_UPDATE` | Inform attestors of progress | Status string |
 | `DISCONNECT` | Graceful shutdown | None |
 
@@ -248,6 +249,7 @@ After handshake, all messages follow a structured protocol.
 | `DNS_SIGNATURE` | Attestor → Coordinator | `signed-dns-proposal.bin` |
 | `P2P_PTK_SIGNATURES` | Attestor → Coordinator | `signed-p2p-ptk-proposals.bin` (Canton 3.4+: only P2P signatures) |
 | `SUBMISSION_SIGNATURES` | Attestor → Coordinator | `submission-signatures.bin` |
+| `KICK_SIGNATURES` | Attestor → Coordinator | `signed-kick-proposals.bin` (DNS and P2P kick proposals) |
 
 ---
 
@@ -280,7 +282,7 @@ Encrypted Packet = Encrypt(MessageType || PayloadLength || Payload)
 
 ```rust
 pub enum MessageType {
-    // Commands (0x0001 - 0x0007)
+    // Commands (0x0001 - 0x0009)
     UploadDars = 0x0001,
     GenerateKeys = 0x0002,
     SignDns = 0x0003,
@@ -288,6 +290,8 @@ pub enum MessageType {
     SignSubmissions = 0x0005,
     StatusUpdate = 0x0006,
     Disconnect = 0x0007,
+    GetNextCommand = 0x0008,
+    SignKick = 0x0009,
 
     // Responses (0x0101 - 0x0105)
     Ack = 0x0101,
@@ -296,11 +300,12 @@ pub enum MessageType {
     Ready = 0x0104,
     Wait = 0x0105,
 
-    // Data Transfers (0x0201 - 0x0204)
+    // Data Transfers (0x0201 - 0x0205)
     KeysUpload = 0x0201,
     DnsSignature = 0x0202,
     P2pPtkSignatures = 0x0203,
     SubmissionSignatures = 0x0204,
+    KickSignatures = 0x0205,
 }
 ```
 
@@ -1234,7 +1239,18 @@ The protocol ensures that sensitive cryptographic material (keys, signatures, pr
    ├─ Workflow: UploadDars → PrepareSubmissions → SignSubmissions → ExecuteSubmissions
    └─ Governance contracts deployed to ledger
 
-4. Shutdown
+4. Kick Workflow (Remove a participant from decentralized party)
+   ├─ Query participants: cargo run -- -c node.toml query-parties --party-id-prefix <prefix>
+   ├─ Remaining participants start: cargo run -- -c node.toml kick \
+   │     --decentralized-party-id <party_id> \
+   │     --participant-id <participant_id> \
+   │     --namespace-fingerprint <namespace_fp>
+   ├─ Coordinator and remaining attestors connect (kicked participant does NOT run workflow)
+   ├─ Mutual authentication via Noise handshake
+   ├─ Workflow: ExportState → CreateKickProposals → SignKick → SubmitKick
+   └─ Participant removed from decentralized party
+
+5. Shutdown
    ├─ Coordinator sends DISCONNECT command
    ├─ All connections gracefully closed
    └─ Session complete
