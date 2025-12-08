@@ -20,12 +20,12 @@ use canton_proto_rs::com::{
 use crate::{
     config::{FieldDefinition, NetworkConfig, NodeConfig},
     consts::{
-        LEDGER_SUBMISSIONS_DIR, MIN_PARTICIPANTS, NAMESPACE_DEF_FILENAME, PREPARED_DIR,
+        LEDGER_SUBMISSIONS_DIR, MIN_PARTICIPANTS_CONTRACTS, NAMESPACE_DEF_FILENAME, PREPARED_DIR,
         PREPARED_SUBMISSION_PREFIX, TOPOLOGY_RETRY_DELAY_SECS, TOPOLOGY_RETRY_MAX_ATTEMPTS,
     },
-    dirs::WorkflowDirs,
     error::Result,
     utils,
+    workflow::contracts::ContractsDirs,
 };
 
 /// Default page size for listing operations (parties, keys, etc.)
@@ -44,7 +44,7 @@ const DEFAULT_PAGE_SIZE: i32 = 1000;
 /// * `network_config` - Network configuration with application settings
 pub async fn prepare_submissions(
     config: &NodeConfig,
-    dirs: &WorkflowDirs,
+    dirs: &ContractsDirs,
     network_config: &NetworkConfig,
 ) -> Result {
     tracing::info!("Preparing submissions...");
@@ -56,15 +56,15 @@ pub async fn prepare_submissions(
     // Step 1: Construct decentralized registrar party ID from namespace definition
     let namespace_file = dirs.dns_submission_dir.join(NAMESPACE_DEF_FILENAME);
     tracing::debug!(
-        "Reading namespace definition from {}",
-        namespace_file.display()
+        "Reading namespace definition from {path}",
+        path = namespace_file.display()
     );
     let namespace_def: DecentralizedNamespaceDefinition =
         utils::read_first_message_from_file(&namespace_file).await?;
 
     let decentralized_registrar = format!(
-        "{party_id_prefix}::{}",
-        namespace_def.decentralized_namespace
+        "{party_id_prefix}::{namespace}",
+        namespace = namespace_def.decentralized_namespace
     );
     tracing::debug!("Constructed decentralized registrar: {decentralized_registrar}");
 
@@ -114,11 +114,14 @@ pub async fn prepare_submissions(
     for participant in &network_config.participants {
         let party = if let Some(party_id) = &participant.party {
             // Use party from config
-            tracing::debug!("Using party from config for {}: {party_id}", participant.id);
+            tracing::debug!(
+                "Using party from config for {id}: {party_id}",
+                id = participant.id
+            );
             party_id.clone()
         } else {
             // Fallback to allocating/finding party
-            tracing::debug!("Allocating/finding party for {}", participant.id);
+            tracing::debug!("Allocating/finding party for {id}", id = participant.id);
             allocate_or_find_party(
                 &mut party_client,
                 &participant.id,
@@ -126,22 +129,26 @@ pub async fn prepare_submissions(
             )
             .await?
         };
-        tracing::debug!("Party for {}: {party}", participant.id);
+        tracing::debug!("Party for {id}: {party}", id = participant.id);
         participant_parties.push(party);
     }
 
-    // Check minimum participants requirement
-    if participant_parties.len() < MIN_PARTICIPANTS {
+    // Validate participant count
+    if participant_parties.is_empty() {
+        anyhow::bail!("No participants found in P2P mapping");
+    }
+
+    if participant_parties.len() < MIN_PARTICIPANTS_CONTRACTS {
         anyhow::bail!(
-            "Expected at least {MIN_PARTICIPANTS} participants, found {}",
-            participant_parties.len()
+            "At least {MIN_PARTICIPANTS_CONTRACTS} participants required for contract operations, found {count}",
+            count = participant_parties.len()
         );
     }
 
     tracing::info!(
-        "Parties for {} participants: {}",
-        participant_parties.len(),
-        participant_parties.join(", ")
+        "Parties for {count} participants: {parties}",
+        count = participant_parties.len(),
+        parties = participant_parties.join(", ")
     );
 
     // Get operator party from config or allocate
@@ -253,10 +260,10 @@ pub async fn prepare_submissions(
 
     for (idx, contract_def) in app_config.contracts.iter().enumerate() {
         tracing::info!(
-            "Preparing submission {}: {} ({})",
-            idx + 1,
-            contract_def.name,
-            contract_def.id
+            "Preparing submission {idx}: {contract_name} ({contract_id})",
+            idx = idx + 1,
+            contract_name = contract_def.name,
+            contract_id = contract_def.id
         );
 
         let template_id = Identifier {
@@ -300,19 +307,21 @@ pub async fn prepare_submissions(
             .await?
             .into_inner();
 
-        let submission_file =
-            prepared_dir.join(format!("{PREPARED_SUBMISSION_PREFIX}-{}.bin", idx + 1));
+        let submission_file = prepared_dir.join(format!(
+            "{PREPARED_SUBMISSION_PREFIX}-{index}.bin",
+            index = idx + 1
+        ));
         tracing::debug!(
-            "Saving prepared submission {} to {}",
-            idx + 1,
-            submission_file.display()
+            "Saving prepared submission {index} to {path}",
+            index = idx + 1,
+            path = submission_file.display()
         );
         utils::write_messages_to_file(&[prepared_submission], &submission_file).await?;
     }
 
     tracing::info!(
-        "{} submissions prepared successfully",
-        app_config.contracts.len()
+        "{count} submissions prepared successfully",
+        count = app_config.contracts.len()
     );
     Ok(())
 }
@@ -440,7 +449,7 @@ where
     // Check if party already exists (exact match or contains the hint)
     for party_details in list_response.party_details {
         if party_details.party.contains(party_id_hint) {
-            tracing::debug!("Found existing party: {}", party_details.party);
+            tracing::debug!("Found existing party: {party}", party = party_details.party);
             return Ok(party_details.party);
         }
     }

@@ -211,8 +211,8 @@ pub fn compute_fingerprint(key: &SigningPublicKey) -> String {
     const PURPOSE_PUBLIC_KEY_FINGERPRINT: i32 = 12;
 
     tracing::debug!(
-        "Computing fingerprint from {} bytes of X.509 key material",
-        key.public_key.len()
+        "Computing fingerprint from {count} bytes of X.509 key material",
+        count = key.public_key.len()
     );
 
     let mut hasher = Sha256::new();
@@ -226,8 +226,8 @@ pub fn compute_fingerprint(key: &SigningPublicKey) -> String {
             // Get the BIT STRING containing the raw public key
             let raw_bytes = spki.subject_public_key.data;
             tracing::debug!(
-                "Extracted {} raw key bytes from X.509 structure",
-                raw_bytes.len()
+                "Extracted {count} raw key bytes from X.509 structure",
+                count = raw_bytes.len()
             );
             hasher.update(raw_bytes.as_ref());
         }
@@ -239,7 +239,10 @@ pub fn compute_fingerprint(key: &SigningPublicKey) -> String {
 
     let hash_result = hasher.finalize();
 
-    let fingerprint = format!("{MULTIHASH_SHA256_PREFIX}{}", hex::encode(hash_result));
+    let fingerprint = format!(
+        "{MULTIHASH_SHA256_PREFIX}{hash}",
+        hash = hex::encode(hash_result)
+    );
     tracing::debug!("Computed fingerprint: {fingerprint}");
 
     fingerprint
@@ -262,8 +265,8 @@ pub async fn get_synchronizer_id(config: &NodeConfig) -> Result<String> {
 
     if response.physical_synchronizer_id.is_empty() {
         anyhow::bail!(
-            "No synchronizer ID returned for synchronizer alias '{}'",
-            config.synchronizer()
+            "No synchronizer ID returned for synchronizer alias '{id}'",
+            id = config.synchronizer()
         );
     }
 
@@ -283,14 +286,17 @@ pub fn extract_synchronizer_fingerprint(synchronizer_id: &str) -> Result<String>
 
     if parts.len() == 3 {
         // Format: alias::fingerprint::version -> return alias::fingerprint
-        Ok(format!("{}::{}", parts[0], parts[1]))
+        Ok(format!(
+            "{alias}::{fingerprint}",
+            alias = parts[0],
+            fingerprint = parts[1]
+        ))
     } else if parts.len() == 2 {
         // Already in alias::fingerprint format
         Ok(synchronizer_id.to_string())
     } else {
         anyhow::bail!(
-            "Invalid synchronizer ID format '{}': expected format '<alias>::<fingerprint>::<version>' or '<alias>::<fingerprint>'",
-            synchronizer_id
+            "Invalid synchronizer ID format '{synchronizer_id}': expected format '<alias>::<fingerprint>::<version>' or '<alias>::<fingerprint>'"
         )
     }
 }
@@ -324,7 +330,10 @@ pub async fn find_participant_number(
     let id_files = find_files_by_pattern(ids_dir, "participant-id", ".bin").await?;
 
     if id_files.is_empty() {
-        anyhow::bail!("No participant ID files found in {}", ids_dir.display());
+        anyhow::bail!(
+            "No participant ID files found in {path}",
+            path = ids_dir.display()
+        );
     }
 
     // Read each file and match against current participant ID
@@ -394,6 +403,7 @@ define_client_creator!(create_state_client, StateServiceClient);
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use prost_types::Timestamp;
 
     #[tokio::test]

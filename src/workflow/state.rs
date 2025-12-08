@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    marker::PhantomData,
     sync::Arc,
 };
 
@@ -17,110 +18,6 @@ pub trait WorkflowStep:
     fn is_waiting_for_attestors(&self) -> bool;
 }
 
-/// Onboarding workflow steps (decentralized party creation)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum OnboardingStep {
-    /// Waiting for all attestors to connect
-    WaitingForAttestors,
-    /// Generate keys
-    GenerateKeys,
-    /// Coordinator creates proposals
-    CreateProposals,
-    /// Sign DNS proposals
-    SignDns,
-    /// Coordinator submits DNS proposals
-    SubmitDns,
-    /// Sign P2P proposals
-    SignP2p,
-    /// Coordinator submits final proposals
-    SubmitFinal,
-    /// Workflow complete
-    Complete,
-}
-
-impl WorkflowStep for OnboardingStep {
-    fn to_command(&self) -> Option<MessageType> {
-        match self {
-            Self::GenerateKeys => Some(MessageType::GenerateKeys),
-            Self::SignDns => Some(MessageType::SignDns),
-            Self::SignP2p => Some(MessageType::SignP2p),
-            Self::Complete => Some(MessageType::Disconnect),
-            Self::WaitingForAttestors
-            | Self::CreateProposals
-            | Self::SubmitDns
-            | Self::SubmitFinal => None,
-        }
-    }
-
-    fn next(&self) -> Option<Self> {
-        match self {
-            Self::WaitingForAttestors => Some(Self::GenerateKeys),
-            Self::GenerateKeys => Some(Self::CreateProposals),
-            Self::CreateProposals => Some(Self::SignDns),
-            Self::SignDns => Some(Self::SubmitDns),
-            Self::SubmitDns => Some(Self::SignP2p),
-            Self::SignP2p => Some(Self::SubmitFinal),
-            Self::SubmitFinal => Some(Self::Complete),
-            Self::Complete => None,
-        }
-    }
-
-    fn requires_attestors(&self) -> bool {
-        matches!(self, Self::GenerateKeys | Self::SignDns | Self::SignP2p)
-    }
-
-    fn is_waiting_for_attestors(&self) -> bool {
-        matches!(self, Self::WaitingForAttestors)
-    }
-}
-
-/// Contracts workflow steps (DAR upload and contract creation)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ContractsStep {
-    /// Waiting for all attestors to connect
-    WaitingForAttestors,
-    /// Upload DARs
-    UploadDars,
-    /// Coordinator prepares submissions
-    PrepareSubmissions,
-    /// Sign submissions
-    SignSubmissions,
-    /// Coordinator executes submissions
-    ExecuteSubmissions,
-    /// Workflow complete
-    Complete,
-}
-
-impl WorkflowStep for ContractsStep {
-    fn to_command(&self) -> Option<MessageType> {
-        match self {
-            Self::UploadDars => Some(MessageType::UploadDars),
-            Self::SignSubmissions => Some(MessageType::SignSubmissions),
-            Self::Complete => Some(MessageType::Disconnect),
-            Self::WaitingForAttestors | Self::PrepareSubmissions | Self::ExecuteSubmissions => None,
-        }
-    }
-
-    fn next(&self) -> Option<Self> {
-        match self {
-            Self::WaitingForAttestors => Some(Self::UploadDars),
-            Self::UploadDars => Some(Self::PrepareSubmissions),
-            Self::PrepareSubmissions => Some(Self::SignSubmissions),
-            Self::SignSubmissions => Some(Self::ExecuteSubmissions),
-            Self::ExecuteSubmissions => Some(Self::Complete),
-            Self::Complete => None,
-        }
-    }
-
-    fn requires_attestors(&self) -> bool {
-        matches!(self, Self::UploadDars | Self::SignSubmissions)
-    }
-
-    fn is_waiting_for_attestors(&self) -> bool {
-        matches!(self, Self::WaitingForAttestors)
-    }
-}
-
 /// Generic workflow state tracker
 pub struct WorkflowState<S> {
     /// Current workflow step
@@ -133,6 +30,7 @@ pub struct WorkflowState<S> {
     completed_attestors: RwLock<HashSet<String>>,
     /// Data received from attestors (e.g., keys, signatures)
     attestor_data: RwLock<HashMap<String, Vec<u8>>>,
+    _p: PhantomData<()>,
 }
 
 impl<S: WorkflowStep + 'static> WorkflowState<S> {
@@ -143,6 +41,7 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
             connected_attestors: RwLock::new(HashSet::new()),
             completed_attestors: RwLock::new(HashSet::new()),
             attestor_data: RwLock::new(HashMap::new()),
+            _p: PhantomData,
         })
     }
 

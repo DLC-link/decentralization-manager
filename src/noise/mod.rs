@@ -2,7 +2,7 @@ pub mod client;
 pub mod election;
 pub mod server;
 
-use std::{path::Path, time::Duration};
+use std::{marker::PhantomData, path::Path, time::Duration};
 
 use bytes::Bytes;
 use http::Uri;
@@ -10,6 +10,7 @@ use hyper::{Body, Request, StatusCode};
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpStream;
+use tokio_noise::handshakes::nn_psk2::Initiator;
 
 use crate::error::Result;
 
@@ -17,7 +18,7 @@ use crate::error::Result;
 pub const NOISE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Message types for the Noise protocol communication
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[repr(u16)]
 pub enum MessageType {
     // Commands (0x0000 - 0x00FF)
@@ -29,6 +30,7 @@ pub enum MessageType {
     StatusUpdate = 0x0006,
     Disconnect = 0x0007,
     GetNextCommand = 0x0008,
+    SignKick = 0x0009,
 
     // Responses (0x0100 - 0x01FF)
     Ack = 0x0101,
@@ -42,6 +44,7 @@ pub enum MessageType {
     DnsSignature = 0x0202,
     P2pSignatures = 0x0203,
     SubmissionSignatures = 0x0204,
+    KickSignatures = 0x0205,
 }
 
 impl TryFrom<u16> for MessageType {
@@ -57,6 +60,7 @@ impl TryFrom<u16> for MessageType {
             0x0006 => Ok(Self::StatusUpdate),
             0x0007 => Ok(Self::Disconnect),
             0x0008 => Ok(Self::GetNextCommand),
+            0x0009 => Ok(Self::SignKick),
             0x0101 => Ok(Self::Ack),
             0x0102 => Ok(Self::Data),
             0x0103 => Ok(Self::Error),
@@ -66,6 +70,7 @@ impl TryFrom<u16> for MessageType {
             0x0202 => Ok(Self::DnsSignature),
             0x0203 => Ok(Self::P2pSignatures),
             0x0204 => Ok(Self::SubmissionSignatures),
+            0x0205 => Ok(Self::KickSignatures),
             _ => Err(anyhow::anyhow!("Unknown message type: 0x{value:04x}")),
         }
     }
@@ -78,15 +83,20 @@ impl MessageType {
 }
 
 /// Message structure for Noise protocol communication
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct Message {
     pub msg_type: MessageType,
     pub payload: Vec<u8>,
+    _p: PhantomData<()>,
 }
 
 impl Message {
     pub fn new(msg_type: MessageType, payload: Vec<u8>) -> Self {
-        Self { msg_type, payload }
+        Self {
+            msg_type,
+            payload,
+            _p: PhantomData,
+        }
     }
 
     /// Create a message with no payload
@@ -94,6 +104,7 @@ impl Message {
         Self {
             msg_type,
             payload: Vec::new(),
+            _p: PhantomData,
         }
     }
 
@@ -118,8 +129,8 @@ impl Message {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         if bytes.len() < 6 {
             anyhow::bail!(
-                "Message too short: expected at least 6 bytes, got {}",
-                bytes.len()
+                "Message too short: expected at least 6 bytes, got {count}",
+                count = bytes.len()
             );
         }
 
@@ -133,15 +144,19 @@ impl Message {
         // Check if we have enough bytes for the payload
         if bytes.len() < 6 + payload_len {
             anyhow::bail!(
-                "Message payload truncated: expected {payload_len} bytes, got {}",
-                bytes.len() - 6
+                "Message payload truncated: expected {payload_len} bytes, got {count}",
+                count = bytes.len() - 6
             );
         }
 
         // Extract payload
         let payload = bytes[6..6 + payload_len].to_vec();
 
-        Ok(Self { msg_type, payload })
+        Ok(Self {
+            msg_type,
+            payload,
+            _p: PhantomData,
+        })
     }
 }
 
@@ -217,6 +232,13 @@ pub fn parse_flexible_uri(uri_str: &str) -> Result<Uri, http::uri::InvalidUri> {
     url.parse::<Uri>()
 }
 
+/// Parse a hex-encoded public key string into a PublicKey
+pub fn parse_public_key(hex_str: &str) -> Result<PublicKey, NoiseError> {
+    let pub_key_bytes = hex::decode(hex_str).map_err(|_| NoiseError::InvalidMessage)?;
+    let pub_key = PublicKey::from_slice(&pub_key_bytes).map_err(|_| NoiseError::InvalidMessage)?;
+    Ok(pub_key)
+}
+
 /// Send a message to a peer using Noise protocol
 pub async fn send_noise_message(
     peer_address: &str,
@@ -249,7 +271,7 @@ pub async fn send_noise_message(
         };
 
     // Create Noise initiator
-    let initiator = tokio_noise::handshakes::nn_psk2::Initiator { psk, identity };
+    let initiator = Initiator { psk, identity };
 
     // Send request over Noise-encrypted channel
     let mut response = hyper_noise::client::send_request(
@@ -271,7 +293,7 @@ pub async fn send_noise_message(
 }
 
 /// Static keypair for Noise protocol authentication
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct NoiseKeypair {
     pub secret_key: SecretKey,
     pub public_key: PublicKey,
@@ -327,8 +349,11 @@ pub async fn generate_keypair<P: AsRef<Path>>(output_path: P) -> Result<NoiseKey
     keypair.save_to_file(&output_path).await?;
 
     tracing::info!("Generated Noise static keypair");
-    tracing::info!("Private key saved to: {}", output_path.as_ref().display());
-    tracing::info!("Public key (hex): {}", keypair.public_key_hex());
+    tracing::info!(
+        "Private key saved to: {path}",
+        path = output_path.as_ref().display()
+    );
+    tracing::info!("Public key (hex): {key}", key = keypair.public_key_hex());
     tracing::warn!("⚠️  Keep your private key secure! Never share it with anyone.");
     tracing::info!("💡 Share your public key with other participants to add to network.toml");
 

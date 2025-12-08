@@ -17,9 +17,9 @@ use crate::{
         CANTON_PROTOCOL_VERSION, EXECUTION_DIR, LEDGER_SUBMISSIONS_DIR, PREPARED_DIR,
         PREPARED_SUBMISSION_PREFIX, SIGNATURES_DIR, SUBMISSION_SIGNATURES_PREFIX,
     },
-    dirs::WorkflowDirs,
     error::Result,
     utils,
+    workflow::contracts::ContractsDirs,
 };
 
 /// DER OCTET STRING tag
@@ -38,7 +38,7 @@ const ED25519_PRIVATE_KEY_LENGTH: u8 = 0x20;
 /// # Arguments
 /// * `config` - Configuration with Admin API connection details
 /// * `dirs` - WorkflowDirs containing all directory paths
-pub async fn sign_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
+pub async fn sign_submissions(config: &NodeConfig, dirs: &ContractsDirs) -> Result {
     tracing::info!("Signing submissions...");
 
     // Step 1: Get participant number
@@ -54,8 +54,8 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
 
     if !keys_file.exists() {
         anyhow::bail!(
-            "Keys file not found: {}. Run step 1 (generate keys) first.",
-            keys_file.display()
+            "Keys file not found: {path}. Run step 1 (generate keys) first.",
+            path = keys_file.display()
         );
     }
 
@@ -64,9 +64,9 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
 
     if exported_keys.len() != 2 {
         anyhow::bail!(
-            "Expected 2 keys in {}, but found {}",
-            keys_file.display(),
-            exported_keys.len()
+            "Expected 2 keys in {path}, but found {count}",
+            path = keys_file.display(),
+            count = exported_keys.len()
         );
     }
 
@@ -102,8 +102,8 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
     }
 
     tracing::debug!(
-        "Verified key exists in Canton vault (found {} matching keys)",
-        keys_response.private_keys_metadata.len()
+        "Verified key exists in Canton vault (found {count} matching keys)",
+        count = keys_response.private_keys_metadata.len()
     );
 
     // Step 3: Dynamically load all prepared submissions
@@ -117,8 +117,8 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
 
     if submission_files.is_empty() {
         anyhow::bail!(
-            "No prepared submission files found in {}",
-            prepared_dir.display()
+            "No prepared submission files found in {path}",
+            path = prepared_dir.display()
         );
     }
 
@@ -130,7 +130,10 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
         prepared_submissions.push(prepared_sub);
     }
 
-    tracing::debug!("Loaded {} prepared submissions", prepared_submissions.len());
+    tracing::debug!(
+        "Loaded {count} prepared submissions",
+        count = prepared_submissions.len()
+    );
 
     // Step 4: Export the private key
     tracing::info!("Exporting private key from Canton...");
@@ -153,7 +156,10 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
     // Step 5: Extract Ed25519 private key from Canton's export response
     // Canton returns the key in a custom format with embedded metadata
     tracing::debug!("Parsing exported key pair...");
-    tracing::debug!("Key pair bytes length: {}", export_response.key_pair.len());
+    tracing::debug!(
+        "Key pair bytes length: {len}",
+        len = export_response.key_pair.len()
+    );
 
     let exported_key_data = &export_response.key_pair;
 
@@ -184,9 +190,9 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
             key_bytes.copy_from_slice(&exported_key_data[offset + 2..offset + 2 + key_size]);
             candidate_keys.push((offset + 2, key_bytes, "DER-tagged"));
             tracing::debug!(
-                "Found DER-tagged 32-byte sequence at offset {}: {:02x?}...",
-                offset + 2,
-                &key_bytes[..8]
+                "Found DER-tagged 32-byte sequence at offset {offset}: {bytes:02x?}...",
+                offset = offset + 2,
+                bytes = &key_bytes[..8]
             );
         }
     }
@@ -201,7 +207,10 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
             candidate_keys.push((offset, key_bytes, "raw"));
         }
 
-        tracing::debug!("Found {} raw 32-byte candidates", candidate_keys.len());
+        tracing::debug!(
+            "Found {count} raw 32-byte candidates",
+            count = candidate_keys.len()
+        );
     }
 
     if candidate_keys.is_empty() {
@@ -209,8 +218,8 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
     }
 
     tracing::info!(
-        "Found {} candidate Ed25519 key positions to try",
-        candidate_keys.len()
+        "Found {count} candidate Ed25519 key positions to try",
+        count = candidate_keys.len()
     );
 
     // Step 6: Try each candidate key and verify it produces the correct public key
@@ -232,9 +241,9 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
 
     if expected_public_key_der.len() < DER_HEADER_LENGTH + ED25519_PUBLIC_KEY_LENGTH {
         anyhow::bail!(
-            "Expected public key is too short: {} bytes (need at least {})",
-            expected_public_key_der.len(),
-            DER_HEADER_LENGTH + ED25519_PUBLIC_KEY_LENGTH
+            "Expected public key is too short: {result_count} bytes (need at least {expected_count})",
+            result_count = expected_public_key_der.len(),
+            expected_count = DER_HEADER_LENGTH + ED25519_PUBLIC_KEY_LENGTH
         );
     }
 
@@ -267,9 +276,9 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
 
     let key_bytes = verified_key_bytes.ok_or_else(|| {
         anyhow::anyhow!(
-            "None of the {} candidate keys produced the expected public key. \
+            "None of the {count} candidate keys produced the expected public key. \
             This indicates the private key is not in the expected format in the exported data.",
-            candidate_keys.len()
+            count = candidate_keys.len()
         )
     })?;
 
@@ -277,8 +286,8 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
 
     // Step 7: Sign transaction hashes with verified key
     tracing::info!(
-        "Signing {} transaction hashes...",
-        prepared_submissions.len()
+        "Signing {count} transaction hashes...",
+        count = prepared_submissions.len()
     );
 
     let signing_key = SigningKey::from_bytes(&key_bytes);
@@ -303,9 +312,9 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
 
     for (idx, prepared_sub) in prepared_submissions.iter().enumerate() {
         tracing::debug!(
-            "Transaction hash {}: {:02x?}",
-            idx + 1,
-            &prepared_sub.prepared_transaction_hash
+            "Transaction hash {idx}: {hash:02x?}",
+            idx = idx + 1,
+            hash = &prepared_sub.prepared_transaction_hash
         );
 
         let signature_bytes = signing_key
@@ -313,9 +322,9 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
             .to_bytes();
 
         tracing::debug!(
-            "Signature {} (first 32 bytes): {:02x?}",
-            idx + 1,
-            &signature_bytes[..32]
+            "Signature {idx} (first 32 bytes): {bytes:02x?}",
+            idx = idx + 1,
+            bytes = &signature_bytes[..32]
         );
 
         // Verify locally
@@ -324,9 +333,12 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
             .verify(&prepared_sub.prepared_transaction_hash, &sig)
             .is_ok()
         {
-            tracing::info!("✓ Signature {} verified locally", idx + 1);
+            tracing::info!("✅ Signature {index} verified locally", index = idx + 1);
         } else {
-            tracing::error!("✗ Signature {} failed local verification!", idx + 1);
+            tracing::error!(
+                "❌ Signature {index} failed local verification!",
+                index = idx + 1
+            );
         }
 
         // Create Signature protobuf message
@@ -340,7 +352,7 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
         });
     }
 
-    tracing::debug!("Generated {} signatures", signatures.len());
+    tracing::debug!("Generated {count} signatures", count = signatures.len());
 
     // Step 8: Save signatures to file
     let execution_dir = dirs.workflow_dir.join(EXECUTION_DIR);
@@ -350,7 +362,10 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &WorkflowDirs) -> Resul
     let signatures_file = signatures_dir.join(format!(
         "{SUBMISSION_SIGNATURES_PREFIX}-{participant_num}.bin"
     ));
-    tracing::info!("Saving signatures to {}", signatures_file.display());
+    tracing::info!(
+        "Saving signatures to {path}",
+        path = signatures_file.display()
+    );
 
     utils::write_messages_to_file(&signatures, &signatures_file).await?;
 

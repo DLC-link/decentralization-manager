@@ -17,9 +17,9 @@ use crate::{
         SIGNED_P2P_PROPOSALS_PREFIX, TOPOLOGY_PROPAGATION_DELAY_SECS, TOPOLOGY_RETRY_DELAY_SECS,
         TOPOLOGY_RETRY_MAX_ATTEMPTS,
     },
-    dirs::WorkflowDirs,
     error::Result,
     utils,
+    workflow::onboarding::OnboardingDirs,
 };
 
 /// Aggregate and submit DNS proposals
@@ -28,24 +28,33 @@ use crate::{
 ///
 /// This step must be run once by the coordinator after all attestors have signed the DNS proposal.
 /// It aggregates all signatures and submits the fully-signed proposal to Canton.
-pub async fn submit_dns_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> Result {
+pub async fn submit_dns_proposals(config: &NodeConfig, dirs: &OnboardingDirs) -> Result {
     tracing::info!("Submitting DNS proposals...");
 
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
     tracing::debug!("Using synchronizer ID: {synchronizer_id}");
 
     let dns_file = dirs.dns_proposals_dir.join(DNS_PROTO_FILENAME);
-    tracing::info!("Reading original DNS proposal from {}", dns_file.display());
+    tracing::info!(
+        "Reading original DNS proposal from {path}",
+        path = dns_file.display()
+    );
     let mut dns_transaction: SignedTopologyTransaction =
         utils::read_first_message_from_file(&dns_file).await?;
 
     let signed_files =
         utils::find_files_by_pattern(&dirs.dns_signed_dir, SIGNED_DNS_PROPOSAL_PREFIX, ".bin")
             .await?;
-    tracing::info!("Found {} signed DNS proposal files", signed_files.len());
+    tracing::info!(
+        "Found {count} signed DNS proposal files",
+        count = signed_files.len()
+    );
 
     for signed_file in &signed_files {
-        tracing::info!("Reading signatures from {}", signed_file.display());
+        tracing::info!(
+            "Reading signatures from {path}",
+            path = signed_file.display()
+        );
         let signed_transactions: Vec<SignedTopologyTransaction> =
             utils::read_all_messages_from_file(signed_file).await?;
 
@@ -57,8 +66,8 @@ pub async fn submit_dns_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> R
     }
 
     tracing::info!(
-        "Aggregated DNS proposal has {} signature(s)",
-        dns_transaction.signatures.len()
+        "Aggregated DNS proposal has {count} signature(s)",
+        count = dns_transaction.signatures.len()
     );
 
     tracing::info!("Submitting aggregated DNS proposal...");
@@ -81,15 +90,15 @@ pub async fn submit_dns_proposals(config: &NodeConfig, dirs: &WorkflowDirs) -> R
 
     let namespace_def_file = dirs.dns_submission_dir.join(NAMESPACE_DEF_FILENAME);
     tracing::info!(
-        "Reading namespace definition from {}",
-        namespace_def_file.display()
+        "Reading namespace definition from {path}",
+        path = namespace_def_file.display()
     );
     let namespace_def: DecentralizedNamespaceDefinition =
         utils::read_first_message_from_file(&namespace_def_file).await?;
 
     tracing::info!(
-        "Waiting for DNS to appear in topology for namespace {}...",
-        namespace_def.decentralized_namespace
+        "Waiting for DNS to appear in topology for namespace {namespace}...",
+        namespace = namespace_def.decentralized_namespace
     );
     wait_for_dns_in_topology(
         config,
@@ -143,19 +152,13 @@ async fn wait_for_dns_in_topology(
 
         if attempt < max_attempts {
             tracing::debug!(
-                "DNS not yet in topology, attempt {}/{}, retrying in {:?}...",
-                attempt,
-                max_attempts,
-                retry_delay
+                "DNS not yet in topology, attempt {attempt}/{max_attempts}, retrying in {retry_delay:?}..."
             );
             time::sleep(retry_delay).await;
         }
     }
 
-    anyhow::bail!(
-        "DNS did not appear in topology after {} attempts",
-        max_attempts
-    )
+    anyhow::bail!("DNS did not appear in topology after {max_attempts} attempts")
 }
 
 /// Aggregate and submit P2P proposals
@@ -169,7 +172,7 @@ async fn wait_for_dns_in_topology(
 /// It aggregates all signatures and submits the fully-signed proposal to Canton.
 pub async fn submit_final_proposals(
     config: &NodeConfig,
-    dirs: &WorkflowDirs,
+    dirs: &OnboardingDirs,
     network_config: &NetworkConfig,
 ) -> Result {
     tracing::info!("Submitting P2P proposal with embedded signing keys (Canton 3.4+)...");
@@ -180,25 +183,34 @@ pub async fn submit_final_proposals(
     tracing::debug!("Using synchronizer ID: {synchronizer_id}");
 
     let p2p_file = dirs.p2p_proposals_dir.join(P2P_PROTO_FILENAME);
-    tracing::info!("Reading original P2P proposal from {}", p2p_file.display());
+    tracing::info!(
+        "Reading original P2P proposal from {path}",
+        path = p2p_file.display()
+    );
     let mut p2p_transaction: SignedTopologyTransaction =
         utils::read_first_message_from_file(&p2p_file).await?;
 
     let signed_files =
         utils::find_files_by_pattern(&dirs.final_signed_dir, SIGNED_P2P_PROPOSALS_PREFIX, ".bin")
             .await?;
-    tracing::info!("Found {} signed P2P proposal files", signed_files.len());
+    tracing::info!(
+        "Found {count} signed P2P proposal files",
+        count = signed_files.len()
+    );
 
     for signed_file in &signed_files {
-        tracing::info!("Reading signatures from {}", signed_file.display());
+        tracing::info!(
+            "Reading signatures from {path}",
+            path = signed_file.display()
+        );
         let signed_transactions: Vec<SignedTopologyTransaction> =
             utils::read_all_messages_from_file(signed_file).await?;
 
         if signed_transactions.len() != 1 {
             anyhow::bail!(
-                "Expected 1 transaction in {}, got {}",
-                signed_file.display(),
-                signed_transactions.len()
+                "Expected 1 transaction in {path}, got {count}",
+                path = signed_file.display(),
+                count = signed_transactions.len()
             );
         }
 
@@ -208,21 +220,21 @@ pub async fn submit_final_proposals(
     }
 
     tracing::info!(
-        "Aggregated P2P proposal has {} signature(s)",
-        p2p_transaction.signatures.len()
+        "Aggregated P2P proposal has {count} signature(s)",
+        count = p2p_transaction.signatures.len()
     );
 
     let namespace_file = dirs.dns_submission_dir.join(NAMESPACE_DEF_FILENAME);
     tracing::info!(
-        "Reading namespace definition from {}",
-        namespace_file.display()
+        "Reading namespace definition from {path}",
+        path = namespace_file.display()
     );
     let namespace_def: DecentralizedNamespaceDefinition =
         utils::read_first_message_from_file(&namespace_file).await?;
 
     let party_id = format!(
-        "{party_id_prefix}::{}",
-        namespace_def.decentralized_namespace
+        "{party_id_prefix}::{namespace}",
+        namespace = namespace_def.decentralized_namespace
     );
     tracing::info!("Constructed party ID: {party_id}");
 
@@ -314,9 +326,9 @@ async fn wait_for_p2p_in_topology(
             if let Some(context) = &result.context {
                 if let Some(valid_from) = &context.valid_from {
                     tracing::debug!(
-                        "P2P mapping effective time: {}.{:09}s",
-                        valid_from.seconds,
-                        valid_from.nanos
+                        "P2P mapping effective time: {seconds}.{nanos:09}s",
+                        seconds = valid_from.seconds,
+                        nanos = valid_from.nanos
                     );
                     return Ok(*valid_from);
                 } else {
