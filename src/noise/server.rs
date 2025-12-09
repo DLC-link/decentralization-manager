@@ -1,4 +1,8 @@
-use std::{collections::{HashMap, HashSet}, marker::PhantomData, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    marker::PhantomData,
+    sync::Arc,
+};
 
 use hyper::{Body, Request, Response, StatusCode};
 use secp256k1::PublicKey;

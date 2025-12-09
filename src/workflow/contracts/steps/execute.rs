@@ -28,8 +28,6 @@ use crate::{
 
 /// Execute signed ledger submissions
 ///
-/// Corresponds to: 05_ExecuteSubmissions.sc
-///
 /// This step must be run by the coordinator with appropriate Ledger API credentials.
 /// It aggregates all signatures and executes the prepared submissions on the ledger.
 ///

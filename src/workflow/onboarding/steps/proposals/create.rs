@@ -28,8 +28,6 @@ use crate::{
 
 /// Create topology proposals for decentralized namespace
 ///
-/// Corresponds to: 01a_CreateProposals.sc
-///
 /// **Important**: This step must be run by a coordinator participant that:
 /// 1. Is connected to the Canton synchronizer
 /// 2. Has collected keys and IDs from all attestors (via Step 1)

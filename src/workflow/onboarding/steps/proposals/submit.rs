@@ -24,8 +24,6 @@ use crate::{
 
 /// Aggregate and submit DNS proposals
 ///
-/// Corresponds to: 02a_SubmitProposals.sc
-///
 /// This step must be run once by the coordinator after all attestors have signed the DNS proposal.
 /// It aggregates all signatures and submits the fully-signed proposal to Canton.
 pub async fn submit_dns_proposals(config: &NodeConfig, dirs: &OnboardingDirs) -> Result {
@@ -162,8 +160,6 @@ async fn wait_for_dns_in_topology(
 }
 
 /// Aggregate and submit P2P proposals
-///
-/// Corresponds to: 03a_SubmitFinalProposals.sc
 ///
 /// **Canton 3.4+**: Submits P2P proposals with embedded signing keys
 /// (replaces the separate PartyToKeyMapping transactions from Canton 3.3).

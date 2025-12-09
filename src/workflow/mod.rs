@@ -111,7 +111,7 @@ pub async fn save_attestor_data<S: state::WorkflowStep + 'static>(
     workflow_state: &WorkflowState<S>,
     dir: &std::path::Path,
     prefix: &str,
-) -> Result<()> {
+) -> Result {
     let attestor_data = workflow_state.get_all_attestor_data().await;
     for (attestor_id, data) in attestor_data {
         let file_path = dir.join(format!("{prefix}-{attestor_id}.bin"));

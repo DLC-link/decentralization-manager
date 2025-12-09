@@ -15,8 +15,6 @@ use crate::{
 
 /// Sign kick proposals
 ///
-/// Corresponds to: 02_MemberSign.sc
-///
 /// Each remaining member (not the kicked member) signs both proposals
 pub async fn sign_proposals(config: &NodeConfig, dirs: &KickDirs) -> Result {
     tracing::info!("Signing kick proposals...");
