@@ -54,4 +54,15 @@ pub enum Commands {
         #[arg(long, value_name = "PREFIX")]
         party_id_prefix: String,
     },
+
+    /// Start the HTTP server for querying decentralized parties
+    Serve {
+        /// Host address to bind to
+        #[arg(long, default_value = "0.0.0.0")]
+        host: String,
+
+        /// Port to listen on
+        #[arg(long, default_value = "8080")]
+        port: u16,
+    },
 }

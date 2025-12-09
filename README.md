@@ -1,6 +1,6 @@
-# Canton Decentralized Party Onboarding Automation
+# Canton Decentralized Party Management
 
-A Rust-based automation tool for multi-party decentralized namespace setup in Canton blockchain networks. This project streamlines the complex process of onboarding multiple parties to a Canton-based Bitcoin (CBTC) governance system by automating topology management, cryptographic key generation, and ledger operations.
+A Rust-based tool for managing decentralized parties in Canton blockchain networks. This project handles the complete lifecycle of multi-party decentralized namespaces for Canton-based Bitcoin (CBTC) governance systems, including onboarding new parties, managing governance contracts, and removing participants.
 
 ## Key Features
 
@@ -17,7 +17,7 @@ A Rust-based automation tool for multi-party decentralized namespace setup in Ca
 
 ## Architecture
 
-This tool implements a port of Canton Scala scripts to Rust, providing a more performant and memory-safe alternative for automated party onboarding. It follows a step-based workflow that ensures proper ordering of operations and handles the complex interdependencies between topology changes and ledger state modifications.
+The tool follows a step-based workflow that ensures proper ordering of operations and handles the complex interdependencies between topology changes and ledger state modifications.
 
 ### Communication Model
 
@@ -41,7 +41,7 @@ See the [Noise Protocol Communication Architecture](docs/NOISE_PROTOCOL_COMMUNIC
 
 ## Project Overview
 
-This project ports Canton Scala scripts to Rust, implementing a multi-party decentralized namespace setup for CBTC (Canton-based Bitcoin) governance. The tool provides multiple workflows and commands:
+This tool provides multiple workflows and commands for managing decentralized parties in CBTC (Canton-based Bitcoin) governance:
 
 ### Onboarding Workflow
 Creates the decentralized party namespace:

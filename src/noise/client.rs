@@ -17,8 +17,6 @@ use crate::{
 /// Client for connecting to the coordinator
 pub struct NoiseClient {
     node_config: Arc<NodeConfig>,
-    #[allow(dead_code)]
-    network_config: Arc<NetworkConfig>,
     keypair: Arc<NoiseKeypair>,
     coordinator: Participant,
     coordinator_pub_key: PublicKey,
@@ -45,7 +43,6 @@ impl NoiseClient {
 
         Ok(Self {
             node_config: Arc::new(node_config),
-            network_config: Arc::new(network_config),
             keypair: Arc::new(keypair),
             coordinator,
             coordinator_pub_key,

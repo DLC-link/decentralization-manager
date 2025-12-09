@@ -85,8 +85,6 @@ async fn sign_proposal(
 
 /// Sign DNS proposal with attestor's key
 ///
-/// Corresponds to: 02_SignProposals.sc
-///
 /// This step must be run by each attestor participant (except the coordinator who created the proposal).
 /// Each attestor signs the DNS proposal with their namespace key.
 pub async fn sign_dns_proposals(config: &NodeConfig, dirs: &OnboardingDirs) -> Result {
@@ -102,8 +100,6 @@ pub async fn sign_dns_proposals(config: &NodeConfig, dirs: &OnboardingDirs) -> R
 }
 
 /// Sign P2P proposals with attestor's key
-///
-/// Corresponds to: 03_SignP2PProposals.sc
 ///
 /// **Canton 3.4+**: Signing keys are now embedded in the P2P mapping.
 /// This function signs the P2P proposal which contains both participant and key information.

@@ -28,19 +28,14 @@ use crate::{
 
 /// Generate cryptographic keys and export participant ID
 ///
-/// Corresponds to: 01_GenerateKeys.sc
-///
 /// Generates:
 /// 1. Namespace signing key (for namespace delegation)
 /// 2. DAML transaction key (for signing transactions)
 /// 3. Exports both keys to attestor-public-keys.bin
 /// 4. Exports participant ID to participant-id.bin
 ///
-/// # Note
-///
-/// This function generates signing keys and exports them along with the participant ID.
-/// The namespace delegation step from the original Scala script is currently skipped
-/// and should be implemented separately using TopologyManagerWriteService.
+/// This function generates signing keys and exports them along with the participant ID,
+/// and proposes a namespace delegation for the generated namespace key.
 pub async fn generate_keys(
     config: &NodeConfig,
     dirs: &OnboardingDirs,

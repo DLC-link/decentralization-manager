@@ -14,8 +14,6 @@ use crate::{
 
 /// Export current decentralized namespace state
 ///
-/// Corresponds to: 00_ExportCurrentState.sc
-///
 /// This step exports:
 /// - Current namespace definition
 /// - Kick target (namespace fingerprint to remove)
