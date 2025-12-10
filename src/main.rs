@@ -20,12 +20,6 @@ async fn main() -> Result {
 
     let args = Cli::parse();
 
-    if let Commands::Keygen { ref output } = args.command {
-        dec_party_onboarding::noise::generate_keypair(output).await?;
-        tracing::info!("Command completed successfully");
-        return Ok(());
-    }
-
     let path = args
         .config
         .as_ref()
@@ -34,7 +28,6 @@ async fn main() -> Result {
     let config = NodeConfig::from_file(path).await?;
 
     match args.command {
-        Commands::Keygen { .. } => unreachable!(),
         Commands::QueryParties {
             ref party_id_prefix,
         } => {

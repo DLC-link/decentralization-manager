@@ -18,13 +18,6 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Generate Noise protocol static keypair for secure communication
-    Keygen {
-        /// Output file path for the private key
-        #[arg(short, long, value_name = "FILE")]
-        output: PathBuf,
-    },
-
     /// Run the onboarding workflow (create decentralized party)
     Onboarding,
 

@@ -1,16 +1,20 @@
 import { useEffect, useState } from "react";
-import { Container, Typography, Box, Alert } from "@mui/material";
+import { Container, Typography, Box, Alert, Button, CircularProgress, IconButton, Tooltip } from "@mui/material";
+import VpnKeyIcon from "@mui/icons-material/VpnKey";
+import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import { Header } from "./components/Header";
 import { PartyCard } from "./components/PartyCard";
 import { NodeConfigAccordion } from "./components/NodeConfigAccordion";
 import { NetworkConfigAccordion } from "./components/NetworkConfigAccordion";
 import { LoadingSkeleton } from "./components/LoadingSkeleton";
+import { useSnackbar } from "./contexts";
 import { API_BASE } from "./constants";
 import type {
   DecentralizedParty,
   NodeConfig,
   NetworkConfig,
   ParticipantStatus,
+  KeyStatusResponse,
 } from "./types";
 
 const App = () => {
@@ -18,8 +22,11 @@ const App = () => {
   const [nodeConfig, setNodeConfig] = useState<NodeConfig | null>(null);
   const [networkConfig, setNetworkConfig] = useState<NetworkConfig | null>(null);
   const [participantStatuses, setParticipantStatuses] = useState<ParticipantStatus[]>([]);
+  const [keyStatus, setKeyStatus] = useState<KeyStatusResponse | null>(null);
+  const [generatingKeys, setGeneratingKeys] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const { showSnackbar } = useSnackbar();
 
   useEffect(() => {
     if ("scrollRestoration" in history) {
@@ -31,10 +38,11 @@ const App = () => {
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const [partiesRes, nodeRes, networkRes] = await Promise.all([
+        const [partiesRes, nodeRes, networkRes, keyStatusRes] = await Promise.all([
           fetch(`${API_BASE}/decentralized-parties`),
           fetch(`${API_BASE}/node-config`),
           fetch(`${API_BASE}/network-config`),
+          fetch(`${API_BASE}/keys/status`),
         ]);
 
         if (!partiesRes.ok || !nodeRes.ok || !networkRes.ok) {
@@ -48,6 +56,11 @@ const App = () => {
         setParties(partiesData.parties);
         setNodeConfig(nodeData);
         setNetworkConfig(networkData);
+
+        if (keyStatusRes.ok) {
+          const keyStatusData = await keyStatusRes.json();
+          setKeyStatus(keyStatusData);
+        }
 
         // Fetch participant statuses (non-blocking)
         fetch(`${API_BASE}/participants-status`)
@@ -64,6 +77,26 @@ const App = () => {
     fetchData();
   }, []);
 
+  const handleGenerateKeys = async () => {
+    setGeneratingKeys(true);
+    try {
+      const res = await fetch(`${API_BASE}/keys/generate`, { method: "POST" });
+      const data = await res.json();
+
+      if (res.ok && data.success) {
+        setKeyStatus({ has_keys: true, public_key: data.public_key });
+        await navigator.clipboard.writeText(data.public_key);
+        showSnackbar("Keys generated and public key copied to clipboard");
+      } else {
+        showSnackbar(data.error || "Failed to generate keys");
+      }
+    } catch {
+      showSnackbar("Failed to generate keys");
+    } finally {
+      setGeneratingKeys(false);
+    }
+  };
+
   return (
     <>
       <Header />
@@ -75,6 +108,53 @@ const App = () => {
           <Alert severity="error">{error}</Alert>
         ) : (
           <>
+            {keyStatus && !keyStatus.has_keys && (
+              <Alert
+                severity="warning"
+                sx={{ mb: 2, borderRadius: 3 }}
+                action={
+                  <Button
+                    color="inherit"
+                    size="small"
+                    onClick={handleGenerateKeys}
+                    disabled={generatingKeys}
+                    startIcon={generatingKeys ? <CircularProgress size={16} /> : <VpnKeyIcon />}
+                  >
+                    {generatingKeys ? "Generating..." : "Generate Keys"}
+                  </Button>
+                }
+              >
+                No Noise protocol keys found. Generate keys to enable secure communication with other nodes.
+              </Alert>
+            )}
+            {keyStatus && keyStatus.has_keys && keyStatus.public_key && (
+              <Alert
+                severity="success"
+                sx={{ mb: 2, borderRadius: 3 }}
+                icon={<VpnKeyIcon />}
+                action={
+                  <Tooltip title="Copy public key">
+                    <IconButton
+                      size="small"
+                      color="inherit"
+                      onClick={() => {
+                        navigator.clipboard.writeText(keyStatus.public_key!);
+                        showSnackbar("Public key copied to clipboard");
+                      }}
+                    >
+                      <ContentCopyIcon fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                }
+              >
+                <Typography variant="body2" component="span">
+                  <strong>Public Key:</strong>{" "}
+                  <code style={{ fontSize: "0.85em", wordBreak: "break-all" }}>
+                    {keyStatus.public_key}
+                  </code>
+                </Typography>
+              </Alert>
+            )}
             {nodeConfig && <NodeConfigAccordion config={nodeConfig} />}
             {networkConfig && (
               <NetworkConfigAccordion

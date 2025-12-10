@@ -18,12 +18,14 @@ use super::{
     AppState,
     queries::{get_contracts, get_party_metadata},
     types::{
-        DecentralizedPartiesResponse, DecentralizedParty, KickRequest, KickResponse, KickStatus,
-        ParticipantInfo, ParticipantStatus, ParticipantsStatusResponse, Permission,
+        DecentralizedPartiesResponse, DecentralizedParty, KeyStatusResponse, KeygenResponse,
+        KickRequest, KickResponse, KickStatus, ParticipantInfo, ParticipantStatus,
+        ParticipantsStatusResponse, Permission,
     },
 };
 use crate::{
-    config::NodeConfig, error::Result, participant_id::CantonId, utils, workflow,
+    config::NodeConfig, error::Result, noise::NoiseKeypair, participant_id::CantonId, utils,
+    workflow,
 };
 
 /// Get the network configuration
@@ -367,6 +369,59 @@ impl KickWorkflowState {
         Self {
             status: tokio::sync::RwLock::new(KickStatus::Idle),
             error: tokio::sync::RwLock::new(None),
+        }
+    }
+}
+
+/// Check if Noise keys exist for this node
+#[get("/keys/status")]
+pub async fn get_key_status(data: web::Data<AppState>) -> impl Responder {
+    let key_file = &data.config.node.static_key_file;
+
+    match NoiseKeypair::from_file(key_file).await {
+        Ok(keypair) => HttpResponse::Ok().json(KeyStatusResponse {
+            has_keys: true,
+            public_key: Some(keypair.public_key_hex()),
+        }),
+        Err(_) => HttpResponse::Ok().json(KeyStatusResponse {
+            has_keys: false,
+            public_key: None,
+        }),
+    }
+}
+
+/// Generate new Noise keypair for this node
+#[post("/keys/generate")]
+pub async fn generate_keys(data: web::Data<AppState>) -> impl Responder {
+    let key_file = &data.config.node.static_key_file;
+
+    // Check if keys already exist
+    if NoiseKeypair::from_file(key_file).await.is_ok() {
+        return HttpResponse::Conflict().json(serde_json::json!({
+            "error": "Keys already exist. Delete the existing key file first if you want to regenerate."
+        }));
+    }
+
+    // Generate new keypair
+    match NoiseKeypair::generate().save_to_file(key_file).await {
+        Ok(()) => {
+            // Read back to get public key
+            match NoiseKeypair::from_file(key_file).await {
+                Ok(keypair) => HttpResponse::Ok().json(KeygenResponse {
+                    success: true,
+                    public_key: keypair.public_key_hex(),
+                    message: "Keypair generated successfully".to_string(),
+                }),
+                Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": format!("Keys generated but failed to read back: {e}")
+                })),
+            }
+        }
+        Err(e) => {
+            tracing::error!("Failed to generate keys: {e}");
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to generate keys: {e}")
+            }))
         }
     }
 }

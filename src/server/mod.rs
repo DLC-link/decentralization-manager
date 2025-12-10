@@ -66,6 +66,8 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig) -> Result {
             .service(handlers::get_participants_status)
             .service(handlers::start_kick)
             .service(handlers::get_kick_status)
+            .service(handlers::get_key_status)
+            .service(handlers::generate_keys)
             .service(assets::serve_frontend)
     })
     .bind((host, port))?
