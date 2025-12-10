@@ -1,3 +1,4 @@
+import { useState } from "react";
 import {
   Card,
   CardContent,
@@ -9,8 +10,12 @@ import {
   TableCell,
   TableHead,
   TableRow,
+  IconButton,
+  Tooltip,
 } from "@mui/material";
+import PersonRemoveIcon from "@mui/icons-material/PersonRemove";
 import { CopyableText } from "./CopyableText";
+import { KickDialog } from "./KickDialog";
 import type { DecentralizedParty } from "../types";
 
 interface PartyCardProps {
@@ -18,6 +23,15 @@ interface PartyCardProps {
 }
 
 export const PartyCard = ({ party }: PartyCardProps) => {
+  const [kickDialogOpen, setKickDialogOpen] = useState(false);
+  const [selectedParticipant, setSelectedParticipant] = useState<string>("");
+  const [selectedOwnerKey, setSelectedOwnerKey] = useState<string>("");
+
+  const handleKickClick = (participantUid: string, ownerIndex: number) => {
+    setSelectedParticipant(participantUid);
+    setSelectedOwnerKey(party.owners[ownerIndex] || "");
+    setKickDialogOpen(true);
+  };
   return (
     <Card sx={{ mb: 3, borderRadius: 3 }}>
       <CardContent sx={{ p: 3, "&:last-child": { pb: 3 } }}>
@@ -64,15 +78,16 @@ export const PartyCard = ({ party }: PartyCardProps) => {
             <TableRow>
               <TableCell>Participant</TableCell>
               <TableCell>Permission</TableCell>
+              <TableCell align="right">Actions</TableCell>
             </TableRow>
           </TableHead>
           <TableBody>
-            {party.participants.map((p) => (
+            {party.participants.map((p, index) => (
               <TableRow key={p.participant_uid}>
                 <TableCell>
                   <CopyableText
                     text={p.participant_uid}
-                    truncate={{ start: 32, end: 32 }}
+                    truncate={{ start: 32, end: 16 }}
                     variant="body2"
                   />
                 </TableCell>
@@ -80,8 +95,21 @@ export const PartyCard = ({ party }: PartyCardProps) => {
                   <Chip
                     label={p.permission}
                     size="small"
-                    color={p.permission === "submission" ? "success" : "default"}
+                    color={
+                      p.permission === "submission" ? "success" : "default"
+                    }
                   />
+                </TableCell>
+                <TableCell align="right">
+                  <Tooltip title="Kick participant">
+                    <IconButton
+                      size="small"
+                      color="error"
+                      onClick={() => handleKickClick(p.participant_uid, index)}
+                    >
+                      <PersonRemoveIcon fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
                 </TableCell>
               </TableRow>
             ))}
@@ -118,6 +146,14 @@ export const PartyCard = ({ party }: PartyCardProps) => {
           </>
         )}
       </CardContent>
+
+      <KickDialog
+        open={kickDialogOpen}
+        onClose={() => setKickDialogOpen(false)}
+        partyId={party.party_id}
+        participantUid={selectedParticipant}
+        ownerKey={selectedOwnerKey}
+      />
     </Card>
   );
-}
+};

@@ -38,9 +38,17 @@ impl OnboardingDirs {
 
     /// Create required directories that don't exist
     pub async fn create_dirs(&self) -> Result {
-        tokio::fs::create_dir_all(&self.workflow_dir).await?;
-        tokio::fs::create_dir_all(&self.keys_dir).await?;
-        tokio::fs::create_dir_all(&self.ids_dir).await?;
+        use anyhow::Context;
+
+        tokio::fs::create_dir_all(&self.workflow_dir)
+            .await
+            .with_context(|| format!("Failed to create dir '{}'", self.workflow_dir.display()))?;
+        tokio::fs::create_dir_all(&self.keys_dir)
+            .await
+            .with_context(|| format!("Failed to create dir '{}'", self.keys_dir.display()))?;
+        tokio::fs::create_dir_all(&self.ids_dir)
+            .await
+            .with_context(|| format!("Failed to create dir '{}'", self.ids_dir.display()))?;
         Ok(())
     }
 }

@@ -63,3 +63,16 @@ export interface ParticipantStatus {
   id: string;
   active: boolean;
 }
+
+export interface KickRequest {
+  decentralized_party_id: string;
+  participant_id: string;
+  namespace_fingerprint: string;
+}
+
+export type KickStatus = "idle" | "inprogress" | "completed" | "failed";
+
+export interface KickStatusResponse {
+  status: KickStatus;
+  error?: string;
+}

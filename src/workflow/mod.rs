@@ -112,10 +112,14 @@ pub async fn save_attestor_data<S: state::WorkflowStep + 'static>(
     dir: &std::path::Path,
     prefix: &str,
 ) -> Result {
+    use anyhow::Context;
+
     let attestor_data = workflow_state.get_all_attestor_data().await;
     for (attestor_id, data) in attestor_data {
         let file_path = dir.join(format!("{prefix}-{attestor_id}.bin"));
-        tokio::fs::write(&file_path, data).await?;
+        tokio::fs::write(&file_path, &data)
+            .await
+            .with_context(|| format!("Failed to write attestor data to '{}'", file_path.display()))?;
     }
     workflow_state.clear_attestor_data().await;
     Ok(())
@@ -279,10 +283,14 @@ pub async fn find_and_read_file(
     suffix: &str,
     error_msg: &str,
 ) -> Result<Vec<u8>> {
+    use anyhow::Context;
+
     let files = utils::find_files_by_pattern(dir, prefix, suffix).await?;
 
     if let Some(path) = files.first() {
-        let data = tokio::fs::read(path).await?;
+        let data = tokio::fs::read(path)
+            .await
+            .with_context(|| format!("Failed to read file '{}'", path.display()))?;
         return Ok(data);
     }
 

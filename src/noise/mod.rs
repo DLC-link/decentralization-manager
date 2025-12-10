@@ -312,7 +312,12 @@ impl NoiseKeypair {
 
     /// Load keypair from a file (expects hex-encoded secret key)
     pub async fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let content = tokio::fs::read_to_string(path).await?;
+        use anyhow::Context;
+
+        let path = path.as_ref();
+        let content = tokio::fs::read_to_string(path)
+            .await
+            .with_context(|| format!("Failed to read key file '{}'", path.display()))?;
         let secret_key_hex = content.trim();
         let secret_key_bytes = hex::decode(secret_key_hex)?;
         let secret_key = SecretKey::from_slice(&secret_key_bytes)?;
@@ -327,8 +332,13 @@ impl NoiseKeypair {
 
     /// Save the private key to a file (hex-encoded)
     pub async fn save_to_file<P: AsRef<Path>>(&self, path: P) -> Result {
+        use anyhow::Context;
+
+        let path = path.as_ref();
         let secret_key_hex = hex::encode(self.secret_key.secret_bytes());
-        tokio::fs::write(path, secret_key_hex).await?;
+        tokio::fs::write(path, secret_key_hex)
+            .await
+            .with_context(|| format!("Failed to write key file '{}'", path.display()))?;
         Ok(())
     }
 

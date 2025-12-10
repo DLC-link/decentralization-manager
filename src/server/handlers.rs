@@ -1,6 +1,6 @@
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use actix_web::{HttpResponse, Responder, get, web};
+use actix_web::{HttpResponse, Responder, get, post, web};
 use canton_proto_rs::com::digitalasset::canton::{
     crypto::{
         admin::v30::{ListMyKeysRequest, vault_service_client::VaultServiceClient},
@@ -18,11 +18,13 @@ use super::{
     AppState,
     queries::{get_contracts, get_party_metadata},
     types::{
-        DecentralizedPartiesResponse, DecentralizedParty, ParticipantInfo, ParticipantStatus,
-        ParticipantsStatusResponse, Permission,
+        DecentralizedPartiesResponse, DecentralizedParty, KickRequest, KickResponse, KickStatus,
+        ParticipantInfo, ParticipantStatus, ParticipantsStatusResponse, Permission,
     },
 };
-use crate::{config::NodeConfig, error::Result, participant_id::CantonId, utils};
+use crate::{
+    config::NodeConfig, error::Result, participant_id::CantonId, utils, workflow,
+};
 
 /// Get the network configuration
 #[get("/network-config")]
@@ -183,9 +185,12 @@ async fn fetch_decentralized_parties(config: &NodeConfig) -> Result<Decentralize
                 let participants = p2p
                     .participants
                     .iter()
-                    .map(|p| ParticipantInfo {
-                        participant_uid: p.participant_uid.clone(),
-                        permission: Permission::from(p.permission),
+                    .filter_map(|p| {
+                        let participant_uid = CantonId::parse(&p.participant_uid).ok()?;
+                        Some(ParticipantInfo {
+                            participant_uid,
+                            permission: Permission::from(p.permission),
+                        })
                     })
                     .collect();
 
@@ -256,4 +261,112 @@ async fn check_participants_status(config: &NodeConfig) -> Result<ParticipantsSt
     let statuses = futures::future::join_all(futures).await;
 
     Ok(ParticipantsStatusResponse { statuses })
+}
+
+/// Start a kick workflow to remove a participant from a decentralized party
+#[post("/kick")]
+pub async fn start_kick(
+    data: web::Data<AppState>,
+    kick_state: web::Data<Arc<KickWorkflowState>>,
+    body: web::Json<KickRequest>,
+) -> impl Responder {
+    // Check if a kick is already in progress
+    {
+        let status = kick_state.status.read().await;
+        if *status == KickStatus::InProgress {
+            return HttpResponse::Conflict().json(serde_json::json!({
+                "error": "A kick workflow is already in progress"
+            }));
+        }
+    }
+
+    // Parse IDs
+    let decentralized_party_id = match CantonId::parse(&body.decentralized_party_id) {
+        Ok(id) => id,
+        Err(e) => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Invalid decentralized_party_id: {e}")
+            }));
+        }
+    };
+
+    let participant_id = match CantonId::parse(&body.participant_id) {
+        Ok(id) => id,
+        Err(e) => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Invalid participant_id: {e}")
+            }));
+        }
+    };
+
+    // Update status to in progress
+    {
+        let mut status = kick_state.status.write().await;
+        *status = KickStatus::InProgress;
+        let mut error = kick_state.error.write().await;
+        *error = None;
+    }
+
+    // Spawn the kick workflow in the background
+    let config = data.config.clone();
+    let kick_state_clone = kick_state.get_ref().clone();
+    let namespace_fingerprint = body.namespace_fingerprint.clone();
+
+    tokio::spawn(async move {
+        let kick_config = workflow::KickConfig::new(
+            decentralized_party_id,
+            participant_id,
+            namespace_fingerprint,
+        );
+
+        let result =
+            workflow::start_node(config, workflow::WorkflowType::Kick, Some(kick_config)).await;
+
+        let mut status = kick_state_clone.status.write().await;
+        let mut error = kick_state_clone.error.write().await;
+
+        match result {
+            Ok(()) => {
+                *status = KickStatus::Completed;
+                tracing::info!("Kick workflow completed successfully");
+            }
+            Err(e) => {
+                *status = KickStatus::Failed;
+                *error = Some(format!("{e}"));
+                tracing::error!("Kick workflow failed: {e}");
+            }
+        }
+    });
+
+    HttpResponse::Accepted().json(KickResponse {
+        status: KickStatus::InProgress,
+        message: "Kick workflow started".to_string(),
+    })
+}
+
+/// Get the current status of the kick workflow
+#[get("/kick/status")]
+pub async fn get_kick_status(kick_state: web::Data<Arc<KickWorkflowState>>) -> impl Responder {
+    let status = kick_state.status.read().await;
+    let error = kick_state.error.read().await;
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "status": *status,
+        "error": *error,
+    }))
+}
+
+/// State for tracking kick workflow
+pub struct KickWorkflowState {
+    pub status: tokio::sync::RwLock<KickStatus>,
+    pub error: tokio::sync::RwLock<Option<String>>,
+}
+
+impl KickWorkflowState {
+    pub fn new() -> Self {
+        Self {
+            status: tokio::sync::RwLock::new(KickStatus::Idle),
+            error: tokio::sync::RwLock::new(None),
+        }
+    }
 }

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use canton_proto_rs::com::digitalasset::canton::protocol::v30::enums::ParticipantPermission;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::participant_id::CantonId;
 
@@ -29,7 +29,7 @@ impl From<i32> for Permission {
 /// Participant in a decentralized party
 #[derive(Clone, Debug, Serialize)]
 pub struct ParticipantInfo {
-    pub participant_uid: String,
+    pub participant_uid: CantonId,
     pub permission: Permission,
 }
 
@@ -79,4 +79,29 @@ pub struct ParticipantStatus {
 #[derive(Serialize)]
 pub struct ParticipantsStatusResponse {
     pub statuses: Vec<ParticipantStatus>,
+}
+
+/// Request to kick a participant from a decentralized party
+#[derive(Clone, Debug, Deserialize)]
+pub struct KickRequest {
+    pub decentralized_party_id: String,
+    pub participant_id: String,
+    pub namespace_fingerprint: String,
+}
+
+/// Status of a kick workflow
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum KickStatus {
+    Idle,
+    InProgress,
+    Completed,
+    Failed,
+}
+
+/// Response for kick workflow initiation
+#[derive(Serialize)]
+pub struct KickResponse {
+    pub status: KickStatus,
+    pub message: String,
 }

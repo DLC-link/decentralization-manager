@@ -173,8 +173,14 @@ impl Default for Timeouts {
 impl NetworkConfig {
     /// Load network configuration from a TOML file
     pub async fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let content = tokio::fs::read_to_string(path.as_ref()).await?;
-        let config: NetworkConfig = toml::from_str(&content)?;
+        use anyhow::Context;
+
+        let path = path.as_ref();
+        let content = tokio::fs::read_to_string(path)
+            .await
+            .with_context(|| format!("Failed to read network config '{}'", path.display()))?;
+        let config: NetworkConfig = toml::from_str(&content)
+            .with_context(|| format!("Failed to parse network config '{}'", path.display()))?;
         Ok(config)
     }
 
@@ -300,13 +306,15 @@ fn default_synchronizer() -> String {
 impl NodeConfig {
     /// Load node configuration from a TOML file
     pub async fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let content = tokio::fs::read_to_string(path.as_ref()).await?;
-        let mut config: NodeConfig = toml::from_str(&content)?;
-        config.config_dir = path
-            .as_ref()
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_default();
+        use anyhow::Context;
+
+        let path = path.as_ref();
+        let content = tokio::fs::read_to_string(path)
+            .await
+            .with_context(|| format!("Failed to read node config '{}'", path.display()))?;
+        let mut config: NodeConfig = toml::from_str(&content)
+            .with_context(|| format!("Failed to parse node config '{}'", path.display()))?;
+        config.config_dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
         Ok(config)
     }
 

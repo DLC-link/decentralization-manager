@@ -1,3 +1,4 @@
+use anyhow::Context;
 use ed25519_dalek::{Signer, SigningKey};
 
 use canton_proto_rs::com::{
@@ -355,7 +356,9 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &ContractsDirs) -> Resu
     // Step 8: Save signatures to file
     let execution_dir = dirs.workflow_dir.join(EXECUTION_DIR);
     let signatures_dir = execution_dir.join(SIGNATURES_DIR);
-    tokio::fs::create_dir_all(&signatures_dir).await?;
+    tokio::fs::create_dir_all(&signatures_dir)
+        .await
+        .with_context(|| format!("Failed to create dir '{}'", signatures_dir.display()))?;
 
     let signatures_file = signatures_dir.join(format!(
         "{SUBMISSION_SIGNATURES_PREFIX}-{participant_num}.bin"

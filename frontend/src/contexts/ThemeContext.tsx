@@ -92,13 +92,6 @@ const getDesignTokens = (mode: "light" | "dark") => ({
             ? "0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1)"
             : "0 1px 3px 0 rgb(0 0 0 / 0.3), 0 1px 2px -1px rgb(0 0 0 / 0.3)",
           border: `1px solid ${mode === "light" ? "#e2e8f0" : "#334155"}`,
-          transition: "box-shadow 0.2s ease-in-out, transform 0.2s ease-in-out",
-          "&:hover": {
-            boxShadow: mode === "light"
-              ? "0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1)"
-              : "0 10px 15px -3px rgb(0 0 0 / 0.4), 0 4px 6px -4px rgb(0 0 0 / 0.4)",
-            transform: "translateY(-2px)",
-          },
         },
       },
     },

@@ -49,18 +49,6 @@ async fn main() -> Result {
         Commands::Contracts => {
             workflow::start_node(config, workflow::WorkflowType::Contracts, None).await?;
         }
-        Commands::Kick {
-            decentralized_party_id,
-            participant_id,
-            namespace_fingerprint,
-        } => {
-            let kick_config = workflow::KickConfig::new(
-                decentralized_party_id,
-                participant_id,
-                namespace_fingerprint,
-            );
-            workflow::start_node(config, workflow::WorkflowType::Kick, Some(kick_config)).await?;
-        }
     }
 
     tracing::info!("Command completed successfully");
