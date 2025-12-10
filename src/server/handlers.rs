@@ -167,7 +167,12 @@ async fn fetch_decentralized_parties(config: &NodeConfig) -> Result<Decentralize
                                 Vec::new()
                             })
                     },
-                    async { get_party_metadata(&config, &party_id_str).await.ok().flatten() }
+                    async {
+                        get_party_metadata(&config, &party_id_str)
+                            .await
+                            .ok()
+                            .flatten()
+                    }
                 );
 
                 let party_id = CantonId::parse(&p2p.party)?;
