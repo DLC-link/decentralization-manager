@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 
 use actix_web::{HttpResponse, Responder, get, web};
 use canton_proto_rs::com::digitalasset::canton::{
@@ -12,11 +12,15 @@ use canton_proto_rs::com::digitalasset::canton::{
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
     },
 };
+use tokio::net::TcpStream;
 
 use super::{
     AppState,
     queries::{get_contracts, get_party_metadata},
-    types::{DecentralizedPartiesResponse, DecentralizedParty, ParticipantInfo, Permission},
+    types::{
+        DecentralizedPartiesResponse, DecentralizedParty, ParticipantInfo, ParticipantStatus,
+        ParticipantsStatusResponse, Permission,
+    },
 };
 use crate::{config::NodeConfig, error::Result, participant_id::CantonId, utils};
 
@@ -202,4 +206,54 @@ async fn fetch_decentralized_parties(config: &NodeConfig) -> Result<Decentralize
     let parties: Vec<_> = results.into_iter().filter_map(|r| r.ok()).collect();
 
     Ok(DecentralizedPartiesResponse { parties })
+}
+
+/// Check connectivity status of all participants
+#[get("/participants-status")]
+pub async fn get_participants_status(data: web::Data<AppState>) -> impl Responder {
+    match check_participants_status(&data.config).await {
+        Ok(response) => HttpResponse::Ok().json(response),
+        Err(e) => {
+            tracing::error!("Failed to check participants status: {e}");
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to check participants status: {e}")
+            }))
+        }
+    }
+}
+
+async fn check_participants_status(config: &NodeConfig) -> Result<ParticipantsStatusResponse> {
+    let network_config = config.load_network_config().await?;
+    let current_node_id = &config.node.node_id;
+
+    let futures: Vec<_> = network_config
+        .participants
+        .iter()
+        .map(|participant| {
+            let id = participant.id.clone();
+            let address = participant.address.clone();
+            let port = participant.port;
+            let is_self = id == *current_node_id;
+
+            async move {
+                let active = if is_self {
+                    // Current node is always active
+                    true
+                } else {
+                    // Try to connect with a short timeout
+                    let addr = format!("{address}:{port}");
+                    tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(&addr))
+                        .await
+                        .map(|r| r.is_ok())
+                        .unwrap_or(false)
+                };
+
+                ParticipantStatus { id, active }
+            }
+        })
+        .collect();
+
+    let statuses = futures::future::join_all(futures).await;
+
+    Ok(ParticipantsStatusResponse { statuses })
 }

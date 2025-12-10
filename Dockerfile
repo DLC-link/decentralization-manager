@@ -1,7 +1,7 @@
 FROM rust:slim-bookworm AS builder
 
 RUN apt-get update
-RUN apt-get install -y cmake pkg-config libssl-dev git openssh-client protobuf-compiler -y
+RUN apt-get install -y cmake pkg-config libssl-dev git openssh-client protobuf-compiler nodejs npm -y
 
 WORKDIR /app
 
@@ -9,8 +9,13 @@ RUN mkdir -p /root/.ssh && ssh-keyscan github.com >> /root/.ssh/known_hosts
 
 ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
 
-COPY Cargo.toml Cargo.lock ./
+COPY frontend/package.json frontend/package-lock.json ./frontend/
+RUN cd frontend && npm ci
+
+COPY Cargo.toml Cargo.lock build.rs ./
 COPY src ./src
+COPY frontend/src ./frontend/src
+COPY frontend/index.html frontend/vite.config.ts frontend/tsconfig*.json frontend/eslint.config.js ./frontend/
 
 RUN --mount=type=ssh cargo build --release
 

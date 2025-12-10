@@ -256,6 +256,8 @@ pub struct NodeConfig {
     pub node: NodeInfo,
     pub network_config: String,
     pub canton: CantonConfig,
+    #[serde(skip)]
+    config_dir: PathBuf,
 }
 
 /// Node-specific information
@@ -299,7 +301,12 @@ impl NodeConfig {
     /// Load node configuration from a TOML file
     pub async fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = tokio::fs::read_to_string(path.as_ref()).await?;
-        let config: NodeConfig = toml::from_str(&content)?;
+        let mut config: NodeConfig = toml::from_str(&content)?;
+        config.config_dir = path
+            .as_ref()
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default();
         Ok(config)
     }
 
@@ -331,9 +338,7 @@ impl NodeConfig {
         let network_config_path = if PathBuf::from(&self.network_config).is_absolute() {
             PathBuf::from(&self.network_config)
         } else {
-            std::env::current_dir()?
-                .join("test-configs")
-                .join(&self.network_config)
+            self.config_dir.join(&self.network_config)
         };
         NetworkConfig::from_file(&network_config_path).await
     }

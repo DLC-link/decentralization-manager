@@ -11,6 +11,7 @@ lto = true
 panic = "unwind"
 
 [dependencies]
+actix-cors = { version = "0.7" }
 actix-web = { version = "4" }
 anyhow = { version = "1.0.98" }
 bytes = { version = "1.9.0" }
@@ -41,6 +42,8 @@ tracing = { version = "0.1" }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1.11", features = ["v4"] }
 x509-parser = { version = "0.16" }
+mime_guess = { version = "2.0" }
+rust-embed = { version = "8.5" }
 
 canton-proto-rs = { git = "ssh://git@github.com/DLC-link/canton-lib", branch = "feat/protos" }
 

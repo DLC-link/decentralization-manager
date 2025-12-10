@@ -67,3 +67,16 @@ pub struct DecentralizedParty {
 pub struct DecentralizedPartiesResponse {
     pub parties: Vec<DecentralizedParty>,
 }
+
+/// Status of a single participant
+#[derive(Clone, Debug, Serialize)]
+pub struct ParticipantStatus {
+    pub id: String,
+    pub active: bool,
+}
+
+/// Response for the participants status endpoint
+#[derive(Serialize)]
+pub struct ParticipantsStatusResponse {
+    pub statuses: Vec<ParticipantStatus>,
+}
