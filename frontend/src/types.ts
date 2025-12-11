@@ -26,7 +26,6 @@ export interface DecentralizedParty {
 export interface NodeConfig {
   node: {
     node_id: string;
-    static_key_file: string;
     listen_address: string;
   };
   network_config: string;
@@ -86,4 +85,11 @@ export interface KeygenResponse {
   success: boolean;
   public_key: string;
   message: string;
+}
+
+export type OnboardingStatus = "idle" | "inprogress" | "completed" | "failed";
+
+export interface OnboardingStatusResponse {
+  status: OnboardingStatus;
+  error?: string;
 }

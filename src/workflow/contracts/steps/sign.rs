@@ -15,8 +15,8 @@ use canton_proto_rs::com::{
 use crate::{
     config::NodeConfig,
     consts::{
-        CANTON_PROTOCOL_VERSION, EXECUTION_DIR, LEDGER_SUBMISSIONS_DIR, PREPARED_DIR,
-        PREPARED_SUBMISSION_PREFIX, SIGNATURES_DIR, SUBMISSION_SIGNATURES_PREFIX,
+        ATTESTOR_KEYS_PREFIX, CANTON_PROTOCOL_VERSION, EXECUTION_DIR, LEDGER_SUBMISSIONS_DIR,
+        PREPARED_DIR, PREPARED_SUBMISSION_PREFIX, SIGNATURES_DIR, SUBMISSION_SIGNATURES_PREFIX,
     },
     error::Result,
     utils,
@@ -49,7 +49,7 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &ContractsDirs) -> Resu
     tracing::info!("Loading DAML public key from exported file...");
     let keys_file = dirs
         .keys_dir
-        .join(format!("attestor-public-keys-{participant_num}.bin"));
+        .join(format!("{ATTESTOR_KEYS_PREFIX}-{participant_num}.bin"));
 
     if !keys_file.exists() {
         anyhow::bail!(

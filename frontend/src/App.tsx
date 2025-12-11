@@ -2,11 +2,13 @@ import { useEffect, useState } from "react";
 import { Container, Typography, Box, Alert, Button, CircularProgress, IconButton, Tooltip } from "@mui/material";
 import VpnKeyIcon from "@mui/icons-material/VpnKey";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
+import AddIcon from "@mui/icons-material/Add";
 import { Header } from "./components/Header";
 import { PartyCard } from "./components/PartyCard";
 import { NodeConfigAccordion } from "./components/NodeConfigAccordion";
 import { NetworkConfigAccordion } from "./components/NetworkConfigAccordion";
 import { LoadingSkeleton } from "./components/LoadingSkeleton";
+import { OnboardingDialog } from "./components/OnboardingDialog";
 import { useSnackbar } from "./contexts";
 import { API_BASE } from "./constants";
 import type {
@@ -24,6 +26,7 @@ const App = () => {
   const [participantStatuses, setParticipantStatuses] = useState<ParticipantStatus[]>([]);
   const [keyStatus, setKeyStatus] = useState<KeyStatusResponse | null>(null);
   const [generatingKeys, setGeneratingKeys] = useState(false);
+  const [onboardingDialogOpen, setOnboardingDialogOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const { showSnackbar } = useSnackbar();
@@ -163,18 +166,32 @@ const App = () => {
               />
             )}
 
-            <Box sx={{ mt: 5, mb: 3 }}>
-              <Typography variant="h6" sx={{ mb: 0.5 }}>
-                Decentralized Parties
-              </Typography>
-              <Typography variant="body2" color="text.secondary">
-                {parties.length} parties
-              </Typography>
+            <Box sx={{ mt: 5, mb: 3, display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+              <Box>
+                <Typography variant="h6" sx={{ mb: 0.5 }}>
+                  Decentralized Parties
+                </Typography>
+                <Typography variant="body2" color="text.secondary">
+                  {parties.length} parties
+                </Typography>
+              </Box>
+              <Button
+                variant="contained"
+                startIcon={<AddIcon />}
+                onClick={() => setOnboardingDialogOpen(true)}
+              >
+                Create Party
+              </Button>
             </Box>
 
             {parties.map((party) => (
               <PartyCard key={party.party_id} party={party} />
             ))}
+
+            <OnboardingDialog
+              open={onboardingDialogOpen}
+              onClose={() => setOnboardingDialogOpen(false)}
+            />
           </>
         )}
       </Container>

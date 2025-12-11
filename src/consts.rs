@@ -49,10 +49,74 @@ pub const DNS_PROTO_FILENAME: &str = "dns_proto.bin";
 /// P2P proposal file name
 pub const P2P_PROTO_FILENAME: &str = "p2p_proto.bin";
 
+/// DNS kick proposal file name
+pub const DNS_KICK_PROTO_FILENAME: &str = "dns_kick_proto.bin";
+
+/// P2P kick proposal file name
+pub const P2P_KICK_PROTO_FILENAME: &str = "p2p_kick_proto.bin";
+
+/// New namespace definition file name (for kick workflow)
+pub const NEW_NAMESPACE_DEF_FILENAME: &str = "newNamespaceDef.bin";
+
+/// Party ID file name
+pub const PARTY_ID_FILENAME: &str = "partyId";
+
+/// Kick target file name
+pub const KICK_TARGET_FILENAME: &str = "kick-target";
+
+/// Kick participant ID file name
+pub const KICK_PARTICIPANT_ID_FILENAME: &str = "kick-participant-id";
+
+/// New threshold file name
+pub const NEW_THRESHOLD_FILENAME: &str = "new-threshold";
+
 /// Prefix for prepared submission files
 pub const PREPARED_SUBMISSION_PREFIX: &str = "prepared-submission";
 
-// Directory names
+// Base directory names (relative to project root or config directory)
+/// Keys directory name
+pub const KEYS_DIR: &str = "keys";
+
+/// Workflow data directory name
+pub const WORKFLOW_DATA_DIR: &str = "workflow-data";
+
+/// DARs directory name
+pub const DARS_DIR: &str = "dars";
+
+/// Data directory name (contains keys and workflow-data)
+pub const DATA_DIR: &str = "data";
+
+// Workflow subdirectory names
+/// Participant keys subdirectory name
+pub const PARTICIPANT_KEYS_DIR: &str = "participant-keys";
+
+/// Participant IDs subdirectory name
+pub const PARTICIPANT_IDS_DIR: &str = "participant-ids";
+
+/// DNS proposals directory name
+pub const DNS_PROPOSALS_DIR: &str = "dns-proposals";
+
+/// DNS submission directory name
+pub const DNS_SUBMISSION_DIR: &str = "dns-submission";
+
+/// P2P proposals directory name
+pub const P2P_PROPOSALS_DIR: &str = "p2p-proposals";
+
+/// Final proposals submission directory name
+pub const FINAL_PROPOSALS_SUBMISSION_DIR: &str = "final-proposals-submission";
+
+/// Signed proposals subdirectory name
+pub const SIGNED_PROPOSALS_DIR: &str = "signed-proposals";
+
+/// Current config directory name (for kick workflow)
+pub const CURRENT_CONFIG_DIR: &str = "current-config";
+
+/// Kick proposals directory name
+pub const KICK_PROPOSALS_DIR: &str = "kick-proposals";
+
+/// Kick signed directory name
+pub const KICK_SIGNED_DIR: &str = "kick-signed";
+
 /// Ledger submissions directory name
 pub const LEDGER_SUBMISSIONS_DIR: &str = "ledger-submissions";
 

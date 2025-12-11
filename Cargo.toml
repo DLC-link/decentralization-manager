@@ -45,7 +45,7 @@ x509-parser = { version = "0.16" }
 mime_guess = { version = "2.0" }
 rust-embed = { version = "8.5" }
 
-canton-proto-rs = { git = "ssh://git@github.com/DLC-link/canton-lib", branch = "feat/protos" }
+canton-proto-rs = { git = "ssh://git@github.com/DLC-link/canton-lib", branch = "main" }
 
 [dev-dependencies]
 tempfile = { version = "3.14" }

@@ -28,16 +28,8 @@ async fn main() -> Result {
     let config = NodeConfig::from_file(path).await?;
 
     match args.command {
-        Commands::QueryParties {
-            ref party_id_prefix,
-        } => {
-            dec_party_onboarding::query_parties::query_parties(&config, party_id_prefix).await?;
-        }
         Commands::Serve { ref host, port } => {
             dec_party_onboarding::server::start_server(host, port, config).await?;
-        }
-        Commands::Onboarding => {
-            workflow::start_node(config, workflow::WorkflowType::Onboarding, None).await?;
         }
         Commands::Contracts => {
             workflow::start_node(config, workflow::WorkflowType::Contracts, None).await?;

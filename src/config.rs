@@ -5,7 +5,10 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::Result;
+use crate::{
+    consts::{DARS_DIR, DATA_DIR, KEYS_DIR, WORKFLOW_DATA_DIR},
+    error::Result,
+};
 
 /// Coordinator selection strategy
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -271,8 +274,6 @@ pub struct NodeConfig {
 pub struct NodeInfo {
     /// Must match one of the participant IDs in network.toml
     pub node_id: String,
-    /// Path to this node's static private key
-    pub static_key_file: String,
     #[serde(default = "default_listen_address")]
     pub listen_address: String,
 }
@@ -349,6 +350,31 @@ impl NodeConfig {
             self.config_dir.join(&self.network_config)
         };
         NetworkConfig::from_file(&network_config_path).await
+    }
+
+    /// Get the data directory (sibling to the config directory)
+    pub fn data_dir(&self) -> PathBuf {
+        self.config_dir.parent().unwrap_or(&self.config_dir).join(DATA_DIR)
+    }
+
+    /// Get the keys directory
+    pub fn keys_dir(&self) -> PathBuf {
+        self.data_dir().join(KEYS_DIR)
+    }
+
+    /// Get the path to this node's key file
+    pub fn key_file_path(&self) -> PathBuf {
+        self.keys_dir().join(format!("{}.key", self.node.node_id))
+    }
+
+    /// Get the workflow data directory
+    pub fn workflow_data_dir(&self) -> PathBuf {
+        self.data_dir().join(WORKFLOW_DATA_DIR)
+    }
+
+    /// Get the dars directory (sibling to the config directory)
+    pub fn dars_dir(&self) -> PathBuf {
+        self.config_dir.parent().unwrap_or(&self.config_dir).join(DARS_DIR)
     }
 }
 

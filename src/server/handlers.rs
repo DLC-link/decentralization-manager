@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc};
 
 use actix_web::{HttpResponse, Responder, get, post, web};
 use canton_proto_rs::com::digitalasset::canton::{
@@ -12,15 +12,14 @@ use canton_proto_rs::com::digitalasset::canton::{
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
     },
 };
-use tokio::net::TcpStream;
 
 use super::{
     AppState,
     queries::{get_contracts, get_party_metadata},
     types::{
         DecentralizedPartiesResponse, DecentralizedParty, KeyStatusResponse, KeygenResponse,
-        KickRequest, KickResponse, KickStatus, ParticipantInfo, ParticipantStatus,
-        ParticipantsStatusResponse, Permission,
+        KickRequest, KickResponse, KickStatus, OnboardingResponse, OnboardingStatus,
+        ParticipantInfo, ParticipantStatus, ParticipantsStatusResponse, Permission,
     },
 };
 use crate::{
@@ -218,7 +217,7 @@ async fn fetch_decentralized_parties(config: &NodeConfig) -> Result<Decentralize
 /// Check connectivity status of all participants
 #[get("/participants-status")]
 pub async fn get_participants_status(data: web::Data<AppState>) -> impl Responder {
-    match check_participants_status(&data.config).await {
+    match check_participants_status(&data.config, &data.peer_status).await {
         Ok(response) => HttpResponse::Ok().json(response),
         Err(e) => {
             tracing::error!("Failed to check participants status: {e}");
@@ -229,38 +228,32 @@ pub async fn get_participants_status(data: web::Data<AppState>) -> impl Responde
     }
 }
 
-async fn check_participants_status(config: &NodeConfig) -> Result<ParticipantsStatusResponse> {
+async fn check_participants_status(
+    config: &NodeConfig,
+    peer_status_cache: &tokio::sync::RwLock<std::collections::HashMap<String, bool>>,
+) -> Result<ParticipantsStatusResponse> {
     let network_config = config.load_network_config().await?;
     let current_node_id = &config.node.node_id;
+    let cache = peer_status_cache.read().await;
 
-    let futures: Vec<_> = network_config
+    let statuses: Vec<ParticipantStatus> = network_config
         .participants
         .iter()
         .map(|participant| {
             let id = participant.id.clone();
-            let address = participant.address.clone();
-            let port = participant.port;
             let is_self = id == *current_node_id;
 
-            async move {
-                let active = if is_self {
-                    // Current node is always active
-                    true
-                } else {
-                    // Try to connect with a short timeout
-                    let addr = format!("{address}:{port}");
-                    tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(&addr))
-                        .await
-                        .map(|r| r.is_ok())
-                        .unwrap_or(false)
-                };
+            let active = if is_self {
+                // Current node is always active
+                true
+            } else {
+                // Get status from cache
+                *cache.get(&id).unwrap_or(&false)
+            };
 
-                ParticipantStatus { id, active }
-            }
+            ParticipantStatus { id, active }
         })
         .collect();
-
-    let statuses = futures::future::join_all(futures).await;
 
     Ok(ParticipantsStatusResponse { statuses })
 }
@@ -313,8 +306,16 @@ pub async fn start_kick(
     let config = data.config.clone();
     let kick_state_clone = kick_state.get_ref().clone();
     let namespace_fingerprint = body.namespace_fingerprint.clone();
+    let listener_control = data.noise_listener_control.clone();
 
     tokio::spawn(async move {
+        // Pause the heartbeat listener
+        {
+            let mut control = listener_control.write().await;
+            control.should_pause = true;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await; // Give it time to stop
+
         let kick_config = workflow::KickConfig::new(
             decentralized_party_id,
             participant_id,
@@ -323,6 +324,13 @@ pub async fn start_kick(
 
         let result =
             workflow::start_node(config, workflow::WorkflowType::Kick, Some(kick_config)).await;
+
+        // Resume the heartbeat listener
+        {
+            let mut control = listener_control.write().await;
+            control.should_pause = false;
+            control.notify.notify_one();
+        }
 
         let mut status = kick_state_clone.status.write().await;
         let mut error = kick_state_clone.error.write().await;
@@ -376,9 +384,9 @@ impl KickWorkflowState {
 /// Check if Noise keys exist for this node
 #[get("/keys/status")]
 pub async fn get_key_status(data: web::Data<AppState>) -> impl Responder {
-    let key_file = &data.config.node.static_key_file;
+    let key_file = data.config.key_file_path();
 
-    match NoiseKeypair::from_file(key_file).await {
+    match NoiseKeypair::from_file(&key_file).await {
         Ok(keypair) => HttpResponse::Ok().json(KeyStatusResponse {
             has_keys: true,
             public_key: Some(keypair.public_key_hex()),
@@ -393,20 +401,20 @@ pub async fn get_key_status(data: web::Data<AppState>) -> impl Responder {
 /// Generate new Noise keypair for this node
 #[post("/keys/generate")]
 pub async fn generate_keys(data: web::Data<AppState>) -> impl Responder {
-    let key_file = &data.config.node.static_key_file;
+    let key_file = data.config.key_file_path();
 
     // Check if keys already exist
-    if NoiseKeypair::from_file(key_file).await.is_ok() {
+    if NoiseKeypair::from_file(&key_file).await.is_ok() {
         return HttpResponse::Conflict().json(serde_json::json!({
             "error": "Keys already exist. Delete the existing key file first if you want to regenerate."
         }));
     }
 
     // Generate new keypair
-    match NoiseKeypair::generate().save_to_file(key_file).await {
+    match NoiseKeypair::generate().save_to_file(&key_file).await {
         Ok(()) => {
             // Read back to get public key
-            match NoiseKeypair::from_file(key_file).await {
+            match NoiseKeypair::from_file(&key_file).await {
                 Ok(keypair) => HttpResponse::Ok().json(KeygenResponse {
                     success: true,
                     public_key: keypair.public_key_hex(),
@@ -422,6 +430,103 @@ pub async fn generate_keys(data: web::Data<AppState>) -> impl Responder {
             HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": format!("Failed to generate keys: {e}")
             }))
+        }
+    }
+}
+
+/// Start an onboarding workflow to create a new decentralized party
+#[post("/onboarding")]
+pub async fn start_onboarding(
+    data: web::Data<AppState>,
+    onboarding_state: web::Data<Arc<OnboardingWorkflowState>>,
+) -> impl Responder {
+    // Check if an onboarding is already in progress
+    {
+        let status = onboarding_state.status.read().await;
+        if *status == OnboardingStatus::InProgress {
+            return HttpResponse::Conflict().json(serde_json::json!({
+                "error": "An onboarding workflow is already in progress"
+            }));
+        }
+    }
+
+    // Update status to in progress
+    {
+        let mut status = onboarding_state.status.write().await;
+        *status = OnboardingStatus::InProgress;
+        let mut error = onboarding_state.error.write().await;
+        *error = None;
+    }
+
+    // Spawn the onboarding workflow in the background
+    let config = data.config.clone();
+    let onboarding_state_clone = onboarding_state.get_ref().clone();
+    let listener_control = data.noise_listener_control.clone();
+
+    tokio::spawn(async move {
+        // Pause the heartbeat listener
+        {
+            let mut control = listener_control.write().await;
+            control.should_pause = true;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await; // Give it time to stop
+
+        let result = workflow::start_node(config, workflow::WorkflowType::Onboarding, None).await;
+
+        // Resume the heartbeat listener
+        {
+            let mut control = listener_control.write().await;
+            control.should_pause = false;
+            control.notify.notify_one();
+        }
+
+        let mut status = onboarding_state_clone.status.write().await;
+        let mut error = onboarding_state_clone.error.write().await;
+
+        match result {
+            Ok(()) => {
+                *status = OnboardingStatus::Completed;
+                tracing::info!("Onboarding workflow completed successfully");
+            }
+            Err(e) => {
+                *status = OnboardingStatus::Failed;
+                *error = Some(format!("{e}"));
+                tracing::error!("Onboarding workflow failed: {e}");
+            }
+        }
+    });
+
+    HttpResponse::Accepted().json(OnboardingResponse {
+        status: OnboardingStatus::InProgress,
+        message: "Onboarding workflow started".to_string(),
+    })
+}
+
+/// Get the current status of the onboarding workflow
+#[get("/onboarding/status")]
+pub async fn get_onboarding_status(
+    onboarding_state: web::Data<Arc<OnboardingWorkflowState>>,
+) -> impl Responder {
+    let status = onboarding_state.status.read().await;
+    let error = onboarding_state.error.read().await;
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "status": *status,
+        "error": *error,
+    }))
+}
+
+/// State for tracking onboarding workflow
+pub struct OnboardingWorkflowState {
+    pub status: tokio::sync::RwLock<OnboardingStatus>,
+    pub error: tokio::sync::RwLock<Option<String>>,
+}
+
+impl OnboardingWorkflowState {
+    pub fn new() -> Self {
+        Self {
+            status: tokio::sync::RwLock::new(OnboardingStatus::Idle),
+            error: tokio::sync::RwLock::new(None),
         }
     }
 }

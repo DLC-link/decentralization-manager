@@ -1,6 +1,12 @@
 use std::path::PathBuf;
 
-use crate::error::Result;
+use crate::{
+    consts::{
+        DNS_PROPOSALS_DIR, DNS_SUBMISSION_DIR, FINAL_PROPOSALS_SUBMISSION_DIR, PARTICIPANT_IDS_DIR,
+        PARTICIPANT_KEYS_DIR, P2P_PROPOSALS_DIR, SIGNED_PROPOSALS_DIR, WORKFLOW_DATA_DIR,
+    },
+    error::Result,
+};
 
 /// Onboarding workflow directory structure
 #[derive(Clone, Debug)]
@@ -19,20 +25,24 @@ pub struct OnboardingDirs {
 impl OnboardingDirs {
     /// Create new OnboardingDirs with default paths
     pub fn new() -> Self {
-        let workflow_dir = PathBuf::from("./workflow-data");
-        let dns_submission_dir = workflow_dir.join("dns-submission");
-        let final_proposals_dir = workflow_dir.join("final-proposals-submission");
+        Self::with_base(PathBuf::from(format!("./{WORKFLOW_DATA_DIR}")))
+    }
+
+    /// Create new OnboardingDirs with a custom base directory
+    pub fn with_base(workflow_dir: PathBuf) -> Self {
+        let dns_submission_dir = workflow_dir.join(DNS_SUBMISSION_DIR);
+        let final_proposals_dir = workflow_dir.join(FINAL_PROPOSALS_SUBMISSION_DIR);
 
         Self {
             workflow_dir: workflow_dir.clone(),
-            keys_dir: workflow_dir.join("participant-keys"),
-            ids_dir: workflow_dir.join("participant-ids"),
-            dns_proposals_dir: workflow_dir.join("dns-proposals"),
+            keys_dir: workflow_dir.join(PARTICIPANT_KEYS_DIR),
+            ids_dir: workflow_dir.join(PARTICIPANT_IDS_DIR),
+            dns_proposals_dir: workflow_dir.join(DNS_PROPOSALS_DIR),
             dns_submission_dir: dns_submission_dir.clone(),
-            dns_signed_dir: dns_submission_dir.join("signed-proposals"),
-            p2p_proposals_dir: workflow_dir.join("p2p-proposals"),
+            dns_signed_dir: dns_submission_dir.join(SIGNED_PROPOSALS_DIR),
+            p2p_proposals_dir: workflow_dir.join(P2P_PROPOSALS_DIR),
             final_proposals_dir: final_proposals_dir.clone(),
-            final_signed_dir: final_proposals_dir.join("signed-proposals"),
+            final_signed_dir: final_proposals_dir.join(SIGNED_PROPOSALS_DIR),
         }
     }
 

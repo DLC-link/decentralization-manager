@@ -1,6 +1,12 @@
 use std::path::PathBuf;
 
-use crate::error::Result;
+use crate::{
+    consts::{
+        CURRENT_CONFIG_DIR, KICK_PROPOSALS_DIR, KICK_SIGNED_DIR, PARTICIPANT_IDS_DIR,
+        WORKFLOW_DATA_DIR,
+    },
+    error::Result,
+};
 
 /// Kick workflow directory structure
 #[derive(Clone, Debug)]
@@ -15,14 +21,17 @@ pub struct KickDirs {
 impl KickDirs {
     /// Create new KickDirs with default paths
     pub fn new() -> Self {
-        let workflow_dir = PathBuf::from("./workflow-data");
+        Self::with_base(PathBuf::from(format!("./{WORKFLOW_DATA_DIR}")))
+    }
 
+    /// Create new KickDirs with a custom base directory
+    pub fn with_base(workflow_dir: PathBuf) -> Self {
         Self {
             workflow_dir: workflow_dir.clone(),
-            kick_config_dir: workflow_dir.join("current-config"),
-            kick_proposals_dir: workflow_dir.join("kick-proposals"),
-            kick_signed_dir: workflow_dir.join("kick-signed"),
-            ids_dir: workflow_dir.join("participant-ids"),
+            kick_config_dir: workflow_dir.join(CURRENT_CONFIG_DIR),
+            kick_proposals_dir: workflow_dir.join(KICK_PROPOSALS_DIR),
+            kick_signed_dir: workflow_dir.join(KICK_SIGNED_DIR),
+            ids_dir: workflow_dir.join(PARTICIPANT_IDS_DIR),
         }
     }
 

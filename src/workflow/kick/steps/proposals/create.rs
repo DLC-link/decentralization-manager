@@ -13,7 +13,11 @@ use canton_proto_rs::com::digitalasset::canton::{
 
 use crate::{
     config::{NetworkConfig, NodeConfig},
-    consts::NAMESPACE_DEF_FILENAME,
+    consts::{
+        DNS_KICK_PROTO_FILENAME, KICK_TARGET_FILENAME, NAMESPACE_DEF_FILENAME,
+        NEW_NAMESPACE_DEF_FILENAME, NEW_THRESHOLD_FILENAME, PARTY_ID_FILENAME,
+        P2P_KICK_PROTO_FILENAME,
+    },
     error::Result,
     utils,
     workflow::kick::{KickConfig, KickDirs},
@@ -49,7 +53,7 @@ pub async fn create_proposals(
     );
 
     // Read kick target
-    let kick_target_file = dirs.kick_config_dir.join("kick-target");
+    let kick_target_file = dirs.kick_config_dir.join(KICK_TARGET_FILENAME);
     let kick_target = fs::read_to_string(&kick_target_file)
         .await?
         .trim()
@@ -57,7 +61,7 @@ pub async fn create_proposals(
     tracing::info!("Kick target: {kick_target}");
 
     // Read new threshold
-    let threshold_file = dirs.kick_config_dir.join("new-threshold");
+    let threshold_file = dirs.kick_config_dir.join(NEW_THRESHOLD_FILENAME);
     let new_threshold: i32 = fs::read_to_string(&threshold_file)
         .await?
         .trim()
@@ -195,14 +199,14 @@ pub async fn create_proposals(
     // Save proposals to files
     fs::create_dir_all(&dirs.kick_proposals_dir).await?;
 
-    let dns_file = dirs.kick_proposals_dir.join("dns_kick_proto.bin");
+    let dns_file = dirs.kick_proposals_dir.join(DNS_KICK_PROTO_FILENAME);
     tracing::info!(
         "Saving DNS kick proposal to {path}",
         path = dns_file.display()
     );
     utils::write_message_to_file(&dns_transaction, &dns_file).await?;
 
-    let p2p_file = dirs.kick_proposals_dir.join("p2p_kick_proto.bin");
+    let p2p_file = dirs.kick_proposals_dir.join(P2P_KICK_PROTO_FILENAME);
     tracing::info!(
         "Saving P2P kick proposal to {path}",
         path = p2p_file.display()
@@ -210,7 +214,7 @@ pub async fn create_proposals(
     utils::write_message_to_file(&p2p_transaction, &p2p_file).await?;
 
     // Save new namespace definition
-    let new_namespace_file = dirs.kick_proposals_dir.join("newNamespaceDef.bin");
+    let new_namespace_file = dirs.kick_proposals_dir.join(NEW_NAMESPACE_DEF_FILENAME);
     tracing::info!(
         "Saving new namespace definition to {path}",
         path = new_namespace_file.display()
@@ -218,7 +222,7 @@ pub async fn create_proposals(
     utils::write_message_to_file(&new_namespace_def, &new_namespace_file).await?;
 
     // Save party ID
-    let party_id_file = dirs.kick_proposals_dir.join("partyId");
+    let party_id_file = dirs.kick_proposals_dir.join(PARTY_ID_FILENAME);
     fs::write(&party_id_file, format!("{party_id}\n")).await?;
 
     tracing::info!("Kick proposals created and saved successfully");

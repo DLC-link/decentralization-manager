@@ -132,13 +132,16 @@ async fn start_attestor(node_config: NodeConfig, network_config: NetworkConfig) 
     let client = NoiseClient::new(node_config.clone(), network_config.clone()).await?;
 
     // Initialize directory paths for all workflows
-    let onboarding_dirs = onboarding::OnboardingDirs::new();
+    let onboarding_dirs = onboarding::OnboardingDirs::with_base(node_config.workflow_data_dir());
     onboarding_dirs.create_dirs().await?;
 
-    let contracts_dirs = contracts::ContractsDirs::new();
+    let contracts_dirs = contracts::ContractsDirs::with_base(
+        node_config.workflow_data_dir(),
+        node_config.dars_dir(),
+    );
     contracts_dirs.create_dirs().await?;
 
-    let kick_dirs = kick::KickDirs::new();
+    let kick_dirs = kick::KickDirs::with_base(node_config.workflow_data_dir());
     kick_dirs.create_dirs().await?;
 
     tracing::info!("Noise client initialized, entering command polling loop");

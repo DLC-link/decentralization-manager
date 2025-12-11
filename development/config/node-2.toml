@@ -4,7 +4,6 @@ network_config = "network.toml"
 
 [node]
 node_id = "app-provider"
-static_key_file = "keys/participant-2.key"
 listen_address = "0.0.0.0"
 
 [canton]

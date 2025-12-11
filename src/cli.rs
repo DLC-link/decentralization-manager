@@ -18,18 +18,8 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Run the onboarding workflow (create decentralized party)
-    Onboarding,
-
     /// Run the contracts workflow (upload DARs and create contracts)
     Contracts,
-
-    /// Query decentralized parties from Canton topology
-    QueryParties {
-        /// Party ID prefix (e.g., "cbtc-network")
-        #[arg(long, value_name = "PREFIX")]
-        party_id_prefix: String,
-    },
 
     /// Start the HTTP server for querying decentralized parties
     Serve {

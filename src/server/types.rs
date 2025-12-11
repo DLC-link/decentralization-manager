@@ -120,3 +120,20 @@ pub struct KeygenResponse {
     pub public_key: String,
     pub message: String,
 }
+
+/// Status of an onboarding workflow
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OnboardingStatus {
+    Idle,
+    InProgress,
+    Completed,
+    Failed,
+}
+
+/// Response for onboarding workflow initiation
+#[derive(Serialize)]
+pub struct OnboardingResponse {
+    pub status: OnboardingStatus,
+    pub message: String,
+}

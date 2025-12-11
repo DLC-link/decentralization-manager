@@ -85,6 +85,11 @@ const getDesignTokens = (mode: "light" | "dark") => ({
     borderRadius: 12,
   },
   components: {
+    MuiDialog: {
+      defaultProps: {
+        disableScrollLock: true,
+      },
+    },
     MuiCard: {
       styleOverrides: {
         root: {

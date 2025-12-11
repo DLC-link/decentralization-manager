@@ -9,7 +9,10 @@ use canton_proto_rs::com::digitalasset::canton::{
 };
 
 use crate::{
-    config::NodeConfig, consts::SIGNED_KICK_PROPOSALS_PREFIX, error::Result, utils,
+    config::NodeConfig,
+    consts::{DNS_KICK_PROTO_FILENAME, P2P_KICK_PROTO_FILENAME, SIGNED_KICK_PROPOSALS_PREFIX},
+    error::Result,
+    utils,
     workflow::kick::KickDirs,
 };
 
@@ -26,7 +29,7 @@ pub async fn sign_proposals(config: &NodeConfig, dirs: &KickDirs) -> Result {
     tracing::debug!("Using synchronizer ID: {synchronizer_id}");
 
     // Read DNS kick proposal
-    let dns_file = dirs.kick_proposals_dir.join("dns_kick_proto.bin");
+    let dns_file = dirs.kick_proposals_dir.join(DNS_KICK_PROTO_FILENAME);
     tracing::info!(
         "Reading DNS kick proposal from {path}",
         path = dns_file.display()
@@ -35,7 +38,7 @@ pub async fn sign_proposals(config: &NodeConfig, dirs: &KickDirs) -> Result {
         utils::read_first_message_from_file(&dns_file).await?;
 
     // Read P2P kick proposal
-    let p2p_file = dirs.kick_proposals_dir.join("p2p_kick_proto.bin");
+    let p2p_file = dirs.kick_proposals_dir.join(P2P_KICK_PROTO_FILENAME);
     tracing::info!(
         "Reading P2P kick proposal from {path}",
         path = p2p_file.display()

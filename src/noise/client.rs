@@ -30,7 +30,7 @@ impl NoiseClient {
         network_config: NetworkConfig,
     ) -> Result<Self, NoiseError> {
         // Load keypair
-        let keypair = NoiseKeypair::from_file(&node_config.node.static_key_file).await?;
+        let keypair = NoiseKeypair::from_file(&node_config.key_file_path()).await?;
 
         // Get coordinator info
         let coordinator = network_config

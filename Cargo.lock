@@ -507,7 +507,7 @@ dependencies = [
 [[package]]
 name = "canton-proto-rs"
 version = "3.4.0"
-source = "git+ssh://git@github.com/DLC-link/canton-lib?branch=feat%2Fprotos#2c5f78357c37bd69d78ce38e016e625059bdb844"
+source = "git+ssh://git@github.com/DLC-link/canton-lib?branch=main#5db6bd659f2da803d61f1674c6d3eb2986498416"
 dependencies = [
  "prost",
  "prost-types",

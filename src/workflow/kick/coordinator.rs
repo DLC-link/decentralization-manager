@@ -33,7 +33,7 @@ pub async fn start_coordinator(
     let workflow_state = server.get_workflow_state();
     let server = Arc::new(server);
 
-    let dirs = KickDirs::new();
+    let dirs = KickDirs::with_base(node_config.workflow_data_dir());
     dirs.create_dirs().await?;
 
     let coordinator_workflow = {

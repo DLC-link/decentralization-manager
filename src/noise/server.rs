@@ -41,7 +41,7 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         initial_step: S,
         exclude_participants: Option<Vec<String>>,
     ) -> Result<Self, NoiseError> {
-        let keypair = NoiseKeypair::from_file(&node_config.node.static_key_file).await?;
+        let keypair = NoiseKeypair::from_file(&node_config.key_file_path()).await?;
 
         let excluded: HashSet<String> = exclude_participants
             .unwrap_or_default()

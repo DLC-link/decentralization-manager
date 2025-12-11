@@ -8,10 +8,6 @@ network_config = "network.toml"
 # Must match one of the participant IDs in network.toml
 node_id = "attestor-1"
 
-# Path to this node's static private key
-# Generate with: cargo run -- keygen -o keys/my_static.key
-static_key_file = "keys/attestor-1.key"
-
 # Override listen address (default: 0.0.0.0)
 listen_address = "0.0.0.0"
 

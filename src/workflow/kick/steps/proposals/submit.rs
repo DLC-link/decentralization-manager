@@ -13,8 +13,9 @@ use canton_proto_rs::com::digitalasset::canton::{
 use crate::{
     config::{NetworkConfig, NodeConfig},
     consts::{
-        SIGNED_KICK_PROPOSALS_PREFIX, TOPOLOGY_PROPAGATION_DELAY_SECS, TOPOLOGY_RETRY_DELAY_SECS,
-        TOPOLOGY_RETRY_MAX_ATTEMPTS,
+        DNS_KICK_PROTO_FILENAME, NEW_NAMESPACE_DEF_FILENAME, PARTY_ID_FILENAME,
+        P2P_KICK_PROTO_FILENAME, SIGNED_KICK_PROPOSALS_PREFIX, TOPOLOGY_PROPAGATION_DELAY_SECS,
+        TOPOLOGY_RETRY_DELAY_SECS, TOPOLOGY_RETRY_MAX_ATTEMPTS,
     },
     error::Result,
     utils,
@@ -35,7 +36,7 @@ pub async fn submit_kick(
     tracing::debug!("Using synchronizer ID: {synchronizer_id}");
 
     // Read original DNS proposal
-    let dns_file = dirs.kick_proposals_dir.join("dns_kick_proto.bin");
+    let dns_file = dirs.kick_proposals_dir.join(DNS_KICK_PROTO_FILENAME);
     tracing::info!(
         "Reading original DNS proposal from {path}",
         path = dns_file.display()
@@ -44,7 +45,7 @@ pub async fn submit_kick(
         utils::read_first_message_from_file(&dns_file).await?;
 
     // Read original P2P proposal
-    let p2p_file = dirs.kick_proposals_dir.join("p2p_kick_proto.bin");
+    let p2p_file = dirs.kick_proposals_dir.join(P2P_KICK_PROTO_FILENAME);
     tracing::info!(
         "Reading original P2P proposal from {path}",
         path = p2p_file.display()
@@ -97,7 +98,7 @@ pub async fn submit_kick(
     );
 
     // Read new namespace definition for validation
-    let new_namespace_file = dirs.kick_proposals_dir.join("newNamespaceDef.bin");
+    let new_namespace_file = dirs.kick_proposals_dir.join(NEW_NAMESPACE_DEF_FILENAME);
     tracing::info!(
         "Reading new namespace definition from {path}",
         path = new_namespace_file.display()
@@ -106,7 +107,7 @@ pub async fn submit_kick(
         utils::read_first_message_from_file(&new_namespace_file).await?;
 
     // Read party ID
-    let party_id_file = dirs.kick_proposals_dir.join("partyId");
+    let party_id_file = dirs.kick_proposals_dir.join(PARTY_ID_FILENAME);
     let party_id = tokio::fs::read_to_string(&party_id_file)
         .await?
         .trim()

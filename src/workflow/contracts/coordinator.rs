@@ -27,7 +27,7 @@ pub async fn start_coordinator(node_config: NodeConfig, network_config: NetworkC
     .await?;
     let server = Arc::new(server);
 
-    let dirs = ContractsDirs::new();
+    let dirs = ContractsDirs::with_base(node_config.workflow_data_dir(), node_config.dars_dir());
     dirs.create_dirs().await?;
 
     tracing::info!("Noise server initialized, listening for connections");
