@@ -1,10 +1,16 @@
 use std::{collections::HashSet, sync::Arc};
 
+use anyhow::Context;
+
 use crate::{
     config::{NetworkConfig, NodeConfig},
-    consts::{SIGNED_DNS_PROPOSAL_PREFIX, SIGNED_P2P_PROPOSALS_PREFIX},
+    consts::{
+        ATTESTOR_KEYS_PREFIX, PARTICIPANT_ID_PREFIX, SIGNED_DNS_PROPOSAL_PREFIX,
+        SIGNED_P2P_PROPOSALS_PREFIX,
+    },
     error::Result,
     noise::server::NoiseServer,
+    utils,
     workflow::state::WorkflowState,
 };
 
@@ -12,6 +18,47 @@ use super::{
     OnboardingDirs, OnboardingStep,
     steps::{create_proposals, generate_keys, submit_dns_proposals, submit_final_proposals},
 };
+
+/// Decode combined keys+id payload and save to separate directories
+async fn save_keys_and_ids<S: crate::workflow::state::WorkflowStep + 'static>(
+    workflow_state: &WorkflowState<S>,
+    dirs: &OnboardingDirs,
+) -> Result {
+    let attestor_data = workflow_state.get_all_attestor_data().await;
+
+    for (attestor_id, data) in attestor_data {
+        let items = utils::decode_length_prefixed(&data, 2)
+            .with_context(|| format!("Invalid payload from {attestor_id}"))?;
+
+        let keys_data = &items[0];
+        let id_data = &items[1];
+
+        tracing::debug!(
+            "Received from {attestor_id}: {keys_len} bytes keys + {id_len} bytes participant ID",
+            keys_len = keys_data.len(),
+            id_len = id_data.len()
+        );
+
+        // Save keys file
+        let keys_path = dirs
+            .keys_dir
+            .join(format!("{ATTESTOR_KEYS_PREFIX}-{attestor_id}.bin"));
+        tokio::fs::write(&keys_path, keys_data)
+            .await
+            .with_context(|| format!("Failed to write keys to '{path}'", path = keys_path.display()))?;
+
+        // Save participant ID file
+        let id_path = dirs
+            .ids_dir
+            .join(format!("{PARTICIPANT_ID_PREFIX}-{attestor_id}.bin"));
+        tokio::fs::write(&id_path, id_data)
+            .await
+            .with_context(|| format!("Failed to write participant ID to '{path}'", path = id_path.display()))?;
+    }
+
+    workflow_state.clear_attestor_data().await;
+    Ok(())
+}
 
 pub async fn start_coordinator(node_config: NodeConfig, network_config: NetworkConfig) -> Result {
     tracing::info!("Initializing Noise server...");
@@ -77,7 +124,15 @@ async fn run_workflow(
             }
             OnboardingStep::CreateProposals => {
                 tracing::info!("Coordinator executing: Create proposals");
+                // Save attestor keys and participant IDs uploaded during GenerateKeys step
+                save_keys_and_ids(&workflow_state, &dirs).await?;
                 create_proposals(&node_config, &dirs, &network_config).await?;
+
+                // Load DNS proposal to send to attestors with SignDns command
+                let dns_proposal_path = dirs.dns_proposals_dir.join("dns_proto.bin");
+                let dns_proposal_data = tokio::fs::read(&dns_proposal_path).await?;
+                workflow_state.set_command_payload(dns_proposal_data).await;
+
                 workflow_state.advance_step().await;
             }
             OnboardingStep::SignDns => {
@@ -92,6 +147,12 @@ async fn run_workflow(
                 )
                 .await?;
                 submit_dns_proposals(&node_config, &dirs).await?;
+
+                // Load P2P proposal to send to attestors with SignP2p command
+                let p2p_proposal_path = dirs.p2p_proposals_dir.join("p2p_proto.bin");
+                let p2p_proposal_data = tokio::fs::read(&p2p_proposal_path).await?;
+                workflow_state.set_command_payload(p2p_proposal_data).await;
+
                 workflow_state.advance_step().await;
             }
             OnboardingStep::SignP2p => {

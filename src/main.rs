@@ -24,7 +24,7 @@ async fn main() -> Result {
         .config
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("Configuration file is required. Use -c <config-file>"))?;
-    tracing::info!("Loading configuration from: {}", path.display());
+    tracing::info!("Loading configuration from: {path}", path = path.display());
     let config = NodeConfig::from_file(path).await?;
 
     match args.command {

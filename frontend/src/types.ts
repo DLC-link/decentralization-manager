@@ -69,12 +69,20 @@ export interface KickRequest {
   namespace_fingerprint: string;
 }
 
-export type KickStatus = "idle" | "inprogress" | "completed" | "failed";
+export type WorkflowProgress = "idle" | "inprogress" | "completed" | "failed";
 
-export interface KickStatusResponse {
-  status: KickStatus;
+// Type aliases for backwards compatibility
+export type KickStatus = WorkflowProgress;
+export type OnboardingStatus = WorkflowProgress;
+
+export interface WorkflowStatusResponse {
+  status: WorkflowProgress;
   error?: string;
 }
+
+// Type aliases for backwards compatibility
+export type KickStatusResponse = WorkflowStatusResponse;
+export type OnboardingStatusResponse = WorkflowStatusResponse;
 
 export interface KeyStatusResponse {
   has_keys: boolean;
@@ -85,11 +93,4 @@ export interface KeygenResponse {
   success: boolean;
   public_key: string;
   message: string;
-}
-
-export type OnboardingStatus = "idle" | "inprogress" | "completed" | "failed";
-
-export interface OnboardingStatusResponse {
-  status: OnboardingStatus;
-  error?: string;
 }

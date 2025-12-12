@@ -6,6 +6,7 @@ use crate::{
         PARTICIPANT_KEYS_DIR, P2P_PROPOSALS_DIR, SIGNED_PROPOSALS_DIR, WORKFLOW_DATA_DIR,
     },
     error::Result,
+    utils,
 };
 
 /// Onboarding workflow directory structure
@@ -48,18 +49,14 @@ impl OnboardingDirs {
 
     /// Create required directories that don't exist
     pub async fn create_dirs(&self) -> Result {
-        use anyhow::Context;
-
-        tokio::fs::create_dir_all(&self.workflow_dir)
-            .await
-            .with_context(|| format!("Failed to create dir '{}'", self.workflow_dir.display()))?;
-        tokio::fs::create_dir_all(&self.keys_dir)
-            .await
-            .with_context(|| format!("Failed to create dir '{}'", self.keys_dir.display()))?;
-        tokio::fs::create_dir_all(&self.ids_dir)
-            .await
-            .with_context(|| format!("Failed to create dir '{}'", self.ids_dir.display()))?;
-        Ok(())
+        utils::create_directories(&[
+            &self.workflow_dir,
+            &self.keys_dir,
+            &self.ids_dir,
+            &self.dns_signed_dir,
+            &self.final_signed_dir,
+        ])
+        .await
     }
 }
 

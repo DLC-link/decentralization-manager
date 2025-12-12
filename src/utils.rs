@@ -4,6 +4,7 @@ use bytes::{Buf, BufMut, BytesMut};
 use prost::Message;
 use tokio::fs;
 
+use anyhow::Context;
 use canton_proto_rs::com::{
     daml::ledger::api::v2::{
         admin::{
@@ -76,6 +77,30 @@ pub async fn read_first_message_from_file<M: Message + Default>(
         .into_iter()
         .next()
         .ok_or_else(|| anyhow::anyhow!("File contains no messages"))
+}
+
+/// Read the first protobuf message from a byte slice
+///
+/// This is useful when receiving message data over the network instead of from a file.
+pub fn read_first_message_from_bytes<M: Message + Default>(data: &[u8]) -> Result<M> {
+    let mut cursor = data;
+
+    if !cursor.has_remaining() {
+        anyhow::bail!("Data is empty, no messages to read");
+    }
+
+    // Read the length prefix (varint)
+    let len = prost::encoding::decode_varint(&mut cursor)? as usize;
+
+    // Read the message bytes
+    if cursor.remaining() < len {
+        let remaining = cursor.remaining();
+        anyhow::bail!("Incomplete message: expected {len} bytes, but only {remaining} remaining");
+    }
+
+    let message_bytes = &cursor[..len];
+    let message = M::decode(message_bytes)?;
+    Ok(message)
 }
 
 /// Write multiple protobuf messages to a file
@@ -407,6 +432,73 @@ define_client_creator!(create_user_client, UserManagementServiceClient);
 define_client_creator!(create_submission_client, InteractiveSubmissionServiceClient);
 define_client_creator!(create_state_client, StateServiceClient);
 
+/// Create a directory with context for error messages
+pub async fn create_directory(path: &Path) -> Result {
+    fs::create_dir_all(path)
+        .await
+        .with_context(|| format!("Failed to create dir '{path}'", path = path.display()))
+}
+
+/// Create multiple directories with context for error messages
+pub async fn create_directories(paths: &[&Path]) -> Result {
+    for path in paths {
+        create_directory(path).await?;
+    }
+    Ok(())
+}
+
+/// Encode multiple byte slices into a length-prefixed payload
+///
+/// Each slice is prefixed with a 4-byte big-endian length.
+/// This is used for combining multiple data items into a single payload
+/// for transmission over the noise protocol.
+pub fn encode_length_prefixed(items: &[&[u8]]) -> Vec<u8> {
+    let total_len: usize = items.iter().map(|item| 4 + item.len()).sum();
+    let mut payload = Vec::with_capacity(total_len);
+
+    for item in items {
+        payload.extend_from_slice(&(item.len() as u32).to_be_bytes());
+        payload.extend_from_slice(item);
+    }
+
+    payload
+}
+
+/// Decode a length-prefixed payload into multiple byte vectors
+///
+/// Each item is prefixed with a 4-byte big-endian length.
+/// Returns the requested number of items or an error if the data is malformed.
+pub fn decode_length_prefixed(data: &[u8], expected_count: usize) -> Result<Vec<Vec<u8>>> {
+    let mut items = Vec::with_capacity(expected_count);
+    let mut offset = 0;
+
+    for i in 0..expected_count {
+        if offset + 4 > data.len() {
+            anyhow::bail!(
+                "Invalid payload: expected length prefix at offset {offset}, but only {len} bytes available (item {i}/{expected_count})",
+                len = data.len()
+            );
+        }
+
+        let item_len =
+            u32::from_be_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]])
+                as usize;
+        offset += 4;
+
+        if offset + item_len > data.len() {
+            anyhow::bail!(
+                "Invalid payload: expected {item_len} bytes at offset {offset}, but only {remaining} remaining (item {i}/{expected_count})",
+                remaining = data.len() - offset
+            );
+        }
+
+        items.push(data[offset..offset + item_len].to_vec());
+        offset += item_len;
+    }
+
+    Ok(items)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -466,5 +558,51 @@ mod tests {
             assert_eq!(original.nanos, read.nanos);
         }
         Ok(())
+    }
+
+    #[test]
+    fn test_encode_decode_length_prefixed() -> Result {
+        let item1 = b"hello";
+        let item2 = b"world";
+        let item3 = b"test data with more bytes";
+
+        let encoded = encode_length_prefixed(&[item1, item2, item3]);
+        let decoded = decode_length_prefixed(&encoded, 3)?;
+
+        assert_eq!(decoded.len(), 3);
+        assert_eq!(decoded[0], item1);
+        assert_eq!(decoded[1], item2);
+        assert_eq!(decoded[2], item3);
+        Ok(())
+    }
+
+    #[test]
+    fn test_encode_decode_empty_items() -> Result {
+        let empty: &[u8] = b"";
+        let non_empty = b"data";
+
+        let encoded = encode_length_prefixed(&[empty, non_empty]);
+        let decoded = decode_length_prefixed(&encoded, 2)?;
+
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded[0], empty);
+        assert_eq!(decoded[1], non_empty);
+        Ok(())
+    }
+
+    #[test]
+    fn test_decode_invalid_payload_short() {
+        let short_data = [0u8; 2]; // Less than 4 bytes
+        let result = decode_length_prefixed(&short_data, 1);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_decode_invalid_payload_truncated() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&10u32.to_be_bytes()); // Says 10 bytes
+        data.extend_from_slice(b"short"); // Only 5 bytes
+        let result = decode_length_prefixed(&data, 1);
+        assert!(result.is_err());
     }
 }

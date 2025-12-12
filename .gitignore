@@ -3,5 +3,5 @@ target/
 # Generated keys and configuration
 
 /development/data/
-
+/configs
 .DS_Store

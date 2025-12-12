@@ -157,7 +157,7 @@ async fn run_heartbeat(
     };
 
     let listen_addr = match network_config.get_participant(&config.node.node_id) {
-        Some(p) => format!("{}:{}", config.node.listen_address, p.port),
+        Some(p) => format!("{addr}:{port}", addr = config.node.listen_address, port = p.port),
         None => {
             tracing::error!("Current node not found in network config");
             return;

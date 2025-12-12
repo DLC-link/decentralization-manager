@@ -208,8 +208,14 @@ impl NoiseClient {
         .await
     }
 
-    /// Poll coordinator for next command
+    /// Poll coordinator for next command, returning just the command type
     pub async fn get_next_command(&self) -> Result<MessageType, NoiseError> {
+        let msg = self.get_next_command_with_payload().await?;
+        Ok(msg.msg_type)
+    }
+
+    /// Poll coordinator for next command, returning full message with payload
+    pub async fn get_next_command_with_payload(&self) -> Result<Message, NoiseError> {
         tracing::debug!("Polling coordinator for next command");
 
         let message = Message::new_empty(MessageType::GetNextCommand);
@@ -218,6 +224,6 @@ impl NoiseClient {
         // Parse response
         let resp_msg = Message::from_bytes(&response).map_err(|_| NoiseError::InvalidMessage)?;
 
-        Ok(resp_msg.msg_type)
+        Ok(resp_msg)
     }
 }

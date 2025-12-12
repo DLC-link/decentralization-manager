@@ -56,7 +56,7 @@ pub async fn get_contracts(config: &NodeConfig, party_id: &str) -> Result<Vec<Co
             let template_id = created
                 .template_id
                 .as_ref()
-                .map(|t| format!("{}:{}", t.module_name, t.entity_name))
+                .map(|t| format!("{module}:{entity}", module = t.module_name, entity = t.entity_name))
                 .unwrap_or_default();
             let package_id = created
                 .template_id

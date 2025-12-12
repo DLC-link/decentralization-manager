@@ -6,6 +6,7 @@ use crate::{
         WORKFLOW_DATA_DIR,
     },
     error::Result,
+    utils,
 };
 
 /// Kick workflow directory structure
@@ -37,21 +38,13 @@ impl KickDirs {
 
     /// Create required directories that don't exist
     pub async fn create_dirs(&self) -> Result {
-        use anyhow::Context;
-
-        tokio::fs::create_dir_all(&self.workflow_dir)
-            .await
-            .with_context(|| format!("Failed to create dir '{}'", self.workflow_dir.display()))?;
-        tokio::fs::create_dir_all(&self.kick_config_dir)
-            .await
-            .with_context(|| format!("Failed to create dir '{}'", self.kick_config_dir.display()))?;
-        tokio::fs::create_dir_all(&self.kick_proposals_dir)
-            .await
-            .with_context(|| format!("Failed to create dir '{}'", self.kick_proposals_dir.display()))?;
-        tokio::fs::create_dir_all(&self.kick_signed_dir)
-            .await
-            .with_context(|| format!("Failed to create dir '{}'", self.kick_signed_dir.display()))?;
-        Ok(())
+        utils::create_directories(&[
+            &self.workflow_dir,
+            &self.kick_config_dir,
+            &self.kick_proposals_dir,
+            &self.kick_signed_dir,
+        ])
+        .await
     }
 }
 

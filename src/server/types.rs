@@ -147,10 +147,10 @@ pub struct KickRequest {
     pub namespace_fingerprint: String,
 }
 
-/// Status of a kick workflow
+/// Progress status of a workflow (kick, onboarding, etc.)
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum KickStatus {
+pub enum WorkflowProgress {
     #[default]
     Idle,
     InProgress,
@@ -158,14 +158,22 @@ pub enum KickStatus {
     Failed,
 }
 
-impl WorkflowStatus for KickStatus {}
+impl WorkflowStatus for WorkflowProgress {}
 
-/// Response for kick workflow initiation
+/// Type aliases for backwards compatibility
+pub type KickStatus = WorkflowProgress;
+pub type OnboardingStatus = WorkflowProgress;
+
+/// Response for workflow initiation (kick, onboarding, etc.)
 #[derive(Serialize)]
-pub struct KickResponse {
-    pub status: KickStatus,
+pub struct WorkflowResponse {
+    pub status: WorkflowProgress,
     pub message: String,
 }
+
+/// Type aliases for backwards compatibility
+pub type KickResponse = WorkflowResponse;
+pub type OnboardingResponse = WorkflowResponse;
 
 /// Response for key status check
 #[derive(Serialize)]
@@ -179,25 +187,5 @@ pub struct KeyStatusResponse {
 pub struct KeygenResponse {
     pub success: bool,
     pub public_key: String,
-    pub message: String,
-}
-
-/// Status of an onboarding workflow
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum OnboardingStatus {
-    #[default]
-    Idle,
-    InProgress,
-    Completed,
-    Failed,
-}
-
-impl WorkflowStatus for OnboardingStatus {}
-
-/// Response for onboarding workflow initiation
-#[derive(Serialize)]
-pub struct OnboardingResponse {
-    pub status: OnboardingStatus,
     pub message: String,
 }

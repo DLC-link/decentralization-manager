@@ -3,6 +3,7 @@ use std::{marker::PhantomData, path::PathBuf};
 use crate::{
     consts::{DARS_DIR, DNS_SUBMISSION_DIR, PARTICIPANT_IDS_DIR, PARTICIPANT_KEYS_DIR, WORKFLOW_DATA_DIR},
     error::Result,
+    utils,
 };
 
 /// Contracts workflow directory structure
@@ -39,18 +40,7 @@ impl ContractsDirs {
 
     /// Create required directories that don't exist
     pub async fn create_dirs(&self) -> Result {
-        use anyhow::Context;
-
-        tokio::fs::create_dir_all(&self.workflow_dir)
-            .await
-            .with_context(|| format!("Failed to create dir '{}'", self.workflow_dir.display()))?;
-        tokio::fs::create_dir_all(&self.ids_dir)
-            .await
-            .with_context(|| format!("Failed to create dir '{}'", self.ids_dir.display()))?;
-        tokio::fs::create_dir_all(&self.keys_dir)
-            .await
-            .with_context(|| format!("Failed to create dir '{}'", self.keys_dir.display()))?;
-        Ok(())
+        utils::create_directories(&[&self.workflow_dir, &self.ids_dir, &self.keys_dir]).await
     }
 }
 

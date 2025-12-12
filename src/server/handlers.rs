@@ -12,6 +12,7 @@ use canton_proto_rs::com::digitalasset::canton::{
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
     },
 };
+
 use super::{
     AppState,
     queries::{get_contracts, get_party_metadata},

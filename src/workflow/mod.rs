@@ -149,11 +149,11 @@ async fn start_attestor(node_config: NodeConfig, network_config: NetworkConfig) 
     // Command polling loop
     let mut consecutive_errors = 0;
     loop {
-        // Poll coordinator for next command
-        let command = match client.get_next_command().await {
-            Ok(cmd) => {
+        // Poll coordinator for next command (with payload for commands that need data)
+        let message = match client.get_next_command_with_payload().await {
+            Ok(msg) => {
                 consecutive_errors = 0; // Reset error count on success
-                cmd
+                msg
             }
             Err(e) => {
                 consecutive_errors += 1;
@@ -175,6 +175,8 @@ async fn start_attestor(node_config: NodeConfig, network_config: NetworkConfig) 
             }
         };
 
+        let command = message.msg_type;
+        let payload = message.payload;
         tracing::info!("Received command: {command:?}");
 
         match command {
@@ -212,7 +214,13 @@ async fn start_attestor(node_config: NodeConfig, network_config: NetworkConfig) 
             }
             MessageType::SignDns => {
                 tracing::info!("Executing: Sign DNS proposal");
-                if let Err(e) = onboarding::sign_dns_proposals(&node_config, &onboarding_dirs).await
+                // Payload contains the DNS proposal from coordinator
+                if payload.is_empty() {
+                    tracing::error!("No DNS proposal payload received from coordinator");
+                    continue;
+                }
+                if let Err(e) =
+                    onboarding::sign_dns_proposals(&node_config, &onboarding_dirs, &payload).await
                 {
                     tracing::error!("Step execution failed: {e}");
                     continue;
@@ -228,7 +236,13 @@ async fn start_attestor(node_config: NodeConfig, network_config: NetworkConfig) 
             }
             MessageType::SignP2p => {
                 tracing::info!("Executing: Sign P2P proposals");
-                if let Err(e) = onboarding::sign_p2p_proposals(&node_config, &onboarding_dirs).await
+                // Payload contains the P2P proposal from coordinator
+                if payload.is_empty() {
+                    tracing::error!("No P2P proposal payload received from coordinator");
+                    continue;
+                }
+                if let Err(e) =
+                    onboarding::sign_p2p_proposals(&node_config, &onboarding_dirs, &payload).await
                 {
                     tracing::error!("Step execution failed: {e}");
                     continue;
@@ -259,7 +273,12 @@ async fn start_attestor(node_config: NodeConfig, network_config: NetworkConfig) 
             }
             MessageType::SignKick => {
                 tracing::info!("Executing: Sign kick proposals");
-                if let Err(e) = kick::sign_proposals(&node_config, &kick_dirs).await {
+                // Payload contains both DNS and P2P kick proposals from coordinator
+                if payload.is_empty() {
+                    tracing::error!("No kick proposals payload received from coordinator");
+                    continue;
+                }
+                if let Err(e) = kick::sign_proposals(&node_config, &kick_dirs, &payload).await {
                     tracing::error!("Step execution failed: {e}");
                     continue;
                 }
