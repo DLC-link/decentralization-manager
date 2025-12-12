@@ -41,7 +41,7 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &ContractsDirs) -> Resu
     tracing::info!("Signing submissions...");
 
     // Step 1: Get participant number
-    let participant_num = utils::get_participant_number(config, &dirs.ids_dir).await?;
+    let participant_num = utils::get_participant_number(config).await?;
     tracing::debug!("Determined participant number: {participant_num}");
 
     // Step 2: Load the DAML public key that was exported in step 1

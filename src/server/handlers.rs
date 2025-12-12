@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use actix_web::{HttpResponse, Responder, get, post, web};
 use canton_proto_rs::com::digitalasset::canton::{
@@ -12,19 +12,22 @@ use canton_proto_rs::com::digitalasset::canton::{
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
     },
 };
-
 use super::{
     AppState,
     queries::{get_contracts, get_party_metadata},
     types::{
-        DecentralizedPartiesResponse, DecentralizedParty, KeyStatusResponse, KeygenResponse,
-        KickRequest, KickResponse, KickStatus, OnboardingResponse, OnboardingStatus,
-        ParticipantInfo, ParticipantStatus, ParticipantsStatusResponse, Permission,
+        DecentralizedPartiesResponse, DecentralizedParty, HttpWorkflowState, KeyStatusResponse,
+        KeygenResponse, KickRequest, KickResponse, KickStatus, ListenerPauseGuard,
+        OnboardingResponse, OnboardingStatus, ParticipantInfo, ParticipantStatus,
+        ParticipantsStatusResponse, Permission,
     },
 };
 use crate::{
-    config::NodeConfig, error::Result, noise::NoiseKeypair, participant_id::CantonId, utils,
-    workflow,
+    config::NodeConfig,
+    error::Result,
+    noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
+    participant_id::CantonId,
+    utils, workflow,
 };
 
 /// Get the network configuration
@@ -307,14 +310,25 @@ pub async fn start_kick(
     let kick_state_clone = kick_state.get_ref().clone();
     let namespace_fingerprint = body.namespace_fingerprint.clone();
     let listener_control = data.noise_listener_control.clone();
+    let listener_notify = data.noise_listener_notify.clone();
 
     tokio::spawn(async move {
-        // Pause the heartbeat listener
-        {
-            let mut control = listener_control.write().await;
-            control.should_pause = true;
+        let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
+
+        // Send kick invites to all peers before starting coordinator workflow
+        let invite_result = send_kick_invites(&config, &participant_id).await;
+        if let Err(e) = invite_result {
+            tracing::error!("Failed to send kick invites: {e}");
+            guard.resume().await;
+            let mut status = kick_state_clone.status.write().await;
+            let mut error = kick_state_clone.error.write().await;
+            *status = KickStatus::Failed;
+            *error = Some(format!("Failed to send invites: {e}"));
+            return;
         }
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await; // Give it time to stop
+
+        // Give peers time to start their attestor workflows
+        tokio::time::sleep(Duration::from_secs(2)).await;
 
         let kick_config = workflow::KickConfig::new(
             decentralized_party_id,
@@ -325,12 +339,7 @@ pub async fn start_kick(
         let result =
             workflow::start_node(config, workflow::WorkflowType::Kick, Some(kick_config)).await;
 
-        // Resume the heartbeat listener
-        {
-            let mut control = listener_control.write().await;
-            control.should_pause = false;
-            control.notify.notify_one();
-        }
+        guard.resume().await;
 
         let mut status = kick_state_clone.status.write().await;
         let mut error = kick_state_clone.error.write().await;
@@ -367,19 +376,7 @@ pub async fn get_kick_status(kick_state: web::Data<Arc<KickWorkflowState>>) -> i
 }
 
 /// State for tracking kick workflow
-pub struct KickWorkflowState {
-    pub status: tokio::sync::RwLock<KickStatus>,
-    pub error: tokio::sync::RwLock<Option<String>>,
-}
-
-impl KickWorkflowState {
-    pub fn new() -> Self {
-        Self {
-            status: tokio::sync::RwLock::new(KickStatus::Idle),
-            error: tokio::sync::RwLock::new(None),
-        }
-    }
-}
+pub type KickWorkflowState = HttpWorkflowState<KickStatus>;
 
 /// Check if Noise keys exist for this node
 #[get("/keys/status")]
@@ -462,23 +459,29 @@ pub async fn start_onboarding(
     let config = data.config.clone();
     let onboarding_state_clone = onboarding_state.get_ref().clone();
     let listener_control = data.noise_listener_control.clone();
+    let listener_notify = data.noise_listener_notify.clone();
 
     tokio::spawn(async move {
-        // Pause the heartbeat listener
-        {
-            let mut control = listener_control.write().await;
-            control.should_pause = true;
+        let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
+
+        // Send invites to all peers before starting coordinator workflow
+        let invite_result = send_onboarding_invites(&config).await;
+        if let Err(e) = invite_result {
+            tracing::error!("Failed to send onboarding invites: {e}");
+            guard.resume().await;
+            let mut status = onboarding_state_clone.status.write().await;
+            let mut error = onboarding_state_clone.error.write().await;
+            *status = OnboardingStatus::Failed;
+            *error = Some(format!("Failed to send invites: {e}"));
+            return;
         }
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await; // Give it time to stop
+
+        // Give peers time to start their attestor workflows
+        tokio::time::sleep(Duration::from_secs(2)).await;
 
         let result = workflow::start_node(config, workflow::WorkflowType::Onboarding, None).await;
 
-        // Resume the heartbeat listener
-        {
-            let mut control = listener_control.write().await;
-            control.should_pause = false;
-            control.notify.notify_one();
-        }
+        guard.resume().await;
 
         let mut status = onboarding_state_clone.status.write().await;
         let mut error = onboarding_state_clone.error.write().await;
@@ -502,6 +505,167 @@ pub async fn start_onboarding(
     })
 }
 
+/// Send onboarding invites to all peers using Noise protocol
+async fn send_onboarding_invites(config: &NodeConfig) -> Result<()> {
+    let network_config = config.load_network_config().await?;
+    let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
+
+    let current_node_id = &config.node.node_id;
+    let invite_message = Message::new_empty(MessageType::InviteOnboarding);
+
+    for participant in &network_config.participants {
+        if participant.id == *current_node_id {
+            continue;
+        }
+
+        if participant.public_key.is_empty() {
+            tracing::warn!(
+                "Skipping invite to {} - no public key configured",
+                participant.id
+            );
+            continue;
+        }
+
+        let peer_pub_key = match parse_public_key(&participant.public_key) {
+            Ok(pk) => pk,
+            Err(e) => {
+                tracing::warn!(
+                    "Skipping invite to {} - invalid public key: {e}",
+                    participant.id
+                );
+                continue;
+            }
+        };
+
+        let psk = keypair.derive_psk(&peer_pub_key);
+        let identity = keypair.public_key.serialize();
+
+        tracing::info!(
+            "Sending onboarding invite to {} at {}:{}",
+            participant.id,
+            participant.address,
+            participant.port
+        );
+
+        match send_noise_message(
+            &participant.address,
+            participant.port,
+            &psk,
+            &identity,
+            &invite_message,
+        )
+        .await
+        {
+            Ok(response) => {
+                if let Ok(msg) = Message::from_bytes(&response) {
+                    if msg.msg_type == MessageType::Ack {
+                        tracing::info!("Peer {} acknowledged invite", participant.id);
+                    } else {
+                        tracing::warn!(
+                            "Peer {} responded with {:?} instead of Ack",
+                            participant.id,
+                            msg.msg_type
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to send invite to {}: {e}", participant.id);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Send kick invites to all peers using Noise protocol (excluding the participant being kicked)
+async fn send_kick_invites(config: &NodeConfig, kicked_participant: &CantonId) -> Result<()> {
+    let network_config = config.load_network_config().await?;
+    let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
+
+    let current_node_id = &config.node.node_id;
+    let invite_message = Message::new_empty(MessageType::InviteKick);
+
+    for participant in &network_config.participants {
+        // Skip self and the participant being kicked
+        if participant.id == *current_node_id {
+            continue;
+        }
+
+        // Skip the participant being kicked (they won't participate in the kick workflow)
+        // Compare the participant's Canton party ID with the kicked participant ID
+        if let Some(party) = &participant.party {
+            if let Ok(party_id) = CantonId::parse(party) {
+                if party_id == *kicked_participant {
+                    tracing::info!(
+                        "Skipping invite to {} - they are being kicked",
+                        participant.id
+                    );
+                    continue;
+                }
+            }
+        }
+
+        if participant.public_key.is_empty() {
+            tracing::warn!(
+                "Skipping invite to {} - no public key configured",
+                participant.id
+            );
+            continue;
+        }
+
+        let peer_pub_key = match parse_public_key(&participant.public_key) {
+            Ok(pk) => pk,
+            Err(e) => {
+                tracing::warn!(
+                    "Skipping invite to {} - invalid public key: {e}",
+                    participant.id
+                );
+                continue;
+            }
+        };
+
+        let psk = keypair.derive_psk(&peer_pub_key);
+        let identity = keypair.public_key.serialize();
+
+        tracing::info!(
+            "Sending kick invite to {} at {}:{}",
+            participant.id,
+            participant.address,
+            participant.port
+        );
+
+        match send_noise_message(
+            &participant.address,
+            participant.port,
+            &psk,
+            &identity,
+            &invite_message,
+        )
+        .await
+        {
+            Ok(response) => {
+                if let Ok(msg) = Message::from_bytes(&response) {
+                    if msg.msg_type == MessageType::Ack {
+                        tracing::info!("Peer {} acknowledged kick invite", participant.id);
+                    } else {
+                        tracing::warn!(
+                            "Peer {} responded with {:?} instead of Ack",
+                            participant.id,
+                            msg.msg_type
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to send kick invite to {}: {e}", participant.id);
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Get the current status of the onboarding workflow
 #[get("/onboarding/status")]
 pub async fn get_onboarding_status(
@@ -517,16 +681,4 @@ pub async fn get_onboarding_status(
 }
 
 /// State for tracking onboarding workflow
-pub struct OnboardingWorkflowState {
-    pub status: tokio::sync::RwLock<OnboardingStatus>,
-    pub error: tokio::sync::RwLock<Option<String>>,
-}
-
-impl OnboardingWorkflowState {
-    pub fn new() -> Self {
-        Self {
-            status: tokio::sync::RwLock::new(OnboardingStatus::Idle),
-            error: tokio::sync::RwLock::new(None),
-        }
-    }
-}
+pub type OnboardingWorkflowState = HttpWorkflowState<OnboardingStatus>;

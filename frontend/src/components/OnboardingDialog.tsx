@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import {
   Dialog,
   DialogTitle,
@@ -16,9 +16,10 @@ import type { OnboardingStatusResponse } from "../types";
 interface OnboardingDialogProps {
   open: boolean;
   onClose: () => void;
+  onComplete: () => void;
 }
 
-export const OnboardingDialog = ({ open, onClose }: OnboardingDialogProps) => {
+export const OnboardingDialog = ({ open, onClose, onComplete }: OnboardingDialogProps) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<OnboardingStatusResponse | null>(null);
@@ -31,30 +32,37 @@ export const OnboardingDialog = ({ open, onClose }: OnboardingDialogProps) => {
     }
   }, [open]);
 
+  const pollStatus = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/onboarding/status`);
+      if (res.ok) {
+        const data: OnboardingStatusResponse = await res.json();
+        setStatus(data);
+        if (data.status !== "inprogress") {
+          setLoading(false);
+          if (data.status === "completed") {
+            onComplete();
+          }
+        }
+      }
+    } catch {
+      // Ignore polling errors
+    }
+  }, [onComplete]);
+
   useEffect(() => {
     let interval: number | undefined;
 
     if (status?.status === "inprogress") {
-      interval = window.setInterval(async () => {
-        try {
-          const res = await fetch(`${API_BASE}/onboarding/status`);
-          if (res.ok) {
-            const data: OnboardingStatusResponse = await res.json();
-            setStatus(data);
-            if (data.status !== "inprogress") {
-              setLoading(false);
-            }
-          }
-        } catch {
-          // Ignore polling errors
-        }
-      }, 2000);
+      // Poll immediately, then every 2 seconds
+      pollStatus();
+      interval = window.setInterval(pollStatus, 2000);
     }
 
     return () => {
       if (interval) clearInterval(interval);
     };
-  }, [status?.status]);
+  }, [status?.status, pollStatus]);
 
   const handleStart = async () => {
     setLoading(true);

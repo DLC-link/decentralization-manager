@@ -24,7 +24,6 @@ use crate::{
 /// Sign a topology proposal and save the signed transaction
 async fn sign_proposal(
     config: &NodeConfig,
-    dirs: &OnboardingDirs,
     input_file: &Path,
     output_dir: &Path,
     output_prefix: &str,
@@ -32,7 +31,7 @@ async fn sign_proposal(
 ) -> Result {
     tracing::info!("Signing {proposal_type} proposal...");
 
-    let participant_num = utils::get_participant_number(config, &dirs.ids_dir).await?;
+    let participant_num = utils::get_participant_number(config).await?;
     tracing::debug!("Determined participant number: {participant_num}");
 
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
@@ -90,7 +89,6 @@ async fn sign_proposal(
 pub async fn sign_dns_proposals(config: &NodeConfig, dirs: &OnboardingDirs) -> Result {
     sign_proposal(
         config,
-        dirs,
         &dirs.dns_proposals_dir.join(DNS_PROTO_FILENAME),
         &dirs.dns_signed_dir,
         SIGNED_DNS_PROPOSAL_PREFIX,
@@ -109,7 +107,6 @@ pub async fn sign_dns_proposals(config: &NodeConfig, dirs: &OnboardingDirs) -> R
 pub async fn sign_p2p_proposals(config: &NodeConfig, dirs: &OnboardingDirs) -> Result {
     sign_proposal(
         config,
-        dirs,
         &dirs.p2p_proposals_dir.join(P2P_PROTO_FILENAME),
         &dirs.final_signed_dir,
         SIGNED_P2P_PROPOSALS_PREFIX,

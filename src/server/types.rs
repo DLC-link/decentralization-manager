@@ -1,9 +1,67 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use canton_proto_rs::com::digitalasset::canton::protocol::v30::enums::ParticipantPermission;
 use serde::{Deserialize, Serialize};
+use tokio::sync::{Notify, RwLock};
 
 use crate::participant_id::CantonId;
+
+use super::ListenerControl;
+
+/// Trait for workflow status types that can be used with HttpWorkflowState
+pub trait WorkflowStatus: Default + Copy + Send + Sync {}
+
+/// Generic state for tracking HTTP-triggered workflows
+pub struct HttpWorkflowState<S: WorkflowStatus> {
+    pub status: RwLock<S>,
+    pub error: RwLock<Option<String>>,
+}
+
+impl<S: WorkflowStatus> HttpWorkflowState<S> {
+    pub fn new() -> Self {
+        Self {
+            status: RwLock::new(S::default()),
+            error: RwLock::new(None),
+        }
+    }
+}
+
+/// Guard that pauses the Noise listener while held and resumes it when dropped
+pub struct ListenerPauseGuard {
+    listener_control: Arc<RwLock<ListenerControl>>,
+    listener_notify: Arc<Notify>,
+}
+
+impl ListenerPauseGuard {
+    /// Pause the listener and return a guard that will resume it when dropped
+    pub async fn pause(
+        listener_control: Arc<RwLock<ListenerControl>>,
+        listener_notify: Arc<Notify>,
+    ) -> Self {
+        {
+            let mut control = listener_control.write().await;
+            control.should_pause = true;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        Self {
+            listener_control,
+            listener_notify,
+        }
+    }
+
+    /// Resume the listener explicitly (also called automatically on drop)
+    pub async fn resume(self) {
+        self.resume_inner().await;
+    }
+
+    async fn resume_inner(&self) {
+        {
+            let mut control = self.listener_control.write().await;
+            control.should_pause = false;
+        }
+        self.listener_notify.notify_one();
+    }
+}
 
 /// Participant permission level
 #[derive(Clone, Debug, Serialize)]
@@ -90,14 +148,17 @@ pub struct KickRequest {
 }
 
 /// Status of a kick workflow
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum KickStatus {
+    #[default]
     Idle,
     InProgress,
     Completed,
     Failed,
 }
+
+impl WorkflowStatus for KickStatus {}
 
 /// Response for kick workflow initiation
 #[derive(Serialize)]
@@ -122,14 +183,17 @@ pub struct KeygenResponse {
 }
 
 /// Status of an onboarding workflow
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OnboardingStatus {
+    #[default]
     Idle,
     InProgress,
     Completed,
     Failed,
 }
+
+impl WorkflowStatus for OnboardingStatus {}
 
 /// Response for onboarding workflow initiation
 #[derive(Serialize)]

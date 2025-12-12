@@ -348,10 +348,20 @@ pub async fn find_participant_number(
 
 /// Get participant number for current participant
 ///
-/// Convenience function that gets the participant ID and finds its number.
-pub async fn get_participant_number(config: &NodeConfig, ids_dir: &Path) -> Result<u32> {
-    let participant_id = get_participant_id(config).await?;
-    find_participant_number(ids_dir, &participant_id).await
+/// Determines participant number from network config order (1-indexed).
+pub async fn get_participant_number(config: &NodeConfig) -> Result<u32> {
+    let network_config = config.load_network_config().await?;
+    let current_node_id = &config.node.node_id;
+
+    for (idx, participant) in network_config.participants.iter().enumerate() {
+        if &participant.id == current_node_id {
+            return Ok((idx + 1) as u32);
+        }
+    }
+
+    anyhow::bail!(
+        "Current node '{current_node_id}' not found in network config participants"
+    )
 }
 
 /// Macro to define authenticated gRPC client creator functions

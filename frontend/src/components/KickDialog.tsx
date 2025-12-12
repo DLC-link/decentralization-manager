@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import {
   Dialog,
   DialogTitle,
@@ -17,6 +17,7 @@ import type { KickRequest, KickStatusResponse } from "../types";
 interface KickDialogProps {
   open: boolean;
   onClose: () => void;
+  onKickComplete: () => void;
   partyId: string;
   participantUid: string;
   ownerKey: string;
@@ -25,6 +26,7 @@ interface KickDialogProps {
 export const KickDialog = ({
   open,
   onClose,
+  onKickComplete,
   partyId,
   participantUid,
   ownerKey,
@@ -46,30 +48,37 @@ export const KickDialog = ({
     }
   }, [open]);
 
+  const pollStatus = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/kick/status`);
+      if (res.ok) {
+        const data: KickStatusResponse = await res.json();
+        setStatus(data);
+        if (data.status !== "inprogress") {
+          setLoading(false);
+          if (data.status === "completed") {
+            onKickComplete();
+          }
+        }
+      }
+    } catch {
+      // Ignore polling errors
+    }
+  }, [onKickComplete]);
+
   useEffect(() => {
     let interval: number | undefined;
 
     if (status?.status === "inprogress") {
-      interval = window.setInterval(async () => {
-        try {
-          const res = await fetch(`${API_BASE}/kick/status`);
-          if (res.ok) {
-            const data: KickStatusResponse = await res.json();
-            setStatus(data);
-            if (data.status !== "inprogress") {
-              setLoading(false);
-            }
-          }
-        } catch {
-          // Ignore polling errors
-        }
-      }, 2000);
+      // Poll immediately, then every 2 seconds
+      pollStatus();
+      interval = window.setInterval(pollStatus, 2000);
     }
 
     return () => {
       if (interval) clearInterval(interval);
     };
-  }, [status?.status]);
+  }, [status?.status, pollStatus]);
 
   const handleKick = async () => {
     setLoading(true);

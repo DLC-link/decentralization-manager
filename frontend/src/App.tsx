@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { Container, Typography, Box, Alert, Button, CircularProgress, IconButton, Tooltip } from "@mui/material";
 import VpnKeyIcon from "@mui/icons-material/VpnKey";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
@@ -38,6 +38,20 @@ const App = () => {
     window.scrollTo(0, 0);
   }, []);
 
+  const refreshParties = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/decentralized-parties`);
+      if (res.ok) {
+        const data = await res.json();
+        setParties(data.parties);
+      } else {
+        showSnackbar("Failed to refresh parties");
+      }
+    } catch (err) {
+      showSnackbar(err instanceof Error ? err.message : "Failed to refresh parties");
+    }
+  }, [showSnackbar]);
+
   useEffect(() => {
     const fetchData = async () => {
       try {
@@ -65,11 +79,6 @@ const App = () => {
           setKeyStatus(keyStatusData);
         }
 
-        // Fetch participant statuses (non-blocking)
-        fetch(`${API_BASE}/participants-status`)
-          .then((res) => res.ok ? res.json() : null)
-          .then((data) => data && setParticipantStatuses(data.statuses))
-          .catch(() => {});
       } catch (err) {
         setError(err instanceof Error ? err.message : "Unknown error");
       } finally {
@@ -78,6 +87,26 @@ const App = () => {
     };
 
     fetchData();
+  }, []);
+
+  // Poll participant statuses every 2 seconds
+  useEffect(() => {
+    const fetchStatuses = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/participants-status`);
+        if (res.ok) {
+          const data = await res.json();
+          setParticipantStatuses(data.statuses);
+        }
+      } catch {
+        // Ignore polling errors
+      }
+    };
+
+    fetchStatuses();
+    const interval = window.setInterval(fetchStatuses, 2000);
+
+    return () => clearInterval(interval);
   }, []);
 
   const handleGenerateKeys = async () => {
@@ -185,12 +214,13 @@ const App = () => {
             </Box>
 
             {parties.map((party) => (
-              <PartyCard key={party.party_id} party={party} />
+              <PartyCard key={party.party_id} party={party} onRefresh={refreshParties} />
             ))}
 
             <OnboardingDialog
               open={onboardingDialogOpen}
               onClose={() => setOnboardingDialogOpen(false)}
+              onComplete={refreshParties}
             />
           </>
         )}

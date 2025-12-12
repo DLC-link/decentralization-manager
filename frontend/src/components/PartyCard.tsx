@@ -20,9 +20,10 @@ import type { DecentralizedParty } from "../types";
 
 interface PartyCardProps {
   party: DecentralizedParty;
+  onRefresh: () => void;
 }
 
-export const PartyCard = ({ party }: PartyCardProps) => {
+export const PartyCard = ({ party, onRefresh }: PartyCardProps) => {
   const [kickDialogOpen, setKickDialogOpen] = useState(false);
   const [selectedParticipant, setSelectedParticipant] = useState<string>("");
   const [selectedOwnerKey, setSelectedOwnerKey] = useState<string>("");
@@ -150,6 +151,7 @@ export const PartyCard = ({ party }: PartyCardProps) => {
       <KickDialog
         open={kickDialogOpen}
         onClose={() => setKickDialogOpen(false)}
+        onKickComplete={onRefresh}
         partyId={party.party_id}
         participantUid={selectedParticipant}
         ownerKey={selectedOwnerKey}
