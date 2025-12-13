@@ -6,7 +6,7 @@ use tracing_subscriber::{
 };
 
 use cli::{Cli, Commands, Parser};
-use dec_party_onboarding::{config::NodeConfig, error::Result, workflow};
+use dec_party_onboarding::{config::NodeConfig, error::Result};
 
 #[tokio::main]
 async fn main() -> Result {
@@ -30,9 +30,6 @@ async fn main() -> Result {
     match args.command {
         Commands::Serve { ref host, port } => {
             dec_party_onboarding::server::start_server(host, port, config).await?;
-        }
-        Commands::Contracts => {
-            workflow::start_node(config, workflow::WorkflowType::Contracts, None).await?;
         }
     }
 

@@ -83,6 +83,7 @@ export interface WorkflowStatusResponse {
 // Type aliases for backwards compatibility
 export type KickStatusResponse = WorkflowStatusResponse;
 export type OnboardingStatusResponse = WorkflowStatusResponse;
+export type ContractsStatusResponse = WorkflowStatusResponse;
 
 export interface KeyStatusResponse {
   has_keys: boolean;

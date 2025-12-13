@@ -5,14 +5,17 @@ pub mod state;
 
 use std::sync::Arc;
 
+use anyhow::Context;
+
 use crate::{
     config::{CoordinatorStrategy, NetworkConfig, NodeConfig},
+    consts::{LEDGER_SUBMISSIONS_DIR, PREPARED_DIR},
     error::Result,
     noise::{MessageType, client::NoiseClient, election, server::NoiseServer},
     utils,
 };
 
-pub use contracts::ContractsStep;
+pub use contracts::{ContractsConfig, ContractsStep};
 pub use kick::{KickConfig, KickStep};
 pub use onboarding::OnboardingStep;
 pub use state::WorkflowState;
@@ -49,6 +52,7 @@ pub async fn start_node(
     node_config: NodeConfig,
     workflow_type: WorkflowType,
     kick_config: Option<KickConfig>,
+    contracts_config: Option<ContractsConfig>,
 ) -> Result {
     tracing::info!("Loading network config...");
     let network_config = node_config.load_network_config().await?;
@@ -67,7 +71,11 @@ pub async fn start_node(
                 onboarding::coordinator::start_coordinator(node_config, network_config).await
             }
             WorkflowType::Contracts => {
-                contracts::coordinator::start_coordinator(node_config, network_config).await
+                let config = contracts_config.ok_or_else(|| {
+                    anyhow::anyhow!("ContractsConfig is required for Contracts workflow")
+                })?;
+                contracts::coordinator::start_coordinator(node_config, network_config, config)
+                    .await
             }
             WorkflowType::Kick => {
                 let config = kick_config
@@ -112,8 +120,6 @@ pub async fn save_attestor_data<S: state::WorkflowStep + 'static>(
     dir: &std::path::Path,
     prefix: &str,
 ) -> Result {
-    use anyhow::Context;
-
     let attestor_data = workflow_state.get_all_attestor_data().await;
     for (attestor_id, data) in attestor_data {
         let file_path = dir.join(format!("{prefix}-{attestor_id}.bin"));
@@ -190,6 +196,15 @@ async fn start_attestor(node_config: NodeConfig, network_config: NetworkConfig) 
             }
             MessageType::UploadDars => {
                 tracing::info!("Executing: Upload DARs");
+
+                // If payload contains DARs from coordinator, save them first
+                if !payload.is_empty() {
+                    if let Err(e) = save_dars_from_payload(&payload, &contracts_dirs).await {
+                        tracing::error!("Failed to save DARs from coordinator: {e}");
+                        continue;
+                    }
+                }
+
                 if let Err(e) = contracts::upload_dars(&node_config, &contracts_dirs).await {
                     tracing::error!("Step execution failed: {e}");
                     continue;
@@ -258,6 +273,17 @@ async fn start_attestor(node_config: NodeConfig, network_config: NetworkConfig) 
             }
             MessageType::SignSubmissions => {
                 tracing::info!("Executing: Sign submissions");
+
+                // If payload contains prepared submissions from coordinator, save them first
+                if !payload.is_empty() {
+                    if let Err(e) =
+                        save_prepared_submissions_from_payload(&payload, &contracts_dirs).await
+                    {
+                        tracing::error!("Failed to save prepared submissions from coordinator: {e}");
+                        continue;
+                    }
+                }
+
                 if let Err(e) = contracts::sign_submissions(&node_config, &contracts_dirs).await {
                     tracing::error!("Step execution failed: {e}");
                     continue;
@@ -305,8 +331,6 @@ pub async fn find_and_read_file(
     suffix: &str,
     error_msg: &str,
 ) -> Result<Vec<u8>> {
-    use anyhow::Context;
-
     let files = utils::find_files_by_pattern(dir, prefix, suffix).await?;
 
     if let Some(path) = files.first() {
@@ -317,4 +341,52 @@ pub async fn find_and_read_file(
     }
 
     anyhow::bail!("{error_msg} in {path}", path = dir.display())
+}
+
+/// Save DAR files received from coordinator to the dars directory
+async fn save_dars_from_payload(
+    payload: &[u8],
+    dirs: &contracts::ContractsDirs,
+) -> Result {
+    let dar_files = utils::decode_files(payload)?;
+
+    tracing::info!(
+        "Received {count} DAR file(s) from coordinator",
+        count = dar_files.len()
+    );
+
+    // Ensure dars directory exists
+    utils::create_directory(&dirs.dars_dir).await?;
+
+    for (filename, data) in dar_files {
+        let path = dirs.dars_dir.join(&filename);
+        tokio::fs::write(&path, &data).await?;
+        tracing::debug!("Saved DAR: {filename}");
+    }
+
+    Ok(())
+}
+
+/// Save prepared submission files received from coordinator
+async fn save_prepared_submissions_from_payload(
+    payload: &[u8],
+    dirs: &contracts::ContractsDirs,
+) -> Result {
+    let files = utils::decode_files(payload)?;
+
+    tracing::info!(
+        "Received {count} prepared submission file(s) from coordinator",
+        count = files.len()
+    );
+
+    let prepared_dir = dirs.workflow_dir.join(LEDGER_SUBMISSIONS_DIR).join(PREPARED_DIR);
+    utils::create_directory(&prepared_dir).await?;
+
+    for (filename, data) in files {
+        let path = prepared_dir.join(&filename);
+        tokio::fs::write(&path, &data).await?;
+        tracing::debug!("Saved prepared submission: {filename}");
+    }
+
+    Ok(())
 }

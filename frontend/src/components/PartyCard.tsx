@@ -12,10 +12,13 @@ import {
   TableRow,
   IconButton,
   Tooltip,
+  Button,
 } from "@mui/material";
 import PersonRemoveIcon from "@mui/icons-material/PersonRemove";
+import UploadFileIcon from "@mui/icons-material/UploadFile";
 import { CopyableText } from "./CopyableText";
 import { KickDialog } from "./KickDialog";
+import { ContractsDialog } from "./ContractsDialog";
 import type { DecentralizedParty } from "../types";
 
 interface PartyCardProps {
@@ -25,6 +28,7 @@ interface PartyCardProps {
 
 export const PartyCard = ({ party, onRefresh }: PartyCardProps) => {
   const [kickDialogOpen, setKickDialogOpen] = useState(false);
+  const [contractsDialogOpen, setContractsDialogOpen] = useState(false);
   const [selectedParticipant, setSelectedParticipant] = useState<string>("");
   const [selectedOwnerKey, setSelectedOwnerKey] = useState<string>("");
 
@@ -33,6 +37,8 @@ export const PartyCard = ({ party, onRefresh }: PartyCardProps) => {
     setSelectedOwnerKey(party.owners[ownerIndex] || "");
     setKickDialogOpen(true);
   };
+
+  const isOwner = Boolean(party.my_owner_key);
   return (
     <Card sx={{ mb: 3, borderRadius: 3 }}>
       <CardContent sx={{ p: 3, "&:last-child": { pb: 3 } }}>
@@ -42,7 +48,7 @@ export const PartyCard = ({ party, onRefresh }: PartyCardProps) => {
           variant="h6"
         />
 
-        <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1, mb: 2, mt: 1.5 }}>
+        <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1, mb: 2, mt: 1.5, alignItems: "center" }}>
           <Chip label={`Threshold: ${party.threshold}`} size="small" />
           <Chip label={`Owners: ${party.owners.length}`} size="small" />
           <Chip
@@ -55,6 +61,16 @@ export const PartyCard = ({ party, onRefresh }: PartyCardProps) => {
               size="small"
               color="primary"
             />
+          )}
+          {isOwner && (
+            <Button
+              variant="outlined"
+              size="small"
+              startIcon={<UploadFileIcon />}
+              onClick={() => setContractsDialogOpen(true)}
+            >
+              Deploy Contracts
+            </Button>
           )}
         </Box>
 
@@ -155,6 +171,13 @@ export const PartyCard = ({ party, onRefresh }: PartyCardProps) => {
         partyId={party.party_id}
         participantUid={selectedParticipant}
         ownerKey={selectedOwnerKey}
+      />
+
+      <ContractsDialog
+        open={contractsDialogOpen}
+        onClose={() => setContractsDialogOpen(false)}
+        onComplete={onRefresh}
+        partyId={party.party_id}
       />
     </Card>
   );

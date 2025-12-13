@@ -1,21 +1,30 @@
 use std::{collections::HashSet, sync::Arc};
 
 use anyhow::Context;
+use tokio::fs;
 
 use crate::{
     config::{NetworkConfig, NodeConfig},
-    consts::SUBMISSION_SIGNATURES_PREFIX,
+    consts::{
+        EXECUTION_DIR, LEDGER_SUBMISSIONS_DIR, PREPARED_DIR, PREPARED_SUBMISSION_PREFIX,
+        SIGNATURES_DIR, SUBMISSION_SIGNATURES_PREFIX,
+    },
     error::Result,
     noise::server::NoiseServer,
+    utils,
     workflow::state::WorkflowState,
 };
 
 use super::{
-    ContractsDirs, ContractsStep,
+    ContractsConfig, ContractsDirs, ContractsStep,
     steps::{execute_submissions, prepare_submissions, sign_submissions, upload_dars},
 };
 
-pub async fn start_coordinator(node_config: NodeConfig, network_config: NetworkConfig) -> Result {
+pub async fn start_coordinator(
+    node_config: NodeConfig,
+    network_config: NetworkConfig,
+    config: ContractsConfig,
+) -> Result {
     tracing::info!("Initializing Noise server...");
 
     let server = NoiseServer::new(
@@ -42,6 +51,7 @@ pub async fn start_coordinator(node_config: NodeConfig, network_config: NetworkC
             node_config_clone,
             network_config_clone,
             dirs_clone,
+            config,
         )
         .await
     });
@@ -54,8 +64,13 @@ async fn run_workflow(
     node_config: NodeConfig,
     network_config: NetworkConfig,
     dirs: ContractsDirs,
+    config: ContractsConfig,
 ) -> Result {
     let mut coordinator_completed_steps = HashSet::new();
+
+    // Load all DAR files to send to attestors with UploadDars command
+    let dar_payload = load_dars_payload(&dirs).await?;
+    workflow_state.set_command_payload(dar_payload).await;
 
     loop {
         let current_step = workflow_state.current_step().await;
@@ -74,7 +89,12 @@ async fn run_workflow(
             }
             ContractsStep::PrepareSubmissions => {
                 tracing::info!("Coordinator executing: Prepare submissions");
-                prepare_submissions(&node_config, &dirs, &network_config).await?;
+                prepare_submissions(&node_config, &dirs, &network_config, &config).await?;
+
+                // Load prepared submissions to send to attestors with SignSubmissions command
+                let submissions_payload = load_prepared_submissions_payload(&dirs).await?;
+                workflow_state.set_command_payload(submissions_payload).await;
+
                 workflow_state.advance_step().await;
             }
             ContractsStep::SignSubmissions => {
@@ -86,9 +106,11 @@ async fn run_workflow(
             }
             ContractsStep::ExecuteSubmissions => {
                 tracing::info!("Coordinator executing: Execute submissions");
+                let signatures_dir = dirs.workflow_dir.join(EXECUTION_DIR).join(SIGNATURES_DIR);
+                utils::create_directory(&signatures_dir).await?;
                 crate::workflow::save_attestor_data(
                     &workflow_state,
-                    &dirs.workflow_dir,
+                    &signatures_dir,
                     SUBMISSION_SIGNATURES_PREFIX,
                 )
                 .await?;
@@ -104,4 +126,84 @@ async fn run_workflow(
     }
 
     Ok(())
+}
+
+/// Load all DAR files from the dars directory and encode them for transmission
+async fn load_dars_payload(dirs: &ContractsDirs) -> Result<Vec<u8>> {
+    tracing::info!(
+        "Loading DARs from {path} for distribution",
+        path = dirs.dars_dir.display()
+    );
+
+    let mut dar_entries = fs::read_dir(&dirs.dars_dir).await?;
+    let mut dar_files = Vec::new();
+
+    while let Some(entry) = dar_entries.next_entry().await? {
+        let path = entry.path();
+        if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("dar") {
+            let filename = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown.dar")
+                .to_string();
+            let data = fs::read(&path).await?;
+            dar_files.push((filename, data));
+        }
+    }
+
+    dar_files.sort_by(|a, b| a.0.cmp(&b.0));
+
+    if dar_files.is_empty() {
+        anyhow::bail!(
+            "No .dar files found in {path}",
+            path = dirs.dars_dir.display()
+        );
+    }
+
+    tracing::info!(
+        "Loaded {count} DAR file(s) for distribution to attestors",
+        count = dar_files.len()
+    );
+
+    Ok(utils::encode_files(&dar_files))
+}
+
+/// Load all prepared submission files and encode them for transmission
+async fn load_prepared_submissions_payload(dirs: &ContractsDirs) -> Result<Vec<u8>> {
+    let prepared_dir = dirs.workflow_dir.join(LEDGER_SUBMISSIONS_DIR).join(PREPARED_DIR);
+
+    tracing::info!(
+        "Loading prepared submissions from {path} for distribution",
+        path = prepared_dir.display()
+    );
+
+    let submission_files =
+        utils::find_files_by_pattern(&prepared_dir, PREPARED_SUBMISSION_PREFIX, ".bin").await?;
+
+    if submission_files.is_empty() {
+        anyhow::bail!(
+            "No prepared submission files found in {path}",
+            path = prepared_dir.display()
+        );
+    }
+
+    let mut files = Vec::new();
+    for path in submission_files {
+        let filename = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown.bin")
+            .to_string();
+        let data = fs::read(&path).await?;
+        files.push((filename, data));
+    }
+
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+
+    tracing::info!(
+        "Loaded {count} prepared submission file(s) for distribution to attestors",
+        count = files.len()
+    );
+
+    Ok(utils::encode_files(&files))
 }

@@ -116,6 +116,31 @@ pub use clap::Parser;
 use crate::{error::Result, utils};
 ```
 
+### Use Statement Placement
+
+All `use` statements must be placed at the top of the file, never inside functions. This keeps imports organized and makes dependencies visible at a glance.
+
+```rust
+// Good
+use anyhow::Context;
+
+use crate::consts::{LEDGER_SUBMISSIONS_DIR, PREPARED_DIR};
+
+pub async fn my_function() -> Result {
+    let dir = Path::new(LEDGER_SUBMISSIONS_DIR).join(PREPARED_DIR);
+    // ...
+}
+
+// Bad
+pub async fn my_function() -> Result {
+    use anyhow::Context;
+    use crate::consts::{LEDGER_SUBMISSIONS_DIR, PREPARED_DIR};
+
+    let dir = Path::new(LEDGER_SUBMISSIONS_DIR).join(PREPARED_DIR);
+    // ...
+}
+```
+
 ### Namespace Resolution
 
 Always use `use` statements for long namespace paths (3+ segments) instead of resolving them inline. This improves code readability and makes it easier to refactor.

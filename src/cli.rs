@@ -18,9 +18,6 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Run the contracts workflow (upload DARs and create contracts)
-    Contracts,
-
     /// Start the HTTP server for querying decentralized parties
     Serve {
         /// Host address to bind to

@@ -28,6 +28,7 @@ pub struct AppState {
     pub noise_listener_notify: Arc<Notify>,
     pub onboarding_trigger: Arc<Notify>,
     pub kick_trigger: Arc<Notify>,
+    pub contracts_trigger: Arc<Notify>,
 }
 
 /// Control mechanism for the Noise port listener
@@ -44,6 +45,7 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig) -> Result {
     let listener_notify = Arc::new(Notify::new());
     let onboarding_trigger = Arc::new(Notify::new());
     let kick_trigger = Arc::new(Notify::new());
+    let contracts_trigger = Arc::new(Notify::new());
 
     let app_state = web::Data::new(AppState {
         config: config.clone(),
@@ -52,9 +54,11 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig) -> Result {
         noise_listener_notify: listener_notify.clone(),
         onboarding_trigger: onboarding_trigger.clone(),
         kick_trigger: kick_trigger.clone(),
+        contracts_trigger: contracts_trigger.clone(),
     });
     let kick_state = web::Data::new(Arc::new(handlers::KickWorkflowState::new()));
     let onboarding_state = web::Data::new(Arc::new(handlers::OnboardingWorkflowState::new()));
+    let contracts_state = web::Data::new(Arc::new(handlers::ContractsWorkflowState::new()));
 
     // Start heartbeat background task (pings peers and listens for invites)
     let heartbeat_config = config.clone();
@@ -63,6 +67,7 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig) -> Result {
     let heartbeat_notify = listener_notify.clone();
     let heartbeat_onboarding_trigger = onboarding_trigger.clone();
     let heartbeat_kick_trigger = kick_trigger.clone();
+    let heartbeat_contracts_trigger = contracts_trigger.clone();
     tokio::spawn(async move {
         run_heartbeat(
             heartbeat_config,
@@ -71,6 +76,7 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig) -> Result {
             heartbeat_notify,
             heartbeat_onboarding_trigger,
             heartbeat_kick_trigger,
+            heartbeat_contracts_trigger,
         )
         .await;
     });
@@ -107,6 +113,22 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig) -> Result {
         .await;
     });
 
+    // Start attestor trigger listener for contracts (starts attestor workflow when contracts invite received)
+    let contracts_attestor_config = config.clone();
+    let contracts_attestor_control = listener_control.clone();
+    let contracts_attestor_notify = listener_notify.clone();
+    let contracts_attestor_state = contracts_state.clone();
+    tokio::spawn(async move {
+        run_contracts_attestor_listener(
+            contracts_attestor_config,
+            contracts_attestor_control,
+            contracts_attestor_notify,
+            contracts_attestor_state,
+            contracts_trigger,
+        )
+        .await;
+    });
+
     tracing::info!("Starting HTTP server on {host}:{port}");
     tracing::info!("Frontend available at http://{host}:{port}/");
 
@@ -118,6 +140,7 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig) -> Result {
             .app_data(app_state.clone())
             .app_data(kick_state.clone())
             .app_data(onboarding_state.clone())
+            .app_data(contracts_state.clone())
             .service(handlers::get_network_config)
             .service(handlers::get_node_config)
             .service(handlers::get_decentralized_parties)
@@ -126,6 +149,8 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig) -> Result {
             .service(handlers::get_kick_status)
             .service(handlers::start_onboarding)
             .service(handlers::get_onboarding_status)
+            .service(handlers::start_contracts)
+            .service(handlers::get_contracts_status)
             .service(handlers::get_key_status)
             .service(handlers::generate_keys)
             .service(assets::serve_frontend)
@@ -145,6 +170,7 @@ async fn run_heartbeat(
     listener_notify: Arc<Notify>,
     onboarding_trigger: Arc<Notify>,
     kick_trigger: Arc<Notify>,
+    contracts_trigger: Arc<Notify>,
 ) {
     use tokio::net::TcpListener;
 
@@ -203,6 +229,7 @@ async fn run_heartbeat(
     let peer_keys_spawn = peer_keys.clone();
     let onboarding_trigger_spawn = onboarding_trigger.clone();
     let kick_trigger_spawn = kick_trigger.clone();
+    let contracts_trigger_spawn = contracts_trigger.clone();
 
     tokio::spawn(async move {
         loop {
@@ -232,9 +259,10 @@ async fn run_heartbeat(
                                     let peer_keys = peer_keys_spawn.clone();
                                     let onboarding_trigger = onboarding_trigger_spawn.clone();
                                     let kick_trigger = kick_trigger_spawn.clone();
+                                    let contracts_trigger = contracts_trigger_spawn.clone();
 
                                     tokio::spawn(async move {
-                                        handle_incoming_connection(socket, peer_addr, keypair, peer_keys, onboarding_trigger, kick_trigger).await;
+                                        handle_incoming_connection(socket, peer_addr, keypair, peer_keys, onboarding_trigger, kick_trigger, contracts_trigger).await;
                                     });
                                 }
                             }
@@ -275,6 +303,7 @@ async fn handle_incoming_connection(
     peer_keys: Arc<HashMap<String, secp256k1::PublicKey>>,
     onboarding_trigger: Arc<Notify>,
     kick_trigger: Arc<Notify>,
+    contracts_trigger: Arc<Notify>,
 ) {
     let secret_key = keypair.secret_key;
     let peer_keys_clone = peer_keys.clone();
@@ -298,6 +327,7 @@ async fn handle_incoming_connection(
 
     let onboarding_trigger = onboarding_trigger.clone();
     let kick_trigger = kick_trigger.clone();
+    let contracts_trigger = contracts_trigger.clone();
 
     let result = hyper_noise::server::serve_http(
         socket,
@@ -305,6 +335,7 @@ async fn handle_incoming_connection(
         move |_peer_id: &[u8], req: hyper::Request<Body>| {
             let onboarding_trigger = onboarding_trigger.clone();
             let kick_trigger = kick_trigger.clone();
+            let contracts_trigger = contracts_trigger.clone();
             async move {
                 let body_bytes = hyper::body::to_bytes(req.into_body()).await?;
 
@@ -333,6 +364,18 @@ async fn handle_incoming_connection(
                                 "Received kick invite, triggering kick attestor workflow"
                             );
                             kick_trigger.notify_one();
+
+                            let ack = Message::new_empty(MessageType::Ack);
+                            return Ok(Response::builder()
+                                .status(StatusCode::OK)
+                                .body(Body::from(ack.to_bytes()))
+                                .unwrap());
+                        }
+                        MessageType::InviteContracts => {
+                            tracing::info!(
+                                "Received contracts invite, triggering contracts attestor workflow"
+                            );
+                            contracts_trigger.notify_one();
 
                             let ack = Message::new_empty(MessageType::Ack);
                             return Ok(Response::builder()
@@ -516,7 +559,8 @@ async fn run_onboarding_attestor_listener(
         // Start attestor workflow
         let workflow_config = config.clone();
         let result =
-            workflow::start_node(workflow_config, workflow::WorkflowType::Onboarding, None).await;
+            workflow::start_node(workflow_config, workflow::WorkflowType::Onboarding, None, None)
+                .await;
 
         guard.resume().await;
 
@@ -576,7 +620,7 @@ async fn run_kick_attestor_listener(
         // Start kick attestor workflow (attestor role, no kick config needed)
         let workflow_config = config.clone();
         let result =
-            workflow::start_node(workflow_config, workflow::WorkflowType::Kick, None).await;
+            workflow::start_node(workflow_config, workflow::WorkflowType::Kick, None, None).await;
 
         guard.resume().await;
 
@@ -593,6 +637,67 @@ async fn run_kick_attestor_listener(
                 *status = types::KickStatus::Failed;
                 *error = Some(format!("{e}"));
                 tracing::error!("Kick attestor workflow failed: {e}");
+            }
+        }
+    }
+}
+
+/// Background task that starts contracts attestor workflow when triggered by an invite
+async fn run_contracts_attestor_listener(
+    config: NodeConfig,
+    listener_control: Arc<RwLock<ListenerControl>>,
+    listener_notify: Arc<Notify>,
+    contracts_state: web::Data<Arc<handlers::ContractsWorkflowState>>,
+    contracts_trigger: Arc<Notify>,
+) {
+    loop {
+        // Wait for trigger
+        contracts_trigger.notified().await;
+
+        tracing::info!("Received contracts invite, starting contracts attestor workflow...");
+
+        // Check if already in progress
+        {
+            let status = contracts_state.status.read().await;
+            if *status == types::WorkflowProgress::InProgress {
+                tracing::warn!("Already in contracts workflow, ignoring invite");
+                continue;
+            }
+        }
+
+        // Update status
+        {
+            let mut status = contracts_state.status.write().await;
+            *status = types::WorkflowProgress::InProgress;
+            let mut error = contracts_state.error.write().await;
+            *error = None;
+        }
+
+        let guard =
+            types::ListenerPauseGuard::pause(listener_control.clone(), listener_notify.clone())
+                .await;
+
+        // Start contracts attestor workflow (attestor role, no contracts config needed)
+        let workflow_config = config.clone();
+        let result =
+            workflow::start_node(workflow_config, workflow::WorkflowType::Contracts, None, None)
+                .await;
+
+        guard.resume().await;
+
+        // Update status
+        let mut status = contracts_state.status.write().await;
+        let mut error = contracts_state.error.write().await;
+
+        match result {
+            Ok(()) => {
+                *status = types::WorkflowProgress::Completed;
+                tracing::info!("Contracts attestor workflow completed successfully");
+            }
+            Err(e) => {
+                *status = types::WorkflowProgress::Failed;
+                *error = Some(format!("{e}"));
+                tracing::error!("Contracts attestor workflow failed: {e}");
             }
         }
     }

@@ -17,10 +17,11 @@ use super::{
     AppState,
     queries::{get_contracts, get_party_metadata},
     types::{
-        DecentralizedPartiesResponse, DecentralizedParty, HttpWorkflowState, KeyStatusResponse,
-        KeygenResponse, KickRequest, KickResponse, KickStatus, ListenerPauseGuard,
-        OnboardingResponse, OnboardingStatus, ParticipantInfo, ParticipantStatus,
-        ParticipantsStatusResponse, Permission,
+        ContractsRequest, DecentralizedPartiesResponse, DecentralizedParty, HttpWorkflowState,
+        KeyStatusResponse, KeygenResponse, KickRequest, KickResponse, KickStatus,
+        ListenerPauseGuard, OnboardingResponse, OnboardingStatus, ParticipantInfo,
+        ParticipantStatus, ParticipantsStatusResponse, Permission, WorkflowProgress,
+        WorkflowResponse,
     },
 };
 use crate::{
@@ -338,7 +339,8 @@ pub async fn start_kick(
         );
 
         let result =
-            workflow::start_node(config, workflow::WorkflowType::Kick, Some(kick_config)).await;
+            workflow::start_node(config, workflow::WorkflowType::Kick, Some(kick_config), None)
+                .await;
 
         guard.resume().await;
 
@@ -480,7 +482,8 @@ pub async fn start_onboarding(
         // Give peers time to start their attestor workflows
         tokio::time::sleep(Duration::from_secs(2)).await;
 
-        let result = workflow::start_node(config, workflow::WorkflowType::Onboarding, None).await;
+        let result =
+            workflow::start_node(config, workflow::WorkflowType::Onboarding, None, None).await;
 
         guard.resume().await;
 
@@ -683,3 +686,178 @@ pub async fn get_onboarding_status(
 
 /// State for tracking onboarding workflow
 pub type OnboardingWorkflowState = HttpWorkflowState<OnboardingStatus>;
+
+/// State for tracking contracts workflow
+pub type ContractsWorkflowState = HttpWorkflowState<WorkflowProgress>;
+
+/// Start a contracts workflow to upload DARs and create contracts
+#[post("/contracts")]
+pub async fn start_contracts(
+    data: web::Data<AppState>,
+    contracts_state: web::Data<Arc<ContractsWorkflowState>>,
+    body: web::Json<ContractsRequest>,
+) -> impl Responder {
+    // Check if a contracts workflow is already in progress
+    {
+        let status = contracts_state.status.read().await;
+        if *status == WorkflowProgress::InProgress {
+            return HttpResponse::Conflict().json(serde_json::json!({
+                "error": "A contracts workflow is already in progress"
+            }));
+        }
+    }
+
+    // Update status to in progress
+    {
+        let mut status = contracts_state.status.write().await;
+        *status = WorkflowProgress::InProgress;
+        let mut error = contracts_state.error.write().await;
+        *error = None;
+    }
+
+    // Create contracts config from request
+    let contracts_config =
+        workflow::ContractsConfig::new(body.decentralized_party_id.clone());
+
+    // Spawn the contracts workflow in the background
+    let config = data.config.clone();
+    let contracts_state_clone = contracts_state.get_ref().clone();
+    let listener_control = data.noise_listener_control.clone();
+    let listener_notify = data.noise_listener_notify.clone();
+
+    tokio::spawn(async move {
+        let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
+
+        // Send invites to all peers before starting coordinator workflow
+        let invite_result = send_contracts_invites(&config).await;
+        if let Err(e) = invite_result {
+            tracing::error!("Failed to send contracts invites: {e}");
+            guard.resume().await;
+            let mut status = contracts_state_clone.status.write().await;
+            let mut error = contracts_state_clone.error.write().await;
+            *status = WorkflowProgress::Failed;
+            *error = Some(format!("Failed to send invites: {e}"));
+            return;
+        }
+
+        // Give peers time to start their attestor workflows
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        let result = workflow::start_node(
+            config,
+            workflow::WorkflowType::Contracts,
+            None,
+            Some(contracts_config),
+        )
+        .await;
+
+        guard.resume().await;
+
+        let mut status = contracts_state_clone.status.write().await;
+        let mut error = contracts_state_clone.error.write().await;
+
+        match result {
+            Ok(()) => {
+                *status = WorkflowProgress::Completed;
+                tracing::info!("Contracts workflow completed successfully");
+            }
+            Err(e) => {
+                *status = WorkflowProgress::Failed;
+                *error = Some(format!("{e}"));
+                tracing::error!("Contracts workflow failed: {e}");
+            }
+        }
+    });
+
+    HttpResponse::Accepted().json(WorkflowResponse {
+        status: WorkflowProgress::InProgress,
+        message: "Contracts workflow started".to_string(),
+    })
+}
+
+/// Send contracts invites to all peers using Noise protocol
+async fn send_contracts_invites(config: &NodeConfig) -> Result<()> {
+    let network_config = config.load_network_config().await?;
+    let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
+
+    let current_node_id = &config.node.node_id;
+    let invite_message = Message::new_empty(MessageType::InviteContracts);
+
+    for participant in &network_config.participants {
+        if participant.id == *current_node_id {
+            continue;
+        }
+
+        if participant.public_key.is_empty() {
+            tracing::warn!(
+                "Skipping invite to {} - no public key configured",
+                participant.id
+            );
+            continue;
+        }
+
+        let peer_pub_key = match parse_public_key(&participant.public_key) {
+            Ok(pk) => pk,
+            Err(e) => {
+                tracing::warn!(
+                    "Skipping invite to {} - invalid public key: {e}",
+                    participant.id
+                );
+                continue;
+            }
+        };
+
+        let psk = keypair.derive_psk(&peer_pub_key);
+        let identity = keypair.public_key.serialize();
+
+        tracing::info!(
+            "Sending contracts invite to {} at {}:{}",
+            participant.id,
+            participant.address,
+            participant.port
+        );
+
+        match send_noise_message(
+            &participant.address,
+            participant.port,
+            &psk,
+            &identity,
+            &invite_message,
+        )
+        .await
+        {
+            Ok(response) => {
+                if let Ok(msg) = Message::from_bytes(&response) {
+                    if msg.msg_type == MessageType::Ack {
+                        tracing::info!("Peer {} acknowledged contracts invite", participant.id);
+                    } else {
+                        tracing::warn!(
+                            "Peer {} responded with {:?} instead of Ack",
+                            participant.id,
+                            msg.msg_type
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to send contracts invite to {}: {e}", participant.id);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Get the current status of the contracts workflow
+#[get("/contracts/status")]
+pub async fn get_contracts_status(
+    contracts_state: web::Data<Arc<ContractsWorkflowState>>,
+) -> impl Responder {
+    let status = contracts_state.status.read().await;
+    let error = contracts_state.error.read().await;
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "status": *status,
+        "error": *error,
+    }))
+}

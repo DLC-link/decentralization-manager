@@ -439,6 +439,42 @@ pub async fn create_directory(path: &Path) -> Result {
         .with_context(|| format!("Failed to create dir '{path}'", path = path.display()))
 }
 
+/// Encode files (filename + data pairs) into a single payload
+///
+/// Format: [count (4 bytes)] + encode_length_prefixed([filename1, data1, filename2, data2, ...])
+pub fn encode_files(files: &[(String, Vec<u8>)]) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&(files.len() as u32).to_be_bytes());
+
+    let items: Vec<&[u8]> = files
+        .iter()
+        .flat_map(|(name, data)| [name.as_bytes(), data.as_slice()])
+        .collect();
+
+    payload.extend(encode_length_prefixed(&items));
+    payload
+}
+
+/// Decode files from a payload
+///
+/// Returns a vector of (filename, data) pairs
+pub fn decode_files(data: &[u8]) -> Result<Vec<(String, Vec<u8>)>> {
+    if data.len() < 4 {
+        anyhow::bail!("Invalid file payload: too short for count");
+    }
+
+    let count = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+    let items = decode_length_prefixed(&data[4..], count * 2)?;
+
+    items
+        .chunks(2)
+        .map(|chunk| {
+            let filename = String::from_utf8(chunk[0].clone())?;
+            Ok((filename, chunk[1].clone()))
+        })
+        .collect()
+}
+
 /// Create multiple directories with context for error messages
 pub async fn create_directories(paths: &[&Path]) -> Result {
     for path in paths {

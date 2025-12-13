@@ -147,6 +147,12 @@ pub struct KickRequest {
     pub namespace_fingerprint: String,
 }
 
+/// Request to deploy contracts for a decentralized party
+#[derive(Clone, Debug, Deserialize)]
+pub struct ContractsRequest {
+    pub decentralized_party_id: CantonId,
+}
+
 /// Progress status of a workflow (kick, onboarding, etc.)
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
