@@ -32,6 +32,11 @@ pub enum MessageType {
     GetNextCommand = 0x0008,
     SignKick = 0x0009,
 
+    // Invites (0x0010 - 0x001F)
+    InviteOnboarding = 0x0010,
+    InviteKick = 0x0011,
+    InviteContracts = 0x0012,
+
     // Responses (0x0100 - 0x01FF)
     Ack = 0x0101,
     Data = 0x0102,
@@ -61,6 +66,9 @@ impl TryFrom<u16> for MessageType {
             0x0007 => Ok(Self::Disconnect),
             0x0008 => Ok(Self::GetNextCommand),
             0x0009 => Ok(Self::SignKick),
+            0x0010 => Ok(Self::InviteOnboarding),
+            0x0011 => Ok(Self::InviteKick),
+            0x0012 => Ok(Self::InviteContracts),
             0x0101 => Ok(Self::Ack),
             0x0102 => Ok(Self::Data),
             0x0103 => Ok(Self::Error),
@@ -312,7 +320,12 @@ impl NoiseKeypair {
 
     /// Load keypair from a file (expects hex-encoded secret key)
     pub async fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let content = tokio::fs::read_to_string(path).await?;
+        use anyhow::Context;
+
+        let path = path.as_ref();
+        let content = tokio::fs::read_to_string(path)
+            .await
+            .with_context(|| format!("Failed to read key file '{}'", path.display()))?;
         let secret_key_hex = content.trim();
         let secret_key_bytes = hex::decode(secret_key_hex)?;
         let secret_key = SecretKey::from_slice(&secret_key_bytes)?;
@@ -327,8 +340,13 @@ impl NoiseKeypair {
 
     /// Save the private key to a file (hex-encoded)
     pub async fn save_to_file<P: AsRef<Path>>(&self, path: P) -> Result {
+        use anyhow::Context;
+
+        let path = path.as_ref();
         let secret_key_hex = hex::encode(self.secret_key.secret_bytes());
-        tokio::fs::write(path, secret_key_hex).await?;
+        tokio::fs::write(path, secret_key_hex)
+            .await
+            .with_context(|| format!("Failed to write key file '{}'", path.display()))?;
         Ok(())
     }
 

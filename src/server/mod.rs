@@ -1,34 +1,716 @@
+mod assets;
 mod handlers;
 mod queries;
 mod types;
 
-use actix_web::{App, HttpServer, web};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use crate::{config::NodeConfig, error::Result};
+use actix_cors::Cors;
+use actix_web::{App, HttpServer, web};
+use hyper::{Body, Response, StatusCode};
+use tokio::sync::{Notify, RwLock};
+use tokio_noise::handshakes::nn_psk2::Responder;
+
+use crate::{
+    config::NodeConfig,
+    error::Result,
+    noise::{Message, MessageType, NoiseKeypair, parse_public_key},
+    workflow,
+};
 
 pub use types::*;
 
 /// Application state shared across all handlers
 pub struct AppState {
     pub config: NodeConfig,
+    pub peer_status: Arc<RwLock<HashMap<String, bool>>>,
+    pub noise_listener_control: Arc<RwLock<ListenerControl>>,
+    pub noise_listener_notify: Arc<Notify>,
+    pub onboarding_trigger: Arc<Notify>,
+    pub kick_trigger: Arc<Notify>,
+    pub contracts_trigger: Arc<Notify>,
 }
 
-/// Start the HTTP server
+/// Control mechanism for the Noise port listener
+pub struct ListenerControl {
+    pub should_pause: bool,
+}
+
+/// Start the HTTP server and a heartbeat system for peer status tracking
 pub async fn start_server(host: &str, port: u16, config: NodeConfig) -> Result {
-    let app_state = web::Data::new(AppState { config });
+    let peer_status = Arc::new(RwLock::new(HashMap::new()));
+    let listener_control = Arc::new(RwLock::new(ListenerControl {
+        should_pause: false,
+    }));
+    let listener_notify = Arc::new(Notify::new());
+    let onboarding_trigger = Arc::new(Notify::new());
+    let kick_trigger = Arc::new(Notify::new());
+    let contracts_trigger = Arc::new(Notify::new());
+
+    let app_state = web::Data::new(AppState {
+        config: config.clone(),
+        peer_status: peer_status.clone(),
+        noise_listener_control: listener_control.clone(),
+        noise_listener_notify: listener_notify.clone(),
+        onboarding_trigger: onboarding_trigger.clone(),
+        kick_trigger: kick_trigger.clone(),
+        contracts_trigger: contracts_trigger.clone(),
+    });
+    let kick_state = web::Data::new(Arc::new(handlers::KickWorkflowState::new()));
+    let onboarding_state = web::Data::new(Arc::new(handlers::OnboardingWorkflowState::new()));
+    let contracts_state = web::Data::new(Arc::new(handlers::ContractsWorkflowState::new()));
+
+    // Start heartbeat background task (pings peers and listens for invites)
+    let heartbeat_config = config.clone();
+    let heartbeat_status = peer_status.clone();
+    let heartbeat_control = listener_control.clone();
+    let heartbeat_notify = listener_notify.clone();
+    let heartbeat_onboarding_trigger = onboarding_trigger.clone();
+    let heartbeat_kick_trigger = kick_trigger.clone();
+    let heartbeat_contracts_trigger = contracts_trigger.clone();
+    tokio::spawn(async move {
+        run_heartbeat(
+            heartbeat_config,
+            heartbeat_status,
+            heartbeat_control,
+            heartbeat_notify,
+            heartbeat_onboarding_trigger,
+            heartbeat_kick_trigger,
+            heartbeat_contracts_trigger,
+        )
+        .await;
+    });
+
+    // Start attestor trigger listener for onboarding (starts attestor workflow when invite received)
+    let onboarding_attestor_config = config.clone();
+    let onboarding_attestor_control = listener_control.clone();
+    let onboarding_attestor_notify = listener_notify.clone();
+    let onboarding_attestor_state = onboarding_state.clone();
+    tokio::spawn(async move {
+        run_onboarding_attestor_listener(
+            onboarding_attestor_config,
+            onboarding_attestor_control,
+            onboarding_attestor_notify,
+            onboarding_attestor_state,
+            onboarding_trigger,
+        )
+        .await;
+    });
+
+    // Start attestor trigger listener for kick (starts attestor workflow when kick invite received)
+    let kick_attestor_config = config.clone();
+    let kick_attestor_control = listener_control.clone();
+    let kick_attestor_notify = listener_notify.clone();
+    let kick_attestor_state = kick_state.clone();
+    tokio::spawn(async move {
+        run_kick_attestor_listener(
+            kick_attestor_config,
+            kick_attestor_control,
+            kick_attestor_notify,
+            kick_attestor_state,
+            kick_trigger,
+        )
+        .await;
+    });
+
+    // Start attestor trigger listener for contracts (starts attestor workflow when contracts invite received)
+    let contracts_attestor_config = config.clone();
+    let contracts_attestor_control = listener_control.clone();
+    let contracts_attestor_notify = listener_notify.clone();
+    let contracts_attestor_state = contracts_state.clone();
+    tokio::spawn(async move {
+        run_contracts_attestor_listener(
+            contracts_attestor_config,
+            contracts_attestor_control,
+            contracts_attestor_notify,
+            contracts_attestor_state,
+            contracts_trigger,
+        )
+        .await;
+    });
 
     tracing::info!("Starting HTTP server on {host}:{port}");
+    tracing::info!("Frontend available at http://{host}:{port}/");
 
     HttpServer::new(move || {
+        let cors = Cors::permissive();
+
         App::new()
+            .wrap(cors)
             .app_data(app_state.clone())
+            .app_data(kick_state.clone())
+            .app_data(onboarding_state.clone())
+            .app_data(contracts_state.clone())
             .service(handlers::get_network_config)
             .service(handlers::get_node_config)
             .service(handlers::get_decentralized_parties)
+            .service(handlers::get_participants_status)
+            .service(handlers::start_kick)
+            .service(handlers::get_kick_status)
+            .service(handlers::start_onboarding)
+            .service(handlers::get_onboarding_status)
+            .service(handlers::start_contracts)
+            .service(handlers::get_contracts_status)
+            .service(handlers::get_key_status)
+            .service(handlers::generate_keys)
+            .service(assets::serve_frontend)
     })
     .bind((host, port))?
     .run()
     .await?;
 
     Ok(())
+}
+
+/// Background task that runs a Noise server for handling pings and invites
+async fn run_heartbeat(
+    config: NodeConfig,
+    peer_status: Arc<RwLock<HashMap<String, bool>>>,
+    listener_control: Arc<RwLock<ListenerControl>>,
+    listener_notify: Arc<Notify>,
+    onboarding_trigger: Arc<Notify>,
+    kick_trigger: Arc<Notify>,
+    contracts_trigger: Arc<Notify>,
+) {
+    use tokio::net::TcpListener;
+
+    let network_config = match config.load_network_config().await {
+        Ok(nc) => nc,
+        Err(e) => {
+            tracing::error!("Failed to load network config for heartbeat listener: {e}");
+            return;
+        }
+    };
+
+    let listen_addr = match network_config.get_participant(&config.node.node_id) {
+        Some(p) => format!(
+            "{addr}:{port}",
+            addr = config.node.listen_address,
+            port = p.port
+        ),
+        None => {
+            tracing::error!("Current node not found in network config");
+            return;
+        }
+    };
+
+    // Load keypair for Noise handshakes
+    let keypair = match NoiseKeypair::from_file(&config.key_file_path()).await {
+        Ok(kp) => Arc::new(kp),
+        Err(e) => {
+            tracing::warn!(
+                "Failed to load keypair for invite listener: {e}. Invites will not work until keys are generated."
+            );
+            // Continue without keypair - we'll just do TCP ping accept/drop
+            run_simple_heartbeat(
+                config,
+                peer_status,
+                listener_control,
+                listener_notify,
+                listen_addr,
+            )
+            .await;
+            return;
+        }
+    };
+
+    // Build peer key map for Noise authentication
+    let mut peer_keys = HashMap::new();
+    for participant in &network_config.participants {
+        if participant.id == config.node.node_id || participant.public_key.is_empty() {
+            continue;
+        }
+        if let Ok(pub_key) = parse_public_key(&participant.public_key) {
+            peer_keys.insert(participant.id.clone(), pub_key);
+        }
+    }
+    let peer_keys = Arc::new(peer_keys);
+
+    // Listener management loop
+    let listener_control_spawn = listener_control.clone();
+    let listener_notify_spawn = listener_notify.clone();
+    let keypair_spawn = keypair.clone();
+    let peer_keys_spawn = peer_keys.clone();
+    let onboarding_trigger_spawn = onboarding_trigger.clone();
+    let kick_trigger_spawn = kick_trigger.clone();
+    let contracts_trigger_spawn = contracts_trigger.clone();
+
+    tokio::spawn(async move {
+        loop {
+            // Wait for permission to bind
+            let should_pause = {
+                let control = listener_control_spawn.read().await;
+                control.should_pause
+            };
+
+            if should_pause {
+                tracing::info!("Noise listener paused for workflow");
+                listener_notify_spawn.notified().await;
+                tracing::info!("Resuming Noise listener");
+                continue;
+            }
+
+            // Try to bind listener
+            match TcpListener::bind(&listen_addr).await {
+                Ok(listener) => {
+                    tracing::info!("Noise invite listener started on {listen_addr}");
+
+                    loop {
+                        tokio::select! {
+                            result = listener.accept() => {
+                                if let Ok((socket, peer_addr)) = result {
+                                    let keypair = keypair_spawn.clone();
+                                    let peer_keys = peer_keys_spawn.clone();
+                                    let onboarding_trigger = onboarding_trigger_spawn.clone();
+                                    let kick_trigger = kick_trigger_spawn.clone();
+                                    let contracts_trigger = contracts_trigger_spawn.clone();
+
+                                    tokio::spawn(async move {
+                                        handle_incoming_connection(socket, peer_addr, keypair, peer_keys, onboarding_trigger, kick_trigger, contracts_trigger).await;
+                                    });
+                                }
+                            }
+                            _ = async {
+                                loop {
+                                    tokio::time::sleep(Duration::from_millis(100)).await;
+                                    let control = listener_control_spawn.read().await;
+                                    if control.should_pause {
+                                        break;
+                                    }
+                                }
+                            } => {
+                                tracing::info!("Stopping listener for workflow");
+                                break;
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to bind invite listener on {listen_addr}: {e}, retrying in 5s"
+                    );
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+            }
+        }
+    });
+
+    // Ping peers every 5 seconds
+    run_peer_ping_loop(config, peer_status).await;
+}
+
+/// Handle an incoming Noise connection (either ping or invite)
+async fn handle_incoming_connection(
+    socket: tokio::net::TcpStream,
+    peer_addr: std::net::SocketAddr,
+    keypair: Arc<NoiseKeypair>,
+    peer_keys: Arc<HashMap<String, secp256k1::PublicKey>>,
+    onboarding_trigger: Arc<Notify>,
+    kick_trigger: Arc<Notify>,
+    contracts_trigger: Arc<Notify>,
+) {
+    let secret_key = keypair.secret_key;
+    let peer_keys_clone = peer_keys.clone();
+
+    // Create PSK derivation responder
+    let responder = Responder::new(move |identity: &[u8]| -> Option<[u8; 32]> {
+        // Identity contains peer's public key
+        if identity.len() == 33 {
+            // Compressed public key
+            if let Ok(peer_pub_key) = secp256k1::PublicKey::from_slice(identity) {
+                let psk = secp256k1::ecdh::SharedSecret::new(&peer_pub_key, &secret_key);
+                return Some(psk.secret_bytes());
+            }
+        }
+        // Fallback: try to find peer by ID string
+        let peer_id = std::str::from_utf8(identity).ok()?;
+        let peer_pub_key = peer_keys_clone.get(peer_id)?;
+        let psk = secp256k1::ecdh::SharedSecret::new(peer_pub_key, &secret_key);
+        Some(psk.secret_bytes())
+    });
+
+    let onboarding_trigger = onboarding_trigger.clone();
+    let kick_trigger = kick_trigger.clone();
+    let contracts_trigger = contracts_trigger.clone();
+
+    let result = hyper_noise::server::serve_http(
+        socket,
+        responder,
+        move |_peer_id: &[u8], req: hyper::Request<Body>| {
+            let onboarding_trigger = onboarding_trigger.clone();
+            let kick_trigger = kick_trigger.clone();
+            let contracts_trigger = contracts_trigger.clone();
+            async move {
+                let body_bytes = hyper::body::to_bytes(req.into_body()).await?;
+
+                if body_bytes.len() < 6 {
+                    return Ok::<_, hyper::Error>(Response::new(Body::empty()));
+                }
+
+                if let Ok(msg) = Message::from_bytes(&body_bytes) {
+                    tracing::info!("Received message type {:?}", msg.msg_type);
+
+                    match msg.msg_type {
+                        MessageType::InviteOnboarding => {
+                            tracing::info!(
+                                "Received onboarding invite, triggering attestor workflow"
+                            );
+                            onboarding_trigger.notify_one();
+
+                            let ack = Message::new_empty(MessageType::Ack);
+                            return Ok(Response::builder()
+                                .status(StatusCode::OK)
+                                .body(Body::from(ack.to_bytes()))
+                                .unwrap());
+                        }
+                        MessageType::InviteKick => {
+                            tracing::info!(
+                                "Received kick invite, triggering kick attestor workflow"
+                            );
+                            kick_trigger.notify_one();
+
+                            let ack = Message::new_empty(MessageType::Ack);
+                            return Ok(Response::builder()
+                                .status(StatusCode::OK)
+                                .body(Body::from(ack.to_bytes()))
+                                .unwrap());
+                        }
+                        MessageType::InviteContracts => {
+                            tracing::info!(
+                                "Received contracts invite, triggering contracts attestor workflow"
+                            );
+                            contracts_trigger.notify_one();
+
+                            let ack = Message::new_empty(MessageType::Ack);
+                            return Ok(Response::builder()
+                                .status(StatusCode::OK)
+                                .body(Body::from(ack.to_bytes()))
+                                .unwrap());
+                        }
+                        _ => {
+                            tracing::debug!("Ignoring message type {:?}", msg.msg_type);
+                        }
+                    }
+                }
+
+                Ok(Response::new(Body::empty()))
+            }
+        },
+        Some(Duration::from_secs(5)),
+    )
+    .await;
+
+    match result {
+        Ok(()) => {
+            tracing::debug!("Connection from {peer_addr} handled successfully");
+        }
+        Err(e) => {
+            tracing::debug!("Noise connection from {peer_addr} failed: {e}");
+        }
+    }
+}
+
+/// Simple heartbeat when we don't have keys yet
+async fn run_simple_heartbeat(
+    config: NodeConfig,
+    peer_status: Arc<RwLock<HashMap<String, bool>>>,
+    listener_control: Arc<RwLock<ListenerControl>>,
+    listener_notify: Arc<Notify>,
+    listen_addr: String,
+) {
+    use tokio::net::TcpListener;
+
+    let listener_control_spawn = listener_control.clone();
+    let listener_notify_spawn = listener_notify.clone();
+    tokio::spawn(async move {
+        loop {
+            let should_pause = {
+                let control = listener_control_spawn.read().await;
+                control.should_pause
+            };
+
+            if should_pause {
+                tracing::info!("Noise listener paused for workflow");
+                listener_notify_spawn.notified().await;
+                tracing::info!("Resuming Noise listener");
+                continue;
+            }
+
+            match TcpListener::bind(&listen_addr).await {
+                Ok(listener) => {
+                    tracing::info!("Simple heartbeat listener started on {listen_addr}");
+
+                    loop {
+                        tokio::select! {
+                            result = listener.accept() => {
+                                if let Ok((socket, _)) = result {
+                                    drop(socket);
+                                }
+                            }
+                            _ = async {
+                                loop {
+                                    tokio::time::sleep(Duration::from_millis(100)).await;
+                                    let control = listener_control_spawn.read().await;
+                                    if control.should_pause {
+                                        break;
+                                    }
+                                }
+                            } => {
+                                tracing::info!("Stopping listener for workflow");
+                                break;
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to bind heartbeat listener on {listen_addr}: {e}, retrying in 5s"
+                    );
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+            }
+        }
+    });
+
+    run_peer_ping_loop(config, peer_status).await;
+}
+
+/// Ping peers every 5 seconds
+async fn run_peer_ping_loop(config: NodeConfig, peer_status: Arc<RwLock<HashMap<String, bool>>>) {
+    let mut interval = tokio::time::interval(Duration::from_secs(5));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        interval.tick().await;
+
+        let network_config = match config.load_network_config().await {
+            Ok(nc) => nc,
+            Err(e) => {
+                tracing::debug!("Failed to load network config for heartbeat: {e}");
+                continue;
+            }
+        };
+
+        let current_node_id = &config.node.node_id;
+        let futures: Vec<_> = network_config
+            .participants
+            .iter()
+            .filter(|p| p.id != *current_node_id)
+            .map(|participant| {
+                let id = participant.id.clone();
+                let address = participant.address.clone();
+                let port = participant.port;
+
+                async move {
+                    let addr = format!("{address}:{port}");
+                    let active = tokio::time::timeout(
+                        Duration::from_secs(2),
+                        tokio::net::TcpStream::connect(&addr),
+                    )
+                    .await
+                    .map(|r| r.is_ok())
+                    .unwrap_or(false);
+
+                    (id, active)
+                }
+            })
+            .collect();
+
+        let results = futures::future::join_all(futures).await;
+
+        let mut status_map = peer_status.write().await;
+        for (id, active) in results {
+            status_map.insert(id, active);
+        }
+    }
+}
+
+/// Background task that starts onboarding attestor workflow when triggered by an invite
+async fn run_onboarding_attestor_listener(
+    config: NodeConfig,
+    listener_control: Arc<RwLock<ListenerControl>>,
+    listener_notify: Arc<Notify>,
+    onboarding_state: web::Data<Arc<handlers::OnboardingWorkflowState>>,
+    onboarding_trigger: Arc<Notify>,
+) {
+    loop {
+        // Wait for trigger
+        onboarding_trigger.notified().await;
+
+        tracing::info!("Received onboarding invite, starting attestor workflow...");
+
+        // Check if already in progress
+        {
+            let status = onboarding_state.status.read().await;
+            if *status == types::OnboardingStatus::InProgress {
+                tracing::warn!("Already in onboarding workflow, ignoring invite");
+                continue;
+            }
+        }
+
+        // Update status
+        {
+            let mut status = onboarding_state.status.write().await;
+            *status = types::OnboardingStatus::InProgress;
+            let mut error = onboarding_state.error.write().await;
+            *error = None;
+        }
+
+        let guard =
+            types::ListenerPauseGuard::pause(listener_control.clone(), listener_notify.clone())
+                .await;
+
+        // Start attestor workflow
+        let workflow_config = config.clone();
+        let result = workflow::start_node(
+            workflow_config,
+            workflow::WorkflowType::Onboarding,
+            None,
+            None,
+        )
+        .await;
+
+        guard.resume().await;
+
+        // Update status
+        let mut status = onboarding_state.status.write().await;
+        let mut error = onboarding_state.error.write().await;
+
+        match result {
+            Ok(()) => {
+                *status = types::OnboardingStatus::Completed;
+                tracing::info!("Onboarding attestor workflow completed successfully");
+            }
+            Err(e) => {
+                *status = types::OnboardingStatus::Failed;
+                *error = Some(format!("{e}"));
+                tracing::error!("Onboarding attestor workflow failed: {e}");
+            }
+        }
+    }
+}
+
+/// Background task that starts kick attestor workflow when triggered by an invite
+async fn run_kick_attestor_listener(
+    config: NodeConfig,
+    listener_control: Arc<RwLock<ListenerControl>>,
+    listener_notify: Arc<Notify>,
+    kick_state: web::Data<Arc<handlers::KickWorkflowState>>,
+    kick_trigger: Arc<Notify>,
+) {
+    loop {
+        // Wait for trigger
+        kick_trigger.notified().await;
+
+        tracing::info!("Received kick invite, starting kick attestor workflow...");
+
+        // Check if already in progress
+        {
+            let status = kick_state.status.read().await;
+            if *status == types::KickStatus::InProgress {
+                tracing::warn!("Already in kick workflow, ignoring invite");
+                continue;
+            }
+        }
+
+        // Update status
+        {
+            let mut status = kick_state.status.write().await;
+            *status = types::KickStatus::InProgress;
+            let mut error = kick_state.error.write().await;
+            *error = None;
+        }
+
+        let guard =
+            types::ListenerPauseGuard::pause(listener_control.clone(), listener_notify.clone())
+                .await;
+
+        // Start kick attestor workflow (attestor role, no kick config needed)
+        let workflow_config = config.clone();
+        let result =
+            workflow::start_node(workflow_config, workflow::WorkflowType::Kick, None, None).await;
+
+        guard.resume().await;
+
+        // Update status
+        let mut status = kick_state.status.write().await;
+        let mut error = kick_state.error.write().await;
+
+        match result {
+            Ok(()) => {
+                *status = types::KickStatus::Completed;
+                tracing::info!("Kick attestor workflow completed successfully");
+            }
+            Err(e) => {
+                *status = types::KickStatus::Failed;
+                *error = Some(format!("{e}"));
+                tracing::error!("Kick attestor workflow failed: {e}");
+            }
+        }
+    }
+}
+
+/// Background task that starts contracts attestor workflow when triggered by an invite
+async fn run_contracts_attestor_listener(
+    config: NodeConfig,
+    listener_control: Arc<RwLock<ListenerControl>>,
+    listener_notify: Arc<Notify>,
+    contracts_state: web::Data<Arc<handlers::ContractsWorkflowState>>,
+    contracts_trigger: Arc<Notify>,
+) {
+    loop {
+        // Wait for trigger
+        contracts_trigger.notified().await;
+
+        tracing::info!("Received contracts invite, starting contracts attestor workflow...");
+
+        // Check if already in progress
+        {
+            let status = contracts_state.status.read().await;
+            if *status == types::WorkflowProgress::InProgress {
+                tracing::warn!("Already in contracts workflow, ignoring invite");
+                continue;
+            }
+        }
+
+        // Update status
+        {
+            let mut status = contracts_state.status.write().await;
+            *status = types::WorkflowProgress::InProgress;
+            let mut error = contracts_state.error.write().await;
+            *error = None;
+        }
+
+        let guard =
+            types::ListenerPauseGuard::pause(listener_control.clone(), listener_notify.clone())
+                .await;
+
+        // Start contracts attestor workflow (attestor role, no contracts config needed)
+        let workflow_config = config.clone();
+        let result = workflow::start_node(
+            workflow_config,
+            workflow::WorkflowType::Contracts,
+            None,
+            None,
+        )
+        .await;
+
+        guard.resume().await;
+
+        // Update status
+        let mut status = contracts_state.status.write().await;
+        let mut error = contracts_state.error.write().await;
+
+        match result {
+            Ok(()) => {
+                *status = types::WorkflowProgress::Completed;
+                tracing::info!("Contracts attestor workflow completed successfully");
+            }
+            Err(e) => {
+                *status = types::WorkflowProgress::Failed;
+                *error = Some(format!("{e}"));
+                tracing::error!("Contracts attestor workflow failed: {e}");
+            }
+        }
+    }
 }

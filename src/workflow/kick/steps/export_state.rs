@@ -1,3 +1,4 @@
+use anyhow::Context;
 use canton_proto_rs::com::digitalasset::canton::topology::admin::v30::{
     BaseQuery, ListDecentralizedNamespaceDefinitionRequest, ListPartyToParticipantRequest, StoreId,
     Synchronizer, base_query, store_id, synchronizer,
@@ -6,7 +7,10 @@ use canton_proto_rs::com::digitalasset::canton::topology::admin::v30::{
 
 use crate::{
     config::{NetworkConfig, NodeConfig},
-    consts::NAMESPACE_DEF_FILENAME,
+    consts::{
+        KICK_PARTICIPANT_ID_FILENAME, KICK_TARGET_FILENAME, NAMESPACE_DEF_FILENAME,
+        NEW_THRESHOLD_FILENAME,
+    },
     error::Result,
     utils,
     workflow::kick::{KickConfig, KickDirs},
@@ -156,12 +160,16 @@ pub async fn export_state(
     );
 
     // Save kick target
-    let kick_target_file = dirs.kick_config_dir.join("kick-target");
-    tokio::fs::write(&kick_target_file, format!("{kick_target_hex}\n")).await?;
+    let kick_target_file = dirs.kick_config_dir.join(KICK_TARGET_FILENAME);
+    tokio::fs::write(&kick_target_file, format!("{kick_target_hex}\n"))
+        .await
+        .with_context(|| format!("Failed to write '{}'", kick_target_file.display()))?;
 
     // Save kick participant ID
-    let kick_participant_file = dirs.kick_config_dir.join("kick-participant-id");
-    tokio::fs::write(&kick_participant_file, format!("{kick_participant}\n")).await?;
+    let kick_participant_file = dirs.kick_config_dir.join(KICK_PARTICIPANT_ID_FILENAME);
+    tokio::fs::write(&kick_participant_file, format!("{kick_participant}\n"))
+        .await
+        .with_context(|| format!("Failed to write '{}'", kick_participant_file.display()))?;
 
     // Calculate new threshold (majority of remaining members)
     let remaining_members = namespace_def.owners.len() - 1;
@@ -171,8 +179,10 @@ pub async fn export_state(
     tracing::info!("New threshold: {new_threshold}");
 
     // Save new threshold
-    let threshold_file = dirs.kick_config_dir.join("new-threshold");
-    tokio::fs::write(&threshold_file, format!("{new_threshold}\n")).await?;
+    let threshold_file = dirs.kick_config_dir.join(NEW_THRESHOLD_FILENAME);
+    tokio::fs::write(&threshold_file, format!("{new_threshold}\n"))
+        .await
+        .with_context(|| format!("Failed to write '{}'", threshold_file.display()))?;
 
     tracing::info!(
         "State exported successfully to {path}",

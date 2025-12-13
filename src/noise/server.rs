@@ -41,7 +41,7 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         initial_step: S,
         exclude_participants: Option<Vec<String>>,
     ) -> Result<Self, NoiseError> {
-        let keypair = NoiseKeypair::from_file(&node_config.node.static_key_file).await?;
+        let keypair = NoiseKeypair::from_file(&node_config.key_file_path()).await?;
 
         let excluded: HashSet<String> = exclude_participants
             .unwrap_or_default()
@@ -190,19 +190,24 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         // Route message based on type
         let response = match message.msg_type {
             MessageType::GetNextCommand => self.handle_get_next_command(peer_id).await?,
-            MessageType::KeysUpload => self.handle_keys_upload(peer_id, message.payload).await?,
+            MessageType::KeysUpload => {
+                self.handle_attestor_data(peer_id, message.payload, "keys upload")
+                    .await?
+            }
             MessageType::DnsSignature => {
-                self.handle_dns_signature(peer_id, message.payload).await?
+                self.handle_attestor_data(peer_id, message.payload, "DNS signature")
+                    .await?
             }
             MessageType::P2pSignatures => {
-                self.handle_p2p_signatures(peer_id, message.payload).await?
+                self.handle_attestor_data(peer_id, message.payload, "P2P signatures")
+                    .await?
             }
             MessageType::SubmissionSignatures => {
-                self.handle_submission_signatures(peer_id, message.payload)
+                self.handle_attestor_data(peer_id, message.payload, "submission signatures")
                     .await?
             }
             MessageType::KickSignatures => {
-                self.handle_kick_signatures(peer_id, message.payload)
+                self.handle_attestor_data(peer_id, message.payload, "kick signatures")
                     .await?
             }
             MessageType::StatusUpdate => {
@@ -237,7 +242,13 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         // Get current command from workflow state
         if let Some(command) = self.workflow_state.current_command().await {
             tracing::info!("Sending command {command:?} to {peer_id}");
-            Ok(Message::new_empty(command))
+            // Include payload for commands that need data (e.g., SignDns, SignP2p)
+            let payload = self.workflow_state.get_command_payload().await;
+            if payload.is_empty() {
+                Ok(Message::new_empty(command))
+            } else {
+                Ok(Message::new(command, payload))
+            }
         } else {
             // No command for attestors right now (coordinator-only step)
             tracing::debug!("Sending Wait to {peer_id} (coordinator-only step)");
@@ -245,89 +256,14 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         }
     }
 
-    /// Handle keys upload from attestor
-    async fn handle_keys_upload(
+    /// Handle attestor data upload (keys, signatures, etc.)
+    async fn handle_attestor_data(
         &self,
         peer_id: String,
         payload: Vec<u8>,
+        data_type: &str,
     ) -> Result<Message, NoiseError> {
-        tracing::info!("Handling keys upload from {peer_id}");
-
-        // Store the keys data
-        self.workflow_state
-            .store_attestor_data(peer_id.clone(), payload)
-            .await;
-
-        // Mark attestor as completed for this step
-        self.workflow_state.attestor_completed(peer_id).await;
-
-        Ok(Message::new_empty(MessageType::Ack))
-    }
-
-    /// Handle DNS signature from attestor
-    async fn handle_dns_signature(
-        &self,
-        peer_id: String,
-        payload: Vec<u8>,
-    ) -> Result<Message, NoiseError> {
-        tracing::info!("Handling DNS signature from {peer_id}");
-
-        // Store the signature data
-        self.workflow_state
-            .store_attestor_data(peer_id.clone(), payload)
-            .await;
-
-        // Mark attestor as completed for this step
-        self.workflow_state.attestor_completed(peer_id).await;
-
-        Ok(Message::new_empty(MessageType::Ack))
-    }
-
-    /// Handle P2P signatures from attestor
-    async fn handle_p2p_signatures(
-        &self,
-        peer_id: String,
-        payload: Vec<u8>,
-    ) -> Result<Message, NoiseError> {
-        tracing::info!("Handling P2P signatures from {peer_id}");
-
-        // Store the signatures data
-        self.workflow_state
-            .store_attestor_data(peer_id.clone(), payload)
-            .await;
-
-        // Mark attestor as completed for this step
-        self.workflow_state.attestor_completed(peer_id).await;
-
-        Ok(Message::new_empty(MessageType::Ack))
-    }
-
-    /// Handle submission signatures from attestor
-    async fn handle_submission_signatures(
-        &self,
-        peer_id: String,
-        payload: Vec<u8>,
-    ) -> Result<Message, NoiseError> {
-        tracing::info!("Handling submission signatures from {peer_id}");
-
-        // Store the signatures data
-        self.workflow_state
-            .store_attestor_data(peer_id.clone(), payload)
-            .await;
-
-        // Mark attestor as completed for this step
-        self.workflow_state.attestor_completed(peer_id).await;
-
-        Ok(Message::new_empty(MessageType::Ack))
-    }
-
-    /// Handle kick signatures from attestor
-    async fn handle_kick_signatures(
-        &self,
-        peer_id: String,
-        payload: Vec<u8>,
-    ) -> Result<Message, NoiseError> {
-        tracing::info!("Handling kick signatures from {peer_id}");
+        tracing::info!("Handling {data_type} from {peer_id}");
 
         self.workflow_state
             .store_attestor_data(peer_id.clone(), payload)

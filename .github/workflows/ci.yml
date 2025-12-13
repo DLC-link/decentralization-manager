@@ -31,7 +31,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
-        run: apt-get update && apt-get install -y pkg-config libssl-dev protobuf-compiler git openssh-client
+        run: apt-get update && apt-get install -y pkg-config libssl-dev protobuf-compiler git openssh-client nodejs npm
       - name: Setup SSH
         run: |
           mkdir -p /root/.ssh
@@ -47,6 +47,11 @@ jobs:
             /usr/local/cargo/git
             target
           key: cargo-${{ hashFiles('Cargo.lock') }}
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: frontend/node_modules
+          key: npm-${{ hashFiles('frontend/package-lock.json') }}
       - run: rustup component add clippy
       - run: cargo clippy --all-targets --all-features
 
@@ -58,7 +63,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
-        run: apt-get update && apt-get install -y pkg-config libssl-dev protobuf-compiler git openssh-client
+        run: apt-get update && apt-get install -y pkg-config libssl-dev protobuf-compiler git openssh-client nodejs npm
       - name: Setup SSH
         run: |
           mkdir -p /root/.ssh
@@ -74,6 +79,11 @@ jobs:
             /usr/local/cargo/git
             target
           key: cargo-${{ hashFiles('Cargo.lock') }}
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: frontend/node_modules
+          key: npm-${{ hashFiles('frontend/package-lock.json') }}
       - run: cargo test
 
   docker:

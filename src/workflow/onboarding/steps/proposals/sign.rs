@@ -22,29 +22,35 @@ use crate::{
 };
 
 /// Sign a topology proposal and save the signed transaction
+///
+/// If `proposal_data` is provided, it's used directly. Otherwise reads from `input_file`.
 async fn sign_proposal(
     config: &NodeConfig,
-    dirs: &OnboardingDirs,
     input_file: &Path,
     output_dir: &Path,
     output_prefix: &str,
     proposal_type: &str,
+    proposal_data: Option<&[u8]>,
 ) -> Result {
     tracing::info!("Signing {proposal_type} proposal...");
 
-    let participant_num = utils::get_participant_number(config, &dirs.ids_dir).await?;
+    let participant_num = utils::get_participant_number(config).await?;
     tracing::debug!("Determined participant number: {participant_num}");
 
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
     tracing::debug!("Using synchronizer ID: {synchronizer_id}");
 
-    tracing::info!(
-        "Reading {proposal_type} proposal from {path}",
-        path = input_file.display()
-    );
-
-    let transaction: SignedTopologyTransaction =
-        utils::read_first_message_from_file(input_file).await?;
+    // Use provided proposal data or read from file
+    let transaction: SignedTopologyTransaction = if let Some(data) = proposal_data {
+        tracing::info!("Using {proposal_type} proposal from coordinator payload");
+        utils::read_first_message_from_bytes(data)?
+    } else {
+        tracing::info!(
+            "Reading {proposal_type} proposal from {path}",
+            path = input_file.display()
+        );
+        utils::read_first_message_from_file(input_file).await?
+    };
 
     let mut topology_client =
         TopologyManagerWriteServiceClient::connect(config.admin_api_url()).await?;
@@ -87,14 +93,23 @@ async fn sign_proposal(
 ///
 /// This step must be run by each attestor participant (except the coordinator who created the proposal).
 /// Each attestor signs the DNS proposal with their namespace key.
-pub async fn sign_dns_proposals(config: &NodeConfig, dirs: &OnboardingDirs) -> Result {
+///
+/// # Arguments
+/// * `config` - Node configuration with Canton connection details
+/// * `dirs` - Directory paths for the onboarding workflow
+/// * `proposal_data` - Proposal data received from coordinator (for distributed mode)
+pub async fn sign_dns_proposals(
+    config: &NodeConfig,
+    dirs: &OnboardingDirs,
+    proposal_data: &[u8],
+) -> Result {
     sign_proposal(
         config,
-        dirs,
         &dirs.dns_proposals_dir.join(DNS_PROTO_FILENAME),
         &dirs.dns_signed_dir,
         SIGNED_DNS_PROPOSAL_PREFIX,
         "DNS",
+        Some(proposal_data),
     )
     .await
 }
@@ -106,14 +121,23 @@ pub async fn sign_dns_proposals(config: &NodeConfig, dirs: &OnboardingDirs) -> R
 ///
 /// This step must be run by each attestor participant (except the coordinator who created the proposals).
 /// Each attestor signs the P2P proposal with their namespace key.
-pub async fn sign_p2p_proposals(config: &NodeConfig, dirs: &OnboardingDirs) -> Result {
+///
+/// # Arguments
+/// * `config` - Node configuration with Canton connection details
+/// * `dirs` - Directory paths for the onboarding workflow
+/// * `proposal_data` - Proposal data received from coordinator (for distributed mode)
+pub async fn sign_p2p_proposals(
+    config: &NodeConfig,
+    dirs: &OnboardingDirs,
+    proposal_data: &[u8],
+) -> Result {
     sign_proposal(
         config,
-        dirs,
         &dirs.p2p_proposals_dir.join(P2P_PROTO_FILENAME),
         &dirs.final_signed_dir,
         SIGNED_P2P_PROPOSALS_PREFIX,
         "P2P",
+        Some(proposal_data),
     )
     .await
 }
