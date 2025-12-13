@@ -384,9 +384,7 @@ pub async fn get_participant_number(config: &NodeConfig) -> Result<u32> {
         }
     }
 
-    anyhow::bail!(
-        "Current node '{current_node_id}' not found in network config participants"
-    )
+    anyhow::bail!("Current node '{current_node_id}' not found in network config participants")
 }
 
 /// Macro to define authenticated gRPC client creator functions
@@ -516,9 +514,12 @@ pub fn decode_length_prefixed(data: &[u8], expected_count: usize) -> Result<Vec<
             );
         }
 
-        let item_len =
-            u32::from_be_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]])
-                as usize;
+        let item_len = u32::from_be_bytes([
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
+        ]) as usize;
         offset += 4;
 
         if offset + item_len > data.len() {

@@ -9,10 +9,7 @@ use canton_proto_rs::com::digitalasset::canton::{
 };
 
 use crate::{
-    config::NodeConfig,
-    consts::SIGNED_KICK_PROPOSALS_PREFIX,
-    error::Result,
-    utils,
+    config::NodeConfig, consts::SIGNED_KICK_PROPOSALS_PREFIX, error::Result, utils,
     workflow::kick::KickDirs,
 };
 
@@ -33,8 +30,10 @@ pub async fn sign_proposals(config: &NodeConfig, dirs: &KickDirs, proposal_data:
     let items = utils::decode_length_prefixed(proposal_data, 2)?;
     tracing::info!("Using kick proposals from coordinator payload");
 
-    let dns_transaction: SignedTopologyTransaction = utils::read_first_message_from_bytes(&items[0])?;
-    let p2p_transaction: SignedTopologyTransaction = utils::read_first_message_from_bytes(&items[1])?;
+    let dns_transaction: SignedTopologyTransaction =
+        utils::read_first_message_from_bytes(&items[0])?;
+    let p2p_transaction: SignedTopologyTransaction =
+        utils::read_first_message_from_bytes(&items[1])?;
 
     // Sign both proposals
     let mut topology_client =

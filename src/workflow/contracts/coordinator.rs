@@ -93,7 +93,9 @@ async fn run_workflow(
 
                 // Load prepared submissions to send to attestors with SignSubmissions command
                 let submissions_payload = load_prepared_submissions_payload(&dirs).await?;
-                workflow_state.set_command_payload(submissions_payload).await;
+                workflow_state
+                    .set_command_payload(submissions_payload)
+                    .await;
 
                 workflow_state.advance_step().await;
             }
@@ -170,7 +172,10 @@ async fn load_dars_payload(dirs: &ContractsDirs) -> Result<Vec<u8>> {
 
 /// Load all prepared submission files and encode them for transmission
 async fn load_prepared_submissions_payload(dirs: &ContractsDirs) -> Result<Vec<u8>> {
-    let prepared_dir = dirs.workflow_dir.join(LEDGER_SUBMISSIONS_DIR).join(PREPARED_DIR);
+    let prepared_dir = dirs
+        .workflow_dir
+        .join(LEDGER_SUBMISSIONS_DIR)
+        .join(PREPARED_DIR);
 
     tracing::info!(
         "Loading prepared submissions from {path} for distribution",

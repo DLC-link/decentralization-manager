@@ -354,7 +354,10 @@ impl NodeConfig {
 
     /// Get the data directory (sibling to the config directory)
     pub fn data_dir(&self) -> PathBuf {
-        self.config_dir.parent().unwrap_or(&self.config_dir).join(DATA_DIR)
+        self.config_dir
+            .parent()
+            .unwrap_or(&self.config_dir)
+            .join(DATA_DIR)
     }
 
     /// Get the keys directory
@@ -374,7 +377,10 @@ impl NodeConfig {
 
     /// Get the dars directory (sibling to the config directory)
     pub fn dars_dir(&self) -> PathBuf {
-        self.config_dir.parent().unwrap_or(&self.config_dir).join(DARS_DIR)
+        self.config_dir
+            .parent()
+            .unwrap_or(&self.config_dir)
+            .join(DARS_DIR)
     }
 }
 

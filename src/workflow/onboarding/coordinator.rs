@@ -45,15 +45,23 @@ async fn save_keys_and_ids<S: crate::workflow::state::WorkflowStep + 'static>(
             .join(format!("{ATTESTOR_KEYS_PREFIX}-{attestor_id}.bin"));
         tokio::fs::write(&keys_path, keys_data)
             .await
-            .with_context(|| format!("Failed to write keys to '{path}'", path = keys_path.display()))?;
+            .with_context(|| {
+                format!(
+                    "Failed to write keys to '{path}'",
+                    path = keys_path.display()
+                )
+            })?;
 
         // Save participant ID file
         let id_path = dirs
             .ids_dir
             .join(format!("{PARTICIPANT_ID_PREFIX}-{attestor_id}.bin"));
-        tokio::fs::write(&id_path, id_data)
-            .await
-            .with_context(|| format!("Failed to write participant ID to '{path}'", path = id_path.display()))?;
+        tokio::fs::write(&id_path, id_data).await.with_context(|| {
+            format!(
+                "Failed to write participant ID to '{path}'",
+                path = id_path.display()
+            )
+        })?;
     }
 
     workflow_state.clear_attestor_data().await;

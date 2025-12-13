@@ -338,9 +338,13 @@ pub async fn start_kick(
             namespace_fingerprint,
         );
 
-        let result =
-            workflow::start_node(config, workflow::WorkflowType::Kick, Some(kick_config), None)
-                .await;
+        let result = workflow::start_node(
+            config,
+            workflow::WorkflowType::Kick,
+            Some(kick_config),
+            None,
+        )
+        .await;
 
         guard.resume().await;
 
@@ -598,16 +602,15 @@ async fn send_kick_invites(config: &NodeConfig, kicked_participant: &CantonId) -
 
         // Skip the participant being kicked (they won't participate in the kick workflow)
         // Compare the participant's Canton party ID with the kicked participant ID
-        if let Some(party) = &participant.party {
-            if let Ok(party_id) = CantonId::parse(party) {
-                if party_id == *kicked_participant {
-                    tracing::info!(
-                        "Skipping invite to {} - they are being kicked",
-                        participant.id
-                    );
-                    continue;
-                }
-            }
+        if let Some(party) = &participant.party
+            && let Ok(party_id) = CantonId::parse(party)
+            && party_id == *kicked_participant
+        {
+            tracing::info!(
+                "Skipping invite to {} - they are being kicked",
+                participant.id
+            );
+            continue;
         }
 
         if participant.public_key.is_empty() {
@@ -716,8 +719,7 @@ pub async fn start_contracts(
     }
 
     // Create contracts config from request
-    let contracts_config =
-        workflow::ContractsConfig::new(body.decentralized_party_id.clone());
+    let contracts_config = workflow::ContractsConfig::new(body.decentralized_party_id.clone());
 
     // Spawn the contracts workflow in the background
     let config = data.config.clone();

@@ -17,12 +17,18 @@ pub struct HttpWorkflowState<S: WorkflowStatus> {
     pub error: RwLock<Option<String>>,
 }
 
-impl<S: WorkflowStatus> HttpWorkflowState<S> {
-    pub fn new() -> Self {
+impl<S: WorkflowStatus> Default for HttpWorkflowState<S> {
+    fn default() -> Self {
         Self {
             status: RwLock::new(S::default()),
             error: RwLock::new(None),
         }
+    }
+}
+
+impl<S: WorkflowStatus> HttpWorkflowState<S> {
+    pub fn new() -> Self {
+        Self::default()
     }
 }
 

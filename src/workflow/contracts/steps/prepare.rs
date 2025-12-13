@@ -5,7 +5,8 @@ use canton_proto_rs::com::daml::ledger::api::v2::{
     Command, CreateCommand, GenMap, Identifier, Optional, Record, RecordField, Value,
     admin::{
         AllocatePartyRequest, CreateUserRequest, GrantUserRightsRequest, ListKnownPartiesRequest,
-        ObjectMeta, Right, User, party_management_service_client::PartyManagementServiceClient,
+        ObjectMeta, Right, User,
+        party_management_service_client::PartyManagementServiceClient,
         right::{CanActAs, CanReadAs, Kind},
     },
     command, gen_map,

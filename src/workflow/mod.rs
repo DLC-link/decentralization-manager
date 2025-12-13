@@ -74,8 +74,7 @@ pub async fn start_node(
                 let config = contracts_config.ok_or_else(|| {
                     anyhow::anyhow!("ContractsConfig is required for Contracts workflow")
                 })?;
-                contracts::coordinator::start_coordinator(node_config, network_config, config)
-                    .await
+                contracts::coordinator::start_coordinator(node_config, network_config, config).await
             }
             WorkflowType::Kick => {
                 let config = kick_config
@@ -123,9 +122,9 @@ pub async fn save_attestor_data<S: state::WorkflowStep + 'static>(
     let attestor_data = workflow_state.get_all_attestor_data().await;
     for (attestor_id, data) in attestor_data {
         let file_path = dir.join(format!("{prefix}-{attestor_id}.bin"));
-        tokio::fs::write(&file_path, &data)
-            .await
-            .with_context(|| format!("Failed to write attestor data to '{}'", file_path.display()))?;
+        tokio::fs::write(&file_path, &data).await.with_context(|| {
+            format!("Failed to write attestor data to '{}'", file_path.display())
+        })?;
     }
     workflow_state.clear_attestor_data().await;
     Ok(())
@@ -198,11 +197,11 @@ async fn start_attestor(node_config: NodeConfig, network_config: NetworkConfig) 
                 tracing::info!("Executing: Upload DARs");
 
                 // If payload contains DARs from coordinator, save them first
-                if !payload.is_empty() {
-                    if let Err(e) = save_dars_from_payload(&payload, &contracts_dirs).await {
-                        tracing::error!("Failed to save DARs from coordinator: {e}");
-                        continue;
-                    }
+                if !payload.is_empty()
+                    && let Err(e) = save_dars_from_payload(&payload, &contracts_dirs).await
+                {
+                    tracing::error!("Failed to save DARs from coordinator: {e}");
+                    continue;
                 }
 
                 if let Err(e) = contracts::upload_dars(&node_config, &contracts_dirs).await {
@@ -275,13 +274,12 @@ async fn start_attestor(node_config: NodeConfig, network_config: NetworkConfig) 
                 tracing::info!("Executing: Sign submissions");
 
                 // If payload contains prepared submissions from coordinator, save them first
-                if !payload.is_empty() {
-                    if let Err(e) =
+                if !payload.is_empty()
+                    && let Err(e) =
                         save_prepared_submissions_from_payload(&payload, &contracts_dirs).await
-                    {
-                        tracing::error!("Failed to save prepared submissions from coordinator: {e}");
-                        continue;
-                    }
+                {
+                    tracing::error!("Failed to save prepared submissions from coordinator: {e}");
+                    continue;
                 }
 
                 if let Err(e) = contracts::sign_submissions(&node_config, &contracts_dirs).await {
@@ -344,10 +342,7 @@ pub async fn find_and_read_file(
 }
 
 /// Save DAR files received from coordinator to the dars directory
-async fn save_dars_from_payload(
-    payload: &[u8],
-    dirs: &contracts::ContractsDirs,
-) -> Result {
+async fn save_dars_from_payload(payload: &[u8], dirs: &contracts::ContractsDirs) -> Result {
     let dar_files = utils::decode_files(payload)?;
 
     tracing::info!(
@@ -379,7 +374,10 @@ async fn save_prepared_submissions_from_payload(
         count = files.len()
     );
 
-    let prepared_dir = dirs.workflow_dir.join(LEDGER_SUBMISSIONS_DIR).join(PREPARED_DIR);
+    let prepared_dir = dirs
+        .workflow_dir
+        .join(LEDGER_SUBMISSIONS_DIR)
+        .join(PREPARED_DIR);
     utils::create_directory(&prepared_dir).await?;
 
     for (filename, data) in files {

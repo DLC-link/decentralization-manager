@@ -183,7 +183,11 @@ async fn run_heartbeat(
     };
 
     let listen_addr = match network_config.get_participant(&config.node.node_id) {
-        Some(p) => format!("{addr}:{port}", addr = config.node.listen_address, port = p.port),
+        Some(p) => format!(
+            "{addr}:{port}",
+            addr = config.node.listen_address,
+            port = p.port
+        ),
         None => {
             tracing::error!("Current node not found in network config");
             return;
@@ -558,9 +562,13 @@ async fn run_onboarding_attestor_listener(
 
         // Start attestor workflow
         let workflow_config = config.clone();
-        let result =
-            workflow::start_node(workflow_config, workflow::WorkflowType::Onboarding, None, None)
-                .await;
+        let result = workflow::start_node(
+            workflow_config,
+            workflow::WorkflowType::Onboarding,
+            None,
+            None,
+        )
+        .await;
 
         guard.resume().await;
 
@@ -679,9 +687,13 @@ async fn run_contracts_attestor_listener(
 
         // Start contracts attestor workflow (attestor role, no contracts config needed)
         let workflow_config = config.clone();
-        let result =
-            workflow::start_node(workflow_config, workflow::WorkflowType::Contracts, None, None)
-                .await;
+        let result = workflow::start_node(
+            workflow_config,
+            workflow::WorkflowType::Contracts,
+            None,
+            None,
+        )
+        .await;
 
         guard.resume().await;
 

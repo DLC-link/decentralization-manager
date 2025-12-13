@@ -1,7 +1,9 @@
 use std::{marker::PhantomData, path::PathBuf};
 
 use crate::{
-    consts::{DARS_DIR, DNS_SUBMISSION_DIR, PARTICIPANT_IDS_DIR, PARTICIPANT_KEYS_DIR, WORKFLOW_DATA_DIR},
+    consts::{
+        DARS_DIR, DNS_SUBMISSION_DIR, PARTICIPANT_IDS_DIR, PARTICIPANT_KEYS_DIR, WORKFLOW_DATA_DIR,
+    },
     error::Result,
     utils,
 };
