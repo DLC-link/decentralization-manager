@@ -30,6 +30,8 @@ pub struct WorkflowState<S> {
     completed_attestors: RwLock<HashSet<String>>,
     /// Data received from attestors (e.g., keys, signatures)
     attestor_data: RwLock<HashMap<String, Vec<u8>>>,
+    /// Payload data to send with the next command (e.g., proposals for signing)
+    command_payload: RwLock<Vec<u8>>,
     _p: PhantomData<()>,
 }
 
@@ -41,8 +43,26 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
             connected_attestors: RwLock::new(HashSet::new()),
             completed_attestors: RwLock::new(HashSet::new()),
             attestor_data: RwLock::new(HashMap::new()),
+            command_payload: RwLock::new(Vec::new()),
             _p: PhantomData,
         })
+    }
+
+    /// Set payload data to be sent with the next command
+    pub async fn set_command_payload(&self, payload: Vec<u8>) {
+        let mut cmd_payload = self.command_payload.write().await;
+        *cmd_payload = payload;
+    }
+
+    /// Get payload data to send with command (clones the data)
+    pub async fn get_command_payload(&self) -> Vec<u8> {
+        self.command_payload.read().await.clone()
+    }
+
+    /// Clear the command payload
+    pub async fn clear_command_payload(&self) {
+        let mut cmd_payload = self.command_payload.write().await;
+        cmd_payload.clear();
     }
 
     pub async fn current_step(&self) -> S {

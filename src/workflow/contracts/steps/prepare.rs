@@ -1,31 +1,28 @@
 use anyhow::Context;
 use tokio::fs;
 
-use canton_proto_rs::com::{
-    daml::ledger::api::v2::{
-        Command, CreateCommand, GenMap, Identifier, Optional, Record, RecordField, Value,
-        admin::{
-            AllocatePartyRequest, CreateUserRequest, GrantUserRightsRequest,
-            ListKnownPartiesRequest, ObjectMeta, Right, User,
-            party_management_service_client::PartyManagementServiceClient,
-            right::{CanActAs, CanReadAs, Kind},
-        },
-        command, gen_map,
-        interactive::PrepareSubmissionRequest,
-        value,
+use canton_proto_rs::com::daml::ledger::api::v2::{
+    Command, CreateCommand, GenMap, Identifier, Optional, Record, RecordField, Value,
+    admin::{
+        AllocatePartyRequest, CreateUserRequest, GrantUserRightsRequest, ListKnownPartiesRequest,
+        ObjectMeta, Right, User,
+        party_management_service_client::PartyManagementServiceClient,
+        right::{CanActAs, CanReadAs, Kind},
     },
-    digitalasset::canton::protocol::v30::DecentralizedNamespaceDefinition,
+    command, gen_map,
+    interactive::PrepareSubmissionRequest,
+    value,
 };
 
 use crate::{
     config::{FieldDefinition, NetworkConfig, NodeConfig},
     consts::{
-        LEDGER_SUBMISSIONS_DIR, MIN_PARTICIPANTS_CONTRACTS, NAMESPACE_DEF_FILENAME, PREPARED_DIR,
+        LEDGER_SUBMISSIONS_DIR, MIN_PARTICIPANTS_CONTRACTS, PREPARED_DIR,
         PREPARED_SUBMISSION_PREFIX, TOPOLOGY_RETRY_DELAY_SECS, TOPOLOGY_RETRY_MAX_ATTEMPTS,
     },
     error::Result,
     utils,
-    workflow::contracts::ContractsDirs,
+    workflow::contracts::{ContractsConfig, ContractsDirs},
 };
 
 /// Default page size for listing operations (parties, keys, etc.)
@@ -40,31 +37,21 @@ const DEFAULT_PAGE_SIZE: i32 = 1000;
 /// * `config` - Configuration with Ledger API connection details
 /// * `dirs` - WorkflowDirs containing all directory paths
 /// * `network_config` - Network configuration with application settings
+/// * `contracts_config` - Contracts workflow configuration with party ID
 pub async fn prepare_submissions(
     config: &NodeConfig,
     dirs: &ContractsDirs,
     network_config: &NetworkConfig,
+    contracts_config: &ContractsConfig,
 ) -> Result {
     tracing::info!("Preparing submissions...");
 
     let app_config = &network_config.application;
-    let party_id_prefix = &app_config.party_id_prefix;
     let user_id = &config.canton.ledger_api_user_id;
 
-    // Step 1: Construct decentralized registrar party ID from namespace definition
-    let namespace_file = dirs.dns_submission_dir.join(NAMESPACE_DEF_FILENAME);
-    tracing::debug!(
-        "Reading namespace definition from {path}",
-        path = namespace_file.display()
-    );
-    let namespace_def: DecentralizedNamespaceDefinition =
-        utils::read_first_message_from_file(&namespace_file).await?;
-
-    let decentralized_registrar = format!(
-        "{party_id_prefix}::{namespace}",
-        namespace = namespace_def.decentralized_namespace
-    );
-    tracing::debug!("Constructed decentralized registrar: {decentralized_registrar}");
+    // Use the decentralized party ID from config
+    let decentralized_registrar = contracts_config.decentralized_party_id.to_string();
+    tracing::debug!("Using decentralized party: {decentralized_registrar}");
 
     // Step 2: Wait for party to be visible in Ledger API
     tracing::info!("Waiting for decentralized party to be visible in Ledger API...");

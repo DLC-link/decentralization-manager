@@ -1,8 +1,10 @@
 pub mod attestor;
+pub mod config;
 pub mod coordinator;
 pub mod dirs;
 pub mod steps;
 
+pub use config::ContractsConfig;
 pub use dirs::ContractsDirs;
 pub use steps::{execute_submissions, prepare_submissions, sign_submissions, upload_dars};
 

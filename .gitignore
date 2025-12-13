@@ -1,8 +1,7 @@
 target/
 
 # Generated keys and configuration
-keys/
-logs/
-workflow-data/
 
+/development/data/
+/configs
 .DS_Store

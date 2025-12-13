@@ -5,7 +5,10 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::Result;
+use crate::{
+    consts::{DARS_DIR, DATA_DIR, KEYS_DIR, WORKFLOW_DATA_DIR},
+    error::Result,
+};
 
 /// Coordinator selection strategy
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -173,8 +176,14 @@ impl Default for Timeouts {
 impl NetworkConfig {
     /// Load network configuration from a TOML file
     pub async fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let content = tokio::fs::read_to_string(path.as_ref()).await?;
-        let config: NetworkConfig = toml::from_str(&content)?;
+        use anyhow::Context;
+
+        let path = path.as_ref();
+        let content = tokio::fs::read_to_string(path)
+            .await
+            .with_context(|| format!("Failed to read network config '{}'", path.display()))?;
+        let config: NetworkConfig = toml::from_str(&content)
+            .with_context(|| format!("Failed to parse network config '{}'", path.display()))?;
         Ok(config)
     }
 
@@ -256,6 +265,8 @@ pub struct NodeConfig {
     pub node: NodeInfo,
     pub network_config: String,
     pub canton: CantonConfig,
+    #[serde(skip)]
+    config_dir: PathBuf,
 }
 
 /// Node-specific information
@@ -263,8 +274,6 @@ pub struct NodeConfig {
 pub struct NodeInfo {
     /// Must match one of the participant IDs in network.toml
     pub node_id: String,
-    /// Path to this node's static private key
-    pub static_key_file: String,
     #[serde(default = "default_listen_address")]
     pub listen_address: String,
 }
@@ -298,8 +307,15 @@ fn default_synchronizer() -> String {
 impl NodeConfig {
     /// Load node configuration from a TOML file
     pub async fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let content = tokio::fs::read_to_string(path.as_ref()).await?;
-        let config: NodeConfig = toml::from_str(&content)?;
+        use anyhow::Context;
+
+        let path = path.as_ref();
+        let content = tokio::fs::read_to_string(path)
+            .await
+            .with_context(|| format!("Failed to read node config '{}'", path.display()))?;
+        let mut config: NodeConfig = toml::from_str(&content)
+            .with_context(|| format!("Failed to parse node config '{}'", path.display()))?;
+        config.config_dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
         Ok(config)
     }
 
@@ -331,11 +347,40 @@ impl NodeConfig {
         let network_config_path = if PathBuf::from(&self.network_config).is_absolute() {
             PathBuf::from(&self.network_config)
         } else {
-            std::env::current_dir()?
-                .join("test-configs")
-                .join(&self.network_config)
+            self.config_dir.join(&self.network_config)
         };
         NetworkConfig::from_file(&network_config_path).await
+    }
+
+    /// Get the data directory (sibling to the config directory)
+    pub fn data_dir(&self) -> PathBuf {
+        self.config_dir
+            .parent()
+            .unwrap_or(&self.config_dir)
+            .join(DATA_DIR)
+    }
+
+    /// Get the keys directory
+    pub fn keys_dir(&self) -> PathBuf {
+        self.data_dir().join(KEYS_DIR)
+    }
+
+    /// Get the path to this node's key file
+    pub fn key_file_path(&self) -> PathBuf {
+        self.keys_dir().join(format!("{}.key", self.node.node_id))
+    }
+
+    /// Get the workflow data directory
+    pub fn workflow_data_dir(&self) -> PathBuf {
+        self.data_dir().join(WORKFLOW_DATA_DIR)
+    }
+
+    /// Get the dars directory (sibling to the config directory)
+    pub fn dars_dir(&self) -> PathBuf {
+        self.config_dir
+            .parent()
+            .unwrap_or(&self.config_dir)
+            .join(DARS_DIR)
     }
 }
 

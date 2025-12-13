@@ -15,33 +15,25 @@ use crate::{
 
 /// Sign kick proposals
 ///
-/// Each remaining member (not the kicked member) signs both proposals
-pub async fn sign_proposals(config: &NodeConfig, dirs: &KickDirs) -> Result {
+/// Each remaining member (not the kicked member) signs both proposals.
+/// `proposal_data` contains both DNS and P2P proposals received from coordinator.
+pub async fn sign_proposals(config: &NodeConfig, dirs: &KickDirs, proposal_data: &[u8]) -> Result {
     tracing::info!("Signing kick proposals...");
 
-    let participant_num = utils::get_participant_number(config, &dirs.ids_dir).await?;
+    let participant_num = utils::get_participant_number(config).await?;
     tracing::debug!("Determined participant number: {participant_num}");
 
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
     tracing::debug!("Using synchronizer ID: {synchronizer_id}");
 
-    // Read DNS kick proposal
-    let dns_file = dirs.kick_proposals_dir.join("dns_kick_proto.bin");
-    tracing::info!(
-        "Reading DNS kick proposal from {path}",
-        path = dns_file.display()
-    );
-    let dns_transaction: SignedTopologyTransaction =
-        utils::read_first_message_from_file(&dns_file).await?;
+    // Parse the combined proposal data from coordinator
+    let items = utils::decode_length_prefixed(proposal_data, 2)?;
+    tracing::info!("Using kick proposals from coordinator payload");
 
-    // Read P2P kick proposal
-    let p2p_file = dirs.kick_proposals_dir.join("p2p_kick_proto.bin");
-    tracing::info!(
-        "Reading P2P kick proposal from {path}",
-        path = p2p_file.display()
-    );
+    let dns_transaction: SignedTopologyTransaction =
+        utils::read_first_message_from_bytes(&items[0])?;
     let p2p_transaction: SignedTopologyTransaction =
-        utils::read_first_message_from_file(&p2p_file).await?;
+        utils::read_first_message_from_bytes(&items[1])?;
 
     // Sign both proposals
     let mut topology_client =

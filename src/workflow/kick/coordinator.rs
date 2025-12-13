@@ -2,9 +2,10 @@ use std::{collections::HashSet, sync::Arc};
 
 use crate::{
     config::{NetworkConfig, NodeConfig},
-    consts::SIGNED_KICK_PROPOSALS_PREFIX,
+    consts::{DNS_KICK_PROTO_FILENAME, P2P_KICK_PROTO_FILENAME, SIGNED_KICK_PROPOSALS_PREFIX},
     error::Result,
     noise::server::NoiseServer,
+    utils,
 };
 
 use super::{
@@ -33,7 +34,7 @@ pub async fn start_coordinator(
     let workflow_state = server.get_workflow_state();
     let server = Arc::new(server);
 
-    let dirs = KickDirs::new();
+    let dirs = KickDirs::with_base(node_config.workflow_data_dir());
     dirs.create_dirs().await?;
 
     let coordinator_workflow = {
@@ -68,6 +69,17 @@ pub async fn start_coordinator(
                         tracing::info!("Coordinator executing: Create proposals");
                         create_proposals(&node_config, &dirs, &network_config, &kick_config)
                             .await?;
+
+                        // Load kick proposals to send to attestors with SignKick command
+                        // Combine both DNS and P2P kick proposals into a single payload
+                        let dns_kick_path = dirs.kick_proposals_dir.join(DNS_KICK_PROTO_FILENAME);
+                        let p2p_kick_path = dirs.kick_proposals_dir.join(P2P_KICK_PROTO_FILENAME);
+
+                        let dns_data = tokio::fs::read(&dns_kick_path).await?;
+                        let p2p_data = tokio::fs::read(&p2p_kick_path).await?;
+
+                        let payload = utils::encode_length_prefixed(&[&dns_data, &p2p_data]);
+                        workflow_state.set_command_payload(payload).await;
                         workflow_state.advance_step().await;
                     }
                     KickStep::SignProposals => {
