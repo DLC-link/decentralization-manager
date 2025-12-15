@@ -18,21 +18,21 @@ data:
     id = "participant-ibtc-devnet-1"
     name = "Participant 1 (Coordinator)"
     role = "coordinator"
-    address = "participant-ibtc-devnet-1.catalyst-canton.svc.cluster.local"
+    address = "dec-party-manager-1.catalyst-canton.svc.cluster.local"
     port = 9000
     public_key = "03fe1929cb1c78f25fd05f7f2b77424b1764c9708d59bfb3743df6ec6aaf8579a7"
 
     [[participants]]
     id = "participant-ibtc-devnet-2"
     name = "Participant 2"
-    address = "participant-ibtc-devnet-2.catalyst-canton.svc.cluster.local"
+    address = "dec-party-manager-2.catalyst-canton.svc.cluster.local"
     port = 9000
     public_key = "02de4346dc38f8f76182ed12abce70671547fbfefd49401278f5836ad73f43ae9f"
 
     [[participants]]
     id = "participant-ibtc-devnet-3"
     name = "Participant 3"
-    address = "participant-ibtc-devnet-3.catalyst-canton.svc.cluster.local"
+    address = "dec-party-manager-3.catalyst-canton.svc.cluster.local"
     port = 9000
     public_key = "03e96a78e81787e797fbc87da4492c4688a879e96c399138a8d3583cbe8a709dd7"
 
@@ -114,7 +114,7 @@ spec:
     spec:
       containers:
         - name: dec-party-manager
-          image: public.ecr.aws/dlc-link/canton-decparty-manager:v0.0.2
+          image: public.ecr.aws/dlc-link/canton-decparty-manager:v0.0.3
           imagePullPolicy: Always
           ports:
             - name: http
@@ -159,8 +159,13 @@ metadata:
 spec:
   type: ClusterIP
   ports:
-    - port: 80
+    - name: http
+      port: 80
       targetPort: 8080
+      protocol: TCP
+    - name: noise
+      port: 9000
+      targetPort: 9000
       protocol: TCP
   selector:
     app.kubernetes.io/name: dec-party-manager
