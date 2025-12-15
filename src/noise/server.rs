@@ -12,7 +12,8 @@ use tokio_noise::handshakes::nn_psk2::Responder;
 use crate::{
     config::{NetworkConfig, NodeConfig},
     noise::{
-        Message, MessageType, NOISE_REQUEST_TIMEOUT, NoiseError, NoiseKeypair, parse_public_key,
+        CHUNK_SIZE, MAX_PAYLOAD_SIZE, Message, MessageType, NOISE_REQUEST_TIMEOUT, NoiseError,
+        NoiseKeypair, parse_public_key,
     },
     workflow::{WorkflowState, state::WorkflowStep},
 };
@@ -190,6 +191,7 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         // Route message based on type
         let response = match message.msg_type {
             MessageType::GetNextCommand => self.handle_get_next_command(peer_id).await?,
+            MessageType::GetChunk => self.handle_get_chunk(message.payload).await?,
             MessageType::KeysUpload => {
                 self.handle_attestor_data(peer_id, message.payload, "keys upload")
                     .await?
@@ -246,14 +248,66 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
             let payload = self.workflow_state.get_command_payload().await;
             if payload.is_empty() {
                 Ok(Message::new_empty(command))
-            } else {
+            } else if payload.len() <= MAX_PAYLOAD_SIZE {
+                // Small payload - send directly
                 Ok(Message::new(command, payload))
+            } else {
+                // Large payload - use chunked transfer
+                let total_size = payload.len() as u32;
+                let chunk_count = payload.len().div_ceil(CHUNK_SIZE) as u32;
+                tracing::info!(
+                    "Payload too large ({total_size} bytes), using chunked transfer ({chunk_count} chunks)"
+                );
+
+                // Build ChunkedCommand payload: [command_type (2 bytes)] [total_size (4 bytes)] [chunk_count (4 bytes)]
+                let mut meta = Vec::with_capacity(10);
+                meta.extend_from_slice(&command.to_u16().to_be_bytes());
+                meta.extend_from_slice(&total_size.to_be_bytes());
+                meta.extend_from_slice(&chunk_count.to_be_bytes());
+
+                Ok(Message::new(MessageType::ChunkedCommand, meta))
             }
         } else {
             // No command for attestors right now (coordinator-only step)
             tracing::debug!("Sending Wait to {peer_id} (coordinator-only step)");
             Ok(Message::new_empty(MessageType::Wait))
         }
+    }
+
+    /// Handle chunk request from attestor
+    async fn handle_get_chunk(&self, request_payload: Vec<u8>) -> Result<Message, NoiseError> {
+        if request_payload.len() < 4 {
+            return Err(NoiseError::InvalidMessage);
+        }
+
+        let chunk_index = u32::from_be_bytes([
+            request_payload[0],
+            request_payload[1],
+            request_payload[2],
+            request_payload[3],
+        ]) as usize;
+
+        let payload = self.workflow_state.get_command_payload().await;
+        let start = chunk_index * CHUNK_SIZE;
+
+        if start >= payload.len() {
+            return Err(NoiseError::InvalidMessage);
+        }
+
+        let end = std::cmp::min(start + CHUNK_SIZE, payload.len());
+        let chunk_data = &payload[start..end];
+
+        tracing::debug!(
+            "Sending chunk {chunk_index} ({start}..{end}, {} bytes)",
+            chunk_data.len()
+        );
+
+        // Build Chunk response: [chunk_index (4 bytes)] [chunk_data (variable)]
+        let mut response = Vec::with_capacity(4 + chunk_data.len());
+        response.extend_from_slice(&(chunk_index as u32).to_be_bytes());
+        response.extend_from_slice(chunk_data);
+
+        Ok(Message::new(MessageType::Chunk, response))
     }
 
     /// Handle attestor data upload (keys, signatures, etc.)

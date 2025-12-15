@@ -15,9 +15,7 @@ fn main() {
             .status()
             .expect("Failed to run npm install");
 
-        if !status.success() {
-            panic!("npm install failed");
-        }
+        assert!(status.success(), "npm install failed");
     }
 
     println!("cargo:info=Building frontend...");
@@ -27,7 +25,5 @@ fn main() {
         .status()
         .expect("Failed to run npm build");
 
-    if !status.success() {
-        panic!("Frontend build failed");
-    }
+    assert!(status.success(), "Frontend build failed");
 }

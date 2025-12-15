@@ -51,7 +51,21 @@ pub enum MessageType {
     P2pSignatures = 0x0203,
     SubmissionSignatures = 0x0204,
     KickSignatures = 0x0205,
+
+    // Chunked Transfer (0x0300 - 0x03FF)
+    /// Command with chunked payload - payload contains: [command_type (2 bytes)] [total_size (4 bytes)] [chunk_count (4 bytes)]
+    ChunkedCommand = 0x0300,
+    /// Request chunk N - payload contains: [chunk_index (4 bytes)]
+    GetChunk = 0x0301,
+    /// Chunk data response - payload contains: [chunk_index (4 bytes)] [chunk_data (variable)]
+    Chunk = 0x0302,
 }
+
+/// Maximum payload size before chunking is required (1KB to stay safely under Noise frame limits)
+pub const MAX_PAYLOAD_SIZE: usize = 1024;
+
+/// Chunk size for large payloads
+pub const CHUNK_SIZE: usize = 1024;
 
 impl TryFrom<u16> for MessageType {
     type Error = anyhow::Error;
@@ -80,6 +94,9 @@ impl TryFrom<u16> for MessageType {
             0x0203 => Ok(Self::P2pSignatures),
             0x0204 => Ok(Self::SubmissionSignatures),
             0x0205 => Ok(Self::KickSignatures),
+            0x0300 => Ok(Self::ChunkedCommand),
+            0x0301 => Ok(Self::GetChunk),
+            0x0302 => Ok(Self::Chunk),
             _ => Err(anyhow::anyhow!("Unknown message type: 0x{value:04x}")),
         }
     }
