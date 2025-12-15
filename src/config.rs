@@ -113,7 +113,6 @@ pub enum FieldDefinition {
 pub struct NetworkInfo {
     pub name: String,
     pub protocol_version: String,
-    pub port: u16,
     pub coordinator_strategy: CoordinatorStrategy,
     /// Operator party ID (optional, can be allocated dynamically if not provided)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -404,7 +403,6 @@ mod tests {
             network: NetworkInfo {
                 name: "test".to_string(),
                 protocol_version: "1.0".to_string(),
-                port: 9000,
                 coordinator_strategy: CoordinatorStrategy::Explicit,
                 operator_party: None,
             },
@@ -445,7 +443,6 @@ mod tests {
             network: NetworkInfo {
                 name: "test".to_string(),
                 protocol_version: "1.0".to_string(),
-                port: 9000,
                 coordinator_strategy: CoordinatorStrategy::First,
                 operator_party: None,
             },
@@ -484,7 +481,6 @@ mod tests {
             network: NetworkInfo {
                 name: "test".to_string(),
                 protocol_version: "1.0".to_string(),
-                port: 9000,
                 coordinator_strategy: CoordinatorStrategy::First,
                 operator_party: None,
             },

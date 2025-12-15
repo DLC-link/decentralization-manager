@@ -579,7 +579,6 @@ Instead of separate coordinator and attestor configurations, all parties use a *
 [network]
 name = "cbtc-setup-network"
 protocol_version = "1.0"
-port = 9000  # Default port for all nodes
 
 # Coordinator selection strategy
 # Options: "first", "explicit", "election"
@@ -861,7 +860,6 @@ One participant (typically the designated coordinator) creates the `network.toml
 [network]
 name = "cbtc-setup-network"
 protocol_version = "1.0"
-port = 9000
 coordinator_strategy = "explicit"
 
 [[participants]]

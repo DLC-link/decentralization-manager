@@ -2,7 +2,6 @@
 [network]
 name = "canton-onboarding-network"
 protocol_version = "1.0"
-port = 9000
 coordinator_strategy = "explicit"
 operator_party = "DSO::1220f70dd748844ea7a902ae0dae7155377bbdec7f945092a137d43433dd5f796731"
 

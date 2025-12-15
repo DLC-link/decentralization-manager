@@ -2,7 +2,6 @@
 [network]
 name = "cbtc-setup-network"
 protocol_version = "1.0"
-port = 9000
 # Options: "explicit", "first", "election"
 coordinator_strategy = "explicit"
 

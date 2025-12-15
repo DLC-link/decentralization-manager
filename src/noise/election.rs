@@ -166,7 +166,6 @@ mod tests {
             network: NetworkInfo {
                 name: "test-network".to_string(),
                 protocol_version: "1.0".to_string(),
-                port: 9000,
                 coordinator_strategy,
                 operator_party: None,
             },

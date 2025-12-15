@@ -183,7 +183,6 @@ cargo run -- keygen -o keys/participant-3.key
 [network]
 name = "my-network"
 protocol_version = "1.0"
-port = 9000
 coordinator_strategy = "explicit"
 
 [[participants]]
