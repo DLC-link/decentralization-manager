@@ -387,6 +387,9 @@ pub async fn get_participant_number(config: &NodeConfig) -> Result<u32> {
     anyhow::bail!("Current node '{current_node_id}' not found in network config participants")
 }
 
+/// Max gRPC message size (32MB) - Canton ledger can return large responses
+pub const MAX_GRPC_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
+
 /// Macro to define authenticated gRPC client creator functions
 macro_rules! define_client_creator {
     ($fn_name:ident, $client_type:ident) => {
@@ -420,7 +423,8 @@ macro_rules! define_client_creator {
                 Ok(req)
             };
 
-            Ok($client_type::with_interceptor(channel, interceptor))
+            Ok($client_type::with_interceptor(channel, interceptor)
+                .max_decoding_message_size(MAX_GRPC_MESSAGE_SIZE))
         }
     };
 }

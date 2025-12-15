@@ -114,7 +114,7 @@ spec:
     spec:
       containers:
         - name: dec-party-manager
-          image: public.ecr.aws/dlc-link/canton-decparty-manager:latest
+          image: public.ecr.aws/dlc-link/canton-decparty-manager:v0.0.2
           imagePullPolicy: Always
           ports:
             - name: http

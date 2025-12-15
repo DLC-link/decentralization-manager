@@ -12,7 +12,7 @@ services:
       - "9001:9001"
     entrypoint:
       [
-        "dec-party-onboarding",
+        "dec-party-manager",
         "-c",
         "/config/node.toml",
         "serve",
@@ -34,7 +34,7 @@ services:
       - "9002:9002"
     entrypoint:
       [
-        "dec-party-onboarding",
+        "dec-party-manager",
         "-c",
         "/config/node.toml",
         "serve",
@@ -56,7 +56,7 @@ services:
       - "9003:9003"
     entrypoint:
       [
-        "dec-party-onboarding",
+        "dec-party-manager",
         "-c",
         "/config/node.toml",
         "serve",

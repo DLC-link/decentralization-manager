@@ -67,10 +67,14 @@ pub async fn get_decentralized_parties(data: web::Data<AppState>) -> impl Respon
 }
 
 async fn fetch_decentralized_parties(config: &NodeConfig) -> Result<DecentralizedPartiesResponse> {
-    let admin_url = config.admin_api_url();
+    let channel = tonic::transport::Channel::from_shared(config.admin_api_url())?
+        .connect()
+        .await?;
 
-    let mut topology_client = TopologyManagerReadServiceClient::connect(admin_url.clone()).await?;
-    let mut vault_client = VaultServiceClient::connect(admin_url).await?;
+    let mut topology_client = TopologyManagerReadServiceClient::new(channel.clone())
+        .max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
+    let mut vault_client =
+        VaultServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
 
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
 
