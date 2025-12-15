@@ -147,3 +147,39 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: dec-party-manager-3-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dec-party-manager-3
+  labels:
+    app.kubernetes.io/name: dec-party-manager
+    app.kubernetes.io/instance: participant-3
+spec:
+  type: ClusterIP
+  ports:
+    - port: 80
+      targetPort: 8080
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: dec-party-manager
+    app.kubernetes.io/instance: participant-3
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: dec-party-manager-3-ingress
+  namespace: catalyst-canton
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: dec-party-manager-3.dev.canton.ibtc.network
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: dec-party-manager-3
+                port:
+                  number: 80

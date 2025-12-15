@@ -152,6 +152,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: dec-party-manager-1
+  namespace: catalyst-canton
   labels:
     app.kubernetes.io/name: dec-party-manager
     app.kubernetes.io/instance: participant-1
