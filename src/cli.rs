@@ -5,7 +5,7 @@ use clap::Subcommand;
 pub use clap::Parser;
 
 #[derive(Parser)]
-#[command(name = "dec-party-onboarding")]
+#[command(name = "dec-party-manager")]
 #[command(about = "Canton decentralized party onboarding workflow automation", long_about = None)]
 pub struct Cli {
     /// Path to configuration file (TOML)

@@ -1,0 +1,149 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dec-party-manager-2-config
+  namespace: catalyst-canton
+  labels:
+    app.kubernetes.io/name: dec-party-manager
+    app.kubernetes.io/instance: participant-2
+data:
+  network.toml: |
+    [network]
+    name = "canton-onboarding-network"
+    protocol_version = "1.0"
+    coordinator_strategy = "explicit"
+    operator_party = "DSO::1220f70dd748844ea7a902ae0dae7155377bbdec7f945092a137d43433dd5f796731"
+
+    [[participants]]
+    id = "participant-ibtc-devnet-1"
+    name = "Participant 1 (Coordinator)"
+    role = "coordinator"
+    address = "participant-ibtc-devnet-1.catalyst-canton.svc.cluster.local"
+    port = 9000
+    public_key = "03fe1929cb1c78f25fd05f7f2b77424b1764c9708d59bfb3743df6ec6aaf8579a7"
+
+    [[participants]]
+    id = "participant-ibtc-devnet-2"
+    name = "Participant 2"
+    address = "participant-ibtc-devnet-2.catalyst-canton.svc.cluster.local"
+    port = 9000
+    public_key = "02de4346dc38f8f76182ed12abce70671547fbfefd49401278f5836ad73f43ae9f"
+
+    [[participants]]
+    id = "participant-ibtc-devnet-3"
+    name = "Participant 3"
+    address = "participant-ibtc-devnet-3.catalyst-canton.svc.cluster.local"
+    port = 9000
+    public_key = "03e96a78e81787e797fbc87da4492c4688a879e96c399138a8d3583cbe8a709dd7"
+
+    [timeouts]
+    handshake_timeout_secs = 30
+    message_timeout_secs = 120
+    connection_retry_attempts = 3
+    connection_retry_delay_secs = 5
+
+    [application]
+    party_id_prefix = "cbtc-network"
+    namespace_key_name = "cbtc-network-namespace"
+    daml_key_name = "cbtc-network-daml-transactions"
+    operator_party_hint = "operator"
+
+  node.toml: |
+    network_config = "network.toml"
+
+    [node]
+    node_id = "participant-ibtc-devnet-2"
+    listen_address = "0.0.0.0"
+
+    [canton]
+    admin_api_host = "participant-ibtc-devnet-2.catalyst-canton.svc.cluster.local"
+    admin_api_port = 5002
+    ledger_api_host = "participant-ibtc-devnet-2.catalyst-canton.svc.cluster.local"
+    ledger_api_port = 5001
+    ledger_api_user_id = ""
+    synchronizer = "global"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: dec-party-manager-2-keys
+  namespace: catalyst-canton
+  labels:
+    app.kubernetes.io/name: dec-party-manager
+    app.kubernetes.io/instance: participant-2
+type: Opaque
+stringData:
+  participant-ibtc-devnet-2.key: "126ae4d604ef8fa883cc81be5212e2179923d3a8f8cfa8b62ade0b5378d13551"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dec-party-manager-2-data
+  namespace: catalyst-canton
+  labels:
+    app.kubernetes.io/name: dec-party-manager
+    app.kubernetes.io/instance: participant-2
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dec-party-manager-2
+  namespace: catalyst-canton
+  labels:
+    app.kubernetes.io/name: dec-party-manager
+    app.kubernetes.io/instance: participant-2
+    app.kubernetes.io/component: attestor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dec-party-manager
+      app.kubernetes.io/instance: participant-2
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dec-party-manager
+        app.kubernetes.io/instance: participant-2
+        app.kubernetes.io/component: attestor
+    spec:
+      containers:
+        - name: dec-party-manager
+          image: public.ecr.aws/dlc-link/canton-decparty-manager:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: noise
+              containerPort: 9000
+              protocol: TCP
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: keys
+              mountPath: /data/keys
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+      volumes:
+        - name: config
+          configMap:
+            name: dec-party-manager-2-config
+        - name: keys
+          secret:
+            secretName: dec-party-manager-2-keys
+        - name: data
+          persistentVolumeClaim:
+            claimName: dec-party-manager-2-data
