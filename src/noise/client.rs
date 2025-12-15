@@ -224,6 +224,59 @@ impl NoiseClient {
         // Parse response
         let resp_msg = Message::from_bytes(&response).map_err(|_| NoiseError::InvalidMessage)?;
 
+        // Handle chunked transfer
+        if resp_msg.msg_type == MessageType::ChunkedCommand {
+            return self.receive_chunked_payload(&resp_msg.payload).await;
+        }
+
         Ok(resp_msg)
+    }
+
+    /// Receive a chunked payload from the coordinator
+    async fn receive_chunked_payload(&self, meta: &[u8]) -> Result<Message, NoiseError> {
+        if meta.len() < 10 {
+            return Err(NoiseError::InvalidMessage);
+        }
+
+        // Parse metadata: [command_type (2 bytes)] [total_size (4 bytes)] [chunk_count (4 bytes)]
+        let command_type = u16::from_be_bytes([meta[0], meta[1]]);
+        let total_size = u32::from_be_bytes([meta[2], meta[3], meta[4], meta[5]]) as usize;
+        let chunk_count = u32::from_be_bytes([meta[6], meta[7], meta[8], meta[9]]) as usize;
+
+        let command =
+            MessageType::try_from(command_type).map_err(|_| NoiseError::InvalidMessage)?;
+
+        tracing::info!(
+            "Receiving chunked payload for {command:?}: {total_size} bytes in {chunk_count} chunks"
+        );
+
+        // Fetch all chunks
+        let mut payload = Vec::with_capacity(total_size);
+        for chunk_index in 0..chunk_count {
+            let chunk_data = self.request_chunk(chunk_index as u32).await?;
+            payload.extend_from_slice(&chunk_data);
+        }
+
+        tracing::info!(
+            "Received complete payload: {len} bytes",
+            len = payload.len()
+        );
+
+        Ok(Message::new(command, payload))
+    }
+
+    /// Request a specific chunk from the coordinator
+    async fn request_chunk(&self, chunk_index: u32) -> Result<Vec<u8>, NoiseError> {
+        let message = Message::new(MessageType::GetChunk, chunk_index.to_be_bytes().to_vec());
+        let response = self.send_message(&message).await?;
+
+        let resp_msg = Message::from_bytes(&response).map_err(|_| NoiseError::InvalidMessage)?;
+
+        if resp_msg.msg_type != MessageType::Chunk || resp_msg.payload.len() < 4 {
+            return Err(NoiseError::InvalidMessage);
+        }
+
+        // Chunk response: [chunk_index (4 bytes)] [chunk_data (variable)]
+        Ok(resp_msg.payload[4..].to_vec())
     }
 }

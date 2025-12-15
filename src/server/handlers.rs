@@ -567,18 +567,18 @@ async fn send_onboarding_invites(config: &NodeConfig) -> Result<()> {
             Ok(response) => {
                 if let Ok(msg) = Message::from_bytes(&response) {
                     if msg.msg_type == MessageType::Ack {
-                        tracing::info!("Peer {} acknowledged invite", participant.id);
+                        tracing::info!("Peer {id} acknowledged invite", id = participant.id);
                     } else {
                         tracing::warn!(
-                            "Peer {} responded with {:?} instead of Ack",
-                            participant.id,
-                            msg.msg_type
+                            "Peer {id} responded with {msg_type:?} instead of Ack",
+                            id = participant.id,
+                            msg_type = msg.msg_type
                         );
                     }
                 }
             }
             Err(e) => {
-                tracing::error!("Failed to send invite to {}: {e}", participant.id);
+                tracing::error!("Failed to send invite to {id}: {e}", id = participant.id);
             }
         }
     }
@@ -654,18 +654,21 @@ async fn send_kick_invites(config: &NodeConfig, kicked_participant: &CantonId) -
             Ok(response) => {
                 if let Ok(msg) = Message::from_bytes(&response) {
                     if msg.msg_type == MessageType::Ack {
-                        tracing::info!("Peer {} acknowledged kick invite", participant.id);
+                        tracing::info!("Peer {id} acknowledged kick invite", id = participant.id);
                     } else {
                         tracing::warn!(
-                            "Peer {} responded with {:?} instead of Ack",
-                            participant.id,
-                            msg.msg_type
+                            "Peer {id} responded with {msg_type:?} instead of Ack",
+                            id = participant.id,
+                            msg_type = msg.msg_type
                         );
                     }
                 }
             }
             Err(e) => {
-                tracing::error!("Failed to send kick invite to {}: {e}", participant.id);
+                tracing::error!(
+                    "Failed to send kick invite to {id}: {e}",
+                    id = participant.id
+                );
             }
         }
     }
@@ -831,18 +834,24 @@ async fn send_contracts_invites(config: &NodeConfig) -> Result<()> {
             Ok(response) => {
                 if let Ok(msg) = Message::from_bytes(&response) {
                     if msg.msg_type == MessageType::Ack {
-                        tracing::info!("Peer {} acknowledged contracts invite", participant.id);
+                        tracing::info!(
+                            "Peer {id} acknowledged contracts invite",
+                            id = participant.id
+                        );
                     } else {
                         tracing::warn!(
-                            "Peer {} responded with {:?} instead of Ack",
-                            participant.id,
-                            msg.msg_type
+                            "Peer {id} responded with {msg_type:?} instead of Ack",
+                            id = participant.id,
+                            msg_type = msg.msg_type
                         );
                     }
                 }
             }
             Err(e) => {
-                tracing::error!("Failed to send contracts invite to {}: {e}", participant.id);
+                tracing::error!(
+                    "Failed to send contracts invite to {id}: {e}",
+                    id = participant.id
+                );
             }
         }
     }
