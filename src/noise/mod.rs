@@ -4,6 +4,7 @@ pub mod server;
 
 use std::{marker::PhantomData, path::Path, time::Duration};
 
+use anyhow::Context;
 use bytes::Bytes;
 use http::Uri;
 use hyper::{Body, Request, StatusCode};
@@ -340,9 +341,15 @@ impl NoiseKeypair {
 
     /// Save the private key to a file (hex-encoded)
     pub async fn save_to_file<P: AsRef<Path>>(&self, path: P) -> Result {
-        use anyhow::Context;
-
         let path = path.as_ref();
+
+        // Ensure parent directory exists
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .with_context(|| format!("Failed to create directory '{}'", parent.display()))?;
+        }
+
         let secret_key_hex = hex::encode(self.secret_key.secret_bytes());
         tokio::fs::write(path, secret_key_hex)
             .await
