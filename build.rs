@@ -8,7 +8,7 @@ fn main() {
     let frontend_dir = Path::new("frontend");
 
     if !frontend_dir.join("node_modules").exists() {
-        println!("cargo:warning=Installing frontend dependencies...");
+        println!("cargo:info=Installing frontend dependencies...");
         let status = Command::new("npm")
             .args(["install"])
             .current_dir(frontend_dir)
@@ -20,7 +20,7 @@ fn main() {
         }
     }
 
-    println!("cargo:warning=Building frontend...");
+    println!("cargo:info=Building frontend...");
     let status = Command::new("npm")
         .args(["run", "build"])
         .current_dir(frontend_dir)

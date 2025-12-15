@@ -11,25 +11,25 @@ operator_party = "DSO::1220f70dd748844ea7a902ae0dae7155377bbdec7f945092a137d4343
 id = "app-user"
 name = "Participant 1 (Coordinator)"
 role = "coordinator"
-address = "localhost"
+address = "participant-1"
 port = 9001
-public_key = "03de34077797e792ba9a9a40acb3dc91ed0979ce793f6086a137328a376019545f" # participant-1
+public_key = "03fe1929cb1c78f25fd05f7f2b77424b1764c9708d59bfb3743df6ec6aaf8579a7"
 
 # Attestor - Participant 2
 [[participants]]
 id = "app-provider"
 name = "Participant 2"
-address = "localhost"
+address = "participant-2"
 port = 9002
-public_key = "032805f436dd9d54f4f4d41716bfb9d7c449e58a40b49cd8face5648441a203af1" # participant-2
+public_key = "02de4346dc38f8f76182ed12abce70671547fbfefd49401278f5836ad73f43ae9f"
 
 # Attestor - Participant 3
 [[participants]]
 id = "sv"
 name = "Participant 3"
-address = "localhost"
+address = "participant-3"
 port = 9003
-public_key = "039cad107043d67dd11167b7cba385bc3c64fd45936f5d5fedae55788ec710907f" # participant-3
+public_key = "03e96a78e81787e797fbc87da4492c4688a879e96c399138a8d3583cbe8a709dd7"
 
 [timeouts]
 handshake_timeout_secs = 30
