@@ -18,10 +18,9 @@ use super::{
     queries::{get_contracts, get_party_metadata},
     types::{
         ContractsRequest, DecentralizedPartiesResponse, DecentralizedParty, HttpWorkflowState,
-        KeyStatusResponse, KeygenResponse, KickRequest, KickResponse, KickStatus,
-        ListenerPauseGuard, OnboardingResponse, OnboardingStatus, ParticipantInfo,
-        ParticipantStatus, ParticipantsStatusResponse, Permission, WorkflowProgress,
-        WorkflowResponse,
+        KeyStatusResponse, KickRequest, KickResponse, KickStatus, ListenerPauseGuard,
+        OnboardingResponse, OnboardingStatus, ParticipantInfo, ParticipantStatus,
+        ParticipantsStatusResponse, Permission, WorkflowProgress, WorkflowResponse,
     },
 };
 use crate::{
@@ -403,42 +402,6 @@ pub async fn get_key_status(data: web::Data<AppState>) -> impl Responder {
             has_keys: false,
             public_key: None,
         }),
-    }
-}
-
-/// Generate new Noise keypair for this node
-#[post("/keys/generate")]
-pub async fn generate_keys(data: web::Data<AppState>) -> impl Responder {
-    let key_file = data.config.key_file_path();
-
-    // Check if keys already exist
-    if NoiseKeypair::from_file(&key_file).await.is_ok() {
-        return HttpResponse::Conflict().json(serde_json::json!({
-            "error": "Keys already exist. Delete the existing key file first if you want to regenerate."
-        }));
-    }
-
-    // Generate new keypair
-    match NoiseKeypair::generate().save_to_file(&key_file).await {
-        Ok(()) => {
-            // Read back to get public key
-            match NoiseKeypair::from_file(&key_file).await {
-                Ok(keypair) => HttpResponse::Ok().json(KeygenResponse {
-                    success: true,
-                    public_key: keypair.public_key_hex(),
-                    message: "Keypair generated successfully".to_string(),
-                }),
-                Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": format!("Keys generated but failed to read back: {e}")
-                })),
-            }
-        }
-        Err(e) => {
-            tracing::error!("Failed to generate keys: {e}");
-            HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Failed to generate keys: {e}")
-            }))
-        }
     }
 }
 

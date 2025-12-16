@@ -80,8 +80,8 @@ pub const CONFIG_DIR: &str = "config";
 /// Data directory name (contains keys, workflow-data, and dars)
 pub const DATA_DIR: &str = "data";
 
-/// Keys directory name (inside data/)
-pub const KEYS_DIR: &str = "keys";
+/// Noise private key filename (inside data/)
+pub const NOISE_KEY_FILENAME: &str = "noise.key";
 
 /// Workflow data directory name (inside data/)
 pub const WORKFLOW_DATA_DIR: &str = "workflow-data";

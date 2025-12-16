@@ -6,7 +6,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    consts::{CONFIG_DIR, DARS_DIR, DATA_DIR, KEYS_DIR, NODE_CONFIG_FILENAME, WORKFLOW_DATA_DIR},
+    consts::{CONFIG_DIR, DARS_DIR, DATA_DIR, NODE_CONFIG_FILENAME, NOISE_KEY_FILENAME, WORKFLOW_DATA_DIR},
     error::Result,
 };
 
@@ -371,14 +371,9 @@ impl NodeConfig {
         self.root_dir.join(DATA_DIR)
     }
 
-    /// Get the keys directory
-    pub fn keys_dir(&self) -> PathBuf {
-        self.data_dir().join(KEYS_DIR)
-    }
-
-    /// Get the path to this node's key file
+    /// Get the path to the noise key file
     pub fn key_file_path(&self) -> PathBuf {
-        self.keys_dir().join(format!("{}.key", self.node.node_id))
+        self.data_dir().join(NOISE_KEY_FILENAME)
     }
 
     /// Get the workflow data directory

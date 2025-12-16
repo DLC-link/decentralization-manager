@@ -14,7 +14,7 @@ use tokio_noise::handshakes::nn_psk2::Responder;
 use crate::{
     config::NodeConfig,
     error::Result,
-    noise::{Message, MessageType, NoiseKeypair, parse_public_key},
+    noise::{Message, MessageType, NoiseKeypair, load_or_generate_keypair, parse_public_key},
     workflow,
 };
 
@@ -152,7 +152,6 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig) -> Result {
             .service(handlers::start_contracts)
             .service(handlers::get_contracts_status)
             .service(handlers::get_key_status)
-            .service(handlers::generate_keys)
             .service(assets::serve_frontend)
     })
     .bind((host, port))?
@@ -194,22 +193,11 @@ async fn run_heartbeat(
         }
     };
 
-    // Load keypair for Noise handshakes
-    let keypair = match NoiseKeypair::from_file(&config.key_file_path()).await {
+    // Load or generate keypair for Noise handshakes
+    let keypair = match load_or_generate_keypair(&config.key_file_path()).await {
         Ok(kp) => Arc::new(kp),
         Err(e) => {
-            tracing::warn!(
-                "Failed to load keypair for invite listener: {e}. Invites will not work until keys are generated."
-            );
-            // Continue without keypair - we'll just do TCP ping accept/drop
-            run_simple_heartbeat(
-                config,
-                peer_status,
-                listener_control,
-                listener_notify,
-                listen_addr,
-            )
-            .await;
+            tracing::error!("Failed to load or generate keypair: {e}");
             return;
         }
     };
@@ -408,71 +396,6 @@ async fn handle_incoming_connection(
             tracing::debug!("Noise connection from {peer_addr} failed: {e}");
         }
     }
-}
-
-/// Simple heartbeat when we don't have keys yet
-async fn run_simple_heartbeat(
-    config: NodeConfig,
-    peer_status: Arc<RwLock<HashMap<String, bool>>>,
-    listener_control: Arc<RwLock<ListenerControl>>,
-    listener_notify: Arc<Notify>,
-    listen_addr: String,
-) {
-    use tokio::net::TcpListener;
-
-    let listener_control_spawn = listener_control.clone();
-    let listener_notify_spawn = listener_notify.clone();
-    tokio::spawn(async move {
-        loop {
-            let should_pause = {
-                let control = listener_control_spawn.read().await;
-                control.should_pause
-            };
-
-            if should_pause {
-                tracing::info!("Noise listener paused for workflow");
-                listener_notify_spawn.notified().await;
-                tracing::info!("Resuming Noise listener");
-                continue;
-            }
-
-            match TcpListener::bind(&listen_addr).await {
-                Ok(listener) => {
-                    tracing::info!("Simple heartbeat listener started on {listen_addr}");
-
-                    loop {
-                        tokio::select! {
-                            result = listener.accept() => {
-                                if let Ok((socket, _)) = result {
-                                    drop(socket);
-                                }
-                            }
-                            _ = async {
-                                loop {
-                                    tokio::time::sleep(Duration::from_millis(100)).await;
-                                    let control = listener_control_spawn.read().await;
-                                    if control.should_pause {
-                                        break;
-                                    }
-                                }
-                            } => {
-                                tracing::info!("Stopping listener for workflow");
-                                break;
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to bind heartbeat listener on {listen_addr}: {e}, retrying in 5s"
-                    );
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                }
-            }
-        }
-    });
-
-    run_peer_ping_loop(config, peer_status).await;
 }
 
 /// Ping peers every 5 seconds

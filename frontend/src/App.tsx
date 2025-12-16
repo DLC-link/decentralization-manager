@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
-import { Container, Typography, Box, Alert, Button, CircularProgress, IconButton, Tooltip } from "@mui/material";
+import { Container, Typography, Box, Alert, IconButton, Tooltip, Button } from "@mui/material";
 import VpnKeyIcon from "@mui/icons-material/VpnKey";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import AddIcon from "@mui/icons-material/Add";
@@ -25,7 +25,6 @@ const App = () => {
   const [networkConfig, setNetworkConfig] = useState<NetworkConfig | null>(null);
   const [participantStatuses, setParticipantStatuses] = useState<ParticipantStatus[]>([]);
   const [keyStatus, setKeyStatus] = useState<KeyStatusResponse | null>(null);
-  const [generatingKeys, setGeneratingKeys] = useState(false);
   const [onboardingDialogOpen, setOnboardingDialogOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -109,26 +108,6 @@ const App = () => {
     return () => clearInterval(interval);
   }, []);
 
-  const handleGenerateKeys = async () => {
-    setGeneratingKeys(true);
-    try {
-      const res = await fetch(`${API_BASE}/keys/generate`, { method: "POST" });
-      const data = await res.json();
-
-      if (res.ok && data.success) {
-        setKeyStatus({ has_keys: true, public_key: data.public_key });
-        await navigator.clipboard.writeText(data.public_key);
-        showSnackbar("Keys generated and public key copied to clipboard");
-      } else {
-        showSnackbar(data.error || "Failed to generate keys");
-      }
-    } catch {
-      showSnackbar("Failed to generate keys");
-    } finally {
-      setGeneratingKeys(false);
-    }
-  };
-
   return (
     <>
       <Header />
@@ -140,25 +119,6 @@ const App = () => {
           <Alert severity="error">{error}</Alert>
         ) : (
           <>
-            {keyStatus && !keyStatus.has_keys && (
-              <Alert
-                severity="warning"
-                sx={{ mb: 2, borderRadius: 3 }}
-                action={
-                  <Button
-                    color="inherit"
-                    size="small"
-                    onClick={handleGenerateKeys}
-                    disabled={generatingKeys}
-                    startIcon={generatingKeys ? <CircularProgress size={16} /> : <VpnKeyIcon />}
-                  >
-                    {generatingKeys ? "Generating..." : "Generate Keys"}
-                  </Button>
-                }
-              >
-                No Noise protocol keys found. Generate keys to enable secure communication with other nodes.
-              </Alert>
-            )}
             {keyStatus && keyStatus.has_keys && keyStatus.public_key && (
               <Alert
                 severity="success"

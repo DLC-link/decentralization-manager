@@ -385,21 +385,24 @@ impl NoiseKeypair {
     }
 }
 
-/// Generate a new Noise static keypair and save to file
-pub async fn generate_keypair<P: AsRef<Path>>(output_path: P) -> Result<NoiseKeypair> {
-    let keypair = NoiseKeypair::generate();
-    keypair.save_to_file(&output_path).await?;
+/// Load or generate a Noise keypair
+///
+/// If the key file exists, loads it. Otherwise, generates a new keypair and saves it.
+/// This is the primary way to obtain a keypair for the application.
+pub async fn load_or_generate_keypair<P: AsRef<Path>>(path: P) -> Result<NoiseKeypair> {
+    let path = path.as_ref();
 
-    tracing::info!("Generated Noise static keypair");
-    tracing::info!(
-        "Private key saved to: {path}",
-        path = output_path.as_ref().display()
-    );
-    tracing::info!("Public key (hex): {key}", key = keypair.public_key_hex());
-    tracing::warn!("⚠️  Keep your private key secure! Never share it with anyone.");
-    tracing::info!("💡 Share your public key with other participants to add to network.toml");
-
-    Ok(keypair)
+    if path.exists() {
+        tracing::debug!("Loading existing Noise keypair from {path}", path = path.display());
+        NoiseKeypair::from_file(path).await
+    } else {
+        tracing::info!("No Noise keypair found, generating new one");
+        let keypair = NoiseKeypair::generate();
+        keypair.save_to_file(path).await?;
+        tracing::info!("Noise keypair saved to {path}", path = path.display());
+        tracing::info!("Public key: {key}", key = keypair.public_key_hex());
+        Ok(keypair)
+    }
 }
 
 #[cfg(test)]

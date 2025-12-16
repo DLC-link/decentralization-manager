@@ -193,11 +193,3 @@ pub struct KeyStatusResponse {
     pub has_keys: bool,
     pub public_key: Option<String>,
 }
-
-/// Response for key generation
-#[derive(Serialize)]
-pub struct KeygenResponse {
-    pub success: bool,
-    pub public_key: String,
-    pub message: String,
-}

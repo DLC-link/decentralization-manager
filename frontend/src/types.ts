@@ -89,9 +89,3 @@ export interface KeyStatusResponse {
   has_keys: boolean;
   public_key?: string;
 }
-
-export interface KeygenResponse {
-  success: boolean;
-  public_key: string;
-  message: string;
-}
