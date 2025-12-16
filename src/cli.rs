@@ -8,9 +8,9 @@ pub use clap::Parser;
 #[command(name = "dec-party-manager")]
 #[command(about = "Canton decentralized party onboarding workflow automation", long_about = None)]
 pub struct Cli {
-    /// Path to configuration file (TOML)
-    #[arg(short, long, value_name = "FILE")]
-    pub config: Option<PathBuf>,
+    /// Path to root directory containing config/ and data/ subdirectories
+    #[arg(short, long, value_name = "DIR", default_value = ".")]
+    pub dir: PathBuf,
 
     #[command(subcommand)]
     pub command: Commands,

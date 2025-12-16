@@ -73,18 +73,24 @@ pub const NEW_THRESHOLD_FILENAME: &str = "new-threshold";
 /// Prefix for prepared submission files
 pub const PREPARED_SUBMISSION_PREFIX: &str = "prepared-submission";
 
-// Base directory names (relative to project root or config directory)
-/// Keys directory name
+// Base directory names (relative to root directory)
+/// Config directory name
+pub const CONFIG_DIR: &str = "config";
+
+/// Data directory name (contains keys, workflow-data, and dars)
+pub const DATA_DIR: &str = "data";
+
+/// Keys directory name (inside data/)
 pub const KEYS_DIR: &str = "keys";
 
-/// Workflow data directory name
+/// Workflow data directory name (inside data/)
 pub const WORKFLOW_DATA_DIR: &str = "workflow-data";
 
-/// DARs directory name
+/// DARs directory name (inside data/)
 pub const DARS_DIR: &str = "dars";
 
-/// Data directory name (contains keys and workflow-data)
-pub const DATA_DIR: &str = "data";
+/// Default node config filename
+pub const NODE_CONFIG_FILENAME: &str = "node.toml";
 
 // Workflow subdirectory names
 /// Participant keys subdirectory name

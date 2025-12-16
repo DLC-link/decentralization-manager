@@ -6,7 +6,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    consts::{DARS_DIR, DATA_DIR, KEYS_DIR, WORKFLOW_DATA_DIR},
+    consts::{CONFIG_DIR, DARS_DIR, DATA_DIR, KEYS_DIR, NODE_CONFIG_FILENAME, WORKFLOW_DATA_DIR},
     error::Result,
 };
 
@@ -264,8 +264,9 @@ pub struct NodeConfig {
     pub node: NodeInfo,
     pub network_config: String,
     pub canton: CantonConfig,
+    /// Root directory containing config/ and data/ subdirectories
     #[serde(skip)]
-    config_dir: PathBuf,
+    root_dir: PathBuf,
 }
 
 /// Node-specific information
@@ -304,18 +305,32 @@ fn default_synchronizer() -> String {
 }
 
 impl NodeConfig {
-    /// Load node configuration from a TOML file
-    pub async fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
+    /// Load node configuration from a root directory
+    ///
+    /// The directory should contain:
+    /// - config/node.toml - Node configuration
+    /// - config/network.toml - Network configuration (referenced in node.toml)
+    /// - data/keys/ - Key files
+    /// - data/workflow-data/ - Workflow state
+    /// - data/dars/ - DAR files
+    pub async fn from_dir<P: AsRef<Path>>(root_dir: P) -> Result<Self> {
         use anyhow::Context;
 
-        let path = path.as_ref();
-        let content = tokio::fs::read_to_string(path)
+        let root_dir = root_dir.as_ref();
+        let config_path = root_dir.join(CONFIG_DIR).join(NODE_CONFIG_FILENAME);
+
+        let content = tokio::fs::read_to_string(&config_path)
             .await
-            .with_context(|| format!("Failed to read node config '{}'", path.display()))?;
+            .with_context(|| format!("Failed to read node config '{}'", config_path.display()))?;
         let mut config: NodeConfig = toml::from_str(&content)
-            .with_context(|| format!("Failed to parse node config '{}'", path.display()))?;
-        config.config_dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+            .with_context(|| format!("Failed to parse node config '{}'", config_path.display()))?;
+        config.root_dir = root_dir.to_path_buf();
         Ok(config)
+    }
+
+    /// Get the config directory
+    pub fn config_dir(&self) -> PathBuf {
+        self.root_dir.join(CONFIG_DIR)
     }
 
     /// Get the full Admin API URL
@@ -346,17 +361,14 @@ impl NodeConfig {
         let network_config_path = if PathBuf::from(&self.network_config).is_absolute() {
             PathBuf::from(&self.network_config)
         } else {
-            self.config_dir.join(&self.network_config)
+            self.config_dir().join(&self.network_config)
         };
         NetworkConfig::from_file(&network_config_path).await
     }
 
-    /// Get the data directory (sibling to the config directory)
+    /// Get the data directory
     pub fn data_dir(&self) -> PathBuf {
-        self.config_dir
-            .parent()
-            .unwrap_or(&self.config_dir)
-            .join(DATA_DIR)
+        self.root_dir.join(DATA_DIR)
     }
 
     /// Get the keys directory
@@ -374,12 +386,9 @@ impl NodeConfig {
         self.data_dir().join(WORKFLOW_DATA_DIR)
     }
 
-    /// Get the dars directory (sibling to the config directory)
+    /// Get the dars directory
     pub fn dars_dir(&self) -> PathBuf {
-        self.config_dir
-            .parent()
-            .unwrap_or(&self.config_dir)
-            .join(DARS_DIR)
+        self.data_dir().join(DARS_DIR)
     }
 }
 

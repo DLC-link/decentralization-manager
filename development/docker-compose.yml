@@ -6,21 +6,11 @@ services:
     volumes:
       - ./participant-1/config:/config
       - ./participant-1/data:/data
-      - ./participant-1/dars:/dars
     ports:
       - "8081:8081"
       - "9001:9001"
     entrypoint:
-      [
-        "dec-party-manager",
-        "-c",
-        "/config/node.toml",
-        "serve",
-        "--host",
-        "0.0.0.0",
-        "--port",
-        "8081",
-      ]
+      ["dec-party-manager", "serve", "--host", "0.0.0.0", "--port", "8081"]
 
   participant-2:
     build:
@@ -33,16 +23,7 @@ services:
       - "8082:8082"
       - "9002:9002"
     entrypoint:
-      [
-        "dec-party-manager",
-        "-c",
-        "/config/node.toml",
-        "serve",
-        "--host",
-        "0.0.0.0",
-        "--port",
-        "8082",
-      ]
+      ["dec-party-manager", "serve", "--host", "0.0.0.0", "--port", "8082"]
 
   participant-3:
     build:
@@ -55,13 +36,4 @@ services:
       - "8083:8083"
       - "9003:9003"
     entrypoint:
-      [
-        "dec-party-manager",
-        "-c",
-        "/config/node.toml",
-        "serve",
-        "--host",
-        "0.0.0.0",
-        "--port",
-        "8083",
-      ]
+      ["dec-party-manager", "serve", "--host", "0.0.0.0", "--port", "8083"]

@@ -20,12 +20,11 @@ async fn main() -> Result {
 
     let args = Cli::parse();
 
-    let path = args
-        .config
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("Configuration file is required. Use -c <config-file>"))?;
-    tracing::info!("Loading configuration from: {path}", path = path.display());
-    let config = NodeConfig::from_file(path).await?;
+    tracing::info!(
+        "Loading configuration from: {path}",
+        path = args.dir.display()
+    );
+    let config = NodeConfig::from_dir(&args.dir).await?;
 
     match args.command {
         Commands::Serve { ref host, port } => {

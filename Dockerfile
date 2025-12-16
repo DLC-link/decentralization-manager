@@ -30,4 +30,4 @@ COPY --from=builder /app/target/release/dec-party-manager /usr/local/bin/
 
 EXPOSE 8080
 
-ENTRYPOINT ["dec-party-manager", "-c", "/config/node.toml", "serve", "--host", "0.0.0.0", "--port", "8080"]
+ENTRYPOINT ["dec-party-manager", "-d", "/", "serve", "--host", "0.0.0.0", "--port", "8080"]
