@@ -1,6 +1,7 @@
 use std::{collections::HashSet, sync::Arc};
 
 use anyhow::Context;
+use base64::{Engine, engine::general_purpose::STANDARD};
 use tokio::fs;
 
 use crate::{
@@ -68,8 +69,8 @@ async fn run_workflow(
 ) -> Result {
     let mut coordinator_completed_steps = HashSet::new();
 
-    // Load all DAR files to send to attestors with UploadDars command
-    let dar_payload = load_dars_payload(&dirs).await?;
+    // Encode DAR files to send to attestors with UploadDars command
+    let dar_payload = encode_dars_payload(&config)?;
     workflow_state.set_command_payload(dar_payload).await;
 
     loop {
@@ -82,7 +83,7 @@ async fn run_workflow(
             ContractsStep::UploadDars => {
                 if !coordinator_completed_steps.contains(&ContractsStep::UploadDars) {
                     tracing::info!("Coordinator executing: Upload DARs");
-                    upload_dars(&node_config, &dirs).await?;
+                    upload_dars(&node_config, &config).await?;
                     coordinator_completed_steps.insert(ContractsStep::UploadDars);
                 }
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
@@ -130,42 +131,32 @@ async fn run_workflow(
     Ok(())
 }
 
-/// Load all DAR files from the dars directory and encode them for transmission
-async fn load_dars_payload(dirs: &ContractsDirs) -> Result<Vec<u8>> {
+/// Encode DAR files from config for transmission to attestors
+fn encode_dars_payload(config: &ContractsConfig) -> Result<Vec<u8>> {
+    if config.dar_files.is_empty() {
+        tracing::info!("No DAR files to distribute to attestors");
+        return Ok(Vec::new());
+    }
+
     tracing::info!(
-        "Loading DARs from {path} for distribution",
-        path = dirs.dars_dir.display()
+        "Encoding {count} DAR file(s) for distribution to attestors",
+        count = config.dar_files.len()
     );
 
-    let mut dar_entries = fs::read_dir(&dirs.dars_dir).await?;
     let mut dar_files = Vec::new();
 
-    while let Some(entry) = dar_entries.next_entry().await? {
-        let path = entry.path();
-        if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("dar") {
-            let filename = path
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("unknown.dar")
-                .to_string();
-            let data = fs::read(&path).await?;
-            dar_files.push((filename, data));
-        }
+    for dar_file in &config.dar_files {
+        let data = STANDARD.decode(&dar_file.data).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to decode base64 DAR data for {}: {e}",
+                dar_file.filename
+            )
+        })?;
+        dar_files.push((dar_file.filename.clone(), data));
     }
 
+    // Sort for consistent ordering
     dar_files.sort_by(|a, b| a.0.cmp(&b.0));
-
-    if dar_files.is_empty() {
-        anyhow::bail!(
-            "No .dar files found in {path}",
-            path = dirs.dars_dir.display()
-        );
-    }
-
-    tracing::info!(
-        "Loaded {count} DAR file(s) for distribution to attestors",
-        count = dar_files.len()
-    );
 
     Ok(utils::encode_files(&dar_files))
 }

@@ -8,8 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     consts::{
-        CONFIG_DIR, CONTRACT_DEPLOY_FILENAME, DARS_DIR, DATA_DIR, NODE_CONFIG_FILENAME,
-        NOISE_KEY_FILENAME, WORKFLOW_DATA_DIR,
+        CONFIG_DIR, DARS_DIR, DATA_DIR, NODE_CONFIG_FILENAME, NOISE_KEY_FILENAME, WORKFLOW_DATA_DIR,
     },
     error::Result,
 };
@@ -102,93 +101,6 @@ impl NetworkConfig {
             .map(|p| (p.public_key.clone(), p.id.clone()))
             .collect()
     }
-}
-
-/// Contract deployment configuration
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ContractDeployConfig {
-    /// Party ID prefix used for constructing decentralized party identifiers
-    /// Format: "{party_id_prefix}::<namespace>"
-    pub party_id_prefix: String,
-    /// Name prefix for namespace signing keys
-    pub namespace_key_name: String,
-    /// Name prefix for DAML transaction signing keys
-    pub daml_key_name: String,
-    /// Operator party ID (optional, can be allocated dynamically if not provided)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub operator_party: Option<String>,
-    /// Party hint for operator party allocation (used if operator_party not set)
-    #[serde(default = "default_operator_party_hint")]
-    pub operator_party_hint: String,
-    /// Contract definitions to create after decentralized party setup
-    #[serde(default)]
-    pub contracts: Vec<ContractDefinition>,
-}
-
-fn default_operator_party_hint() -> String {
-    "operator".to_string()
-}
-
-impl ContractDeployConfig {
-    /// Load contract deployment configuration from a TOML file
-    pub async fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let path = path.as_ref();
-        let content = tokio::fs::read_to_string(path).await.with_context(|| {
-            format!("Failed to read contract deploy config '{}'", path.display())
-        })?;
-        let config: ContractDeployConfig = toml::from_str(&content).with_context(|| {
-            format!(
-                "Failed to parse contract deploy config '{path}'",
-                path = path.display()
-            )
-        })?;
-        Ok(config)
-    }
-}
-
-/// Definition of a Daml contract to create on the ledger
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ContractDefinition {
-    /// Unique identifier for this contract (used as command ID)
-    pub id: String,
-    /// Human-readable name for logging
-    pub name: String,
-    /// Package ID (can use # prefix for symbolic lookup)
-    pub package_id: String,
-    /// Module name (e.g., "CBTC.Governance")
-    pub module_name: String,
-    /// Entity/template name (e.g., "CBTCGovernanceRules")
-    pub entity_name: String,
-    /// Record fields for the create command
-    pub fields: Vec<FieldDefinition>,
-}
-
-/// Definition of a field value in a Daml record
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum FieldDefinition {
-    /// The decentralized party ID
-    DecentralizedParty,
-    /// The operator party ID
-    OperatorParty,
-    /// A specific participant's party ID (0-indexed)
-    ParticipantParty { index: usize },
-    /// Static text value
-    Text { value: String },
-    /// Integer value
-    Int64 { value: i64 },
-    /// Boolean value
-    Bool { value: bool },
-    /// The instrument record (admin party + instrument id)
-    Instrument { id: String },
-    /// Set of all participant parties (as GenMap<Party, Unit>)
-    AttestorsSet,
-    /// Optional wrapper around another field
-    Optional { inner: Box<FieldDefinition> },
-    /// Nested record with fields
-    Record { fields: Vec<FieldDefinition> },
-    /// Governance threshold (calculated from participant count)
-    GovernanceThreshold,
 }
 
 /// Timeout configuration
@@ -289,7 +201,6 @@ impl NodeConfig {
     /// The directory should contain:
     /// - config/node.toml - Node configuration
     /// - config/peers.csv - Peers list (id,name,address,port,public_key,party)
-    /// - config/contract-deploy.toml - Contract deployment configuration (optional)
     /// - data/noise.key - Noise keypair (auto-generated if missing)
     /// - data/workflow-data/ - Workflow state
     /// - data/dars/ - DAR files
@@ -342,17 +253,6 @@ impl NodeConfig {
     pub async fn save_network_config(&self, config: &NetworkConfig) -> Result<()> {
         let peers_config_path = self.config_dir().join("peers.csv");
         config.save_to_file(&peers_config_path).await
-    }
-
-    /// Load the contract deployment configuration (if it exists)
-    pub async fn load_contract_deploy_config(&self) -> Result<Option<ContractDeployConfig>> {
-        let config_path = self.config_dir().join(CONTRACT_DEPLOY_FILENAME);
-        if !config_path.exists() {
-            return Ok(None);
-        }
-        ContractDeployConfig::from_file(&config_path)
-            .await
-            .map(Some)
     }
 
     /// Get the data directory

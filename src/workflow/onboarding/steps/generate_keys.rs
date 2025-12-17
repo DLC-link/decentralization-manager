@@ -17,7 +17,7 @@ use canton_proto_rs::com::digitalasset::canton::{
 
 use crate::{
     config::{NetworkConfig, NodeConfig},
-    consts::ATTESTOR_KEYS_PREFIX,
+    consts::{ATTESTOR_KEYS_PREFIX, DAML_KEY_NAME, NAMESPACE_KEY_NAME},
     error::Result,
     utils::{compute_fingerprint, write_messages_to_file},
     workflow::onboarding::OnboardingDirs,
@@ -39,22 +39,13 @@ pub async fn generate_keys(
 ) -> Result {
     tracing::info!("Generating cryptographic keys...");
 
-    // Load contract deploy config for key names
-    let contract_deploy_config = config
-        .load_contract_deploy_config()
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("Contract deploy config not found"))?;
-
-    let namespace_key_name = &contract_deploy_config.namespace_key_name;
-    let daml_key_name = &contract_deploy_config.daml_key_name;
-
     let mut vault_client = VaultServiceClient::connect(config.admin_api_url()).await?;
 
     // Generate namespace signing key
-    tracing::debug!("Generating namespace signing key with name '{namespace_key_name}'");
+    tracing::debug!("Generating namespace signing key with name '{NAMESPACE_KEY_NAME}'");
     let namespace_key = generate_signing_key(
         &mut vault_client,
-        namespace_key_name,
+        NAMESPACE_KEY_NAME,
         vec![SigningKeyUsage::Namespace as i32],
     )
     .await?;
@@ -66,10 +57,10 @@ pub async fn generate_keys(
     propose_namespace_delegation(config, &namespace_key, &namespace_fingerprint).await?;
 
     // Generate DAML signing key for transactions
-    tracing::debug!("Generating DAML signing key with name '{daml_key_name}'");
+    tracing::debug!("Generating DAML signing key with name '{DAML_KEY_NAME}'");
     let daml_key = generate_signing_key(
         &mut vault_client,
-        daml_key_name,
+        DAML_KEY_NAME,
         vec![SigningKeyUsage::Protocol as i32],
     )
     .await?;

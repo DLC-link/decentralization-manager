@@ -178,15 +178,20 @@ pub async fn start_attestor(node_config: NodeConfig, coordinator: Peer) -> Resul
             MessageType::UploadDars => {
                 tracing::info!("Executing: Upload DARs");
 
-                // If payload contains DARs from coordinator, save them first
-                if !payload.is_empty()
-                    && let Err(e) = save_dars_from_payload(&payload, &contracts_dirs).await
-                {
-                    tracing::error!("Failed to save DARs from coordinator: {e}");
-                    continue;
-                }
+                // Decode DAR files from payload and upload directly
+                let dar_files = if payload.is_empty() {
+                    Vec::new()
+                } else {
+                    match utils::decode_files(&payload) {
+                        Ok(files) => files,
+                        Err(e) => {
+                            tracing::error!("Failed to decode DARs from coordinator: {e}");
+                            continue;
+                        }
+                    }
+                };
 
-                if let Err(e) = contracts::upload_dars(&node_config, &contracts_dirs).await {
+                if let Err(e) = contracts::upload_dars_from_bytes(&node_config, dar_files).await {
                     tracing::error!("Step execution failed: {e}");
                     continue;
                 }
@@ -321,27 +326,6 @@ pub async fn find_and_read_file(
     }
 
     anyhow::bail!("{error_msg} in {path}", path = dir.display())
-}
-
-/// Save DAR files received from coordinator to the dars directory
-async fn save_dars_from_payload(payload: &[u8], dirs: &contracts::ContractsDirs) -> Result {
-    let dar_files = utils::decode_files(payload)?;
-
-    tracing::info!(
-        "Received {count} DAR file(s) from coordinator",
-        count = dar_files.len()
-    );
-
-    // Ensure dars directory exists
-    utils::create_directory(&dirs.dars_dir).await?;
-
-    for (filename, data) in dar_files {
-        let path = dirs.dars_dir.join(&filename);
-        tokio::fs::write(&path, &data).await?;
-        tracing::debug!("Saved DAR: {filename}");
-    }
-
-    Ok(())
 }
 
 /// Save prepared submission files received from coordinator

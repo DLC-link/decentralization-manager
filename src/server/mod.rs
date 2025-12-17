@@ -155,8 +155,14 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig) -> Result {
     HttpServer::new(move || {
         let cors = Cors::permissive();
 
+        // Increase payload limit to 100MB for DAR file uploads
+        let json_config = web::JsonConfig::default().limit(100 * 1024 * 1024);
+        let payload_config = web::PayloadConfig::default().limit(100 * 1024 * 1024);
+
         App::new()
             .wrap(cors)
+            .app_data(json_config)
+            .app_data(payload_config)
             .app_data(app_state.clone())
             .app_data(kick_state.clone())
             .app_data(onboarding_state.clone())

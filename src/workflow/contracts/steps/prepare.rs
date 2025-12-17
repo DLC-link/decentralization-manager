@@ -15,14 +15,14 @@ use canton_proto_rs::com::daml::ledger::api::v2::{
 };
 
 use crate::{
-    config::{FieldDefinition, NetworkConfig, NodeConfig},
+    config::{NetworkConfig, NodeConfig},
     consts::{
         LEDGER_SUBMISSIONS_DIR, MIN_PARTICIPANTS_CONTRACTS, PREPARED_DIR,
         PREPARED_SUBMISSION_PREFIX, TOPOLOGY_RETRY_DELAY_SECS, TOPOLOGY_RETRY_MAX_ATTEMPTS,
     },
     error::Result,
     utils,
-    workflow::contracts::{ContractsConfig, ContractsDirs},
+    workflow::contracts::{ContractsConfig, ContractsDirs, FieldDefinition},
 };
 
 /// Default page size for listing operations (parties, keys, etc.)
@@ -45,12 +45,6 @@ pub async fn prepare_submissions(
     contracts_config: &ContractsConfig,
 ) -> Result {
     tracing::info!("Preparing submissions...");
-
-    // Load contract deploy config for operator party hint
-    let contract_deploy_config = config
-        .load_contract_deploy_config()
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("Contract deploy config not found"))?;
 
     let user_id = &config.canton.ledger_api_user_id;
 
@@ -139,14 +133,14 @@ pub async fn prepare_submissions(
     );
 
     // Get operator party from config or allocate
-    let operator = if let Some(operator_party) = &contract_deploy_config.operator_party {
+    let operator = if let Some(operator_party) = &contracts_config.operator_party {
         tracing::debug!("Using operator party from config: {operator_party}");
         operator_party.clone()
     } else {
         tracing::debug!("Allocating/finding operator party");
         allocate_or_find_party(
             &mut party_client,
-            &contract_deploy_config.operator_party_hint,
+            &contracts_config.operator_party_hint,
             &utils::get_synchronizer_id(config).await?,
         )
         .await?
@@ -238,14 +232,14 @@ pub async fn prepare_submissions(
     let prepared_dir = ledger_submissions_dir.join(PREPARED_DIR);
     fs::create_dir_all(&prepared_dir).await?;
 
-    if contract_deploy_config.contracts.is_empty() {
+    if contracts_config.contracts.is_empty() {
         tracing::warn!(
             "No contracts defined in application config, skipping submission preparation"
         );
         return Ok(());
     }
 
-    for (idx, contract_def) in contract_deploy_config.contracts.iter().enumerate() {
+    for (idx, contract_def) in contracts_config.contracts.iter().enumerate() {
         tracing::info!(
             "Preparing submission {idx}: {contract_name} ({contract_id})",
             idx = idx + 1,
@@ -308,7 +302,7 @@ pub async fn prepare_submissions(
 
     tracing::info!(
         "{count} submissions prepared successfully",
-        count = contract_deploy_config.contracts.len()
+        count = contracts_config.contracts.len()
     );
     Ok(())
 }

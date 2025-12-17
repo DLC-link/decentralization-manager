@@ -751,6 +751,7 @@ dependencies = [
  "actix-cors",
  "actix-web",
  "anyhow",
+ "base64",
  "bytes",
  "canton-proto-rs",
  "clap",

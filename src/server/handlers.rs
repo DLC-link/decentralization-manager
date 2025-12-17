@@ -694,7 +694,13 @@ pub async fn start_contracts(
     }
 
     // Create contracts config from request
-    let contracts_config = workflow::ContractsConfig::new(body.decentralized_party_id.clone());
+    let contracts_config = workflow::ContractsConfig::new(
+        body.decentralized_party_id.clone(),
+        body.operator_party.clone(),
+        body.operator_party_hint.clone(),
+        body.dar_files.clone(),
+        body.contracts.clone(),
+    );
 
     // Spawn the contracts workflow in the background
     let config = data.config.clone();
