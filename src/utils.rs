@@ -378,7 +378,7 @@ pub async fn get_participant_number(config: &NodeConfig) -> Result<u32> {
     let network_config = config.load_network_config().await?;
     let current_node_id = &config.node.node_id;
 
-    for (idx, participant) in network_config.participants.iter().enumerate() {
+    for (idx, participant) in network_config.peers.iter().enumerate() {
         if &participant.id == current_node_id {
             return Ok((idx + 1) as u32);
         }

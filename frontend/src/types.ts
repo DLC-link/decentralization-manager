@@ -39,23 +39,17 @@ export interface NodeConfig {
   };
 }
 
-export interface NetworkParticipant {
+export interface Peer {
   id: string;
   name: string;
-  role?: string;
   address: string;
   port: number;
   public_key: string;
+  party?: string;
 }
 
 export interface NetworkConfig {
-  network: {
-    name: string;
-    protocol_version: string;
-    port: number;
-    coordinator_strategy: string;
-  };
-  participants: NetworkParticipant[];
+  peers: Peer[];
 }
 
 export interface ParticipantStatus {

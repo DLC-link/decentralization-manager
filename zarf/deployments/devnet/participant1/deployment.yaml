@@ -7,53 +7,11 @@ metadata:
     app.kubernetes.io/name: dec-party-manager
     app.kubernetes.io/instance: participant-1
 data:
-  network.toml: |
-    [network]
-    name = "canton-onboarding-network"
-    protocol_version = "1.0"
-    coordinator_strategy = "explicit"
-    operator_party = "DSO::1220f70dd748844ea7a902ae0dae7155377bbdec7f945092a137d43433dd5f796731"
-
-    [[participants]]
-    id = "participant-ibtc-devnet-1"
-    name = "Participant 1 (Coordinator)"
-    role = "coordinator"
-    address = "dec-party-manager-1.catalyst-canton.svc.cluster.local"
-    port = 9000
-    public_key = "03fe1929cb1c78f25fd05f7f2b77424b1764c9708d59bfb3743df6ec6aaf8579a7"
-
-    [[participants]]
-    id = "participant-ibtc-devnet-2"
-    name = "Participant 2"
-    address = "dec-party-manager-2.catalyst-canton.svc.cluster.local"
-    port = 9000
-    public_key = "02de4346dc38f8f76182ed12abce70671547fbfefd49401278f5836ad73f43ae9f"
-
-    [[participants]]
-    id = "participant-ibtc-devnet-3"
-    name = "Participant 3"
-    address = "dec-party-manager-3.catalyst-canton.svc.cluster.local"
-    port = 9000
-    public_key = "03e96a78e81787e797fbc87da4492c4688a879e96c399138a8d3583cbe8a709dd7"
-
-    [timeouts]
-    handshake_timeout_secs = 30
-    message_timeout_secs = 120
-    connection_retry_attempts = 3
-    connection_retry_delay_secs = 5
-
-    [application]
-    party_id_prefix = "cbtc-network"
-    namespace_key_name = "cbtc-network-namespace"
-    daml_key_name = "cbtc-network-daml-transactions"
-    operator_party_hint = "operator"
-
   node.toml: |
-    network_config = "network.toml"
-
     [node]
     node_id = "participant-ibtc-devnet-1"
     listen_address = "0.0.0.0"
+    port = 9000
 
     [canton]
     admin_api_host = "participant-ibtc-devnet-1.catalyst-canton.svc.cluster.local"
@@ -62,18 +20,17 @@ data:
     ledger_api_port = 5001
     ledger_api_user_id = ""
     synchronizer = "global"
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: dec-party-manager-1-keys
-  namespace: catalyst-canton
-  labels:
-    app.kubernetes.io/name: dec-party-manager
-    app.kubernetes.io/instance: participant-1
-type: Opaque
-stringData:
-  participant-ibtc-devnet-1.key: "5138dc5e38d3c641666f92b435a9853f37baead3e7dc7b538f59e3c93362bde7"
+
+    [timeouts]
+    handshake_timeout_secs = 30
+    message_timeout_secs = 120
+    connection_retry_attempts = 3
+    connection_retry_delay_secs = 5
+
+  peers.csv: |
+    id,name,address,port,public_key,party
+    participant-ibtc-devnet-2,Participant 2,dec-party-manager-2.catalyst-canton.svc.cluster.local,9000,02de4346dc38f8f76182ed12abce70671547fbfefd49401278f5836ad73f43ae9f,
+    participant-ibtc-devnet-3,Participant 3,dec-party-manager-3.catalyst-canton.svc.cluster.local,9000,03e96a78e81787e797fbc87da4492c4688a879e96c399138a8d3583cbe8a709dd7,
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -112,10 +69,26 @@ spec:
         app.kubernetes.io/instance: participant-1
         app.kubernetes.io/component: coordinator
     spec:
+      initContainers:
+        - name: copy-config
+          image: busybox:latest
+          command:
+            - sh
+            - -c
+            - |
+              mkdir -p /app/config /app/data
+              cp /config-readonly/* /app/config/
+              echo "Config copied to persistent storage"
+          volumeMounts:
+            - name: config
+              mountPath: /config-readonly
+            - name: data
+              mountPath: /app
       containers:
         - name: dec-party-manager
-          image: public.ecr.aws/dlc-link/canton-decparty-manager:v0.0.3
+          image: public.ecr.aws/dlc-link/canton-decparty-manager:v0.0.4
           imagePullPolicy: Always
+          command: ["dec-party-manager", "-d", "/app", "serve", "--host", "0.0.0.0", "--port", "8080"]
           ports:
             - name: http
               containerPort: 8080
@@ -124,12 +97,8 @@ spec:
               containerPort: 9000
               protocol: TCP
           volumeMounts:
-            - name: config
-              mountPath: /config
-            - name: keys
-              mountPath: /data/keys
             - name: data
-              mountPath: /data
+              mountPath: /app
           resources:
             requests:
               memory: "128Mi"
@@ -141,9 +110,6 @@ spec:
         - name: config
           configMap:
             name: dec-party-manager-1-config
-        - name: keys
-          secret:
-            secretName: dec-party-manager-1-keys
         - name: data
           persistentVolumeClaim:
             claimName: dec-party-manager-1-data

@@ -8,18 +8,19 @@ use std::sync::Arc;
 use anyhow::Context;
 
 use crate::{
-    config::{CoordinatorStrategy, NetworkConfig, NodeConfig},
+    config::{NodeConfig, Peer},
     consts::{LEDGER_SUBMISSIONS_DIR, PREPARED_DIR},
     error::Result,
-    noise::{MessageType, client::NoiseClient, election, server::NoiseServer},
+    noise::{MessageType, client::NoiseClient, server::NoiseServer},
     utils,
 };
 
 pub use contracts::{ContractsConfig, ContractsStep};
 pub use kick::{KickConfig, KickStep};
-pub use onboarding::OnboardingStep;
+pub use onboarding::{OnboardingConfig, OnboardingStep};
 pub use state::WorkflowState;
 
+/// Workflow types that can be run
 #[derive(Clone, Copy, Debug)]
 pub enum WorkflowType {
     Onboarding,
@@ -27,63 +28,37 @@ pub enum WorkflowType {
     Kick,
 }
 
-async fn determine_coordinator(
-    node_config: &NodeConfig,
-    network_config: &NetworkConfig,
-) -> Result<bool> {
-    match network_config.network.coordinator_strategy {
-        CoordinatorStrategy::Election => {
-            tracing::info!("Running leader election (Bully algorithm)");
-            let election_result =
-                election::run_election(network_config, &node_config.node.node_id).await?;
-
-            tracing::info!(
-                "Election complete: {id} is the coordinator",
-                id = election_result.coordinator.id
-            );
-
-            Ok(election_result.is_me)
-        }
-        _ => network_config.is_coordinator(&node_config.node.node_id),
-    }
-}
-
-pub async fn start_node(
+/// Start a coordinator workflow (called when this node initiates the workflow from UI)
+pub async fn start_coordinator(
     node_config: NodeConfig,
     workflow_type: WorkflowType,
+    onboarding_config: Option<OnboardingConfig>,
     kick_config: Option<KickConfig>,
     contracts_config: Option<ContractsConfig>,
 ) -> Result {
     tracing::info!("Loading network config...");
     let network_config = node_config.load_network_config().await?;
 
-    let is_coordinator = determine_coordinator(&node_config, &network_config).await?;
-    let role = if is_coordinator {
-        "COORDINATOR"
-    } else {
-        "ATTESTOR"
-    };
-    tracing::info!("Starting {workflow_type:?} workflow as {role}");
+    tracing::info!("Starting {workflow_type:?} workflow as COORDINATOR");
 
-    if is_coordinator {
-        match workflow_type {
-            WorkflowType::Onboarding => {
-                onboarding::coordinator::start_coordinator(node_config, network_config).await
-            }
-            WorkflowType::Contracts => {
-                let config = contracts_config.ok_or_else(|| {
-                    anyhow::anyhow!("ContractsConfig is required for Contracts workflow")
-                })?;
-                contracts::coordinator::start_coordinator(node_config, network_config, config).await
-            }
-            WorkflowType::Kick => {
-                let config = kick_config
-                    .ok_or_else(|| anyhow::anyhow!("KickConfig is required for Kick workflow"))?;
-                kick::coordinator::start_coordinator(node_config, network_config, config).await
-            }
+    match workflow_type {
+        WorkflowType::Onboarding => {
+            let config = onboarding_config.ok_or_else(|| {
+                anyhow::anyhow!("OnboardingConfig is required for Onboarding workflow")
+            })?;
+            onboarding::coordinator::start_coordinator(node_config, network_config, config).await
         }
-    } else {
-        start_attestor(node_config, network_config).await
+        WorkflowType::Contracts => {
+            let config = contracts_config.ok_or_else(|| {
+                anyhow::anyhow!("ContractsConfig is required for Contracts workflow")
+            })?;
+            contracts::coordinator::start_coordinator(node_config, network_config, config).await
+        }
+        WorkflowType::Kick => {
+            let config = kick_config
+                .ok_or_else(|| anyhow::anyhow!("KickConfig is required for Kick workflow"))?;
+            kick::coordinator::start_coordinator(node_config, network_config, config).await
+        }
     }
 }
 
@@ -131,10 +106,17 @@ pub async fn save_attestor_data<S: state::WorkflowStep + 'static>(
 }
 
 /// Start node in attestor mode (client)
-async fn start_attestor(node_config: NodeConfig, network_config: NetworkConfig) -> Result {
-    tracing::info!("Initializing Noise client...");
+/// Called when this node receives a workflow invite from the coordinator
+pub async fn start_attestor(node_config: NodeConfig, coordinator: Peer) -> Result {
+    tracing::info!(
+        "Initializing Noise client to connect to coordinator {}...",
+        coordinator.id
+    );
 
-    let client = NoiseClient::new(node_config.clone(), network_config.clone()).await?;
+    // Load network config for workflows that need it
+    let network_config = node_config.load_network_config().await?;
+
+    let client = NoiseClient::new(node_config.clone(), coordinator).await?;
 
     // Initialize directory paths for all workflows
     let onboarding_dirs = onboarding::OnboardingDirs::with_base(node_config.workflow_data_dir());

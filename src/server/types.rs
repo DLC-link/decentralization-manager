@@ -153,6 +153,13 @@ pub struct KickRequest {
     pub namespace_fingerprint: String,
 }
 
+/// Request to create a new decentralized party
+#[derive(Clone, Debug, Deserialize)]
+pub struct OnboardingRequest {
+    /// Party ID prefix for the decentralized party (e.g., "xyz-network")
+    pub party_id_prefix: String,
+}
+
 /// Request to deploy contracts for a decentralized party
 #[derive(Clone, Debug, Deserialize)]
 pub struct ContractsRequest {

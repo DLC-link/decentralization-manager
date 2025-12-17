@@ -17,6 +17,7 @@ import type {
   NetworkConfig,
   ParticipantStatus,
   KeyStatusResponse,
+  Peer,
 } from "./types";
 
 const App = () => {
@@ -49,6 +50,25 @@ const App = () => {
     } catch (err) {
       showSnackbar(err instanceof Error ? err.message : "Failed to refresh parties");
     }
+  }, [showSnackbar]);
+
+  const savePeers = useCallback(async (peers: Peer[]) => {
+    const res = await fetch(`${API_BASE}/network-config`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(peers),
+    });
+    if (!res.ok) {
+      const data = await res.json();
+      throw new Error(data.error || "Failed to save peers");
+    }
+    // Refresh the network config
+    const networkRes = await fetch(`${API_BASE}/network-config`);
+    if (networkRes.ok) {
+      const networkData = await networkRes.json();
+      setNetworkConfig(networkData);
+    }
+    showSnackbar("Peers saved successfully");
   }, [showSnackbar]);
 
   useEffect(() => {
@@ -152,6 +172,7 @@ const App = () => {
               <NetworkConfigAccordion
                 config={networkConfig}
                 participantStatuses={participantStatuses}
+                onSave={savePeers}
               />
             )}
 

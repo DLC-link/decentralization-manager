@@ -11,7 +11,7 @@ use canton_proto_rs::com::digitalasset::canton::{
 };
 
 use crate::{
-    config::{NetworkConfig, NodeConfig},
+    config::NodeConfig,
     consts::{
         DNS_PROTO_FILENAME, NAMESPACE_DEF_FILENAME, P2P_PROTO_FILENAME, SIGNED_DNS_PROPOSAL_PREFIX,
         SIGNED_P2P_PROPOSALS_PREFIX, TOPOLOGY_PROPAGATION_DELAY_SECS, TOPOLOGY_RETRY_DELAY_SECS,
@@ -19,7 +19,7 @@ use crate::{
     },
     error::Result,
     utils,
-    workflow::onboarding::OnboardingDirs,
+    workflow::onboarding::{OnboardingConfig, OnboardingDirs},
 };
 
 /// Aggregate and submit DNS proposals
@@ -169,11 +169,12 @@ async fn wait_for_dns_in_topology(
 pub async fn submit_final_proposals(
     config: &NodeConfig,
     dirs: &OnboardingDirs,
-    network_config: &NetworkConfig,
+    onboarding_config: &OnboardingConfig,
 ) -> Result {
     tracing::info!("Submitting P2P proposal with embedded signing keys (Canton 3.4+)...");
 
-    let party_id_prefix = &network_config.application.party_id_prefix;
+    // Use party_id_prefix from onboarding config (provided via UI)
+    let party_id_prefix = &onboarding_config.party_id_prefix;
 
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
     tracing::debug!("Using synchronizer ID: {synchronizer_id}");

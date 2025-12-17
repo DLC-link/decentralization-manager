@@ -15,7 +15,7 @@ use crate::{
 };
 
 use super::{
-    OnboardingDirs, OnboardingStep,
+    OnboardingConfig, OnboardingDirs, OnboardingStep,
     steps::{create_proposals, generate_keys, submit_dns_proposals, submit_final_proposals},
 };
 
@@ -68,7 +68,11 @@ async fn save_keys_and_ids<S: crate::workflow::state::WorkflowStep + 'static>(
     Ok(())
 }
 
-pub async fn start_coordinator(node_config: NodeConfig, network_config: NetworkConfig) -> Result {
+pub async fn start_coordinator(
+    node_config: NodeConfig,
+    network_config: NetworkConfig,
+    onboarding_config: OnboardingConfig,
+) -> Result {
     tracing::info!("Initializing Noise server...");
 
     let server = NoiseServer::new(
@@ -88,12 +92,14 @@ pub async fn start_coordinator(node_config: NodeConfig, network_config: NetworkC
     let workflow_state = server.get_workflow_state();
     let node_config_clone = node_config.clone();
     let network_config_clone = network_config.clone();
+    let onboarding_config_clone = onboarding_config.clone();
     let dirs_clone = dirs.clone();
     let workflow_handle = tokio::spawn(async move {
         run_workflow(
             workflow_state,
             node_config_clone,
             network_config_clone,
+            onboarding_config_clone,
             dirs_clone,
         )
         .await
@@ -106,6 +112,7 @@ async fn run_workflow(
     workflow_state: Arc<WorkflowState<OnboardingStep>>,
     node_config: NodeConfig,
     network_config: NetworkConfig,
+    onboarding_config: OnboardingConfig,
     dirs: OnboardingDirs,
 ) -> Result {
     let mut coordinator_completed_steps = HashSet::new();
@@ -134,7 +141,7 @@ async fn run_workflow(
                 tracing::info!("Coordinator executing: Create proposals");
                 // Save attestor keys and participant IDs uploaded during GenerateKeys step
                 save_keys_and_ids(&workflow_state, &dirs).await?;
-                create_proposals(&node_config, &dirs, &network_config).await?;
+                create_proposals(&node_config, &dirs, &onboarding_config).await?;
 
                 // Load DNS proposal to send to attestors with SignDns command
                 let dns_proposal_path = dirs.dns_proposals_dir.join("dns_proto.bin");
@@ -174,7 +181,7 @@ async fn run_workflow(
                     SIGNED_P2P_PROPOSALS_PREFIX,
                 )
                 .await?;
-                submit_final_proposals(&node_config, &dirs, &network_config).await?;
+                submit_final_proposals(&node_config, &dirs, &onboarding_config).await?;
                 workflow_state.advance_step().await;
             }
             OnboardingStep::Complete => {

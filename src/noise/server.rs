@@ -50,17 +50,17 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
             .collect();
 
         let mut peer_keys = HashMap::new();
-        for participant in &network_config.participants {
-            if participant.id == node_config.node.node_id || excluded.contains(&participant.id) {
+        for peer in &network_config.peers {
+            if peer.id == node_config.node.node_id || excluded.contains(&peer.id) {
                 continue;
             }
 
-            let pub_key = parse_public_key(&participant.public_key)?;
-            peer_keys.insert(participant.id.clone(), pub_key);
+            let pub_key = parse_public_key(&peer.public_key)?;
+            peer_keys.insert(peer.id.clone(), pub_key);
         }
 
         let expected_attestors: Vec<String> = network_config
-            .participants
+            .peers
             .iter()
             .filter(|p| p.id != node_config.node.node_id && !excluded.contains(&p.id))
             .map(|p| p.id.clone())
@@ -103,8 +103,8 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
             host = self.node_config.node.listen_address,
             port = self
                 .network_config
-                .get_participant(&self.node_config.node.node_id)
-                .ok_or_else(|| { NoiseError::UnknownPeer(self.node_config.node.node_id.clone()) })?
+                .get_peer(&self.node_config.node.node_id)
+                .ok_or_else(|| NoiseError::UnknownPeer(self.node_config.node.node_id.clone()))?
                 .port
         );
 

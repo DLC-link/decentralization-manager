@@ -116,7 +116,7 @@ async fn run_workflow(
                     SUBMISSION_SIGNATURES_PREFIX,
                 )
                 .await?;
-                execute_submissions(&node_config, &dirs, &network_config).await?;
+                execute_submissions(&node_config, &dirs, &config).await?;
                 workflow_state.advance_step().await;
             }
             ContractsStep::Complete => {

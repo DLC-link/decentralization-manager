@@ -1,50 +1,12 @@
-# Network-wide configuration shared by all participants
-[network]
-name = "canton-onboarding-network"
-protocol_version = "1.0"
-coordinator_strategy = "explicit"
-operator_party = "DSO::1220f70dd748844ea7a902ae0dae7155377bbdec7f945092a137d43433dd5f796731"
-
-# Coordinator - Participant 1
-[[participants]]
-id = "app-user"
-name = "Participant 1 (Coordinator)"
-role = "coordinator"
-address = "participant-1"
-port = 9001
-public_key = "03fe1929cb1c78f25fd05f7f2b77424b1764c9708d59bfb3743df6ec6aaf8579a7"
-
-# Attestor - Participant 2
-[[participants]]
-id = "app-provider"
-name = "Participant 2"
-address = "participant-2"
-port = 9002
-public_key = "02de4346dc38f8f76182ed12abce70671547fbfefd49401278f5836ad73f43ae9f"
-
-# Attestor - Participant 3
-[[participants]]
-id = "sv"
-name = "Participant 3"
-address = "participant-3"
-port = 9003
-public_key = "03e96a78e81787e797fbc87da4492c4688a879e96c399138a8d3583cbe8a709dd7"
-
-[timeouts]
-handshake_timeout_secs = 30
-message_timeout_secs = 120
-connection_retry_attempts = 3
-connection_retry_delay_secs = 5
-
-# Application-specific configuration
-[application]
+# Contract deployment configuration
 party_id_prefix = "cbtc-network"
 namespace_key_name = "cbtc-network-namespace"
 daml_key_name = "cbtc-network-daml-transactions"
+operator_party = "DSO::1220f70dd748844ea7a902ae0dae7155377bbdec7f945092a137d43433dd5f796731"
 operator_party_hint = "operator"
 
 # Contract definitions for governance setup
-[[application.contracts]]
+[[contracts]]
 id = "create-govR"
 name = "CBTCGovernanceRules"
 package_id = "#cbtc-governance"
@@ -58,7 +20,7 @@ fields = [
     { type = "optional", inner = { type = "governance_threshold" } },
 ]
 
-[[application.contracts]]
+[[contracts]]
 id = "create-daR"
 name = "CBTCDepositAccountRules"
 package_id = "#cbtc"
@@ -70,7 +32,7 @@ fields = [
     { type = "instrument", id = "CBTC" },
 ]
 
-[[application.contracts]]
+[[contracts]]
 id = "create-waR"
 name = "CBTCWithdrawAccountRules"
 package_id = "#cbtc"

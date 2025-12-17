@@ -40,7 +40,6 @@ pub async fn start_coordinator(
     let coordinator_workflow = {
         let workflow_state = workflow_state.clone();
         let node_config = node_config.clone();
-        let network_config = network_config.clone();
         let kick_config = kick_config.clone();
         let dirs = dirs.clone();
 
@@ -58,8 +57,7 @@ pub async fn start_coordinator(
                     KickStep::ExportState => {
                         if !coordinator_completed_steps.contains(&KickStep::ExportState) {
                             tracing::info!("Coordinator executing: Export state");
-                            export_state(&node_config, &dirs, &network_config, &kick_config)
-                                .await?;
+                            export_state(&node_config, &dirs, &kick_config).await?;
                             coordinator_completed_steps.insert(KickStep::ExportState);
                             workflow_state.advance_step().await;
                         }
@@ -67,8 +65,7 @@ pub async fn start_coordinator(
                     }
                     KickStep::CreateProposals => {
                         tracing::info!("Coordinator executing: Create proposals");
-                        create_proposals(&node_config, &dirs, &network_config, &kick_config)
-                            .await?;
+                        create_proposals(&node_config, &dirs, &kick_config).await?;
 
                         // Load kick proposals to send to attestors with SignKick command
                         // Combine both DNS and P2P kick proposals into a single payload
@@ -93,7 +90,7 @@ pub async fn start_coordinator(
                             SIGNED_KICK_PROPOSALS_PREFIX,
                         )
                         .await?;
-                        submit_kick(&node_config, &dirs, &network_config).await?;
+                        submit_kick(&node_config, &dirs).await?;
                         workflow_state.advance_step().await;
                     }
                     KickStep::Complete => {

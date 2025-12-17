@@ -19,12 +19,13 @@ use super::{
     types::{
         ContractsRequest, DecentralizedPartiesResponse, DecentralizedParty, HttpWorkflowState,
         KeyStatusResponse, KickRequest, KickResponse, KickStatus, ListenerPauseGuard,
-        OnboardingResponse, OnboardingStatus, ParticipantInfo, ParticipantStatus,
-        ParticipantsStatusResponse, Permission, WorkflowProgress, WorkflowResponse,
+        OnboardingRequest, OnboardingResponse, OnboardingStatus, ParticipantInfo,
+        ParticipantStatus, ParticipantsStatusResponse, Permission, WorkflowProgress,
+        WorkflowResponse,
     },
 };
 use crate::{
-    config::NodeConfig,
+    config::{NetworkConfig, NodeConfig, Peer},
     error::Result,
     noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
     participant_id::CantonId,
@@ -40,6 +41,33 @@ pub async fn get_network_config(data: web::Data<AppState>) -> impl Responder {
             tracing::error!("Failed to load network config: {e}");
             HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": format!("Failed to load network config: {e}")
+            }))
+        }
+    }
+}
+
+/// Save the network configuration (peers list)
+#[post("/network-config")]
+pub async fn save_network_config(
+    data: web::Data<AppState>,
+    body: web::Json<Vec<Peer>>,
+) -> impl Responder {
+    let network_config = NetworkConfig {
+        peers: body.into_inner(),
+    };
+
+    match data.config.save_network_config(&network_config).await {
+        Ok(()) => {
+            tracing::info!(
+                "Saved network config with {} peers",
+                network_config.peers.len()
+            );
+            HttpResponse::Ok().json(serde_json::json!({ "success": true }))
+        }
+        Err(e) => {
+            tracing::error!("Failed to save network config: {e}");
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to save network config: {e}")
             }))
         }
     }
@@ -245,10 +273,10 @@ async fn check_participants_status(
     let cache = peer_status_cache.read().await;
 
     let statuses: Vec<ParticipantStatus> = network_config
-        .participants
+        .peers
         .iter()
-        .map(|participant| {
-            let id = participant.id.clone();
+        .map(|peer| {
+            let id = peer.id.clone();
             let is_self = id == *current_node_id;
 
             let active = if is_self {
@@ -341,11 +369,12 @@ pub async fn start_kick(
             namespace_fingerprint,
         );
 
-        let result = workflow::start_node(
+        let result = workflow::start_coordinator(
             config,
             workflow::WorkflowType::Kick,
+            None, // No onboarding config
             Some(kick_config),
-            None,
+            None, // No contracts config
         )
         .await;
 
@@ -410,6 +439,7 @@ pub async fn get_key_status(data: web::Data<AppState>) -> impl Responder {
 pub async fn start_onboarding(
     data: web::Data<AppState>,
     onboarding_state: web::Data<Arc<OnboardingWorkflowState>>,
+    body: web::Json<OnboardingRequest>,
 ) -> impl Responder {
     // Check if an onboarding is already in progress
     {
@@ -434,6 +464,7 @@ pub async fn start_onboarding(
     let onboarding_state_clone = onboarding_state.get_ref().clone();
     let listener_control = data.noise_listener_control.clone();
     let listener_notify = data.noise_listener_notify.clone();
+    let party_id_prefix = body.party_id_prefix.clone();
 
     tokio::spawn(async move {
         let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
@@ -453,8 +484,16 @@ pub async fn start_onboarding(
         // Give peers time to start their attestor workflows
         tokio::time::sleep(Duration::from_secs(2)).await;
 
-        let result =
-            workflow::start_node(config, workflow::WorkflowType::Onboarding, None, None).await;
+        let onboarding_config = workflow::OnboardingConfig::new(party_id_prefix);
+
+        let result = workflow::start_coordinator(
+            config,
+            workflow::WorkflowType::Onboarding,
+            Some(onboarding_config),
+            None, // No kick config
+            None, // No contracts config
+        )
+        .await;
 
         guard.resume().await;
 
@@ -481,33 +520,27 @@ pub async fn start_onboarding(
 }
 
 /// Send onboarding invites to all peers using Noise protocol
-async fn send_onboarding_invites(config: &NodeConfig) -> Result<()> {
+async fn send_onboarding_invites(config: &NodeConfig) -> Result {
     let network_config = config.load_network_config().await?;
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
 
     let current_node_id = &config.node.node_id;
     let invite_message = Message::new_empty(MessageType::InviteOnboarding);
 
-    for participant in &network_config.participants {
-        if participant.id == *current_node_id {
+    for peer in &network_config.peers {
+        if peer.id == *current_node_id {
             continue;
         }
 
-        if participant.public_key.is_empty() {
-            tracing::warn!(
-                "Skipping invite to {} - no public key configured",
-                participant.id
-            );
+        if peer.public_key.is_empty() {
+            tracing::warn!("Skipping invite to {} - no public key configured", peer.id);
             continue;
         }
 
-        let peer_pub_key = match parse_public_key(&participant.public_key) {
+        let peer_pub_key = match parse_public_key(&peer.public_key) {
             Ok(pk) => pk,
             Err(e) => {
-                tracing::warn!(
-                    "Skipping invite to {} - invalid public key: {e}",
-                    participant.id
-                );
+                tracing::warn!("Skipping invite to {} - invalid public key: {e}", peer.id);
                 continue;
             }
         };
@@ -517,35 +550,27 @@ async fn send_onboarding_invites(config: &NodeConfig) -> Result<()> {
 
         tracing::info!(
             "Sending onboarding invite to {} at {}:{}",
-            participant.id,
-            participant.address,
-            participant.port
+            peer.id,
+            peer.address,
+            peer.port
         );
 
-        match send_noise_message(
-            &participant.address,
-            participant.port,
-            &psk,
-            &identity,
-            &invite_message,
-        )
-        .await
-        {
+        match send_noise_message(&peer.address, peer.port, &psk, &identity, &invite_message).await {
             Ok(response) => {
                 if let Ok(msg) = Message::from_bytes(&response) {
                     if msg.msg_type == MessageType::Ack {
-                        tracing::info!("Peer {id} acknowledged invite", id = participant.id);
+                        tracing::info!("Peer {id} acknowledged invite", id = peer.id);
                     } else {
                         tracing::warn!(
                             "Peer {id} responded with {msg_type:?} instead of Ack",
-                            id = participant.id,
+                            id = peer.id,
                             msg_type = msg.msg_type
                         );
                     }
                 }
             }
             Err(e) => {
-                tracing::error!("Failed to send invite to {id}: {e}", id = participant.id);
+                tracing::error!("Failed to send invite to {id}: {e}", id = peer.id);
             }
         }
     }
@@ -553,48 +578,39 @@ async fn send_onboarding_invites(config: &NodeConfig) -> Result<()> {
     Ok(())
 }
 
-/// Send kick invites to all peers using Noise protocol (excluding the participant being kicked)
-async fn send_kick_invites(config: &NodeConfig, kicked_participant: &CantonId) -> Result<()> {
+/// Send kick invites to all peers using Noise protocol (excluding the peer being kicked)
+async fn send_kick_invites(config: &NodeConfig, kicked_participant: &CantonId) -> Result {
     let network_config = config.load_network_config().await?;
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
 
     let current_node_id = &config.node.node_id;
     let invite_message = Message::new_empty(MessageType::InviteKick);
 
-    for participant in &network_config.participants {
-        // Skip self and the participant being kicked
-        if participant.id == *current_node_id {
+    for peer in &network_config.peers {
+        // Skip self and the peer being kicked
+        if peer.id == *current_node_id {
             continue;
         }
 
-        // Skip the participant being kicked (they won't participate in the kick workflow)
-        // Compare the participant's Canton party ID with the kicked participant ID
-        if let Some(party) = &participant.party
+        // Skip the peer being kicked (they won't participate in the kick workflow)
+        // Compare the peer's Canton party ID with the kicked participant ID
+        if let Some(party) = &peer.party
             && let Ok(party_id) = CantonId::parse(party)
             && party_id == *kicked_participant
         {
-            tracing::info!(
-                "Skipping invite to {} - they are being kicked",
-                participant.id
-            );
+            tracing::info!("Skipping invite to {} - they are being kicked", peer.id);
             continue;
         }
 
-        if participant.public_key.is_empty() {
-            tracing::warn!(
-                "Skipping invite to {} - no public key configured",
-                participant.id
-            );
+        if peer.public_key.is_empty() {
+            tracing::warn!("Skipping invite to {} - no public key configured", peer.id);
             continue;
         }
 
-        let peer_pub_key = match parse_public_key(&participant.public_key) {
+        let peer_pub_key = match parse_public_key(&peer.public_key) {
             Ok(pk) => pk,
             Err(e) => {
-                tracing::warn!(
-                    "Skipping invite to {} - invalid public key: {e}",
-                    participant.id
-                );
+                tracing::warn!("Skipping invite to {} - invalid public key: {e}", peer.id);
                 continue;
             }
         };
@@ -604,38 +620,27 @@ async fn send_kick_invites(config: &NodeConfig, kicked_participant: &CantonId) -
 
         tracing::info!(
             "Sending kick invite to {} at {}:{}",
-            participant.id,
-            participant.address,
-            participant.port
+            peer.id,
+            peer.address,
+            peer.port
         );
 
-        match send_noise_message(
-            &participant.address,
-            participant.port,
-            &psk,
-            &identity,
-            &invite_message,
-        )
-        .await
-        {
+        match send_noise_message(&peer.address, peer.port, &psk, &identity, &invite_message).await {
             Ok(response) => {
                 if let Ok(msg) = Message::from_bytes(&response) {
                     if msg.msg_type == MessageType::Ack {
-                        tracing::info!("Peer {id} acknowledged kick invite", id = participant.id);
+                        tracing::info!("Peer {id} acknowledged kick invite", id = peer.id);
                     } else {
                         tracing::warn!(
                             "Peer {id} responded with {msg_type:?} instead of Ack",
-                            id = participant.id,
+                            id = peer.id,
                             msg_type = msg.msg_type
                         );
                     }
                 }
             }
             Err(e) => {
-                tracing::error!(
-                    "Failed to send kick invite to {id}: {e}",
-                    id = participant.id
-                );
+                tracing::error!("Failed to send kick invite to {id}: {e}", id = peer.id);
             }
         }
     }
@@ -715,10 +720,11 @@ pub async fn start_contracts(
         // Give peers time to start their attestor workflows
         tokio::time::sleep(Duration::from_secs(2)).await;
 
-        let result = workflow::start_node(
+        let result = workflow::start_coordinator(
             config,
             workflow::WorkflowType::Contracts,
-            None,
+            None, // No onboarding config
+            None, // No kick config
             Some(contracts_config),
         )
         .await;
@@ -748,33 +754,27 @@ pub async fn start_contracts(
 }
 
 /// Send contracts invites to all peers using Noise protocol
-async fn send_contracts_invites(config: &NodeConfig) -> Result<()> {
+async fn send_contracts_invites(config: &NodeConfig) -> Result {
     let network_config = config.load_network_config().await?;
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
 
     let current_node_id = &config.node.node_id;
     let invite_message = Message::new_empty(MessageType::InviteContracts);
 
-    for participant in &network_config.participants {
-        if participant.id == *current_node_id {
+    for peer in &network_config.peers {
+        if peer.id == *current_node_id {
             continue;
         }
 
-        if participant.public_key.is_empty() {
-            tracing::warn!(
-                "Skipping invite to {} - no public key configured",
-                participant.id
-            );
+        if peer.public_key.is_empty() {
+            tracing::warn!("Skipping invite to {} - no public key configured", peer.id);
             continue;
         }
 
-        let peer_pub_key = match parse_public_key(&participant.public_key) {
+        let peer_pub_key = match parse_public_key(&peer.public_key) {
             Ok(pk) => pk,
             Err(e) => {
-                tracing::warn!(
-                    "Skipping invite to {} - invalid public key: {e}",
-                    participant.id
-                );
+                tracing::warn!("Skipping invite to {} - invalid public key: {e}", peer.id);
                 continue;
             }
         };
@@ -784,41 +784,27 @@ async fn send_contracts_invites(config: &NodeConfig) -> Result<()> {
 
         tracing::info!(
             "Sending contracts invite to {} at {}:{}",
-            participant.id,
-            participant.address,
-            participant.port
+            peer.id,
+            peer.address,
+            peer.port
         );
 
-        match send_noise_message(
-            &participant.address,
-            participant.port,
-            &psk,
-            &identity,
-            &invite_message,
-        )
-        .await
-        {
+        match send_noise_message(&peer.address, peer.port, &psk, &identity, &invite_message).await {
             Ok(response) => {
                 if let Ok(msg) = Message::from_bytes(&response) {
                     if msg.msg_type == MessageType::Ack {
-                        tracing::info!(
-                            "Peer {id} acknowledged contracts invite",
-                            id = participant.id
-                        );
+                        tracing::info!("Peer {id} acknowledged contracts invite", id = peer.id);
                     } else {
                         tracing::warn!(
                             "Peer {id} responded with {msg_type:?} instead of Ack",
-                            id = participant.id,
+                            id = peer.id,
                             msg_type = msg.msg_type
                         );
                     }
                 }
             }
             Err(e) => {
-                tracing::error!(
-                    "Failed to send contracts invite to {id}: {e}",
-                    id = participant.id
-                );
+                tracing::error!("Failed to send contracts invite to {id}: {e}", id = peer.id);
             }
         }
     }

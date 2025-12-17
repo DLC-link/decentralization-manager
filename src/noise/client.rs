@@ -7,7 +7,7 @@ use tokio::net::TcpStream;
 use tokio_noise::handshakes::nn_psk2::Initiator;
 
 use crate::{
-    config::{NetworkConfig, NodeConfig, Participant},
+    config::{NodeConfig, Peer},
     noise::{
         Message, MessageType, NOISE_REQUEST_TIMEOUT, NoiseError, NoiseKeypair, parse_flexible_uri,
         parse_public_key,
@@ -18,25 +18,16 @@ use crate::{
 pub struct NoiseClient {
     node_config: Arc<NodeConfig>,
     keypair: Arc<NoiseKeypair>,
-    coordinator: Participant,
+    coordinator: Peer,
     coordinator_pub_key: PublicKey,
     _p: PhantomData<()>,
 }
 
 impl NoiseClient {
-    /// Create a new Noise client
-    pub async fn new(
-        node_config: NodeConfig,
-        network_config: NetworkConfig,
-    ) -> Result<Self, NoiseError> {
+    /// Create a new Noise client to connect to a specific coordinator
+    pub async fn new(node_config: NodeConfig, coordinator: Peer) -> Result<Self, NoiseError> {
         // Load keypair
         let keypair = NoiseKeypair::from_file(&node_config.key_file_path()).await?;
-
-        // Get coordinator info
-        let coordinator = network_config
-            .get_coordinator()
-            .map_err(|e| NoiseError::UnknownPeer(format!("Failed to get coordinator: {e}")))?
-            .clone();
 
         // Parse coordinator's public key
         let coordinator_pub_key = parse_public_key(&coordinator.public_key)?;

@@ -1,5 +1,4 @@
 pub mod client;
-pub mod election;
 pub mod server;
 
 use std::{marker::PhantomData, path::Path, time::Duration};
@@ -393,7 +392,10 @@ pub async fn load_or_generate_keypair<P: AsRef<Path>>(path: P) -> Result<NoiseKe
     let path = path.as_ref();
 
     if path.exists() {
-        tracing::debug!("Loading existing Noise keypair from {path}", path = path.display());
+        tracing::debug!(
+            "Loading existing Noise keypair from {path}",
+            path = path.display()
+        );
         NoiseKeypair::from_file(path).await
     } else {
         tracing::info!("No Noise keypair found, generating new one");

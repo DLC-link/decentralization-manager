@@ -92,6 +92,9 @@ pub const DARS_DIR: &str = "dars";
 /// Default node config filename
 pub const NODE_CONFIG_FILENAME: &str = "node.toml";
 
+/// Contract deploy config filename
+pub const CONTRACT_DEPLOY_FILENAME: &str = "contract-deploy.toml";
+
 // Workflow subdirectory names
 /// Participant keys subdirectory name
 pub const PARTICIPANT_KEYS_DIR: &str = "participant-keys";

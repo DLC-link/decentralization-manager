@@ -6,6 +6,7 @@ services:
     volumes:
       - ./participant-1/config:/config
       - ./participant-1/data:/data
+    network_mode: host
     ports:
       - "8081:8081"
       - "9001:9001"
@@ -19,6 +20,7 @@ services:
     volumes:
       - ./participant-2/config:/config
       - ./participant-2/data:/data
+    network_mode: host
     ports:
       - "8082:8082"
       - "9002:9002"
@@ -32,6 +34,7 @@ services:
     volumes:
       - ./participant-3/config:/config
       - ./participant-3/data:/data
+    network_mode: host
     ports:
       - "8083:8083"
       - "9003:9003"

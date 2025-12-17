@@ -12,7 +12,7 @@ use canton_proto_rs::com::digitalasset::canton::{
 };
 
 use crate::{
-    config::{NetworkConfig, NodeConfig},
+    config::NodeConfig,
     consts::{
         DNS_KICK_PROTO_FILENAME, KICK_TARGET_FILENAME, NAMESPACE_DEF_FILENAME,
         NEW_NAMESPACE_DEF_FILENAME, NEW_THRESHOLD_FILENAME, P2P_KICK_PROTO_FILENAME,
@@ -31,7 +31,6 @@ use crate::{
 pub async fn create_proposals(
     config: &NodeConfig,
     dirs: &KickDirs,
-    network_config: &NetworkConfig,
     kick_config: &KickConfig,
 ) -> Result {
     tracing::info!("Creating kick proposals...");
@@ -90,10 +89,10 @@ pub async fn create_proposals(
         owners: new_owners,
     };
 
-    // Get party ID
+    // Get party ID using prefix from decentralized party ID (provided via UI)
     let party_id = format!(
         "{party_id_prefix}::{namespace}",
-        party_id_prefix = network_config.application.party_id_prefix,
+        party_id_prefix = kick_config.decentralized_party_id.prefix,
         namespace = current_namespace_def.decentralized_namespace
     );
     tracing::info!("Party ID: {party_id}");

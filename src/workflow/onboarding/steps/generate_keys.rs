@@ -1,7 +1,5 @@
 use std::path::Path;
 
-use tokio::fs;
-
 use canton_proto_rs::com::digitalasset::canton::{
     crypto::{
         admin::v30::{GenerateSigningKeyRequest, vault_service_client::VaultServiceClient},
@@ -19,22 +17,20 @@ use canton_proto_rs::com::digitalasset::canton::{
 
 use crate::{
     config::{NetworkConfig, NodeConfig},
-    consts::{ATTESTOR_KEYS_PREFIX, PARTICIPANT_ID_PREFIX},
+    consts::ATTESTOR_KEYS_PREFIX,
     error::Result,
-    participant_id::CantonId,
-    utils::{compute_fingerprint, get_participant_id, write_messages_to_file},
+    utils::{compute_fingerprint, write_messages_to_file},
     workflow::onboarding::OnboardingDirs,
 };
 
-/// Generate cryptographic keys and export participant ID
+/// Generate cryptographic keys and export them
 ///
 /// Generates:
 /// 1. Namespace signing key (for namespace delegation)
 /// 2. DAML transaction key (for signing transactions)
 /// 3. Exports both keys to attestor-public-keys.bin
-/// 4. Exports participant ID to participant-id.bin
 ///
-/// This function generates signing keys and exports them along with the participant ID,
+/// This function generates signing keys and exports them,
 /// and proposes a namespace delegation for the generated namespace key.
 pub async fn generate_keys(
     config: &NodeConfig,
@@ -43,10 +39,16 @@ pub async fn generate_keys(
 ) -> Result {
     tracing::info!("Generating cryptographic keys...");
 
-    let mut vault_client = VaultServiceClient::connect(config.admin_api_url()).await?;
+    // Load contract deploy config for key names
+    let contract_deploy_config = config
+        .load_contract_deploy_config()
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Contract deploy config not found"))?;
 
-    let namespace_key_name = &network_config.application.namespace_key_name;
-    let daml_key_name = &network_config.application.daml_key_name;
+    let namespace_key_name = &contract_deploy_config.namespace_key_name;
+    let daml_key_name = &contract_deploy_config.daml_key_name;
+
+    let mut vault_client = VaultServiceClient::connect(config.admin_api_url()).await?;
 
     // Generate namespace signing key
     tracing::debug!("Generating namespace signing key with name '{namespace_key_name}'");
@@ -72,17 +74,13 @@ pub async fn generate_keys(
     )
     .await?;
 
-    // Get participant ID and export keys
-    let canton_participant_id = get_participant_id(config).await?;
+    // Export keys with participant position from network config
     let participant_num = get_participant_position(&config.node.node_id, network_config)?;
-    tracing::info!(
-        "Participant ID: {canton_participant_id}, participant number: {participant_num}"
-    );
+    tracing::info!("Participant number: {participant_num}");
 
     export_keys(&dirs.keys_dir, &namespace_key, &daml_key, participant_num).await?;
-    export_participant_id(&dirs.ids_dir, &canton_participant_id, participant_num).await?;
 
-    tracing::info!("Keys and participant ID exported successfully");
+    tracing::info!("Keys exported successfully");
 
     Ok(())
 }
@@ -111,7 +109,7 @@ async fn generate_signing_key(
 /// Helper: Get participant position (1-based index) from network config
 fn get_participant_position(node_id: &str, network_config: &NetworkConfig) -> Result<u32> {
     network_config
-        .participants
+        .peers
         .iter()
         .position(|p| p.id == node_id)
         .map(|pos| (pos + 1) as u32)
@@ -129,22 +127,6 @@ async fn export_keys(
     let output_path = keys_dir.join(&filename);
     tracing::debug!("Exporting keys to {path}", path = output_path.display());
     write_messages_to_file(&[namespace_key.clone(), daml_key.clone()], &output_path).await
-}
-
-/// Helper: Export participant ID to file
-async fn export_participant_id(
-    ids_dir: &Path,
-    participant_id: &CantonId,
-    participant_num: u32,
-) -> Result {
-    let filename = format!("{PARTICIPANT_ID_PREFIX}-{participant_num}.bin");
-    let output_path = ids_dir.join(&filename);
-    tracing::debug!(
-        "Exporting participant ID to {path}",
-        path = output_path.display()
-    );
-    fs::write(&output_path, participant_id.to_file_format().as_bytes()).await?;
-    Ok(())
 }
 
 /// Propose namespace delegation for the generated namespace key
