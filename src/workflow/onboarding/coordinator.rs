@@ -91,14 +91,12 @@ pub async fn start_coordinator(
 
     let workflow_state = server.get_workflow_state();
     let node_config_clone = node_config.clone();
-    let network_config_clone = network_config.clone();
     let onboarding_config_clone = onboarding_config.clone();
     let dirs_clone = dirs.clone();
     let workflow_handle = tokio::spawn(async move {
         run_workflow(
             workflow_state,
             node_config_clone,
-            network_config_clone,
             onboarding_config_clone,
             dirs_clone,
         )
@@ -111,11 +109,15 @@ pub async fn start_coordinator(
 async fn run_workflow(
     workflow_state: Arc<WorkflowState<OnboardingStep>>,
     node_config: NodeConfig,
-    network_config: NetworkConfig,
     onboarding_config: OnboardingConfig,
     dirs: OnboardingDirs,
 ) -> Result {
     let mut coordinator_completed_steps = HashSet::new();
+
+    // Set the onboarding config as payload for GenerateKeys step
+    let config_payload =
+        serde_json::to_vec(&onboarding_config).context("Failed to serialize onboarding config")?;
+    workflow_state.set_command_payload(config_payload).await;
 
     loop {
         let current_step = workflow_state.current_step().await;
@@ -127,7 +129,7 @@ async fn run_workflow(
             OnboardingStep::GenerateKeys => {
                 if !coordinator_completed_steps.contains(&OnboardingStep::GenerateKeys) {
                     tracing::info!("Coordinator executing: Generate keys");
-                    generate_keys(&node_config, &dirs, &network_config).await?;
+                    generate_keys(&node_config, &dirs, &onboarding_config).await?;
                     coordinator_completed_steps.insert(OnboardingStep::GenerateKeys);
 
                     tracing::info!(

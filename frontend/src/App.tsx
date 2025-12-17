@@ -9,6 +9,7 @@ import { NodeConfigAccordion } from "./components/NodeConfigAccordion";
 import { NetworkConfigAccordion } from "./components/NetworkConfigAccordion";
 import { LoadingSkeleton } from "./components/LoadingSkeleton";
 import { OnboardingDialog } from "./components/OnboardingDialog";
+import { copyToClipboard } from "./components/CopyableText";
 import { useSnackbar } from "./contexts";
 import { API_BASE } from "./constants";
 import type {
@@ -149,9 +150,9 @@ const App = () => {
                     <IconButton
                       size="small"
                       color="inherit"
-                      onClick={() => {
-                        navigator.clipboard.writeText(keyStatus.public_key!);
-                        showSnackbar("Public key copied to clipboard");
+                      onClick={async () => {
+                        const success = await copyToClipboard(keyStatus.public_key!);
+                        showSnackbar(success ? "Copied to clipboard" : "Failed to copy");
                       }}
                     >
                       <ContentCopyIcon fontSize="small" />
@@ -171,6 +172,8 @@ const App = () => {
             {networkConfig && (
               <NetworkConfigAccordion
                 config={networkConfig}
+                nodeConfig={nodeConfig ?? undefined}
+                keyStatus={keyStatus ?? undefined}
                 participantStatuses={participantStatuses}
                 onSave={savePeers}
               />

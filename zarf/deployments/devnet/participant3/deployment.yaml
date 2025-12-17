@@ -26,11 +26,6 @@ data:
     message_timeout_secs = 120
     connection_retry_attempts = 3
     connection_retry_delay_secs = 5
-
-  peers.csv: |
-    id,name,address,port,public_key,party
-    participant-ibtc-devnet-1,Participant 1,dec-party-manager-1.catalyst-canton.svc.cluster.local,9000,03fe1929cb1c78f25fd05f7f2b77424b1764c9708d59bfb3743df6ec6aaf8579a7,
-    participant-ibtc-devnet-2,Participant 2,dec-party-manager-2.catalyst-canton.svc.cluster.local,9000,02de4346dc38f8f76182ed12abce70671547fbfefd49401278f5836ad73f43ae9f,
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -86,9 +81,19 @@ spec:
               mountPath: /app
       containers:
         - name: dec-party-manager
-          image: public.ecr.aws/dlc-link/canton-decparty-manager:v0.0.4
+          image: public.ecr.aws/dlc-link/canton-decparty-manager:v0.0.7
           imagePullPolicy: Always
-          command: ["dec-party-manager", "-d", "/app", "serve", "--host", "0.0.0.0", "--port", "8080"]
+          command:
+            [
+              "dec-party-manager",
+              "-d",
+              "/app",
+              "serve",
+              "--host",
+              "0.0.0.0",
+              "--port",
+              "8080",
+            ]
           ports:
             - name: http
               containerPort: 8080

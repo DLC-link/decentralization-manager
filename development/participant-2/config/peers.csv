@@ -1,4 +1,0 @@
-id,name,address,port,public_key,party
-app-user,Participant 1,localhost,9001,03821d71639fce494a8a36271d44a839454706252e45ff1eb5a8f61a7e7a50c7c2,
-app-provider,Participant 2,localhost,9002,0210ead9f673e6fa73892b7753f235ed7db7f826e31aaa619648283b5bd392b372,
-sv,Participant 3,localhost,9003,022e4bf05143c9e64c691dbcaf8de1b7ac34a37dc9dc5f601b5d0b133ff5d5c484,

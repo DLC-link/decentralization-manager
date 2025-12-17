@@ -42,8 +42,18 @@ impl NetworkConfig {
     /// Load network configuration from a CSV file
     ///
     /// CSV format: id,name,address,port,public_key,party
+    /// Creates an empty file with header if it doesn't exist
     pub async fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
+
+        // Create file with header if it doesn't exist
+        if !path.exists() {
+            tracing::info!("Creating empty peers.csv at '{}'", path.display());
+            tokio::fs::write(path, "id,name,address,port,public_key,party\n")
+                .await
+                .with_context(|| format!("Failed to create peers config '{}'", path.display()))?;
+        }
+
         let content = tokio::fs::read_to_string(path)
             .await
             .with_context(|| format!("Failed to read peers config '{}'", path.display()))?;

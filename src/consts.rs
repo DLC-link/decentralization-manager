@@ -92,12 +92,6 @@ pub const DARS_DIR: &str = "dars";
 /// Default node config filename
 pub const NODE_CONFIG_FILENAME: &str = "node.toml";
 
-/// Name prefix for namespace signing keys
-pub const NAMESPACE_KEY_NAME: &str = "cbtc-network-namespace";
-
-/// Name prefix for DAML transaction signing keys
-pub const DAML_KEY_NAME: &str = "cbtc-network-daml-transactions";
-
 // Workflow subdirectory names
 /// Participant keys subdirectory name
 pub const PARTICIPANT_KEYS_DIR: &str = "participant-keys";

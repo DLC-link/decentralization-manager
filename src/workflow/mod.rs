@@ -113,9 +113,6 @@ pub async fn start_attestor(node_config: NodeConfig, coordinator: Peer) -> Resul
         coordinator.id
     );
 
-    // Load network config for workflows that need it
-    let network_config = node_config.load_network_config().await?;
-
     let client = NoiseClient::new(node_config.clone(), coordinator).await?;
 
     // Initialize directory paths for all workflows
@@ -201,8 +198,18 @@ pub async fn start_attestor(node_config: NodeConfig, coordinator: Peer) -> Resul
             }
             MessageType::GenerateKeys => {
                 tracing::info!("Executing: Generate keys");
+                // Deserialize onboarding config from payload
+                let onboarding_config: onboarding::OnboardingConfig =
+                    match serde_json::from_slice(&payload) {
+                        Ok(config) => config,
+                        Err(e) => {
+                            tracing::error!("Failed to deserialize onboarding config: {e}");
+                            continue;
+                        }
+                    };
                 if let Err(e) =
-                    onboarding::generate_keys(&node_config, &onboarding_dirs, &network_config).await
+                    onboarding::generate_keys(&node_config, &onboarding_dirs, &onboarding_config)
+                        .await
                 {
                     tracing::error!("Step execution failed: {e}");
                     continue;

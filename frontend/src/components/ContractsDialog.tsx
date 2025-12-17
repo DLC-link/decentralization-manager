@@ -64,8 +64,7 @@ const createEmptyContract = (): ContractDefinition => ({
 });
 
 // Default contracts from original contract-deploy.toml
-const DEFAULT_OPERATOR_PARTY =
-  "DSO::1220f70dd748844ea7a902ae0dae7155377bbdec7f945092a137d43433dd5f796731";
+const DEFAULT_OPERATOR_PARTY = "";
 
 const getDefaultContracts = (): ContractDefinition[] => [
   {
@@ -239,8 +238,19 @@ const FieldEditor = ({ field, onChange, onDelete }: FieldEditorProps) => {
       )}
 
       {field.type === "optional" && (
-        <Box sx={{ flex: 1, pl: 2, borderLeft: "2px solid", borderColor: "primary.light" }}>
-          <Typography variant="caption" color="text.secondary" sx={{ mb: 0.5, display: "block" }}>
+        <Box
+          sx={{
+            flex: 1,
+            pl: 2,
+            borderLeft: "2px solid",
+            borderColor: "primary.light",
+          }}
+        >
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            sx={{ mb: 0.5, display: "block" }}
+          >
             Inner type:
           </Typography>
           <FormControl size="small" sx={{ minWidth: 150 }}>
@@ -248,9 +258,16 @@ const FieldEditor = ({ field, onChange, onDelete }: FieldEditorProps) => {
             <Select
               value={field.inner?.type || "text"}
               label="Inner Type"
-              onChange={(e) => onChange({ ...field, inner: createDefaultField(e.target.value) })}
+              onChange={(e) =>
+                onChange({
+                  ...field,
+                  inner: createDefaultField(e.target.value),
+                })
+              }
             >
-              {FIELD_TYPES.filter((ft) => ft.value !== "optional" && ft.value !== "record").map((ft) => (
+              {FIELD_TYPES.filter(
+                (ft) => ft.value !== "optional" && ft.value !== "record",
+              ).map((ft) => (
                 <MenuItem key={ft.value} value={ft.value}>
                   {ft.label}
                 </MenuItem>
@@ -261,12 +278,26 @@ const FieldEditor = ({ field, onChange, onDelete }: FieldEditorProps) => {
       )}
 
       {field.type === "record" && (
-        <Box sx={{ flex: 1, pl: 2, borderLeft: "2px solid", borderColor: "secondary.light" }}>
-          <Typography variant="caption" color="text.secondary" sx={{ mb: 0.5, display: "block" }}>
+        <Box
+          sx={{
+            flex: 1,
+            pl: 2,
+            borderLeft: "2px solid",
+            borderColor: "secondary.light",
+          }}
+        >
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            sx={{ mb: 0.5, display: "block" }}
+          >
             Record fields:
           </Typography>
           {field.fields?.map((subField, idx) => (
-            <Box key={idx} sx={{ display: "flex", gap: 1, alignItems: "center", mb: 0.5 }}>
+            <Box
+              key={idx}
+              sx={{ display: "flex", gap: 1, alignItems: "center", mb: 0.5 }}
+            >
               <FormControl size="small" sx={{ minWidth: 150 }}>
                 <Select
                   value={subField.type}
@@ -276,17 +307,21 @@ const FieldEditor = ({ field, onChange, onDelete }: FieldEditorProps) => {
                     onChange({ ...field, fields: newFields });
                   }}
                 >
-                  {FIELD_TYPES.filter((ft) => ft.value !== "record").map((ft) => (
-                    <MenuItem key={ft.value} value={ft.value}>
-                      {ft.label}
-                    </MenuItem>
-                  ))}
+                  {FIELD_TYPES.filter((ft) => ft.value !== "record").map(
+                    (ft) => (
+                      <MenuItem key={ft.value} value={ft.value}>
+                        {ft.label}
+                      </MenuItem>
+                    ),
+                  )}
                 </Select>
               </FormControl>
               <IconButton
                 size="small"
                 onClick={() => {
-                  const newFields = (field.fields || []).filter((_, i) => i !== idx);
+                  const newFields = (field.fields || []).filter(
+                    (_, i) => i !== idx,
+                  );
                   onChange({ ...field, fields: newFields });
                 }}
               >
@@ -350,8 +385,20 @@ const ContractEditor = ({
   };
 
   return (
-    <Accordion defaultExpanded={index === 0}>
-      <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+    <Accordion
+      defaultExpanded={index === 0}
+      sx={{
+        borderRadius: 3,
+        mb: 1,
+        "&:first-of-type": { borderRadius: 3 },
+        "&:last-of-type": { borderRadius: 3 },
+        overflow: "hidden",
+      }}
+    >
+      <AccordionSummary
+        expandIcon={<ExpandMoreIcon />}
+        sx={{ borderRadius: "12px 12px 0 0" }}
+      >
         <Box
           sx={{
             display: "flex",
@@ -360,9 +407,7 @@ const ContractEditor = ({
             justifyContent: "space-between",
           }}
         >
-          <Typography>
-            {contract.name || `Contract ${index + 1}`}
-          </Typography>
+          <Typography>{contract.name || `Contract ${index + 1}`}</Typography>
           <IconButton
             size="small"
             onClick={(e) => {
@@ -375,7 +420,7 @@ const ContractEditor = ({
           </IconButton>
         </Box>
       </AccordionSummary>
-      <AccordionDetails>
+      <AccordionDetails sx={{ p: 3 }}>
         <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
           <Box sx={{ display: "flex", gap: 2 }}>
             <TextField
@@ -464,9 +509,8 @@ export const ContractsDialog = ({
   const [operatorParty, setOperatorParty] = useState(DEFAULT_OPERATOR_PARTY);
   const [operatorPartyHint, setOperatorPartyHint] = useState("operator");
   const [darFiles, setDarFiles] = useState<DarFile[]>([]);
-  const [contracts, setContracts] = useState<ContractDefinition[]>(
-    getDefaultContracts
-  );
+  const [contracts, setContracts] =
+    useState<ContractDefinition[]>(getDefaultContracts);
 
   useEffect(() => {
     if (!open) {
@@ -508,7 +552,9 @@ export const ContractsDialog = ({
     };
   }, [status?.status, pollStatus]);
 
-  const handleFileSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileSelect = async (
+    event: React.ChangeEvent<HTMLInputElement>,
+  ) => {
     const files = event.target.files;
     if (!files) return;
 
@@ -521,8 +567,8 @@ export const ContractsDialog = ({
         const base64 = btoa(
           new Uint8Array(arrayBuffer).reduce(
             (data, byte) => data + String.fromCharCode(byte),
-            ""
-          )
+            "",
+          ),
         );
         newDarFiles.push({
           filename: file.name,
@@ -544,7 +590,10 @@ export const ContractsDialog = ({
     setContracts([...contracts, createEmptyContract()]);
   };
 
-  const handleContractChange = (index: number, contract: ContractDefinition) => {
+  const handleContractChange = (
+    index: number,
+    contract: ContractDefinition,
+  ) => {
     const newContracts = [...contracts];
     newContracts[index] = contract;
     setContracts(newContracts);
@@ -697,7 +746,9 @@ export const ContractsDialog = ({
               </Box>
 
               <Divider />
-              <Typography variant="subtitle1">Operator Configuration</Typography>
+              <Typography variant="subtitle1">
+                Operator Configuration
+              </Typography>
 
               <TextField
                 size="small"
@@ -725,7 +776,9 @@ export const ContractsDialog = ({
                   alignItems: "center",
                 }}
               >
-                <Typography variant="subtitle1">Contract Definitions</Typography>
+                <Typography variant="subtitle1">
+                  Contract Definitions
+                </Typography>
                 <Button
                   startIcon={<AddIcon />}
                   onClick={handleAddContract}

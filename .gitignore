@@ -2,7 +2,7 @@ target/
 
 # Generated keys and configuration
 
-/development/participant-*/data/keys/
-/development/participant-*/data/workflow-data/
+/development/participant-*/config/peers.csv
+/development/participant-*/data/
 /configs
 .DS_Store

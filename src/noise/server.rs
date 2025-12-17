@@ -21,7 +21,6 @@ use crate::{
 /// Coordinator server that accepts connections from attestors
 pub struct NoiseServer<S: WorkflowStep + 'static> {
     node_config: Arc<NodeConfig>,
-    network_config: Arc<NetworkConfig>,
     keypair: Arc<NoiseKeypair>,
     peer_keys: HashMap<String, PublicKey>,
     workflow_state: Arc<WorkflowState<S>>,
@@ -84,7 +83,6 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
 
         Ok(Self {
             node_config: Arc::new(node_config),
-            network_config: Arc::new(network_config),
             keypair: Arc::new(keypair),
             peer_keys,
             workflow_state,
@@ -101,11 +99,7 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         let listen_addr = format!(
             "{host}:{port}",
             host = self.node_config.node.listen_address,
-            port = self
-                .network_config
-                .get_peer(&self.node_config.node.node_id)
-                .ok_or_else(|| NoiseError::UnknownPeer(self.node_config.node.node_id.clone()))?
-                .port
+            port = self.node_config.node.port
         );
 
         tracing::info!("Starting Noise server on {listen_addr}");

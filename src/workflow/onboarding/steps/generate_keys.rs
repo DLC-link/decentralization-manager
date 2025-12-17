@@ -16,11 +16,12 @@ use canton_proto_rs::com::digitalasset::canton::{
 };
 
 use crate::{
-    config::{NetworkConfig, NodeConfig},
-    consts::{ATTESTOR_KEYS_PREFIX, DAML_KEY_NAME, NAMESPACE_KEY_NAME},
+    config::NodeConfig,
+    consts::{ATTESTOR_KEYS_PREFIX, PARTICIPANT_ID_PREFIX},
     error::Result,
-    utils::{compute_fingerprint, write_messages_to_file},
-    workflow::onboarding::OnboardingDirs,
+    participant_id::CantonId,
+    utils::{compute_fingerprint, get_participant_id, write_messages_to_file},
+    workflow::onboarding::{OnboardingConfig, OnboardingDirs},
 };
 
 /// Generate cryptographic keys and export them
@@ -35,17 +36,21 @@ use crate::{
 pub async fn generate_keys(
     config: &NodeConfig,
     dirs: &OnboardingDirs,
-    network_config: &NetworkConfig,
+    onboarding_config: &OnboardingConfig,
 ) -> Result {
     tracing::info!("Generating cryptographic keys...");
 
     let mut vault_client = VaultServiceClient::connect(config.admin_api_url()).await?;
 
+    // Derive key names from party_id_prefix
+    let namespace_key_name = onboarding_config.namespace_key_name();
+    let daml_key_name = onboarding_config.daml_key_name();
+
     // Generate namespace signing key
-    tracing::debug!("Generating namespace signing key with name '{NAMESPACE_KEY_NAME}'");
+    tracing::debug!("Generating namespace signing key with name '{namespace_key_name}'");
     let namespace_key = generate_signing_key(
         &mut vault_client,
-        NAMESPACE_KEY_NAME,
+        &namespace_key_name,
         vec![SigningKeyUsage::Namespace as i32],
     )
     .await?;
@@ -57,21 +62,24 @@ pub async fn generate_keys(
     propose_namespace_delegation(config, &namespace_key, &namespace_fingerprint).await?;
 
     // Generate DAML signing key for transactions
-    tracing::debug!("Generating DAML signing key with name '{DAML_KEY_NAME}'");
+    tracing::debug!("Generating DAML signing key with name '{daml_key_name}'");
     let daml_key = generate_signing_key(
         &mut vault_client,
-        DAML_KEY_NAME,
+        &daml_key_name,
         vec![SigningKeyUsage::Protocol as i32],
     )
     .await?;
 
-    // Export keys with participant position from network config
-    let participant_num = get_participant_position(&config.node.node_id, network_config)?;
-    tracing::info!("Participant number: {participant_num}");
-
-    export_keys(&dirs.keys_dir, &namespace_key, &daml_key, participant_num).await?;
-
+    // Export keys with node ID
+    let node_id = &config.node.node_id;
+    export_keys(&dirs.keys_dir, &namespace_key, &daml_key, node_id).await?;
     tracing::info!("Keys exported successfully");
+
+    // Get and export participant ID from Canton
+    let participant_id = get_participant_id(config).await?;
+    tracing::info!("Participant ID: {participant_id}");
+    export_participant_id(&dirs.ids_dir, &participant_id, node_id).await?;
+    tracing::info!("Participant ID exported successfully");
 
     Ok(())
 }
@@ -97,27 +105,30 @@ async fn generate_signing_key(
         .ok_or_else(|| anyhow::anyhow!("No public key returned from VaultService"))
 }
 
-/// Helper: Get participant position (1-based index) from network config
-fn get_participant_position(node_id: &str, network_config: &NetworkConfig) -> Result<u32> {
-    network_config
-        .peers
-        .iter()
-        .position(|p| p.id == node_id)
-        .map(|pos| (pos + 1) as u32)
-        .ok_or_else(|| anyhow::anyhow!("Node ID '{node_id}' not found in network configuration"))
-}
-
 /// Helper: Export keys to file
 async fn export_keys(
     keys_dir: &Path,
     namespace_key: &SigningPublicKey,
     daml_key: &SigningPublicKey,
-    participant_num: u32,
+    node_id: &str,
 ) -> Result {
-    let filename = format!("{ATTESTOR_KEYS_PREFIX}-{participant_num}.bin");
+    let filename = format!("{ATTESTOR_KEYS_PREFIX}-{node_id}.bin");
     let output_path = keys_dir.join(&filename);
     tracing::debug!("Exporting keys to {path}", path = output_path.display());
     write_messages_to_file(&[namespace_key.clone(), daml_key.clone()], &output_path).await
+}
+
+/// Helper: Export participant ID to file
+async fn export_participant_id(ids_dir: &Path, participant_id: &CantonId, node_id: &str) -> Result {
+    tokio::fs::create_dir_all(ids_dir).await?;
+    let filename = format!("{PARTICIPANT_ID_PREFIX}-{node_id}.bin");
+    let output_path = ids_dir.join(&filename);
+    tracing::debug!(
+        "Exporting participant ID to {path}",
+        path = output_path.display()
+    );
+    tokio::fs::write(&output_path, participant_id.to_file_format()).await?;
+    Ok(())
 }
 
 /// Propose namespace delegation for the generated namespace key

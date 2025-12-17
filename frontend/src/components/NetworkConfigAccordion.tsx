@@ -14,6 +14,7 @@ import {
   TextField,
   Button,
   Stack,
+  Tooltip,
 } from "@mui/material";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import CircleIcon from "@mui/icons-material/Circle";
@@ -22,7 +23,18 @@ import DeleteIcon from "@mui/icons-material/Delete";
 import AddIcon from "@mui/icons-material/Add";
 import SaveIcon from "@mui/icons-material/Save";
 import CancelIcon from "@mui/icons-material/Cancel";
-import type { NetworkConfig, Peer, ParticipantStatus } from "../types";
+import PersonIcon from "@mui/icons-material/Person";
+import ContentCopyIcon from "@mui/icons-material/ContentCopy";
+import ContentPasteIcon from "@mui/icons-material/ContentPaste";
+import { useSnackbar } from "../contexts";
+import { copyToClipboard } from "./CopyableText";
+import type {
+  NetworkConfig,
+  Peer,
+  ParticipantStatus,
+  NodeConfig,
+  KeyStatusResponse,
+} from "../types";
 
 const accordionSx = {
   borderRadius: 3,
@@ -34,6 +46,8 @@ const accordionSx = {
 
 interface NetworkConfigAccordionProps {
   config: NetworkConfig;
+  nodeConfig?: NodeConfig;
+  keyStatus?: KeyStatusResponse;
   participantStatuses?: ParticipantStatus[];
   onSave?: (peers: Peer[]) => Promise<void>;
 }
@@ -48,15 +62,37 @@ const emptyPeer: Peer = {
 
 export const NetworkConfigAccordion = ({
   config,
+  nodeConfig,
+  keyStatus,
   participantStatuses,
   onSave,
 }: NetworkConfigAccordionProps) => {
   const [editing, setEditing] = useState(false);
   const [editedPeers, setEditedPeers] = useState<Peer[]>([]);
   const [saving, setSaving] = useState(false);
+  const { showSnackbar } = useSnackbar();
+
+  const selfNodeId = nodeConfig?.node.node_id;
+  const selfPublicKey = keyStatus?.public_key || "";
+  const selfPort = nodeConfig?.node.port ?? 9000;
 
   const getStatus = (id: string) =>
     participantStatuses?.find((s) => s.id === id)?.active;
+
+  // Build display list: self first, then other peers
+  const selfPeer = config.peers.find((p) => p.id === selfNodeId);
+  const otherPeers = config.peers.filter((p) => p.id !== selfNodeId);
+
+  // Create self entry if not in peers list
+  const selfEntry: Peer | null = selfNodeId
+    ? selfPeer || {
+        id: selfNodeId,
+        name: selfNodeId,
+        address: nodeConfig?.node.listen_address || "localhost",
+        port: selfPort,
+        public_key: selfPublicKey,
+      }
+    : null;
 
   const startEditing = () => {
     setEditedPeers(config.peers.map((p) => ({ ...p })));
@@ -81,14 +117,36 @@ export const NetworkConfigAccordion = ({
     }
   };
 
-  const updatePeer = (index: number, field: keyof Peer, value: string | number) => {
+  const updatePeer = (
+    index: number,
+    field: keyof Peer,
+    value: string | number,
+  ) => {
     setEditedPeers((peers) =>
-      peers.map((p, i) => (i === index ? { ...p, [field]: value } : p))
+      peers.map((p, i) => (i === index ? { ...p, [field]: value } : p)),
     );
   };
 
   const addPeer = () => {
     setEditedPeers((peers) => [...peers, { ...emptyPeer }]);
+  };
+
+  const addPeerFromClipboard = async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      const parts = text.trim().split(",");
+      if (parts.length < 5) {
+        showSnackbar("Invalid CSV format. Expected: id,name,address,port,public_key");
+        return;
+      }
+      const [id, name, address, portStr, public_key] = parts;
+      const port = parseInt(portStr) || 9000;
+      const newPeer: Peer = { id, name, address, port, public_key };
+      setEditedPeers((peers) => [...peers, newPeer]);
+      showSnackbar("Peer added from clipboard");
+    } catch {
+      showSnackbar("Failed to read clipboard");
+    }
   };
 
   const removePeer = (index: number) => {
@@ -139,13 +197,17 @@ export const NetworkConfigAccordion = ({
                   label="Port"
                   type="number"
                   value={peer.port}
-                  onChange={(e) => updatePeer(index, "port", parseInt(e.target.value) || 0)}
+                  onChange={(e) =>
+                    updatePeer(index, "port", parseInt(e.target.value) || 0)
+                  }
                 />
                 <TextField
                   size="small"
                   label="Public Key"
                   value={peer.public_key}
-                  onChange={(e) => updatePeer(index, "public_key", e.target.value)}
+                  onChange={(e) =>
+                    updatePeer(index, "public_key", e.target.value)
+                  }
                 />
                 <IconButton
                   color="error"
@@ -156,15 +218,27 @@ export const NetworkConfigAccordion = ({
                 </IconButton>
               </Box>
             ))}
-            <Box sx={{ display: "flex", gap: 1, justifyContent: "space-between" }}>
-              <Button
-                startIcon={<AddIcon />}
-                onClick={addPeer}
-                variant="outlined"
-                size="small"
-              >
-                Add Peer
-              </Button>
+            <Box
+              sx={{ display: "flex", gap: 1, justifyContent: "space-between" }}
+            >
+              <Box sx={{ display: "flex", gap: 1 }}>
+                <Button
+                  startIcon={<AddIcon />}
+                  onClick={addPeer}
+                  variant="outlined"
+                  size="small"
+                >
+                  Add Peer
+                </Button>
+                <Button
+                  startIcon={<ContentPasteIcon />}
+                  onClick={addPeerFromClipboard}
+                  variant="outlined"
+                  size="small"
+                >
+                  Paste from Clipboard
+                </Button>
+              </Box>
               <Box sx={{ display: "flex", gap: 1 }}>
                 <Button
                   startIcon={<CancelIcon />}
@@ -218,10 +292,54 @@ export const NetworkConfigAccordion = ({
                 <TableCell>Name</TableCell>
                 <TableCell>Address</TableCell>
                 <TableCell>Public Key</TableCell>
+                <TableCell></TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
-              {config.peers.map((p) => {
+              {selfEntry && (
+                <TableRow sx={{ bgcolor: "action.selected" }}>
+                  <TableCell>
+                    <PersonIcon sx={{ fontSize: 14, color: "primary.main" }} />
+                  </TableCell>
+                  <TableCell>
+                    <Box
+                      sx={{ display: "flex", alignItems: "center", gap: 0.5 }}
+                    >
+                      {selfEntry.id}
+                      <Typography variant="caption" color="text.secondary">
+                        (you)
+                      </Typography>
+                    </Box>
+                  </TableCell>
+                  <TableCell>{selfEntry.name}</TableCell>
+                  <TableCell>
+                    {selfEntry.address}:{selfEntry.port}
+                  </TableCell>
+                  <TableCell
+                    sx={{ fontFamily: "monospace", fontSize: "0.75rem" }}
+                  >
+                    {selfEntry.public_key
+                      ? `${selfEntry.public_key.slice(0, 16)}...`
+                      : "-"}
+                  </TableCell>
+                  <TableCell>
+                    <Tooltip title="Copy as CSV row">
+                      <IconButton
+                        size="small"
+                        onClick={async () => {
+                          const name = selfPeer?.name || selfEntry.id;
+                          const csvRow = `${selfEntry.id},${name},${selfEntry.address},${selfEntry.port},${selfEntry.public_key},`;
+                          const success = await copyToClipboard(csvRow);
+                          showSnackbar(success ? "Copied to clipboard" : "Failed to copy");
+                        }}
+                      >
+                        <ContentCopyIcon fontSize="small" />
+                      </IconButton>
+                    </Tooltip>
+                  </TableCell>
+                </TableRow>
+              )}
+              {otherPeers.map((p) => {
                 const isActive = getStatus(p.id);
                 return (
                   <TableRow key={p.id}>
@@ -243,9 +361,12 @@ export const NetworkConfigAccordion = ({
                     <TableCell>
                       {p.address}:{p.port}
                     </TableCell>
-                    <TableCell sx={{ fontFamily: "monospace", fontSize: "0.75rem" }}>
-                      {p.public_key.slice(0, 16)}...
+                    <TableCell
+                      sx={{ fontFamily: "monospace", fontSize: "0.75rem" }}
+                    >
+                      {p.public_key ? `${p.public_key.slice(0, 16)}...` : "-"}
                     </TableCell>
+                    <TableCell></TableCell>
                   </TableRow>
                 );
               })}
