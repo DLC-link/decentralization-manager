@@ -27,6 +27,8 @@ export interface NodeConfig {
   node: {
     node_id: string;
     listen_address: string;
+    public_address?: string;
+    port: number;
   };
   network_config: string;
   canton: {
@@ -39,23 +41,17 @@ export interface NodeConfig {
   };
 }
 
-export interface NetworkParticipant {
+export interface Peer {
   id: string;
   name: string;
-  role?: string;
   address: string;
   port: number;
   public_key: string;
+  party?: string;
 }
 
 export interface NetworkConfig {
-  network: {
-    name: string;
-    protocol_version: string;
-    port: number;
-    coordinator_strategy: string;
-  };
-  participants: NetworkParticipant[];
+  peers: Peer[];
 }
 
 export interface ParticipantStatus {
@@ -90,8 +86,39 @@ export interface KeyStatusResponse {
   public_key?: string;
 }
 
-export interface KeygenResponse {
-  success: boolean;
-  public_key: string;
-  message: string;
+// DAR file for upload
+export interface DarFile {
+  filename: string;
+  data: string; // base64-encoded
+}
+
+// Contract deployment types
+export type FieldDefinition =
+  | { type: "decentralized_party" }
+  | { type: "operator_party" }
+  | { type: "participant_party"; index: number }
+  | { type: "text"; value: string }
+  | { type: "int64"; value: number }
+  | { type: "bool"; value: boolean }
+  | { type: "instrument"; id: string }
+  | { type: "attestors_set" }
+  | { type: "optional"; inner: FieldDefinition }
+  | { type: "record"; fields: FieldDefinition[] }
+  | { type: "governance_threshold" };
+
+export interface ContractDefinition {
+  id: string;
+  name: string;
+  package_id: string;
+  module_name: string;
+  entity_name: string;
+  fields: FieldDefinition[];
+}
+
+export interface ContractsRequest {
+  decentralized_party_id: string;
+  operator_party?: string;
+  operator_party_hint: string;
+  dar_files: DarFile[];
+  contracts: ContractDefinition[];
 }

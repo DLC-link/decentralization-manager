@@ -9,21 +9,19 @@ use canton_proto_rs::com::{
             PrepareSubmissionResponse, SinglePartySignatures,
         },
     },
-    digitalasset::canton::{
-        crypto::v30::Signature as CantonSignature, protocol::v30::DecentralizedNamespaceDefinition,
-    },
+    digitalasset::canton::crypto::v30::Signature as CantonSignature,
 };
 
 use crate::{
-    config::{NetworkConfig, NodeConfig},
+    config::NodeConfig,
     consts::{
-        EXECUTION_DIR, LEDGER_SUBMISSIONS_DIR, NAMESPACE_DEF_FILENAME, PREPARED_DIR,
-        PREPARED_SUBMISSION_PREFIX, SIGNATURES_DIR, SUBMISSION_SIGNATURES_PREFIX,
-        TOPOLOGY_RETRY_DELAY_SECS, TOPOLOGY_RETRY_MAX_ATTEMPTS,
+        EXECUTION_DIR, LEDGER_SUBMISSIONS_DIR, PREPARED_DIR, PREPARED_SUBMISSION_PREFIX,
+        SIGNATURES_DIR, SUBMISSION_SIGNATURES_PREFIX, TOPOLOGY_RETRY_DELAY_SECS,
+        TOPOLOGY_RETRY_MAX_ATTEMPTS,
     },
     error::Result,
     utils,
-    workflow::contracts::ContractsDirs,
+    workflow::contracts::{ContractsConfig, ContractsDirs},
 };
 
 /// Execute signed ledger submissions
@@ -34,30 +32,18 @@ use crate::{
 /// # Arguments
 /// * `config` - Configuration with Ledger API connection details
 /// * `dirs` - WorkflowDirs containing all directory paths
-/// * `network_config` - Network configuration with application settings
+/// * `contracts_config` - Contracts workflow configuration with party ID
 pub async fn execute_submissions(
     config: &NodeConfig,
     dirs: &ContractsDirs,
-    network_config: &NetworkConfig,
+    contracts_config: &ContractsConfig,
 ) -> Result {
     tracing::info!("Executing submissions...");
 
-    let party_id_prefix = &network_config.application.party_id_prefix;
     let user_id = &config.canton.ledger_api_user_id;
 
-    // Step 1: Get decentralized party ID from namespace definition
-    let namespace_file = dirs.dns_submission_dir.join(NAMESPACE_DEF_FILENAME);
-    tracing::debug!(
-        "Reading namespace definition from {path}",
-        path = namespace_file.display()
-    );
-    let namespace_def: DecentralizedNamespaceDefinition =
-        utils::read_first_message_from_file(&namespace_file).await?;
-
-    let decentralized_party = format!(
-        "{party_id_prefix}::{namespace}",
-        namespace = namespace_def.decentralized_namespace
-    );
+    // Use the decentralized party ID from contracts config (provided via UI)
+    let decentralized_party = contracts_config.decentralized_party_id.to_string();
     tracing::debug!("Decentralized party: {decentralized_party}");
 
     // Step 2: Dynamically load all prepared submissions

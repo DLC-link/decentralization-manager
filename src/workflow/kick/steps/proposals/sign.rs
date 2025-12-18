@@ -20,9 +20,7 @@ use crate::{
 pub async fn sign_proposals(config: &NodeConfig, dirs: &KickDirs, proposal_data: &[u8]) -> Result {
     tracing::info!("Signing kick proposals...");
 
-    let participant_num = utils::get_participant_number(config).await?;
-    tracing::debug!("Determined participant number: {participant_num}");
-
+    let node_id = &config.node.node_id;
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
     tracing::debug!("Using synchronizer ID: {synchronizer_id}");
 
@@ -65,9 +63,9 @@ pub async fn sign_proposals(config: &NodeConfig, dirs: &KickDirs, proposal_data:
 
     // Save signed proposals
     fs::create_dir_all(&dirs.kick_signed_dir).await?;
-    let output_file = dirs.kick_signed_dir.join(format!(
-        "{SIGNED_KICK_PROPOSALS_PREFIX}-{participant_num}.bin"
-    ));
+    let output_file = dirs
+        .kick_signed_dir
+        .join(format!("{SIGNED_KICK_PROPOSALS_PREFIX}-{node_id}.bin"));
     tracing::info!(
         "Saving signed kick proposals to {path}",
         path = output_file.display()

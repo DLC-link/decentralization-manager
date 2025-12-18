@@ -20,6 +20,7 @@ import { CopyableText } from "./CopyableText";
 import { KickDialog } from "./KickDialog";
 import { ContractsDialog } from "./ContractsDialog";
 import type { DecentralizedParty } from "../types";
+import { MAINNET_DEMO } from "../constants";
 
 interface PartyCardProps {
   party: DecentralizedParty;
@@ -68,6 +69,7 @@ export const PartyCard = ({ party, onRefresh }: PartyCardProps) => {
               size="small"
               startIcon={<UploadFileIcon />}
               onClick={() => setContractsDialogOpen(true)}
+              disabled={MAINNET_DEMO}
             >
               Deploy Contracts
             </Button>
@@ -119,13 +121,16 @@ export const PartyCard = ({ party, onRefresh }: PartyCardProps) => {
                 </TableCell>
                 <TableCell align="right">
                   <Tooltip title="Kick participant">
-                    <IconButton
-                      size="small"
-                      color="error"
-                      onClick={() => handleKickClick(p.participant_uid, index)}
-                    >
-                      <PersonRemoveIcon fontSize="small" />
-                    </IconButton>
+                    <span>
+                      <IconButton
+                        size="small"
+                        color="error"
+                        onClick={() => handleKickClick(p.participant_uid, index)}
+                        disabled={MAINNET_DEMO}
+                      >
+                        <PersonRemoveIcon fontSize="small" />
+                      </IconButton>
+                    </span>
                   </Tooltip>
                 </TableCell>
               </TableRow>

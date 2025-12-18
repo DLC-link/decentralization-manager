@@ -9,6 +9,7 @@ import {
   CircularProgress,
   Alert,
   Box,
+  TextField,
 } from "@mui/material";
 import { API_BASE } from "../constants";
 import type { OnboardingStatusResponse } from "../types";
@@ -23,12 +24,14 @@ export const OnboardingDialog = ({ open, onClose, onComplete }: OnboardingDialog
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<OnboardingStatusResponse | null>(null);
+  const [partyIdPrefix, setPartyIdPrefix] = useState("");
 
   useEffect(() => {
     if (!open) {
       setError(null);
       setStatus(null);
       setLoading(false);
+      setPartyIdPrefix("");
     }
   }, [open]);
 
@@ -65,6 +68,11 @@ export const OnboardingDialog = ({ open, onClose, onComplete }: OnboardingDialog
   }, [status?.status, pollStatus]);
 
   const handleStart = async () => {
+    if (!partyIdPrefix.trim()) {
+      setError("Party ID prefix is required");
+      return;
+    }
+
     setLoading(true);
     setError(null);
 
@@ -72,6 +80,7 @@ export const OnboardingDialog = ({ open, onClose, onComplete }: OnboardingDialog
       const res = await fetch(`${API_BASE}/onboarding`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ party_id_prefix: partyIdPrefix.trim() }),
       });
 
       if (!res.ok) {
@@ -102,6 +111,16 @@ export const OnboardingDialog = ({ open, onClose, onComplete }: OnboardingDialog
             This will coordinate with other participants to establish the party
             topology and namespace definition.
           </Typography>
+
+          <TextField
+            label="Party ID Prefix"
+            value={partyIdPrefix}
+            onChange={(e) => setPartyIdPrefix(e.target.value)}
+            placeholder="e.g., my-network"
+            fullWidth
+            disabled={loading || status?.status === "inprogress"}
+            helperText="A unique identifier prefix for the decentralized party"
+          />
 
           {error && <Alert severity="error">{error}</Alert>}
 
@@ -137,7 +156,7 @@ export const OnboardingDialog = ({ open, onClose, onComplete }: OnboardingDialog
             onClick={handleStart}
             variant="contained"
             color="primary"
-            disabled={loading}
+            disabled={loading || !partyIdPrefix.trim()}
           >
             {loading ? <CircularProgress size={20} /> : "Start Onboarding"}
           </Button>

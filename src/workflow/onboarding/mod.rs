@@ -1,8 +1,10 @@
 pub mod attestor;
+pub mod config;
 pub mod coordinator;
 pub mod dirs;
 pub mod steps;
 
+pub use config::OnboardingConfig;
 pub use dirs::OnboardingDirs;
 pub use steps::{
     create_proposals, generate_keys, sign_dns_proposals, sign_p2p_proposals, submit_dns_proposals,

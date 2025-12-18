@@ -34,9 +34,7 @@ async fn sign_proposal(
 ) -> Result {
     tracing::info!("Signing {proposal_type} proposal...");
 
-    let participant_num = utils::get_participant_number(config).await?;
-    tracing::debug!("Determined participant number: {participant_num}");
-
+    let node_id = &config.node.node_id;
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
     tracing::debug!("Using synchronizer ID: {synchronizer_id}");
 
@@ -77,7 +75,7 @@ async fn sign_proposal(
     }
 
     fs::create_dir_all(output_dir).await?;
-    let output_file = output_dir.join(format!("{output_prefix}-{participant_num}.bin"));
+    let output_file = output_dir.join(format!("{output_prefix}-{node_id}.bin"));
     tracing::info!(
         "Saving signed {proposal_type} proposal to {path}",
         path = output_file.display()

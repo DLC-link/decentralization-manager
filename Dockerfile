@@ -15,7 +15,7 @@ RUN cd frontend && npm ci
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY src ./src
 COPY frontend/src ./frontend/src
-COPY frontend/index.html frontend/vite.config.ts frontend/tsconfig*.json frontend/eslint.config.js ./frontend/
+COPY frontend/index.html frontend/vite.config.ts frontend/tsconfig*.json frontend/eslint.config.js frontend/.env ./frontend/
 
 RUN --mount=type=ssh cargo build --release
 
@@ -26,8 +26,8 @@ WORKDIR /app
 COPY --from=builder /lib/x86_64-linux-gnu/libgcc_s.so.1 /lib64/libgcc_s.so.1
 COPY --from=builder /lib/x86_64-linux-gnu/libssl.so.3 /lib64/libssl.so.3
 COPY --from=builder /lib/x86_64-linux-gnu/libcrypto.so.3 /lib64/libcrypto.so.3
-COPY --from=builder /app/target/release/dec-party-onboarding /usr/local/bin/
+COPY --from=builder /app/target/release/dec-party-manager /usr/local/bin/
 
 EXPOSE 8080
 
-ENTRYPOINT ["dec-party-onboarding", "-c", "/config/node.toml", "serve", "--host", "0.0.0.0", "--port", "8080"]
+ENTRYPOINT ["dec-party-manager", "-d", "/", "serve", "--host", "0.0.0.0", "--port", "8080"]

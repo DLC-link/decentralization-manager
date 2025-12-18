@@ -371,21 +371,8 @@ pub async fn find_participant_number(
     anyhow::bail!("Current participant ID '{current_participant_id}' not found in ids directory")
 }
 
-/// Get participant number for current participant
-///
-/// Determines participant number from network config order (1-indexed).
-pub async fn get_participant_number(config: &NodeConfig) -> Result<u32> {
-    let network_config = config.load_network_config().await?;
-    let current_node_id = &config.node.node_id;
-
-    for (idx, participant) in network_config.participants.iter().enumerate() {
-        if &participant.id == current_node_id {
-            return Ok((idx + 1) as u32);
-        }
-    }
-
-    anyhow::bail!("Current node '{current_node_id}' not found in network config participants")
-}
+/// Max gRPC message size (32MB) - Canton ledger can return large responses
+pub const MAX_GRPC_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
 
 /// Macro to define authenticated gRPC client creator functions
 macro_rules! define_client_creator {
@@ -420,7 +407,8 @@ macro_rules! define_client_creator {
                 Ok(req)
             };
 
-            Ok($client_type::with_interceptor(channel, interceptor))
+            Ok($client_type::with_interceptor(channel, interceptor)
+                .max_decoding_message_size(MAX_GRPC_MESSAGE_SIZE))
         }
     };
 }

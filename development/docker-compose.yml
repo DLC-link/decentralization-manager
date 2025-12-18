@@ -6,21 +6,12 @@ services:
     volumes:
       - ./participant-1/config:/config
       - ./participant-1/data:/data
-      - ./participant-1/dars:/dars
+    network_mode: host
     ports:
       - "8081:8081"
       - "9001:9001"
     entrypoint:
-      [
-        "dec-party-onboarding",
-        "-c",
-        "/config/node.toml",
-        "serve",
-        "--host",
-        "0.0.0.0",
-        "--port",
-        "8081",
-      ]
+      ["dec-party-manager", "-d", "/", "serve", "--host", "0.0.0.0", "--port", "8081"]
 
   participant-2:
     build:
@@ -29,20 +20,12 @@ services:
     volumes:
       - ./participant-2/config:/config
       - ./participant-2/data:/data
+    network_mode: host
     ports:
       - "8082:8082"
       - "9002:9002"
     entrypoint:
-      [
-        "dec-party-onboarding",
-        "-c",
-        "/config/node.toml",
-        "serve",
-        "--host",
-        "0.0.0.0",
-        "--port",
-        "8082",
-      ]
+      ["dec-party-manager", "-d", "/", "serve", "--host", "0.0.0.0", "--port", "8082"]
 
   participant-3:
     build:
@@ -51,17 +34,9 @@ services:
     volumes:
       - ./participant-3/config:/config
       - ./participant-3/data:/data
+    network_mode: host
     ports:
       - "8083:8083"
       - "9003:9003"
     entrypoint:
-      [
-        "dec-party-onboarding",
-        "-c",
-        "/config/node.toml",
-        "serve",
-        "--host",
-        "0.0.0.0",
-        "--port",
-        "8083",
-      ]
+      ["dec-party-manager", "-d", "/", "serve", "--host", "0.0.0.0", "--port", "8083"]
