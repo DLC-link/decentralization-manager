@@ -11,7 +11,7 @@ use canton_proto_rs::com::digitalasset::canton::{
 };
 
 use crate::{
-    config::{NetworkConfig, NodeConfig},
+    config::NodeConfig,
     consts::{
         DNS_KICK_PROTO_FILENAME, NEW_NAMESPACE_DEF_FILENAME, P2P_KICK_PROTO_FILENAME,
         PARTY_ID_FILENAME, SIGNED_KICK_PROPOSALS_PREFIX, TOPOLOGY_PROPAGATION_DELAY_SECS,
@@ -25,11 +25,7 @@ use crate::{
 /// Submit kick to synchronizer
 ///
 /// Coordinator aggregates signatures and submits the kick
-pub async fn submit_kick(
-    config: &NodeConfig,
-    dirs: &KickDirs,
-    _network_config: &NetworkConfig,
-) -> Result {
+pub async fn submit_kick(config: &NodeConfig, dirs: &KickDirs) -> Result {
     tracing::info!("Submitting kick to synchronizer...");
 
     let synchronizer_id = utils::get_synchronizer_id(config).await?;

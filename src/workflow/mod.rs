@@ -8,18 +8,19 @@ use std::sync::Arc;
 use anyhow::Context;
 
 use crate::{
-    config::{CoordinatorStrategy, NetworkConfig, NodeConfig},
+    config::{NodeConfig, Peer},
     consts::{LEDGER_SUBMISSIONS_DIR, PREPARED_DIR},
     error::Result,
-    noise::{MessageType, client::NoiseClient, election, server::NoiseServer},
+    noise::{MessageType, client::NoiseClient, server::NoiseServer},
     utils,
 };
 
 pub use contracts::{ContractsConfig, ContractsStep};
 pub use kick::{KickConfig, KickStep};
-pub use onboarding::OnboardingStep;
+pub use onboarding::{OnboardingConfig, OnboardingStep};
 pub use state::WorkflowState;
 
+/// Workflow types that can be run
 #[derive(Clone, Copy, Debug)]
 pub enum WorkflowType {
     Onboarding,
@@ -27,63 +28,37 @@ pub enum WorkflowType {
     Kick,
 }
 
-async fn determine_coordinator(
-    node_config: &NodeConfig,
-    network_config: &NetworkConfig,
-) -> Result<bool> {
-    match network_config.network.coordinator_strategy {
-        CoordinatorStrategy::Election => {
-            tracing::info!("Running leader election (Bully algorithm)");
-            let election_result =
-                election::run_election(network_config, &node_config.node.node_id).await?;
-
-            tracing::info!(
-                "Election complete: {id} is the coordinator",
-                id = election_result.coordinator.id
-            );
-
-            Ok(election_result.is_me)
-        }
-        _ => network_config.is_coordinator(&node_config.node.node_id),
-    }
-}
-
-pub async fn start_node(
+/// Start a coordinator workflow (called when this node initiates the workflow from UI)
+pub async fn start_coordinator(
     node_config: NodeConfig,
     workflow_type: WorkflowType,
+    onboarding_config: Option<OnboardingConfig>,
     kick_config: Option<KickConfig>,
     contracts_config: Option<ContractsConfig>,
 ) -> Result {
     tracing::info!("Loading network config...");
     let network_config = node_config.load_network_config().await?;
 
-    let is_coordinator = determine_coordinator(&node_config, &network_config).await?;
-    let role = if is_coordinator {
-        "COORDINATOR"
-    } else {
-        "ATTESTOR"
-    };
-    tracing::info!("Starting {workflow_type:?} workflow as {role}");
+    tracing::info!("Starting {workflow_type:?} workflow as COORDINATOR");
 
-    if is_coordinator {
-        match workflow_type {
-            WorkflowType::Onboarding => {
-                onboarding::coordinator::start_coordinator(node_config, network_config).await
-            }
-            WorkflowType::Contracts => {
-                let config = contracts_config.ok_or_else(|| {
-                    anyhow::anyhow!("ContractsConfig is required for Contracts workflow")
-                })?;
-                contracts::coordinator::start_coordinator(node_config, network_config, config).await
-            }
-            WorkflowType::Kick => {
-                let config = kick_config
-                    .ok_or_else(|| anyhow::anyhow!("KickConfig is required for Kick workflow"))?;
-                kick::coordinator::start_coordinator(node_config, network_config, config).await
-            }
+    match workflow_type {
+        WorkflowType::Onboarding => {
+            let config = onboarding_config.ok_or_else(|| {
+                anyhow::anyhow!("OnboardingConfig is required for Onboarding workflow")
+            })?;
+            onboarding::coordinator::start_coordinator(node_config, network_config, config).await
         }
-    } else {
-        start_attestor(node_config, network_config).await
+        WorkflowType::Contracts => {
+            let config = contracts_config.ok_or_else(|| {
+                anyhow::anyhow!("ContractsConfig is required for Contracts workflow")
+            })?;
+            contracts::coordinator::start_coordinator(node_config, network_config, config).await
+        }
+        WorkflowType::Kick => {
+            let config = kick_config
+                .ok_or_else(|| anyhow::anyhow!("KickConfig is required for Kick workflow"))?;
+            kick::coordinator::start_coordinator(node_config, network_config, config).await
+        }
     }
 }
 
@@ -131,10 +106,14 @@ pub async fn save_attestor_data<S: state::WorkflowStep + 'static>(
 }
 
 /// Start node in attestor mode (client)
-async fn start_attestor(node_config: NodeConfig, network_config: NetworkConfig) -> Result {
-    tracing::info!("Initializing Noise client...");
+/// Called when this node receives a workflow invite from the coordinator
+pub async fn start_attestor(node_config: NodeConfig, coordinator: Peer) -> Result {
+    tracing::info!(
+        "Initializing Noise client to connect to coordinator {}...",
+        coordinator.id
+    );
 
-    let client = NoiseClient::new(node_config.clone(), network_config.clone()).await?;
+    let client = NoiseClient::new(node_config.clone(), coordinator).await?;
 
     // Initialize directory paths for all workflows
     let onboarding_dirs = onboarding::OnboardingDirs::with_base(node_config.workflow_data_dir());
@@ -196,15 +175,20 @@ async fn start_attestor(node_config: NodeConfig, network_config: NetworkConfig) 
             MessageType::UploadDars => {
                 tracing::info!("Executing: Upload DARs");
 
-                // If payload contains DARs from coordinator, save them first
-                if !payload.is_empty()
-                    && let Err(e) = save_dars_from_payload(&payload, &contracts_dirs).await
-                {
-                    tracing::error!("Failed to save DARs from coordinator: {e}");
-                    continue;
-                }
+                // Decode DAR files from payload and upload directly
+                let dar_files = if payload.is_empty() {
+                    Vec::new()
+                } else {
+                    match utils::decode_files(&payload) {
+                        Ok(files) => files,
+                        Err(e) => {
+                            tracing::error!("Failed to decode DARs from coordinator: {e}");
+                            continue;
+                        }
+                    }
+                };
 
-                if let Err(e) = contracts::upload_dars(&node_config, &contracts_dirs).await {
+                if let Err(e) = contracts::upload_dars_from_bytes(&node_config, dar_files).await {
                     tracing::error!("Step execution failed: {e}");
                     continue;
                 }
@@ -214,8 +198,18 @@ async fn start_attestor(node_config: NodeConfig, network_config: NetworkConfig) 
             }
             MessageType::GenerateKeys => {
                 tracing::info!("Executing: Generate keys");
+                // Deserialize onboarding config from payload
+                let onboarding_config: onboarding::OnboardingConfig =
+                    match serde_json::from_slice(&payload) {
+                        Ok(config) => config,
+                        Err(e) => {
+                            tracing::error!("Failed to deserialize onboarding config: {e}");
+                            continue;
+                        }
+                    };
                 if let Err(e) =
-                    onboarding::generate_keys(&node_config, &onboarding_dirs, &network_config).await
+                    onboarding::generate_keys(&node_config, &onboarding_dirs, &onboarding_config)
+                        .await
                 {
                     tracing::error!("Step execution failed: {e}");
                     continue;
@@ -339,27 +333,6 @@ pub async fn find_and_read_file(
     }
 
     anyhow::bail!("{error_msg} in {path}", path = dir.display())
-}
-
-/// Save DAR files received from coordinator to the dars directory
-async fn save_dars_from_payload(payload: &[u8], dirs: &contracts::ContractsDirs) -> Result {
-    let dar_files = utils::decode_files(payload)?;
-
-    tracing::info!(
-        "Received {count} DAR file(s) from coordinator",
-        count = dar_files.len()
-    );
-
-    // Ensure dars directory exists
-    utils::create_directory(&dirs.dars_dir).await?;
-
-    for (filename, data) in dar_files {
-        let path = dirs.dars_dir.join(&filename);
-        tokio::fs::write(&path, &data).await?;
-        tracing::debug!("Saved DAR: {filename}");
-    }
-
-    Ok(())
 }
 
 /// Save prepared submission files received from coordinator

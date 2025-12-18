@@ -4,9 +4,11 @@ pub mod coordinator;
 pub mod dirs;
 pub mod steps;
 
-pub use config::ContractsConfig;
+pub use config::{ContractDefinition, ContractsConfig, DarFile, FieldDefinition};
 pub use dirs::ContractsDirs;
-pub use steps::{execute_submissions, prepare_submissions, sign_submissions, upload_dars};
+pub use steps::{
+    execute_submissions, prepare_submissions, sign_submissions, upload_dars, upload_dars_from_bytes,
+};
 
 use crate::{noise::MessageType, workflow::state::WorkflowStep};
 

@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
-import { Container, Typography, Box, Alert, Button, CircularProgress, IconButton, Tooltip } from "@mui/material";
+import { Container, Typography, Box, Alert, IconButton, Tooltip, Button } from "@mui/material";
 import VpnKeyIcon from "@mui/icons-material/VpnKey";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import AddIcon from "@mui/icons-material/Add";
@@ -9,14 +9,16 @@ import { NodeConfigAccordion } from "./components/NodeConfigAccordion";
 import { NetworkConfigAccordion } from "./components/NetworkConfigAccordion";
 import { LoadingSkeleton } from "./components/LoadingSkeleton";
 import { OnboardingDialog } from "./components/OnboardingDialog";
+import { copyToClipboard } from "./components/CopyableText";
 import { useSnackbar } from "./contexts";
-import { API_BASE } from "./constants";
+import { API_BASE, MAINNET_DEMO } from "./constants";
 import type {
   DecentralizedParty,
   NodeConfig,
   NetworkConfig,
   ParticipantStatus,
   KeyStatusResponse,
+  Peer,
 } from "./types";
 
 const App = () => {
@@ -25,7 +27,6 @@ const App = () => {
   const [networkConfig, setNetworkConfig] = useState<NetworkConfig | null>(null);
   const [participantStatuses, setParticipantStatuses] = useState<ParticipantStatus[]>([]);
   const [keyStatus, setKeyStatus] = useState<KeyStatusResponse | null>(null);
-  const [generatingKeys, setGeneratingKeys] = useState(false);
   const [onboardingDialogOpen, setOnboardingDialogOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -50,6 +51,25 @@ const App = () => {
     } catch (err) {
       showSnackbar(err instanceof Error ? err.message : "Failed to refresh parties");
     }
+  }, [showSnackbar]);
+
+  const savePeers = useCallback(async (peers: Peer[]) => {
+    const res = await fetch(`${API_BASE}/network-config`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(peers),
+    });
+    if (!res.ok) {
+      const data = await res.json();
+      throw new Error(data.error || "Failed to save peers");
+    }
+    // Refresh the network config
+    const networkRes = await fetch(`${API_BASE}/network-config`);
+    if (networkRes.ok) {
+      const networkData = await networkRes.json();
+      setNetworkConfig(networkData);
+    }
+    showSnackbar("Peers saved successfully");
   }, [showSnackbar]);
 
   useEffect(() => {
@@ -109,26 +129,6 @@ const App = () => {
     return () => clearInterval(interval);
   }, []);
 
-  const handleGenerateKeys = async () => {
-    setGeneratingKeys(true);
-    try {
-      const res = await fetch(`${API_BASE}/keys/generate`, { method: "POST" });
-      const data = await res.json();
-
-      if (res.ok && data.success) {
-        setKeyStatus({ has_keys: true, public_key: data.public_key });
-        await navigator.clipboard.writeText(data.public_key);
-        showSnackbar("Keys generated and public key copied to clipboard");
-      } else {
-        showSnackbar(data.error || "Failed to generate keys");
-      }
-    } catch {
-      showSnackbar("Failed to generate keys");
-    } finally {
-      setGeneratingKeys(false);
-    }
-  };
-
   return (
     <>
       <Header />
@@ -140,25 +140,6 @@ const App = () => {
           <Alert severity="error">{error}</Alert>
         ) : (
           <>
-            {keyStatus && !keyStatus.has_keys && (
-              <Alert
-                severity="warning"
-                sx={{ mb: 2, borderRadius: 3 }}
-                action={
-                  <Button
-                    color="inherit"
-                    size="small"
-                    onClick={handleGenerateKeys}
-                    disabled={generatingKeys}
-                    startIcon={generatingKeys ? <CircularProgress size={16} /> : <VpnKeyIcon />}
-                  >
-                    {generatingKeys ? "Generating..." : "Generate Keys"}
-                  </Button>
-                }
-              >
-                No Noise protocol keys found. Generate keys to enable secure communication with other nodes.
-              </Alert>
-            )}
             {keyStatus && keyStatus.has_keys && keyStatus.public_key && (
               <Alert
                 severity="success"
@@ -169,9 +150,9 @@ const App = () => {
                     <IconButton
                       size="small"
                       color="inherit"
-                      onClick={() => {
-                        navigator.clipboard.writeText(keyStatus.public_key!);
-                        showSnackbar("Public key copied to clipboard");
+                      onClick={async () => {
+                        const success = await copyToClipboard(keyStatus.public_key!);
+                        showSnackbar(success ? "Copied to clipboard" : "Failed to copy");
                       }}
                     >
                       <ContentCopyIcon fontSize="small" />
@@ -191,7 +172,10 @@ const App = () => {
             {networkConfig && (
               <NetworkConfigAccordion
                 config={networkConfig}
+                nodeConfig={nodeConfig ?? undefined}
+                keyStatus={keyStatus ?? undefined}
                 participantStatuses={participantStatuses}
+                onSave={savePeers}
               />
             )}
 
@@ -208,6 +192,7 @@ const App = () => {
                 variant="contained"
                 startIcon={<AddIcon />}
                 onClick={() => setOnboardingDialogOpen(true)}
+                disabled={MAINNET_DEMO}
               >
                 Create Party
               </Button>

@@ -4,7 +4,10 @@ use canton_proto_rs::com::digitalasset::canton::protocol::v30::enums::Participan
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, RwLock};
 
-use crate::participant_id::CantonId;
+use crate::{
+    participant_id::CantonId,
+    workflow::contracts::{ContractDefinition, DarFile},
+};
 
 use super::ListenerControl;
 
@@ -153,10 +156,34 @@ pub struct KickRequest {
     pub namespace_fingerprint: String,
 }
 
+/// Request to create a new decentralized party
+#[derive(Clone, Debug, Deserialize)]
+pub struct OnboardingRequest {
+    /// Party ID prefix for the decentralized party (e.g., "xyz-network")
+    pub party_id_prefix: String,
+}
+
 /// Request to deploy contracts for a decentralized party
 #[derive(Clone, Debug, Deserialize)]
 pub struct ContractsRequest {
+    /// Decentralized party ID to deploy contracts for
     pub decentralized_party_id: CantonId,
+    /// Operator party ID (optional, can be allocated dynamically if not provided)
+    #[serde(default)]
+    pub operator_party: Option<String>,
+    /// Party hint for operator party allocation (used if operator_party not set)
+    #[serde(default = "default_operator_party_hint")]
+    pub operator_party_hint: String,
+    /// DAR files to upload (base64-encoded)
+    #[serde(default)]
+    pub dar_files: Vec<DarFile>,
+    /// Contract definitions to create after decentralized party setup
+    #[serde(default)]
+    pub contracts: Vec<ContractDefinition>,
+}
+
+fn default_operator_party_hint() -> String {
+    "operator".to_string()
 }
 
 /// Progress status of a workflow (kick, onboarding, etc.)
@@ -192,12 +219,4 @@ pub type OnboardingResponse = WorkflowResponse;
 pub struct KeyStatusResponse {
     pub has_keys: bool,
     pub public_key: Option<String>,
-}
-
-/// Response for key generation
-#[derive(Serialize)]
-pub struct KeygenResponse {
-    pub success: bool,
-    pub public_key: String,
-    pub message: String,
 }

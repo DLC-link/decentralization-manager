@@ -6,7 +6,7 @@ use canton_proto_rs::com::digitalasset::canton::topology::admin::v30::{
 };
 
 use crate::{
-    config::{NetworkConfig, NodeConfig},
+    config::NodeConfig,
     consts::{
         KICK_PARTICIPANT_ID_FILENAME, KICK_TARGET_FILENAME, NAMESPACE_DEF_FILENAME,
         NEW_THRESHOLD_FILENAME,
@@ -26,7 +26,6 @@ use crate::{
 pub async fn export_state(
     config: &NodeConfig,
     dirs: &KickDirs,
-    network_config: &NetworkConfig,
     kick_config: &KickConfig,
 ) -> Result {
     tracing::info!("Exporting current decentralized namespace state...");
@@ -97,7 +96,8 @@ pub async fn export_state(
     utils::write_message_to_file(namespace_def, &namespace_file).await?;
 
     // Get P2P mapping to find participants
-    let party_id_prefix = &network_config.application.party_id_prefix;
+    // Use the prefix from the decentralized party ID provided via UI
+    let party_id_prefix = &kick_config.decentralized_party_id.prefix;
     let party_id = format!("{party_id_prefix}::{namespace_hex}");
     tracing::info!("Querying P2P mapping for party: {party_id}");
 

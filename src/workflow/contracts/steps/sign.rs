@@ -40,16 +40,14 @@ const ED25519_PRIVATE_KEY_LENGTH: u8 = 0x20;
 pub async fn sign_submissions(config: &NodeConfig, dirs: &ContractsDirs) -> Result {
     tracing::info!("Signing submissions...");
 
-    // Step 1: Get participant number
-    let participant_num = utils::get_participant_number(config).await?;
-    tracing::debug!("Determined participant number: {participant_num}");
+    let node_id = &config.node.node_id;
 
-    // Step 2: Load the DAML public key that was exported in step 1
+    // Step 1: Load the DAML public key that was exported during onboarding
     // This ensures we use the newly generated key, not an old key from a previous run
     tracing::info!("Loading DAML public key from exported file...");
     let keys_file = dirs
         .keys_dir
-        .join(format!("{ATTESTOR_KEYS_PREFIX}-{participant_num}.bin"));
+        .join(format!("{ATTESTOR_KEYS_PREFIX}-{node_id}.bin"));
 
     if !keys_file.exists() {
         anyhow::bail!(
@@ -360,9 +358,8 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &ContractsDirs) -> Resu
         .await
         .with_context(|| format!("Failed to create dir '{}'", signatures_dir.display()))?;
 
-    let signatures_file = signatures_dir.join(format!(
-        "{SUBMISSION_SIGNATURES_PREFIX}-{participant_num}.bin"
-    ));
+    let signatures_file =
+        signatures_dir.join(format!("{SUBMISSION_SIGNATURES_PREFIX}-{node_id}.bin"));
     tracing::info!(
         "Saving signatures to {path}",
         path = signatures_file.display()

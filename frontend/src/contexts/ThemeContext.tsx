@@ -23,16 +23,28 @@ export const useThemeMode = () => {
 const getDesignTokens = (mode: "light" | "dark") => ({
   palette: {
     mode,
-    primary: {
-      main: "#6366f1",
-      light: "#818cf8",
-      dark: "#4f46e5",
-    },
-    secondary: {
-      main: "#ec4899",
-      light: "#f472b6",
-      dark: "#db2777",
-    },
+    primary: mode === "light"
+      ? {
+          main: "#6366f1",
+          light: "#818cf8",
+          dark: "#4f46e5",
+        }
+      : {
+          main: "#a5b4fc",
+          light: "#c7d2fe",
+          dark: "#818cf8",
+        },
+    secondary: mode === "light"
+      ? {
+          main: "#ec4899",
+          light: "#f472b6",
+          dark: "#db2777",
+        }
+      : {
+          main: "#f9a8d4",
+          light: "#fbcfe8",
+          dark: "#f472b6",
+        },
     success: {
       main: "#10b981",
       light: "#34d399",

@@ -15,14 +15,14 @@ use canton_proto_rs::com::daml::ledger::api::v2::{
 };
 
 use crate::{
-    config::{FieldDefinition, NetworkConfig, NodeConfig},
+    config::{NetworkConfig, NodeConfig},
     consts::{
         LEDGER_SUBMISSIONS_DIR, MIN_PARTICIPANTS_CONTRACTS, PREPARED_DIR,
         PREPARED_SUBMISSION_PREFIX, TOPOLOGY_RETRY_DELAY_SECS, TOPOLOGY_RETRY_MAX_ATTEMPTS,
     },
     error::Result,
     utils,
-    workflow::contracts::{ContractsConfig, ContractsDirs},
+    workflow::contracts::{ContractsConfig, ContractsDirs, FieldDefinition},
 };
 
 /// Default page size for listing operations (parties, keys, etc.)
@@ -36,7 +36,7 @@ const DEFAULT_PAGE_SIZE: i32 = 1000;
 /// # Arguments
 /// * `config` - Configuration with Ledger API connection details
 /// * `dirs` - WorkflowDirs containing all directory paths
-/// * `network_config` - Network configuration with application settings
+/// * `network_config` - Network configuration with peer settings
 /// * `contracts_config` - Contracts workflow configuration with party ID
 pub async fn prepare_submissions(
     config: &NodeConfig,
@@ -46,7 +46,6 @@ pub async fn prepare_submissions(
 ) -> Result {
     tracing::info!("Preparing submissions...");
 
-    let app_config = &network_config.application;
     let user_id = &config.canton.ledger_api_user_id;
 
     // Use the decentralized party ID from config
@@ -92,29 +91,26 @@ pub async fn prepare_submissions(
         }
     }
 
-    // Step 3: Allocate parties for each participant
-    tracing::info!("Getting parties for participants...");
+    // Step 3: Allocate parties for each peer
+    tracing::info!("Getting parties for peers...");
     let mut participant_parties = Vec::new();
 
-    for participant in &network_config.participants {
-        let party = if let Some(party_id) = &participant.party {
+    for peer in &network_config.peers {
+        let party = if let Some(party_id) = &peer.party {
             // Use party from config
-            tracing::debug!(
-                "Using party from config for {id}: {party_id}",
-                id = participant.id
-            );
+            tracing::debug!("Using party from config for {id}: {party_id}", id = peer.id);
             party_id.clone()
         } else {
             // Fallback to allocating/finding party
-            tracing::debug!("Allocating/finding party for {id}", id = participant.id);
+            tracing::debug!("Allocating/finding party for {id}", id = peer.id);
             allocate_or_find_party(
                 &mut party_client,
-                &participant.id,
+                &peer.id,
                 &utils::get_synchronizer_id(config).await?,
             )
             .await?
         };
-        tracing::debug!("Party for {id}: {party}", id = participant.id);
+        tracing::debug!("Party for {id}: {party}", id = peer.id);
         participant_parties.push(party);
     }
 
@@ -137,14 +133,14 @@ pub async fn prepare_submissions(
     );
 
     // Get operator party from config or allocate
-    let operator = if let Some(operator_party) = &network_config.network.operator_party {
+    let operator = if let Some(operator_party) = &contracts_config.operator_party {
         tracing::debug!("Using operator party from config: {operator_party}");
         operator_party.clone()
     } else {
         tracing::debug!("Allocating/finding operator party");
         allocate_or_find_party(
             &mut party_client,
-            &app_config.operator_party_hint,
+            &contracts_config.operator_party_hint,
             &utils::get_synchronizer_id(config).await?,
         )
         .await?
@@ -236,14 +232,14 @@ pub async fn prepare_submissions(
     let prepared_dir = ledger_submissions_dir.join(PREPARED_DIR);
     fs::create_dir_all(&prepared_dir).await?;
 
-    if app_config.contracts.is_empty() {
+    if contracts_config.contracts.is_empty() {
         tracing::warn!(
             "No contracts defined in application config, skipping submission preparation"
         );
         return Ok(());
     }
 
-    for (idx, contract_def) in app_config.contracts.iter().enumerate() {
+    for (idx, contract_def) in contracts_config.contracts.iter().enumerate() {
         tracing::info!(
             "Preparing submission {idx}: {contract_name} ({contract_id})",
             idx = idx + 1,
@@ -306,7 +302,7 @@ pub async fn prepare_submissions(
 
     tracing::info!(
         "{count} submissions prepared successfully",
-        count = app_config.contracts.len()
+        count = contracts_config.contracts.len()
     );
     Ok(())
 }

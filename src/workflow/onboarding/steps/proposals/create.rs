@@ -15,7 +15,7 @@ use canton_proto_rs::com::digitalasset::canton::{
 };
 
 use crate::{
-    config::{NetworkConfig, NodeConfig},
+    config::NodeConfig,
     consts::{
         ATTESTOR_KEYS_PREFIX, DNS_PROTO_FILENAME, NAMESPACE_DEF_FILENAME, P2P_PROTO_FILENAME,
         PARTICIPANT_ID_PREFIX,
@@ -23,7 +23,7 @@ use crate::{
     error::Result,
     participant_id::CantonId,
     utils::{self, MULTIHASH_SHA256_PREFIX},
-    workflow::onboarding::OnboardingDirs,
+    workflow::onboarding::{OnboardingConfig, OnboardingDirs},
 };
 
 /// Create topology proposals for decentralized namespace
@@ -46,11 +46,12 @@ use crate::{
 pub async fn create_proposals(
     config: &NodeConfig,
     dirs: &OnboardingDirs,
-    network_config: &NetworkConfig,
+    onboarding_config: &OnboardingConfig,
 ) -> Result {
     tracing::info!("Creating topology proposals...");
 
-    let party_id_prefix = &network_config.application.party_id_prefix;
+    // Use party_id_prefix from onboarding config (provided via UI)
+    let party_id_prefix = &onboarding_config.party_id_prefix;
 
     // Step 1: Load all attestor key files
     if !dirs.keys_dir.exists() {
