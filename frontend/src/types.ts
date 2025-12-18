@@ -27,6 +27,7 @@ export interface NodeConfig {
   node: {
     node_id: string;
     listen_address: string;
+    public_address?: string;
     port: number;
   };
   network_config: string;

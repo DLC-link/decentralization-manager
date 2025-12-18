@@ -167,16 +167,30 @@ pub struct NodeConfig {
 pub struct NodeInfo {
     /// Unique identifier for this node (used for peer identification)
     pub node_id: String,
-    /// Address to listen on for Noise protocol connections
+    /// Address to listen on for Noise protocol connections (use 0.0.0.0 to listen on all interfaces)
     #[serde(default = "default_listen_address")]
     pub listen_address: String,
     /// Port to listen on for Noise protocol connections
     #[serde(default = "default_noise_port")]
     pub port: u16,
+    /// Public address that other peers should use to connect to this node.
+    /// This is the address shared when exporting peer info.
+    #[serde(default)]
+    pub public_address: Option<String>,
 }
 
 fn default_listen_address() -> String {
     "0.0.0.0".to_string()
+}
+
+impl NodeInfo {
+    /// Get the public address for this node (for sharing with peers).
+    /// Falls back to listen_address if public_address is not set.
+    pub fn public_address(&self) -> &str {
+        self.public_address
+            .as_deref()
+            .unwrap_or(&self.listen_address)
+    }
 }
 
 fn default_noise_port() -> u16 {

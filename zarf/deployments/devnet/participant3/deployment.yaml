@@ -11,6 +11,7 @@ data:
     [node]
     node_id = "participant-ibtc-devnet-3"
     listen_address = "0.0.0.0"
+    public_address = "dec-party-manager-3.catalyst-canton.svc.cluster.local"
     port = 9000
 
     [canton]
@@ -81,7 +82,7 @@ spec:
               mountPath: /app
       containers:
         - name: dec-party-manager
-          image: public.ecr.aws/dlc-link/canton-decparty-manager:v0.0.7
+          image: public.ecr.aws/dlc-link/canton-decparty-manager:v0.0.8
           imagePullPolicy: Always
           command:
             [

@@ -88,7 +88,7 @@ export const NetworkConfigAccordion = ({
     ? selfPeer || {
         id: selfNodeId,
         name: selfNodeId,
-        address: nodeConfig?.node.listen_address || "localhost",
+        address: nodeConfig?.node.public_address || nodeConfig?.node.listen_address || "localhost",
         port: selfPort,
         public_key: selfPublicKey,
       }

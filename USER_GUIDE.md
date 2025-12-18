@@ -9,7 +9,7 @@ docker run -d \
   -p 9000:9000 \
   -v $(pwd)/config:/config \
   -v $(pwd)/data:/data \
-  public.ecr.aws/dlc-link/canton-decparty-manager:v0.0.7
+  public.ecr.aws/dlc-link/canton-decparty-manager:mainnet-demo
 ```
 
 Access the web UI at `http://localhost:8080`
@@ -22,6 +22,7 @@ Before running, create a `config/node.toml` file:
 [node]
 node_id = "my-participant"
 listen_address = "0.0.0.0"
+public_address = "your-public-ip-or-hostname"  # Address other peers will use to connect
 port = 9000
 
 [canton]
@@ -39,6 +40,8 @@ message_timeout_secs = 120
 connection_retry_attempts = 3
 connection_retry_delay_secs = 5
 ```
+
+**Note:** The `public_address` is used when sharing your peer info with others. Set it to your actual reachable IP address or hostname. The `listen_address` should remain `0.0.0.0` to listen on all interfaces.
 
 ## Port Requirements
 
@@ -61,6 +64,7 @@ data:
     [node]
     node_id = "my-participant"
     listen_address = "0.0.0.0"
+    public_address = "dec-party-manager.your-namespace.svc.cluster.local"
     port = 9000
 
     [canton]
@@ -113,7 +117,7 @@ spec:
               subPath: config
       containers:
         - name: dec-party-manager
-          image: public.ecr.aws/dlc-link/canton-decparty-manager:latest
+          image: public.ecr.aws/dlc-link/canton-decparty-manager:mainnet-demo
           ports:
             - containerPort: 8080
             - containerPort: 9000

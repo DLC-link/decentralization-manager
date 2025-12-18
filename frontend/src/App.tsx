@@ -11,7 +11,7 @@ import { LoadingSkeleton } from "./components/LoadingSkeleton";
 import { OnboardingDialog } from "./components/OnboardingDialog";
 import { copyToClipboard } from "./components/CopyableText";
 import { useSnackbar } from "./contexts";
-import { API_BASE } from "./constants";
+import { API_BASE, MAINNET_DEMO } from "./constants";
 import type {
   DecentralizedParty,
   NodeConfig,
@@ -192,6 +192,7 @@ const App = () => {
                 variant="contained"
                 startIcon={<AddIcon />}
                 onClick={() => setOnboardingDialogOpen(true)}
+                disabled={MAINNET_DEMO}
               >
                 Create Party
               </Button>
