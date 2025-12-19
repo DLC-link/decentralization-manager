@@ -12,6 +12,7 @@ use canton_proto_rs::com::digitalasset::canton::{
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
     },
 };
+use serde::Deserialize;
 
 use super::{
     AppState,
@@ -79,10 +80,21 @@ pub async fn get_node_config(data: web::Data<AppState>) -> impl Responder {
     HttpResponse::Ok().json(&data.config)
 }
 
+/// Query parameters for decentralized parties endpoint
+#[derive(Debug, Deserialize)]
+pub struct PartiesQuery {
+    /// Filter parties by prefix (e.g., "cbtc-network")
+    #[serde(default)]
+    pub prefix: Option<String>,
+}
+
 /// Get decentralized parties the current participant is a member of
 #[get("/decentralized-parties")]
-pub async fn get_decentralized_parties(data: web::Data<AppState>) -> impl Responder {
-    match fetch_decentralized_parties(&data.config).await {
+pub async fn get_decentralized_parties(
+    data: web::Data<AppState>,
+    query: web::Query<PartiesQuery>,
+) -> impl Responder {
+    match fetch_decentralized_parties(&data.config, query.prefix.as_deref()).await {
         Ok(response) => HttpResponse::Ok().json(response),
         Err(e) => {
             tracing::error!("Failed to fetch decentralized parties: {e}");
@@ -93,7 +105,10 @@ pub async fn get_decentralized_parties(data: web::Data<AppState>) -> impl Respon
     }
 }
 
-async fn fetch_decentralized_parties(config: &NodeConfig) -> Result<DecentralizedPartiesResponse> {
+async fn fetch_decentralized_parties(
+    config: &NodeConfig,
+    prefix_filter: Option<&str>,
+) -> Result<DecentralizedPartiesResponse> {
     let channel = tonic::transport::Channel::from_shared(config.admin_api_url())?
         .connect()
         .await?;
@@ -146,7 +161,7 @@ async fn fetch_decentralized_parties(config: &NodeConfig) -> Result<Decentralize
         .await?
         .into_inner();
 
-    // Query all P2P mappings once (instead of per-party)
+    // Query P2P mappings with optional party prefix filter
     let p2p_response = topology_client
         .list_party_to_participant(tonic::Request::new(ListPartyToParticipantRequest {
             base_query: Some(BaseQuery {
@@ -161,7 +176,7 @@ async fn fetch_decentralized_parties(config: &NodeConfig) -> Result<Decentralize
                 filter_signed_key: String::new(),
                 protocol_version: None,
             }),
-            filter_party: String::new(),
+            filter_party: prefix_filter.unwrap_or_default().to_string(),
             filter_participant: String::new(),
         }))
         .await?

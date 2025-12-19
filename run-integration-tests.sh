@@ -201,9 +201,13 @@ echo "=========================================="
 echo "Phase 3: Running onboarding workflow..."
 echo "=========================================="
 
+# Use unique party ID prefix for each run to avoid Canton key name collisions
+PARTY_PREFIX="test-network-$(date +%s)"
+echo "Using party ID prefix: $PARTY_PREFIX"
+
 ONBOARDING_REQUEST=$(cat <<EOF
 {
-  "party_id_prefix": "test-network"
+  "party_id_prefix": "$PARTY_PREFIX"
 }
 EOF
 )
