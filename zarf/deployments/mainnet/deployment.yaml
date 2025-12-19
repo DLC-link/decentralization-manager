@@ -1,0 +1,163 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dec-party-manager-1-config
+  namespace: catalyst-canton
+  labels:
+    app.kubernetes.io/name: dec-party-manager
+    app.kubernetes.io/instance: participant-1
+data:
+  node.toml: |
+    [node]
+    node_id = "participant-ibtc-mainnet"
+    listen_address = "0.0.0.0"
+    public_address = "dec-party-manager-1.catalyst-canton.svc.cluster.local"
+    port = 9000
+
+    [canton]
+    admin_api_host = "participant-ibtc-mainnet.catalyst-canton.svc.cluster.local"
+    admin_api_port = 5002
+    ledger_api_host = "participant-ibtc-mainnet.catalyst-canton.svc.cluster.local"
+    ledger_api_port = 5001
+    ledger_api_user_id = "service-account-ibtc-mainnet"
+    synchronizer = "global"
+
+    [timeouts]
+    handshake_timeout_secs = 30
+    message_timeout_secs = 120
+    connection_retry_attempts = 3
+    connection_retry_delay_secs = 5
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dec-party-manager-1-data
+  namespace: catalyst-canton
+  labels:
+    app.kubernetes.io/name: dec-party-manager
+    app.kubernetes.io/instance: participant-1
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dec-party-manager-1
+  namespace: catalyst-canton
+  labels:
+    app.kubernetes.io/name: dec-party-manager
+    app.kubernetes.io/instance: participant-1
+    app.kubernetes.io/component: coordinator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dec-party-manager
+      app.kubernetes.io/instance: participant-1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dec-party-manager
+        app.kubernetes.io/instance: participant-1
+        app.kubernetes.io/component: coordinator
+    spec:
+      initContainers:
+        - name: copy-config
+          image: busybox:latest
+          command:
+            - sh
+            - -c
+            - |
+              mkdir -p /app/config /app/data
+              cp /config-readonly/* /app/config/
+              echo "Config copied to persistent storage"
+          volumeMounts:
+            - name: config
+              mountPath: /config-readonly
+            - name: data
+              mountPath: /app
+      containers:
+        - name: dec-party-manager
+          image: public.ecr.aws/dlc-link/canton-decparty-manager:v0.0.8
+          imagePullPolicy: Always
+          command:
+            [
+              "dec-party-manager",
+              "-d",
+              "/app",
+              "serve",
+              "--host",
+              "0.0.0.0",
+              "--port",
+              "8080",
+            ]
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: noise
+              containerPort: 9000
+              protocol: TCP
+          volumeMounts:
+            - name: data
+              mountPath: /app
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+      volumes:
+        - name: config
+          configMap:
+            name: dec-party-manager-1-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: dec-party-manager-1-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dec-party-manager-1
+  namespace: catalyst-canton
+  labels:
+    app.kubernetes.io/name: dec-party-manager
+    app.kubernetes.io/instance: participant-1
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      protocol: TCP
+    - name: noise
+      port: 9000
+      targetPort: 9000
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: dec-party-manager
+    app.kubernetes.io/instance: participant-1
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: dec-party-manager-1-ingress
+  namespace: catalyst-canton
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: dec-party-manager-1.canton.ibtc.network
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: dec-party-manager-1
+                port:
+                  number: 80
