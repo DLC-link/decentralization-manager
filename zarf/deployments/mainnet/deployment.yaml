@@ -11,7 +11,7 @@ data:
     [node]
     node_id = "participant-ibtc-mainnet"
     listen_address = "0.0.0.0"
-    public_address = "dec-party-manager-1.catalyst-canton.svc.cluster.local"
+    public_address = "a76cb23b1bb6d464ca05fa7e123d8b36-1570805738.us-east-1.elb.amazonaws.com"
     port = 9000
 
     [canton]
@@ -82,7 +82,7 @@ spec:
               mountPath: /app
       containers:
         - name: dec-party-manager
-          image: public.ecr.aws/dlc-link/canton-decparty-manager:v0.0.8
+          image: public.ecr.aws/dlc-link/canton-decparty-manager:v0.0.9
           imagePullPolicy: Always
           command:
             [
@@ -129,7 +129,7 @@ metadata:
     app.kubernetes.io/name: dec-party-manager
     app.kubernetes.io/instance: participant-1
 spec:
-  type: ClusterIP
+  type: LoadBalancer
   ports:
     - name: http
       port: 80
@@ -142,22 +142,3 @@ spec:
   selector:
     app.kubernetes.io/name: dec-party-manager
     app.kubernetes.io/instance: participant-1
----
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: dec-party-manager-1-ingress
-  namespace: catalyst-canton
-spec:
-  ingressClassName: traefik
-  rules:
-    - host: dec-party-manager-1.canton.example.com
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: dec-party-manager-1
-                port:
-                  number: 80
