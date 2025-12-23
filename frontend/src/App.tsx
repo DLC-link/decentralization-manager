@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
-import { Container, Typography, Box, Alert, IconButton, Tooltip, Button } from "@mui/material";
+import { Container, Typography, Box, Alert, IconButton, Tooltip, Button, TextField, InputAdornment } from "@mui/material";
+import FilterListIcon from "@mui/icons-material/FilterList";
 import VpnKeyIcon from "@mui/icons-material/VpnKey";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import AddIcon from "@mui/icons-material/Add";
@@ -30,6 +31,7 @@ const App = () => {
   const [onboardingDialogOpen, setOnboardingDialogOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [partyFilter, setPartyFilter] = useState("cbtc-network");
   const { showSnackbar } = useSnackbar();
 
   useEffect(() => {
@@ -41,7 +43,8 @@ const App = () => {
 
   const refreshParties = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/decentralized-parties`);
+      const params = partyFilter ? `?prefix=${encodeURIComponent(partyFilter)}` : "";
+      const res = await fetch(`${API_BASE}/decentralized-parties${params}`);
       if (res.ok) {
         const data = await res.json();
         setParties(data.parties);
@@ -51,7 +54,7 @@ const App = () => {
     } catch (err) {
       showSnackbar(err instanceof Error ? err.message : "Failed to refresh parties");
     }
-  }, [showSnackbar]);
+  }, [showSnackbar, partyFilter]);
 
   const savePeers = useCallback(async (peers: Peer[]) => {
     const res = await fetch(`${API_BASE}/network-config`, {
@@ -75,8 +78,9 @@ const App = () => {
   useEffect(() => {
     const fetchData = async () => {
       try {
+        const partiesParams = partyFilter ? `?prefix=${encodeURIComponent(partyFilter)}` : "";
         const [partiesRes, nodeRes, networkRes, keyStatusRes] = await Promise.all([
-          fetch(`${API_BASE}/decentralized-parties`),
+          fetch(`${API_BASE}/decentralized-parties${partiesParams}`),
           fetch(`${API_BASE}/node-config`),
           fetch(`${API_BASE}/network-config`),
           fetch(`${API_BASE}/keys/status`),
@@ -107,6 +111,7 @@ const App = () => {
     };
 
     fetchData();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Poll participant statuses every 2 seconds
@@ -179,23 +184,45 @@ const App = () => {
               />
             )}
 
-            <Box sx={{ mt: 5, mb: 3, display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-              <Box>
-                <Typography variant="h6" sx={{ mb: 0.5 }}>
-                  Decentralized Parties
-                </Typography>
-                <Typography variant="body2" color="text.secondary">
-                  {parties.length} parties
-                </Typography>
+            <Box sx={{ mt: 5, mb: 3 }}>
+              <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", mb: 2 }}>
+                <Box>
+                  <Typography variant="h6" sx={{ mb: 0.5 }}>
+                    Decentralized Parties
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    {parties.length} parties
+                  </Typography>
+                </Box>
+                <Button
+                  variant="contained"
+                  startIcon={<AddIcon />}
+                  onClick={() => setOnboardingDialogOpen(true)}
+                  disabled={MAINNET_DEMO}
+                >
+                  Create Party
+                </Button>
               </Box>
-              <Button
-                variant="contained"
-                startIcon={<AddIcon />}
-                onClick={() => setOnboardingDialogOpen(true)}
-                disabled={MAINNET_DEMO}
-              >
-                Create Party
-              </Button>
+              <TextField
+                size="small"
+                label="Filter by prefix"
+                value={partyFilter}
+                onChange={(e) => setPartyFilter(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    refreshParties();
+                  }
+                }}
+                InputProps={{
+                  startAdornment: (
+                    <InputAdornment position="start">
+                      <FilterListIcon fontSize="small" color="action" />
+                    </InputAdornment>
+                  ),
+                }}
+                sx={{ width: 300 }}
+                helperText="Press Enter to apply filter"
+              />
             </Box>
 
             {parties.map((party) => (

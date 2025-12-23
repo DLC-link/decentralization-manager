@@ -371,8 +371,8 @@ pub async fn find_participant_number(
     anyhow::bail!("Current participant ID '{current_participant_id}' not found in ids directory")
 }
 
-/// Max gRPC message size (32MB) - Canton ledger can return large responses
-pub const MAX_GRPC_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
+/// Max gRPC message size (512MB) - Canton ledger can return large responses
+pub const MAX_GRPC_MESSAGE_SIZE: usize = 512 * 1024 * 1024;
 
 /// Macro to define authenticated gRPC client creator functions
 macro_rules! define_client_creator {
