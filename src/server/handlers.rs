@@ -358,6 +358,7 @@ pub async fn start_kick(
     let config = data.config.clone();
     let kick_state_clone = kick_state.get_ref().clone();
     let namespace_fingerprint = body.namespace_fingerprint.clone();
+    let new_threshold = body.new_threshold;
     let listener_control = data.noise_listener_control.clone();
     let listener_notify = data.noise_listener_notify.clone();
 
@@ -383,6 +384,7 @@ pub async fn start_kick(
             decentralized_party_id,
             participant_id,
             namespace_fingerprint,
+            new_threshold,
         );
 
         let result = workflow::start_coordinator(

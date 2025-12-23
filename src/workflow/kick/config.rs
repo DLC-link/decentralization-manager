@@ -16,6 +16,9 @@ pub struct KickConfig {
     /// Namespace fingerprint (DNS owner key) to remove
     pub namespace_fingerprint: String,
 
+    /// New threshold after the kick (configured by user)
+    pub new_threshold: i32,
+
     _p: PhantomData<()>,
 }
 
@@ -24,11 +27,13 @@ impl KickConfig {
         decentralized_party_id: CantonId,
         participant_id: CantonId,
         namespace_fingerprint: String,
+        new_threshold: i32,
     ) -> Self {
         Self {
             decentralized_party_id,
             participant_id,
             namespace_fingerprint,
+            new_threshold,
             _p: PhantomData,
         }
     }
