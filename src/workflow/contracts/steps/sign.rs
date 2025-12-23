@@ -264,7 +264,7 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &ContractsDirs) -> Resu
 
         // Compare raw Ed25519 public keys (32 bytes)
         if derived_public_bytes.as_slice() == expected_raw_public_key {
-            tracing::info!("✓ Found matching private key at offset {offset} ({source})");
+            tracing::info!("✅ Found matching private key at offset {offset} ({source})");
             tracing::debug!("Private key (first 16 bytes): {:02x?}", &key_bytes[..16]);
             verified_key_bytes = Some(*key_bytes);
             break;
