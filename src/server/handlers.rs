@@ -1,7 +1,6 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use actix_web::{HttpResponse, Responder, get, post, web};
-use serde::Deserialize;
 use canton_proto_rs::com::digitalasset::canton::{
     crypto::{
         admin::v30::{ListMyKeysRequest, vault_service_client::VaultServiceClient},
