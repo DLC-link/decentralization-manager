@@ -63,6 +63,7 @@ export interface KickRequest {
   decentralized_party_id: string;
   participant_id: string;
   namespace_fingerprint: string;
+  new_threshold: number;
 }
 
 export type WorkflowProgress = "idle" | "inprogress" | "completed" | "failed";
