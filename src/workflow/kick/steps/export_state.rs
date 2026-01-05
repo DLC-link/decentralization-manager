@@ -171,12 +171,12 @@ pub async fn export_state(
         .await
         .with_context(|| format!("Failed to write '{}'", kick_participant_file.display()))?;
 
-    // Calculate new threshold (majority of remaining members)
+    // Use the threshold configured by the user
     let remaining_members = namespace_def.owners.len() - 1;
-    let new_threshold = remaining_members.div_ceil(2).max(1) as i32;
+    let new_threshold = kick_config.new_threshold;
 
     tracing::info!("Remaining members after kick: {remaining_members}");
-    tracing::info!("New threshold: {new_threshold}");
+    tracing::info!("New threshold (configured): {new_threshold}");
 
     // Save new threshold
     let threshold_file = dirs.kick_config_dir.join(NEW_THRESHOLD_FILENAME);

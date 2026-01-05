@@ -20,7 +20,8 @@ interface KickDialogProps {
   onKickComplete: () => void;
   partyId: string;
   participantUid: string;
-  ownerKey: string;
+  currentThreshold: number;
+  currentOwnerCount: number;
 }
 
 export const KickDialog = ({
@@ -29,22 +30,30 @@ export const KickDialog = ({
   onKickComplete,
   partyId,
   participantUid,
-  ownerKey,
+  currentThreshold,
+  currentOwnerCount,
 }: KickDialogProps) => {
-  const [namespaceFingerprint, setNamespaceFingerprint] = useState(ownerKey);
+  const [namespaceFingerprint, setNamespaceFingerprint] = useState("");
+  const [newThreshold, setNewThreshold] = useState(1);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<KickStatusResponse | null>(null);
 
+  // Calculate suggested threshold when owner count changes
+  const remainingOwners = currentOwnerCount - 1;
+  const suggestedThreshold = Math.max(1, Math.ceil(remainingOwners / 2));
+
   useEffect(() => {
-    setNamespaceFingerprint(ownerKey);
-  }, [ownerKey]);
+    // Reset threshold to suggested value when dialog opens with new data
+    setNewThreshold(Math.min(currentThreshold, remainingOwners) || suggestedThreshold);
+  }, [currentThreshold, remainingOwners, suggestedThreshold]);
 
   useEffect(() => {
     if (!open) {
       setError(null);
       setStatus(null);
       setLoading(false);
+      setNamespaceFingerprint("");
     }
   }, [open]);
 
@@ -88,6 +97,7 @@ export const KickDialog = ({
       decentralized_party_id: partyId,
       participant_id: participantUid,
       namespace_fingerprint: namespaceFingerprint,
+      new_threshold: newThreshold,
     };
 
     try {
@@ -151,6 +161,18 @@ export const KickDialog = ({
             helperText="The namespace fingerprint (DNS owner key) to remove"
           />
 
+          <TextField
+            label="New Threshold"
+            type="number"
+            value={newThreshold}
+            onChange={(e) => setNewThreshold(Math.max(1, parseInt(e.target.value) || 1))}
+            fullWidth
+            size="small"
+            disabled={loading}
+            slotProps={{ htmlInput: { min: 1, max: remainingOwners } }}
+            helperText={`Threshold after kick (suggested: ${suggestedThreshold}, max: ${remainingOwners})`}
+          />
+
           {error && <Alert severity="error">{error}</Alert>}
 
           {status?.status === "inprogress" && (
@@ -185,7 +207,7 @@ export const KickDialog = ({
             onClick={handleKick}
             variant="contained"
             color="error"
-            disabled={loading || !namespaceFingerprint}
+            disabled={loading || !namespaceFingerprint || newThreshold < 1 || newThreshold > remainingOwners}
           >
             {loading ? <CircularProgress size={20} /> : "Kick Participant"}
           </Button>

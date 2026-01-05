@@ -31,11 +31,9 @@ export const PartyCard = ({ party, onRefresh }: PartyCardProps) => {
   const [kickDialogOpen, setKickDialogOpen] = useState(false);
   const [contractsDialogOpen, setContractsDialogOpen] = useState(false);
   const [selectedParticipant, setSelectedParticipant] = useState<string>("");
-  const [selectedOwnerKey, setSelectedOwnerKey] = useState<string>("");
 
-  const handleKickClick = (participantUid: string, ownerIndex: number) => {
+  const handleKickClick = (participantUid: string) => {
     setSelectedParticipant(participantUid);
-    setSelectedOwnerKey(party.owners[ownerIndex] || "");
     setKickDialogOpen(true);
   };
 
@@ -101,7 +99,7 @@ export const PartyCard = ({ party, onRefresh }: PartyCardProps) => {
             </TableRow>
           </TableHead>
           <TableBody>
-            {party.participants.map((p, index) => (
+            {party.participants.map((p) => (
               <TableRow key={p.participant_uid}>
                 <TableCell>
                   <CopyableText
@@ -125,7 +123,7 @@ export const PartyCard = ({ party, onRefresh }: PartyCardProps) => {
                       <IconButton
                         size="small"
                         color="error"
-                        onClick={() => handleKickClick(p.participant_uid, index)}
+                        onClick={() => handleKickClick(p.participant_uid)}
                         disabled={MAINNET_DEMO}
                       >
                         <PersonRemoveIcon fontSize="small" />
@@ -175,7 +173,8 @@ export const PartyCard = ({ party, onRefresh }: PartyCardProps) => {
         onKickComplete={onRefresh}
         partyId={party.party_id}
         participantUid={selectedParticipant}
-        ownerKey={selectedOwnerKey}
+        currentThreshold={party.threshold}
+        currentOwnerCount={party.owners.length}
       />
 
       <ContractsDialog
