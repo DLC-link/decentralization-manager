@@ -313,6 +313,7 @@ async fn handle_incoming_connection(
 ) {
     let secret_key = keypair.secret_key;
     let peer_keys_clone = peer_keys.clone();
+    let our_public_key_hex = keypair.public_key_hex();
 
     // Create PSK derivation responder
     let responder = Responder::new(move |identity: &[u8]| -> Option<[u8; 32]> {
@@ -336,6 +337,7 @@ async fn handle_incoming_connection(
         responder,
         move |peer_id: &[u8], req: hyper::Request<Body>| {
             let triggers = triggers.clone();
+            let our_pubkey = our_public_key_hex.clone();
             // Convert peer_id (public key bytes) to hex for storage
             let peer_pubkey_hex = if peer_id.len() == 33 {
                 Some(hex::encode(peer_id))
@@ -350,9 +352,17 @@ async fn handle_incoming_connection(
                 }
 
                 if let Ok(msg) = Message::from_bytes(&body_bytes) {
-                    tracing::info!("Received message type {:?}", msg.msg_type);
+                    tracing::debug!("Received message type {:?}", msg.msg_type);
 
                     match msg.msg_type {
+                        MessageType::Ping => {
+                            tracing::debug!("Received ping, responding with pong");
+                            let pong = Message::new(MessageType::Pong, our_pubkey.into_bytes());
+                            return Ok(Response::builder()
+                                .status(StatusCode::OK)
+                                .body(Body::from(pong.to_bytes()))
+                                .unwrap());
+                        }
                         MessageType::InviteOnboarding => {
                             tracing::info!(
                                 "Received onboarding invite, triggering attestor workflow"

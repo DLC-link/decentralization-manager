@@ -315,7 +315,7 @@ The following crates should be used for their respective purposes:
 
 ### Async Runtime
 - **`tokio`** - Async runtime for I/O operations
-  - Use `rt-multi-thread` feature for multi-threaded runtime
+  - Use `rt-multi-thread` feature for multithreaded runtime
   - Use `macros` feature for `#[tokio::main]` and `#[tokio::test]`
 
 When a new crate is needed, prefer using these standard crates over alternatives to maintain consistency across the codebase.

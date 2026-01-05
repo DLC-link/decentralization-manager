@@ -34,6 +34,7 @@ import type {
   ParticipantStatus,
   NodeConfig,
   KeyStatusResponse,
+  ConnectionStatus,
 } from "../types";
 
 const accordionSx = {
@@ -76,8 +77,37 @@ export const NetworkConfigAccordion = ({
   const selfPublicKey = keyStatus?.public_key || "";
   const selfPort = nodeConfig?.node.port ?? 9000;
 
-  const getStatus = (id: string) =>
-    participantStatuses?.find((s) => s.id === id)?.active;
+  const getStatus = (id: string): ConnectionStatus | undefined =>
+    participantStatuses?.find((s) => s.id === id)?.status;
+
+  const getStatusColor = (status: ConnectionStatus | undefined): string => {
+    switch (status) {
+      case "Connected":
+        return "success.main";
+      case "CurrentNode":
+        return "primary.main";
+      case "Unreachable":
+      case "HandshakeFailed":
+        return "error.main";
+      default:
+        return "text.disabled";
+    }
+  };
+
+  const getStatusTooltip = (status: ConnectionStatus | undefined): string => {
+    switch (status) {
+      case "Connected":
+        return "Connected via Noise protocol";
+      case "CurrentNode":
+        return "This is the current node";
+      case "Unreachable":
+        return "Cannot reach peer (TCP connection failed)";
+      case "HandshakeFailed":
+        return "Noise handshake failed - check if the public key is correct";
+      default:
+        return "Status unknown";
+    }
+  };
 
   // Build display list: self first, then other peers
   const selfPeer = config.peers.find((p) => p.id === selfNodeId);
@@ -340,21 +370,19 @@ export const NetworkConfigAccordion = ({
                 </TableRow>
               )}
               {otherPeers.map((p) => {
-                const isActive = getStatus(p.id);
+                const status = getStatus(p.id);
                 return (
                   <TableRow key={p.id}>
                     <TableCell>
-                      <CircleIcon
-                        sx={{
-                          fontSize: 12,
-                          color:
-                            isActive === undefined
-                              ? "text.disabled"
-                              : isActive
-                                ? "success.main"
-                                : "error.main",
-                        }}
-                      />
+                      <Tooltip title={getStatusTooltip(status)} arrow>
+                        <CircleIcon
+                          sx={{
+                            fontSize: 12,
+                            color: getStatusColor(status),
+                            cursor: "help",
+                          }}
+                        />
+                      </Tooltip>
                     </TableCell>
                     <TableCell>{p.id}</TableCell>
                     <TableCell>{p.name}</TableCell>
