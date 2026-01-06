@@ -54,9 +54,15 @@ export interface NetworkConfig {
   peers: Peer[];
 }
 
+export type ConnectionStatus =
+  | "CurrentNode"
+  | "Connected"
+  | "Unreachable"
+  | "HandshakeFailed";
+
 export interface ParticipantStatus {
   id: string;
-  active: boolean;
+  status: ConnectionStatus;
 }
 
 export interface KickRequest {

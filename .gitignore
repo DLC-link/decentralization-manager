@@ -6,3 +6,4 @@ target/
 /development/participant-*/data/
 /configs
 .DS_Store
+.idea
