@@ -176,6 +176,8 @@ pub struct KickRequest {
 pub struct OnboardingRequest {
     /// Party ID prefix for the decentralized party (e.g., "xyz-network")
     pub party_id_prefix: String,
+    /// List of peer IDs to invite to the decentralized party
+    pub peer_ids: Vec<String>,
 }
 
 /// Request to deploy contracts for a decentralized party

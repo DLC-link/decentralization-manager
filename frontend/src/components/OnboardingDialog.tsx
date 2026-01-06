@@ -10,9 +10,13 @@ import {
   Alert,
   Box,
   TextField,
+  FormGroup,
+  FormControlLabel,
+  Checkbox,
+  Divider,
 } from "@mui/material";
 import { API_BASE } from "../constants";
-import type { OnboardingStatusResponse } from "../types";
+import type { OnboardingStatusResponse, Peer, NodeConfig } from "../types";
 
 interface OnboardingDialogProps {
   open: boolean;
@@ -25,6 +29,41 @@ export const OnboardingDialog = ({ open, onClose, onComplete }: OnboardingDialog
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<OnboardingStatusResponse | null>(null);
   const [partyIdPrefix, setPartyIdPrefix] = useState("");
+  const [peers, setPeers] = useState<Peer[]>([]);
+  const [selfNodeId, setSelfNodeId] = useState<string | null>(null);
+  const [selectedPeerIds, setSelectedPeerIds] = useState<Set<string>>(new Set());
+  const [loadingPeers, setLoadingPeers] = useState(false);
+
+  // Fetch peers when dialog opens
+  useEffect(() => {
+    if (open) {
+      const fetchPeers = async () => {
+        setLoadingPeers(true);
+        try {
+          const [networkRes, nodeRes] = await Promise.all([
+            fetch(`${API_BASE}/network-config`),
+            fetch(`${API_BASE}/node-config`),
+          ]);
+          if (networkRes.ok) {
+            const data = await networkRes.json();
+            setPeers(data.peers || []);
+            // Select all peers by default
+            const allPeerIds = new Set<string>((data.peers || []).map((p: Peer) => p.id));
+            setSelectedPeerIds(allPeerIds);
+          }
+          if (nodeRes.ok) {
+            const nodeData: NodeConfig = await nodeRes.json();
+            setSelfNodeId(nodeData.node.node_id);
+          }
+        } catch {
+          // Ignore fetch errors
+        } finally {
+          setLoadingPeers(false);
+        }
+      };
+      fetchPeers();
+    }
+  }, [open]);
 
   useEffect(() => {
     if (!open) {
@@ -32,8 +71,24 @@ export const OnboardingDialog = ({ open, onClose, onComplete }: OnboardingDialog
       setStatus(null);
       setLoading(false);
       setPartyIdPrefix("");
+      setSelectedPeerIds(new Set());
     }
   }, [open]);
+
+  const togglePeer = (peerId: string) => {
+    setSelectedPeerIds((prev) => {
+      const newSet = new Set(prev);
+      if (newSet.has(peerId)) {
+        newSet.delete(peerId);
+      } else {
+        newSet.add(peerId);
+      }
+      return newSet;
+    });
+  };
+
+  // Filter out self from peer list
+  const selectablePeers = peers.filter((p) => p.id !== selfNodeId);
 
   const pollStatus = useCallback(async () => {
     try {
@@ -73,6 +128,11 @@ export const OnboardingDialog = ({ open, onClose, onComplete }: OnboardingDialog
       return;
     }
 
+    if (selectedPeerIds.size === 0) {
+      setError("At least one peer must be selected");
+      return;
+    }
+
     setLoading(true);
     setError(null);
 
@@ -80,7 +140,10 @@ export const OnboardingDialog = ({ open, onClose, onComplete }: OnboardingDialog
       const res = await fetch(`${API_BASE}/onboarding`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ party_id_prefix: partyIdPrefix.trim() }),
+        body: JSON.stringify({
+          party_id_prefix: partyIdPrefix.trim(),
+          peer_ids: Array.from(selectedPeerIds),
+        }),
       });
 
       if (!res.ok) {
@@ -122,6 +185,46 @@ export const OnboardingDialog = ({ open, onClose, onComplete }: OnboardingDialog
             helperText="A unique identifier prefix for the decentralized party"
           />
 
+          <Divider />
+
+          <Box>
+            <Typography variant="subtitle2" sx={{ mb: 1 }}>
+              Select Peers to Invite
+            </Typography>
+            {loadingPeers ? (
+              <Box sx={{ display: "flex", justifyContent: "center", py: 2 }}>
+                <CircularProgress size={24} />
+              </Box>
+            ) : selectablePeers.length === 0 ? (
+              <Typography variant="body2" color="text.secondary">
+                No peers configured. Add peers in the Network Configuration first.
+              </Typography>
+            ) : (
+              <FormGroup>
+                {selectablePeers.map((peer) => (
+                  <FormControlLabel
+                    key={peer.id}
+                    control={
+                      <Checkbox
+                        checked={selectedPeerIds.has(peer.id)}
+                        onChange={() => togglePeer(peer.id)}
+                        disabled={loading || status?.status === "inprogress"}
+                      />
+                    }
+                    label={
+                      <Box>
+                        <Typography variant="body2">{peer.name || peer.id}</Typography>
+                        <Typography variant="caption" color="text.secondary">
+                          {peer.address}:{peer.port}
+                        </Typography>
+                      </Box>
+                    }
+                  />
+                ))}
+              </FormGroup>
+            )}
+          </Box>
+
           {error && <Alert severity="error">{error}</Alert>}
 
           {status?.status === "inprogress" && (
@@ -156,7 +259,7 @@ export const OnboardingDialog = ({ open, onClose, onComplete }: OnboardingDialog
             onClick={handleStart}
             variant="contained"
             color="primary"
-            disabled={loading || !partyIdPrefix.trim()}
+            disabled={loading || !partyIdPrefix.trim() || selectedPeerIds.size === 0}
           >
             {loading ? <CircularProgress size={20} /> : "Start Onboarding"}
           </Button>

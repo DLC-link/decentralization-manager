@@ -538,12 +538,13 @@ pub async fn start_onboarding(
     let listener_control = data.noise_listener_control.clone();
     let listener_notify = data.noise_listener_notify.clone();
     let party_id_prefix = body.party_id_prefix.clone();
+    let peer_ids = body.peer_ids.clone();
 
     tokio::spawn(async move {
         let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
 
-        // Send invites to all peers before starting coordinator workflow
-        let invite_result = send_onboarding_invites(&config).await;
+        // Send invites to selected peers before starting coordinator workflow
+        let invite_result = send_onboarding_invites(&config, &peer_ids).await;
         if let Err(e) = invite_result {
             tracing::error!("Failed to send onboarding invites: {e}");
             guard.resume().await;
@@ -592,28 +593,31 @@ pub async fn start_onboarding(
     })
 }
 
-/// Send onboarding invites to all peers using Noise protocol
-async fn send_onboarding_invites(config: &NodeConfig) -> Result {
+/// Send onboarding invites to selected peers using Noise protocol
+async fn send_onboarding_invites(config: &NodeConfig, peer_ids: &[String]) -> Result {
     let network_config = config.load_network_config().await?;
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
 
-    let current_node_id = &config.node.node_id;
     let invite_message = Message::new_empty(MessageType::InviteOnboarding);
 
-    for peer in &network_config.peers {
-        if peer.id == *current_node_id {
-            continue;
-        }
+    for peer_id in peer_ids {
+        let peer = match network_config.peers.iter().find(|p| &p.id == peer_id) {
+            Some(p) => p,
+            None => {
+                tracing::warn!("Skipping invite to {peer_id} - peer not found in network config");
+                continue;
+            }
+        };
 
         if peer.public_key.is_empty() {
-            tracing::warn!("Skipping invite to {} - no public key configured", peer.id);
+            tracing::warn!("Skipping invite to {peer_id} - no public key configured");
             continue;
         }
 
         let peer_pub_key = match parse_public_key(&peer.public_key) {
             Ok(pk) => pk,
             Err(e) => {
-                tracing::warn!("Skipping invite to {} - invalid public key: {e}", peer.id);
+                tracing::warn!("Skipping invite to {peer_id} - invalid public key: {e}");
                 continue;
             }
         };
@@ -622,28 +626,26 @@ async fn send_onboarding_invites(config: &NodeConfig) -> Result {
         let identity = keypair.public_key.serialize();
 
         tracing::info!(
-            "Sending onboarding invite to {} at {}:{}",
-            peer.id,
-            peer.address,
-            peer.port
+            "Sending onboarding invite to {peer_id} at {addr}:{port}",
+            addr = peer.address,
+            port = peer.port
         );
 
         match send_noise_message(&peer.address, peer.port, &psk, &identity, &invite_message).await {
             Ok(response) => {
                 if let Ok(msg) = Message::from_bytes(&response) {
                     if msg.msg_type == MessageType::Ack {
-                        tracing::info!("Peer {id} acknowledged invite", id = peer.id);
+                        tracing::info!("Peer {peer_id} acknowledged invite");
                     } else {
                         tracing::warn!(
-                            "Peer {id} responded with {msg_type:?} instead of Ack",
-                            id = peer.id,
+                            "Peer {peer_id} responded with {msg_type:?} instead of Ack",
                             msg_type = msg.msg_type
                         );
                     }
                 }
             }
             Err(e) => {
-                tracing::error!("Failed to send invite to {id}: {e}", id = peer.id);
+                tracing::error!("Failed to send invite to {peer_id}: {e}");
             }
         }
     }
