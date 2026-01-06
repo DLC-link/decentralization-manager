@@ -9,10 +9,10 @@ import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import type { NodeConfig } from "../types";
 
 const accordionSx = {
-  borderRadius: 3,
+  borderRadius: 2,
   mb: 2,
-  "&:first-of-type": { borderRadius: 3 },
-  "&:last-of-type": { borderRadius: 3 },
+  "&:first-of-type": { borderRadius: 2 },
+  "&:last-of-type": { borderRadius: 2 },
   overflow: "hidden",
 };
 
@@ -25,7 +25,7 @@ export const NodeConfigAccordion = ({ config }: NodeConfigAccordionProps) => {
     <Accordion defaultExpanded sx={accordionSx}>
       <AccordionSummary
         expandIcon={<ExpandMoreIcon />}
-        sx={{ borderRadius: "12px 12px 0 0" }}
+        sx={{ borderRadius: "8px 8px 0 0" }}
       >
         <Typography variant="h6">Node Configuration</Typography>
       </AccordionSummary>

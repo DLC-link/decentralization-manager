@@ -1,8 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
-import { Container, Typography, Box, Alert, IconButton, Tooltip, Button, TextField, InputAdornment } from "@mui/material";
+import { Container, Typography, Box, Alert, Button, TextField, InputAdornment } from "@mui/material";
 import FilterListIcon from "@mui/icons-material/FilterList";
-import VpnKeyIcon from "@mui/icons-material/VpnKey";
-import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import AddIcon from "@mui/icons-material/Add";
 import { Header } from "./components/Header";
 import { PartyCard } from "./components/PartyCard";
@@ -10,7 +8,6 @@ import { NodeConfigAccordion } from "./components/NodeConfigAccordion";
 import { NetworkConfigAccordion } from "./components/NetworkConfigAccordion";
 import { LoadingSkeleton } from "./components/LoadingSkeleton";
 import { OnboardingDialog } from "./components/OnboardingDialog";
-import { copyToClipboard } from "./components/CopyableText";
 import { useSnackbar } from "./contexts";
 import { API_BASE, MAINNET_DEMO } from "./constants";
 import type {
@@ -145,34 +142,6 @@ const App = () => {
           <Alert severity="error">{error}</Alert>
         ) : (
           <>
-            {keyStatus && keyStatus.has_keys && keyStatus.public_key && (
-              <Alert
-                severity="success"
-                sx={{ mb: 2, borderRadius: 3 }}
-                icon={<VpnKeyIcon />}
-                action={
-                  <Tooltip title="Copy public key">
-                    <IconButton
-                      size="small"
-                      color="inherit"
-                      onClick={async () => {
-                        const success = await copyToClipboard(keyStatus.public_key!);
-                        showSnackbar(success ? "Copied to clipboard" : "Failed to copy");
-                      }}
-                    >
-                      <ContentCopyIcon fontSize="small" />
-                    </IconButton>
-                  </Tooltip>
-                }
-              >
-                <Typography variant="body2" component="span">
-                  <strong>Public Key:</strong>{" "}
-                  <code style={{ fontSize: "0.85em", wordBreak: "break-all" }}>
-                    {keyStatus.public_key}
-                  </code>
-                </Typography>
-              </Alert>
-            )}
             {nodeConfig && <NodeConfigAccordion config={nodeConfig} />}
             {networkConfig && (
               <NetworkConfigAccordion

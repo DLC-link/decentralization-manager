@@ -39,7 +39,7 @@ export const PartyCard = ({ party, onRefresh }: PartyCardProps) => {
 
   const isOwner = Boolean(party.my_owner_key);
   return (
-    <Card sx={{ mb: 3, borderRadius: 3 }}>
+    <Card sx={{ mb: 3, borderRadius: 2 }}>
       <CardContent sx={{ p: 3, "&:last-child": { pb: 3 } }}>
         <CopyableText
           text={party.party_id}
@@ -90,25 +90,27 @@ export const PartyCard = ({ party, onRefresh }: PartyCardProps) => {
         <Typography variant="subtitle2" sx={{ mt: 3, mb: 1.5 }}>
           Participants
         </Typography>
+      </CardContent>
+      <Box sx={{ overflowX: "auto" }}>
         <Table size="small">
           <TableHead>
             <TableRow>
-              <TableCell>Participant</TableCell>
-              <TableCell>Permission</TableCell>
-              <TableCell align="right">Actions</TableCell>
+              <TableCell sx={{ py: 1 }}>Participant</TableCell>
+              <TableCell sx={{ py: 1 }}>Permission</TableCell>
+              <TableCell sx={{ py: 1 }} align="right">Actions</TableCell>
             </TableRow>
           </TableHead>
           <TableBody>
             {party.participants.map((p) => (
               <TableRow key={p.participant_uid}>
-                <TableCell>
+                <TableCell sx={{ py: 1 }}>
                   <CopyableText
                     text={p.participant_uid}
                     truncate={{ start: 32, end: 16 }}
                     variant="body2"
                   />
                 </TableCell>
-                <TableCell>
+                <TableCell sx={{ py: 1 }}>
                   <Chip
                     label={p.permission}
                     size="small"
@@ -117,7 +119,7 @@ export const PartyCard = ({ party, onRefresh }: PartyCardProps) => {
                     }
                   />
                 </TableCell>
-                <TableCell align="right">
+                <TableCell sx={{ py: 1 }} align="right">
                   <Tooltip title="Kick participant">
                     <span>
                       <IconButton
@@ -135,24 +137,28 @@ export const PartyCard = ({ party, onRefresh }: PartyCardProps) => {
             ))}
           </TableBody>
         </Table>
+      </Box>
 
-        {party.contracts && party.contracts.length > 0 && (
-          <>
-            <Typography variant="subtitle2" sx={{ mt: 3, mb: 1.5 }}>
+      {party.contracts && party.contracts.length > 0 && (
+        <>
+          <CardContent sx={{ pb: 0, "&:last-child": { pb: 0 } }}>
+            <Typography variant="subtitle2" sx={{ mb: 1.5 }}>
               Contracts
             </Typography>
+          </CardContent>
+          <Box sx={{ overflowX: "auto" }}>
             <Table size="small">
               <TableHead>
                 <TableRow>
-                  <TableCell>Template</TableCell>
-                  <TableCell>Contract ID</TableCell>
+                  <TableCell sx={{ py: 1 }}>Template</TableCell>
+                  <TableCell sx={{ py: 1 }}>Contract ID</TableCell>
                 </TableRow>
               </TableHead>
               <TableBody>
                 {party.contracts.map((c) => (
                   <TableRow key={c.contract_id}>
-                    <TableCell>{c.template_id}</TableCell>
-                    <TableCell>
+                    <TableCell sx={{ py: 1 }}>{c.template_id}</TableCell>
+                    <TableCell sx={{ py: 1 }}>
                       <CopyableText
                         text={c.contract_id}
                         truncate={{ start: 16, end: 16 }}
@@ -163,9 +169,9 @@ export const PartyCard = ({ party, onRefresh }: PartyCardProps) => {
                 ))}
               </TableBody>
             </Table>
-          </>
-        )}
-      </CardContent>
+          </Box>
+        </>
+      )}
 
       <KickDialog
         open={kickDialogOpen}
