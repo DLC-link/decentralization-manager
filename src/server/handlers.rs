@@ -18,11 +18,11 @@ use super::{
     AppState,
     queries::{get_contracts, get_party_metadata},
     types::{
-        ContractsRequest, DecentralizedPartiesResponse, DecentralizedParty, HttpWorkflowState,
-        KeyStatusResponse, KickRequest, KickResponse, KickStatus, ListenerPauseGuard,
-        OnboardingRequest, OnboardingResponse, OnboardingStatus, ParticipantInfo,
-        ParticipantStatus, ParticipantsStatusResponse, Permission, WorkflowProgress,
-        WorkflowResponse,
+        ConnectionStatus, ContractsRequest, DecentralizedPartiesResponse, DecentralizedParty,
+        HttpWorkflowState, KeyStatusResponse, KickRequest, KickResponse, KickStatus,
+        ListenerPauseGuard, OnboardingRequest, OnboardingResponse, OnboardingStatus,
+        ParticipantInfo, ParticipantStatus, ParticipantsStatusResponse, Permission,
+        WorkflowProgress, WorkflowResponse,
     },
 };
 use crate::{
@@ -268,7 +268,7 @@ async fn fetch_decentralized_parties(
 /// Check connectivity status of all participants
 #[get("/participants-status")]
 pub async fn get_participants_status(data: web::Data<AppState>) -> impl Responder {
-    match check_participants_status(&data.config, &data.peer_status).await {
+    match check_participants_status(&data.config).await {
         Ok(response) => HttpResponse::Ok().json(response),
         Err(e) => {
             tracing::error!("Failed to check participants status: {e}");
@@ -279,32 +279,88 @@ pub async fn get_participants_status(data: web::Data<AppState>) -> impl Responde
     }
 }
 
-async fn check_participants_status(
-    config: &NodeConfig,
-    peer_status_cache: &tokio::sync::RwLock<std::collections::HashMap<String, bool>>,
-) -> Result<ParticipantsStatusResponse> {
+async fn check_participants_status(config: &NodeConfig) -> Result<ParticipantsStatusResponse> {
     let network_config = config.load_network_config().await?;
     let current_node_id = &config.node.node_id;
-    let cache = peer_status_cache.read().await;
+    let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
 
-    let statuses: Vec<ParticipantStatus> = network_config
-        .peers
-        .iter()
-        .map(|peer| {
-            let id = peer.id.clone();
-            let is_self = id == *current_node_id;
+    let ping_message = Message::new_empty(MessageType::Ping);
 
-            let active = if is_self {
-                // Current node is always active
-                true
-            } else {
-                // Get status from cache
-                *cache.get(&id).unwrap_or(&false)
-            };
+    let mut status_futures = Vec::new();
 
-            ParticipantStatus { id, active }
-        })
-        .collect();
+    for peer in network_config.peers.iter() {
+        let peer_id = peer.id.clone();
+        let is_self = peer_id == *current_node_id;
+
+        if is_self {
+            status_futures.push(tokio::spawn(async move {
+                ParticipantStatus {
+                    id: peer_id,
+                    status: ConnectionStatus::CurrentNode,
+                }
+            }));
+            continue;
+        }
+
+        let peer_pub_key = parse_public_key(&peer.public_key).ok();
+        let psk = peer_pub_key.map(|pk| keypair.derive_psk(&pk));
+        let identity = keypair.public_key.serialize();
+        let address = peer.address.clone();
+        let port = peer.port;
+        let ping_msg = ping_message.clone();
+
+        status_futures.push(tokio::spawn(async move {
+            // First check if node is reachable via TCP
+            let socket_addr = format!("{address}:{port}");
+            let tcp_check = tokio::time::timeout(
+                Duration::from_secs(3),
+                tokio::net::TcpStream::connect(&socket_addr),
+            )
+            .await;
+
+            match tcp_check {
+                Ok(Ok(_)) => {
+                    // TCP connection succeeded, now check Noise handshake
+                    let (Some(psk), Some(_)) = (psk, peer_pub_key) else {
+                        // Invalid public key but node is reachable
+                        return ParticipantStatus {
+                            id: peer_id,
+                            status: ConnectionStatus::HandshakeFailed,
+                        };
+                    };
+
+                    match send_noise_message(&address, port, &psk, &identity, &ping_msg).await {
+                        Ok(response) => {
+                            let status = match Message::from_bytes(&response) {
+                                Ok(msg) if msg.msg_type == MessageType::Pong => {
+                                    ConnectionStatus::Connected
+                                }
+                                _ => ConnectionStatus::HandshakeFailed,
+                            };
+                            ParticipantStatus {
+                                id: peer_id,
+                                status,
+                            }
+                        }
+                        Err(_) => ParticipantStatus {
+                            id: peer_id,
+                            status: ConnectionStatus::HandshakeFailed,
+                        },
+                    }
+                }
+                _ => {
+                    // TCP connection failed - node is unreachable
+                    ParticipantStatus {
+                        id: peer_id,
+                        status: ConnectionStatus::Unreachable,
+                    }
+                }
+            }
+        }));
+    }
+
+    let results = futures::future::join_all(status_futures).await;
+    let statuses: Vec<ParticipantStatus> = results.into_iter().filter_map(|r| r.ok()).collect();
 
     Ok(ParticipantsStatusResponse { statuses })
 }

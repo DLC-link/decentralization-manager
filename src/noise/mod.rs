@@ -31,6 +31,7 @@ pub enum MessageType {
     Disconnect = 0x0007,
     GetNextCommand = 0x0008,
     SignKick = 0x0009,
+    Ping = 0x000A,
 
     // Invites (0x0010 - 0x001F)
     InviteOnboarding = 0x0010,
@@ -43,6 +44,7 @@ pub enum MessageType {
     Error = 0x0103,
     Ready = 0x0104,
     Wait = 0x0105,
+    Pong = 0x0106,
 
     // Data Transfers (0x0200 - 0x02FF)
     KeysUpload = 0x0201,
@@ -80,6 +82,7 @@ impl TryFrom<u16> for MessageType {
             0x0007 => Ok(Self::Disconnect),
             0x0008 => Ok(Self::GetNextCommand),
             0x0009 => Ok(Self::SignKick),
+            0x000A => Ok(Self::Ping),
             0x0010 => Ok(Self::InviteOnboarding),
             0x0011 => Ok(Self::InviteKick),
             0x0012 => Ok(Self::InviteContracts),
@@ -88,6 +91,7 @@ impl TryFrom<u16> for MessageType {
             0x0103 => Ok(Self::Error),
             0x0104 => Ok(Self::Ready),
             0x0105 => Ok(Self::Wait),
+            0x0106 => Ok(Self::Pong),
             0x0201 => Ok(Self::KeysUpload),
             0x0202 => Ok(Self::DnsSignature),
             0x0203 => Ok(Self::P2pSignatures),

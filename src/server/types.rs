@@ -135,11 +135,25 @@ pub struct DecentralizedPartiesResponse {
     pub parties: Vec<DecentralizedParty>,
 }
 
+/// Connection status for a participant
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub enum ConnectionStatus {
+    /// Current node (always reachable)
+    CurrentNode,
+    /// Successfully connected via Noise protocol
+    Connected,
+    /// Failed to establish TCP connection (peer not reachable)
+    Unreachable,
+    /// Noise handshake/decryption failed (likely wrong public key configured)
+    HandshakeFailed,
+}
+
 /// Status of a single participant
 #[derive(Clone, Debug, Serialize)]
 pub struct ParticipantStatus {
     pub id: String,
-    pub active: bool,
+    pub status: ConnectionStatus,
 }
 
 /// Response for the participants status endpoint
