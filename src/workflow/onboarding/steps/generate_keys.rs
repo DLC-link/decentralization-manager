@@ -70,15 +70,21 @@ pub async fn generate_keys(
     )
     .await?;
 
-    // Export keys with node ID
-    let node_id = &config.node.node_id;
-    export_keys(&dirs.keys_dir, &namespace_key, &daml_key, node_id).await?;
+    // Export keys with participant ID
+    let participant_id_str = config.node.participant_id.to_string();
+    export_keys(
+        &dirs.keys_dir,
+        &namespace_key,
+        &daml_key,
+        &participant_id_str,
+    )
+    .await?;
     tracing::info!("Keys exported successfully");
 
     // Get and export participant ID from Canton
     let participant_id = get_participant_id(config).await?;
     tracing::info!("Participant ID: {participant_id}");
-    export_participant_id(&dirs.ids_dir, &participant_id, node_id).await?;
+    export_participant_id(&dirs.ids_dir, &participant_id, &participant_id_str).await?;
     tracing::info!("Participant ID exported successfully");
 
     Ok(())

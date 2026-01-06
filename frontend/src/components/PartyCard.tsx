@@ -25,9 +25,10 @@ import { MAINNET_DEMO } from "../constants";
 interface PartyCardProps {
   party: DecentralizedParty;
   onRefresh: () => void;
+  selfParticipantId?: string;
 }
 
-export const PartyCard = ({ party, onRefresh }: PartyCardProps) => {
+export const PartyCard = ({ party, onRefresh, selfParticipantId }: PartyCardProps) => {
   const [kickDialogOpen, setKickDialogOpen] = useState(false);
   const [contractsDialogOpen, setContractsDialogOpen] = useState(false);
   const [selectedParticipant, setSelectedParticipant] = useState<string>("");
@@ -120,13 +121,13 @@ export const PartyCard = ({ party, onRefresh }: PartyCardProps) => {
                   />
                 </TableCell>
                 <TableCell sx={{ py: 1 }} align="right">
-                  <Tooltip title="Kick participant">
+                  <Tooltip title={p.participant_uid === selfParticipantId ? "Cannot kick yourself" : "Kick participant"}>
                     <span>
                       <IconButton
                         size="small"
                         color="error"
                         onClick={() => handleKickClick(p.participant_uid)}
-                        disabled={MAINNET_DEMO}
+                        disabled={MAINNET_DEMO || p.participant_uid === selfParticipantId}
                       >
                         <PersonRemoveIcon fontSize="small" />
                       </IconButton>

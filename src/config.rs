@@ -11,6 +11,7 @@ use crate::{
         CONFIG_DIR, DARS_DIR, DATA_DIR, NODE_CONFIG_FILENAME, NOISE_KEY_FILENAME, WORKFLOW_DATA_DIR,
     },
     error::Result,
+    participant_id::CantonId,
 };
 
 /// Network configuration - list of peers in the network
@@ -23,8 +24,8 @@ pub struct NetworkConfig {
 /// A peer in the network
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Peer {
-    /// Unique identifier for the peer (e.g., "participant-1")
-    pub id: String,
+    /// Canton participant UID (e.g., "PAR::participant1::1220...")
+    pub participant_id: CantonId,
     /// Human-readable name
     pub name: String,
     /// Network address (hostname or IP)
@@ -41,7 +42,7 @@ pub struct Peer {
 impl NetworkConfig {
     /// Load network configuration from a CSV file
     ///
-    /// CSV format: id,name,address,port,public_key,party
+    /// CSV format: participant_id,name,address,port,public_key,party
     /// Creates an empty file with header if it doesn't exist
     pub async fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
@@ -49,7 +50,7 @@ impl NetworkConfig {
         // Create file with header if it doesn't exist
         if !path.exists() {
             tracing::info!("Creating empty peers.csv at '{}'", path.display());
-            tokio::fs::write(path, "id,name,address,port,public_key,party\n")
+            tokio::fs::write(path, "participant_id,name,address,port,public_key,party\n")
                 .await
                 .with_context(|| format!("Failed to create peers config '{}'", path.display()))?;
         }
@@ -99,16 +100,18 @@ impl NetworkConfig {
         ((self.peers.len() / 2) + 1) as u32
     }
 
-    /// Get peer by ID
+    /// Get peer by participant ID string
     pub fn get_peer(&self, id: &str) -> Option<&Peer> {
-        self.peers.iter().find(|p| p.id == id)
+        self.peers
+            .iter()
+            .find(|p| p.participant_id.to_string() == id)
     }
 
     /// Create a map of public keys to peer IDs for verification
     pub fn get_public_key_allowlist(&self) -> HashMap<String, String> {
         self.peers
             .iter()
-            .map(|p| (p.public_key.clone(), p.id.clone()))
+            .map(|p| (p.public_key.clone(), p.participant_id.to_string()))
             .collect()
     }
 }
@@ -165,8 +168,8 @@ pub struct NodeConfig {
 /// Node-specific information
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct NodeInfo {
-    /// Unique identifier for this node (used for peer identification)
-    pub node_id: String,
+    /// Canton participant ID for this node (e.g., "participant1::1220...")
+    pub participant_id: CantonId,
     /// Address to listen on for Noise protocol connections (use 0.0.0.0 to listen on all interfaces)
     #[serde(default = "default_listen_address")]
     pub listen_address: String,
@@ -304,34 +307,26 @@ impl NodeConfig {
 mod tests {
     use super::*;
 
+    fn test_peer(index: u8, pub_key: &str) -> Peer {
+        // Create a valid hex namespace (68 hex chars = 34 bytes)
+        let namespace = format!("1220{:0>64}", format!("{index:02x}"));
+        Peer {
+            participant_id: CantonId::parse(&format!("node{index}::{namespace}")).unwrap(),
+            name: format!("Node {index}"),
+            address: format!("10.0.1.{index}"),
+            port: 9000,
+            public_key: pub_key.to_string(),
+            party: None,
+        }
+    }
+
     #[test]
     fn test_governance_threshold() {
         let network = NetworkConfig {
             peers: vec![
-                Peer {
-                    id: "node1".to_string(),
-                    name: "Node 1".to_string(),
-                    address: "10.0.1.1".to_string(),
-                    port: 9000,
-                    public_key: "abc123".to_string(),
-                    party: None,
-                },
-                Peer {
-                    id: "node2".to_string(),
-                    name: "Node 2".to_string(),
-                    address: "10.0.1.2".to_string(),
-                    port: 9000,
-                    public_key: "def456".to_string(),
-                    party: None,
-                },
-                Peer {
-                    id: "node3".to_string(),
-                    name: "Node 3".to_string(),
-                    address: "10.0.1.3".to_string(),
-                    port: 9000,
-                    public_key: "ghi789".to_string(),
-                    party: None,
-                },
+                test_peer(1, "abc123"),
+                test_peer(2, "def456"),
+                test_peer(3, "ghi789"),
             ],
         };
 
@@ -340,47 +335,27 @@ mod tests {
 
     #[test]
     fn test_get_peer() {
-        let network = NetworkConfig {
-            peers: vec![Peer {
-                id: "node1".to_string(),
-                name: "Node 1".to_string(),
-                address: "10.0.1.1".to_string(),
-                port: 9000,
-                public_key: "abc123".to_string(),
-                party: None,
-            }],
-        };
+        let peer1 = test_peer(1, "abc123");
+        let peer1_id = peer1.participant_id.to_string();
+        let network = NetworkConfig { peers: vec![peer1] };
 
-        assert!(network.get_peer("node1").is_some());
+        assert!(network.get_peer(&peer1_id).is_some());
         assert!(network.get_peer("nonexistent").is_none());
     }
 
     #[test]
     fn test_public_key_allowlist() {
+        let peer1 = test_peer(1, "abc123");
+        let peer2 = test_peer(2, "def456");
+        let peer1_id = peer1.participant_id.to_string();
+        let peer2_id = peer2.participant_id.to_string();
         let network = NetworkConfig {
-            peers: vec![
-                Peer {
-                    id: "node1".to_string(),
-                    name: "Node 1".to_string(),
-                    address: "10.0.1.1".to_string(),
-                    port: 9000,
-                    public_key: "abc123".to_string(),
-                    party: None,
-                },
-                Peer {
-                    id: "node2".to_string(),
-                    name: "Node 2".to_string(),
-                    address: "10.0.1.2".to_string(),
-                    port: 9000,
-                    public_key: "def456".to_string(),
-                    party: None,
-                },
-            ],
+            peers: vec![peer1, peer2],
         };
 
         let allowlist = network.get_public_key_allowlist();
         assert_eq!(allowlist.len(), 2);
-        assert_eq!(allowlist.get("abc123"), Some(&"node1".to_string()));
-        assert_eq!(allowlist.get("def456"), Some(&"node2".to_string()));
+        assert_eq!(allowlist.get("abc123"), Some(&peer1_id));
+        assert_eq!(allowlist.get("def456"), Some(&peer2_id));
     }
 }

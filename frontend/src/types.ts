@@ -25,7 +25,7 @@ export interface DecentralizedParty {
 
 export interface NodeConfig {
   node: {
-    node_id: string;
+    participant_id: string;
     listen_address: string;
     public_address?: string;
     port: number;
@@ -42,7 +42,7 @@ export interface NodeConfig {
 }
 
 export interface Peer {
-  id: string;
+  participant_id: string;
   name: string;
   address: string;
   port: number;
@@ -128,4 +128,19 @@ export interface ContractsRequest {
   operator_party_hint: string;
   dar_files: DarFile[];
   contracts: ContractDefinition[];
+}
+
+// Invitation types
+export type InvitationType = "Onboarding" | "Kick" | "Contracts";
+
+export interface PendingInvitation {
+  id: string;
+  invitation_type: InvitationType;
+  coordinator_pubkey: string;
+  coordinator_name?: string;
+  received_at: number;
+}
+
+export interface PendingInvitationsResponse {
+  invitations: PendingInvitation[];
 }

@@ -50,19 +50,24 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
 
         let mut peer_keys = HashMap::new();
         for peer in &network_config.peers {
-            if peer.id == node_config.node.node_id || excluded.contains(&peer.id) {
+            let peer_id = peer.participant_id.to_string();
+            if peer.participant_id == node_config.node.participant_id || excluded.contains(&peer_id)
+            {
                 continue;
             }
 
             let pub_key = parse_public_key(&peer.public_key)?;
-            peer_keys.insert(peer.id.clone(), pub_key);
+            peer_keys.insert(peer_id, pub_key);
         }
 
         let expected_attestors: Vec<String> = network_config
             .peers
             .iter()
-            .filter(|p| p.id != node_config.node.node_id && !excluded.contains(&p.id))
-            .map(|p| p.id.clone())
+            .filter(|p| {
+                let peer_id = p.participant_id.to_string();
+                p.participant_id != node_config.node.participant_id && !excluded.contains(&peer_id)
+            })
+            .map(|p| p.participant_id.to_string())
             .collect();
 
         if !excluded.is_empty() {

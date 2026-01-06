@@ -48,12 +48,12 @@ export const OnboardingDialog = ({ open, onClose, onComplete }: OnboardingDialog
             const data = await networkRes.json();
             setPeers(data.peers || []);
             // Select all peers by default
-            const allPeerIds = new Set<string>((data.peers || []).map((p: Peer) => p.id));
+            const allPeerIds = new Set<string>((data.peers || []).map((p: Peer) => p.participant_id));
             setSelectedPeerIds(allPeerIds);
           }
           if (nodeRes.ok) {
             const nodeData: NodeConfig = await nodeRes.json();
-            setSelfNodeId(nodeData.node.node_id);
+            setSelfNodeId(nodeData.node.participant_id);
           }
         } catch {
           // Ignore fetch errors
@@ -87,8 +87,8 @@ export const OnboardingDialog = ({ open, onClose, onComplete }: OnboardingDialog
     });
   };
 
-  // Filter out self from peer list
-  const selectablePeers = peers.filter((p) => p.id !== selfNodeId);
+  // Filter out self from peer list (compare prefix of participant_id with selfNodeId)
+  const selectablePeers = peers.filter((p) => p.participant_id.split("::")[0] !== selfNodeId);
 
   const pollStatus = useCallback(async () => {
     try {
@@ -203,17 +203,17 @@ export const OnboardingDialog = ({ open, onClose, onComplete }: OnboardingDialog
               <FormGroup>
                 {selectablePeers.map((peer) => (
                   <FormControlLabel
-                    key={peer.id}
+                    key={peer.participant_id}
                     control={
                       <Checkbox
-                        checked={selectedPeerIds.has(peer.id)}
-                        onChange={() => togglePeer(peer.id)}
+                        checked={selectedPeerIds.has(peer.participant_id)}
+                        onChange={() => togglePeer(peer.participant_id)}
                         disabled={loading || status?.status === "inprogress"}
                       />
                     }
                     label={
                       <Box>
-                        <Typography variant="body2">{peer.name || peer.id}</Typography>
+                        <Typography variant="body2">{peer.name || peer.participant_id}</Typography>
                         <Typography variant="caption" color="text.secondary">
                           {peer.address}:{peer.port}
                         </Typography>

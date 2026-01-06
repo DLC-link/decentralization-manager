@@ -8,6 +8,7 @@ import { NodeConfigAccordion } from "./components/NodeConfigAccordion";
 import { NetworkConfigAccordion } from "./components/NetworkConfigAccordion";
 import { LoadingSkeleton } from "./components/LoadingSkeleton";
 import { OnboardingDialog } from "./components/OnboardingDialog";
+import { InvitationModal } from "./components/InvitationModal";
 import { useSnackbar } from "./contexts";
 import { API_BASE, MAINNET_DEMO } from "./constants";
 import type {
@@ -17,6 +18,7 @@ import type {
   ParticipantStatus,
   KeyStatusResponse,
   Peer,
+  PendingInvitation,
 } from "./types";
 
 const App = () => {
@@ -26,6 +28,8 @@ const App = () => {
   const [participantStatuses, setParticipantStatuses] = useState<ParticipantStatus[]>([]);
   const [keyStatus, setKeyStatus] = useState<KeyStatusResponse | null>(null);
   const [onboardingDialogOpen, setOnboardingDialogOpen] = useState(false);
+  const [_pendingInvitations, setPendingInvitations] = useState<PendingInvitation[]>([]);
+  const [currentInvitation, setCurrentInvitation] = useState<PendingInvitation | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [partyFilter, setPartyFilter] = useState("cbtc-network");
@@ -131,6 +135,42 @@ const App = () => {
     return () => clearInterval(interval);
   }, []);
 
+  // Poll pending invitations every 2 seconds
+  useEffect(() => {
+    const fetchInvitations = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/invitations`);
+        if (res.ok) {
+          const data = await res.json();
+          setPendingInvitations(data.invitations);
+          // Show modal for first invitation if not already showing one
+          if (data.invitations.length > 0 && !currentInvitation) {
+            setCurrentInvitation(data.invitations[0]);
+          }
+        }
+      } catch {
+        // Ignore polling errors
+      }
+    };
+
+    fetchInvitations();
+    const interval = window.setInterval(fetchInvitations, 2000);
+
+    return () => clearInterval(interval);
+  }, [currentInvitation]);
+
+  const handleInvitationAction = useCallback(() => {
+    setCurrentInvitation(null);
+    // Show next invitation if there are more
+    setPendingInvitations((prev) => {
+      const remaining = prev.filter((i) => i.id !== currentInvitation?.id);
+      if (remaining.length > 0) {
+        setTimeout(() => setCurrentInvitation(remaining[0]), 500);
+      }
+      return remaining;
+    });
+  }, [currentInvitation]);
+
   return (
     <>
       <Header />
@@ -195,13 +235,24 @@ const App = () => {
             </Box>
 
             {parties.map((party) => (
-              <PartyCard key={party.party_id} party={party} onRefresh={refreshParties} />
+              <PartyCard
+                key={party.party_id}
+                party={party}
+                onRefresh={refreshParties}
+                selfParticipantId={nodeConfig?.node.participant_id}
+              />
             ))}
 
             <OnboardingDialog
               open={onboardingDialogOpen}
               onClose={() => setOnboardingDialogOpen(false)}
               onComplete={refreshParties}
+            />
+
+            <InvitationModal
+              invitation={currentInvitation}
+              onClose={() => setCurrentInvitation(null)}
+              onAction={handleInvitationAction}
             />
           </>
         )}

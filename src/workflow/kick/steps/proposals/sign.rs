@@ -20,7 +20,7 @@ use crate::{
 pub async fn sign_proposals(config: &NodeConfig, dirs: &KickDirs, proposal_data: &[u8]) -> Result {
     tracing::info!("Signing kick proposals...");
 
-    let node_id = &config.node.node_id;
+    let node_id = config.node.participant_id.to_string();
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
     tracing::debug!("Using synchronizer ID: {synchronizer_id}");
 

@@ -19,10 +19,11 @@ use super::{
     queries::{get_contracts, get_party_metadata},
     types::{
         ConnectionStatus, ContractsRequest, DecentralizedPartiesResponse, DecentralizedParty,
-        HttpWorkflowState, KeyStatusResponse, KickRequest, KickResponse, KickStatus,
-        ListenerPauseGuard, OnboardingRequest, OnboardingResponse, OnboardingStatus,
-        ParticipantInfo, ParticipantStatus, ParticipantsStatusResponse, Permission,
-        WorkflowProgress, WorkflowResponse,
+        HttpWorkflowState, InvitationActionRequest, InvitationType, KeyStatusResponse, KickRequest,
+        KickResponse, KickStatus, ListenerPauseGuard, OnboardingRequest, OnboardingResponse,
+        OnboardingStatus, ParticipantInfo, ParticipantStatus, ParticipantsStatusResponse,
+        PendingInvitation, PendingInvitationsResponse, Permission, WorkflowProgress,
+        WorkflowResponse,
     },
 };
 use crate::{
@@ -281,7 +282,7 @@ pub async fn get_participants_status(data: web::Data<AppState>) -> impl Responde
 
 async fn check_participants_status(config: &NodeConfig) -> Result<ParticipantsStatusResponse> {
     let network_config = config.load_network_config().await?;
-    let current_node_id = &config.node.node_id;
+    let current_participant_id = &config.node.participant_id;
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
 
     let ping_message = Message::new_empty(MessageType::Ping);
@@ -289,8 +290,8 @@ async fn check_participants_status(config: &NodeConfig) -> Result<ParticipantsSt
     let mut status_futures = Vec::new();
 
     for peer in network_config.peers.iter() {
-        let peer_id = peer.id.clone();
-        let is_self = peer_id == *current_node_id;
+        let peer_id = peer.participant_id.to_string();
+        let is_self = peer.participant_id == *current_participant_id;
 
         if is_self {
             status_futures.push(tokio::spawn(async move {
@@ -372,17 +373,14 @@ pub async fn start_kick(
     kick_state: web::Data<Arc<KickWorkflowState>>,
     body: web::Json<KickRequest>,
 ) -> impl Responder {
-    // Check if a kick is already in progress
-    {
-        let status = kick_state.status.read().await;
-        if *status == KickStatus::InProgress {
-            return HttpResponse::Conflict().json(serde_json::json!({
-                "error": "A kick workflow is already in progress"
-            }));
-        }
-    }
+    tracing::info!(
+        "Kick request received: party={}, participant_to_kick={}, threshold={}",
+        body.decentralized_party_id,
+        body.participant_id,
+        body.new_threshold
+    );
 
-    // Parse IDs
+    // Parse IDs first for validation
     let decentralized_party_id = match CantonId::parse(&body.decentralized_party_id) {
         Ok(id) => id,
         Err(e) => {
@@ -400,6 +398,23 @@ pub async fn start_kick(
             }));
         }
     };
+
+    // Prevent kicking ourselves
+    if participant_id == data.config.node.participant_id {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "Cannot kick yourself"
+        }));
+    }
+
+    // Check if a kick is already in progress
+    {
+        let status = kick_state.status.read().await;
+        if *status == KickStatus::InProgress {
+            return HttpResponse::Conflict().json(serde_json::json!({
+                "error": "A kick workflow is already in progress"
+            }));
+        }
+    }
 
     // Update status to in progress
     {
@@ -601,7 +616,11 @@ async fn send_onboarding_invites(config: &NodeConfig, peer_ids: &[String]) -> Re
     let invite_message = Message::new_empty(MessageType::InviteOnboarding);
 
     for peer_id in peer_ids {
-        let peer = match network_config.peers.iter().find(|p| &p.id == peer_id) {
+        let peer = match network_config
+            .peers
+            .iter()
+            .find(|p| p.participant_id.to_string() == *peer_id)
+        {
             Some(p) => p,
             None => {
                 tracing::warn!("Skipping invite to {peer_id} - peer not found in network config");
@@ -623,7 +642,8 @@ async fn send_onboarding_invites(config: &NodeConfig, peer_ids: &[String]) -> Re
         };
 
         let psk = keypair.derive_psk(&peer_pub_key);
-        let identity = keypair.public_key.serialize();
+        // Use participant_id as identity (must match what server expects in peer_keys lookup)
+        let identity = config.node.participant_id.to_string();
 
         tracing::info!(
             "Sending onboarding invite to {peer_id} at {addr}:{port}",
@@ -631,7 +651,15 @@ async fn send_onboarding_invites(config: &NodeConfig, peer_ids: &[String]) -> Re
             port = peer.port
         );
 
-        match send_noise_message(&peer.address, peer.port, &psk, &identity, &invite_message).await {
+        match send_noise_message(
+            &peer.address,
+            peer.port,
+            &psk,
+            identity.as_bytes(),
+            &invite_message,
+        )
+        .await
+        {
             Ok(response) => {
                 if let Ok(msg) = Message::from_bytes(&response) {
                     if msg.msg_type == MessageType::Ack {
@@ -658,64 +686,92 @@ async fn send_kick_invites(config: &NodeConfig, kicked_participant: &CantonId) -
     let network_config = config.load_network_config().await?;
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
 
-    let current_node_id = &config.node.node_id;
+    let current_participant_id = &config.node.participant_id;
     let invite_message = Message::new_empty(MessageType::InviteKick);
 
+    tracing::info!(
+        "Kick invites: self={}, kicked={}",
+        current_participant_id,
+        kicked_participant
+    );
+
     for peer in &network_config.peers {
-        // Skip self and the peer being kicked
-        if peer.id == *current_node_id {
+        tracing::debug!(
+            "Checking peer {}: self_match={}, kicked_match={}",
+            peer.participant_id,
+            peer.participant_id == *current_participant_id,
+            peer.participant_id == *kicked_participant
+        );
+
+        // Skip self
+        if peer.participant_id == *current_participant_id {
+            tracing::debug!("Skipping {} - this is self", peer.participant_id);
             continue;
         }
 
         // Skip the peer being kicked (they won't participate in the kick workflow)
-        // Compare the peer's Canton party ID with the kicked participant ID
-        if let Some(party) = &peer.party
-            && let Ok(party_id) = CantonId::parse(party)
-            && party_id == *kicked_participant
-        {
-            tracing::info!("Skipping invite to {} - they are being kicked", peer.id);
+        if peer.participant_id == *kicked_participant {
+            tracing::info!(
+                "Skipping invite to {} - they are being kicked",
+                peer.participant_id
+            );
             continue;
         }
 
         if peer.public_key.is_empty() {
-            tracing::warn!("Skipping invite to {} - no public key configured", peer.id);
+            tracing::warn!(
+                "Skipping invite to {} - no public key configured",
+                peer.participant_id
+            );
             continue;
         }
 
         let peer_pub_key = match parse_public_key(&peer.public_key) {
             Ok(pk) => pk,
             Err(e) => {
-                tracing::warn!("Skipping invite to {} - invalid public key: {e}", peer.id);
+                tracing::warn!(
+                    "Skipping invite to {} - invalid public key: {e}",
+                    peer.participant_id
+                );
                 continue;
             }
         };
 
         let psk = keypair.derive_psk(&peer_pub_key);
-        let identity = keypair.public_key.serialize();
+        // Use participant_id as identity (must match what server expects in peer_keys lookup)
+        let identity = config.node.participant_id.to_string();
 
         tracing::info!(
             "Sending kick invite to {} at {}:{}",
-            peer.id,
+            peer.participant_id,
             peer.address,
             peer.port
         );
 
-        match send_noise_message(&peer.address, peer.port, &psk, &identity, &invite_message).await {
+        match send_noise_message(
+            &peer.address,
+            peer.port,
+            &psk,
+            identity.as_bytes(),
+            &invite_message,
+        )
+        .await
+        {
             Ok(response) => {
                 if let Ok(msg) = Message::from_bytes(&response) {
                     if msg.msg_type == MessageType::Ack {
-                        tracing::info!("Peer {id} acknowledged kick invite", id = peer.id);
+                        tracing::info!("Peer {} acknowledged kick invite", peer.participant_id);
                     } else {
                         tracing::warn!(
-                            "Peer {id} responded with {msg_type:?} instead of Ack",
-                            id = peer.id,
+                            "Peer {} responded with {msg_type:?} instead of Ack",
+                            peer.participant_id,
                             msg_type = msg.msg_type
                         );
                     }
                 }
             }
             Err(e) => {
-                tracing::error!("Failed to send kick invite to {id}: {e}", id = peer.id);
+                tracing::error!("Failed to send kick invite to {}: {e}", peer.participant_id);
             }
         }
     }
@@ -839,23 +895,29 @@ async fn send_contracts_invites(config: &NodeConfig) -> Result {
     let network_config = config.load_network_config().await?;
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
 
-    let current_node_id = &config.node.node_id;
+    let current_participant_id = &config.node.participant_id;
     let invite_message = Message::new_empty(MessageType::InviteContracts);
 
     for peer in &network_config.peers {
-        if peer.id == *current_node_id {
+        if peer.participant_id == *current_participant_id {
             continue;
         }
 
         if peer.public_key.is_empty() {
-            tracing::warn!("Skipping invite to {} - no public key configured", peer.id);
+            tracing::warn!(
+                "Skipping invite to {} - no public key configured",
+                peer.participant_id
+            );
             continue;
         }
 
         let peer_pub_key = match parse_public_key(&peer.public_key) {
             Ok(pk) => pk,
             Err(e) => {
-                tracing::warn!("Skipping invite to {} - invalid public key: {e}", peer.id);
+                tracing::warn!(
+                    "Skipping invite to {} - invalid public key: {e}",
+                    peer.participant_id
+                );
                 continue;
             }
         };
@@ -865,7 +927,7 @@ async fn send_contracts_invites(config: &NodeConfig) -> Result {
 
         tracing::info!(
             "Sending contracts invite to {} at {}:{}",
-            peer.id,
+            peer.participant_id,
             peer.address,
             peer.port
         );
@@ -874,18 +936,24 @@ async fn send_contracts_invites(config: &NodeConfig) -> Result {
             Ok(response) => {
                 if let Ok(msg) = Message::from_bytes(&response) {
                     if msg.msg_type == MessageType::Ack {
-                        tracing::info!("Peer {id} acknowledged contracts invite", id = peer.id);
+                        tracing::info!(
+                            "Peer {} acknowledged contracts invite",
+                            peer.participant_id
+                        );
                     } else {
                         tracing::warn!(
-                            "Peer {id} responded with {msg_type:?} instead of Ack",
-                            id = peer.id,
+                            "Peer {} responded with {msg_type:?} instead of Ack",
+                            peer.participant_id,
                             msg_type = msg.msg_type
                         );
                     }
                 }
             }
             Err(e) => {
-                tracing::error!("Failed to send contracts invite to {id}: {e}", id = peer.id);
+                tracing::error!(
+                    "Failed to send contracts invite to {}: {e}",
+                    peer.participant_id
+                );
             }
         }
     }
@@ -905,4 +973,100 @@ pub async fn get_contracts_status(
         "status": *status,
         "error": *error,
     }))
+}
+
+/// Get all pending invitations
+#[get("/invitations")]
+pub async fn get_invitations(data: web::Data<AppState>) -> impl Responder {
+    let invitations = data.pending_invitations.read().await;
+
+    // Try to resolve coordinator names from network config
+    let network_config = data.config.load_network_config().await.ok();
+    let invitations_with_names: Vec<PendingInvitation> = invitations
+        .iter()
+        .map(|inv| {
+            let coordinator_name = network_config.as_ref().and_then(|nc| {
+                nc.peers
+                    .iter()
+                    .find(|p| p.public_key == inv.coordinator_pubkey)
+                    .map(|p| p.name.clone())
+            });
+            PendingInvitation {
+                coordinator_name,
+                ..inv.clone()
+            }
+        })
+        .collect();
+
+    HttpResponse::Ok().json(PendingInvitationsResponse {
+        invitations: invitations_with_names,
+    })
+}
+
+/// Accept a pending invitation and trigger the workflow
+#[post("/invitations/accept")]
+pub async fn accept_invitation(
+    data: web::Data<AppState>,
+    body: web::Json<InvitationActionRequest>,
+) -> impl Responder {
+    let invitation = {
+        let mut invitations = data.pending_invitations.write().await;
+        let idx = invitations.iter().position(|i| i.id == body.id);
+        match idx {
+            Some(i) => invitations.remove(i),
+            None => {
+                return HttpResponse::NotFound().json(serde_json::json!({
+                    "error": "Invitation not found"
+                }));
+            }
+        }
+    };
+
+    // Store coordinator's public key and trigger the appropriate workflow
+    {
+        let mut coordinator_pubkey = data.coordinator_pubkey.write().await;
+        *coordinator_pubkey = Some(invitation.coordinator_pubkey.clone());
+    }
+
+    match invitation.invitation_type {
+        InvitationType::Onboarding => {
+            tracing::info!("Accepting onboarding invitation, triggering attestor workflow");
+            data.onboarding_trigger.notify_one();
+        }
+        InvitationType::Kick => {
+            tracing::info!("Accepting kick invitation, triggering attestor workflow");
+            data.kick_trigger.notify_one();
+        }
+        InvitationType::Contracts => {
+            tracing::info!("Accepting contracts invitation, triggering attestor workflow");
+            data.contracts_trigger.notify_one();
+        }
+    }
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "message": "Invitation accepted"
+    }))
+}
+
+/// Decline a pending invitation
+#[post("/invitations/decline")]
+pub async fn decline_invitation(
+    data: web::Data<AppState>,
+    body: web::Json<InvitationActionRequest>,
+) -> impl Responder {
+    let mut invitations = data.pending_invitations.write().await;
+    let idx = invitations.iter().position(|i| i.id == body.id);
+
+    match idx {
+        Some(i) => {
+            invitations.remove(i);
+            tracing::info!("Declined invitation {}", body.id);
+            HttpResponse::Ok().json(serde_json::json!({
+                "message": "Invitation declined"
+            }))
+        }
+        None => HttpResponse::NotFound().json(serde_json::json!({
+            "error": "Invitation not found"
+        })),
+    }
 }
