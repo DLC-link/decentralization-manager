@@ -1,7 +1,7 @@
 # Node configuration for Participant 3
 
 [node]
-participant_id = "sv::1220ad79d197936995c5da2775139c185748c6400e380885405b0404cc5ad818cb66"
+participant_id = "sv::12204091b9d435c5e332bd84f966edec44c2f84d1512b7a71e24032a6cd486d2b08e"
 listen_address = "0.0.0.0"
 port = 9003
 

@@ -16,6 +16,9 @@ pub struct DarFile {
 pub struct ContractsConfig {
     /// Decentralized party ID to deploy contracts for
     pub decentralized_party_id: CantonId,
+    /// List of participant IDs that will sign submissions
+    #[serde(default)]
+    pub participant_ids: Vec<CantonId>,
     /// Operator party ID (optional, can be allocated dynamically if not provided)
     #[serde(default)]
     pub operator_party: Option<String>,
@@ -28,6 +31,9 @@ pub struct ContractsConfig {
     /// Contract definitions to create after decentralized party setup
     #[serde(default)]
     pub contracts: Vec<ContractDefinition>,
+    /// Workflow instance name for directory organization (e.g., "xyz-network-contracts-20260108-143052")
+    #[serde(default)]
+    pub instance_name: String,
 }
 
 fn default_operator_party_hint() -> String {
@@ -37,17 +43,21 @@ fn default_operator_party_hint() -> String {
 impl ContractsConfig {
     pub fn new(
         decentralized_party_id: CantonId,
+        participant_ids: Vec<CantonId>,
         operator_party: Option<String>,
         operator_party_hint: String,
         dar_files: Vec<DarFile>,
         contracts: Vec<ContractDefinition>,
+        instance_name: String,
     ) -> Self {
         Self {
             decentralized_party_id,
+            participant_ids,
             operator_party,
             operator_party_hint,
             dar_files,
             contracts,
+            instance_name,
         }
     }
 }

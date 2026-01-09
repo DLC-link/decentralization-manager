@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use crate::{
     consts::{
         DNS_PROPOSALS_DIR, DNS_SUBMISSION_DIR, FINAL_PROPOSALS_SUBMISSION_DIR, P2P_PROPOSALS_DIR,
-        PARTICIPANT_IDS_DIR, PARTICIPANT_KEYS_DIR, SIGNED_PROPOSALS_DIR, WORKFLOW_DATA_DIR,
+        PARTICIPANT_IDS_DIR, PARTICIPANT_KEYS_DIR, SIGNED_PROPOSALS_DIR,
     },
     error::Result,
     utils,
@@ -24,13 +24,9 @@ pub struct OnboardingDirs {
 }
 
 impl OnboardingDirs {
-    /// Create new OnboardingDirs with default paths
-    pub fn new() -> Self {
-        Self::with_base(PathBuf::from(format!("./{WORKFLOW_DATA_DIR}")))
-    }
-
-    /// Create new OnboardingDirs with a custom base directory
-    pub fn with_base(workflow_dir: PathBuf) -> Self {
+    /// Create new OnboardingDirs with a base directory and instance name
+    pub fn with_base(base_workflow_dir: PathBuf, instance_name: &str) -> Self {
+        let workflow_dir = base_workflow_dir.join(instance_name);
         let dns_submission_dir = workflow_dir.join(DNS_SUBMISSION_DIR);
         let final_proposals_dir = workflow_dir.join(FINAL_PROPOSALS_SUBMISSION_DIR);
 
@@ -57,11 +53,5 @@ impl OnboardingDirs {
             &self.final_signed_dir,
         ])
         .await
-    }
-}
-
-impl Default for OnboardingDirs {
-    fn default() -> Self {
-        Self::new()
     }
 }

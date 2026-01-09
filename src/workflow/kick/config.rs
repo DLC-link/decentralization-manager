@@ -19,6 +19,9 @@ pub struct KickConfig {
     /// New threshold after the kick (configured by user)
     pub new_threshold: i32,
 
+    /// Workflow instance name for directory organization (e.g., "xyz-network-kick-20260108-143052")
+    pub instance_name: String,
+
     _p: PhantomData<()>,
 }
 
@@ -28,12 +31,14 @@ impl KickConfig {
         participant_id: CantonId,
         namespace_fingerprint: String,
         new_threshold: i32,
+        instance_name: String,
     ) -> Self {
         Self {
             decentralized_party_id,
             participant_id,
             namespace_fingerprint,
             new_threshold,
+            instance_name,
             _p: PhantomData,
         }
     }
