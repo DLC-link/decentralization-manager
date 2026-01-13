@@ -950,7 +950,15 @@ async fn send_contracts_invites(config: &NodeConfig) -> Result {
             peer.port
         );
 
-        match send_noise_message(&peer.address, peer.port, &psk, identity.as_bytes(), &invite_message).await {
+        match send_noise_message(
+            &peer.address,
+            peer.port,
+            &psk,
+            identity.as_bytes(),
+            &invite_message,
+        )
+        .await
+        {
             Ok(response) => {
                 if let Ok(msg) = Message::from_bytes(&response) {
                     if msg.msg_type == MessageType::Ack {
