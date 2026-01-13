@@ -1,7 +1,7 @@
 import { Box, Card, CardContent, Skeleton } from "@mui/material";
 
 const AccordionSkeleton = () => (
-  <Card sx={{ mb: 2, borderRadius: 3 }}>
+  <Card sx={{ mb: 2, borderRadius: 2 }}>
     <CardContent sx={{ p: 3 }}>
       <Skeleton variant="text" width="40%" height={32} />
       <Box sx={{ mt: 2 }}>
@@ -15,7 +15,7 @@ const AccordionSkeleton = () => (
 );
 
 const PartyCardSkeleton = () => (
-  <Card sx={{ mb: 3, borderRadius: 3 }}>
+  <Card sx={{ mb: 3, borderRadius: 2 }}>
     <CardContent sx={{ p: 3 }}>
       <Skeleton variant="text" width="70%" height={32} />
       <Box sx={{ display: "flex", gap: 1, mt: 1.5, mb: 2 }}>

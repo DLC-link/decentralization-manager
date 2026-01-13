@@ -31,6 +31,8 @@ pub struct AppState {
     pub contracts_trigger: Arc<Notify>,
     /// Coordinator's public key (set when invite is received)
     pub coordinator_pubkey: Arc<RwLock<Option<String>>>,
+    /// Pending invitations awaiting user acceptance
+    pub pending_invitations: Arc<RwLock<Vec<PendingInvitation>>>,
 }
 
 /// Control mechanism for the Noise port listener
@@ -41,10 +43,7 @@ pub struct ListenerControl {
 /// Workflow triggers shared across Noise server handlers
 #[derive(Clone)]
 struct WorkflowTriggers {
-    onboarding: Arc<Notify>,
-    kick: Arc<Notify>,
-    contracts: Arc<Notify>,
-    coordinator_pubkey: Arc<RwLock<Option<String>>>,
+    pending_invitations: Arc<RwLock<Vec<PendingInvitation>>>,
 }
 
 /// Start the HTTP server and a heartbeat system for peer status tracking
@@ -58,6 +57,7 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig) -> Result {
     let kick_trigger = Arc::new(Notify::new());
     let contracts_trigger = Arc::new(Notify::new());
     let coordinator_pubkey = Arc::new(RwLock::new(None));
+    let pending_invitations = Arc::new(RwLock::new(Vec::new()));
 
     let app_state = web::Data::new(AppState {
         config: config.clone(),
@@ -68,6 +68,7 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig) -> Result {
         kick_trigger: kick_trigger.clone(),
         contracts_trigger: contracts_trigger.clone(),
         coordinator_pubkey: coordinator_pubkey.clone(),
+        pending_invitations: pending_invitations.clone(),
     });
     let kick_state = web::Data::new(Arc::new(handlers::KickWorkflowState::new()));
     let onboarding_state = web::Data::new(Arc::new(handlers::OnboardingWorkflowState::new()));
@@ -79,10 +80,7 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig) -> Result {
     let heartbeat_control = listener_control.clone();
     let heartbeat_notify = listener_notify.clone();
     let heartbeat_triggers = WorkflowTriggers {
-        onboarding: onboarding_trigger.clone(),
-        kick: kick_trigger.clone(),
-        contracts: contracts_trigger.clone(),
-        coordinator_pubkey: coordinator_pubkey.clone(),
+        pending_invitations: pending_invitations.clone(),
     };
     tokio::spawn(async move {
         run_heartbeat(
@@ -179,6 +177,9 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig) -> Result {
             .service(handlers::start_contracts)
             .service(handlers::get_contracts_status)
             .service(handlers::get_key_status)
+            .service(handlers::get_invitations)
+            .service(handlers::accept_invitation)
+            .service(handlers::decline_invitation)
             .service(assets::serve_frontend)
     })
     .bind((host, port))?
@@ -225,11 +226,11 @@ async fn run_heartbeat(
     // Build peer key map for Noise authentication
     let mut peer_keys = HashMap::new();
     for peer in &network_config.peers {
-        if peer.id == config.node.node_id || peer.public_key.is_empty() {
+        if peer.participant_id == config.node.participant_id || peer.public_key.is_empty() {
             continue;
         }
         if let Ok(pub_key) = parse_public_key(&peer.public_key) {
-            peer_keys.insert(peer.id.clone(), pub_key);
+            peer_keys.insert(peer.participant_id.to_string(), pub_key);
         }
     }
     let peer_keys = Arc::new(peer_keys);
@@ -338,9 +339,16 @@ async fn handle_incoming_connection(
         move |peer_id: &[u8], req: hyper::Request<Body>| {
             let triggers = triggers.clone();
             let our_pubkey = our_public_key_hex.clone();
-            // Convert peer_id (public key bytes) to hex for storage
+            let peer_keys = peer_keys.clone();
+            // Convert peer_id to hex public key for storage
+            // peer_id can be either raw 33-byte public key or participant_id string
             let peer_pubkey_hex = if peer_id.len() == 33 {
                 Some(hex::encode(peer_id))
+            } else if let Ok(peer_id_str) = std::str::from_utf8(peer_id) {
+                // Look up public key by participant_id
+                peer_keys
+                    .get(peer_id_str)
+                    .map(|pk| hex::encode(pk.serialize()))
             } else {
                 None
             };
@@ -365,15 +373,24 @@ async fn handle_incoming_connection(
                         }
                         MessageType::InviteOnboarding => {
                             tracing::info!(
-                                "Received onboarding invite, triggering attestor workflow"
+                                "Received onboarding invite, storing as pending invitation"
                             );
-                            // Store coordinator's public key
                             if let Some(ref pubkey) = peer_pubkey_hex {
-                                let mut guard = triggers.coordinator_pubkey.write().await;
-                                *guard = Some(pubkey.clone());
-                                tracing::debug!("Stored coordinator pubkey: {pubkey}");
+                                let invitation = PendingInvitation {
+                                    id: format!("onboarding-{}", &pubkey[..16]),
+                                    invitation_type: InvitationType::Onboarding,
+                                    coordinator_pubkey: pubkey.clone(),
+                                    coordinator_name: None,
+                                    received_at: std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|d| d.as_secs() as i64)
+                                        .unwrap_or(0),
+                                };
+                                let mut invitations = triggers.pending_invitations.write().await;
+                                // Remove any existing invitation of the same type from the same coordinator
+                                invitations.retain(|i| i.id != invitation.id);
+                                invitations.push(invitation);
                             }
-                            triggers.onboarding.notify_one();
 
                             let ack = Message::new_empty(MessageType::Ack);
                             return Ok(Response::builder()
@@ -382,15 +399,22 @@ async fn handle_incoming_connection(
                                 .unwrap());
                         }
                         MessageType::InviteKick => {
-                            tracing::info!(
-                                "Received kick invite, triggering kick attestor workflow"
-                            );
-                            // Store coordinator's public key
+                            tracing::info!("Received kick invite, storing as pending invitation");
                             if let Some(ref pubkey) = peer_pubkey_hex {
-                                let mut guard = triggers.coordinator_pubkey.write().await;
-                                *guard = Some(pubkey.clone());
+                                let invitation = PendingInvitation {
+                                    id: format!("kick-{}", &pubkey[..16]),
+                                    invitation_type: InvitationType::Kick,
+                                    coordinator_pubkey: pubkey.clone(),
+                                    coordinator_name: None,
+                                    received_at: std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|d| d.as_secs() as i64)
+                                        .unwrap_or(0),
+                                };
+                                let mut invitations = triggers.pending_invitations.write().await;
+                                invitations.retain(|i| i.id != invitation.id);
+                                invitations.push(invitation);
                             }
-                            triggers.kick.notify_one();
 
                             let ack = Message::new_empty(MessageType::Ack);
                             return Ok(Response::builder()
@@ -400,14 +424,23 @@ async fn handle_incoming_connection(
                         }
                         MessageType::InviteContracts => {
                             tracing::info!(
-                                "Received contracts invite, triggering contracts attestor workflow"
+                                "Received contracts invite, storing as pending invitation"
                             );
-                            // Store coordinator's public key
                             if let Some(ref pubkey) = peer_pubkey_hex {
-                                let mut guard = triggers.coordinator_pubkey.write().await;
-                                *guard = Some(pubkey.clone());
+                                let invitation = PendingInvitation {
+                                    id: format!("contracts-{}", &pubkey[..16]),
+                                    invitation_type: InvitationType::Contracts,
+                                    coordinator_pubkey: pubkey.clone(),
+                                    coordinator_name: None,
+                                    received_at: std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|d| d.as_secs() as i64)
+                                        .unwrap_or(0),
+                                };
+                                let mut invitations = triggers.pending_invitations.write().await;
+                                invitations.retain(|i| i.id != invitation.id);
+                                invitations.push(invitation);
                             }
-                            triggers.contracts.notify_one();
 
                             let ack = Message::new_empty(MessageType::Ack);
                             return Ok(Response::builder()
@@ -454,13 +487,13 @@ async fn run_peer_ping_loop(config: NodeConfig, peer_status: Arc<RwLock<HashMap<
             }
         };
 
-        let current_node_id = &config.node.node_id;
+        let current_participant_id = &config.node.participant_id;
         let futures: Vec<_> = network_config
             .peers
             .iter()
-            .filter(|p| p.id != *current_node_id)
+            .filter(|p| p.participant_id != *current_participant_id)
             .map(|peer| {
-                let id = peer.id.clone();
+                let id = peer.participant_id.to_string();
                 let address = peer.address.clone();
                 let port = peer.port;
 
@@ -542,7 +575,7 @@ async fn run_onboarding_attestor_listener(
             }
         };
 
-        tracing::info!("Coordinator identified: {id}", id = coordinator.id);
+        tracing::info!("Coordinator identified: {}", coordinator.participant_id);
 
         // Update status
         {
@@ -633,7 +666,7 @@ async fn run_kick_attestor_listener(
             }
         };
 
-        tracing::info!("Coordinator identified: {id}", id = coordinator.id);
+        tracing::info!("Coordinator identified: {}", coordinator.participant_id);
 
         // Update status
         {
@@ -724,7 +757,7 @@ async fn run_contracts_attestor_listener(
             }
         };
 
-        tracing::info!("Coordinator identified: {id}", id = coordinator.id);
+        tracing::info!("Coordinator identified: {}", coordinator.participant_id);
 
         // Update status
         {

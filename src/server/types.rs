@@ -176,6 +176,8 @@ pub struct KickRequest {
 pub struct OnboardingRequest {
     /// Party ID prefix for the decentralized party (e.g., "xyz-network")
     pub party_id_prefix: String,
+    /// List of peer IDs to invite to the decentralized party
+    pub peer_ids: Vec<String>,
 }
 
 /// Request to deploy contracts for a decentralized party
@@ -234,4 +236,35 @@ pub type OnboardingResponse = WorkflowResponse;
 pub struct KeyStatusResponse {
     pub has_keys: bool,
     pub public_key: Option<String>,
+}
+
+/// Type of workflow invitation
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum InvitationType {
+    Onboarding,
+    Kick,
+    Contracts,
+}
+
+/// A pending invitation from a coordinator
+#[derive(Clone, Debug, Serialize)]
+pub struct PendingInvitation {
+    pub id: String,
+    pub invitation_type: InvitationType,
+    pub coordinator_pubkey: String,
+    pub coordinator_name: Option<String>,
+    pub received_at: i64,
+}
+
+/// Response for pending invitations endpoint
+#[derive(Serialize)]
+pub struct PendingInvitationsResponse {
+    pub invitations: Vec<PendingInvitation>,
+}
+
+/// Request to accept or decline an invitation
+#[derive(Deserialize)]
+pub struct InvitationActionRequest {
+    pub id: String,
 }

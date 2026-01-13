@@ -80,8 +80,9 @@ impl NoiseClient {
         // Derive PSK for this connection
         let psk = self.keypair.derive_psk(&self.coordinator_pub_key);
 
-        // Use our node_id as identity
-        let identity = self.node_config.node.node_id.as_bytes();
+        // Use our participant_id as identity
+        let identity = self.node_config.node.participant_id.to_string();
+        let identity = identity.as_bytes();
 
         // Create Noise initiator
         let initiator = Initiator {
