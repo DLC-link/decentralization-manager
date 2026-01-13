@@ -185,6 +185,8 @@ pub struct OnboardingRequest {
 pub struct ContractsRequest {
     /// Decentralized party ID to deploy contracts for
     pub decentralized_party_id: CantonId,
+    /// List of participant IDs that will sign submissions
+    pub participant_ids: Vec<CantonId>,
     /// Operator party ID (optional, can be allocated dynamically if not provided)
     #[serde(default)]
     pub operator_party: Option<String>,

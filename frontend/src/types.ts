@@ -124,6 +124,7 @@ export interface ContractDefinition {
 
 export interface ContractsRequest {
   decentralized_party_id: string;
+  participant_ids: string[];
   operator_party?: string;
   operator_party_hint: string;
   dar_files: DarFile[];
