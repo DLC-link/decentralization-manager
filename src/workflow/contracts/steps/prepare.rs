@@ -98,19 +98,22 @@ pub async fn prepare_submissions(
     for peer in &network_config.peers {
         let party = if let Some(party_id) = &peer.party {
             // Use party from config
-            tracing::debug!("Using party from config for {id}: {party_id}", id = peer.id);
+            tracing::debug!(
+                "Using party from config for {}: {party_id}",
+                peer.participant_id
+            );
             party_id.clone()
         } else {
             // Fallback to allocating/finding party
-            tracing::debug!("Allocating/finding party for {id}", id = peer.id);
+            tracing::debug!("Allocating/finding party for {}", peer.participant_id);
             allocate_or_find_party(
                 &mut party_client,
-                &peer.id,
+                &peer.participant_id.to_string(),
                 &utils::get_synchronizer_id(config).await?,
             )
             .await?
         };
-        tracing::debug!("Party for {id}: {party}", id = peer.id);
+        tracing::debug!("Party for {}: {party}", peer.participant_id);
         participant_parties.push(party);
     }
 

@@ -1,7 +1,7 @@
 # Node configuration for Participant 2
 
 [node]
-node_id = "app-provider"
+participant_id = "participant::1220790f9e9cfe0fb323e012719c8c30b54253761e172319099997cddcaf56ceb520"
 listen_address = "0.0.0.0"
 port = 9002
 

@@ -110,7 +110,7 @@ pub async fn save_attestor_data<S: state::WorkflowStep + 'static>(
 pub async fn start_attestor(node_config: NodeConfig, coordinator: Peer) -> Result {
     tracing::info!(
         "Initializing Noise client to connect to coordinator {}...",
-        coordinator.id
+        coordinator.participant_id
     );
 
     let client = NoiseClient::new(node_config.clone(), coordinator).await?;

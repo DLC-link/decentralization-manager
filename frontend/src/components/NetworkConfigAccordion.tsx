@@ -15,6 +15,8 @@ import {
   Button,
   Stack,
   Tooltip,
+  useMediaQuery,
+  useTheme,
 } from "@mui/material";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import CircleIcon from "@mui/icons-material/Circle";
@@ -27,7 +29,7 @@ import PersonIcon from "@mui/icons-material/Person";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import ContentPasteIcon from "@mui/icons-material/ContentPaste";
 import { useSnackbar } from "../contexts";
-import { copyToClipboard } from "./CopyableText";
+import { CopyableText, copyToClipboard } from "./CopyableText";
 import type {
   NetworkConfig,
   Peer,
@@ -38,10 +40,10 @@ import type {
 } from "../types";
 
 const accordionSx = {
-  borderRadius: 3,
+  borderRadius: 2,
   mb: 2,
-  "&:first-of-type": { borderRadius: 3 },
-  "&:last-of-type": { borderRadius: 3 },
+  "&:first-of-type": { borderRadius: 2 },
+  "&:last-of-type": { borderRadius: 2 },
   overflow: "hidden",
 };
 
@@ -54,7 +56,7 @@ interface NetworkConfigAccordionProps {
 }
 
 const emptyPeer: Peer = {
-  id: "",
+  participant_id: "",
   name: "",
   address: "localhost",
   port: 9000,
@@ -72,10 +74,19 @@ export const NetworkConfigAccordion = ({
   const [editedPeers, setEditedPeers] = useState<Peer[]>([]);
   const [saving, setSaving] = useState(false);
   const { showSnackbar } = useSnackbar();
+  const theme = useTheme();
+  const isSmall = useMediaQuery(theme.breakpoints.down("sm"));
+  const isMedium = useMediaQuery(theme.breakpoints.down("md"));
 
-  const selfNodeId = nodeConfig?.node.node_id;
+  const selfNodeId = nodeConfig?.node.participant_id;
   const selfPublicKey = keyStatus?.public_key || "";
   const selfPort = nodeConfig?.node.port ?? 9000;
+
+  const truncateKey = (key: string): string => {
+    if (!key) return "-";
+    const len = isSmall ? 8 : isMedium ? 12 : 16;
+    return `${key.slice(0, len)}...`;
+  };
 
   const getStatus = (id: string): ConnectionStatus | undefined =>
     participantStatuses?.find((s) => s.id === id)?.status;
@@ -110,13 +121,13 @@ export const NetworkConfigAccordion = ({
   };
 
   // Build display list: self first, then other peers
-  const selfPeer = config.peers.find((p) => p.id === selfNodeId);
-  const otherPeers = config.peers.filter((p) => p.id !== selfNodeId);
+  const selfPeer = config.peers.find((p) => p.participant_id === selfNodeId);
+  const otherPeers = config.peers.filter((p) => p.participant_id !== selfNodeId);
 
   // Create self entry if not in peers list
   const selfEntry: Peer | null = selfNodeId
     ? selfPeer || {
-        id: selfNodeId,
+        participant_id: selfNodeId,
         name: selfNodeId,
         address: nodeConfig?.node.public_address || nodeConfig?.node.listen_address || "localhost",
         port: selfPort,
@@ -166,12 +177,12 @@ export const NetworkConfigAccordion = ({
       const text = await navigator.clipboard.readText();
       const parts = text.trim().split(",");
       if (parts.length < 5) {
-        showSnackbar("Invalid CSV format. Expected: id,name,address,port,public_key");
+        showSnackbar("Invalid CSV format. Expected: participant_id,name,address,port,public_key");
         return;
       }
-      const [id, name, address, portStr, public_key] = parts;
+      const [participant_id, name, address, portStr, public_key] = parts;
       const port = parseInt(portStr) || 9000;
-      const newPeer: Peer = { id, name, address, port, public_key };
+      const newPeer: Peer = { participant_id, name, address, port, public_key };
       setEditedPeers((peers) => [...peers, newPeer]);
       showSnackbar("Peer added from clipboard");
     } catch {
@@ -188,7 +199,7 @@ export const NetworkConfigAccordion = ({
       <Accordion sx={accordionSx} defaultExpanded>
         <AccordionSummary
           expandIcon={<ExpandMoreIcon />}
-          sx={{ borderRadius: "12px 12px 0 0" }}
+          sx={{ borderRadius: "8px 8px 0 0" }}
         >
           <Typography variant="h6">Edit Peers</Typography>
         </AccordionSummary>
@@ -206,9 +217,9 @@ export const NetworkConfigAccordion = ({
               >
                 <TextField
                   size="small"
-                  label="ID"
-                  value={peer.id}
-                  onChange={(e) => updatePeer(index, "id", e.target.value)}
+                  label="Participant ID"
+                  value={peer.participant_id}
+                  onChange={(e) => updatePeer(index, "participant_id", e.target.value)}
                 />
                 <TextField
                   size="small"
@@ -300,80 +311,81 @@ export const NetworkConfigAccordion = ({
     <Accordion sx={accordionSx}>
       <AccordionSummary
         expandIcon={<ExpandMoreIcon />}
-        sx={{ borderRadius: "12px 12px 0 0" }}
+        sx={{ borderRadius: "8px 8px 0 0" }}
       >
         <Typography variant="h6">Network Configuration</Typography>
       </AccordionSummary>
-      <AccordionDetails sx={{ p: 3 }}>
+      <AccordionDetails sx={{ p: 0 }}>
         <Box>
-          <Box sx={{ display: "flex", justifyContent: "space-between", mb: 1 }}>
+          <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", px: 2, py: 1 }}>
             <Typography variant="subtitle1">Peers:</Typography>
-            {onSave && (
-              <IconButton size="small" onClick={startEditing}>
-                <EditIcon fontSize="small" />
-              </IconButton>
-            )}
+            <Box sx={{ display: "flex", gap: 1 }}>
+              {selfEntry && (
+                <Button
+                  size="small"
+                  variant="outlined"
+                  startIcon={<ContentCopyIcon />}
+                  onClick={async () => {
+                    const name = selfPeer?.name || selfEntry.participant_id;
+                    const csvRow = `${selfEntry.participant_id},${name},${selfEntry.address},${selfEntry.port},${selfEntry.public_key},`;
+                    const success = await copyToClipboard(csvRow);
+                    showSnackbar(success ? "Copied to clipboard" : "Failed to copy");
+                  }}
+                >
+                  Share my data
+                </Button>
+              )}
+              {onSave && (
+                <IconButton size="small" onClick={startEditing}>
+                  <EditIcon fontSize="small" />
+                </IconButton>
+              )}
+            </Box>
           </Box>
-          <Table size="small">
-            <TableHead>
-              <TableRow>
-                <TableCell>Status</TableCell>
-                <TableCell>ID</TableCell>
-                <TableCell>Name</TableCell>
-                <TableCell>Address</TableCell>
-                <TableCell>Public Key</TableCell>
-                <TableCell></TableCell>
-              </TableRow>
-            </TableHead>
+          <Box sx={{ overflowX: "auto" }}>
+            <Table size="small" sx={{ minWidth: 650 }}>
+              <TableHead>
+                <TableRow>
+                  <TableCell sx={{ py: 1, width: 50 }}>Status</TableCell>
+                  <TableCell sx={{ py: 1 }}>ID</TableCell>
+                  <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>Name</TableCell>
+                  <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>Address</TableCell>
+                  <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>Public Key</TableCell>
+                </TableRow>
+              </TableHead>
             <TableBody>
               {selfEntry && (
                 <TableRow sx={{ bgcolor: "action.selected" }}>
-                  <TableCell>
+                  <TableCell sx={{ py: 1 }}>
                     <PersonIcon sx={{ fontSize: 14, color: "primary.main" }} />
                   </TableCell>
-                  <TableCell>
-                    <Box
-                      sx={{ display: "flex", alignItems: "center", gap: 0.5 }}
-                    >
-                      {selfEntry.id}
-                      <Typography variant="caption" color="text.secondary">
-                        (you)
-                      </Typography>
-                    </Box>
+                  <TableCell sx={{ py: 1 }}>
+                    <CopyableText
+                      text={selfEntry.participant_id}
+                      truncate={{ start: 16, end: 8 }}
+                      variant="body2"
+                    />
                   </TableCell>
-                  <TableCell>{selfEntry.name}</TableCell>
-                  <TableCell>
+                  <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>
+                    <Typography variant="body2" color="text.secondary">
+                      You
+                    </Typography>
+                  </TableCell>
+                  <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>
                     {selfEntry.address}:{selfEntry.port}
                   </TableCell>
                   <TableCell
-                    sx={{ fontFamily: "monospace", fontSize: "0.75rem" }}
+                    sx={{ fontFamily: "monospace", fontSize: "0.75rem", py: 1 }}
                   >
-                    {selfEntry.public_key
-                      ? `${selfEntry.public_key.slice(0, 16)}...`
-                      : "-"}
-                  </TableCell>
-                  <TableCell>
-                    <Tooltip title="Copy as CSV row">
-                      <IconButton
-                        size="small"
-                        onClick={async () => {
-                          const name = selfPeer?.name || selfEntry.id;
-                          const csvRow = `${selfEntry.id},${name},${selfEntry.address},${selfEntry.port},${selfEntry.public_key},`;
-                          const success = await copyToClipboard(csvRow);
-                          showSnackbar(success ? "Copied to clipboard" : "Failed to copy");
-                        }}
-                      >
-                        <ContentCopyIcon fontSize="small" />
-                      </IconButton>
-                    </Tooltip>
+                    {truncateKey(selfEntry.public_key)}
                   </TableCell>
                 </TableRow>
               )}
               {otherPeers.map((p) => {
-                const status = getStatus(p.id);
+                const status = getStatus(p.participant_id);
                 return (
-                  <TableRow key={p.id}>
-                    <TableCell>
+                  <TableRow key={p.participant_id}>
+                    <TableCell sx={{ py: 1 }}>
                       <Tooltip title={getStatusTooltip(status)} arrow>
                         <CircleIcon
                           sx={{
@@ -384,22 +396,28 @@ export const NetworkConfigAccordion = ({
                         />
                       </Tooltip>
                     </TableCell>
-                    <TableCell>{p.id}</TableCell>
-                    <TableCell>{p.name}</TableCell>
-                    <TableCell>
+                    <TableCell sx={{ py: 1 }}>
+                      <CopyableText
+                        text={p.participant_id}
+                        truncate={{ start: 16, end: 8 }}
+                        variant="body2"
+                      />
+                    </TableCell>
+                    <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>{p.name}</TableCell>
+                    <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>
                       {p.address}:{p.port}
                     </TableCell>
                     <TableCell
-                      sx={{ fontFamily: "monospace", fontSize: "0.75rem" }}
+                      sx={{ fontFamily: "monospace", fontSize: "0.75rem", py: 1 }}
                     >
-                      {p.public_key ? `${p.public_key.slice(0, 16)}...` : "-"}
+                      {truncateKey(p.public_key)}
                     </TableCell>
-                    <TableCell></TableCell>
                   </TableRow>
                 );
               })}
             </TableBody>
           </Table>
+          </Box>
         </Box>
       </AccordionDetails>
     </Accordion>

@@ -6,13 +6,14 @@ import {
   Box,
 } from "@mui/material";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
+import { CopyableText } from "./CopyableText";
 import type { NodeConfig } from "../types";
 
 const accordionSx = {
-  borderRadius: 3,
+  borderRadius: 2,
   mb: 2,
-  "&:first-of-type": { borderRadius: 3 },
-  "&:last-of-type": { borderRadius: 3 },
+  "&:first-of-type": { borderRadius: 2 },
+  "&:last-of-type": { borderRadius: 2 },
   overflow: "hidden",
 };
 
@@ -25,15 +26,22 @@ export const NodeConfigAccordion = ({ config }: NodeConfigAccordionProps) => {
     <Accordion defaultExpanded sx={accordionSx}>
       <AccordionSummary
         expandIcon={<ExpandMoreIcon />}
-        sx={{ borderRadius: "12px 12px 0 0" }}
+        sx={{ borderRadius: "8px 8px 0 0" }}
       >
         <Typography variant="h6">Node Configuration</Typography>
       </AccordionSummary>
       <AccordionDetails sx={{ p: 3 }}>
         <Box>
-          <Typography>
-            <strong>Node ID:</strong> {config.node.node_id}
-          </Typography>
+          <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: 0.5 }}>
+            <Typography component="span">
+              <strong>Participant ID:</strong>
+            </Typography>
+            <CopyableText
+              text={config.node.participant_id}
+              truncate={{ start: 16, end: 8 }}
+              variant="body1"
+            />
+          </Box>
           <Typography>
             <strong>Admin API:</strong> {config.canton.admin_api_host}:
             {config.canton.admin_api_port}

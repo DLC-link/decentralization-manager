@@ -34,7 +34,7 @@ async fn sign_proposal(
 ) -> Result {
     tracing::info!("Signing {proposal_type} proposal...");
 
-    let node_id = &config.node.node_id;
+    let node_id = config.node.participant_id.to_string();
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
     tracing::debug!("Using synchronizer ID: {synchronizer_id}");
 
