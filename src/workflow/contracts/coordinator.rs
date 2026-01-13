@@ -37,7 +37,12 @@ pub async fn start_coordinator(
     .await?;
     let server = Arc::new(server);
 
-    let dirs = ContractsDirs::with_base(node_config.workflow_data_dir(), node_config.dars_dir());
+    let dirs = ContractsDirs::with_base(
+        node_config.workflow_data_dir(),
+        &config.instance_name,
+        &config.decentralized_party_id.prefix,
+        node_config.dars_dir(),
+    );
     dirs.create_dirs().await?;
 
     tracing::info!("Noise server initialized, listening for connections");
@@ -93,7 +98,8 @@ async fn run_workflow(
                 prepare_submissions(&node_config, &dirs, &network_config, &config).await?;
 
                 // Load prepared submissions to send to attestors with SignSubmissions command
-                let submissions_payload = load_prepared_submissions_payload(&dirs).await?;
+                // Prepend config so attestors know the instance_name for directory creation
+                let submissions_payload = load_prepared_submissions_payload(&dirs, &config).await?;
                 workflow_state
                     .set_command_payload(submissions_payload)
                     .await;
@@ -162,7 +168,11 @@ fn encode_dars_payload(config: &ContractsConfig) -> Result<Vec<u8>> {
 }
 
 /// Load all prepared submission files and encode them for transmission
-async fn load_prepared_submissions_payload(dirs: &ContractsDirs) -> Result<Vec<u8>> {
+/// Returns: [config_json_len][config_json][files_payload]
+async fn load_prepared_submissions_payload(
+    dirs: &ContractsDirs,
+    config: &ContractsConfig,
+) -> Result<Vec<u8>> {
     let prepared_dir = dirs
         .workflow_dir
         .join(LEDGER_SUBMISSIONS_DIR)
@@ -201,5 +211,11 @@ async fn load_prepared_submissions_payload(dirs: &ContractsDirs) -> Result<Vec<u
         count = files.len()
     );
 
-    Ok(utils::encode_files(&files))
+    // Encode config + files payload
+    let config_data = serde_json::to_vec(config).context("Failed to serialize contracts config")?;
+    let files_payload = utils::encode_files(&files);
+    Ok(utils::encode_length_prefixed(&[
+        &config_data,
+        &files_payload,
+    ]))
 }

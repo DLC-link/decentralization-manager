@@ -189,6 +189,7 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId }: PartyCardProp
         onClose={() => setContractsDialogOpen(false)}
         onComplete={onRefresh}
         partyId={party.party_id}
+        participantIds={party.participants.map((p) => p.participant_uid)}
       />
     </Card>
   );

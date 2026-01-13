@@ -84,7 +84,10 @@ pub async fn start_coordinator(
     .await?;
     let server = Arc::new(server);
 
-    let dirs = OnboardingDirs::with_base(node_config.workflow_data_dir());
+    let dirs = OnboardingDirs::with_base(
+        node_config.workflow_data_dir(),
+        &onboarding_config.instance_name,
+    );
     dirs.create_dirs().await?;
 
     tracing::info!("Noise server initialized, listening for connections");

@@ -91,35 +91,26 @@ pub async fn prepare_submissions(
         }
     }
 
-    // Step 3: Allocate parties for each peer
-    tracing::info!("Getting parties for peers...");
+    // Step 3: Get parties for each participant
+    tracing::info!("Getting parties for participants...");
     let mut participant_parties = Vec::new();
+    let synchronizer_id = utils::get_synchronizer_id(config).await?;
 
-    for peer in &network_config.peers {
-        let party = if let Some(party_id) = &peer.party {
-            // Use party from config
-            tracing::debug!(
-                "Using party from config for {}: {party_id}",
-                peer.participant_id
-            );
-            party_id.clone()
-        } else {
-            // Fallback to allocating/finding party
-            tracing::debug!("Allocating/finding party for {}", peer.participant_id);
-            allocate_or_find_party(
-                &mut party_client,
-                &peer.participant_id.to_string(),
-                &utils::get_synchronizer_id(config).await?,
-            )
-            .await?
-        };
-        tracing::debug!("Party for {}: {party}", peer.participant_id);
+    for participant_id in &contracts_config.participant_ids {
+        tracing::debug!("Finding party for participant {participant_id}");
+        let party = allocate_or_find_party(
+            &mut party_client,
+            &participant_id.to_string(),
+            &synchronizer_id,
+        )
+        .await?;
+        tracing::debug!("Party for {participant_id}: {party}");
         participant_parties.push(party);
     }
 
     // Validate participant count
     if participant_parties.is_empty() {
-        anyhow::bail!("No participants found in P2P mapping");
+        anyhow::bail!("No participants provided in contracts config");
     }
 
     if participant_parties.len() < MIN_PARTICIPANTS_CONTRACTS {

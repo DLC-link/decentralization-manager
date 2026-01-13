@@ -38,6 +38,7 @@ interface ContractsDialogProps {
   onClose: () => void;
   onComplete: () => void;
   partyId: string;
+  participantIds: string[];
 }
 
 const FIELD_TYPES = [
@@ -500,6 +501,7 @@ export const ContractsDialog = ({
   onClose,
   onComplete,
   partyId,
+  participantIds,
 }: ContractsDialogProps) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -610,6 +612,7 @@ export const ContractsDialog = ({
     try {
       const request: ContractsRequest = {
         decentralized_party_id: partyId,
+        participant_ids: participantIds,
         operator_party: operatorParty || undefined,
         operator_party_hint: operatorPartyHint,
         dar_files: darFiles,

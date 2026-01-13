@@ -450,11 +450,17 @@ pub async fn start_kick(
         // Give peers time to start their attestor workflows
         tokio::time::sleep(Duration::from_secs(2)).await;
 
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let instance_name = format!("{}-kick-{timestamp}", decentralized_party_id.prefix);
         let kick_config = workflow::KickConfig::new(
             decentralized_party_id,
             participant_id,
             namespace_fingerprint,
             new_threshold,
+            instance_name,
         );
 
         let result = workflow::start_coordinator(
@@ -573,7 +579,8 @@ pub async fn start_onboarding(
         // Give peers time to start their attestor workflows
         tokio::time::sleep(Duration::from_secs(2)).await;
 
-        let onboarding_config = workflow::OnboardingConfig::new(party_id_prefix);
+        let instance_name = format!("{party_id_prefix}-creation");
+        let onboarding_config = workflow::OnboardingConfig::new(party_id_prefix, instance_name);
 
         let result = workflow::start_coordinator(
             config,
@@ -825,12 +832,22 @@ pub async fn start_contracts(
     }
 
     // Create contracts config from request
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let instance_name = format!(
+        "{}-contracts-{timestamp}",
+        body.decentralized_party_id.prefix
+    );
     let contracts_config = workflow::ContractsConfig::new(
         body.decentralized_party_id.clone(),
+        body.participant_ids.clone(),
         body.operator_party.clone(),
         body.operator_party_hint.clone(),
         body.dar_files.clone(),
         body.contracts.clone(),
+        instance_name,
     );
 
     // Spawn the contracts workflow in the background

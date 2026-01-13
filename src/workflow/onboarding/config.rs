@@ -7,13 +7,16 @@ use serde::{Deserialize, Serialize};
 pub struct OnboardingConfig {
     /// Party ID prefix for the decentralized party (e.g., "xyz-network")
     pub party_id_prefix: String,
+    /// Workflow instance name for directory organization (e.g., "xyz-network-creation")
+    pub instance_name: String,
     _p: PhantomData<()>,
 }
 
 impl OnboardingConfig {
-    pub fn new(party_id_prefix: String) -> Self {
+    pub fn new(party_id_prefix: String, instance_name: String) -> Self {
         Self {
             party_id_prefix,
+            instance_name,
             _p: PhantomData,
         }
     }
