@@ -940,7 +940,8 @@ async fn send_contracts_invites(config: &NodeConfig) -> Result {
         };
 
         let psk = keypair.derive_psk(&peer_pub_key);
-        let identity = keypair.public_key.serialize();
+        // Use participant_id as identity (must match what server expects in peer_keys lookup)
+        let identity = config.node.participant_id.to_string();
 
         tracing::info!(
             "Sending contracts invite to {} at {}:{}",
@@ -949,7 +950,15 @@ async fn send_contracts_invites(config: &NodeConfig) -> Result {
             peer.port
         );
 
-        match send_noise_message(&peer.address, peer.port, &psk, &identity, &invite_message).await {
+        match send_noise_message(
+            &peer.address,
+            peer.port,
+            &psk,
+            identity.as_bytes(),
+            &invite_message,
+        )
+        .await
+        {
             Ok(response) => {
                 if let Ok(msg) = Message::from_bytes(&response) {
                     if msg.msg_type == MessageType::Ack {

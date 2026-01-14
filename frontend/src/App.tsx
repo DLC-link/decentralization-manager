@@ -1,5 +1,13 @@
 import { useEffect, useState, useCallback } from "react";
-import { Container, Typography, Box, Alert, Button, TextField, InputAdornment } from "@mui/material";
+import {
+  Container,
+  Typography,
+  Box,
+  Alert,
+  Button,
+  TextField,
+  InputAdornment,
+} from "@mui/material";
 import FilterListIcon from "@mui/icons-material/FilterList";
 import AddIcon from "@mui/icons-material/Add";
 import { Header } from "./components/Header";
@@ -24,12 +32,19 @@ import type {
 const App = () => {
   const [parties, setParties] = useState<DecentralizedParty[]>([]);
   const [nodeConfig, setNodeConfig] = useState<NodeConfig | null>(null);
-  const [networkConfig, setNetworkConfig] = useState<NetworkConfig | null>(null);
-  const [participantStatuses, setParticipantStatuses] = useState<ParticipantStatus[]>([]);
+  const [networkConfig, setNetworkConfig] = useState<NetworkConfig | null>(
+    null,
+  );
+  const [participantStatuses, setParticipantStatuses] = useState<
+    ParticipantStatus[]
+  >([]);
   const [keyStatus, setKeyStatus] = useState<KeyStatusResponse | null>(null);
   const [onboardingDialogOpen, setOnboardingDialogOpen] = useState(false);
-  const [_pendingInvitations, setPendingInvitations] = useState<PendingInvitation[]>([]);
-  const [currentInvitation, setCurrentInvitation] = useState<PendingInvitation | null>(null);
+  const [_pendingInvitations, setPendingInvitations] = useState<
+    PendingInvitation[]
+  >([]);
+  const [currentInvitation, setCurrentInvitation] =
+    useState<PendingInvitation | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [partyFilter, setPartyFilter] = useState("cbtc-network");
@@ -44,7 +59,9 @@ const App = () => {
 
   const refreshParties = useCallback(async () => {
     try {
-      const params = partyFilter ? `?prefix=${encodeURIComponent(partyFilter)}` : "";
+      const params = partyFilter
+        ? `?prefix=${encodeURIComponent(partyFilter)}`
+        : "";
       const res = await fetch(`${API_BASE}/decentralized-parties${params}`);
       if (res.ok) {
         const data = await res.json();
@@ -53,39 +70,47 @@ const App = () => {
         showSnackbar("Failed to refresh parties");
       }
     } catch (err) {
-      showSnackbar(err instanceof Error ? err.message : "Failed to refresh parties");
+      showSnackbar(
+        err instanceof Error ? err.message : "Failed to refresh parties",
+      );
     }
   }, [showSnackbar, partyFilter]);
 
-  const savePeers = useCallback(async (peers: Peer[]) => {
-    const res = await fetch(`${API_BASE}/network-config`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(peers),
-    });
-    if (!res.ok) {
-      const data = await res.json();
-      throw new Error(data.error || "Failed to save peers");
-    }
-    // Refresh the network config
-    const networkRes = await fetch(`${API_BASE}/network-config`);
-    if (networkRes.ok) {
-      const networkData = await networkRes.json();
-      setNetworkConfig(networkData);
-    }
-    showSnackbar("Peers saved successfully");
-  }, [showSnackbar]);
+  const savePeers = useCallback(
+    async (peers: Peer[]) => {
+      const res = await fetch(`${API_BASE}/network-config`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(peers),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || "Failed to save peers");
+      }
+      // Refresh the network config
+      const networkRes = await fetch(`${API_BASE}/network-config`);
+      if (networkRes.ok) {
+        const networkData = await networkRes.json();
+        setNetworkConfig(networkData);
+      }
+      showSnackbar("Peers saved successfully");
+    },
+    [showSnackbar],
+  );
 
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const partiesParams = partyFilter ? `?prefix=${encodeURIComponent(partyFilter)}` : "";
-        const [partiesRes, nodeRes, networkRes, keyStatusRes] = await Promise.all([
-          fetch(`${API_BASE}/decentralized-parties${partiesParams}`),
-          fetch(`${API_BASE}/node-config`),
-          fetch(`${API_BASE}/network-config`),
-          fetch(`${API_BASE}/keys/status`),
-        ]);
+        const partiesParams = partyFilter
+          ? `?prefix=${encodeURIComponent(partyFilter)}`
+          : "";
+        const [partiesRes, nodeRes, networkRes, keyStatusRes] =
+          await Promise.all([
+            fetch(`${API_BASE}/decentralized-parties${partiesParams}`),
+            fetch(`${API_BASE}/node-config`),
+            fetch(`${API_BASE}/network-config`),
+            fetch(`${API_BASE}/keys/status`),
+          ]);
 
         if (!partiesRes.ok || !nodeRes.ok || !networkRes.ok) {
           throw new Error("Failed to fetch data");
@@ -103,7 +128,6 @@ const App = () => {
           const keyStatusData = await keyStatusRes.json();
           setKeyStatus(keyStatusData);
         }
-
       } catch (err) {
         setError(err instanceof Error ? err.message : "Unknown error");
       } finally {
@@ -112,7 +136,7 @@ const App = () => {
     };
 
     fetchData();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Poll participant statuses every 2 seconds
@@ -194,7 +218,14 @@ const App = () => {
             )}
 
             <Box sx={{ mt: 5, mb: 3 }}>
-              <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", mb: 2 }}>
+              <Box
+                sx={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "flex-start",
+                  mb: 2,
+                }}
+              >
                 <Box>
                   <Typography variant="h6" sx={{ mb: 0.5 }}>
                     Decentralized Parties
@@ -259,6 +290,6 @@ const App = () => {
       </Container>
     </>
   );
-}
+};
 
 export default App;
