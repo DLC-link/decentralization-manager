@@ -1,18 +1,15 @@
 mod cli;
 
-use tracing_subscriber::{
-    filter::{EnvFilter, LevelFilter},
-    prelude::*,
-};
+use tracing_subscriber::{filter::EnvFilter, prelude::*};
 
 use cli::{Cli, Commands, Parser};
 use dec_party_manager::{config::NodeConfig, error::Result};
 
 #[tokio::main]
 async fn main() -> Result {
-    let filter = EnvFilter::builder()
-        .with_default_directive(LevelFilter::INFO.into())
-        .from_env_lossy();
+    let filter = EnvFilter::try_new("info,tokio_noise=error,hyper_noise=error")
+        .or_else(|_| EnvFilter::try_from_default_env())
+        .unwrap_or_else(|_| EnvFilter::new("info"));
 
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer().with_filter(filter))

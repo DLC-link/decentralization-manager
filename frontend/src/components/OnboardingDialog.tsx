@@ -24,14 +24,20 @@ interface OnboardingDialogProps {
   onComplete: () => void;
 }
 
-export const OnboardingDialog = ({ open, onClose, onComplete }: OnboardingDialogProps) => {
+export const OnboardingDialog = ({
+  open,
+  onClose,
+  onComplete,
+}: OnboardingDialogProps) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<OnboardingStatusResponse | null>(null);
   const [partyIdPrefix, setPartyIdPrefix] = useState("");
   const [peers, setPeers] = useState<Peer[]>([]);
   const [selfNodeId, setSelfNodeId] = useState<string | null>(null);
-  const [selectedPeerIds, setSelectedPeerIds] = useState<Set<string>>(new Set());
+  const [selectedPeerIds, setSelectedPeerIds] = useState<Set<string>>(
+    new Set(),
+  );
   const [loadingPeers, setLoadingPeers] = useState(false);
 
   // Fetch peers when dialog opens
@@ -48,7 +54,9 @@ export const OnboardingDialog = ({ open, onClose, onComplete }: OnboardingDialog
             const data = await networkRes.json();
             setPeers(data.peers || []);
             // Select all peers by default
-            const allPeerIds = new Set<string>((data.peers || []).map((p: Peer) => p.participant_id));
+            const allPeerIds = new Set<string>(
+              (data.peers || []).map((p: Peer) => p.participant_id),
+            );
             setSelectedPeerIds(allPeerIds);
           }
           if (nodeRes.ok) {
@@ -88,7 +96,9 @@ export const OnboardingDialog = ({ open, onClose, onComplete }: OnboardingDialog
   };
 
   // Filter out self from peer list (compare prefix of participant_id with selfNodeId)
-  const selectablePeers = peers.filter((p) => p.participant_id.split("::")[0] !== selfNodeId);
+  const selectablePeers = peers.filter(
+    (p) => p.participant_id.split("::")[0] !== selfNodeId,
+  );
 
   const pollStatus = useCallback(async () => {
     try {
@@ -197,7 +207,8 @@ export const OnboardingDialog = ({ open, onClose, onComplete }: OnboardingDialog
               </Box>
             ) : selectablePeers.length === 0 ? (
               <Typography variant="body2" color="text.secondary">
-                No peers configured. Add peers in the Network Configuration first.
+                No peers configured. Add peers in the Network Configuration
+                first.
               </Typography>
             ) : (
               <FormGroup>
@@ -213,7 +224,9 @@ export const OnboardingDialog = ({ open, onClose, onComplete }: OnboardingDialog
                     }
                     label={
                       <Box>
-                        <Typography variant="body2">{peer.name || peer.participant_id}</Typography>
+                        <Typography variant="body2">
+                          {peer.name || peer.participant_id}
+                        </Typography>
                         <Typography variant="caption" color="text.secondary">
                           {peer.address}:{peer.port}
                         </Typography>
@@ -259,7 +272,9 @@ export const OnboardingDialog = ({ open, onClose, onComplete }: OnboardingDialog
             onClick={handleStart}
             variant="contained"
             color="primary"
-            disabled={loading || !partyIdPrefix.trim() || selectedPeerIds.size === 0}
+            disabled={
+              loading || !partyIdPrefix.trim() || selectedPeerIds.size === 0
+            }
           >
             {loading ? <CircularProgress size={20} /> : "Start Onboarding"}
           </Button>
