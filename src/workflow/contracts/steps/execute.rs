@@ -33,14 +33,16 @@ use crate::{
 /// * `config` - Configuration with Ledger API connection details
 /// * `dirs` - WorkflowDirs containing all directory paths
 /// * `contracts_config` - Contracts workflow configuration with party ID
+/// * `token` - Authentication token for Ledger API
+/// * `user_id` - User ID for Ledger API operations
 pub async fn execute_submissions(
     config: &NodeConfig,
     dirs: &ContractsDirs,
     contracts_config: &ContractsConfig,
+    token: &str,
+    user_id: &str,
 ) -> Result {
     tracing::info!("Executing submissions...");
-
-    let user_id = &config.canton.ledger_api_user_id;
 
     // Use the decentralized party ID from contracts config (provided via UI)
     let decentralized_party = contracts_config.decentralized_party_id.to_string();
@@ -122,7 +124,8 @@ pub async fn execute_submissions(
     );
 
     // Step 4: Execute each submission
-    let mut submission_client = utils::create_submission_client(config).await?;
+    let token_opt = Some(token.to_string());
+    let mut submission_client = utils::create_submission_client(config, token_opt.clone()).await?;
 
     for (idx, prepared_response) in prepared_submissions.iter().enumerate() {
         tracing::info!("Executing submission {index}...", index = idx + 1);
@@ -193,7 +196,7 @@ pub async fn execute_submissions(
 
     // Step 5: Wait for contracts to appear in ACS
     tracing::info!("Waiting for contracts to appear in ledger...");
-    let mut state_client = utils::create_state_client(config).await?;
+    let mut state_client = utils::create_state_client(config, token_opt).await?;
 
     let max_attempts = TOPOLOGY_RETRY_MAX_ATTEMPTS;
     let retry_delay = tokio::time::Duration::from_secs(TOPOLOGY_RETRY_DELAY_SECS);

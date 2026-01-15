@@ -37,7 +37,6 @@ export interface NodeConfig {
     ledger_api_host: string;
     ledger_api_port: number;
     synchronizer: string;
-    ledger_api_user_id: string;
   };
 }
 
@@ -144,4 +143,33 @@ export interface PendingInvitation {
 
 export interface PendingInvitationsResponse {
   invitations: PendingInvitation[];
+}
+
+// Authentication types
+export type AuthStatus =
+  | { status: "authenticated" }
+  | { status: "mock" }
+  | { status: "failed"; error: string }
+  | { status: "notconfigured" };
+
+export interface PartyAuthStatus {
+  party_id: string;
+  user_id: string;
+  keycloak_url?: string;
+  keycloak_realm?: string;
+  status: AuthStatus;
+}
+
+export interface AuthStatusResponse {
+  parties: PartyAuthStatus[];
+}
+
+export interface AuthTestResult {
+  party_id: string;
+  success: boolean;
+  error?: string;
+}
+
+export interface AuthTestResponse {
+  results: AuthTestResult[];
 }

@@ -24,8 +24,12 @@ async fn main() -> Result {
     let config = NodeConfig::from_dir(&args.dir).await?;
 
     match args.command {
-        Commands::Serve { ref host, port } => {
-            dec_party_manager::server::start_server(host, port, config).await?;
+        Commands::Serve {
+            ref host,
+            port,
+            test,
+        } => {
+            dec_party_manager::server::start_server(host, port, config, test).await?;
         }
     }
 

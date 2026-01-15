@@ -270,3 +270,46 @@ pub struct PendingInvitationsResponse {
 pub struct InvitationActionRequest {
     pub id: String,
 }
+
+/// Authentication status for a party
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "status", rename_all = "lowercase")]
+pub enum AuthStatus {
+    Authenticated,
+    Mock,
+    Failed { error: String },
+    NotConfigured,
+}
+
+/// Authentication status for a single party
+#[derive(Clone, Debug, Serialize)]
+pub struct PartyAuthStatus {
+    pub party_id: String,
+    pub user_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keycloak_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keycloak_realm: Option<String>,
+    pub status: AuthStatus,
+}
+
+/// Response for the auth status endpoint
+#[derive(Serialize)]
+pub struct AuthStatusResponse {
+    pub parties: Vec<PartyAuthStatus>,
+}
+
+/// Result of an authentication test
+#[derive(Clone, Debug, Serialize)]
+pub struct AuthTestResult {
+    pub party_id: String,
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Response for the auth test endpoint
+#[derive(Serialize)]
+pub struct AuthTestResponse {
+    pub results: Vec<AuthTestResult>,
+}

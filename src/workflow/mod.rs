@@ -8,6 +8,7 @@ use std::sync::Arc;
 use anyhow::Context;
 
 use crate::{
+    auth::WorkflowAuth,
     config::{NodeConfig, Peer},
     consts::{LEDGER_SUBMISSIONS_DIR, PREPARED_DIR},
     error::Result,
@@ -35,6 +36,7 @@ pub async fn start_coordinator(
     onboarding_config: Option<OnboardingConfig>,
     kick_config: Option<KickConfig>,
     contracts_config: Option<ContractsConfig>,
+    workflow_auth: Option<WorkflowAuth>,
 ) -> Result {
     tracing::info!("Loading network config...");
     let network_config = node_config.load_network_config().await?;
@@ -52,7 +54,13 @@ pub async fn start_coordinator(
             let config = contracts_config.ok_or_else(|| {
                 anyhow::anyhow!("ContractsConfig is required for Contracts workflow")
             })?;
-            contracts::coordinator::start_coordinator(node_config, network_config, config).await
+            contracts::coordinator::start_coordinator(
+                node_config,
+                network_config,
+                config,
+                workflow_auth,
+            )
+            .await
         }
         WorkflowType::Kick => {
             let config = kick_config

@@ -12,6 +12,7 @@ use tokio::sync::{Notify, RwLock};
 use tokio_noise::handshakes::nn_psk2::Responder;
 
 use crate::{
+    auth::{AuthRegistry, MockAuthRegistry},
     config::NodeConfig,
     error::Result,
     noise::{Message, MessageType, NoiseKeypair, load_or_generate_keypair, parse_public_key},
@@ -33,6 +34,12 @@ pub struct AppState {
     pub coordinator_pubkey: Arc<RwLock<Option<String>>>,
     /// Pending invitations awaiting user acceptance
     pub pending_invitations: Arc<RwLock<Vec<PendingInvitation>>>,
+    /// Authentication registry for per-party Keycloak auth (None in test mode)
+    pub auth_registry: Option<Arc<AuthRegistry>>,
+    /// Mock authentication registry for test mode
+    pub mock_auth_registry: Option<Arc<MockAuthRegistry>>,
+    /// Whether the server is running in test mode
+    pub test_mode: bool,
 }
 
 /// Control mechanism for the Noise port listener
@@ -47,7 +54,25 @@ struct WorkflowTriggers {
 }
 
 /// Start the HTTP server and a heartbeat system for peer status tracking
-pub async fn start_server(host: &str, port: u16, config: NodeConfig) -> Result {
+pub async fn start_server(host: &str, port: u16, config: NodeConfig, test_mode: bool) -> Result {
+    // Initialize auth registries based on mode
+    let (auth_registry, mock_auth_registry) = if test_mode {
+        tracing::info!("Running in TEST MODE - using mock authentication");
+        (None, Some(Arc::new(MockAuthRegistry::new())))
+    } else if config.parties.is_empty() {
+        tracing::info!("No party credentials configured, auth registry disabled");
+        (None, None)
+    } else {
+        tracing::info!(
+            "Initializing auth registry for {} parties",
+            config.parties.len()
+        );
+        (
+            Some(Arc::new(AuthRegistry::new(&config.parties).await?)),
+            None,
+        )
+    };
+
     let peer_status = Arc::new(RwLock::new(HashMap::new()));
     let listener_control = Arc::new(RwLock::new(ListenerControl {
         should_pause: false,
@@ -69,6 +94,9 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig) -> Result {
         contracts_trigger: contracts_trigger.clone(),
         coordinator_pubkey: coordinator_pubkey.clone(),
         pending_invitations: pending_invitations.clone(),
+        auth_registry,
+        mock_auth_registry,
+        test_mode,
     });
     let kick_state = web::Data::new(Arc::new(handlers::KickWorkflowState::new()));
     let onboarding_state = web::Data::new(Arc::new(handlers::OnboardingWorkflowState::new()));
@@ -180,6 +208,8 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig) -> Result {
             .service(handlers::get_invitations)
             .service(handlers::accept_invitation)
             .service(handlers::decline_invitation)
+            .service(handlers::get_auth_status)
+            .service(handlers::test_auth)
             .service(assets::serve_frontend)
     })
     .bind((host, port))?

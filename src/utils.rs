@@ -379,6 +379,7 @@ macro_rules! define_client_creator {
     ($fn_name:ident, $client_type:ident) => {
         pub async fn $fn_name(
             config: &NodeConfig,
+            token: Option<String>,
         ) -> Result<
             $client_type<
                 tonic::service::interceptor::InterceptedService<
@@ -394,7 +395,6 @@ macro_rules! define_client_creator {
                 .connect()
                 .await?;
 
-            let token = config.canton.ledger_api_token.clone();
             let interceptor = move |mut req: tonic::Request<()>| {
                 if let Some(ref token) = token {
                     let bearer_token = format!("Bearer {token}");

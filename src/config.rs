@@ -116,6 +116,32 @@ impl NetworkConfig {
     }
 }
 
+/// Keycloak authentication configuration
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct KeycloakConfig {
+    /// Keycloak server URL (e.g., "https://keycloak.example.com")
+    pub url: String,
+    /// Keycloak realm name
+    pub realm: String,
+    /// OAuth2 client ID
+    pub client_id: String,
+    /// Username for password flow
+    pub username: String,
+    /// Password for password flow (consider using env var reference)
+    pub password: String,
+}
+
+/// Credentials for a specific decentralized party
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PartyCredentials {
+    /// The decentralized party ID this credential is for
+    pub party_id: CantonId,
+    /// Canton/Ledger API user ID (must match JWT 'sub' claim)
+    pub user_id: String,
+    /// Keycloak authentication configuration
+    pub keycloak: KeycloakConfig,
+}
+
 /// Timeout configuration
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Timeouts {
@@ -160,6 +186,9 @@ pub struct NodeConfig {
     pub canton: CantonConfig,
     #[serde(default)]
     pub timeouts: Timeouts,
+    /// Per-party credentials with Keycloak auth (multiple parties supported)
+    #[serde(default)]
+    pub parties: Vec<PartyCredentials>,
     /// Root directory containing config/ and data/ subdirectories
     #[serde(skip)]
     root_dir: PathBuf,
@@ -209,13 +238,6 @@ pub struct CantonConfig {
     pub ledger_api_port: u16,
     #[serde(default = "default_synchronizer")]
     pub synchronizer: String,
-    /// Optional JWT token for Ledger API authentication
-    /// If not provided, requests will be sent without authentication
-    #[serde(default)]
-    pub ledger_api_token: Option<String>,
-    /// Ledger API user ID for submission operations
-    /// Must match the JWT token's "sub" claim
-    pub ledger_api_user_id: String,
 }
 
 fn default_synchronizer() -> String {
@@ -300,6 +322,11 @@ impl NodeConfig {
     /// Get the dars directory
     pub fn dars_dir(&self) -> PathBuf {
         self.data_dir().join(DARS_DIR)
+    }
+
+    /// Get party credentials by party ID
+    pub fn get_party_credentials(&self, party_id: &CantonId) -> Option<&PartyCredentials> {
+        self.parties.iter().find(|p| &p.party_id == party_id)
     }
 }
 

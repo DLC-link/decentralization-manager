@@ -18,15 +18,17 @@ use super::{
     AppState,
     queries::{get_contracts, get_party_metadata},
     types::{
-        ConnectionStatus, ContractsRequest, DecentralizedPartiesResponse, DecentralizedParty,
-        HttpWorkflowState, InvitationActionRequest, InvitationType, KeyStatusResponse, KickRequest,
-        KickResponse, KickStatus, ListenerPauseGuard, OnboardingRequest, OnboardingResponse,
-        OnboardingStatus, ParticipantInfo, ParticipantStatus, ParticipantsStatusResponse,
+        AuthStatus, AuthStatusResponse, AuthTestResponse, AuthTestResult, ConnectionStatus,
+        ContractsRequest, DecentralizedPartiesResponse, DecentralizedParty, HttpWorkflowState,
+        InvitationActionRequest, InvitationType, KeyStatusResponse, KickRequest, KickResponse,
+        KickStatus, ListenerPauseGuard, OnboardingRequest, OnboardingResponse, OnboardingStatus,
+        ParticipantInfo, ParticipantStatus, ParticipantsStatusResponse, PartyAuthStatus,
         PendingInvitation, PendingInvitationsResponse, Permission, WorkflowProgress,
         WorkflowResponse,
     },
 };
 use crate::{
+    auth::{AuthRegistry, WorkflowAuth},
     config::{NetworkConfig, NodeConfig, Peer},
     error::Result,
     noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
@@ -95,7 +97,13 @@ pub async fn get_decentralized_parties(
     data: web::Data<AppState>,
     query: web::Query<PartiesQuery>,
 ) -> impl Responder {
-    match fetch_decentralized_parties(&data.config, query.prefix.as_deref()).await {
+    match fetch_decentralized_parties(
+        &data.config,
+        query.prefix.as_deref(),
+        data.auth_registry.clone(),
+    )
+    .await
+    {
         Ok(response) => HttpResponse::Ok().json(response),
         Err(e) => {
             tracing::error!("Failed to fetch decentralized parties: {e}");
@@ -109,6 +117,7 @@ pub async fn get_decentralized_parties(
 async fn fetch_decentralized_parties(
     config: &NodeConfig,
     prefix_filter: Option<&str>,
+    auth_registry: Option<Arc<AuthRegistry>>,
 ) -> Result<DecentralizedPartiesResponse> {
     let channel = tonic::transport::Channel::from_shared(config.admin_api_url())?
         .connect()
@@ -215,11 +224,22 @@ async fn fetch_decentralized_parties(
         .into_iter()
         .map(|(item, my_owner_key, p2p)| {
             let config = config.clone();
+            let auth_registry = auth_registry.clone();
             let party_id_str = p2p.party.clone();
             async move {
+                // Get token for this party from auth registry
+                let token = match &auth_registry {
+                    Some(registry) => match registry.get_by_str(&party_id_str) {
+                        Some(tm) => tm.get_token().await.ok(),
+                        None => None,
+                    },
+                    None => None,
+                };
+
+                let token_clone = token.clone();
                 let (contracts, local_metadata) = tokio::join!(
                     async {
-                        get_contracts(&config, &party_id_str)
+                        get_contracts(&config, &party_id_str, token)
                             .await
                             .unwrap_or_else(|e| {
                                 tracing::warn!("Failed to get contracts for {party_id_str}: {e}");
@@ -227,7 +247,7 @@ async fn fetch_decentralized_parties(
                             })
                     },
                     async {
-                        get_party_metadata(&config, &party_id_str)
+                        get_party_metadata(&config, &party_id_str, token_clone)
                             .await
                             .ok()
                             .flatten()
@@ -469,6 +489,7 @@ pub async fn start_kick(
             None, // No onboarding config
             Some(kick_config),
             None, // No contracts config
+            None, // No auth registry for kick
         )
         .await;
 
@@ -588,6 +609,7 @@ pub async fn start_onboarding(
             Some(onboarding_config),
             None, // No kick config
             None, // No contracts config
+            None, // No auth registry for onboarding
         )
         .await;
 
@@ -852,6 +874,16 @@ pub async fn start_contracts(
 
     // Spawn the contracts workflow in the background
     let config = data.config.clone();
+    // Build WorkflowAuth from either real auth registry or mock (test mode)
+    let workflow_auth = data
+        .auth_registry
+        .as_ref()
+        .map(|r| WorkflowAuth::Keycloak(r.clone()))
+        .or_else(|| {
+            data.mock_auth_registry
+                .as_ref()
+                .map(|r| WorkflowAuth::Mock(r.clone()))
+        });
     let contracts_state_clone = contracts_state.get_ref().clone();
     let listener_control = data.noise_listener_control.clone();
     let listener_notify = data.noise_listener_notify.clone();
@@ -880,6 +912,7 @@ pub async fn start_contracts(
             None, // No onboarding config
             None, // No kick config
             Some(contracts_config),
+            workflow_auth,
         )
         .await;
 
@@ -1095,4 +1128,105 @@ pub async fn decline_invitation(
             "error": "Invitation not found"
         })),
     }
+}
+
+/// Check authentication status for all configured parties
+#[get("/auth/status")]
+pub async fn get_auth_status(data: web::Data<AppState>) -> impl Responder {
+    let mut party_statuses = Vec::new();
+
+    // Handle test mode - return mock status
+    if data.test_mode {
+        if let Some(ref mock_registry) = data.mock_auth_registry {
+            let manager = mock_registry.get_by_str("");
+            party_statuses.push(PartyAuthStatus {
+                party_id: "(test mode)".to_string(),
+                user_id: manager.user_id().to_string(),
+                keycloak_url: None,
+                keycloak_realm: None,
+                status: AuthStatus::Mock,
+            });
+        }
+        return HttpResponse::Ok().json(AuthStatusResponse {
+            parties: party_statuses,
+        });
+    }
+
+    // Check each configured party
+    for party_creds in &data.config.parties {
+        let party_id = party_creds.party_id.to_string();
+        let user_id = party_creds.user_id.clone();
+
+        // Try to get a token from the auth registry
+        let status = match &data.auth_registry {
+            Some(registry) => match registry.get(&party_creds.party_id) {
+                Some(tm) => match tm.get_token().await {
+                    Ok(_) => AuthStatus::Authenticated,
+                    Err(e) => AuthStatus::Failed {
+                        error: e.to_string(),
+                    },
+                },
+                None => AuthStatus::NotConfigured,
+            },
+            None => AuthStatus::NotConfigured,
+        };
+
+        party_statuses.push(PartyAuthStatus {
+            party_id,
+            user_id,
+            keycloak_url: Some(party_creds.keycloak.url.clone()),
+            keycloak_realm: Some(party_creds.keycloak.realm.clone()),
+            status,
+        });
+    }
+
+    HttpResponse::Ok().json(AuthStatusResponse {
+        parties: party_statuses,
+    })
+}
+
+/// Test authentication by attempting to get a fresh token
+#[post("/auth/test")]
+pub async fn test_auth(data: web::Data<AppState>) -> impl Responder {
+    let mut results = Vec::new();
+
+    // Handle test mode - mock auth always succeeds
+    if data.test_mode {
+        results.push(AuthTestResult {
+            party_id: "(test mode)".to_string(),
+            success: true,
+            error: None,
+        });
+        return HttpResponse::Ok().json(AuthTestResponse { results });
+    }
+
+    for party_creds in &data.config.parties {
+        let party_id = party_creds.party_id.to_string();
+
+        // Attempt fresh authentication
+        let result = test_keycloak_auth(&party_creds.keycloak).await;
+
+        results.push(AuthTestResult {
+            party_id,
+            success: result.is_ok(),
+            error: result.err(),
+        });
+    }
+
+    HttpResponse::Ok().json(AuthTestResponse { results })
+}
+
+async fn test_keycloak_auth(
+    config: &crate::config::KeycloakConfig,
+) -> std::result::Result<(), String> {
+    let url = keycloak::login::password_url(&config.url, &config.realm);
+    keycloak::login::password(keycloak::login::PasswordParams {
+        client_id: config.client_id.clone(),
+        username: config.username.clone(),
+        password: config.password.clone(),
+        url,
+    })
+    .await
+    .map(|_| ())
+    .map_err(|e| e.to_string())
 }

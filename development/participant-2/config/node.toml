@@ -19,3 +19,14 @@ handshake_timeout_secs = 30
 message_timeout_secs = 120
 connection_retry_attempts = 3
 connection_retry_delay_secs = 5
+
+[[parties]]
+party_id = "cbtc-network::12202a83c6f4082217c175e29bc53da5f2703ba2675778ab99217a5a881a949203ff"
+user_id = "merchant_user"
+
+[parties.keycloak]
+url = "https://keycloak.dev.canton.ibtc.network"
+realm = "ibtc-catalyst-devnet"
+client_id = "ibtc-devnet-1-wallet-ui"
+username = "merchant_user"
+password = "ZQX@axp2fub9pug9rxp"

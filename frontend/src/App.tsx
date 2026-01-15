@@ -14,6 +14,7 @@ import { Header } from "./components/Header";
 import { PartyCard } from "./components/PartyCard";
 import { NodeConfigAccordion } from "./components/NodeConfigAccordion";
 import { NetworkConfigAccordion } from "./components/NetworkConfigAccordion";
+import { AuthCheckAccordion } from "./components/AuthCheckAccordion";
 import { LoadingSkeleton } from "./components/LoadingSkeleton";
 import { OnboardingDialog } from "./components/OnboardingDialog";
 import { InvitationModal } from "./components/InvitationModal";
@@ -216,6 +217,7 @@ const App = () => {
                 onSave={savePeers}
               />
             )}
+            <AuthCheckAccordion />
 
             <Box sx={{ mt: 5, mb: 3 }}>
               <Box
