@@ -281,16 +281,42 @@ pub enum AuthStatus {
     NotConfigured,
 }
 
+/// User rights validation result
+#[derive(Clone, Debug, Serialize)]
+pub struct RightsStatus {
+    /// Whether user can actAs the member party
+    pub member_party_act_as: bool,
+    /// Whether user can readAs the member party
+    pub member_party_read_as: bool,
+    /// Whether user can actAs the decentralized party
+    pub dec_party_act_as: bool,
+    /// Whether user can readAs the decentralized party
+    pub dec_party_read_as: bool,
+}
+
+impl RightsStatus {
+    /// Check if all required rights are present
+    pub fn is_valid(&self) -> bool {
+        self.member_party_act_as
+            && self.member_party_read_as
+            && self.dec_party_act_as
+            && self.dec_party_read_as
+    }
+}
+
 /// Authentication status for a single party
 #[derive(Clone, Debug, Serialize)]
 pub struct PartyAuthStatus {
-    pub party_id: String,
+    pub dec_party_id: String,
+    pub member_party_id: String,
     pub user_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keycloak_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keycloak_realm: Option<String>,
     pub status: AuthStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rights: Option<RightsStatus>,
 }
 
 /// Response for the auth status endpoint

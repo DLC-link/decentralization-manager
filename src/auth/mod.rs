@@ -27,6 +27,8 @@ struct TokenState {
 pub struct TokenManager {
     config: KeycloakConfig,
     user_id: String,
+    /// The member party ID that owns these credentials
+    member_party_id: CantonId,
     state: RwLock<TokenState>,
 }
 
@@ -36,11 +38,16 @@ impl TokenManager {
     /// # Errors
     ///
     /// Returns an error if Keycloak authentication fails
-    pub async fn new(config: KeycloakConfig, user_id: String) -> Result<Self> {
+    pub async fn new(
+        config: KeycloakConfig,
+        user_id: String,
+        member_party_id: CantonId,
+    ) -> Result<Self> {
         let state = Self::authenticate(&config).await?;
         Ok(Self {
             config,
             user_id,
+            member_party_id,
             state: RwLock::new(state),
         })
     }
@@ -48,6 +55,11 @@ impl TokenManager {
     /// Get the user ID for this party's credentials
     pub fn user_id(&self) -> &str {
         &self.user_id
+    }
+
+    /// Get the member party ID that owns these credentials
+    pub fn member_party_id(&self) -> &CantonId {
+        &self.member_party_id
     }
 
     /// Get a fresh access token, refreshing if necessary
@@ -139,12 +151,20 @@ impl AuthRegistry {
         let mut managers = HashMap::new();
 
         for party in parties {
-            let party_id = party.party_id.to_string();
-            tracing::info!("Initializing authentication for party: {party_id}");
+            let dec_party_id = party.dec_party_id.to_string();
+            tracing::info!(
+                "Initializing authentication for dec_party={dec_party_id}, member_party={}",
+                party.member_party_id
+            );
 
-            let manager = TokenManager::new(party.keycloak.clone(), party.user_id.clone()).await?;
+            let manager = TokenManager::new(
+                party.keycloak.clone(),
+                party.user_id.clone(),
+                party.member_party_id.clone(),
+            )
+            .await?;
 
-            managers.insert(party_id, Arc::new(manager));
+            managers.insert(dec_party_id, Arc::new(manager));
         }
 
         Ok(Self { managers })
@@ -178,22 +198,41 @@ pub enum WorkflowAuth {
     Mock(Arc<MockAuthRegistry>),
 }
 
+/// Credentials for a party, including token, user_id, and member_party_id
+pub struct PartyAuthCredentials {
+    pub token: String,
+    pub user_id: String,
+    pub member_party_id: CantonId,
+}
+
 impl WorkflowAuth {
-    /// Get token and user_id for a party
-    /// For mock auth, returns the static mock credentials regardless of party_id
-    pub async fn get_credentials(&self, party_id: &CantonId) -> Result<(String, String)> {
+    /// Get credentials for a decentralized party
+    ///
+    /// Returns token, user_id, and member_party_id.
+    /// The member_party_id is the local party that owns the credentials and can
+    /// act_as/read_as both itself and the decentralized party.
+    pub async fn get_credentials(&self, dec_party_id: &CantonId) -> Result<PartyAuthCredentials> {
         match self {
             WorkflowAuth::Keycloak(registry) => {
-                let tm = registry.get(party_id).ok_or_else(|| {
-                    anyhow::anyhow!("No credentials configured for party: {party_id}")
+                let tm = registry.get(dec_party_id).ok_or_else(|| {
+                    anyhow::anyhow!("No credentials configured for party: {dec_party_id}")
                 })?;
                 let token = tm.get_token().await?;
                 let user_id = tm.user_id().to_string();
-                Ok((token, user_id))
+                let member_party_id = tm.member_party_id().clone();
+                Ok(PartyAuthCredentials {
+                    token,
+                    user_id,
+                    member_party_id,
+                })
             }
             WorkflowAuth::Mock(registry) => {
-                let mm = registry.get(party_id);
-                Ok((mm.get_token(), mm.user_id().to_string()))
+                let mm = registry.get(dec_party_id);
+                Ok(PartyAuthCredentials {
+                    token: mm.get_token(),
+                    user_id: mm.user_id().to_string(),
+                    member_party_id: mm.member_party_id().clone(),
+                })
             }
         }
     }

@@ -76,11 +76,13 @@ async fn run_workflow(
     config: ContractsConfig,
     workflow_auth: Option<WorkflowAuth>,
 ) -> Result {
-    // Get token and user_id for the decentralized party
-    let party_id = &config.decentralized_party_id;
+    // Get credentials for the decentralized party
+    let dec_party_id = &config.decentralized_party_id;
     let auth = workflow_auth
         .ok_or_else(|| anyhow::anyhow!("Auth not configured, cannot run contracts workflow"))?;
-    let (token, user_id) = auth.get_credentials(party_id).await?;
+    let creds = auth.get_credentials(dec_party_id).await?;
+    let token = creds.token;
+    let user_id = creds.user_id;
 
     let mut coordinator_completed_steps = HashSet::new();
 

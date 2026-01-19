@@ -152,12 +152,21 @@ export type AuthStatus =
   | { status: "failed"; error: string }
   | { status: "notconfigured" };
 
+export interface RightsStatus {
+  member_party_act_as: boolean;
+  member_party_read_as: boolean;
+  dec_party_act_as: boolean;
+  dec_party_read_as: boolean;
+}
+
 export interface PartyAuthStatus {
-  party_id: string;
+  dec_party_id: string;
+  member_party_id: string;
   user_id: string;
   keycloak_url?: string;
   keycloak_realm?: string;
   status: AuthStatus;
+  rights?: RightsStatus;
 }
 
 export interface AuthStatusResponse {

@@ -134,9 +134,11 @@ pub struct KeycloakConfig {
 /// Credentials for a specific decentralized party
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PartyCredentials {
-    /// The decentralized party ID this credential is for
-    pub party_id: CantonId,
-    /// Canton/Ledger API user ID (must match JWT 'sub' claim)
+    /// The decentralized party ID (shared among all members)
+    pub dec_party_id: CantonId,
+    /// The member party ID (local to this node, owns the credentials)
+    pub member_party_id: CantonId,
+    /// Canton/Ledger API user ID (must match JWT 'sub' claim, belongs to member_party)
     pub user_id: String,
     /// Keycloak authentication configuration
     pub keycloak: KeycloakConfig,
@@ -324,9 +326,11 @@ impl NodeConfig {
         self.data_dir().join(DARS_DIR)
     }
 
-    /// Get party credentials by party ID
-    pub fn get_party_credentials(&self, party_id: &CantonId) -> Option<&PartyCredentials> {
-        self.parties.iter().find(|p| &p.party_id == party_id)
+    /// Get party credentials by decentralized party ID
+    pub fn get_party_credentials(&self, dec_party_id: &CantonId) -> Option<&PartyCredentials> {
+        self.parties
+            .iter()
+            .find(|p| &p.dec_party_id == dec_party_id)
     }
 }
 

@@ -1,15 +1,21 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use actix_web::{HttpResponse, Responder, get, post, web};
-use canton_proto_rs::com::digitalasset::canton::{
-    crypto::{
-        admin::v30::{ListMyKeysRequest, vault_service_client::VaultServiceClient},
-        v30::public_key,
+use canton_proto_rs::com::{
+    daml::ledger::api::v2::admin::{
+        ListUserRightsRequest,
+        right::{CanActAs, CanReadAs, Kind},
     },
-    topology::admin::v30::{
-        BaseQuery, ListDecentralizedNamespaceDefinitionRequest, ListPartyToParticipantRequest,
-        StoreId, Synchronizer, base_query, store_id, synchronizer,
-        topology_manager_read_service_client::TopologyManagerReadServiceClient,
+    digitalasset::canton::{
+        crypto::{
+            admin::v30::{ListMyKeysRequest, vault_service_client::VaultServiceClient},
+            v30::public_key,
+        },
+        topology::admin::v30::{
+            BaseQuery, ListDecentralizedNamespaceDefinitionRequest, ListPartyToParticipantRequest,
+            StoreId, Synchronizer, base_query, store_id, synchronizer,
+            topology_manager_read_service_client::TopologyManagerReadServiceClient,
+        },
     },
 };
 use serde::Deserialize;
@@ -23,7 +29,7 @@ use super::{
         InvitationActionRequest, InvitationType, KeyStatusResponse, KickRequest, KickResponse,
         KickStatus, ListenerPauseGuard, OnboardingRequest, OnboardingResponse, OnboardingStatus,
         ParticipantInfo, ParticipantStatus, ParticipantsStatusResponse, PartyAuthStatus,
-        PendingInvitation, PendingInvitationsResponse, Permission, WorkflowProgress,
+        PendingInvitation, PendingInvitationsResponse, Permission, RightsStatus, WorkflowProgress,
         WorkflowResponse,
     },
 };
@@ -1140,11 +1146,13 @@ pub async fn get_auth_status(data: web::Data<AppState>) -> impl Responder {
         if let Some(ref mock_registry) = data.mock_auth_registry {
             let manager = mock_registry.get_by_str("");
             party_statuses.push(PartyAuthStatus {
-                party_id: "(test mode)".to_string(),
+                dec_party_id: "(test mode)".to_string(),
+                member_party_id: "(test mode)".to_string(),
                 user_id: manager.user_id().to_string(),
                 keycloak_url: None,
                 keycloak_realm: None,
                 status: AuthStatus::Mock,
+                rights: None,
             });
         }
         return HttpResponse::Ok().json(AuthStatusResponse {
@@ -1154,34 +1162,102 @@ pub async fn get_auth_status(data: web::Data<AppState>) -> impl Responder {
 
     // Check each configured party
     for party_creds in &data.config.parties {
-        let party_id = party_creds.party_id.to_string();
+        let dec_party_id = party_creds.dec_party_id.to_string();
+        let member_party_id = party_creds.member_party_id.to_string();
         let user_id = party_creds.user_id.clone();
 
         // Try to get a token from the auth registry
-        let status = match &data.auth_registry {
-            Some(registry) => match registry.get(&party_creds.party_id) {
+        let (status, token) = match &data.auth_registry {
+            Some(registry) => match registry.get(&party_creds.dec_party_id) {
                 Some(tm) => match tm.get_token().await {
-                    Ok(_) => AuthStatus::Authenticated,
-                    Err(e) => AuthStatus::Failed {
-                        error: e.to_string(),
-                    },
+                    Ok(t) => (AuthStatus::Authenticated, Some(t)),
+                    Err(e) => (
+                        AuthStatus::Failed {
+                            error: e.to_string(),
+                        },
+                        None,
+                    ),
                 },
-                None => AuthStatus::NotConfigured,
+                None => (AuthStatus::NotConfigured, None),
             },
-            None => AuthStatus::NotConfigured,
+            None => (AuthStatus::NotConfigured, None),
+        };
+
+        // Check user rights if we have a valid token
+        let rights = if let Some(ref t) = token {
+            check_user_rights(&data.config, t, &user_id, &member_party_id, &dec_party_id)
+                .await
+                .ok()
+        } else {
+            None
         };
 
         party_statuses.push(PartyAuthStatus {
-            party_id,
+            dec_party_id,
+            member_party_id,
             user_id,
             keycloak_url: Some(party_creds.keycloak.url.clone()),
             keycloak_realm: Some(party_creds.keycloak.realm.clone()),
             status,
+            rights,
         });
     }
 
     HttpResponse::Ok().json(AuthStatusResponse {
         parties: party_statuses,
+    })
+}
+
+/// Check user rights for both member party and decentralized party
+async fn check_user_rights(
+    config: &NodeConfig,
+    token: &str,
+    user_id: &str,
+    member_party_id: &str,
+    dec_party_id: &str,
+) -> Result<RightsStatus> {
+    let mut client = utils::create_user_client(config, Some(token.to_string())).await?;
+
+    let response = client
+        .list_user_rights(tonic::Request::new(ListUserRightsRequest {
+            user_id: user_id.to_string(),
+            identity_provider_id: String::new(),
+        }))
+        .await?
+        .into_inner();
+
+    let mut member_party_act_as = false;
+    let mut member_party_read_as = false;
+    let mut dec_party_act_as = false;
+    let mut dec_party_read_as = false;
+
+    for right in response.rights {
+        match right.kind {
+            Some(Kind::CanActAs(CanActAs { party })) => {
+                if party == member_party_id {
+                    member_party_act_as = true;
+                }
+                if party == dec_party_id {
+                    dec_party_act_as = true;
+                }
+            }
+            Some(Kind::CanReadAs(CanReadAs { party })) => {
+                if party == member_party_id {
+                    member_party_read_as = true;
+                }
+                if party == dec_party_id {
+                    dec_party_read_as = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(RightsStatus {
+        member_party_act_as,
+        member_party_read_as,
+        dec_party_act_as,
+        dec_party_read_as,
     })
 }
 
@@ -1201,13 +1277,13 @@ pub async fn test_auth(data: web::Data<AppState>) -> impl Responder {
     }
 
     for party_creds in &data.config.parties {
-        let party_id = party_creds.party_id.to_string();
+        let dec_party_id = party_creds.dec_party_id.to_string();
 
         // Attempt fresh authentication
         let result = test_keycloak_auth(&party_creds.keycloak).await;
 
         results.push(AuthTestResult {
-            party_id,
+            party_id: dec_party_id,
             success: result.is_ok(),
             error: result.err(),
         });

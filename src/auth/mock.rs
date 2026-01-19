@@ -12,14 +12,21 @@ pub const MOCK_USER_ID: &str = "ledger-api-user";
 pub struct MockTokenManager {
     user_id: String,
     token: String,
+    member_party_id: CantonId,
 }
 
 impl MockTokenManager {
     /// Create a new MockTokenManager with default test credentials
     pub fn new() -> Self {
+        // Use a placeholder member party ID for test mode
+        let member_party_id = CantonId::parse(
+            "mock-member::1220aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01",
+        )
+        .expect("hardcoded mock member party ID should be valid");
         Self {
             user_id: MOCK_USER_ID.to_string(),
             token: MOCK_TOKEN.to_string(),
+            member_party_id,
         }
     }
 
@@ -31,6 +38,11 @@ impl MockTokenManager {
     /// Get the mock token (always succeeds)
     pub fn get_token(&self) -> String {
         self.token.clone()
+    }
+
+    /// Get the member party ID
+    pub fn member_party_id(&self) -> &CantonId {
+        &self.member_party_id
     }
 }
 

@@ -16,9 +16,10 @@ import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import ErrorIcon from "@mui/icons-material/Error";
 import HelpOutlineIcon from "@mui/icons-material/HelpOutline";
 import ScienceIcon from "@mui/icons-material/Science";
+import WarningIcon from "@mui/icons-material/Warning";
 import { CopyableText } from "./CopyableText";
 import { API_BASE } from "../constants";
-import type { PartyAuthStatus, AuthStatusResponse, AuthTestResponse } from "../types";
+import type { PartyAuthStatus, AuthStatusResponse, AuthTestResponse, RightsStatus } from "../types";
 
 const accordionSx = {
   borderRadius: 2,
@@ -66,7 +67,7 @@ export const AuthCheckAccordion = () => {
         // Update statuses based on test results
         setAuthStatuses((prev) =>
           prev.map((party) => {
-            const result = data.results.find((r) => r.party_id === party.party_id);
+            const result = data.results.find((r) => r.party_id === party.dec_party_id);
             if (result) {
               return {
                 ...party,
@@ -78,6 +79,8 @@ export const AuthCheckAccordion = () => {
             return party;
           })
         );
+        // Refresh to get updated rights status
+        fetchAuthStatus();
       } else {
         setError("Failed to test authentication");
       }
@@ -86,6 +89,16 @@ export const AuthCheckAccordion = () => {
     } finally {
       setTesting(false);
     }
+  };
+
+  const isRightsValid = (rights: RightsStatus | undefined): boolean => {
+    if (!rights) return false;
+    return (
+      rights.member_party_act_as &&
+      rights.member_party_read_as &&
+      rights.dec_party_act_as &&
+      rights.dec_party_read_as
+    );
   };
 
   const getStatusIcon = (status: PartyAuthStatus["status"]) => {
@@ -127,7 +140,7 @@ export const AuthCheckAccordion = () => {
           {!loading && hasParties && (
             <Box sx={{ display: "flex", gap: 0.5, ml: 1 }}>
               {authStatuses.map((party) => (
-                <Box key={party.party_id}>{getStatusIcon(party.status)}</Box>
+                <Box key={party.dec_party_id}>{getStatusIcon(party.status)}</Box>
               ))}
             </Box>
           )}
@@ -163,7 +176,7 @@ export const AuthCheckAccordion = () => {
 
             {authStatuses.map((party, index) => (
               <Box
-                key={party.party_id}
+                key={party.dec_party_id}
                 sx={{
                   p: 2,
                   mb: index < authStatuses.length - 1 ? 2 : 0,
@@ -182,14 +195,25 @@ export const AuthCheckAccordion = () => {
                   }}
                 >
                   <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-                    <Typography variant="subtitle2">Party</Typography>
+                    <Typography variant="subtitle2">Dec Party</Typography>
                     <CopyableText
-                      text={party.party_id}
+                      text={party.dec_party_id}
                       truncate={{ start: 16, end: 8 }}
                       variant="body2"
                     />
                   </Box>
                   {getStatusChip(party.status)}
+                </Box>
+
+                <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: 0.5 }}>
+                  <Typography variant="body2" color="text.secondary">
+                    <strong>Member Party:</strong>
+                  </Typography>
+                  <CopyableText
+                    text={party.member_party_id}
+                    truncate={{ start: 16, end: 8 }}
+                    variant="body2"
+                  />
                 </Box>
 
                 <Typography variant="body2" color="text.secondary" sx={{ mb: 0.5 }}>
@@ -206,6 +230,45 @@ export const AuthCheckAccordion = () => {
                   </Typography>
                 )}
 
+                {party.rights && (
+                  <Box sx={{ mt: 1.5 }}>
+                    <Typography variant="subtitle2" sx={{ mb: 0.5 }}>
+                      User Rights
+                      {isRightsValid(party.rights) ? (
+                        <CheckCircleIcon color="success" fontSize="small" sx={{ ml: 1, verticalAlign: "middle" }} />
+                      ) : (
+                        <WarningIcon color="warning" fontSize="small" sx={{ ml: 1, verticalAlign: "middle" }} />
+                      )}
+                    </Typography>
+                    <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
+                      <Chip
+                        label="Member actAs"
+                        size="small"
+                        color={party.rights.member_party_act_as ? "success" : "error"}
+                        variant={party.rights.member_party_act_as ? "filled" : "outlined"}
+                      />
+                      <Chip
+                        label="Member readAs"
+                        size="small"
+                        color={party.rights.member_party_read_as ? "success" : "error"}
+                        variant={party.rights.member_party_read_as ? "filled" : "outlined"}
+                      />
+                      <Chip
+                        label="DecParty actAs"
+                        size="small"
+                        color={party.rights.dec_party_act_as ? "success" : "error"}
+                        variant={party.rights.dec_party_act_as ? "filled" : "outlined"}
+                      />
+                      <Chip
+                        label="DecParty readAs"
+                        size="small"
+                        color={party.rights.dec_party_read_as ? "success" : "error"}
+                        variant={party.rights.dec_party_read_as ? "filled" : "outlined"}
+                      />
+                    </Box>
+                  </Box>
+                )}
+
                 {party.status.status === "mock" && (
                   <Alert severity="warning" sx={{ mt: 1 }}>
                     Running in test mode with mock authentication. Static JWT token is being used.
@@ -214,6 +277,11 @@ export const AuthCheckAccordion = () => {
                 {party.status.status === "failed" && (
                   <Alert severity="error" sx={{ mt: 1 }}>
                     {party.status.error}
+                  </Alert>
+                )}
+                {party.rights && !isRightsValid(party.rights) && (
+                  <Alert severity="warning" sx={{ mt: 1 }}>
+                    Missing required user rights. Ensure the user has actAs and readAs permissions for both the member party and decentralized party.
                   </Alert>
                 )}
               </Box>
