@@ -19,6 +19,7 @@ import UploadFileIcon from "@mui/icons-material/UploadFile";
 import { CopyableText } from "./CopyableText";
 import { KickDialog } from "./KickDialog";
 import { ContractsDialog } from "./ContractsDialog";
+import { GovernanceSection } from "./GovernanceSection";
 import type { DecentralizedParty } from "../types";
 import { MAINNET_DEMO } from "../constants";
 
@@ -173,6 +174,10 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId }: PartyCardProp
           </Box>
         </>
       )}
+
+      <CardContent sx={{ pt: 0 }}>
+        <GovernanceSection partyId={party.party_id} />
+      </CardContent>
 
       <KickDialog
         open={kickDialogOpen}
