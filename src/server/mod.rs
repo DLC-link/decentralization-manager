@@ -210,6 +210,9 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig, test_mode: 
             .service(handlers::decline_invitation)
             .service(handlers::get_auth_status)
             .service(handlers::test_auth)
+            .service(handlers::get_governance)
+            .service(handlers::confirm_action)
+            .service(handlers::execute_action)
             .service(assets::serve_frontend)
     })
     .bind((host, port))?
