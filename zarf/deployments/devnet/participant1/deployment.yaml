@@ -93,7 +93,7 @@ spec:
               mountPath: /app
       containers:
         - name: dec-party-manager
-          image: public.ecr.aws/dlc-link/canton-decparty-manager:0.0.13
+          image: public.ecr.aws/dlc-link/canton-decparty-manager:0.0.15
           imagePullPolicy: Always
           command:
             [

@@ -2,22 +2,18 @@ use std::collections::HashMap;
 
 use canton_proto_rs::com::daml::ledger::api::v2::{
     CumulativeFilter, EventFormat, Filters, GetActiveContractsRequest, GetLedgerEndRequest,
-    Identifier, TemplateFilter, WildcardFilter, cumulative_filter,
-    get_active_contracts_response::ContractEntry, value,
+    WildcardFilter, cumulative_filter, get_active_contracts_response::ContractEntry, value,
 };
 
 use crate::{config::NodeConfig, error::Result, utils};
 
 use super::types::{ContractInfo, GovernanceAction, GovernanceConfirmation, PartyMetadata};
 
-/// Hardcoded governance confirmation templates
-const GOVERNANCE_TEMPLATES: &[(&str, &str, &str)] = &[
-    (
-        "#bitsafe-vault-governance-v0",
-        "BitsafeVault.VaultGovernance",
-        "VaultGovernanceConfirmation",
-    ),
-    ("#cbtc-governance-devnet", "CBTC.Governance", "Confirmation"),
+/// Governance confirmation template identifiers (module_name, entity_name)
+/// Package IDs are not specified to support different deployments
+const GOVERNANCE_TEMPLATES: &[(&str, &str)] = &[
+    ("BitsafeVault.VaultGovernance", "VaultGovernanceConfirmation"),
+    ("CBTC.Governance", "Confirmation"),
 ];
 
 /// Get active contracts for a party
@@ -129,10 +125,17 @@ pub async fn get_party_metadata(
     }
 }
 
+/// Check if a template matches any governance confirmation template
+fn is_governance_template(module_name: &str, entity_name: &str) -> bool {
+    GOVERNANCE_TEMPLATES
+        .iter()
+        .any(|(m, e)| *m == module_name && *e == entity_name)
+}
+
 /// Get governance confirmations for a decentralized party
 ///
-/// Fetches active contracts matching governance confirmation templates,
-/// extracts action field, and groups by action.
+/// Fetches all active contracts and filters for governance confirmation templates,
+/// then extracts action field and groups by action.
 pub async fn get_governance_confirmations(
     config: &NodeConfig,
     party_id: &str,
@@ -148,31 +151,18 @@ pub async fn get_governance_confirmations(
         .into_inner()
         .offset;
 
-    // Build filters for all governance templates
-    let cumulative_filters: Vec<CumulativeFilter> = GOVERNANCE_TEMPLATES
-        .iter()
-        .map(|(package_id, module_name, entity_name)| {
-            let template_id = Identifier {
-                package_id: (*package_id).to_string(),
-                module_name: (*module_name).to_string(),
-                entity_name: (*entity_name).to_string(),
-            };
-            CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
-                    TemplateFilter {
-                        template_id: Some(template_id),
-                        include_created_event_blob: false,
-                    },
-                )),
-            }
-        })
-        .collect();
-
+    // Use wildcard filter to get all contracts, then filter in code
     let mut filters_by_party = HashMap::new();
     filters_by_party.insert(
         party_id.to_string(),
         Filters {
-            cumulative: cumulative_filters,
+            cumulative: vec![CumulativeFilter {
+                identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
+                    WildcardFilter {
+                        include_created_event_blob: false,
+                    },
+                )),
+            }],
         },
     );
 
@@ -197,6 +187,22 @@ pub async fn get_governance_confirmations(
         if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
             && let Some(created) = active.created_event
         {
+            // Check if this is a governance confirmation template
+            let template = created.template_id.as_ref();
+            let is_governance = template
+                .map(|t| is_governance_template(&t.module_name, &t.entity_name))
+                .unwrap_or(false);
+
+            if !is_governance {
+                continue;
+            }
+
+            // Debug: log available fields (temporary info level for debugging)
+            if let Some(record) = created.create_arguments.as_ref() {
+                let field_names: Vec<&str> = record.fields.iter().map(|f| f.label.as_str()).collect();
+                tracing::info!("Governance contract fields: {field_names:?}");
+            }
+
             // Extract action field from create_arguments
             let action = created
                 .create_arguments
