@@ -9,7 +9,7 @@ metadata:
 data:
   node.toml: |
     [node]
-    node_id = "participant-ibtc-devnet-3"
+    participant_id = "iBTC-validator-3::1220d544125d3619e9c4d7340466a78a85f738e75a740837fa6283a1051494f5df23"
     listen_address = "0.0.0.0"
     public_address = "dec-party-manager-3.catalyst-canton.svc.cluster.local"
     port = 9000
@@ -27,6 +27,18 @@ data:
     message_timeout_secs = 120
     connection_retry_attempts = 3
     connection_retry_delay_secs = 5
+
+    [[parties]]
+    dec_party_id = "cbtc-network::12202a83c6f4082217c175e29bc53da5f2703ba2675778ab99217a5a881a949203ff"
+    member_party_id = "merchant::1220fa8543db6c66fe3a55b1f180c8dfc7f876265c76684fbc1d35d89e02c8aafe8e"
+    user_id = "merchant_user"
+
+    [parties.keycloak]
+    url = "https://keycloak.dev.canton.ibtc.network"
+    realm = "ibtc-catalyst-devnet"
+    client_id = "ibtc-devnet-1-wallet-ui"
+    username = "merchant_user"
+    password = "ZQX@axp2fub9pug9rxp"
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -82,7 +94,7 @@ spec:
               mountPath: /app
       containers:
         - name: dec-party-manager
-          image: public.ecr.aws/dlc-link/canton-decparty-manager:v0.0.9-demo
+          image: public.ecr.aws/dlc-link/canton-decparty-manager:v0.0.11
           imagePullPolicy: Always
           command:
             [

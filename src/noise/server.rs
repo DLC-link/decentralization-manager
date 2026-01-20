@@ -51,7 +51,7 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         let mut peer_keys = HashMap::new();
         for peer in &network_config.peers {
             let peer_id = peer.participant_id.to_string();
-            if peer.participant_id == node_config.node.participant_id || excluded.contains(&peer_id)
+            if peer.participant_id == *node_config.participant_id() || excluded.contains(&peer_id)
             {
                 continue;
             }
@@ -65,7 +65,7 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
             .iter()
             .filter(|p| {
                 let peer_id = p.participant_id.to_string();
-                p.participant_id != node_config.node.participant_id && !excluded.contains(&peer_id)
+                p.participant_id != *node_config.participant_id() && !excluded.contains(&peer_id)
             })
             .map(|p| p.participant_id.to_string())
             .collect();

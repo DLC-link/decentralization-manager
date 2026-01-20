@@ -313,7 +313,7 @@ pub async fn get_participants_status(data: web::Data<AppState>) -> impl Responde
 
 async fn check_participants_status(config: &NodeConfig) -> Result<ParticipantsStatusResponse> {
     let network_config = config.load_network_config().await?;
-    let current_participant_id = &config.node.participant_id;
+    let current_participant_id = config.participant_id();
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
 
     let ping_message = Message::new_empty(MessageType::Ping);
@@ -431,7 +431,7 @@ pub async fn start_kick(
     };
 
     // Prevent kicking ourselves
-    if participant_id == data.config.node.participant_id {
+    if participant_id == *data.config.participant_id() {
         return HttpResponse::BadRequest().json(serde_json::json!({
             "error": "Cannot kick yourself"
         }));
@@ -683,7 +683,7 @@ async fn send_onboarding_invites(config: &NodeConfig, peer_ids: &[String]) -> Re
 
         let psk = keypair.derive_psk(&peer_pub_key);
         // Use participant_id as identity (must match what server expects in peer_keys lookup)
-        let identity = config.node.participant_id.to_string();
+        let identity = config.participant_id().to_string();
 
         tracing::info!(
             "Sending onboarding invite to {peer_id} at {addr}:{port}",
@@ -726,7 +726,7 @@ async fn send_kick_invites(config: &NodeConfig, kicked_participant: &CantonId) -
     let network_config = config.load_network_config().await?;
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
 
-    let current_participant_id = &config.node.participant_id;
+    let current_participant_id = config.participant_id();
     let invite_message = Message::new_empty(MessageType::InviteKick);
 
     tracing::info!(
@@ -779,7 +779,7 @@ async fn send_kick_invites(config: &NodeConfig, kicked_participant: &CantonId) -
 
         let psk = keypair.derive_psk(&peer_pub_key);
         // Use participant_id as identity (must match what server expects in peer_keys lookup)
-        let identity = config.node.participant_id.to_string();
+        let identity = config.participant_id().to_string();
 
         tracing::info!(
             "Sending kick invite to {} at {}:{}",
@@ -956,7 +956,7 @@ async fn send_contracts_invites(config: &NodeConfig) -> Result {
     let network_config = config.load_network_config().await?;
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
 
-    let current_participant_id = &config.node.participant_id;
+    let current_participant_id = config.participant_id();
     let invite_message = Message::new_empty(MessageType::InviteContracts);
 
     for peer in &network_config.peers {
@@ -985,7 +985,7 @@ async fn send_contracts_invites(config: &NodeConfig) -> Result {
 
         let psk = keypair.derive_psk(&peer_pub_key);
         // Use participant_id as identity (must match what server expects in peer_keys lookup)
-        let identity = config.node.participant_id.to_string();
+        let identity = config.participant_id().to_string();
 
         tracing::info!(
             "Sending contracts invite to {} at {}:{}",

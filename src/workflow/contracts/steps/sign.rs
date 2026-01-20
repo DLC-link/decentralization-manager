@@ -40,7 +40,7 @@ const ED25519_PRIVATE_KEY_LENGTH: u8 = 0x20;
 pub async fn sign_submissions(config: &NodeConfig, dirs: &ContractsDirs) -> Result {
     tracing::info!("Signing submissions...");
 
-    let node_id = config.node.participant_id.to_string();
+    let node_id = config.participant_id().to_string();
 
     // Step 1: Load the DAML public key that was exported during onboarding
     // This ensures we use the newly generated key, not an old key from a previous run
