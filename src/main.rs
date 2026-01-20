@@ -3,7 +3,7 @@ mod cli;
 use tracing_subscriber::{filter::EnvFilter, prelude::*};
 
 use cli::{Cli, Commands, Parser};
-use dec_party_manager::{config::NodeConfig, error::Result};
+use dec_party_manager::{config::NodeConfig, error::Result, utils};
 
 #[tokio::main]
 async fn main() -> Result {
@@ -21,7 +21,15 @@ async fn main() -> Result {
         "Loading configuration from: {path}",
         path = args.dir.display()
     );
-    let config = NodeConfig::from_dir(&args.dir).await?;
+    let mut config = NodeConfig::from_dir(&args.dir).await?;
+
+    // Resolve participant_id from Canton if not configured
+    utils::resolve_participant_id(&mut config).await?;
+
+    tracing::info!(
+        "Running as participant: {}",
+        config.participant_id()
+    );
 
     match args.command {
         Commands::Serve {

@@ -200,7 +200,9 @@ pub struct NodeConfig {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct NodeInfo {
     /// Canton participant ID for this node (e.g., "participant1::1220...")
-    pub participant_id: CantonId,
+    /// If not specified, it will be queried from Canton and saved to the config.
+    #[serde(default)]
+    pub participant_id: Option<CantonId>,
     /// Address to listen on for Noise protocol connections (use 0.0.0.0 to listen on all interfaces)
     #[serde(default = "default_listen_address")]
     pub listen_address: String,
@@ -331,6 +333,42 @@ impl NodeConfig {
         self.parties
             .iter()
             .find(|p| &p.dec_party_id == dec_party_id)
+    }
+
+    /// Get the participant ID, panicking if not resolved
+    ///
+    /// Call `resolve_participant_id` before using this method.
+    pub fn participant_id(&self) -> &CantonId {
+        self.node
+            .participant_id
+            .as_ref()
+            .expect("participant_id not resolved - call resolve_participant_id first")
+    }
+
+    /// Check if participant_id is already set
+    pub fn has_participant_id(&self) -> bool {
+        self.node.participant_id.is_some()
+    }
+
+    /// Set the participant_id and save the config to disk
+    pub async fn set_and_save_participant_id(&mut self, participant_id: CantonId) -> Result<()> {
+        self.node.participant_id = Some(participant_id);
+        self.save_config().await
+    }
+
+    /// Save the current config to disk
+    async fn save_config(&self) -> Result<()> {
+        let config_path = self.root_dir.join(CONFIG_DIR).join(NODE_CONFIG_FILENAME);
+
+        // Create a serializable version without the root_dir field
+        let toml_content = toml::to_string_pretty(self)
+            .with_context(|| "Failed to serialize config to TOML")?;
+
+        tokio::fs::write(&config_path, toml_content)
+            .await
+            .with_context(|| format!("Failed to write config to '{}'", config_path.display()))?;
+
+        Ok(())
     }
 }
 
