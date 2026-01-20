@@ -7,7 +7,9 @@ A web application for managing decentralized parties in Canton blockchain networ
 - **Web-Based Management UI**: React frontend for managing decentralized parties
 - **Multi-Party Onboarding**: Coordinated workflow for creating decentralized party namespaces
 - **Contract Deployment**: Upload DAR files and deploy governance contracts with multi-party signing
+- **Governance Actions**: View and manage governance confirmations with threshold-based execution
 - **Participant Management**: View party membership, kick participants with threshold-based voting
+- **Keycloak Authentication**: Supports M2M (client_credentials) and password flows for Ledger API access
 - **Secure P2P Communication**: Noise Protocol Framework for encrypted coordinator-attestor communication
 - **Real-time Status**: Live peer connectivity monitoring and workflow progress tracking
 - **Canton Integration**: Native gRPC integration with Canton Admin and Ledger APIs
@@ -107,7 +109,6 @@ ledger_api_host = "localhost"
 ledger_api_port = 5001
 ledger_api_user_id = "ledger-api-user"
 synchronizer = "global"
-# ledger_api_token = "jwt-token"  # Optional, for authenticated access
 
 [timeouts]
 handshake_timeout_secs = 30
@@ -174,7 +175,7 @@ participant-3,Participant 3,10.0.0.3,9003,03cd56ef...,
 | `/node-config` | GET | Returns node configuration |
 | `/network-config` | GET | Returns network peer list |
 | `/network-config` | POST | Updates network peer list |
-| `/decentralized-parties` | GET | Lists decentralized parties |
+| `/decentralized-parties` | GET | Lists decentralized parties (filtered by template) |
 | `/participants-status` | GET | Returns peer connectivity status |
 | `/keys/status` | GET | Returns Noise keypair status |
 | `/onboarding` | POST | Starts onboarding workflow |
@@ -183,6 +184,14 @@ participant-3,Participant 3,10.0.0.3,9003,03cd56ef...,
 | `/contracts/status` | GET | Returns contracts progress |
 | `/kick` | POST | Starts kick workflow |
 | `/kick/status` | GET | Returns kick progress |
+| `/invitations` | GET | Returns pending workflow invitations |
+| `/invitations/accept` | POST | Accepts a pending invitation |
+| `/invitations/decline` | POST | Declines a pending invitation |
+| `/auth/status` | GET | Returns authentication status for configured parties |
+| `/auth/test` | POST | Tests Keycloak authentication |
+| `/governance/confirmations` | GET | Returns governance confirmations grouped by action |
+| `/governance/confirm` | POST | Submits a governance confirmation |
+| `/governance/execute` | POST | Executes a confirmed governance action |
 
 ## Development
 
