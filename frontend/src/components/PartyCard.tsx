@@ -20,16 +20,19 @@ import { CopyableText } from "./CopyableText";
 import { KickDialog } from "./KickDialog";
 import { ContractsDialog } from "./ContractsDialog";
 import { GovernanceSection } from "./GovernanceSection";
-import type { DecentralizedParty } from "../types";
+import { AuthSection } from "./AuthSection";
+import type { DecentralizedParty, PartyAuthStatus } from "../types";
 import { MAINNET_DEMO } from "../constants";
 
 interface PartyCardProps {
   party: DecentralizedParty;
   onRefresh: () => void;
   selfParticipantId?: string;
+  authStatus?: PartyAuthStatus;
+  onAuthRefresh?: () => void;
 }
 
-export const PartyCard = ({ party, onRefresh, selfParticipantId }: PartyCardProps) => {
+export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onAuthRefresh }: PartyCardProps) => {
   const [kickDialogOpen, setKickDialogOpen] = useState(false);
   const [contractsDialogOpen, setContractsDialogOpen] = useState(false);
   const [selectedParticipant, setSelectedParticipant] = useState<string>("");
@@ -236,6 +239,7 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId }: PartyCardProp
       )}
 
       <CardContent sx={{ pt: 0 }}>
+        <AuthSection partyId={party.party_id} authStatus={authStatus} onRefresh={onAuthRefresh} />
         <GovernanceSection partyId={party.party_id} />
       </CardContent>
 

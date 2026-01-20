@@ -218,7 +218,6 @@ let config = Config {
     admin_api_port: 5001,
     ledger_api_host: "localhost".to_string(),
     ledger_api_port: 5002,
-    ledger_api_token: None,  // Trailing comma
 };
 ```
 
