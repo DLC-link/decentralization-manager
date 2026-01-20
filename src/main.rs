@@ -7,7 +7,7 @@ use dec_party_manager::{config::NodeConfig, error::Result, utils};
 
 #[tokio::main]
 async fn main() -> Result {
-    let filter = EnvFilter::try_new("info,tokio_noise=error,hyper_noise=error")
+    let filter = EnvFilter::try_new("debug,tokio_noise=error,hyper_noise=error")
         .or_else(|_| EnvFilter::try_from_default_env())
         .unwrap_or_else(|_| EnvFilter::new("info"));
 
@@ -26,10 +26,7 @@ async fn main() -> Result {
     // Resolve participant_id from Canton if not configured
     utils::resolve_participant_id(&mut config).await?;
 
-    tracing::info!(
-        "Running as participant: {}",
-        config.participant_id()
-    );
+    tracing::info!("Running as participant: {}", config.participant_id());
 
     match args.command {
         Commands::Serve {

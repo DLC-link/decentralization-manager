@@ -30,15 +30,14 @@ data:
 
     [[parties]]
     dec_party_id = "cbtc-network::12202a83c6f4082217c175e29bc53da5f2703ba2675778ab99217a5a881a949203ff"
-    member_party_id = "merchant::1220fa8543db6c66fe3a55b1f180c8dfc7f876265c76684fbc1d35d89e02c8aafe8e"
-    user_id = "merchant_user"
+    member_party_id = "attestor-2::122099953934d9fe163fed07dd371fa13982b2b30749d6df56ecdba385f8c78a867a"
+    user_id = "attestorUser2"
 
     [parties.keycloak]
     url = "https://keycloak.dev.canton.ibtc.network"
     realm = "ibtc-catalyst-devnet"
-    client_id = "ibtc-devnet-1-wallet-ui"
-    username = "merchant_user"
-    password = "ZQX@axp2fub9pug9rxp"
+    client_id = "attestor-2"
+    client_secret = "FbhvorMHEMrjUipxrfnwLjMBkFOzaIZ5"
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -94,7 +93,7 @@ spec:
               mountPath: /app
       containers:
         - name: dec-party-manager
-          image: public.ecr.aws/dlc-link/canton-decparty-manager:v0.0.11
+          image: public.ecr.aws/dlc-link/canton-decparty-manager:0.0.13
           imagePullPolicy: Always
           command:
             [

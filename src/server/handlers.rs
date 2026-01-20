@@ -1,6 +1,7 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use actix_web::{HttpResponse, Responder, get, post, web};
+use base64::Engine;
 use canton_proto_rs::com::{
     daml::ledger::api::v2::{
         Command, Commands, ExerciseCommand, Identifier, RecordField, SubmitAndWaitRequest, Value,
@@ -8,7 +9,9 @@ use canton_proto_rs::com::{
             ListUserRightsRequest,
             right::{CanActAs, CanReadAs, Kind},
         },
-        command, command_service_client::CommandServiceClient, value,
+        command,
+        command_service_client::CommandServiceClient,
+        value,
     },
     digitalasset::canton::{
         crypto::{
@@ -1213,6 +1216,30 @@ pub async fn get_auth_status(data: web::Data<AppState>) -> impl Responder {
     })
 }
 
+/// Extract user_id (sub claim) from JWT token
+fn extract_user_id_from_jwt(token: &str) -> Option<String> {
+    // JWT format: header.payload.signature
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+
+    // Decode the payload (second part) - URL-safe base64 without padding
+    let payload = parts[1];
+    let padding_needed = (4 - (payload.len() % 4)) % 4;
+    let padded = if padding_needed > 0 {
+        format!("{}{}", payload, "=".repeat(padding_needed))
+    } else {
+        payload.to_string()
+    };
+
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(&padded)
+        .ok()?;
+    let json: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+    json.get("sub").and_then(|v| v.as_str()).map(String::from)
+}
+
 /// Check user rights for both member party and decentralized party
 async fn check_user_rights(
     config: &NodeConfig,
@@ -1223,13 +1250,25 @@ async fn check_user_rights(
 ) -> Result<RightsStatus> {
     let mut client = utils::create_user_client(config, Some(token.to_string())).await?;
 
+    // For M2M auth, the actual user_id in Canton is from JWT's 'sub' claim
+    let effective_user_id = extract_user_id_from_jwt(token).unwrap_or_else(|| user_id.to_string());
+
+    tracing::debug!(
+        "Checking rights for user_id={effective_user_id} (configured: {user_id}), member_party={member_party_id}, dec_party={dec_party_id}"
+    );
+
     let response = client
         .list_user_rights(tonic::Request::new(ListUserRightsRequest {
-            user_id: user_id.to_string(),
+            user_id: effective_user_id.clone(),
             identity_provider_id: String::new(),
         }))
         .await?
         .into_inner();
+
+    tracing::debug!(
+        "ListUserRights for {effective_user_id} returned {} rights",
+        response.rights.len()
+    );
 
     let mut member_party_act_as = false;
     let mut member_party_read_as = false;
@@ -1238,7 +1277,8 @@ async fn check_user_rights(
 
     for right in response.rights {
         match right.kind {
-            Some(Kind::CanActAs(CanActAs { party })) => {
+            Some(Kind::CanActAs(CanActAs { ref party })) => {
+                tracing::debug!("  CanActAs: {party}");
                 if party == member_party_id {
                     member_party_act_as = true;
                 }
@@ -1246,7 +1286,8 @@ async fn check_user_rights(
                     dec_party_act_as = true;
                 }
             }
-            Some(Kind::CanReadAs(CanReadAs { party })) => {
+            Some(Kind::CanReadAs(CanReadAs { ref party })) => {
+                tracing::debug!("  CanReadAs: {party}");
                 if party == member_party_id {
                     member_party_read_as = true;
                 }
@@ -1301,15 +1342,37 @@ async fn test_keycloak_auth(
     config: &crate::config::KeycloakConfig,
 ) -> std::result::Result<(), String> {
     let url = keycloak::login::password_url(&config.url, &config.realm);
-    keycloak::login::password(keycloak::login::PasswordParams {
-        client_id: config.client_id.clone(),
-        username: config.username.clone(),
-        password: config.password.clone(),
-        url,
-    })
-    .await
-    .map(|_| ())
-    .map_err(|e| e.to_string())
+
+    // Use client_credentials if client_secret is set, otherwise password flow
+    if let Some(ref client_secret) = config.client_secret {
+        keycloak::login::client_credentials(keycloak::login::ClientCredentialsParams {
+            url,
+            client_id: config.client_id.clone(),
+            client_secret: client_secret.clone(),
+        })
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    } else {
+        let username = config
+            .username
+            .as_ref()
+            .ok_or_else(|| "Missing username for password flow".to_string())?;
+        let password = config
+            .password
+            .as_ref()
+            .ok_or_else(|| "Missing password for password flow".to_string())?;
+
+        keycloak::login::password(keycloak::login::PasswordParams {
+            client_id: config.client_id.clone(),
+            username: username.clone(),
+            password: password.clone(),
+            url,
+        })
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    }
 }
 
 // ============================================================================
@@ -1341,7 +1404,9 @@ pub async fn get_governance(
     let token = get_party_token(&data, &party_id).await;
 
     // Get threshold for this party (default to 2 if not found)
-    let threshold = get_party_threshold(&data, &query.party_id).await.unwrap_or(2);
+    let threshold = get_party_threshold(&data, &query.party_id)
+        .await
+        .unwrap_or(2);
 
     match get_governance_confirmations(&data.config, &query.party_id, threshold, token).await {
         Ok(actions) => HttpResponse::Ok().json(GovernanceResponse { actions, threshold }),
@@ -1507,8 +1572,8 @@ async fn execute_confirm_action(
         .connect()
         .await?;
 
-    let mut client = CommandServiceClient::new(channel)
-        .max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
+    let mut client =
+        CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
 
     let template_id = Identifier {
         package_id: "#bitsafe-vault-governance-v0".to_string(),
@@ -1518,15 +1583,17 @@ async fn execute_confirm_action(
 
     // Build choice argument: ConfirmAction { action : Text }
     let choice_argument = Value {
-        sum: Some(value::Sum::Record(canton_proto_rs::com::daml::ledger::api::v2::Record {
-            record_id: None,
-            fields: vec![RecordField {
-                label: "action".to_string(),
-                value: Some(Value {
-                    sum: Some(value::Sum::Text(request.action_id.clone())),
-                }),
-            }],
-        })),
+        sum: Some(value::Sum::Record(
+            canton_proto_rs::com::daml::ledger::api::v2::Record {
+                record_id: None,
+                fields: vec![RecordField {
+                    label: "action".to_string(),
+                    value: Some(Value {
+                        sum: Some(value::Sum::Text(request.action_id.clone())),
+                    }),
+                }],
+            },
+        )),
     };
 
     let cmd = Command {
@@ -1577,8 +1644,8 @@ async fn execute_confirmed_action(
         .connect()
         .await?;
 
-    let mut client = CommandServiceClient::new(channel)
-        .max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
+    let mut client =
+        CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
 
     let template_id = Identifier {
         package_id: "#bitsafe-vault-governance-v0".to_string(),
@@ -1588,15 +1655,17 @@ async fn execute_confirmed_action(
 
     // Build choice argument: ExecuteConfirmedAction { action : Text }
     let choice_argument = Value {
-        sum: Some(value::Sum::Record(canton_proto_rs::com::daml::ledger::api::v2::Record {
-            record_id: None,
-            fields: vec![RecordField {
-                label: "action".to_string(),
-                value: Some(Value {
-                    sum: Some(value::Sum::Text(request.action_id.clone())),
-                }),
-            }],
-        })),
+        sum: Some(value::Sum::Record(
+            canton_proto_rs::com::daml::ledger::api::v2::Record {
+                record_id: None,
+                fields: vec![RecordField {
+                    label: "action".to_string(),
+                    value: Some(Value {
+                        sum: Some(value::Sum::Text(request.action_id.clone())),
+                    }),
+                }],
+            },
+        )),
     };
 
     let cmd = Command {
