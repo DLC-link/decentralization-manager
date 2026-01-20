@@ -232,7 +232,7 @@ export const AuthCheckAccordion = () => {
 
                 {party.rights && (
                   <Box sx={{ mt: 1.5 }}>
-                    <Typography variant="subtitle2" sx={{ mb: 0.5 }}>
+                    <Typography variant="subtitle2" sx={{ mb: 1 }}>
                       User Rights
                       {isRightsValid(party.rights) ? (
                         <CheckCircleIcon color="success" fontSize="small" sx={{ ml: 1, verticalAlign: "middle" }} />
@@ -240,31 +240,53 @@ export const AuthCheckAccordion = () => {
                         <WarningIcon color="warning" fontSize="small" sx={{ ml: 1, verticalAlign: "middle" }} />
                       )}
                     </Typography>
-                    <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
-                      <Chip
-                        label="Member actAs"
-                        size="small"
-                        color={party.rights.member_party_act_as ? "success" : "error"}
-                        variant={party.rights.member_party_act_as ? "filled" : "outlined"}
-                      />
-                      <Chip
-                        label="Member readAs"
-                        size="small"
-                        color={party.rights.member_party_read_as ? "success" : "error"}
-                        variant={party.rights.member_party_read_as ? "filled" : "outlined"}
-                      />
-                      <Chip
-                        label="DecParty actAs"
-                        size="small"
-                        color={party.rights.dec_party_act_as ? "success" : "error"}
-                        variant={party.rights.dec_party_act_as ? "filled" : "outlined"}
-                      />
-                      <Chip
-                        label="DecParty readAs"
-                        size="small"
-                        color={party.rights.dec_party_read_as ? "success" : "error"}
-                        variant={party.rights.dec_party_read_as ? "filled" : "outlined"}
-                      />
+                    <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+                      <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                        <Typography variant="body2" color="text.secondary" sx={{ minWidth: 100 }}>
+                          Dec Party:
+                        </Typography>
+                        <Chip
+                          label="actAs"
+                          size="small"
+                          variant="outlined"
+                          sx={{
+                            borderColor: party.rights.dec_party_act_as ? "success.main" : "grey.400",
+                            color: party.rights.dec_party_act_as ? "success.main" : "grey.500",
+                          }}
+                        />
+                        <Chip
+                          label="readAs"
+                          size="small"
+                          variant="outlined"
+                          sx={{
+                            borderColor: party.rights.dec_party_read_as ? "success.main" : "grey.400",
+                            color: party.rights.dec_party_read_as ? "success.main" : "grey.500",
+                          }}
+                        />
+                      </Box>
+                      <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                        <Typography variant="body2" color="text.secondary" sx={{ minWidth: 100 }}>
+                          Member Party:
+                        </Typography>
+                        <Chip
+                          label="actAs"
+                          size="small"
+                          variant="outlined"
+                          sx={{
+                            borderColor: party.rights.member_party_act_as ? "success.main" : "grey.400",
+                            color: party.rights.member_party_act_as ? "success.main" : "grey.500",
+                          }}
+                        />
+                        <Chip
+                          label="readAs"
+                          size="small"
+                          variant="outlined"
+                          sx={{
+                            borderColor: party.rights.member_party_read_as ? "success.main" : "grey.400",
+                            color: party.rights.member_party_read_as ? "success.main" : "grey.500",
+                          }}
+                        />
+                      </Box>
                     </Box>
                   </Box>
                 )}

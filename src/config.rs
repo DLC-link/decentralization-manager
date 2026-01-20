@@ -117,6 +117,10 @@ impl NetworkConfig {
 }
 
 /// Keycloak authentication configuration
+///
+/// Supports two authentication methods:
+/// 1. Client credentials (M2M): Set `client_id` and `client_secret`
+/// 2. Password flow: Set `client_id`, `username`, and `password`
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct KeycloakConfig {
     /// Keycloak server URL (e.g., "https://keycloak.example.com")
@@ -125,10 +129,15 @@ pub struct KeycloakConfig {
     pub realm: String,
     /// OAuth2 client ID
     pub client_id: String,
+    /// Client secret for M2M (client_credentials) flow
+    #[serde(default)]
+    pub client_secret: Option<String>,
     /// Username for password flow
-    pub username: String,
-    /// Password for password flow (consider using env var reference)
-    pub password: String,
+    #[serde(default)]
+    pub username: Option<String>,
+    /// Password for password flow
+    #[serde(default)]
+    pub password: Option<String>,
 }
 
 /// Credentials for a specific decentralized party
@@ -361,8 +370,8 @@ impl NodeConfig {
         let config_path = self.root_dir.join(CONFIG_DIR).join(NODE_CONFIG_FILENAME);
 
         // Create a serializable version without the root_dir field
-        let toml_content = toml::to_string_pretty(self)
-            .with_context(|| "Failed to serialize config to TOML")?;
+        let toml_content =
+            toml::to_string_pretty(self).with_context(|| "Failed to serialize config to TOML")?;
 
         tokio::fs::write(&config_path, toml_content)
             .await

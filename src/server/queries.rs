@@ -17,11 +17,7 @@ const GOVERNANCE_TEMPLATES: &[(&str, &str, &str)] = &[
         "BitsafeVault.VaultGovernance",
         "VaultGovernanceConfirmation",
     ),
-    (
-        "#cbtc-governance-devnet",
-        "CBTC.Governance",
-        "Confirmation",
-    ),
+    ("#cbtc-governance-devnet", "CBTC.Governance", "Confirmation"),
 ];
 
 /// Get active contracts for a party
