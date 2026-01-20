@@ -88,6 +88,16 @@ export const NetworkConfigAccordion = ({
     return `${key.slice(0, len)}...`;
   };
 
+  // Truncate participant ID: prefix::1220...last4
+  const truncateParticipantId = (id: string): string => {
+    if (!id) return "";
+    const parts = id.split("::");
+    if (parts.length !== 2) return id;
+    const [prefix, namespace] = parts;
+    if (namespace.length <= 8) return id;
+    return `${prefix}::${namespace.slice(0, 4)}...${namespace.slice(-4)}`;
+  };
+
   const getStatus = (id: string): ConnectionStatus | undefined =>
     participantStatuses?.find((s) => s.id === id)?.status;
 
@@ -326,7 +336,7 @@ export const NetworkConfigAccordion = ({
                   variant="outlined"
                   startIcon={<ContentCopyIcon />}
                   onClick={async () => {
-                    const name = selfPeer?.name || selfEntry.participant_id;
+                    const name = selfPeer?.name || truncateParticipantId(selfEntry.participant_id);
                     const csvRow = `${selfEntry.participant_id},${name},${selfEntry.address},${selfEntry.port},${selfEntry.public_key},`;
                     const success = await copyToClipboard(csvRow);
                     showSnackbar(success ? "Copied to clipboard" : "Failed to copy");
