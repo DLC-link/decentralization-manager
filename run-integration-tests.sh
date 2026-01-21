@@ -160,19 +160,19 @@ rm -rf "$DEV_DIR/participant-1/data"
 rm -rf "$DEV_DIR/participant-2/data"
 rm -rf "$DEV_DIR/participant-3/data"
 
-# Start participant 1
+# Start participant 1 (with --test for mock auth)
 echo "Starting participant-1..."
-"$BINARY" -d "$DEV_DIR/participant-1" serve --host 0.0.0.0 --port $P1_HTTP &
+"$BINARY" -d "$DEV_DIR/participant-1" serve --host 0.0.0.0 --port $P1_HTTP --test &
 PIDS+=($!)
 
-# Start participant 2
+# Start participant 2 (with --test for mock auth)
 echo "Starting participant-2..."
-"$BINARY" -d "$DEV_DIR/participant-2" serve --host 0.0.0.0 --port $P2_HTTP &
+"$BINARY" -d "$DEV_DIR/participant-2" serve --host 0.0.0.0 --port $P2_HTTP --test &
 PIDS+=($!)
 
-# Start participant 3
+# Start participant 3 (with --test for mock auth)
 echo "Starting participant-3..."
-"$BINARY" -d "$DEV_DIR/participant-3" serve --host 0.0.0.0 --port $P3_HTTP &
+"$BINARY" -d "$DEV_DIR/participant-3" serve --host 0.0.0.0 --port $P3_HTTP --test &
 PIDS+=($!)
 
 # Wait for all servers to be ready
@@ -250,19 +250,19 @@ PIDS=()
 
 sleep 2
 
-# Start participant 1
+# Start participant 1 (with --test for mock auth)
 echo "Starting participant-1..."
-"$BINARY" -d "$DEV_DIR/participant-1" serve --host 0.0.0.0 --port $P1_HTTP &
+"$BINARY" -d "$DEV_DIR/participant-1" serve --host 0.0.0.0 --port $P1_HTTP --test &
 PIDS+=($!)
 
-# Start participant 2
+# Start participant 2 (with --test for mock auth)
 echo "Starting participant-2..."
-"$BINARY" -d "$DEV_DIR/participant-2" serve --host 0.0.0.0 --port $P2_HTTP &
+"$BINARY" -d "$DEV_DIR/participant-2" serve --host 0.0.0.0 --port $P2_HTTP --test &
 PIDS+=($!)
 
-# Start participant 3
+# Start participant 3 (with --test for mock auth)
 echo "Starting participant-3..."
-"$BINARY" -d "$DEV_DIR/participant-3" serve --host 0.0.0.0 --port $P3_HTTP &
+"$BINARY" -d "$DEV_DIR/participant-3" serve --host 0.0.0.0 --port $P3_HTTP --test &
 PIDS+=($!)
 
 # Wait for all servers to be ready

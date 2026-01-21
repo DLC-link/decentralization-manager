@@ -10,8 +10,12 @@ use crate::{config::NodeConfig, error::Result, utils};
 use super::types::{ContractInfo, PartyMetadata};
 
 /// Get active contracts for a party
-pub async fn get_contracts(config: &NodeConfig, party_id: &str) -> Result<Vec<ContractInfo>> {
-    let mut state_client = utils::create_state_client(config).await?;
+pub async fn get_contracts(
+    config: &NodeConfig,
+    party_id: &str,
+    token: Option<String>,
+) -> Result<Vec<ContractInfo>> {
+    let mut state_client = utils::create_state_client(config, token).await?;
 
     // Get current ledger end
     let ledger_end = state_client
@@ -85,10 +89,11 @@ pub async fn get_contracts(config: &NodeConfig, party_id: &str) -> Result<Vec<Co
 pub async fn get_party_metadata(
     config: &NodeConfig,
     party_id: &str,
+    token: Option<String>,
 ) -> Result<Option<PartyMetadata>> {
     use canton_proto_rs::com::daml::ledger::api::v2::admin::ListKnownPartiesRequest;
 
-    let mut client = utils::create_party_client(config).await?;
+    let mut client = utils::create_party_client(config, token).await?;
 
     let response = client
         .list_known_parties(tonic::Request::new(ListKnownPartiesRequest {

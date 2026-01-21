@@ -5,6 +5,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use tokio::fs;
 
 use crate::{
+    auth::WorkflowAuth,
     config::{NetworkConfig, NodeConfig},
     consts::{
         EXECUTION_DIR, LEDGER_SUBMISSIONS_DIR, PREPARED_DIR, PREPARED_SUBMISSION_PREFIX,
@@ -25,6 +26,7 @@ pub async fn start_coordinator(
     node_config: NodeConfig,
     network_config: NetworkConfig,
     config: ContractsConfig,
+    workflow_auth: Option<WorkflowAuth>,
 ) -> Result {
     tracing::info!("Initializing Noise server...");
 
@@ -58,6 +60,7 @@ pub async fn start_coordinator(
             network_config_clone,
             dirs_clone,
             config,
+            workflow_auth,
         )
         .await
     });
@@ -71,7 +74,16 @@ async fn run_workflow(
     network_config: NetworkConfig,
     dirs: ContractsDirs,
     config: ContractsConfig,
+    workflow_auth: Option<WorkflowAuth>,
 ) -> Result {
+    // Get credentials for the decentralized party
+    let dec_party_id = &config.decentralized_party_id;
+    let auth = workflow_auth
+        .ok_or_else(|| anyhow::anyhow!("Auth not configured, cannot run contracts workflow"))?;
+    let creds = auth.get_credentials(dec_party_id).await?;
+    let token = creds.token;
+    let user_id = creds.user_id;
+
     let mut coordinator_completed_steps = HashSet::new();
 
     // Encode DAR files to send to attestors with UploadDars command
@@ -95,7 +107,15 @@ async fn run_workflow(
             }
             ContractsStep::PrepareSubmissions => {
                 tracing::info!("Coordinator executing: Prepare submissions");
-                prepare_submissions(&node_config, &dirs, &network_config, &config).await?;
+                prepare_submissions(
+                    &node_config,
+                    &dirs,
+                    &network_config,
+                    &config,
+                    &token,
+                    &user_id,
+                )
+                .await?;
 
                 // Load prepared submissions to send to attestors with SignSubmissions command
                 // Prepend config so attestors know the instance_name for directory creation
@@ -123,7 +143,7 @@ async fn run_workflow(
                     SUBMISSION_SIGNATURES_PREFIX,
                 )
                 .await?;
-                execute_submissions(&node_config, &dirs, &config).await?;
+                execute_submissions(&node_config, &dirs, &config, &token, &user_id).await?;
                 workflow_state.advance_step().await;
             }
             ContractsStep::Complete => {

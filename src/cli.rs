@@ -27,5 +27,9 @@ pub enum Commands {
         /// Port to listen on
         #[arg(long, default_value = "8080")]
         port: u16,
+
+        /// Enable test mode with mock authentication (uses static JWT token)
+        #[arg(long, default_value = "false")]
+        test: bool,
     },
 }
