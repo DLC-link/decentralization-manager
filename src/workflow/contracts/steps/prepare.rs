@@ -38,15 +38,17 @@ const DEFAULT_PAGE_SIZE: i32 = 1000;
 /// * `dirs` - WorkflowDirs containing all directory paths
 /// * `network_config` - Network configuration with peer settings
 /// * `contracts_config` - Contracts workflow configuration with party ID
+/// * `token` - Authentication token for Ledger API
+/// * `user_id` - User ID for Ledger API operations
 pub async fn prepare_submissions(
     config: &NodeConfig,
     dirs: &ContractsDirs,
     network_config: &NetworkConfig,
     contracts_config: &ContractsConfig,
+    token: &str,
+    user_id: &str,
 ) -> Result {
     tracing::info!("Preparing submissions...");
-
-    let user_id = &config.canton.ledger_api_user_id;
 
     // Use the decentralized party ID from config
     let decentralized_registrar = contracts_config.decentralized_party_id.to_string();
@@ -54,7 +56,8 @@ pub async fn prepare_submissions(
 
     // Step 2: Wait for party to be visible in Ledger API
     tracing::info!("Waiting for decentralized party to be visible in Ledger API...");
-    let mut party_client = utils::create_party_client(config).await?;
+    let token_opt = Some(token.to_string());
+    let mut party_client = utils::create_party_client(config, token_opt.clone()).await?;
 
     let max_attempts = TOPOLOGY_RETRY_MAX_ATTEMPTS;
     let retry_delay = tokio::time::Duration::from_secs(TOPOLOGY_RETRY_DELAY_SECS);
@@ -144,7 +147,7 @@ pub async fn prepare_submissions(
     // Step 4: Create ledger-api-user and grant rights
     // Note: User ID must match JWT token's "sub" claim
     tracing::info!("Setting up {user_id}...");
-    let mut user_client = utils::create_user_client(config).await?;
+    let mut user_client = utils::create_user_client(config, token_opt.clone()).await?;
 
     // Try to create user (may already exist) - use first participant as primary party
     let primary_party = participant_parties
@@ -221,7 +224,7 @@ pub async fn prepare_submissions(
     };
 
     // Step 6: Prepare submissions for each contract defined in config
-    let mut submission_client = utils::create_submission_client(config).await?;
+    let mut submission_client = utils::create_submission_client(config, token_opt.clone()).await?;
     let ledger_submissions_dir = dirs.workflow_dir.join(LEDGER_SUBMISSIONS_DIR);
     let prepared_dir = ledger_submissions_dir.join(PREPARED_DIR);
     fs::create_dir_all(&prepared_dir).await?;
