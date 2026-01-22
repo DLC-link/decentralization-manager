@@ -397,7 +397,7 @@ fn build_field_value(field_def: &FieldDefinition, context: &SubmissionContext) -
             value::Sum::Record(Record {
                 record_id: None,
                 fields: vec![RecordField {
-                    label: String::new(),
+                    label: "map".to_string(),
                     value: Some(Value {
                         sum: Some(value::Sum::GenMap(gen_map)),
                     }),
@@ -405,11 +405,11 @@ fn build_field_value(field_def: &FieldDefinition, context: &SubmissionContext) -
             })
         }
         FieldDefinition::RelTime { microseconds } => {
-            // DA.Time.Types:RelTime is a record containing a single Int64 field (microseconds)
+            // DA.Time.Types:RelTime is a record containing a "microseconds" field (Int64)
             value::Sum::Record(Record {
                 record_id: None,
                 fields: vec![RecordField {
-                    label: String::new(),
+                    label: "microseconds".to_string(),
                     value: Some(Value {
                         sum: Some(value::Sum::Int64(*microseconds)),
                     }),

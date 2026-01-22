@@ -439,17 +439,18 @@ pub enum ActionType {
 
     // Vault Deployment (2)
     VaultDeployment {
+        vault_rules_cid: String,
         vault_name: String,
         share_symbol: String,
         asset_instrument_id: InstrumentId,
         limits: VaultLimits,
-        vault_manager: String,
         vault_backend_signatory: String,
-        vault_far_config: FarConfig,
+        #[serde(default)]
+        vault_far_config: Option<FarConfig>,
     },
     YieldEpochDeployment {
+        vault_rules_cid: String,
         vault_cid: String,
-        vault_manager: String,
         asset_instrument_id: InstrumentId,
         vault_backend_signatory: String,
     },
@@ -476,10 +477,11 @@ pub enum ActionType {
 
     // Processor (1)
     ProcessorDeploymentRequest {
-        authorized_vault_manager: String,
+        vault_processor_rules_cid: String,
         vault_backend_signatory: String,
         allocation_factory_cid: String,
-        processor_far_config: FarConfig,
+        #[serde(default)]
+        processor_far_config: Option<FarConfig>,
         initial_supported_vaults: Vec<String>,
     },
 
@@ -517,4 +519,59 @@ pub struct ExecuteActionRequestV2 {
     pub rules_contract_id: String,
     pub action: ActionType,
     pub confirmation_cids: Vec<String>,
+}
+
+/// V2 A single governance confirmation with parsed action
+#[derive(Clone, Debug, Serialize)]
+pub struct GovernanceConfirmationV2 {
+    pub contract_id: String,
+    pub action: ActionType,
+    pub confirming_party: String,
+}
+
+/// V2 A governance action with its confirmations, grouped by action hash
+#[derive(Clone, Debug, Serialize)]
+pub struct GovernanceActionV2 {
+    /// Deterministic hash of the serialized action for grouping
+    pub action_hash: String,
+    /// The parsed action type
+    pub action: ActionType,
+    /// List of confirmations for this action
+    pub confirmations: Vec<GovernanceConfirmationV2>,
+    /// Number of confirmations
+    pub confirmation_count: usize,
+    /// Whether threshold is met for execution
+    pub can_execute: bool,
+}
+
+/// V2 Response for governance confirmations endpoint
+#[derive(Serialize)]
+pub struct GovernanceResponseV2 {
+    pub actions: Vec<GovernanceActionV2>,
+    pub threshold: usize,
+}
+
+/// Request to expire a stale confirmation
+#[derive(Clone, Debug, Deserialize)]
+pub struct ExpireConfirmationRequest {
+    pub party_id: CantonId,
+    pub rules_contract_id: String,
+    pub confirmation_cid: String,
+}
+
+/// State of a VaultGovernanceRules contract
+#[derive(Clone, Debug, Serialize)]
+pub struct GovernanceState {
+    pub contract_id: String,
+    pub vault_manager: String,
+    pub members: Vec<String>,
+    pub threshold: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action_confirmation_timeout_microseconds: Option<i64>,
+}
+
+/// Response for the governance state endpoint
+#[derive(Serialize)]
+pub struct GovernanceStateResponse {
+    pub state: Option<GovernanceState>,
 }

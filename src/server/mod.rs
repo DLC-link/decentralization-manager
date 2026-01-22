@@ -205,10 +205,13 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig, test_mode: 
             .service(handlers::get_auth_status)
             .service(handlers::test_auth)
             .service(handlers::get_governance)
+            .service(handlers::get_governance_v2)
+            .service(handlers::get_governance_state_v2)
             .service(handlers::confirm_action)
             .service(handlers::execute_action)
             .service(handlers::confirm_action_v2)
             .service(handlers::execute_action_v2)
+            .service(handlers::expire_confirmation)
             .service(assets::serve_frontend)
     })
     .bind((host, port))?

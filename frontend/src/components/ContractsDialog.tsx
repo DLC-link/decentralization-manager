@@ -128,7 +128,7 @@ const getVaultContracts = (): ContractDefinition[] => [
     entity_name: "VaultGovernanceRules",
     fields: [
       { type: "decentralized_party" }, // vaultManager : Party
-      { type: "party_set" }, // members : Set Party (DA.Set.Types:Set Party)
+      { type: "party_set" }, // members : Set Party (DA.Set.Types:Set Party - Record with GenMap)
       { type: "governance_threshold" }, // threshold : Int
       { type: "optional", inner: { type: "rel_time", microseconds: 3600000000 } }, // actionConfirmationTimeout : Optional RelTime (1 hour)
     ],

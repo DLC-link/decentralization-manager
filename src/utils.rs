@@ -347,7 +347,7 @@ pub async fn get_participant_id(config: &NodeConfig) -> Result<CantonId> {
 /// to get the participant ID and saves it to the config file.
 ///
 /// Returns the participant ID (either from config or freshly queried).
-pub async fn resolve_participant_id(config: &mut NodeConfig) -> Result<()> {
+pub async fn resolve_participant_id(config: &mut NodeConfig) -> Result {
     if config.has_participant_id() {
         tracing::debug!(
             "Participant ID already configured: {}",

@@ -30,16 +30,20 @@ use serde::Deserialize;
 
 use super::{
     AppState, action_serializer,
-    queries::{get_contracts, get_governance_confirmations, get_party_metadata},
+    queries::{
+        get_contracts, get_governance_confirmations, get_governance_confirmations_v2,
+        get_governance_state, get_party_metadata,
+    },
     types::{
         AuthStatus, AuthStatusResponse, AuthTestResponse, AuthTestResult, ConfirmActionRequest,
         ConfirmActionRequestV2, ConnectionStatus, ContractsRequest, DecentralizedPartiesResponse,
-        DecentralizedParty, ExecuteActionRequest, ExecuteActionRequestV2, GovernanceResponse,
-        HttpWorkflowState, InvitationActionRequest, InvitationType, KeyStatusResponse, KickRequest,
-        KickResponse, KickStatus, ListenerPauseGuard, OnboardingRequest, OnboardingResponse,
-        OnboardingStatus, ParticipantInfo, ParticipantStatus, ParticipantsStatusResponse,
-        PartyAuthStatus, PendingInvitation, PendingInvitationsResponse, Permission, RightsStatus,
-        WorkflowProgress, WorkflowResponse,
+        DecentralizedParty, ExecuteActionRequest, ExecuteActionRequestV2,
+        ExpireConfirmationRequest, GovernanceResponse, GovernanceResponseV2,
+        GovernanceStateResponse, HttpWorkflowState, InvitationActionRequest, InvitationType,
+        KeyStatusResponse, KickRequest, KickResponse, KickStatus, ListenerPauseGuard,
+        OnboardingRequest, OnboardingResponse, OnboardingStatus, ParticipantInfo,
+        ParticipantStatus, ParticipantsStatusResponse, PartyAuthStatus, PendingInvitation,
+        PendingInvitationsResponse, Permission, RightsStatus, WorkflowProgress, WorkflowResponse,
     },
 };
 use crate::{
@@ -1420,6 +1424,83 @@ pub async fn get_governance(
     }
 }
 
+/// Get governance confirmations with parsed actions (V2)
+#[get("/governance/v2/confirmations")]
+pub async fn get_governance_v2(
+    data: web::Data<AppState>,
+    query: web::Query<GovernanceQuery>,
+) -> impl Responder {
+    let party_id = match CantonId::parse(&query.party_id) {
+        Ok(id) => id,
+        Err(e) => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Invalid party_id: {e}")
+            }));
+        }
+    };
+
+    // Get token for this party
+    let token = get_party_token(&data, &party_id).await;
+
+    // Check if we're in test mode (mock auth)
+    let test_mode = matches!(data.auth, Some(WorkflowAuth::Mock(_)));
+
+    // Get threshold for this party (default to 2 if not found)
+    let threshold = get_party_threshold(&data, &query.party_id)
+        .await
+        .unwrap_or(2);
+
+    match get_governance_confirmations_v2(
+        &data.config,
+        &query.party_id,
+        threshold,
+        token,
+        test_mode,
+    )
+    .await
+    {
+        Ok(actions) => HttpResponse::Ok().json(GovernanceResponseV2 { actions, threshold }),
+        Err(e) => {
+            tracing::error!("Failed to fetch V2 governance confirmations: {e}");
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to fetch governance confirmations: {e}")
+            }))
+        }
+    }
+}
+
+/// Get governance state (VaultGovernanceRules contract state)
+#[get("/governance/v2/state")]
+pub async fn get_governance_state_v2(
+    data: web::Data<AppState>,
+    query: web::Query<GovernanceQuery>,
+) -> impl Responder {
+    let party_id = match CantonId::parse(&query.party_id) {
+        Ok(id) => id,
+        Err(e) => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Invalid party_id: {e}")
+            }));
+        }
+    };
+
+    // Get token for this party
+    let token = get_party_token(&data, &party_id).await;
+
+    // Check if we're in test mode (mock auth)
+    let test_mode = matches!(data.auth, Some(WorkflowAuth::Mock(_)));
+
+    match get_governance_state(&data.config, &query.party_id, token, test_mode).await {
+        Ok(state) => HttpResponse::Ok().json(GovernanceStateResponse { state }),
+        Err(e) => {
+            tracing::error!("Failed to fetch governance state: {e}");
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to fetch governance state: {e}")
+            }))
+        }
+    }
+}
+
 /// Submit a confirmation for a governance action
 #[post("/governance/confirm")]
 pub async fn confirm_action(
@@ -1761,6 +1842,37 @@ pub async fn execute_action_v2(
     }
 }
 
+/// Expire a stale governance confirmation
+#[post("/governance/v2/expire")]
+pub async fn expire_confirmation(
+    data: web::Data<AppState>,
+    body: web::Json<ExpireConfirmationRequest>,
+) -> impl Responder {
+    let party_id = &body.party_id;
+
+    // Get token and credentials for this party
+    let (token, member_party_id) = match get_party_credentials_v2(&data, party_id).await {
+        Some(creds) => creds,
+        None => {
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "No credentials configured for party"
+            }));
+        }
+    };
+
+    match execute_expire_confirmation(&data.config, &body, &token, &member_party_id).await {
+        Ok(()) => HttpResponse::Ok().json(serde_json::json!({
+            "message": "Confirmation expired successfully"
+        })),
+        Err(e) => {
+            tracing::error!("Failed to expire confirmation: {e}");
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to expire confirmation: {e}")
+            }))
+        }
+    }
+}
+
 /// Get token and member_party_id for a party (V2 version)
 async fn get_party_credentials_v2(
     data: &web::Data<AppState>,
@@ -1874,6 +1986,76 @@ async fn execute_confirmed_action_v2(
             template_id: Some(template_id),
             contract_id: request.rules_contract_id.clone(),
             choice: "VaultGovernanceRules_ExecuteConfirmedAction".to_string(),
+            choice_argument: Some(choice_argument),
+        })),
+    };
+
+    let commands = Commands {
+        workflow_id: String::new(),
+        user_id: String::new(),
+        command_id: uuid::Uuid::new_v4().to_string(),
+        commands: vec![cmd],
+        deduplication_period: None,
+        min_ledger_time_abs: None,
+        min_ledger_time_rel: None,
+        act_as: vec![member_party_id.to_string()],
+        read_as: vec![request.party_id.to_string()],
+        submission_id: String::new(),
+        disclosed_contracts: vec![],
+        synchronizer_id: String::new(),
+        package_id_selection_preference: vec![],
+        prefetch_contract_keys: vec![],
+    };
+
+    let mut req = tonic::Request::new(SubmitAndWaitRequest {
+        commands: Some(commands),
+    });
+    req.metadata_mut()
+        .insert("authorization", format!("Bearer {token}").parse().unwrap());
+
+    client.submit_and_wait(req).await?;
+
+    Ok(())
+}
+
+/// Execute ExpireConfirmation choice on VaultGovernanceRules contract
+async fn execute_expire_confirmation(
+    config: &NodeConfig,
+    request: &ExpireConfirmationRequest,
+    token: &str,
+    member_party_id: &str,
+) -> Result {
+    let channel = tonic::transport::Channel::from_shared(config.ledger_api_url())?
+        .connect()
+        .await?;
+
+    let mut client =
+        CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
+
+    let template_id = Identifier {
+        package_id: "#bitsafe-vault-governance-v0".to_string(),
+        module_name: "BitsafeVault.VaultGovernance".to_string(),
+        entity_name: "VaultGovernanceRules".to_string(),
+    };
+
+    // Build choice argument: ExpireConfirmation { confirmationCid : ContractId VaultGovernanceConfirmation }
+    let choice_argument = Value {
+        sum: Some(value::Sum::Record(Record {
+            record_id: None,
+            fields: vec![RecordField {
+                label: "confirmationCid".to_string(),
+                value: Some(Value {
+                    sum: Some(value::Sum::ContractId(request.confirmation_cid.clone())),
+                }),
+            }],
+        })),
+    };
+
+    let cmd = Command {
+        command: Some(command::Command::Exercise(ExerciseCommand {
+            template_id: Some(template_id),
+            contract_id: request.rules_contract_id.clone(),
+            choice: "VaultGovernanceRules_ExpireConfirmation".to_string(),
             choice_argument: Some(choice_argument),
         })),
     };
