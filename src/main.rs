@@ -7,9 +7,9 @@ use dec_party_manager::{config::NodeConfig, error::Result, utils};
 
 #[tokio::main]
 async fn main() -> Result {
-    let filter = EnvFilter::try_new("dec_party_manager=debug,tokio_noise=error,hyper_noise=error")
-        .or_else(|_| EnvFilter::try_from_default_env())
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new("dec_party_manager=info,tokio_noise=error,hyper_noise=error")
+    });
 
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer().with_filter(filter))
