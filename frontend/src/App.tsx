@@ -14,7 +14,6 @@ import { Header } from "./components/Header";
 import { PartyCard } from "./components/PartyCard";
 import { NodeConfigAccordion } from "./components/NodeConfigAccordion";
 import { NetworkConfigAccordion } from "./components/NetworkConfigAccordion";
-import { AuthCheckAccordion } from "./components/AuthCheckAccordion";
 import { LoadingSkeleton } from "./components/LoadingSkeleton";
 import { OnboardingDialog } from "./components/OnboardingDialog";
 import { InvitationModal } from "./components/InvitationModal";
@@ -28,6 +27,8 @@ import type {
   KeyStatusResponse,
   Peer,
   PendingInvitation,
+  PartyAuthStatus,
+  AuthStatusResponse,
 } from "./types";
 
 const App = () => {
@@ -40,6 +41,7 @@ const App = () => {
     ParticipantStatus[]
   >([]);
   const [keyStatus, setKeyStatus] = useState<KeyStatusResponse | null>(null);
+  const [authStatuses, setAuthStatuses] = useState<PartyAuthStatus[]>([]);
   const [onboardingDialogOpen, setOnboardingDialogOpen] = useState(false);
   const [_pendingInvitations, setPendingInvitations] = useState<
     PendingInvitation[]
@@ -99,18 +101,31 @@ const App = () => {
     [showSnackbar],
   );
 
+  const refreshAuthStatus = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/auth/status`);
+      if (res.ok) {
+        const data: AuthStatusResponse = await res.json();
+        setAuthStatuses(data.parties);
+      }
+    } catch {
+      // Ignore auth status errors
+    }
+  }, []);
+
   useEffect(() => {
     const fetchData = async () => {
       try {
         const partiesParams = partyFilter
           ? `?prefix=${encodeURIComponent(partyFilter)}`
           : "";
-        const [partiesRes, nodeRes, networkRes, keyStatusRes] =
+        const [partiesRes, nodeRes, networkRes, keyStatusRes, authStatusRes] =
           await Promise.all([
             fetch(`${API_BASE}/decentralized-parties${partiesParams}`),
             fetch(`${API_BASE}/node-config`),
             fetch(`${API_BASE}/network-config`),
             fetch(`${API_BASE}/keys/status`),
+            fetch(`${API_BASE}/auth/status`),
           ]);
 
         if (!partiesRes.ok || !nodeRes.ok || !networkRes.ok) {
@@ -128,6 +143,11 @@ const App = () => {
         if (keyStatusRes.ok) {
           const keyStatusData = await keyStatusRes.json();
           setKeyStatus(keyStatusData);
+        }
+
+        if (authStatusRes.ok) {
+          const authStatusData: AuthStatusResponse = await authStatusRes.json();
+          setAuthStatuses(authStatusData.parties);
         }
       } catch (err) {
         setError(err instanceof Error ? err.message : "Unknown error");
@@ -217,7 +237,6 @@ const App = () => {
                 onSave={savePeers}
               />
             )}
-            <AuthCheckAccordion />
 
             <Box sx={{ mt: 5, mb: 3 }}>
               <Box
@@ -273,6 +292,8 @@ const App = () => {
                 party={party}
                 onRefresh={refreshParties}
                 selfParticipantId={nodeConfig?.node.participant_id}
+                authStatus={authStatuses.find((a) => a.dec_party_id === party.party_id)}
+                onAuthRefresh={refreshAuthStatus}
               />
             ))}
 

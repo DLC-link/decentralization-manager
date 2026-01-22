@@ -32,7 +32,6 @@ ledger_api_host = "your-canton-node"
 ledger_api_port = 5001
 ledger_api_user_id = "ledger-api-user"
 synchronizer = "global"
-# ledger_api_token = "your-jwt-token"  # Optional
 
 [timeouts]
 handshake_timeout_secs = 30

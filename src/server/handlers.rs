@@ -42,7 +42,7 @@ use super::{
     },
 };
 use crate::{
-    auth::{AuthRegistry, WorkflowAuth},
+    auth::WorkflowAuth,
     config::{NetworkConfig, NodeConfig, Peer},
     error::Result,
     noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
@@ -111,12 +111,8 @@ pub async fn get_decentralized_parties(
     data: web::Data<AppState>,
     query: web::Query<PartiesQuery>,
 ) -> impl Responder {
-    match fetch_decentralized_parties(
-        &data.config,
-        query.prefix.as_deref(),
-        data.auth_registry.clone(),
-    )
-    .await
+    match fetch_decentralized_parties(&data.config, query.prefix.as_deref(), data.auth.clone())
+        .await
     {
         Ok(response) => HttpResponse::Ok().json(response),
         Err(e) => {
@@ -131,7 +127,7 @@ pub async fn get_decentralized_parties(
 async fn fetch_decentralized_parties(
     config: &NodeConfig,
     prefix_filter: Option<&str>,
-    auth_registry: Option<Arc<AuthRegistry>>,
+    auth: Option<WorkflowAuth>,
 ) -> Result<DecentralizedPartiesResponse> {
     let channel = tonic::transport::Channel::from_shared(config.admin_api_url())?
         .connect()
@@ -233,27 +229,35 @@ async fn fetch_decentralized_parties(
         })
         .collect();
 
+    // Check if we're in test mode (mock auth)
+    let test_mode = matches!(auth, Some(WorkflowAuth::Mock(_)));
+
     // Fetch contracts and metadata in parallel for all parties
     let futures: Vec<_> = my_parties
         .into_iter()
         .map(|(item, my_owner_key, p2p)| {
             let config = config.clone();
-            let auth_registry = auth_registry.clone();
+            let auth = auth.clone();
             let party_id_str = p2p.party.clone();
             async move {
-                // Get token for this party from auth registry
-                let token = match &auth_registry {
-                    Some(registry) => match registry.get_by_str(&party_id_str) {
-                        Some(tm) => tm.get_token().await.ok(),
-                        None => None,
-                    },
+                // Get token for this party from auth (real or mock)
+                let token = match &auth {
+                    Some(WorkflowAuth::Keycloak(registry)) => {
+                        match registry.get_by_str(&party_id_str) {
+                            Some(tm) => tm.get_token().await.ok(),
+                            None => None,
+                        }
+                    }
+                    Some(WorkflowAuth::Mock(mock_registry)) => {
+                        Some(mock_registry.get_by_str(&party_id_str).get_token())
+                    }
                     None => None,
                 };
 
                 let token_clone = token.clone();
                 let (contracts, local_metadata) = tokio::join!(
                     async {
-                        get_contracts(&config, &party_id_str, token)
+                        get_contracts(&config, &party_id_str, token, test_mode)
                             .await
                             .unwrap_or_else(|e| {
                                 tracing::warn!("Failed to get contracts for {party_id_str}: {e}");
@@ -888,16 +892,7 @@ pub async fn start_contracts(
 
     // Spawn the contracts workflow in the background
     let config = data.config.clone();
-    // Build WorkflowAuth from either real auth registry or mock (test mode)
-    let workflow_auth = data
-        .auth_registry
-        .as_ref()
-        .map(|r| WorkflowAuth::Keycloak(r.clone()))
-        .or_else(|| {
-            data.mock_auth_registry
-                .as_ref()
-                .map(|r| WorkflowAuth::Mock(r.clone()))
-        });
+    let workflow_auth = data.auth.clone();
     let contracts_state_clone = contracts_state.get_ref().clone();
     let listener_control = data.noise_listener_control.clone();
     let listener_notify = data.noise_listener_notify.clone();
@@ -1150,19 +1145,17 @@ pub async fn get_auth_status(data: web::Data<AppState>) -> impl Responder {
     let mut party_statuses = Vec::new();
 
     // Handle test mode - return mock status
-    if data.test_mode {
-        if let Some(ref mock_registry) = data.mock_auth_registry {
-            let manager = mock_registry.get_by_str("");
-            party_statuses.push(PartyAuthStatus {
-                dec_party_id: "(test mode)".to_string(),
-                member_party_id: "(test mode)".to_string(),
-                user_id: manager.user_id().to_string(),
-                keycloak_url: None,
-                keycloak_realm: None,
-                status: AuthStatus::Mock,
-                rights: None,
-            });
-        }
+    if let Some(WorkflowAuth::Mock(ref mock_registry)) = data.auth {
+        let manager = mock_registry.get_by_str("");
+        party_statuses.push(PartyAuthStatus {
+            dec_party_id: "(test mode)".to_string(),
+            member_party_id: "(test mode)".to_string(),
+            user_id: manager.user_id().to_string(),
+            keycloak_url: None,
+            keycloak_realm: None,
+            status: AuthStatus::Mock,
+            rights: None,
+        });
         return HttpResponse::Ok().json(AuthStatusResponse {
             parties: party_statuses,
         });
@@ -1175,20 +1168,22 @@ pub async fn get_auth_status(data: web::Data<AppState>) -> impl Responder {
         let user_id = party_creds.user_id.clone();
 
         // Try to get a token from the auth registry
-        let (status, token) = match &data.auth_registry {
-            Some(registry) => match registry.get(&party_creds.dec_party_id) {
-                Some(tm) => match tm.get_token().await {
-                    Ok(t) => (AuthStatus::Authenticated, Some(t)),
-                    Err(e) => (
-                        AuthStatus::Failed {
-                            error: e.to_string(),
-                        },
-                        None,
-                    ),
-                },
-                None => (AuthStatus::NotConfigured, None),
-            },
-            None => (AuthStatus::NotConfigured, None),
+        let (status, token) = match &data.auth {
+            Some(WorkflowAuth::Keycloak(registry)) => {
+                match registry.get(&party_creds.dec_party_id) {
+                    Some(tm) => match tm.get_token().await {
+                        Ok(t) => (AuthStatus::Authenticated, Some(t)),
+                        Err(e) => (
+                            AuthStatus::Failed {
+                                error: e.to_string(),
+                            },
+                            None,
+                        ),
+                    },
+                    None => (AuthStatus::NotConfigured, None),
+                }
+            }
+            _ => (AuthStatus::NotConfigured, None),
         };
 
         // Check user rights if we have a valid token
@@ -1313,7 +1308,7 @@ pub async fn test_auth(data: web::Data<AppState>) -> impl Responder {
     let mut results = Vec::new();
 
     // Handle test mode - mock auth always succeeds
-    if data.test_mode {
+    if matches!(data.auth, Some(WorkflowAuth::Mock(_))) {
         results.push(AuthTestResult {
             party_id: "(test mode)".to_string(),
             success: true,
@@ -1403,12 +1398,17 @@ pub async fn get_governance(
     // Get token for this party
     let token = get_party_token(&data, &party_id).await;
 
+    // Check if we're in test mode (mock auth)
+    let test_mode = matches!(data.auth, Some(WorkflowAuth::Mock(_)));
+
     // Get threshold for this party (default to 2 if not found)
     let threshold = get_party_threshold(&data, &query.party_id)
         .await
         .unwrap_or(2);
 
-    match get_governance_confirmations(&data.config, &query.party_id, threshold, token).await {
+    match get_governance_confirmations(&data.config, &query.party_id, threshold, token, test_mode)
+        .await
+    {
         Ok(actions) => HttpResponse::Ok().json(GovernanceResponse { actions, threshold }),
         Err(e) => {
             tracing::error!("Failed to fetch governance confirmations: {e}");
@@ -1481,19 +1481,13 @@ pub async fn execute_action(
     }
 }
 
-/// Get token for a party from either real or mock auth registry
+/// Get token for a party from auth registry
 async fn get_party_token(data: &web::Data<AppState>, party_id: &CantonId) -> Option<String> {
-    // Try real auth registry first
-    if let Some(ref registry) = data.auth_registry
-        && let Some(tm) = registry.get(party_id)
-    {
-        return tm.get_token().await.ok();
+    match &data.auth {
+        Some(WorkflowAuth::Keycloak(registry)) => registry.get(party_id)?.get_token().await.ok(),
+        Some(WorkflowAuth::Mock(mock_registry)) => Some(mock_registry.get(party_id).get_token()),
+        None => None,
     }
-    // Fall back to mock auth in test mode
-    if let Some(ref mock_registry) = data.mock_auth_registry {
-        return Some(mock_registry.get(party_id).get_token());
-    }
-    None
 }
 
 /// Get token and user_id for a party
@@ -1501,19 +1495,18 @@ async fn get_party_credentials(
     data: &web::Data<AppState>,
     party_id: &CantonId,
 ) -> Option<(String, String)> {
-    // Try real auth registry first
-    if let Some(ref registry) = data.auth_registry
-        && let Some(tm) = registry.get(party_id)
-        && let Ok(token) = tm.get_token().await
-    {
-        return Some((token, tm.user_id().to_string()));
+    match &data.auth {
+        Some(WorkflowAuth::Keycloak(registry)) => {
+            let tm = registry.get(party_id)?;
+            let token = tm.get_token().await.ok()?;
+            Some((token, tm.user_id().to_string()))
+        }
+        Some(WorkflowAuth::Mock(mock_registry)) => {
+            let mm = mock_registry.get(party_id);
+            Some((mm.get_token(), mm.user_id().to_string()))
+        }
+        None => None,
     }
-    // Fall back to mock auth in test mode
-    if let Some(ref mock_registry) = data.mock_auth_registry {
-        let mm = mock_registry.get(party_id);
-        return Some((mm.get_token(), mm.user_id().to_string()));
-    }
-    None
 }
 
 /// Get threshold for a decentralized party
