@@ -19,11 +19,17 @@ import {
   FormControl,
   InputLabel,
   Divider,
+  Card,
+  CardActionArea,
+  CardContent,
 } from "@mui/material";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import AddIcon from "@mui/icons-material/Add";
 import DeleteIcon from "@mui/icons-material/Delete";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
+import ArrowBackIcon from "@mui/icons-material/ArrowBack";
+import AccountBalanceIcon from "@mui/icons-material/AccountBalance";
+import StorageIcon from "@mui/icons-material/Storage";
 import { API_BASE } from "../constants";
 import type {
   ContractsStatusResponse,
@@ -40,6 +46,8 @@ interface ContractsDialogProps {
   partyId: string;
   participantIds: string[];
 }
+
+type ContractType = "cbtc" | "vault" | null;
 
 const FIELD_TYPES = [
   { value: "decentralized_party", label: "Decentralized Party" },
@@ -64,10 +72,10 @@ const createEmptyContract = (): ContractDefinition => ({
   fields: [],
 });
 
-// Default contracts from original contract-deploy.toml
 const DEFAULT_OPERATOR_PARTY = "";
 
-const getDefaultContracts = (): ContractDefinition[] => [
+// CBTC contract definitions
+const getCbtcContracts = (): ContractDefinition[] => [
   {
     id: "create-govR",
     name: "CBTCGovernanceRules",
@@ -107,6 +115,20 @@ const getDefaultContracts = (): ContractDefinition[] => [
     ],
   },
 ];
+
+// Vault contract definitions (empty for now)
+const getVaultContracts = (): ContractDefinition[] => [];
+
+const getContractsForType = (type: ContractType): ContractDefinition[] => {
+  switch (type) {
+    case "cbtc":
+      return getCbtcContracts();
+    case "vault":
+      return getVaultContracts();
+    default:
+      return [];
+  }
+};
 
 const createDefaultField = (type: string): FieldDefinition => {
   switch (type) {
@@ -496,6 +518,65 @@ const ContractEditor = ({
   );
 };
 
+// Contract type selection screen
+interface ContractTypeSelectionProps {
+  onSelect: (type: ContractType) => void;
+}
+
+const ContractTypeSelection = ({ onSelect }: ContractTypeSelectionProps) => {
+  return (
+    <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
+      <Typography variant="body2" color="text.secondary">
+        Select the type of contracts you want to deploy.
+      </Typography>
+
+      <Box sx={{ display: "flex", gap: 2, mt: 1 }}>
+        <Card
+          sx={{
+            flex: 1,
+            border: 1,
+            borderColor: "divider",
+            "&:hover": { borderColor: "primary.main" },
+          }}
+        >
+          <CardActionArea onClick={() => onSelect("cbtc")} sx={{ p: 2 }}>
+            <CardContent sx={{ textAlign: "center" }}>
+              <AccountBalanceIcon
+                sx={{ fontSize: 48, color: "primary.main", mb: 1 }}
+              />
+              <Typography variant="h6">CBTC</Typography>
+              <Typography variant="body2" color="text.secondary">
+                Deploy CBTC governance and account rules contracts
+              </Typography>
+            </CardContent>
+          </CardActionArea>
+        </Card>
+
+        <Card
+          sx={{
+            flex: 1,
+            border: 1,
+            borderColor: "divider",
+            "&:hover": { borderColor: "primary.main" },
+          }}
+        >
+          <CardActionArea onClick={() => onSelect("vault")} sx={{ p: 2 }}>
+            <CardContent sx={{ textAlign: "center" }}>
+              <StorageIcon
+                sx={{ fontSize: 48, color: "secondary.main", mb: 1 }}
+              />
+              <Typography variant="h6">Vault</Typography>
+              <Typography variant="body2" color="text.secondary">
+                Deploy Bitsafe Vault governance contracts
+              </Typography>
+            </CardContent>
+          </CardActionArea>
+        </Card>
+      </Box>
+    </Box>
+  );
+};
+
 export const ContractsDialog = ({
   open,
   onClose,
@@ -506,21 +587,34 @@ export const ContractsDialog = ({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<ContractsStatusResponse | null>(null);
+  const [contractType, setContractType] = useState<ContractType>(null);
 
-  // Form state - initialized with defaults from original contract-deploy.toml
+  // Form state
   const [operatorParty, setOperatorParty] = useState(DEFAULT_OPERATOR_PARTY);
   const [operatorPartyHint, setOperatorPartyHint] = useState("operator");
   const [darFiles, setDarFiles] = useState<DarFile[]>([]);
-  const [contracts, setContracts] =
-    useState<ContractDefinition[]>(getDefaultContracts);
+  const [contracts, setContracts] = useState<ContractDefinition[]>([]);
 
+  // Reset state when dialog opens/closes
   useEffect(() => {
     if (!open) {
       setError(null);
       setStatus(null);
       setLoading(false);
+      setContractType(null);
+      setDarFiles([]);
+      setContracts([]);
+      setOperatorParty(DEFAULT_OPERATOR_PARTY);
+      setOperatorPartyHint("operator");
     }
   }, [open]);
+
+  // Initialize contracts when type is selected
+  useEffect(() => {
+    if (contractType) {
+      setContracts(getContractsForType(contractType));
+    }
+  }, [contractType]);
 
   const pollStatus = useCallback(async () => {
     try {
@@ -544,7 +638,6 @@ export const ContractsDialog = ({
     let interval: number | undefined;
 
     if (status?.status === "inprogress") {
-      // Poll immediately, then every 2 seconds
       pollStatus();
       interval = window.setInterval(pollStatus, 2000);
     }
@@ -580,7 +673,6 @@ export const ContractsDialog = ({
     }
 
     setDarFiles([...darFiles, ...newDarFiles]);
-    // Reset input to allow selecting same files again
     event.target.value = "";
   };
 
@@ -643,21 +735,36 @@ export const ContractsDialog = ({
     }
   };
 
+  const handleBack = () => {
+    setContractType(null);
+    setContracts([]);
+    setDarFiles([]);
+  };
+
   const isInProgress = status?.status === "inprogress";
   const isCompleted = status?.status === "completed";
   const isFailed = status?.status === "failed";
 
+  const getDialogTitle = () => {
+    if (!contractType) return "Deploy Contracts";
+    if (contractType === "cbtc") return "Deploy CBTC Contracts";
+    return "Deploy Vault Contracts";
+  };
+
   return (
     <Dialog open={open} onClose={handleClose} maxWidth="md" fullWidth>
-      <DialogTitle>Deploy Contracts</DialogTitle>
+      <DialogTitle>
+        <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+          {contractType && !isInProgress && !isCompleted && (
+            <IconButton size="small" onClick={handleBack} sx={{ mr: 1 }}>
+              <ArrowBackIcon />
+            </IconButton>
+          )}
+          {getDialogTitle()}
+        </Box>
+      </DialogTitle>
       <DialogContent>
         <Box sx={{ display: "flex", flexDirection: "column", gap: 2, mt: 1 }}>
-          <Typography variant="body2" color="text.secondary">
-            Configure and deploy contracts for the decentralized party. This
-            will coordinate with other participants to sign and execute the
-            submissions.
-          </Typography>
-
           {error && <Alert severity="error">{error}</Alert>}
 
           {isInProgress && (
@@ -678,8 +785,18 @@ export const ContractsDialog = ({
             </Alert>
           )}
 
-          {!isInProgress && !isCompleted && (
+          {!isInProgress && !isCompleted && !contractType && (
+            <ContractTypeSelection onSelect={setContractType} />
+          )}
+
+          {!isInProgress && !isCompleted && contractType && (
             <>
+              <Typography variant="body2" color="text.secondary">
+                Configure and deploy contracts for the decentralized party. This
+                will coordinate with other participants to sign and execute the
+                submissions.
+              </Typography>
+
               <Divider />
               <Typography variant="subtitle1">DAR Files</Typography>
               <Box
@@ -816,7 +933,8 @@ export const ContractsDialog = ({
         <Button onClick={handleClose} disabled={loading}>
           {isCompleted || isFailed ? "Close" : "Cancel"}
         </Button>
-        {!status?.status || status.status === "idle" || isFailed ? (
+        {contractType &&
+        (!status?.status || status.status === "idle" || isFailed) ? (
           <Button
             onClick={handleStart}
             variant="contained"
