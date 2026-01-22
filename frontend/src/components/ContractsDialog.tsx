@@ -57,7 +57,9 @@ const FIELD_TYPES = [
   { value: "int64", label: "Integer (64-bit)" },
   { value: "bool", label: "Boolean" },
   { value: "instrument", label: "Instrument" },
-  { value: "attestors_set", label: "Attestors Set" },
+  { value: "attestors_set", label: "Attestors Set (GenMap)" },
+  { value: "party_set", label: "Party Set (DA.Set)" },
+  { value: "rel_time", label: "Relative Time (DA.Time)" },
   { value: "governance_threshold", label: "Governance Threshold" },
   { value: "optional", label: "Optional" },
   { value: "record", label: "Record" },
@@ -116,8 +118,22 @@ const getCbtcContracts = (): ContractDefinition[] => [
   },
 ];
 
-// Vault contract definitions (empty for now)
-const getVaultContracts = (): ContractDefinition[] => [];
+// Vault contract definitions
+const getVaultContracts = (): ContractDefinition[] => [
+  {
+    id: "create-vault-governance-rules",
+    name: "VaultGovernanceRules",
+    package_id: "#bitsafe-vault-governance-v0-rc2",
+    module_name: "BitsafeVault.VaultGovernance",
+    entity_name: "VaultGovernanceRules",
+    fields: [
+      { type: "decentralized_party" }, // vaultManager : Party
+      { type: "party_set" }, // members : Set Party (DA.Set.Types:Set Party)
+      { type: "governance_threshold" }, // threshold : Int
+      { type: "optional", inner: { type: "rel_time", microseconds: 3600000000 } }, // actionConfirmationTimeout : Optional RelTime (1 hour)
+    ],
+  },
+];
 
 const getContractsForType = (type: ContractType): ContractDefinition[] => {
   switch (type) {
@@ -148,6 +164,10 @@ const createDefaultField = (type: string): FieldDefinition => {
       return { type: "instrument", id: "" };
     case "attestors_set":
       return { type: "attestors_set" };
+    case "party_set":
+      return { type: "party_set" };
+    case "rel_time":
+      return { type: "rel_time", microseconds: 3600000000 }; // 1 hour default
     case "governance_threshold":
       return { type: "governance_threshold" };
     case "optional":
@@ -539,7 +559,10 @@ const ContractTypeSelection = ({ onSelect }: ContractTypeSelectionProps) => {
             "&:hover": { borderColor: "primary.main" },
           }}
         >
-          <CardActionArea onClick={() => onSelect("cbtc")} sx={{ p: 2 }}>
+          <CardActionArea
+            onClick={() => onSelect("cbtc")}
+            sx={{ p: 2, height: "100%" }}
+          >
             <CardContent sx={{ textAlign: "center" }}>
               <AccountBalanceIcon
                 sx={{ fontSize: 48, color: "primary.main", mb: 1 }}
@@ -560,7 +583,10 @@ const ContractTypeSelection = ({ onSelect }: ContractTypeSelectionProps) => {
             "&:hover": { borderColor: "primary.main" },
           }}
         >
-          <CardActionArea onClick={() => onSelect("vault")} sx={{ p: 2 }}>
+          <CardActionArea
+            onClick={() => onSelect("vault")}
+            sx={{ p: 2, height: "100%" }}
+          >
             <CardContent sx={{ textAlign: "center" }}>
               <StorageIcon
                 sx={{ fontSize: 48, color: "secondary.main", mb: 1 }}

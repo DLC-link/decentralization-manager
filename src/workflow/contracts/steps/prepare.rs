@@ -1,6 +1,4 @@
 use anyhow::Context;
-use tokio::fs;
-
 use canton_proto_rs::com::daml::ledger::api::v2::{
     Command, CreateCommand, GenMap, Identifier, Optional, Record, RecordField, Value,
     admin::{
@@ -13,6 +11,7 @@ use canton_proto_rs::com::daml::ledger::api::v2::{
     interactive::PrepareSubmissionRequest,
     value,
 };
+use tokio::fs;
 
 use crate::{
     config::{NetworkConfig, NodeConfig},
@@ -361,7 +360,7 @@ fn build_field_value(field_def: &FieldDefinition, context: &SubmissionContext) -
             })
         }
         FieldDefinition::AttestorsSet => {
-            // Set Party represented as GenMap<Party, Unit>
+            // Raw GenMap<Party, Unit> for CBTC-style contracts
             let unit = Value {
                 sum: Some(value::Sum::Unit(())),
             };
@@ -376,6 +375,45 @@ fn build_field_value(field_def: &FieldDefinition, context: &SubmissionContext) -
                         value: Some(unit.clone()),
                     })
                     .collect(),
+            })
+        }
+        FieldDefinition::PartySet => {
+            // DA.Set.Types:Set Party is a record containing a "map" field with GenMap<Party, Unit>
+            let unit = Value {
+                sum: Some(value::Sum::Unit(())),
+            };
+            let gen_map = GenMap {
+                entries: context
+                    .participant_parties
+                    .iter()
+                    .map(|party| gen_map::Entry {
+                        key: Some(Value {
+                            sum: Some(value::Sum::Party(party.clone())),
+                        }),
+                        value: Some(unit.clone()),
+                    })
+                    .collect(),
+            };
+            value::Sum::Record(Record {
+                record_id: None,
+                fields: vec![RecordField {
+                    label: String::new(),
+                    value: Some(Value {
+                        sum: Some(value::Sum::GenMap(gen_map)),
+                    }),
+                }],
+            })
+        }
+        FieldDefinition::RelTime { microseconds } => {
+            // DA.Time.Types:RelTime is a record containing a single Int64 field (microseconds)
+            value::Sum::Record(Record {
+                record_id: None,
+                fields: vec![RecordField {
+                    label: String::new(),
+                    value: Some(Value {
+                        sum: Some(value::Sum::Int64(*microseconds)),
+                    }),
+                }],
             })
         }
         FieldDefinition::Optional { inner } => {

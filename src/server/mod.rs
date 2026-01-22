@@ -1,3 +1,4 @@
+mod action_serializer;
 mod assets;
 mod handlers;
 mod queries;
@@ -206,6 +207,8 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig, test_mode: 
             .service(handlers::get_governance)
             .service(handlers::confirm_action)
             .service(handlers::execute_action)
+            .service(handlers::confirm_action_v2)
+            .service(handlers::execute_action_v2)
             .service(assets::serve_frontend)
     })
     .bind((host, port))?

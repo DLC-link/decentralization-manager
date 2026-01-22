@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 
 use canton_proto_rs::com::daml::ledger::api::v2::{
-    CumulativeFilter, EventFormat, Filters, GetActiveContractsRequest, GetLedgerEndRequest,
-    Identifier, TemplateFilter, WildcardFilter, cumulative_filter,
+    CreatedEvent, CumulativeFilter, EventFormat, Filters, GetActiveContractsRequest,
+    GetLedgerEndRequest, Identifier, TemplateFilter, WildcardFilter,
+    admin::ListKnownPartiesRequest, cumulative_filter,
     get_active_contracts_response::ContractEntry, value,
 };
 
@@ -10,32 +11,70 @@ use crate::{config::NodeConfig, error::Result, utils};
 
 use super::types::{ContractInfo, GovernanceAction, GovernanceConfirmation, PartyMetadata};
 
-/// Contract template identifiers for the contracts list (package_id, module_name, entity_name)
+/// Template identifier for DAML contracts
+struct TemplateId {
+    package_id: &'static str,
+    module_name: &'static str,
+    entity_name: &'static str,
+}
+
+/// Contract template identifiers for the contracts list
 /// Each template is queried separately to handle cases where packages may not exist
-const CONTRACT_TEMPLATES: &[(&str, &str, &str)] = &[
-    ("#cbtc-governance", "CBTC.Governance", "CBTCGovernanceRules"),
-    ("#cbtc", "CBTC.DepositAccount", "CBTCDepositAccountRules"),
-    ("#cbtc", "CBTC.DepositAccount", "CBTCDepositAccount"),
-    ("#cbtc", "CBTC.WithdrawAccount", "CBTCWithdrawAccountRules"),
-    ("#cbtc", "CBTC.WithdrawAccount", "CBTCWithdrawAccount"),
+const CONTRACT_TEMPLATES: &[TemplateId] = &[
+    // CBTC contracts
+    TemplateId {
+        package_id: "#cbtc-governance",
+        module_name: "CBTC.Governance",
+        entity_name: "CBTCGovernanceRules",
+    },
+    TemplateId {
+        package_id: "#cbtc",
+        module_name: "CBTC.DepositAccount",
+        entity_name: "CBTCDepositAccountRules",
+    },
+    TemplateId {
+        package_id: "#cbtc",
+        module_name: "CBTC.DepositAccount",
+        entity_name: "CBTCDepositAccount",
+    },
+    TemplateId {
+        package_id: "#cbtc",
+        module_name: "CBTC.WithdrawAccount",
+        entity_name: "CBTCWithdrawAccountRules",
+    },
+    TemplateId {
+        package_id: "#cbtc",
+        module_name: "CBTC.WithdrawAccount",
+        entity_name: "CBTCWithdrawAccount",
+    },
+    // Vault contracts
+    TemplateId {
+        package_id: "#bitsafe-vault-governance-v0-rc2",
+        module_name: "BitsafeVault.VaultGovernance",
+        entity_name: "VaultGovernanceRules",
+    },
 ];
 
-/// Governance confirmation template identifiers (package_id, module_name, entity_name)
+/// Governance confirmation template identifiers
 /// Each template is queried separately to handle cases where packages may not exist
-const GOVERNANCE_TEMPLATES: &[(&str, &str, &str)] = &[
-    (
-        "#bitsafe-vault-governance-v0",
-        "BitsafeVault.VaultGovernance",
-        "VaultGovernanceConfirmation",
-    ),
-    ("#cbtc-governance", "CBTC.Governance", "Confirmation"),
+const GOVERNANCE_TEMPLATES: &[TemplateId] = &[
+    TemplateId {
+        package_id: "#bitsafe-vault-governance-v0",
+        module_name: "BitsafeVault.VaultGovernance",
+        entity_name: "VaultGovernanceConfirmation",
+    },
+    TemplateId {
+        package_id: "#cbtc-governance",
+        module_name: "CBTC.Governance",
+        entity_name: "Confirmation",
+    },
 ];
 
 /// Check if a template matches any contract template we want to display
 fn is_contract_template(module_name: &str, entity_name: &str) -> bool {
     CONTRACT_TEMPLATES
         .iter()
-        .any(|(_p, m, e)| *m == module_name && *e == entity_name)
+        .any(|t| t.module_name == module_name && t.entity_name == entity_name)
 }
 
 /// Get active contracts for a party
@@ -60,30 +99,35 @@ pub async fn get_contracts(
     } else {
         // Production mode: query each template separately to handle missing packages
         tracing::debug!("Using TemplateFilter for contracts query (per-template)");
-        for (package_id, module_name, entity_name) in CONTRACT_TEMPLATES {
+        for t in CONTRACT_TEMPLATES {
             match fetch_contracts_for_template(
                 config,
                 party_id,
                 token.clone(),
-                package_id,
-                module_name,
-                entity_name,
+                t.package_id,
+                t.module_name,
+                t.entity_name,
                 &mut contracts,
             )
             .await
             {
                 Ok(()) => {
-                    tracing::debug!("Successfully queried {module_name}:{entity_name}");
+                    tracing::debug!("Successfully queried {}:{}", t.module_name, t.entity_name);
                 }
                 Err(e) => {
                     let err_str = e.to_string();
                     if err_str.contains("PACKAGE_NAMES_NOT_FOUND") {
                         tracing::debug!(
-                            "Package {package_id} not found, skipping {module_name}:{entity_name}"
+                            "Package {} not found, skipping {}:{}",
+                            t.package_id,
+                            t.module_name,
+                            t.entity_name
                         );
                     } else {
                         tracing::warn!(
-                            "Failed to query {module_name}:{entity_name}: {e}, continuing..."
+                            "Failed to query {}:{}: {e}, continuing...",
+                            t.module_name,
+                            t.entity_name
                         );
                     }
                 }
@@ -241,8 +285,6 @@ pub async fn get_party_metadata(
     party_id: &str,
     token: Option<String>,
 ) -> Result<Option<PartyMetadata>> {
-    use canton_proto_rs::com::daml::ledger::api::v2::admin::ListKnownPartiesRequest;
-
     let mut client = utils::create_party_client(config, token).await?;
 
     let response = client
@@ -272,7 +314,7 @@ pub async fn get_party_metadata(
 fn is_governance_template(module_name: &str, entity_name: &str) -> bool {
     GOVERNANCE_TEMPLATES
         .iter()
-        .any(|(_p, m, e)| *m == module_name && *e == entity_name)
+        .any(|t| t.module_name == module_name && t.entity_name == entity_name)
 }
 
 /// Get governance confirmations for a decentralized party
@@ -303,31 +345,36 @@ pub async fn get_governance_confirmations(
     } else {
         // Production mode: query each template separately to handle missing packages
         tracing::debug!("Using TemplateFilter for governance query (per-template)");
-        for (package_id, module_name, entity_name) in GOVERNANCE_TEMPLATES {
+        for t in GOVERNANCE_TEMPLATES {
             match fetch_governance_for_template(
                 config,
                 party_id,
                 token.clone(),
-                package_id,
-                module_name,
-                entity_name,
+                t.package_id,
+                t.module_name,
+                t.entity_name,
                 &mut confirmations_by_action,
             )
             .await
             {
                 Ok(()) => {
-                    tracing::debug!("Successfully queried {module_name}:{entity_name}");
+                    tracing::debug!("Successfully queried {}:{}", t.module_name, t.entity_name);
                 }
                 Err(e) => {
                     // Log but continue - package might not exist on this participant
                     let err_str = e.to_string();
                     if err_str.contains("PACKAGE_NAMES_NOT_FOUND") {
                         tracing::debug!(
-                            "Package {package_id} not found, skipping {module_name}:{entity_name}"
+                            "Package {} not found, skipping {}:{}",
+                            t.package_id,
+                            t.module_name,
+                            t.entity_name
                         );
                     } else {
                         tracing::warn!(
-                            "Failed to query {module_name}:{entity_name}: {e}, continuing..."
+                            "Failed to query {}:{}: {e}, continuing...",
+                            t.module_name,
+                            t.entity_name
                         );
                     }
                 }
@@ -480,7 +527,7 @@ async fn fetch_governance_for_template(
 
 /// Extract action and confirming_party from a created event and add to the map
 fn extract_and_add_confirmation(
-    created: &canton_proto_rs::com::daml::ledger::api::v2::CreatedEvent,
+    created: &CreatedEvent,
     confirmations_by_action: &mut HashMap<String, Vec<GovernanceConfirmation>>,
 ) {
     // Extract action field from create_arguments

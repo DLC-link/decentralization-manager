@@ -4,7 +4,8 @@ use actix_web::{HttpResponse, Responder, get, post, web};
 use base64::Engine;
 use canton_proto_rs::com::{
     daml::ledger::api::v2::{
-        Command, Commands, ExerciseCommand, Identifier, RecordField, SubmitAndWaitRequest, Value,
+        Command, Commands, ExerciseCommand, Identifier, Record, RecordField, SubmitAndWaitRequest,
+        Value,
         admin::{
             ListUserRightsRequest,
             right::{CanActAs, CanReadAs, Kind},
@@ -28,17 +29,17 @@ use canton_proto_rs::com::{
 use serde::Deserialize;
 
 use super::{
-    AppState,
+    AppState, action_serializer,
     queries::{get_contracts, get_governance_confirmations, get_party_metadata},
     types::{
         AuthStatus, AuthStatusResponse, AuthTestResponse, AuthTestResult, ConfirmActionRequest,
-        ConnectionStatus, ContractsRequest, DecentralizedPartiesResponse, DecentralizedParty,
-        ExecuteActionRequest, GovernanceResponse, HttpWorkflowState, InvitationActionRequest,
-        InvitationType, KeyStatusResponse, KickRequest, KickResponse, KickStatus,
-        ListenerPauseGuard, OnboardingRequest, OnboardingResponse, OnboardingStatus,
-        ParticipantInfo, ParticipantStatus, ParticipantsStatusResponse, PartyAuthStatus,
-        PendingInvitation, PendingInvitationsResponse, Permission, RightsStatus, WorkflowProgress,
-        WorkflowResponse,
+        ConfirmActionRequestV2, ConnectionStatus, ContractsRequest, DecentralizedPartiesResponse,
+        DecentralizedParty, ExecuteActionRequest, ExecuteActionRequestV2, GovernanceResponse,
+        HttpWorkflowState, InvitationActionRequest, InvitationType, KeyStatusResponse, KickRequest,
+        KickResponse, KickStatus, ListenerPauseGuard, OnboardingRequest, OnboardingResponse,
+        OnboardingStatus, ParticipantInfo, ParticipantStatus, ParticipantsStatusResponse,
+        PartyAuthStatus, PendingInvitation, PendingInvitationsResponse, Permission, RightsStatus,
+        WorkflowProgress, WorkflowResponse,
     },
 };
 use crate::{
@@ -1576,17 +1577,15 @@ async fn execute_confirm_action(
 
     // Build choice argument: ConfirmAction { action : Text }
     let choice_argument = Value {
-        sum: Some(value::Sum::Record(
-            canton_proto_rs::com::daml::ledger::api::v2::Record {
-                record_id: None,
-                fields: vec![RecordField {
-                    label: "action".to_string(),
-                    value: Some(Value {
-                        sum: Some(value::Sum::Text(request.action_id.clone())),
-                    }),
-                }],
-            },
-        )),
+        sum: Some(value::Sum::Record(Record {
+            record_id: None,
+            fields: vec![RecordField {
+                label: "action".to_string(),
+                value: Some(Value {
+                    sum: Some(value::Sum::Text(request.action_id.clone())),
+                }),
+            }],
+        })),
     };
 
     let cmd = Command {
@@ -1648,17 +1647,15 @@ async fn execute_confirmed_action(
 
     // Build choice argument: ExecuteConfirmedAction { action : Text }
     let choice_argument = Value {
-        sum: Some(value::Sum::Record(
-            canton_proto_rs::com::daml::ledger::api::v2::Record {
-                record_id: None,
-                fields: vec![RecordField {
-                    label: "action".to_string(),
-                    value: Some(Value {
-                        sum: Some(value::Sum::Text(request.action_id.clone())),
-                    }),
-                }],
-            },
-        )),
+        sum: Some(value::Sum::Record(Record {
+            record_id: None,
+            fields: vec![RecordField {
+                label: "action".to_string(),
+                value: Some(Value {
+                    sum: Some(value::Sum::Text(request.action_id.clone())),
+                }),
+            }],
+        })),
     };
 
     let cmd = Command {
@@ -1679,6 +1676,217 @@ async fn execute_confirmed_action(
         min_ledger_time_abs: None,
         min_ledger_time_rel: None,
         act_as: vec![user_id.to_string()],
+        read_as: vec![request.party_id.to_string()],
+        submission_id: String::new(),
+        disclosed_contracts: vec![],
+        synchronizer_id: String::new(),
+        package_id_selection_preference: vec![],
+        prefetch_contract_keys: vec![],
+    };
+
+    let mut req = tonic::Request::new(SubmitAndWaitRequest {
+        commands: Some(commands),
+    });
+    req.metadata_mut()
+        .insert("authorization", format!("Bearer {token}").parse().unwrap());
+
+    client.submit_and_wait(req).await?;
+
+    Ok(())
+}
+
+// ============================================================================
+// V2 Governance Endpoints (Structured Actions)
+// ============================================================================
+
+/// Submit a confirmation for a governance action using structured ActionType
+#[post("/governance/v2/confirm")]
+pub async fn confirm_action_v2(
+    data: web::Data<AppState>,
+    body: web::Json<ConfirmActionRequestV2>,
+) -> impl Responder {
+    let party_id = &body.party_id;
+
+    // Get token and credentials for this party
+    let (token, member_party_id) = match get_party_credentials_v2(&data, party_id).await {
+        Some(creds) => creds,
+        None => {
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "No credentials configured for party"
+            }));
+        }
+    };
+
+    match execute_confirm_action_v2(&data.config, &body, &token, &member_party_id).await {
+        Ok(()) => HttpResponse::Ok().json(serde_json::json!({
+            "message": "Confirmation submitted successfully"
+        })),
+        Err(e) => {
+            tracing::error!("Failed to submit V2 confirmation: {e}");
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to submit confirmation: {e}")
+            }))
+        }
+    }
+}
+
+/// Execute a confirmed governance action using structured ActionType
+#[post("/governance/v2/execute")]
+pub async fn execute_action_v2(
+    data: web::Data<AppState>,
+    body: web::Json<ExecuteActionRequestV2>,
+) -> impl Responder {
+    let party_id = &body.party_id;
+
+    // Get token and credentials for this party
+    let (token, member_party_id) = match get_party_credentials_v2(&data, party_id).await {
+        Some(creds) => creds,
+        None => {
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "No credentials configured for party"
+            }));
+        }
+    };
+
+    match execute_confirmed_action_v2(&data.config, &body, &token, &member_party_id).await {
+        Ok(()) => HttpResponse::Ok().json(serde_json::json!({
+            "message": "Action executed successfully"
+        })),
+        Err(e) => {
+            tracing::error!("Failed to execute V2 action: {e}");
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to execute action: {e}")
+            }))
+        }
+    }
+}
+
+/// Get token and member_party_id for a party (V2 version)
+async fn get_party_credentials_v2(
+    data: &web::Data<AppState>,
+    party_id: &CantonId,
+) -> Option<(String, String)> {
+    match &data.auth {
+        Some(WorkflowAuth::Keycloak(registry)) => {
+            let tm = registry.get(party_id)?;
+            let token = tm.get_token().await.ok()?;
+            Some((token, tm.member_party_id().to_string()))
+        }
+        Some(WorkflowAuth::Mock(mock_registry)) => {
+            let mm = mock_registry.get(party_id);
+            Some((mm.get_token(), mm.member_party_id().to_string()))
+        }
+        None => None,
+    }
+}
+
+/// Execute ConfirmAction choice on VaultGovernanceRules contract with structured action
+async fn execute_confirm_action_v2(
+    config: &NodeConfig,
+    request: &ConfirmActionRequestV2,
+    token: &str,
+    member_party_id: &str,
+) -> Result {
+    let channel = tonic::transport::Channel::from_shared(config.ledger_api_url())?
+        .connect()
+        .await?;
+
+    let mut client =
+        CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
+
+    let template_id = Identifier {
+        package_id: "#bitsafe-vault-governance-v0".to_string(),
+        module_name: "BitsafeVault.VaultGovernance".to_string(),
+        entity_name: "VaultGovernanceRules".to_string(),
+    };
+
+    // Build choice argument using action_serializer
+    let choice_argument =
+        action_serializer::build_confirm_action_argument(member_party_id, &request.action);
+
+    let cmd = Command {
+        command: Some(command::Command::Exercise(ExerciseCommand {
+            template_id: Some(template_id),
+            contract_id: request.rules_contract_id.clone(),
+            choice: "VaultGovernanceRules_ConfirmAction".to_string(),
+            choice_argument: Some(choice_argument),
+        })),
+    };
+
+    let commands = Commands {
+        workflow_id: String::new(),
+        user_id: String::new(),
+        command_id: uuid::Uuid::new_v4().to_string(),
+        commands: vec![cmd],
+        deduplication_period: None,
+        min_ledger_time_abs: None,
+        min_ledger_time_rel: None,
+        act_as: vec![member_party_id.to_string()],
+        read_as: vec![request.party_id.to_string()],
+        submission_id: String::new(),
+        disclosed_contracts: vec![],
+        synchronizer_id: String::new(),
+        package_id_selection_preference: vec![],
+        prefetch_contract_keys: vec![],
+    };
+
+    let mut req = tonic::Request::new(SubmitAndWaitRequest {
+        commands: Some(commands),
+    });
+    req.metadata_mut()
+        .insert("authorization", format!("Bearer {token}").parse().unwrap());
+
+    client.submit_and_wait(req).await?;
+
+    Ok(())
+}
+
+/// Execute ExecuteConfirmedAction choice on VaultGovernanceRules contract with structured action
+async fn execute_confirmed_action_v2(
+    config: &NodeConfig,
+    request: &ExecuteActionRequestV2,
+    token: &str,
+    member_party_id: &str,
+) -> Result {
+    let channel = tonic::transport::Channel::from_shared(config.ledger_api_url())?
+        .connect()
+        .await?;
+
+    let mut client =
+        CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
+
+    let template_id = Identifier {
+        package_id: "#bitsafe-vault-governance-v0".to_string(),
+        module_name: "BitsafeVault.VaultGovernance".to_string(),
+        entity_name: "VaultGovernanceRules".to_string(),
+    };
+
+    // Build choice argument using action_serializer
+    let choice_argument = action_serializer::build_execute_action_argument(
+        member_party_id,
+        &request.action,
+        &request.confirmation_cids,
+        None, // contractCid is optional, typically None for execute
+    );
+
+    let cmd = Command {
+        command: Some(command::Command::Exercise(ExerciseCommand {
+            template_id: Some(template_id),
+            contract_id: request.rules_contract_id.clone(),
+            choice: "VaultGovernanceRules_ExecuteConfirmedAction".to_string(),
+            choice_argument: Some(choice_argument),
+        })),
+    };
+
+    let commands = Commands {
+        workflow_id: String::new(),
+        user_id: String::new(),
+        command_id: uuid::Uuid::new_v4().to_string(),
+        commands: vec![cmd],
+        deduplication_period: None,
+        min_ledger_time_abs: None,
+        min_ledger_time_rel: None,
+        act_as: vec![member_party_id.to_string()],
         read_as: vec![request.party_id.to_string()],
         submission_id: String::new(),
         disclosed_contracts: vec![],

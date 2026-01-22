@@ -108,6 +108,8 @@ export type FieldDefinition =
   | { type: "bool"; value: boolean }
   | { type: "instrument"; id: string }
   | { type: "attestors_set" }
+  | { type: "party_set" }
+  | { type: "rel_time"; microseconds: number }
   | { type: "optional"; inner: FieldDefinition }
   | { type: "record"; fields: FieldDefinition[] }
   | { type: "governance_threshold" };
@@ -212,4 +214,141 @@ export interface ExecuteActionRequest {
   party_id: string;
   action_id: string;
   rules_contract_id: string;
+}
+
+// ============================================================================
+// V2 Structured Action Types for Vault Governance
+// ============================================================================
+
+export interface InstrumentId {
+  issuer: string;
+  symbol: string;
+}
+
+export interface VaultLimits {
+  max_total_deposit: string;
+  min_deposit_amount: string;
+  min_withdrawal_amount: string;
+}
+
+export interface AppRewardBeneficiary {
+  beneficiary: string;
+  weight: string;
+}
+
+export interface FarConfig {
+  featured_app_right_cid: string;
+  beneficiaries: AppRewardBeneficiary[];
+}
+
+// Union type for all governance actions
+export type ActionType =
+  // Governance (4)
+  | {
+      type: "governance_add_member";
+      member: string;
+      new_threshold: number;
+    }
+  | {
+      type: "governance_remove_member";
+      member: string;
+      new_threshold: number;
+    }
+  | {
+      type: "governance_set_threshold";
+      new_threshold: number;
+    }
+  | {
+      type: "governance_set_timeout";
+      new_timeout_microseconds: number;
+    }
+
+  // Vault Deployment (2)
+  | {
+      type: "vault_deployment";
+      vault_name: string;
+      share_symbol: string;
+      asset_instrument_id: InstrumentId;
+      limits: VaultLimits;
+      vault_manager: string;
+      vault_backend_signatory: string;
+      vault_far_config: FarConfig;
+    }
+  | {
+      type: "yield_epoch_deployment";
+      vault_cid: string;
+      vault_manager: string;
+      asset_instrument_id: InstrumentId;
+      vault_backend_signatory: string;
+    }
+
+  // Vault Operations (5)
+  | {
+      type: "vault_pause";
+      vault_id: string;
+    }
+  | {
+      type: "vault_unpause";
+      vault_id: string;
+    }
+  | {
+      type: "vault_update_limits";
+      vault_id: string;
+      new_limits: VaultLimits;
+    }
+  | {
+      type: "vault_update_backend";
+      vault_id: string;
+      new_backend_signatory: string;
+    }
+  | {
+      type: "vault_update_far_beneficiaries";
+      vault_id: string;
+      new_beneficiaries: AppRewardBeneficiary[];
+    }
+
+  // Processor (1)
+  | {
+      type: "processor_deployment_request";
+      authorized_vault_manager: string;
+      vault_backend_signatory: string;
+      allocation_factory_cid: string;
+      processor_far_config: FarConfig;
+      initial_supported_vaults: string[];
+    }
+
+  // Utility Onboarding (3)
+  | {
+      type: "utility_create_provider_request";
+      operator: string;
+    }
+  | {
+      type: "utility_create_user_request";
+      operator: string;
+    }
+  | {
+      type: "utility_setup";
+      operator: string;
+      provider_service_cid: string;
+      user_service_cid: string;
+    }
+
+  // DevNet (1)
+  | {
+      type: "dev_net_feature_app";
+      amulet_rules_cid: string;
+    };
+
+// V2 request types
+export interface ConfirmActionRequestV2 {
+  party_id: string;
+  rules_contract_id: string;
+  action: ActionType;
+}
+
+export interface ExecuteActionRequestV2 {
+  party_id: string;
+  rules_contract_id: string;
+  action: ActionType;
+  confirmation_cids: string[];
 }

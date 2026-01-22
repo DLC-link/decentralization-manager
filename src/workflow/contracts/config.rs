@@ -99,6 +99,10 @@ pub enum FieldDefinition {
     Instrument { id: String },
     /// Set of all participant parties (as GenMap<Party, Unit>)
     AttestorsSet,
+    /// Set of all participant parties (as DA.Set.Types:Set Party - Record wrapped GenMap)
+    PartySet,
+    /// Relative time value (as DA.Time.Types:RelTime - Record wrapped Int64 microseconds)
+    RelTime { microseconds: i64 },
     /// Optional wrapper around another field
     Optional { inner: Box<FieldDefinition> },
     /// Nested record with fields

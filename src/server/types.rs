@@ -383,3 +383,138 @@ pub struct ExecuteActionRequest {
     pub action_id: String,
     pub rules_contract_id: String,
 }
+
+// ============================================================================
+// V2 Structured Action Types for Vault Governance
+// ============================================================================
+
+/// Instrument identifier (issuer + symbol)
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InstrumentId {
+    pub issuer: String,
+    pub symbol: String,
+}
+
+/// Vault limits configuration
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VaultLimits {
+    pub max_total_deposit: String,
+    pub min_deposit_amount: String,
+    pub min_withdrawal_amount: String,
+}
+
+/// Featured App Right beneficiary
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AppRewardBeneficiary {
+    pub beneficiary: String,
+    pub weight: String,
+}
+
+/// Featured App Right configuration
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FarConfig {
+    pub featured_app_right_cid: String,
+    pub beneficiaries: Vec<AppRewardBeneficiary>,
+}
+
+/// Structured action types for Vault governance
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ActionType {
+    // Governance (4)
+    GovernanceAddMember {
+        member: String,
+        new_threshold: i64,
+    },
+    GovernanceRemoveMember {
+        member: String,
+        new_threshold: i64,
+    },
+    GovernanceSetThreshold {
+        new_threshold: i64,
+    },
+    GovernanceSetTimeout {
+        new_timeout_microseconds: i64,
+    },
+
+    // Vault Deployment (2)
+    VaultDeployment {
+        vault_name: String,
+        share_symbol: String,
+        asset_instrument_id: InstrumentId,
+        limits: VaultLimits,
+        vault_manager: String,
+        vault_backend_signatory: String,
+        vault_far_config: FarConfig,
+    },
+    YieldEpochDeployment {
+        vault_cid: String,
+        vault_manager: String,
+        asset_instrument_id: InstrumentId,
+        vault_backend_signatory: String,
+    },
+
+    // Vault Operations (5)
+    VaultPause {
+        vault_id: String,
+    },
+    VaultUnpause {
+        vault_id: String,
+    },
+    VaultUpdateLimits {
+        vault_id: String,
+        new_limits: VaultLimits,
+    },
+    VaultUpdateBackend {
+        vault_id: String,
+        new_backend_signatory: String,
+    },
+    VaultUpdateFarBeneficiaries {
+        vault_id: String,
+        new_beneficiaries: Vec<AppRewardBeneficiary>,
+    },
+
+    // Processor (1)
+    ProcessorDeploymentRequest {
+        authorized_vault_manager: String,
+        vault_backend_signatory: String,
+        allocation_factory_cid: String,
+        processor_far_config: FarConfig,
+        initial_supported_vaults: Vec<String>,
+    },
+
+    // Utility Onboarding (3)
+    UtilityCreateProviderRequest {
+        operator: String,
+    },
+    UtilityCreateUserRequest {
+        operator: String,
+    },
+    UtilitySetup {
+        operator: String,
+        provider_service_cid: String,
+        user_service_cid: String,
+    },
+
+    // DevNet (1)
+    DevNetFeatureApp {
+        amulet_rules_cid: String,
+    },
+}
+
+/// V2 Request to submit a confirmation for an action with structured type
+#[derive(Clone, Debug, Deserialize)]
+pub struct ConfirmActionRequestV2 {
+    pub party_id: CantonId,
+    pub rules_contract_id: String,
+    pub action: ActionType,
+}
+
+/// V2 Request to execute a confirmed action with structured type
+#[derive(Clone, Debug, Deserialize)]
+pub struct ExecuteActionRequestV2 {
+    pub party_id: CantonId,
+    pub rules_contract_id: String,
+    pub action: ActionType,
+    pub confirmation_cids: Vec<String>,
+}
