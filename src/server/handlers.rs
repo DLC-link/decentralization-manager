@@ -1,10 +1,17 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use actix_web::{HttpResponse, Responder, get, post, web};
+use base64::Engine;
 use canton_proto_rs::com::{
-    daml::ledger::api::v2::admin::{
-        ListUserRightsRequest,
-        right::{CanActAs, CanReadAs, Kind},
+    daml::ledger::api::v2::{
+        Command, Commands, ExerciseCommand, Identifier, RecordField, SubmitAndWaitRequest, Value,
+        admin::{
+            ListUserRightsRequest,
+            right::{CanActAs, CanReadAs, Kind},
+        },
+        command,
+        command_service_client::CommandServiceClient,
+        value,
     },
     digitalasset::canton::{
         crypto::{
@@ -22,12 +29,13 @@ use serde::Deserialize;
 
 use super::{
     AppState,
-    queries::{get_contracts, get_party_metadata},
+    queries::{get_contracts, get_governance_confirmations, get_party_metadata},
     types::{
-        AuthStatus, AuthStatusResponse, AuthTestResponse, AuthTestResult, ConnectionStatus,
-        ContractsRequest, DecentralizedPartiesResponse, DecentralizedParty, HttpWorkflowState,
-        InvitationActionRequest, InvitationType, KeyStatusResponse, KickRequest, KickResponse,
-        KickStatus, ListenerPauseGuard, OnboardingRequest, OnboardingResponse, OnboardingStatus,
+        AuthStatus, AuthStatusResponse, AuthTestResponse, AuthTestResult, ConfirmActionRequest,
+        ConnectionStatus, ContractsRequest, DecentralizedPartiesResponse, DecentralizedParty,
+        ExecuteActionRequest, GovernanceResponse, HttpWorkflowState, InvitationActionRequest,
+        InvitationType, KeyStatusResponse, KickRequest, KickResponse, KickStatus,
+        ListenerPauseGuard, OnboardingRequest, OnboardingResponse, OnboardingStatus,
         ParticipantInfo, ParticipantStatus, ParticipantsStatusResponse, PartyAuthStatus,
         PendingInvitation, PendingInvitationsResponse, Permission, RightsStatus, WorkflowProgress,
         WorkflowResponse,
@@ -308,7 +316,7 @@ pub async fn get_participants_status(data: web::Data<AppState>) -> impl Responde
 
 async fn check_participants_status(config: &NodeConfig) -> Result<ParticipantsStatusResponse> {
     let network_config = config.load_network_config().await?;
-    let current_participant_id = &config.node.participant_id;
+    let current_participant_id = config.participant_id();
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
 
     let ping_message = Message::new_empty(MessageType::Ping);
@@ -426,7 +434,7 @@ pub async fn start_kick(
     };
 
     // Prevent kicking ourselves
-    if participant_id == data.config.node.participant_id {
+    if participant_id == *data.config.participant_id() {
         return HttpResponse::BadRequest().json(serde_json::json!({
             "error": "Cannot kick yourself"
         }));
@@ -678,7 +686,7 @@ async fn send_onboarding_invites(config: &NodeConfig, peer_ids: &[String]) -> Re
 
         let psk = keypair.derive_psk(&peer_pub_key);
         // Use participant_id as identity (must match what server expects in peer_keys lookup)
-        let identity = config.node.participant_id.to_string();
+        let identity = config.participant_id().to_string();
 
         tracing::info!(
             "Sending onboarding invite to {peer_id} at {addr}:{port}",
@@ -721,7 +729,7 @@ async fn send_kick_invites(config: &NodeConfig, kicked_participant: &CantonId) -
     let network_config = config.load_network_config().await?;
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
 
-    let current_participant_id = &config.node.participant_id;
+    let current_participant_id = config.participant_id();
     let invite_message = Message::new_empty(MessageType::InviteKick);
 
     tracing::info!(
@@ -774,7 +782,7 @@ async fn send_kick_invites(config: &NodeConfig, kicked_participant: &CantonId) -
 
         let psk = keypair.derive_psk(&peer_pub_key);
         // Use participant_id as identity (must match what server expects in peer_keys lookup)
-        let identity = config.node.participant_id.to_string();
+        let identity = config.participant_id().to_string();
 
         tracing::info!(
             "Sending kick invite to {} at {}:{}",
@@ -951,7 +959,7 @@ async fn send_contracts_invites(config: &NodeConfig) -> Result {
     let network_config = config.load_network_config().await?;
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
 
-    let current_participant_id = &config.node.participant_id;
+    let current_participant_id = config.participant_id();
     let invite_message = Message::new_empty(MessageType::InviteContracts);
 
     for peer in &network_config.peers {
@@ -980,7 +988,7 @@ async fn send_contracts_invites(config: &NodeConfig) -> Result {
 
         let psk = keypair.derive_psk(&peer_pub_key);
         // Use participant_id as identity (must match what server expects in peer_keys lookup)
-        let identity = config.node.participant_id.to_string();
+        let identity = config.participant_id().to_string();
 
         tracing::info!(
             "Sending contracts invite to {} at {}:{}",
@@ -1208,6 +1216,30 @@ pub async fn get_auth_status(data: web::Data<AppState>) -> impl Responder {
     })
 }
 
+/// Extract user_id (sub claim) from JWT token
+fn extract_user_id_from_jwt(token: &str) -> Option<String> {
+    // JWT format: header.payload.signature
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+
+    // Decode the payload (second part) - URL-safe base64 without padding
+    let payload = parts[1];
+    let padding_needed = (4 - (payload.len() % 4)) % 4;
+    let padded = if padding_needed > 0 {
+        format!("{}{}", payload, "=".repeat(padding_needed))
+    } else {
+        payload.to_string()
+    };
+
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(&padded)
+        .ok()?;
+    let json: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+    json.get("sub").and_then(|v| v.as_str()).map(String::from)
+}
+
 /// Check user rights for both member party and decentralized party
 async fn check_user_rights(
     config: &NodeConfig,
@@ -1218,13 +1250,25 @@ async fn check_user_rights(
 ) -> Result<RightsStatus> {
     let mut client = utils::create_user_client(config, Some(token.to_string())).await?;
 
+    // For M2M auth, the actual user_id in Canton is from JWT's 'sub' claim
+    let effective_user_id = extract_user_id_from_jwt(token).unwrap_or_else(|| user_id.to_string());
+
+    tracing::debug!(
+        "Checking rights for user_id={effective_user_id} (configured: {user_id}), member_party={member_party_id}, dec_party={dec_party_id}"
+    );
+
     let response = client
         .list_user_rights(tonic::Request::new(ListUserRightsRequest {
-            user_id: user_id.to_string(),
+            user_id: effective_user_id.clone(),
             identity_provider_id: String::new(),
         }))
         .await?
         .into_inner();
+
+    tracing::debug!(
+        "ListUserRights for {effective_user_id} returned {} rights",
+        response.rights.len()
+    );
 
     let mut member_party_act_as = false;
     let mut member_party_read_as = false;
@@ -1233,7 +1277,8 @@ async fn check_user_rights(
 
     for right in response.rights {
         match right.kind {
-            Some(Kind::CanActAs(CanActAs { party })) => {
+            Some(Kind::CanActAs(CanActAs { ref party })) => {
+                tracing::debug!("  CanActAs: {party}");
                 if party == member_party_id {
                     member_party_act_as = true;
                 }
@@ -1241,7 +1286,8 @@ async fn check_user_rights(
                     dec_party_act_as = true;
                 }
             }
-            Some(Kind::CanReadAs(CanReadAs { party })) => {
+            Some(Kind::CanReadAs(CanReadAs { ref party })) => {
+                tracing::debug!("  CanReadAs: {party}");
                 if party == member_party_id {
                     member_party_read_as = true;
                 }
@@ -1296,13 +1342,365 @@ async fn test_keycloak_auth(
     config: &crate::config::KeycloakConfig,
 ) -> std::result::Result<(), String> {
     let url = keycloak::login::password_url(&config.url, &config.realm);
-    keycloak::login::password(keycloak::login::PasswordParams {
-        client_id: config.client_id.clone(),
-        username: config.username.clone(),
-        password: config.password.clone(),
-        url,
-    })
-    .await
-    .map(|_| ())
-    .map_err(|e| e.to_string())
+
+    // Use client_credentials if client_secret is set, otherwise password flow
+    if let Some(ref client_secret) = config.client_secret {
+        keycloak::login::client_credentials(keycloak::login::ClientCredentialsParams {
+            url,
+            client_id: config.client_id.clone(),
+            client_secret: client_secret.clone(),
+        })
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    } else {
+        let username = config
+            .username
+            .as_ref()
+            .ok_or_else(|| "Missing username for password flow".to_string())?;
+        let password = config
+            .password
+            .as_ref()
+            .ok_or_else(|| "Missing password for password flow".to_string())?;
+
+        keycloak::login::password(keycloak::login::PasswordParams {
+            client_id: config.client_id.clone(),
+            username: username.clone(),
+            password: password.clone(),
+            url,
+        })
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    }
+}
+
+// ============================================================================
+// Governance Endpoints
+// ============================================================================
+
+/// Query parameters for governance confirmations endpoint
+#[derive(Debug, Deserialize)]
+pub struct GovernanceQuery {
+    pub party_id: String,
+}
+
+/// Get governance confirmations for a decentralized party
+#[get("/governance/confirmations")]
+pub async fn get_governance(
+    data: web::Data<AppState>,
+    query: web::Query<GovernanceQuery>,
+) -> impl Responder {
+    let party_id = match CantonId::parse(&query.party_id) {
+        Ok(id) => id,
+        Err(e) => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Invalid party_id: {e}")
+            }));
+        }
+    };
+
+    // Get token for this party
+    let token = get_party_token(&data, &party_id).await;
+
+    // Get threshold for this party (default to 2 if not found)
+    let threshold = get_party_threshold(&data, &query.party_id)
+        .await
+        .unwrap_or(2);
+
+    match get_governance_confirmations(&data.config, &query.party_id, threshold, token).await {
+        Ok(actions) => HttpResponse::Ok().json(GovernanceResponse { actions, threshold }),
+        Err(e) => {
+            tracing::error!("Failed to fetch governance confirmations: {e}");
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to fetch governance confirmations: {e}")
+            }))
+        }
+    }
+}
+
+/// Submit a confirmation for a governance action
+#[post("/governance/confirm")]
+pub async fn confirm_action(
+    data: web::Data<AppState>,
+    body: web::Json<ConfirmActionRequest>,
+) -> impl Responder {
+    let party_id = &body.party_id;
+
+    // Get token and user_id for this party
+    let (token, user_id) = match get_party_credentials(&data, party_id).await {
+        Some(creds) => creds,
+        None => {
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "No credentials configured for party"
+            }));
+        }
+    };
+
+    match execute_confirm_action(&data.config, &body, &token, &user_id).await {
+        Ok(()) => HttpResponse::Ok().json(serde_json::json!({
+            "message": "Confirmation submitted successfully"
+        })),
+        Err(e) => {
+            tracing::error!("Failed to submit confirmation: {e}");
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to submit confirmation: {e}")
+            }))
+        }
+    }
+}
+
+/// Execute a confirmed governance action
+#[post("/governance/execute")]
+pub async fn execute_action(
+    data: web::Data<AppState>,
+    body: web::Json<ExecuteActionRequest>,
+) -> impl Responder {
+    let party_id = &body.party_id;
+
+    // Get token and user_id for this party
+    let (token, user_id) = match get_party_credentials(&data, party_id).await {
+        Some(creds) => creds,
+        None => {
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "No credentials configured for party"
+            }));
+        }
+    };
+
+    match execute_confirmed_action(&data.config, &body, &token, &user_id).await {
+        Ok(()) => HttpResponse::Ok().json(serde_json::json!({
+            "message": "Action executed successfully"
+        })),
+        Err(e) => {
+            tracing::error!("Failed to execute action: {e}");
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to execute action: {e}")
+            }))
+        }
+    }
+}
+
+/// Get token for a party from either real or mock auth registry
+async fn get_party_token(data: &web::Data<AppState>, party_id: &CantonId) -> Option<String> {
+    // Try real auth registry first
+    if let Some(ref registry) = data.auth_registry
+        && let Some(tm) = registry.get(party_id)
+    {
+        return tm.get_token().await.ok();
+    }
+    // Fall back to mock auth in test mode
+    if let Some(ref mock_registry) = data.mock_auth_registry {
+        return Some(mock_registry.get(party_id).get_token());
+    }
+    None
+}
+
+/// Get token and user_id for a party
+async fn get_party_credentials(
+    data: &web::Data<AppState>,
+    party_id: &CantonId,
+) -> Option<(String, String)> {
+    // Try real auth registry first
+    if let Some(ref registry) = data.auth_registry
+        && let Some(tm) = registry.get(party_id)
+        && let Ok(token) = tm.get_token().await
+    {
+        return Some((token, tm.user_id().to_string()));
+    }
+    // Fall back to mock auth in test mode
+    if let Some(ref mock_registry) = data.mock_auth_registry {
+        let mm = mock_registry.get(party_id);
+        return Some((mm.get_token(), mm.user_id().to_string()));
+    }
+    None
+}
+
+/// Get threshold for a decentralized party
+async fn get_party_threshold(data: &web::Data<AppState>, party_id: &str) -> Option<usize> {
+    // Extract namespace from party_id
+    let namespace = party_id.rsplit_once("::")?.1;
+
+    let channel = tonic::transport::Channel::from_shared(data.config.admin_api_url())
+        .ok()?
+        .connect()
+        .await
+        .ok()?;
+
+    let mut topology_client = TopologyManagerReadServiceClient::new(channel)
+        .max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
+
+    let synchronizer_id = utils::get_synchronizer_id(&data.config).await.ok()?;
+
+    let response = topology_client
+        .list_decentralized_namespace_definition(tonic::Request::new(
+            ListDecentralizedNamespaceDefinitionRequest {
+                base_query: Some(BaseQuery {
+                    store: Some(StoreId {
+                        store: Some(store_id::Store::Synchronizer(Synchronizer {
+                            kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id)),
+                        })),
+                    }),
+                    proposals: false,
+                    operation: 0,
+                    time_query: Some(base_query::TimeQuery::HeadState(())),
+                    filter_signed_key: String::new(),
+                    protocol_version: None,
+                }),
+                filter_namespace: namespace.to_string(),
+            },
+        ))
+        .await
+        .ok()?
+        .into_inner();
+
+    response
+        .results
+        .first()
+        .and_then(|r| r.item.as_ref())
+        .map(|item| item.threshold as usize)
+}
+
+/// Execute ConfirmAction choice on VaultGovernanceRules contract
+async fn execute_confirm_action(
+    config: &NodeConfig,
+    request: &ConfirmActionRequest,
+    token: &str,
+    user_id: &str,
+) -> Result {
+    let channel = tonic::transport::Channel::from_shared(config.ledger_api_url())?
+        .connect()
+        .await?;
+
+    let mut client =
+        CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
+
+    let template_id = Identifier {
+        package_id: "#bitsafe-vault-governance-v0".to_string(),
+        module_name: "BitsafeVault.VaultGovernance".to_string(),
+        entity_name: "VaultGovernanceRules".to_string(),
+    };
+
+    // Build choice argument: ConfirmAction { action : Text }
+    let choice_argument = Value {
+        sum: Some(value::Sum::Record(
+            canton_proto_rs::com::daml::ledger::api::v2::Record {
+                record_id: None,
+                fields: vec![RecordField {
+                    label: "action".to_string(),
+                    value: Some(Value {
+                        sum: Some(value::Sum::Text(request.action_id.clone())),
+                    }),
+                }],
+            },
+        )),
+    };
+
+    let cmd = Command {
+        command: Some(command::Command::Exercise(ExerciseCommand {
+            template_id: Some(template_id),
+            contract_id: request.rules_contract_id.clone(),
+            choice: "ConfirmAction".to_string(),
+            choice_argument: Some(choice_argument),
+        })),
+    };
+
+    let commands = Commands {
+        workflow_id: String::new(),
+        user_id: user_id.to_string(),
+        command_id: uuid::Uuid::new_v4().to_string(),
+        commands: vec![cmd],
+        deduplication_period: None,
+        min_ledger_time_abs: None,
+        min_ledger_time_rel: None,
+        act_as: vec![user_id.to_string()],
+        read_as: vec![request.party_id.to_string()],
+        submission_id: String::new(),
+        disclosed_contracts: vec![],
+        synchronizer_id: String::new(),
+        package_id_selection_preference: vec![],
+        prefetch_contract_keys: vec![],
+    };
+
+    let mut req = tonic::Request::new(SubmitAndWaitRequest {
+        commands: Some(commands),
+    });
+    req.metadata_mut()
+        .insert("authorization", format!("Bearer {token}").parse().unwrap());
+
+    client.submit_and_wait(req).await?;
+
+    Ok(())
+}
+
+/// Execute ExecuteConfirmedAction choice on VaultGovernanceRules contract
+async fn execute_confirmed_action(
+    config: &NodeConfig,
+    request: &ExecuteActionRequest,
+    token: &str,
+    user_id: &str,
+) -> Result {
+    let channel = tonic::transport::Channel::from_shared(config.ledger_api_url())?
+        .connect()
+        .await?;
+
+    let mut client =
+        CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
+
+    let template_id = Identifier {
+        package_id: "#bitsafe-vault-governance-v0".to_string(),
+        module_name: "BitsafeVault.VaultGovernance".to_string(),
+        entity_name: "VaultGovernanceRules".to_string(),
+    };
+
+    // Build choice argument: ExecuteConfirmedAction { action : Text }
+    let choice_argument = Value {
+        sum: Some(value::Sum::Record(
+            canton_proto_rs::com::daml::ledger::api::v2::Record {
+                record_id: None,
+                fields: vec![RecordField {
+                    label: "action".to_string(),
+                    value: Some(Value {
+                        sum: Some(value::Sum::Text(request.action_id.clone())),
+                    }),
+                }],
+            },
+        )),
+    };
+
+    let cmd = Command {
+        command: Some(command::Command::Exercise(ExerciseCommand {
+            template_id: Some(template_id),
+            contract_id: request.rules_contract_id.clone(),
+            choice: "ExecuteConfirmedAction".to_string(),
+            choice_argument: Some(choice_argument),
+        })),
+    };
+
+    let commands = Commands {
+        workflow_id: String::new(),
+        user_id: user_id.to_string(),
+        command_id: uuid::Uuid::new_v4().to_string(),
+        commands: vec![cmd],
+        deduplication_period: None,
+        min_ledger_time_abs: None,
+        min_ledger_time_rel: None,
+        act_as: vec![user_id.to_string()],
+        read_as: vec![request.party_id.to_string()],
+        submission_id: String::new(),
+        disclosed_contracts: vec![],
+        synchronizer_id: String::new(),
+        package_id_selection_preference: vec![],
+        prefetch_contract_keys: vec![],
+    };
+
+    let mut req = tonic::Request::new(SubmitAndWaitRequest {
+        commands: Some(commands),
+    });
+    req.metadata_mut()
+        .insert("authorization", format!("Bearer {token}").parse().unwrap());
+
+    client.submit_and_wait(req).await?;
+
+    Ok(())
 }

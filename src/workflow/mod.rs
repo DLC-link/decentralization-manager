@@ -84,8 +84,8 @@ pub async fn run_server_with_workflow<S: state::WorkflowStep + 'static>(
                     tracing::info!("Workflow completed successfully, shutting down");
                 }
                 Ok(Err(e)) => {
-                    tracing::error!("Workflow failed: {e}");
-                    anyhow::bail!("Coordinator workflow failed: {e}");
+                    tracing::error!("Workflow failed: {e:#}");
+                    anyhow::bail!("Coordinator workflow failed: {e:#}");
                 }
                 Err(e) => {
                     tracing::error!("Workflow task panicked: {e}");
@@ -315,7 +315,7 @@ pub async fn start_attestor(node_config: NodeConfig, coordinator: Peer) -> Resul
                 }
 
                 if let Err(e) = contracts::sign_submissions(&node_config, &dirs).await {
-                    tracing::error!("Step execution failed: {e}");
+                    tracing::error!("Step execution failed: {e:#}");
                     continue;
                 }
                 if let Err(e) =

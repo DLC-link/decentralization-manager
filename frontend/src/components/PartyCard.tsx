@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import {
   Card,
   CardContent,
@@ -19,6 +19,7 @@ import UploadFileIcon from "@mui/icons-material/UploadFile";
 import { CopyableText } from "./CopyableText";
 import { KickDialog } from "./KickDialog";
 import { ContractsDialog } from "./ContractsDialog";
+import { GovernanceSection } from "./GovernanceSection";
 import type { DecentralizedParty } from "../types";
 import { MAINNET_DEMO } from "../constants";
 
@@ -32,6 +33,26 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId }: PartyCardProp
   const [kickDialogOpen, setKickDialogOpen] = useState(false);
   const [contractsDialogOpen, setContractsDialogOpen] = useState(false);
   const [selectedParticipant, setSelectedParticipant] = useState<string>("");
+  const [canScrollUp, setCanScrollUp] = useState(false);
+  const [canScrollDown, setCanScrollDown] = useState(false);
+  const contractsScrollRef = useRef<HTMLDivElement>(null);
+
+  const updateScrollShadows = useCallback(() => {
+    const el = contractsScrollRef.current;
+    if (el) {
+      setCanScrollUp(el.scrollTop > 0);
+      setCanScrollDown(el.scrollTop < el.scrollHeight - el.clientHeight - 1);
+    }
+  }, []);
+
+  useEffect(() => {
+    const el = contractsScrollRef.current;
+    if (el) {
+      updateScrollShadows();
+      el.addEventListener("scroll", updateScrollShadows);
+      return () => el.removeEventListener("scroll", updateScrollShadows);
+    }
+  }, [party.contracts, updateScrollShadows]);
 
   const handleKickClick = (participantUid: string) => {
     setSelectedParticipant(participantUid);
@@ -147,32 +168,76 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId }: PartyCardProp
               Contracts
             </Typography>
           </CardContent>
-          <Box sx={{ overflowX: "auto" }}>
-            <Table size="small">
-              <TableHead>
-                <TableRow>
-                  <TableCell sx={{ py: 1 }}>Template</TableCell>
-                  <TableCell sx={{ py: 1 }}>Contract ID</TableCell>
-                </TableRow>
-              </TableHead>
-              <TableBody>
-                {party.contracts.map((c) => (
-                  <TableRow key={c.contract_id}>
-                    <TableCell sx={{ py: 1 }}>{c.template_id}</TableCell>
-                    <TableCell sx={{ py: 1 }}>
-                      <CopyableText
-                        text={c.contract_id}
-                        truncate={{ start: 16, end: 16 }}
-                        variant="caption"
-                      />
-                    </TableCell>
+          <Box sx={{ position: "relative" }}>
+            {/* Top shadow */}
+            <Box
+              sx={{
+                position: "absolute",
+                top: 0,
+                left: 0,
+                right: 0,
+                height: 16,
+                background: "linear-gradient(to bottom, rgba(0,0,0,0.08), transparent)",
+                pointerEvents: "none",
+                opacity: canScrollUp ? 1 : 0,
+                transition: "opacity 0.2s",
+                zIndex: 1,
+              }}
+            />
+            {/* Scrollable container */}
+            <Box
+              ref={contractsScrollRef}
+              sx={{
+                maxHeight: 180, // ~4-5 rows
+                overflowY: "auto",
+                overflowX: "auto",
+              }}
+            >
+              <Table size="small">
+                <TableHead>
+                  <TableRow>
+                    <TableCell sx={{ py: 1 }}>Template</TableCell>
+                    <TableCell sx={{ py: 1 }}>Contract ID</TableCell>
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+                </TableHead>
+                <TableBody>
+                  {party.contracts.map((c) => (
+                    <TableRow key={c.contract_id}>
+                      <TableCell sx={{ py: 1 }}>{c.template_id}</TableCell>
+                      <TableCell sx={{ py: 1 }}>
+                        <CopyableText
+                          text={c.contract_id}
+                          truncate={{ start: 16, end: 16 }}
+                          variant="caption"
+                        />
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </Box>
+            {/* Bottom shadow */}
+            <Box
+              sx={{
+                position: "absolute",
+                bottom: 0,
+                left: 0,
+                right: 0,
+                height: 16,
+                background: "linear-gradient(to top, rgba(0,0,0,0.08), transparent)",
+                pointerEvents: "none",
+                opacity: canScrollDown ? 1 : 0,
+                transition: "opacity 0.2s",
+                zIndex: 1,
+              }}
+            />
           </Box>
         </>
       )}
+
+      <CardContent sx={{ pt: 0 }}>
+        <GovernanceSection partyId={party.party_id} />
+      </CardContent>
 
       <KickDialog
         open={kickDialogOpen}

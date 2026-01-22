@@ -182,3 +182,34 @@ export interface AuthTestResult {
 export interface AuthTestResponse {
   results: AuthTestResult[];
 }
+
+// Governance types
+export interface GovernanceConfirmation {
+  contract_id: string;
+  action: string;
+  confirming_party: string;
+}
+
+export interface GovernanceAction {
+  action_id: string;
+  confirmations: GovernanceConfirmation[];
+  confirmation_count: number;
+  can_execute: boolean;
+}
+
+export interface GovernanceResponse {
+  actions: GovernanceAction[];
+  threshold: number;
+}
+
+export interface ConfirmActionRequest {
+  party_id: string;
+  action_id: string;
+  rules_contract_id: string;
+}
+
+export interface ExecuteActionRequest {
+  party_id: string;
+  action_id: string;
+  rules_contract_id: string;
+}

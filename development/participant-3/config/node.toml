@@ -22,12 +22,11 @@ connection_retry_delay_secs = 5
 
 [[parties]]
 dec_party_id = "cbtc-network::12202a83c6f4082217c175e29bc53da5f2703ba2675778ab99217a5a881a949203ff"
-member_party_id = "merchant::1220fa8543db6c66fe3a55b1f180c8dfc7f876265c76684fbc1d35d89e02c8aafe8e"
-user_id = "merchant_user"
+member_party_id = "attestor-3::1220d544125d3619e9c4d7340466a78a85f738e75a740837fa6283a1051494f5df23"
+user_id = "attestorUser3"
 
 [parties.keycloak]
 url = "https://keycloak.dev.canton.example.com"
 realm = "canton-devnet"
-client_id = "devnet-1-wallet-ui"
-username = "merchant_user"
-password = "***REDACTED-PASSWORD***"
+client_id = "attestor-3"
+client_secret = "***REDACTED-CLIENT-SECRET***"

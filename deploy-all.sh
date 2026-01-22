@@ -2,7 +2,7 @@
 
 set -e
 
-TAG="v0.0.8"
+TAG="0.0.15"
 IMAGE="public.ecr.aws/dlc-link/canton-decparty-manager"
 DEPLOY_DIR="zarf/deployments/devnet"
 
@@ -16,10 +16,10 @@ sed -i '' "s|$IMAGE:[^\"]*|$IMAGE:$TAG|g" "$DEPLOY_DIR/participant1/deployment.y
 sed -i '' "s|$IMAGE:[^\"]*|$IMAGE:$TAG|g" "$DEPLOY_DIR/participant2/deployment.yaml"
 sed -i '' "s|$IMAGE:[^\"]*|$IMAGE:$TAG|g" "$DEPLOY_DIR/participant3/deployment.yaml"
 
-echo "Deleting existing deployments..."
-kubectl delete -f "$DEPLOY_DIR/participant1/deployment.yaml" --ignore-not-found
-kubectl delete -f "$DEPLOY_DIR/participant2/deployment.yaml" --ignore-not-found
-kubectl delete -f "$DEPLOY_DIR/participant3/deployment.yaml" --ignore-not-found
+echo "Deleting existing deployments (preserving PVCs)..."
+kubectl delete deployment dec-party-manager-1 -n catalyst-canton --ignore-not-found
+kubectl delete deployment dec-party-manager-2 -n catalyst-canton --ignore-not-found
+kubectl delete deployment dec-party-manager-3 -n catalyst-canton --ignore-not-found
 
 echo "Applying deployments..."
 kubectl apply -f "$DEPLOY_DIR/participant1/deployment.yaml"
