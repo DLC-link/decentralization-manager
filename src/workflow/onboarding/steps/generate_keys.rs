@@ -71,7 +71,7 @@ pub async fn generate_keys(
     .await?;
 
     // Export keys with participant ID
-    let participant_id_str = config.node.participant_id.to_string();
+    let participant_id_str = config.participant_id().to_string();
     export_keys(
         &dirs.keys_dir,
         &namespace_key,

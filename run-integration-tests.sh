@@ -37,6 +37,7 @@ trap cleanup EXIT
 wait_for_server() {
     local port=$1
     local name=$2
+    local noise_port=$3
     local max_attempts=30
     local attempt=0
 
@@ -64,7 +65,23 @@ wait_for_server() {
         fi
         sleep 1
     done
-    echo "$name is ready (keys generated)"
+
+    # Wait for noise listener to be ready (required for peer-to-peer communication)
+    # Use bash's built-in /dev/tcp instead of nc for better portability
+    if [ -n "$noise_port" ]; then
+        attempt=0
+        echo "Waiting for $name noise listener on port $noise_port..."
+        while ! (echo >/dev/tcp/localhost/"$noise_port") 2>/dev/null; do
+            attempt=$((attempt + 1))
+            if [ $attempt -ge $max_attempts ]; then
+                echo "ERROR: $name noise listener not ready after $max_attempts attempts"
+                exit 1
+            fi
+            sleep 1
+        done
+    fi
+
+    echo "$name is ready (HTTP, keys, and noise listener)"
 }
 
 poll_status() {
@@ -175,12 +192,10 @@ echo "Starting participant-3..."
 "$BINARY" -d "$DEV_DIR/participant-3" serve --host 0.0.0.0 --port $P3_HTTP --test &
 PIDS+=($!)
 
-# Wait for all servers to be ready
-wait_for_server $P1_HTTP "participant-1"
-wait_for_server $P2_HTTP "participant-2"
-wait_for_server $P3_HTTP "participant-3"
-
-sleep 2
+# Wait for all servers to be ready (HTTP + noise listeners)
+wait_for_server $P1_HTTP "participant-1" $P1_NOISE
+wait_for_server $P2_HTTP "participant-2" $P2_NOISE
+wait_for_server $P3_HTTP "participant-3" $P3_NOISE
 
 # ==============================================================================
 # Phase 2: Configure peers
@@ -265,13 +280,12 @@ echo "Starting participant-3..."
 "$BINARY" -d "$DEV_DIR/participant-3" serve --host 0.0.0.0 --port $P3_HTTP --test &
 PIDS+=($!)
 
-# Wait for all servers to be ready
-wait_for_server $P1_HTTP "participant-1"
-wait_for_server $P2_HTTP "participant-2"
-wait_for_server $P3_HTTP "participant-3"
+# Wait for all servers to be ready (HTTP + noise listeners)
+wait_for_server $P1_HTTP "participant-1" $P1_NOISE
+wait_for_server $P2_HTTP "participant-2" $P2_NOISE
+wait_for_server $P3_HTTP "participant-3" $P3_NOISE
 
 echo "Servers restarted with peer configuration"
-sleep 2
 
 # ==============================================================================
 # Phase 3: Run onboarding workflow

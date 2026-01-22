@@ -210,6 +210,9 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig, test_mode: 
             .service(handlers::decline_invitation)
             .service(handlers::get_auth_status)
             .service(handlers::test_auth)
+            .service(handlers::get_governance)
+            .service(handlers::confirm_action)
+            .service(handlers::execute_action)
             .service(assets::serve_frontend)
     })
     .bind((host, port))?
@@ -256,7 +259,7 @@ async fn run_heartbeat(
     // Build peer key map for Noise authentication
     let mut peer_keys = HashMap::new();
     for peer in &network_config.peers {
-        if peer.participant_id == config.node.participant_id || peer.public_key.is_empty() {
+        if peer.participant_id == *config.participant_id() || peer.public_key.is_empty() {
             continue;
         }
         if let Ok(pub_key) = parse_public_key(&peer.public_key) {
@@ -517,7 +520,7 @@ async fn run_peer_ping_loop(config: NodeConfig, peer_status: Arc<RwLock<HashMap<
             }
         };
 
-        let current_participant_id = &config.node.participant_id;
+        let current_participant_id = config.participant_id();
         let futures: Vec<_> = network_config
             .peers
             .iter()

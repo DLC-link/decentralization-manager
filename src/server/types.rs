@@ -339,3 +339,47 @@ pub struct AuthTestResult {
 pub struct AuthTestResponse {
     pub results: Vec<AuthTestResult>,
 }
+
+// ============================================================================
+// Governance Types
+// ============================================================================
+
+/// A single governance confirmation contract
+#[derive(Clone, Debug, Serialize)]
+pub struct GovernanceConfirmation {
+    pub contract_id: String,
+    pub action: String,
+    pub confirming_party: String,
+}
+
+/// A governance action with its confirmations
+#[derive(Clone, Debug, Serialize)]
+pub struct GovernanceAction {
+    pub action_id: String,
+    pub confirmations: Vec<GovernanceConfirmation>,
+    pub confirmation_count: usize,
+    pub can_execute: bool,
+}
+
+/// Response for governance confirmations endpoint
+#[derive(Serialize)]
+pub struct GovernanceResponse {
+    pub actions: Vec<GovernanceAction>,
+    pub threshold: usize,
+}
+
+/// Request to submit a confirmation for an action
+#[derive(Clone, Debug, Deserialize)]
+pub struct ConfirmActionRequest {
+    pub party_id: CantonId,
+    pub action_id: String,
+    pub rules_contract_id: String,
+}
+
+/// Request to execute a confirmed action
+#[derive(Clone, Debug, Deserialize)]
+pub struct ExecuteActionRequest {
+    pub party_id: CantonId,
+    pub action_id: String,
+    pub rules_contract_id: String,
+}

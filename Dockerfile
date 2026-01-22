@@ -26,6 +26,7 @@ WORKDIR /app
 COPY --from=builder /lib/x86_64-linux-gnu/libgcc_s.so.1 /lib64/libgcc_s.so.1
 COPY --from=builder /lib/x86_64-linux-gnu/libssl.so.3 /lib64/libssl.so.3
 COPY --from=builder /lib/x86_64-linux-gnu/libcrypto.so.3 /lib64/libcrypto.so.3
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=builder /app/target/release/dec-party-manager /usr/local/bin/
 
 EXPOSE 8080

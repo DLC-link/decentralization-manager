@@ -6,21 +6,48 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use keycloak::login::{PasswordParams, RefreshParams};
+use keycloak::login::{ClientCredentialsParams, PasswordParams, RefreshParams};
+use thiserror::Error;
 use tokio::sync::RwLock;
 
 pub use mock::{MockAuthRegistry, MockTokenManager};
 
 use crate::{
     config::{KeycloakConfig, PartyCredentials},
-    error::Result,
     participant_id::CantonId,
 };
 
+/// Authentication errors
+#[derive(Error, Debug)]
+pub enum AuthError {
+    #[error("Keycloak M2M authentication failed: {0}")]
+    M2MAuthFailed(String),
+
+    #[error("Keycloak password authentication failed: {0}")]
+    PasswordAuthFailed(String),
+
+    #[error("Token refresh failed: {0}")]
+    RefreshFailed(String),
+
+    #[error("Missing username for password flow")]
+    MissingUsername,
+
+    #[error("Missing password for password flow")]
+    MissingPassword,
+
+    #[error("No credentials configured for party: {0}")]
+    NoCredentials(String),
+}
+
+type Result<T> = std::result::Result<T, AuthError>;
+
 struct TokenState {
     access_token: String,
+    /// Refresh token (empty for M2M/client_credentials flow)
     refresh_token: String,
     expires_at: SystemTime,
+    /// Whether this is using M2M auth (no refresh token available)
+    is_m2m: bool,
 }
 
 /// Manages Keycloak token lifecycle with automatic refresh for a single party
@@ -83,14 +110,34 @@ impl TokenManager {
 
     async fn authenticate(config: &KeycloakConfig) -> Result<TokenState> {
         let url = keycloak::login::password_url(&config.url, &config.realm);
-        let response = keycloak::login::password(PasswordParams {
-            client_id: config.client_id.clone(),
-            username: config.username.clone(),
-            password: config.password.clone(),
-            url,
-        })
-        .await
-        .map_err(|e| anyhow::anyhow!("Keycloak authentication failed: {e}"))?;
+
+        // Choose auth method: client_credentials (M2M) if client_secret is set, otherwise password flow
+        let (response, is_m2m) = if let Some(ref client_secret) = config.client_secret {
+            tracing::debug!("Using client_credentials (M2M) auth flow");
+            let response = keycloak::login::client_credentials(ClientCredentialsParams {
+                url,
+                client_id: config.client_id.clone(),
+                client_secret: client_secret.clone(),
+            })
+            .await
+            .map_err(AuthError::M2MAuthFailed)?;
+            (response, true)
+        } else {
+            // Password flow requires username and password
+            let username = config.username.as_ref().ok_or(AuthError::MissingUsername)?;
+            let password = config.password.as_ref().ok_or(AuthError::MissingPassword)?;
+
+            tracing::debug!("Using password auth flow");
+            let response = keycloak::login::password(PasswordParams {
+                client_id: config.client_id.clone(),
+                username: username.clone(),
+                password: password.clone(),
+                url,
+            })
+            .await
+            .map_err(AuthError::PasswordAuthFailed)?;
+            (response, false)
+        };
 
         let expires_in_secs = (response.expires_in.saturating_sub(60)) as u64;
         let expires_at = SystemTime::now()
@@ -101,11 +148,21 @@ impl TokenManager {
             access_token: response.access_token,
             refresh_token: response.refresh_token,
             expires_at,
+            is_m2m,
         })
     }
 
     async fn refresh_or_reauthenticate(&self) -> Result<()> {
         let mut state = self.state.write().await;
+
+        // M2M auth doesn't have refresh tokens, just re-authenticate
+        if state.is_m2m {
+            tracing::debug!("M2M token expired, re-authenticating");
+            *state = Self::authenticate(&self.config).await?;
+            return Ok(());
+        }
+
+        // Password flow: try refresh token first
         let url = keycloak::login::password_url(&self.config.url, &self.config.realm);
 
         match keycloak::login::refresh(RefreshParams {
@@ -128,7 +185,7 @@ impl TokenManager {
                 *state = Self::authenticate(&self.config).await?;
             }
             Err(e) => {
-                return Err(anyhow::anyhow!("Token refresh failed: {e}"));
+                return Err(AuthError::RefreshFailed(e));
             }
         }
 
@@ -214,9 +271,9 @@ impl WorkflowAuth {
     pub async fn get_credentials(&self, dec_party_id: &CantonId) -> Result<PartyAuthCredentials> {
         match self {
             WorkflowAuth::Keycloak(registry) => {
-                let tm = registry.get(dec_party_id).ok_or_else(|| {
-                    anyhow::anyhow!("No credentials configured for party: {dec_party_id}")
-                })?;
+                let tm = registry
+                    .get(dec_party_id)
+                    .ok_or_else(|| AuthError::NoCredentials(dec_party_id.to_string()))?;
                 let token = tm.get_token().await?;
                 let user_id = tm.user_id().to_string();
                 let member_party_id = tm.member_party_id().clone();
