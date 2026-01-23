@@ -718,7 +718,7 @@ export const ContractsDialog = ({
 
   // Form state
   const [operatorParty, setOperatorParty] = useState(DEFAULT_OPERATOR_PARTY);
-  const [operatorPartyHint, setOperatorPartyHint] = useState("operator");
+  const [participantParties, setParticipantParties] = useState<string[]>([]);
   const [darFiles, setDarFiles] = useState<DarFile[]>([]);
   const [contracts, setContracts] = useState<ContractDefinition[]>([]);
 
@@ -732,7 +732,7 @@ export const ContractsDialog = ({
       setDarFiles([]);
       setContracts([]);
       setOperatorParty(DEFAULT_OPERATOR_PARTY);
-      setOperatorPartyHint("operator");
+      setParticipantParties([]);
     }
   }, [open]);
 
@@ -828,12 +828,25 @@ export const ContractsDialog = ({
     setLoading(true);
     setError(null);
 
+    // Validate required fields
+    if (!operatorParty) {
+      setError("Operator party ID is required");
+      setLoading(false);
+      return;
+    }
+
+    if (participantParties.length !== participantIds.length) {
+      setError(`Please provide party IDs for all ${participantIds.length} participants`);
+      setLoading(false);
+      return;
+    }
+
     try {
       const request: ContractsRequest = {
         decentralized_party_id: partyId,
         participant_ids: participantIds,
-        operator_party: operatorParty || undefined,
-        operator_party_hint: operatorPartyHint,
+        participant_parties: participantParties,
+        operator_party: operatorParty,
         dar_files: darFiles,
         contracts: contracts,
       };
@@ -992,32 +1005,76 @@ export const ContractsDialog = ({
                 )}
               </Box>
 
-              {contractType === "cbtc" && (
-                <>
-                  <Divider />
-                  <Typography variant="subtitle1">
-                    Operator Configuration
-                  </Typography>
+              <Divider />
+              <Typography variant="subtitle1">Party Configuration</Typography>
 
-                  <TextField
-                    size="small"
-                    label="Operator Party ID (optional)"
-                    value={operatorParty}
-                    onChange={(e) => setOperatorParty(e.target.value)}
-                    fullWidth
-                    helperText="Leave empty to allocate a new operator party"
-                  />
+              <TextField
+                size="small"
+                label="Operator Party ID"
+                value={operatorParty}
+                onChange={(e) => setOperatorParty(e.target.value)}
+                fullWidth
+                required
+                error={!operatorParty}
+                helperText="Full party ID for the operator (e.g., operator::1220...)"
+              />
 
-                  <TextField
-                    size="small"
-                    label="Operator Party Hint"
-                    value={operatorPartyHint}
-                    onChange={(e) => setOperatorPartyHint(e.target.value)}
-                    fullWidth
-                    helperText="Used when allocating a new operator party"
-                  />
-                </>
-              )}
+              <Typography variant="subtitle2" sx={{ mt: 1 }}>
+                Participant Party IDs ({participantParties.length}/{participantIds.length})
+              </Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                Enter the party ID for each participant. Must match the order of participant IDs.
+              </Typography>
+              <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+                <TextField
+                  size="small"
+                  placeholder="Paste party ID, press Enter"
+                  fullWidth
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      const input = e.target as HTMLInputElement;
+                      const value = input.value.trim();
+                      if (value && participantParties.length < participantIds.length) {
+                        setParticipantParties([...participantParties, value]);
+                        input.value = "";
+                      }
+                      e.preventDefault();
+                    }
+                  }}
+                  disabled={participantParties.length >= participantIds.length}
+                />
+                {participantParties.length > 0 && (
+                  <Box sx={{ display: "flex", flexDirection: "column", gap: 0.5 }}>
+                    {participantParties.map((party, idx) => (
+                      <Box
+                        key={idx}
+                        sx={{
+                          display: "flex",
+                          alignItems: "center",
+                          bgcolor: "action.hover",
+                          borderRadius: 1,
+                          px: 1,
+                          py: 0.5,
+                        }}
+                      >
+                        <Typography variant="caption" color="text.secondary" sx={{ mr: 1, minWidth: 20 }}>
+                          {idx + 1}.
+                        </Typography>
+                        <Typography variant="caption" sx={{ flex: 1, fontFamily: "monospace", overflow: "hidden", textOverflow: "ellipsis" }}>
+                          {party}
+                        </Typography>
+                        <IconButton
+                          size="small"
+                          onClick={() => setParticipantParties(participantParties.filter((_, i) => i !== idx))}
+                          sx={{ p: 0.25 }}
+                        >
+                          <DeleteIcon sx={{ fontSize: 14 }} />
+                        </IconButton>
+                      </Box>
+                    ))}
+                  </Box>
+                )}
+              </Box>
 
               <Divider />
               <Box

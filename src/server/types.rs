@@ -187,22 +187,16 @@ pub struct ContractsRequest {
     pub decentralized_party_id: CantonId,
     /// List of participant IDs that will sign submissions
     pub participant_ids: Vec<CantonId>,
-    /// Operator party ID (optional, can be allocated dynamically if not provided)
-    #[serde(default)]
-    pub operator_party: Option<String>,
-    /// Party hint for operator party allocation (used if operator_party not set)
-    #[serde(default = "default_operator_party_hint")]
-    pub operator_party_hint: String,
+    /// List of party IDs for each participant (must match participant_ids order)
+    pub participant_parties: Vec<CantonId>,
+    /// Operator party ID
+    pub operator_party: CantonId,
     /// DAR files to upload (base64-encoded)
     #[serde(default)]
     pub dar_files: Vec<DarFile>,
     /// Contract definitions to create after decentralized party setup
     #[serde(default)]
     pub contracts: Vec<ContractDefinition>,
-}
-
-fn default_operator_party_hint() -> String {
-    "operator".to_string()
 }
 
 /// Progress status of a workflow (kick, onboarding, etc.)

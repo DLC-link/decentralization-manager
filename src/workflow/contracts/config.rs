@@ -19,12 +19,11 @@ pub struct ContractsConfig {
     /// List of participant IDs that will sign submissions
     #[serde(default)]
     pub participant_ids: Vec<CantonId>,
-    /// Operator party ID (optional, can be allocated dynamically if not provided)
+    /// List of party IDs for each participant (must match participant_ids order)
     #[serde(default)]
-    pub operator_party: Option<String>,
-    /// Party hint for operator party allocation (used if operator_party not set)
-    #[serde(default = "default_operator_party_hint")]
-    pub operator_party_hint: String,
+    pub participant_parties: Vec<CantonId>,
+    /// Operator party ID
+    pub operator_party: CantonId,
     /// DAR files to upload (base64-encoded)
     #[serde(default)]
     pub dar_files: Vec<DarFile>,
@@ -36,16 +35,12 @@ pub struct ContractsConfig {
     pub instance_name: String,
 }
 
-fn default_operator_party_hint() -> String {
-    "operator".to_string()
-}
-
 impl ContractsConfig {
     pub fn new(
         decentralized_party_id: CantonId,
         participant_ids: Vec<CantonId>,
-        operator_party: Option<String>,
-        operator_party_hint: String,
+        participant_parties: Vec<CantonId>,
+        operator_party: CantonId,
         dar_files: Vec<DarFile>,
         contracts: Vec<ContractDefinition>,
         instance_name: String,
@@ -53,8 +48,8 @@ impl ContractsConfig {
         Self {
             decentralized_party_id,
             participant_ids,
+            participant_parties,
             operator_party,
-            operator_party_hint,
             dar_files,
             contracts,
             instance_name,

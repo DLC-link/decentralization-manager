@@ -888,8 +888,8 @@ pub async fn start_contracts(
     let contracts_config = workflow::ContractsConfig::new(
         body.decentralized_party_id.clone(),
         body.participant_ids.clone(),
+        body.participant_parties.clone(),
         body.operator_party.clone(),
-        body.operator_party_hint.clone(),
         body.dar_files.clone(),
         body.contracts.clone(),
         instance_name,
