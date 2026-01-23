@@ -243,7 +243,7 @@ export interface FarConfig {
 
 // Union type for all governance actions
 export type ActionType =
-  // Governance (4)
+  // Governance
   | {
       type: "governance_add_member";
       member: string;
@@ -263,7 +263,7 @@ export type ActionType =
       new_timeout_microseconds: number;
     }
 
-  // Vault Deployment (2)
+  // Vault Deployment
   | {
       type: "vault_deployment";
       vault_name: string;
@@ -282,7 +282,7 @@ export type ActionType =
       vault_backend_signatory: string;
     }
 
-  // Vault Operations (5)
+  // Vault Operations
   | {
       type: "vault_pause";
       vault_id: string;
@@ -307,7 +307,7 @@ export type ActionType =
       new_beneficiaries: AppRewardBeneficiary[];
     }
 
-  // Processor (1)
+  // Processor
   | {
       type: "processor_deployment_request";
       authorized_vault_manager: string;
@@ -317,7 +317,7 @@ export type ActionType =
       initial_supported_vaults: string[];
     }
 
-  // Utility Onboarding (3)
+  // Utility Onboarding
   | {
       type: "utility_create_provider_request";
       operator: string;
@@ -333,7 +333,7 @@ export type ActionType =
       user_service_cid: string;
     }
 
-  // DevNet (1)
+  // DevNet
   | {
       type: "dev_net_feature_app";
       amulet_rules_cid: string;

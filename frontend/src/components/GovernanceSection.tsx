@@ -36,26 +36,49 @@ import type {
   InstrumentId,
   VaultLimits,
   FarConfig,
+  AppRewardBeneficiary,
 } from "../types";
 
 // Action type labels for display
 const ACTION_TYPE_OPTIONS = [
+  // Governance
   { value: "governance_add_member", label: "Add Governance Member" },
   { value: "governance_remove_member", label: "Remove Governance Member" },
   { value: "governance_set_threshold", label: "Set Governance Threshold" },
   { value: "governance_set_timeout", label: "Set Governance Timeout" },
-  { value: "vault_deployment", label: "Vault Deployment" },
-  { value: "yield_epoch_deployment", label: "Yield Epoch Deployment" },
+  // Vault Deployment
+  { value: "vault_deployment", label: "Deploy Vault" },
+  { value: "yield_epoch_deployment", label: "Deploy YieldEpoch" },
+  // Vault Operations
   { value: "vault_pause", label: "Pause Vault" },
   { value: "vault_unpause", label: "Unpause Vault" },
   { value: "vault_update_limits", label: "Update Vault Limits" },
   { value: "vault_update_backend", label: "Update Vault Backend" },
+  {
+    value: "vault_update_far_beneficiaries",
+    label: "Update FAR Beneficiaries",
+  },
+  // Processor
+  {
+    value: "processor_deployment_request",
+    label: "Request Processor Deployment",
+  },
+  // Utility Onboarding
+  {
+    value: "utility_create_provider_request",
+    label: "Utility: Create Provider",
+  },
+  { value: "utility_create_user_request", label: "Utility: Create User" },
+  { value: "utility_setup", label: "Utility: Setup" },
+  // DevNet
+  { value: "dev_net_feature_app", label: "DevNet: Feature App" },
 ] as const;
 
 type ActionTypeKey = (typeof ACTION_TYPE_OPTIONS)[number]["value"];
 
 interface GovernanceSectionProps {
   partyId: string;
+  rulesContractId?: string;
 }
 
 // Default values for action form
@@ -70,18 +93,24 @@ const defaultFarConfig: FarConfig = {
   beneficiaries: [],
 };
 
-export const GovernanceSection = ({ partyId }: GovernanceSectionProps) => {
+export const GovernanceSection = ({
+  partyId,
+  rulesContractId: initialRulesContractId,
+}: GovernanceSectionProps) => {
   const [expanded, setExpanded] = useState(true);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<GovernanceResponse | null>(null);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
-  const [rulesContractId, setRulesContractId] = useState("");
+  const [rulesContractId, setRulesContractId] = useState(
+    initialRulesContractId || "",
+  );
 
   // V2 action form state
   const [showNewActionForm, setShowNewActionForm] = useState(false);
-  const [selectedActionType, setSelectedActionType] =
-    useState<ActionTypeKey>("governance_add_member");
+  const [selectedActionType, setSelectedActionType] = useState<ActionTypeKey>(
+    "governance_add_member",
+  );
   const [v2Loading, setV2Loading] = useState(false);
 
   // Form fields for various action types
@@ -100,11 +129,30 @@ export const GovernanceSection = ({ partyId }: GovernanceSectionProps) => {
     useState<FarConfig>(defaultFarConfig);
   const [vaultCid, setVaultCid] = useState("");
   const [vaultId, setVaultId] = useState("");
+  // New fields for additional action types
+  const [operatorParty, setOperatorParty] = useState("");
+  const [providerServiceCid, setProviderServiceCid] = useState("");
+  const [userServiceCid, setUserServiceCid] = useState("");
+  const [amuletRulesCid, setAmuletRulesCid] = useState("");
+  const [allocationFactoryCid, setAllocationFactoryCid] = useState("");
+  const [initialSupportedVaults, setInitialSupportedVaults] = useState<
+    string[]
+  >([]);
+  const [farBeneficiaries, setFarBeneficiaries] = useState<
+    AppRewardBeneficiary[]
+  >([]);
+
+  // Update rulesContractId when prop changes
+  useEffect(() => {
+    if (initialRulesContractId) {
+      setRulesContractId(initialRulesContractId);
+    }
+  }, [initialRulesContractId]);
 
   const fetchGovernance = useCallback(async () => {
     try {
       const res = await fetch(
-        `${API_BASE}/governance/confirmations?party_id=${encodeURIComponent(partyId)}`
+        `${API_BASE}/governance/confirmations?party_id=${encodeURIComponent(partyId)}`,
       );
       if (res.ok) {
         const response: GovernanceResponse = await res.json();
@@ -115,7 +163,9 @@ export const GovernanceSection = ({ partyId }: GovernanceSectionProps) => {
         setError(errData.error || "Failed to fetch governance data");
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to fetch governance data");
+      setError(
+        e instanceof Error ? e.message : "Failed to fetch governance data",
+      );
     } finally {
       setLoading(false);
     }
@@ -157,7 +207,9 @@ export const GovernanceSection = ({ partyId }: GovernanceSectionProps) => {
       // Refresh data
       await fetchGovernance();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to submit confirmation");
+      setError(
+        e instanceof Error ? e.message : "Failed to submit confirmation",
+      );
     } finally {
       setActionLoading(null);
     }
@@ -203,13 +255,27 @@ export const GovernanceSection = ({ partyId }: GovernanceSectionProps) => {
   const buildActionFromForm = (): ActionType | null => {
     switch (selectedActionType) {
       case "governance_add_member":
-        return { type: "governance_add_member", member: memberParty, new_threshold: newThreshold };
+        return {
+          type: "governance_add_member",
+          member: memberParty,
+          new_threshold: newThreshold,
+        };
       case "governance_remove_member":
-        return { type: "governance_remove_member", member: memberParty, new_threshold: newThreshold };
+        return {
+          type: "governance_remove_member",
+          member: memberParty,
+          new_threshold: newThreshold,
+        };
       case "governance_set_threshold":
-        return { type: "governance_set_threshold", new_threshold: newThreshold };
+        return {
+          type: "governance_set_threshold",
+          new_threshold: newThreshold,
+        };
       case "governance_set_timeout":
-        return { type: "governance_set_timeout", new_timeout_microseconds: timeoutMicroseconds };
+        return {
+          type: "governance_set_timeout",
+          new_timeout_microseconds: timeoutMicroseconds,
+        };
       case "vault_deployment":
         return {
           type: "vault_deployment",
@@ -234,9 +300,51 @@ export const GovernanceSection = ({ partyId }: GovernanceSectionProps) => {
       case "vault_unpause":
         return { type: "vault_unpause", vault_id: vaultId };
       case "vault_update_limits":
-        return { type: "vault_update_limits", vault_id: vaultId, new_limits: vaultLimits };
+        return {
+          type: "vault_update_limits",
+          vault_id: vaultId,
+          new_limits: vaultLimits,
+        };
       case "vault_update_backend":
-        return { type: "vault_update_backend", vault_id: vaultId, new_backend_signatory: vaultBackendSignatory };
+        return {
+          type: "vault_update_backend",
+          vault_id: vaultId,
+          new_backend_signatory: vaultBackendSignatory,
+        };
+      case "vault_update_far_beneficiaries":
+        return {
+          type: "vault_update_far_beneficiaries",
+          vault_id: vaultId,
+          new_beneficiaries: farBeneficiaries,
+        };
+      case "processor_deployment_request":
+        return {
+          type: "processor_deployment_request",
+          authorized_vault_manager: vaultManager,
+          vault_backend_signatory: vaultBackendSignatory,
+          allocation_factory_cid: allocationFactoryCid,
+          processor_far_config: vaultFarConfig,
+          initial_supported_vaults: initialSupportedVaults,
+        };
+      case "utility_create_provider_request":
+        return {
+          type: "utility_create_provider_request",
+          operator: operatorParty,
+        };
+      case "utility_create_user_request":
+        return { type: "utility_create_user_request", operator: operatorParty };
+      case "utility_setup":
+        return {
+          type: "utility_setup",
+          operator: operatorParty,
+          provider_service_cid: providerServiceCid,
+          user_service_cid: userServiceCid,
+        };
+      case "dev_net_feature_app":
+        return {
+          type: "dev_net_feature_app",
+          amulet_rules_cid: amuletRulesCid,
+        };
       default:
         return null;
     }
@@ -279,7 +387,9 @@ export const GovernanceSection = ({ partyId }: GovernanceSectionProps) => {
       setShowNewActionForm(false);
       await fetchGovernance();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to submit V2 confirmation");
+      setError(
+        e instanceof Error ? e.message : "Failed to submit V2 confirmation",
+      );
     } finally {
       setV2Loading(false);
     }
@@ -327,7 +437,9 @@ export const GovernanceSection = ({ partyId }: GovernanceSectionProps) => {
             label="Timeout (microseconds)"
             type="number"
             value={timeoutMicroseconds}
-            onChange={(e) => setTimeoutMicroseconds(parseInt(e.target.value) || 0)}
+            onChange={(e) =>
+              setTimeoutMicroseconds(parseInt(e.target.value) || 0)
+            }
             size="small"
             fullWidth
             helperText="1 hour = 3,600,000,000 microseconds"
@@ -359,7 +471,10 @@ export const GovernanceSection = ({ partyId }: GovernanceSectionProps) => {
               label="Max Total Deposit"
               value={vaultLimits.max_total_deposit}
               onChange={(e) =>
-                setVaultLimits({ ...vaultLimits, max_total_deposit: e.target.value })
+                setVaultLimits({
+                  ...vaultLimits,
+                  max_total_deposit: e.target.value,
+                })
               }
               size="small"
               fullWidth
@@ -369,7 +484,10 @@ export const GovernanceSection = ({ partyId }: GovernanceSectionProps) => {
               label="Min Deposit Amount"
               value={vaultLimits.min_deposit_amount}
               onChange={(e) =>
-                setVaultLimits({ ...vaultLimits, min_deposit_amount: e.target.value })
+                setVaultLimits({
+                  ...vaultLimits,
+                  min_deposit_amount: e.target.value,
+                })
               }
               size="small"
               fullWidth
@@ -379,7 +497,10 @@ export const GovernanceSection = ({ partyId }: GovernanceSectionProps) => {
               label="Min Withdrawal Amount"
               value={vaultLimits.min_withdrawal_amount}
               onChange={(e) =>
-                setVaultLimits({ ...vaultLimits, min_withdrawal_amount: e.target.value })
+                setVaultLimits({
+                  ...vaultLimits,
+                  min_withdrawal_amount: e.target.value,
+                })
               }
               size="small"
               fullWidth
@@ -432,7 +553,10 @@ export const GovernanceSection = ({ partyId }: GovernanceSectionProps) => {
               label="Issuer Party"
               value={assetInstrumentId.issuer}
               onChange={(e) =>
-                setAssetInstrumentId({ ...assetInstrumentId, issuer: e.target.value })
+                setAssetInstrumentId({
+                  ...assetInstrumentId,
+                  issuer: e.target.value,
+                })
               }
               size="small"
               fullWidth
@@ -442,7 +566,10 @@ export const GovernanceSection = ({ partyId }: GovernanceSectionProps) => {
               label="Symbol"
               value={assetInstrumentId.symbol}
               onChange={(e) =>
-                setAssetInstrumentId({ ...assetInstrumentId, symbol: e.target.value })
+                setAssetInstrumentId({
+                  ...assetInstrumentId,
+                  symbol: e.target.value,
+                })
               }
               size="small"
               fullWidth
@@ -455,7 +582,10 @@ export const GovernanceSection = ({ partyId }: GovernanceSectionProps) => {
               label="Max Total Deposit"
               value={vaultLimits.max_total_deposit}
               onChange={(e) =>
-                setVaultLimits({ ...vaultLimits, max_total_deposit: e.target.value })
+                setVaultLimits({
+                  ...vaultLimits,
+                  max_total_deposit: e.target.value,
+                })
               }
               size="small"
               fullWidth
@@ -465,7 +595,10 @@ export const GovernanceSection = ({ partyId }: GovernanceSectionProps) => {
               label="Min Deposit Amount"
               value={vaultLimits.min_deposit_amount}
               onChange={(e) =>
-                setVaultLimits({ ...vaultLimits, min_deposit_amount: e.target.value })
+                setVaultLimits({
+                  ...vaultLimits,
+                  min_deposit_amount: e.target.value,
+                })
               }
               size="small"
               fullWidth
@@ -475,7 +608,10 @@ export const GovernanceSection = ({ partyId }: GovernanceSectionProps) => {
               label="Min Withdrawal Amount"
               value={vaultLimits.min_withdrawal_amount}
               onChange={(e) =>
-                setVaultLimits({ ...vaultLimits, min_withdrawal_amount: e.target.value })
+                setVaultLimits({
+                  ...vaultLimits,
+                  min_withdrawal_amount: e.target.value,
+                })
               }
               size="small"
               fullWidth
@@ -501,7 +637,10 @@ export const GovernanceSection = ({ partyId }: GovernanceSectionProps) => {
               label="Featured App Right Contract ID"
               value={vaultFarConfig.featured_app_right_cid}
               onChange={(e) =>
-                setVaultFarConfig({ ...vaultFarConfig, featured_app_right_cid: e.target.value })
+                setVaultFarConfig({
+                  ...vaultFarConfig,
+                  featured_app_right_cid: e.target.value,
+                })
               }
               size="small"
               fullWidth
@@ -534,7 +673,10 @@ export const GovernanceSection = ({ partyId }: GovernanceSectionProps) => {
               label="Issuer Party"
               value={assetInstrumentId.issuer}
               onChange={(e) =>
-                setAssetInstrumentId({ ...assetInstrumentId, issuer: e.target.value })
+                setAssetInstrumentId({
+                  ...assetInstrumentId,
+                  issuer: e.target.value,
+                })
               }
               size="small"
               fullWidth
@@ -544,7 +686,10 @@ export const GovernanceSection = ({ partyId }: GovernanceSectionProps) => {
               label="Symbol"
               value={assetInstrumentId.symbol}
               onChange={(e) =>
-                setAssetInstrumentId({ ...assetInstrumentId, symbol: e.target.value })
+                setAssetInstrumentId({
+                  ...assetInstrumentId,
+                  symbol: e.target.value,
+                })
               }
               size="small"
               fullWidth
@@ -558,6 +703,178 @@ export const GovernanceSection = ({ partyId }: GovernanceSectionProps) => {
               fullWidth
             />
           </>
+        );
+      case "vault_update_far_beneficiaries":
+        return (
+          <>
+            <TextField
+              label="Vault Contract ID"
+              value={vaultId}
+              onChange={(e) => setVaultId(e.target.value)}
+              size="small"
+              fullWidth
+              sx={{ mb: 2 }}
+            />
+            <Typography variant="caption" color="text.secondary">
+              FAR Beneficiaries (add beneficiary party + weight)
+            </Typography>
+            {farBeneficiaries.map((b, idx) => (
+              <Box key={idx} sx={{ display: "flex", gap: 1, mb: 1 }}>
+                <TextField
+                  label="Beneficiary Party"
+                  value={b.beneficiary}
+                  onChange={(e) => {
+                    const updated = [...farBeneficiaries];
+                    updated[idx] = { ...b, beneficiary: e.target.value };
+                    setFarBeneficiaries(updated);
+                  }}
+                  size="small"
+                  sx={{ flex: 2 }}
+                />
+                <TextField
+                  label="Weight"
+                  value={b.weight}
+                  onChange={(e) => {
+                    const updated = [...farBeneficiaries];
+                    updated[idx] = { ...b, weight: e.target.value };
+                    setFarBeneficiaries(updated);
+                  }}
+                  size="small"
+                  sx={{ flex: 1 }}
+                />
+                <Button
+                  size="small"
+                  color="error"
+                  onClick={() =>
+                    setFarBeneficiaries(
+                      farBeneficiaries.filter((_, i) => i !== idx),
+                    )
+                  }
+                >
+                  Remove
+                </Button>
+              </Box>
+            ))}
+            <Button
+              size="small"
+              onClick={() =>
+                setFarBeneficiaries([
+                  ...farBeneficiaries,
+                  { beneficiary: "", weight: "1" },
+                ])
+              }
+            >
+              Add Beneficiary
+            </Button>
+          </>
+        );
+      case "processor_deployment_request":
+        return (
+          <>
+            <TextField
+              label="Authorized Vault Manager Party"
+              value={vaultManager}
+              onChange={(e) => setVaultManager(e.target.value)}
+              size="small"
+              fullWidth
+              sx={{ mb: 2 }}
+            />
+            <TextField
+              label="Vault Backend Signatory Party"
+              value={vaultBackendSignatory}
+              onChange={(e) => setVaultBackendSignatory(e.target.value)}
+              size="small"
+              fullWidth
+              sx={{ mb: 2 }}
+            />
+            <TextField
+              label="Allocation Factory Contract ID"
+              value={allocationFactoryCid}
+              onChange={(e) => setAllocationFactoryCid(e.target.value)}
+              size="small"
+              fullWidth
+              sx={{ mb: 2 }}
+            />
+            <TextField
+              label="Featured App Right Contract ID"
+              value={vaultFarConfig.featured_app_right_cid}
+              onChange={(e) =>
+                setVaultFarConfig({
+                  ...vaultFarConfig,
+                  featured_app_right_cid: e.target.value,
+                })
+              }
+              size="small"
+              fullWidth
+              sx={{ mb: 2 }}
+            />
+            <Typography variant="caption" color="text.secondary">
+              Initial Supported Vaults (comma-separated Contract IDs)
+            </Typography>
+            <TextField
+              value={initialSupportedVaults.join(", ")}
+              onChange={(e) =>
+                setInitialSupportedVaults(
+                  e.target.value
+                    .split(",")
+                    .map((s) => s.trim())
+                    .filter(Boolean),
+                )
+              }
+              size="small"
+              fullWidth
+              placeholder="vault-cid-1, vault-cid-2"
+            />
+          </>
+        );
+      case "utility_create_provider_request":
+      case "utility_create_user_request":
+        return (
+          <TextField
+            label="Operator Party"
+            value={operatorParty}
+            onChange={(e) => setOperatorParty(e.target.value)}
+            size="small"
+            fullWidth
+          />
+        );
+      case "utility_setup":
+        return (
+          <>
+            <TextField
+              label="Operator Party"
+              value={operatorParty}
+              onChange={(e) => setOperatorParty(e.target.value)}
+              size="small"
+              fullWidth
+              sx={{ mb: 2 }}
+            />
+            <TextField
+              label="Provider Service Contract ID"
+              value={providerServiceCid}
+              onChange={(e) => setProviderServiceCid(e.target.value)}
+              size="small"
+              fullWidth
+              sx={{ mb: 2 }}
+            />
+            <TextField
+              label="User Service Contract ID"
+              value={userServiceCid}
+              onChange={(e) => setUserServiceCid(e.target.value)}
+              size="small"
+              fullWidth
+            />
+          </>
+        );
+      case "dev_net_feature_app":
+        return (
+          <TextField
+            label="Amulet Rules Contract ID"
+            value={amuletRulesCid}
+            onChange={(e) => setAmuletRulesCid(e.target.value)}
+            size="small"
+            fullWidth
+          />
         );
       default:
         return null;
@@ -649,7 +966,9 @@ export const GovernanceSection = ({ partyId }: GovernanceSectionProps) => {
                 <Select
                   value={selectedActionType}
                   label="Action Type"
-                  onChange={(e) => setSelectedActionType(e.target.value as ActionTypeKey)}
+                  onChange={(e) =>
+                    setSelectedActionType(e.target.value as ActionTypeKey)
+                  }
                 >
                   {ACTION_TYPE_OPTIONS.map((opt) => (
                     <MenuItem key={opt.value} value={opt.value}>
@@ -668,11 +987,20 @@ export const GovernanceSection = ({ partyId }: GovernanceSectionProps) => {
                   variant="contained"
                   onClick={handleSubmitV2Action}
                   disabled={v2Loading || !rulesContractId}
-                  startIcon={v2Loading ? <CircularProgress size={16} /> : <CheckCircleIcon />}
+                  startIcon={
+                    v2Loading ? (
+                      <CircularProgress size={16} />
+                    ) : (
+                      <CheckCircleIcon />
+                    )
+                  }
                 >
                   Submit Confirmation
                 </Button>
-                <Button variant="outlined" onClick={() => setShowNewActionForm(false)}>
+                <Button
+                  variant="outlined"
+                  onClick={() => setShowNewActionForm(false)}
+                >
                   Cancel
                 </Button>
               </Box>
@@ -696,7 +1024,10 @@ export const GovernanceSection = ({ partyId }: GovernanceSectionProps) => {
                 {data.actions.map((action) => (
                   <TableRow key={action.action_id}>
                     <TableCell sx={{ py: 1 }}>
-                      <Typography variant="body2" sx={{ fontFamily: "monospace" }}>
+                      <Typography
+                        variant="body2"
+                        sx={{ fontFamily: "monospace" }}
+                      >
                         {action.action_id.length > 50
                           ? `${action.action_id.substring(0, 50)}...`
                           : action.action_id}
@@ -710,7 +1041,13 @@ export const GovernanceSection = ({ partyId }: GovernanceSectionProps) => {
                       />
                     </TableCell>
                     <TableCell sx={{ py: 1 }} align="right">
-                      <Box sx={{ display: "flex", gap: 1, justifyContent: "flex-end" }}>
+                      <Box
+                        sx={{
+                          display: "flex",
+                          gap: 1,
+                          justifyContent: "flex-end",
+                        }}
+                      >
                         <Button
                           size="small"
                           variant="outlined"
