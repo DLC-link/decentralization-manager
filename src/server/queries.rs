@@ -517,22 +517,44 @@ async fn fetch_governance_for_template(
     Ok(())
 }
 
+/// Extract a string representation of an action value (handles both Text and Variant)
+fn extract_action_string(value: &Value) -> Option<String> {
+    match &value.sum {
+        // Direct text value (legacy format)
+        Some(value::Sum::Text(s)) => Some(s.clone()),
+        // Variant value (structured format) - extract nested constructor names
+        Some(value::Sum::Variant(variant)) => {
+            let outer = &variant.constructor;
+            // Check if there's a nested variant (e.g., GovernanceAction(Governance_SelfDestruct))
+            if let Some(inner_value) = variant.value.as_ref() {
+                if let Some(value::Sum::Variant(inner_variant)) = &inner_value.sum {
+                    // Nested variant: "OuterVariant(InnerVariant)"
+                    Some(format!("{}({})", outer, inner_variant.constructor))
+                } else {
+                    // Single variant with record payload
+                    Some(outer.clone())
+                }
+            } else {
+                Some(outer.clone())
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Extract action and confirming_party from a created event and add to the map
 fn extract_and_add_confirmation(
     created: &CreatedEvent,
     confirmations_by_action: &mut HashMap<String, Vec<GovernanceConfirmation>>,
 ) {
-    // Extract action field from create_arguments
+    // Extract action field from create_arguments (handles both Text and Variant)
     let action = created
         .create_arguments
         .as_ref()
         .and_then(|record| {
             record.fields.iter().find_map(|field| {
                 if field.label == "action" {
-                    field.value.as_ref().and_then(|v| match &v.sum {
-                        Some(value::Sum::Text(s)) => Some(s.clone()),
-                        _ => None,
-                    })
+                    field.value.as_ref().and_then(extract_action_string)
                 } else {
                     None
                 }
