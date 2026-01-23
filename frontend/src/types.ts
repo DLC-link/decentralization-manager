@@ -102,17 +102,17 @@ export interface DarFile {
 export type FieldDefinition =
   | { type: "decentralized_party" }
   | { type: "operator_party" }
-  | { type: "participant_party"; index: number }
+  | { type: "participant_party"; id: string }
   | { type: "text"; value: string }
   | { type: "int64"; value: number }
   | { type: "bool"; value: boolean }
   | { type: "instrument"; id: string }
   | { type: "attestors_set" }
-  | { type: "party_set" }
+  | { type: "party_set"; parties: string[] }
   | { type: "rel_time"; microseconds: number }
   | { type: "optional"; inner: FieldDefinition }
   | { type: "record"; fields: FieldDefinition[] }
-  | { type: "governance_threshold" };
+  | { type: "governance_threshold"; value?: number };
 
 export interface ContractDefinition {
   id: string;

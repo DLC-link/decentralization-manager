@@ -17,7 +17,6 @@ import {
   Select,
   MenuItem,
   FormControl,
-  InputLabel,
   Divider,
   Card,
   CardActionArea,
@@ -50,20 +49,40 @@ interface ContractsDialogProps {
 type ContractType = "cbtc" | "vault" | null;
 
 const FIELD_TYPES = [
-  { value: "decentralized_party", label: "Decentralized Party" },
-  { value: "operator_party", label: "Operator Party" },
-  { value: "participant_party", label: "Participant Party" },
-  { value: "text", label: "Text" },
-  { value: "int64", label: "Integer (64-bit)" },
-  { value: "bool", label: "Boolean" },
-  { value: "instrument", label: "Instrument" },
-  { value: "attestors_set", label: "Attestors Set (GenMap)" },
-  { value: "party_set", label: "Party Set (DA.Set)" },
-  { value: "rel_time", label: "Relative Time (DA.Time)" },
-  { value: "governance_threshold", label: "Governance Threshold" },
+  { value: "decentralized_party", label: "Dec. Party" },
+  { value: "operator_party", label: "Operator" },
+  { value: "participant_party", label: "Party" },
+  { value: "party_set", label: "Party Set" },
+  { value: "attestors_set", label: "Attestors Set" },
+  { value: "governance_threshold", label: "Threshold" },
+  { value: "rel_time", label: "RelTime" },
   { value: "optional", label: "Optional" },
+  { value: "instrument", label: "Instrument" },
+  { value: "text", label: "Text" },
+  { value: "int64", label: "Integer" },
+  { value: "bool", label: "Boolean" },
   { value: "record", label: "Record" },
 ];
+
+const createDefaultField = (type: string, participantCount: number = 3): FieldDefinition => {
+  const defaultThreshold = Math.max(2, Math.ceil((participantCount * 2) / 3));
+  switch (type) {
+    case "decentralized_party": return { type: "decentralized_party" };
+    case "operator_party": return { type: "operator_party" };
+    case "participant_party": return { type: "participant_party", id: "" };
+    case "party_set": return { type: "party_set", parties: [] };
+    case "attestors_set": return { type: "attestors_set" };
+    case "governance_threshold": return { type: "governance_threshold", value: defaultThreshold };
+    case "rel_time": return { type: "rel_time", microseconds: 3600000000 };
+    case "optional": return { type: "optional", inner: { type: "rel_time", microseconds: 3600000000 } };
+    case "instrument": return { type: "instrument", id: "" };
+    case "text": return { type: "text", value: "" };
+    case "int64": return { type: "int64", value: 0 };
+    case "bool": return { type: "bool", value: false };
+    case "record": return { type: "record", fields: [] };
+    default: return { type: "text", value: "" };
+  }
+};
 
 const createEmptyContract = (): ContractDefinition => ({
   id: "",
@@ -119,63 +138,33 @@ const getCbtcContracts = (): ContractDefinition[] => [
 ];
 
 // Vault contract definitions
-const getVaultContracts = (): ContractDefinition[] => [
-  {
-    id: "create-vault-governance-rules",
-    name: "VaultGovernanceRules",
-    package_id: "#bitsafe-vault-governance-v0-rc2",
-    module_name: "BitsafeVault.VaultGovernance",
-    entity_name: "VaultGovernanceRules",
-    fields: [
-      { type: "decentralized_party" }, // vaultManager : Party
-      { type: "party_set" }, // members : Set Party (DA.Set.Types:Set Party - Record with GenMap)
-      { type: "governance_threshold" }, // threshold : Int
-      { type: "optional", inner: { type: "rel_time", microseconds: 3600000000 } }, // actionConfirmationTimeout : Optional RelTime (1 hour)
-    ],
-  },
-];
+const getVaultContracts = (participantCount: number = 3): ContractDefinition[] => {
+  const defaultThreshold = Math.max(2, Math.ceil((participantCount * 2) / 3));
+  return [
+    {
+      id: "create-vault-governance-rules",
+      name: "VaultGovernanceRules",
+      package_id: "#bitsafe-vault-governance-v0-rc2",
+      module_name: "BitsafeVault.VaultGovernance",
+      entity_name: "VaultGovernanceRules",
+      fields: [
+        { type: "decentralized_party" }, // vaultManager : Party
+        { type: "party_set", parties: [] }, // members : Set Party - add parties manually
+        { type: "governance_threshold", value: defaultThreshold }, // threshold : Int
+        { type: "optional", inner: { type: "rel_time", microseconds: 86400000000 } }, // actionConfirmationTimeout : Optional RelTime (24 hours)
+      ],
+    },
+  ];
+};
 
-const getContractsForType = (type: ContractType): ContractDefinition[] => {
+const getContractsForType = (type: ContractType, participantCount: number = 3): ContractDefinition[] => {
   switch (type) {
     case "cbtc":
       return getCbtcContracts();
     case "vault":
-      return getVaultContracts();
+      return getVaultContracts(participantCount);
     default:
       return [];
-  }
-};
-
-const createDefaultField = (type: string): FieldDefinition => {
-  switch (type) {
-    case "decentralized_party":
-      return { type: "decentralized_party" };
-    case "operator_party":
-      return { type: "operator_party" };
-    case "participant_party":
-      return { type: "participant_party", index: 0 };
-    case "text":
-      return { type: "text", value: "" };
-    case "int64":
-      return { type: "int64", value: 0 };
-    case "bool":
-      return { type: "bool", value: false };
-    case "instrument":
-      return { type: "instrument", id: "" };
-    case "attestors_set":
-      return { type: "attestors_set" };
-    case "party_set":
-      return { type: "party_set" };
-    case "rel_time":
-      return { type: "rel_time", microseconds: 3600000000 }; // 1 hour default
-    case "governance_threshold":
-      return { type: "governance_threshold" };
-    case "optional":
-      return { type: "optional", inner: { type: "text", value: "" } };
-    case "record":
-      return { type: "record", fields: [] };
-    default:
-      return { type: "text", value: "" };
   }
 };
 
@@ -183,210 +172,332 @@ interface FieldEditorProps {
   field: FieldDefinition;
   onChange: (field: FieldDefinition) => void;
   onDelete: () => void;
+  participantCount?: number;
+  partyId?: string;
 }
 
-const FieldEditor = ({ field, onChange, onDelete }: FieldEditorProps) => {
-  const handleTypeChange = (newType: string) => {
-    onChange(createDefaultField(newType));
+const FieldEditor = ({ field, onChange, onDelete, participantCount = 3, partyId }: FieldEditorProps) => {
+  const defaultThreshold = Math.max(2, Math.ceil((participantCount * 2) / 3));
+
+  const renderValueInput = () => {
+    switch (field.type) {
+      case "decentralized_party":
+        return (
+          <Typography
+            variant="body2"
+            color="text.secondary"
+            sx={{
+              fontFamily: "monospace",
+              fontSize: 14,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+              width: "100%",
+            }}
+          >
+            {partyId || "(dec party ID)"}
+          </Typography>
+        );
+      case "operator_party":
+        return (
+          <Typography variant="body2" color="text.secondary" sx={{ fontStyle: "italic" }}>
+            (auto-allocated)
+          </Typography>
+        );
+      case "attestors_set":
+        return (
+          <Typography variant="body2" color="text.secondary" sx={{ fontStyle: "italic" }}>
+            (all {participantCount} participants)
+          </Typography>
+        );
+
+      case "participant_party":
+        return (
+          <TextField
+            size="small"
+            placeholder="Paste party ID"
+            value={field.id}
+            onChange={(e) => onChange({ ...field, id: e.target.value })}
+            fullWidth
+          />
+        );
+
+      case "party_set":
+        return (
+          <Box sx={{ display: "flex", flexDirection: "column", gap: 1, flex: 1 }}>
+            <TextField
+              size="small"
+              placeholder="Paste party ID, press Enter"
+              fullWidth
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  const input = e.target as HTMLInputElement;
+                  const value = input.value.trim();
+                  if (value && !field.parties.includes(value)) {
+                    onChange({ ...field, parties: [...field.parties, value] });
+                    input.value = "";
+                  }
+                  e.preventDefault();
+                }
+              }}
+            />
+            {field.parties.length > 0 && (
+              <Box sx={{ display: "flex", flexDirection: "column", gap: 0.5 }}>
+                {field.parties.map((party, idx) => (
+                  <Box
+                    key={idx}
+                    sx={{
+                      display: "flex",
+                      alignItems: "center",
+                      bgcolor: "action.hover",
+                      borderRadius: 1,
+                      px: 1,
+                      py: 0.25,
+                    }}
+                  >
+                    <Typography variant="caption" sx={{ flex: 1, fontFamily: "monospace" }}>
+                      {party}
+                    </Typography>
+                    <IconButton
+                      size="small"
+                      onClick={() => onChange({ ...field, parties: field.parties.filter((_, i) => i !== idx) })}
+                      sx={{ p: 0.25 }}
+                    >
+                      <DeleteIcon sx={{ fontSize: 14 }} />
+                    </IconButton>
+                  </Box>
+                ))}
+              </Box>
+            )}
+          </Box>
+        );
+
+      case "governance_threshold":
+        return (
+          <TextField
+            size="small"
+            label="Value"
+            type="number"
+            value={field.value ?? defaultThreshold}
+            onChange={(e) => onChange({ ...field, value: parseInt(e.target.value) || defaultThreshold })}
+            sx={{ width: 100 }}
+          />
+        );
+
+      case "rel_time":
+        return (
+          <FormControl size="small" sx={{ width: 130 }}>
+            <Select
+              value={field.microseconds || 3600000000}
+              onChange={(e) => onChange({ ...field, microseconds: Number(e.target.value) })}
+            >
+              <MenuItem value={180000000}>3 min</MenuItem>
+              <MenuItem value={600000000}>10 min</MenuItem>
+              <MenuItem value={1800000000}>30 min</MenuItem>
+              <MenuItem value={3600000000}>1 hour</MenuItem>
+              <MenuItem value={7200000000}>2 hours</MenuItem>
+              <MenuItem value={86400000000}>24 hours</MenuItem>
+            </Select>
+          </FormControl>
+        );
+
+      case "optional": {
+        const innerTypes = FIELD_TYPES.filter(t => t.value !== "optional" && t.value !== "record");
+        return (
+          <Box sx={{ display: "flex", gap: 1, alignItems: "center", flex: 1 }}>
+            <FormControl size="small" sx={{ width: 140 }}>
+              <Select
+                value={field.inner?.type || "rel_time"}
+                onChange={(e) => onChange({ ...field, inner: createDefaultField(e.target.value, participantCount) })}
+              >
+                {innerTypes.map((t) => (
+                  <MenuItem key={t.value} value={t.value}>{t.label}</MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+            {field.inner?.type === "rel_time" && (
+              <FormControl size="small" sx={{ width: 130 }}>
+                <Select
+                  value={(field.inner as { microseconds: number }).microseconds || 3600000000}
+                  onChange={(e) => onChange({ ...field, inner: { type: "rel_time", microseconds: Number(e.target.value) } })}
+                >
+                  <MenuItem value={180000000}>3 min</MenuItem>
+                  <MenuItem value={600000000}>10 min</MenuItem>
+                  <MenuItem value={1800000000}>30 min</MenuItem>
+                  <MenuItem value={3600000000}>1 hour</MenuItem>
+                  <MenuItem value={7200000000}>2 hours</MenuItem>
+                  <MenuItem value={86400000000}>24 hours</MenuItem>
+                </Select>
+              </FormControl>
+            )}
+            {field.inner?.type === "governance_threshold" && (
+              <TextField
+                size="small"
+                label="Value"
+                type="number"
+                value={(field.inner as { value?: number }).value ?? defaultThreshold}
+                onChange={(e) => onChange({ ...field, inner: { type: "governance_threshold", value: parseInt(e.target.value) || defaultThreshold } })}
+                sx={{ width: 100 }}
+              />
+            )}
+            {field.inner?.type === "text" && (
+              <TextField
+                size="small"
+                label="Value"
+                value={(field.inner as { value: string }).value}
+                onChange={(e) => onChange({ ...field, inner: { type: "text", value: e.target.value } })}
+                sx={{ flex: 1 }}
+              />
+            )}
+            {field.inner?.type === "int64" && (
+              <TextField
+                size="small"
+                label="Value"
+                type="number"
+                value={(field.inner as { value: number }).value}
+                onChange={(e) => onChange({ ...field, inner: { type: "int64", value: parseInt(e.target.value) || 0 } })}
+                sx={{ width: 100 }}
+              />
+            )}
+          </Box>
+        );
+      }
+
+      case "instrument":
+        return (
+          <TextField
+            size="small"
+            label="ID"
+            value={field.id}
+            onChange={(e) => onChange({ ...field, id: e.target.value })}
+            sx={{ width: 150 }}
+          />
+        );
+
+      case "text":
+        return (
+          <TextField
+            size="small"
+            label="Value"
+            value={field.value}
+            onChange={(e) => onChange({ ...field, value: e.target.value })}
+            sx={{ flex: 1 }}
+          />
+        );
+
+      case "int64":
+        return (
+          <TextField
+            size="small"
+            label="Value"
+            type="number"
+            value={field.value}
+            onChange={(e) => onChange({ ...field, value: parseInt(e.target.value) || 0 })}
+            sx={{ width: 120 }}
+          />
+        );
+
+      case "bool":
+        return (
+          <FormControl size="small" sx={{ width: 100 }}>
+            <Select
+              value={field.value ? "true" : "false"}
+              onChange={(e) => onChange({ ...field, value: e.target.value === "true" })}
+            >
+              <MenuItem value="true">True</MenuItem>
+              <MenuItem value="false">False</MenuItem>
+            </Select>
+          </FormControl>
+        );
+
+      case "record":
+        return (
+          <Box sx={{ display: "flex", flexDirection: "column", gap: 1, flex: 1 }}>
+            <Box
+              sx={{
+                border: "1px solid",
+                borderColor: "divider",
+                borderRadius: 1,
+                p: 1.5,
+                bgcolor: "action.hover",
+              }}
+            >
+              {field.fields.length === 0 ? (
+                <Typography variant="body2" color="text.secondary" sx={{ fontStyle: "italic" }}>
+                  Empty record
+                </Typography>
+              ) : (
+                <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+                  {field.fields.map((nestedField, idx) => (
+                    <Box key={idx} sx={{ display: "flex", gap: 1, alignItems: "center" }}>
+                      <FormControl size="small" sx={{ width: 130 }}>
+                        <Select
+                          value={nestedField.type}
+                          onChange={(e) => {
+                            const newFields = [...field.fields];
+                            newFields[idx] = createDefaultField(e.target.value, participantCount);
+                            onChange({ ...field, fields: newFields });
+                          }}
+                        >
+                          {FIELD_TYPES.filter(t => t.value !== "record").map((t) => (
+                            <MenuItem key={t.value} value={t.value}>{t.label}</MenuItem>
+                          ))}
+                        </Select>
+                      </FormControl>
+                      <IconButton
+                        size="small"
+                        onClick={() => {
+                          const newFields = field.fields.filter((_, i) => i !== idx);
+                          onChange({ ...field, fields: newFields });
+                        }}
+                        color="error"
+                      >
+                        <DeleteIcon sx={{ fontSize: 16 }} />
+                      </IconButton>
+                    </Box>
+                  ))}
+                </Box>
+              )}
+              <Button
+                size="small"
+                startIcon={<AddIcon />}
+                onClick={() => onChange({ ...field, fields: [...field.fields, { type: "text", value: "" }] })}
+                sx={{ mt: 1 }}
+              >
+                Add
+              </Button>
+            </Box>
+          </Box>
+        );
+
+      default:
+        return null;
+    }
   };
 
   return (
     <Box
       sx={{
-        display: "flex",
-        gap: 1,
-        alignItems: "flex-start",
-        mb: 1,
-        p: 1,
-        border: "1px solid",
-        borderColor: "divider",
-        borderRadius: 1,
+        display: "grid",
+        gridTemplateColumns: "150px 1fr 40px",
+        gap: 1.5,
+        alignItems: "center",
+        py: 1,
       }}
     >
-      <FormControl size="small" sx={{ minWidth: 180 }}>
-        <InputLabel>Field Type</InputLabel>
+      <FormControl size="small" fullWidth>
         <Select
           value={field.type}
-          label="Field Type"
-          onChange={(e) => handleTypeChange(e.target.value)}
+          onChange={(e) => onChange(createDefaultField(e.target.value, participantCount))}
         >
-          {FIELD_TYPES.map((ft) => (
-            <MenuItem key={ft.value} value={ft.value}>
-              {ft.label}
-            </MenuItem>
+          {FIELD_TYPES.map((t) => (
+            <MenuItem key={t.value} value={t.value}>{t.label}</MenuItem>
           ))}
         </Select>
       </FormControl>
-
-      {field.type === "participant_party" && (
-        <TextField
-          size="small"
-          label="Index"
-          type="number"
-          value={field.index}
-          onChange={(e) =>
-            onChange({ ...field, index: parseInt(e.target.value) || 0 })
-          }
-          sx={{ width: 100 }}
-        />
-      )}
-
-      {field.type === "text" && (
-        <TextField
-          size="small"
-          label="Value"
-          value={field.value}
-          onChange={(e) => onChange({ ...field, value: e.target.value })}
-          sx={{ flex: 1 }}
-        />
-      )}
-
-      {field.type === "int64" && (
-        <TextField
-          size="small"
-          label="Value"
-          type="number"
-          value={field.value}
-          onChange={(e) =>
-            onChange({ ...field, value: parseInt(e.target.value) || 0 })
-          }
-          sx={{ width: 150 }}
-        />
-      )}
-
-      {field.type === "bool" && (
-        <FormControl size="small" sx={{ minWidth: 100 }}>
-          <InputLabel>Value</InputLabel>
-          <Select
-            value={field.value ? "true" : "false"}
-            label="Value"
-            onChange={(e) =>
-              onChange({ ...field, value: e.target.value === "true" })
-            }
-          >
-            <MenuItem value="true">True</MenuItem>
-            <MenuItem value="false">False</MenuItem>
-          </Select>
-        </FormControl>
-      )}
-
-      {field.type === "instrument" && (
-        <TextField
-          size="small"
-          label="Instrument ID"
-          value={field.id}
-          onChange={(e) => onChange({ ...field, id: e.target.value })}
-          sx={{ flex: 1 }}
-        />
-      )}
-
-      {field.type === "optional" && (
-        <Box
-          sx={{
-            flex: 1,
-            pl: 2,
-            borderLeft: "2px solid",
-            borderColor: "primary.light",
-          }}
-        >
-          <Typography
-            variant="caption"
-            color="text.secondary"
-            sx={{ mb: 0.5, display: "block" }}
-          >
-            Inner type:
-          </Typography>
-          <FormControl size="small" sx={{ minWidth: 150 }}>
-            <InputLabel>Inner Type</InputLabel>
-            <Select
-              value={field.inner?.type || "text"}
-              label="Inner Type"
-              onChange={(e) =>
-                onChange({
-                  ...field,
-                  inner: createDefaultField(e.target.value),
-                })
-              }
-            >
-              {FIELD_TYPES.filter(
-                (ft) => ft.value !== "optional" && ft.value !== "record",
-              ).map((ft) => (
-                <MenuItem key={ft.value} value={ft.value}>
-                  {ft.label}
-                </MenuItem>
-              ))}
-            </Select>
-          </FormControl>
-        </Box>
-      )}
-
-      {field.type === "record" && (
-        <Box
-          sx={{
-            flex: 1,
-            pl: 2,
-            borderLeft: "2px solid",
-            borderColor: "secondary.light",
-          }}
-        >
-          <Typography
-            variant="caption"
-            color="text.secondary"
-            sx={{ mb: 0.5, display: "block" }}
-          >
-            Record fields:
-          </Typography>
-          {field.fields?.map((subField, idx) => (
-            <Box
-              key={idx}
-              sx={{ display: "flex", gap: 1, alignItems: "center", mb: 0.5 }}
-            >
-              <FormControl size="small" sx={{ minWidth: 150 }}>
-                <Select
-                  value={subField.type}
-                  onChange={(e) => {
-                    const newFields = [...(field.fields || [])];
-                    newFields[idx] = createDefaultField(e.target.value);
-                    onChange({ ...field, fields: newFields });
-                  }}
-                >
-                  {FIELD_TYPES.filter((ft) => ft.value !== "record").map(
-                    (ft) => (
-                      <MenuItem key={ft.value} value={ft.value}>
-                        {ft.label}
-                      </MenuItem>
-                    ),
-                  )}
-                </Select>
-              </FormControl>
-              <IconButton
-                size="small"
-                onClick={() => {
-                  const newFields = (field.fields || []).filter(
-                    (_, i) => i !== idx,
-                  );
-                  onChange({ ...field, fields: newFields });
-                }}
-              >
-                <DeleteIcon fontSize="small" />
-              </IconButton>
-            </Box>
-          ))}
-          <Button
-            size="small"
-            startIcon={<AddIcon />}
-            onClick={() =>
-              onChange({
-                ...field,
-                fields: [...(field.fields || []), { type: "text", value: "" }],
-              })
-            }
-          >
-            Add Field
-          </Button>
-        </Box>
-      )}
-
+      <Box sx={{ display: "flex", alignItems: "center", minWidth: 0 }}>
+        {renderValueInput()}
+      </Box>
       <IconButton size="small" onClick={onDelete} color="error">
         <DeleteIcon fontSize="small" />
       </IconButton>
@@ -399,6 +510,8 @@ interface ContractEditorProps {
   onChange: (contract: ContractDefinition) => void;
   onDelete: () => void;
   index: number;
+  participantCount: number;
+  partyId: string;
 }
 
 const ContractEditor = ({
@@ -406,6 +519,8 @@ const ContractEditor = ({
   onChange,
   onDelete,
   index,
+  participantCount,
+  partyId,
 }: ContractEditorProps) => {
   const handleFieldChange = (fieldIndex: number, newField: FieldDefinition) => {
     const newFields = [...contract.fields];
@@ -465,22 +580,6 @@ const ContractEditor = ({
       </AccordionSummary>
       <AccordionDetails sx={{ p: 3 }}>
         <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
-          <Box sx={{ display: "flex", gap: 2 }}>
-            <TextField
-              size="small"
-              label="Contract ID"
-              value={contract.id}
-              onChange={(e) => onChange({ ...contract, id: e.target.value })}
-              fullWidth
-            />
-            <TextField
-              size="small"
-              label="Name"
-              value={contract.name}
-              onChange={(e) => onChange({ ...contract, name: e.target.value })}
-              fullWidth
-            />
-          </Box>
           <TextField
             size="small"
             label="Package ID"
@@ -522,6 +621,8 @@ const ContractEditor = ({
               field={field}
               onChange={(newField) => handleFieldChange(fieldIndex, newField)}
               onDelete={() => handleDeleteField(fieldIndex)}
+              participantCount={participantCount}
+              partyId={partyId}
             />
           ))}
           <Button
@@ -638,9 +739,9 @@ export const ContractsDialog = ({
   // Initialize contracts when type is selected
   useEffect(() => {
     if (contractType) {
-      setContracts(getContractsForType(contractType));
+      setContracts(getContractsForType(contractType, participantIds.length));
     }
-  }, [contractType]);
+  }, [contractType, participantIds.length]);
 
   const pollStatus = useCallback(async () => {
     try {
@@ -891,28 +992,32 @@ export const ContractsDialog = ({
                 )}
               </Box>
 
-              <Divider />
-              <Typography variant="subtitle1">
-                Operator Configuration
-              </Typography>
+              {contractType === "cbtc" && (
+                <>
+                  <Divider />
+                  <Typography variant="subtitle1">
+                    Operator Configuration
+                  </Typography>
 
-              <TextField
-                size="small"
-                label="Operator Party ID (optional)"
-                value={operatorParty}
-                onChange={(e) => setOperatorParty(e.target.value)}
-                fullWidth
-                helperText="Leave empty to allocate a new operator party"
-              />
+                  <TextField
+                    size="small"
+                    label="Operator Party ID (optional)"
+                    value={operatorParty}
+                    onChange={(e) => setOperatorParty(e.target.value)}
+                    fullWidth
+                    helperText="Leave empty to allocate a new operator party"
+                  />
 
-              <TextField
-                size="small"
-                label="Operator Party Hint"
-                value={operatorPartyHint}
-                onChange={(e) => setOperatorPartyHint(e.target.value)}
-                fullWidth
-                helperText="Used when allocating a new operator party"
-              />
+                  <TextField
+                    size="small"
+                    label="Operator Party Hint"
+                    value={operatorPartyHint}
+                    onChange={(e) => setOperatorPartyHint(e.target.value)}
+                    fullWidth
+                    helperText="Used when allocating a new operator party"
+                  />
+                </>
+              )}
 
               <Divider />
               <Box
@@ -948,6 +1053,8 @@ export const ContractsDialog = ({
                     onChange={(c) => handleContractChange(index, c)}
                     onDelete={() => handleDeleteContract(index)}
                     index={index}
+                    participantCount={participantIds.length}
+                    partyId={partyId}
                   />
                 ))
               )}

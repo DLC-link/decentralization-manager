@@ -329,13 +329,7 @@ fn build_field_value(field_def: &FieldDefinition, context: &SubmissionContext) -
             value::Sum::Party(context.decentralized_party.clone())
         }
         FieldDefinition::OperatorParty => value::Sum::Party(context.operator_party.clone()),
-        FieldDefinition::ParticipantParty { index } => {
-            let party = context
-                .participant_parties
-                .get(*index)
-                .ok_or_else(|| anyhow::anyhow!("Participant index {index} out of bounds"))?;
-            value::Sum::Party(party.clone())
-        }
+        FieldDefinition::ParticipantParty { id } => value::Sum::Party(id.to_string()),
         FieldDefinition::Text { value: text } => value::Sum::Text(text.clone()),
         FieldDefinition::Int64 { value: num } => value::Sum::Int64(*num),
         FieldDefinition::Bool { value: b } => value::Sum::Bool(*b),
@@ -377,18 +371,17 @@ fn build_field_value(field_def: &FieldDefinition, context: &SubmissionContext) -
                     .collect(),
             })
         }
-        FieldDefinition::PartySet => {
+        FieldDefinition::PartySet { parties } => {
             // DA.Set.Types:Set Party is a record containing a "map" field with GenMap<Party, Unit>
             let unit = Value {
                 sum: Some(value::Sum::Unit(())),
             };
             let gen_map = GenMap {
-                entries: context
-                    .participant_parties
+                entries: parties
                     .iter()
                     .map(|party| gen_map::Entry {
                         key: Some(Value {
-                            sum: Some(value::Sum::Party(party.clone())),
+                            sum: Some(value::Sum::Party(party.to_string())),
                         }),
                         value: Some(unit.clone()),
                     })
@@ -432,7 +425,10 @@ fn build_field_value(field_def: &FieldDefinition, context: &SubmissionContext) -
                 fields: record_fields,
             })
         }
-        FieldDefinition::GovernanceThreshold => value::Sum::Int64(context.governance_threshold),
+        FieldDefinition::GovernanceThreshold { value } => {
+            // Use provided value or fall back to calculated threshold
+            value::Sum::Int64(value.unwrap_or(context.governance_threshold))
+        }
     };
 
     Ok(Value { sum: Some(sum) })

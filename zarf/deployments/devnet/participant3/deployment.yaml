@@ -107,7 +107,7 @@ spec:
               value: dec_party_manager=debug,tokio_noise=error,hyper_noise=error
       containers:
         - name: dec-party-manager
-          image: public.ecr.aws/dlc-link/canton-decparty-manager:0.0.19
+          image: public.ecr.aws/dlc-link/canton-decparty-manager:0.0.20
           imagePullPolicy: Always
           command:
             [

@@ -87,8 +87,8 @@ pub enum FieldDefinition {
     DecentralizedParty,
     /// The operator party ID
     OperatorParty,
-    /// A specific participant's party ID (0-indexed)
-    ParticipantParty { index: usize },
+    /// A specific party ID
+    ParticipantParty { id: CantonId },
     /// Static text value
     Text { value: String },
     /// Integer value
@@ -99,14 +99,14 @@ pub enum FieldDefinition {
     Instrument { id: String },
     /// Set of all participant parties (as GenMap<Party, Unit>)
     AttestorsSet,
-    /// Set of all participant parties (as DA.Set.Types:Set Party - Record wrapped GenMap)
-    PartySet,
+    /// Set of parties (as DA.Set.Types:Set Party - Record wrapped GenMap)
+    PartySet { parties: Vec<CantonId> },
     /// Relative time value (as DA.Time.Types:RelTime - Record wrapped Int64 microseconds)
     RelTime { microseconds: i64 },
     /// Optional wrapper around another field
     Optional { inner: Box<FieldDefinition> },
     /// Nested record with fields
     Record { fields: Vec<FieldDefinition> },
-    /// Governance threshold (calculated from participant count)
-    GovernanceThreshold,
+    /// Governance threshold value
+    GovernanceThreshold { value: Option<i64> },
 }

@@ -2,7 +2,7 @@
 
 set -e
 
-TAG="0.0.19"
+TAG="0.0.20"
 IMAGE="public.ecr.aws/dlc-link/canton-decparty-manager"
 DEPLOY_DIR="zarf/deployments/devnet"
 

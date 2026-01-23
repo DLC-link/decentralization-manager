@@ -222,7 +222,10 @@ pub fn serialize_action(action: &ActionType) -> Value {
                 ),
                 field("limits", serialize_vault_limits(limits)),
                 field("vaultBackendSignatory", make_party(vault_backend_signatory)),
-                field("vaultFarConfig", serialize_optional_far_config(vault_far_config)),
+                field(
+                    "vaultFarConfig",
+                    serialize_optional_far_config(vault_far_config),
+                ),
             ]),
         ),
 
@@ -573,10 +576,12 @@ pub fn deserialize_action(value: &Value) -> Result<ActionType> {
                     member: extract_party(get_field(record, "member")?)?,
                     new_threshold: extract_int64(get_field(record, "newThreshold")?)?,
                 }),
-                "Governance_RemoveMemberAndSetThreshold" => Ok(ActionType::GovernanceRemoveMember {
-                    member: extract_party(get_field(record, "member")?)?,
-                    new_threshold: extract_int64(get_field(record, "newThreshold")?)?,
-                }),
+                "Governance_RemoveMemberAndSetThreshold" => {
+                    Ok(ActionType::GovernanceRemoveMember {
+                        member: extract_party(get_field(record, "member")?)?,
+                        new_threshold: extract_int64(get_field(record, "newThreshold")?)?,
+                    })
+                }
                 "Governance_SetThreshold" => Ok(ActionType::GovernanceSetThreshold {
                     new_threshold: extract_int64(get_field(record, "newThreshold")?)?,
                 }),
