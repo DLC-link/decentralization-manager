@@ -134,3 +134,7 @@ pub const EXECUTION_DIR: &str = "execution";
 
 /// Signatures subdirectory name
 pub const SIGNATURES_DIR: &str = "signatures";
+
+// Daml package identifiers
+/// Vault governance package ID
+pub const VAULT_GOVERNANCE_PACKAGE_ID: &str = "#bitsafe-vault-governance-v0-rc2";

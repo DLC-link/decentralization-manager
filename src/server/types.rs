@@ -335,66 +335,25 @@ pub struct AuthTestResponse {
 }
 
 // ============================================================================
-// Governance Types
+// Governance Types (Structured Actions)
 // ============================================================================
 
-/// A single governance confirmation contract
-#[derive(Clone, Debug, Serialize)]
-pub struct GovernanceConfirmation {
-    pub contract_id: String,
-    pub action: String,
-    pub confirming_party: String,
-}
-
-/// A governance action with its confirmations
-#[derive(Clone, Debug, Serialize)]
-pub struct GovernanceAction {
-    pub action_id: String,
-    pub confirmations: Vec<GovernanceConfirmation>,
-    pub confirmation_count: usize,
-    pub can_execute: bool,
-}
-
-/// Response for governance confirmations endpoint
-#[derive(Serialize)]
-pub struct GovernanceResponse {
-    pub actions: Vec<GovernanceAction>,
-    pub threshold: usize,
-}
-
-/// Request to submit a confirmation for an action
-#[derive(Clone, Debug, Deserialize)]
-pub struct ConfirmActionRequest {
-    pub party_id: CantonId,
-    pub action_id: String,
-    pub rules_contract_id: String,
-}
-
-/// Request to execute a confirmed action
-#[derive(Clone, Debug, Deserialize)]
-pub struct ExecuteActionRequest {
-    pub party_id: CantonId,
-    pub action_id: String,
-    pub rules_contract_id: String,
-}
-
-// ============================================================================
-// V2 Structured Action Types for Vault Governance
-// ============================================================================
-
-/// Instrument identifier (issuer + symbol)
+/// Instrument identifier (admin + id)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InstrumentId {
-    pub issuer: String,
-    pub symbol: String,
+    pub admin: String,
+    pub id: String,
 }
 
-/// Vault limits configuration
+/// Vault limits configuration (all fields are optional in DAML)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VaultLimits {
-    pub max_total_deposit: String,
-    pub min_deposit_amount: String,
-    pub min_withdrawal_amount: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_total_deposit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_deposit_amount: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_withdrawal_amount: Option<String>,
 }
 
 /// Featured App Right beneficiary
@@ -479,7 +438,7 @@ pub enum ActionType {
         initial_supported_vaults: Vec<String>,
     },
 
-    // Utility Onboarding (3)
+    // Utility Onboarding (5)
     UtilityCreateProviderRequest {
         operator: String,
     },
@@ -491,6 +450,31 @@ pub enum ActionType {
         provider_service_cid: String,
         user_service_cid: String,
     },
+    UtilityAcceptHolderServiceRequest {
+        operator: String,
+        provider_service_cid: String,
+        holder_service_request_cid: String,
+        holder: String,
+    },
+    UtilityCreateTransferRule {
+        operator: String,
+        registrar_service_cid: String,
+    },
+
+    // Credential Actions (2)
+    CredentialOfferFree {
+        operator: String,
+        user_service_cid: String,
+        holder: String,
+        id: String,
+        description: String,
+        claims: Vec<Claim>,
+    },
+    CredentialAcceptFree {
+        operator: String,
+        user_service_cid: String,
+        credential_offer_cid: String,
+    },
 
     // DevNet (1)
     DevNetFeatureApp {
@@ -498,7 +482,15 @@ pub enum ActionType {
     },
 }
 
-/// V2 Request to submit a confirmation for an action with structured type
+/// Credential claim (subject, property, value)
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Claim {
+    pub subject: String,
+    pub property: String,
+    pub value: String,
+}
+
+/// Request to submit a confirmation for an action with structured type
 #[derive(Clone, Debug, Deserialize)]
 pub struct ConfirmActionRequestV2 {
     pub party_id: CantonId,
@@ -506,7 +498,7 @@ pub struct ConfirmActionRequestV2 {
     pub action: ActionType,
 }
 
-/// V2 Request to execute a confirmed action with structured type
+/// Request to execute a confirmed action with structured type
 #[derive(Clone, Debug, Deserialize)]
 pub struct ExecuteActionRequestV2 {
     pub party_id: CantonId,
@@ -515,7 +507,7 @@ pub struct ExecuteActionRequestV2 {
     pub confirmation_cids: Vec<String>,
 }
 
-/// V2 A single governance confirmation with parsed action
+/// A single governance confirmation with parsed action
 #[derive(Clone, Debug, Serialize)]
 pub struct GovernanceConfirmationV2 {
     pub contract_id: String,
@@ -523,7 +515,7 @@ pub struct GovernanceConfirmationV2 {
     pub confirming_party: String,
 }
 
-/// V2 A governance action with its confirmations, grouped by action hash
+/// A governance action with its confirmations, grouped by action hash
 #[derive(Clone, Debug, Serialize)]
 pub struct GovernanceActionV2 {
     /// Deterministic hash of the serialized action for grouping
@@ -538,7 +530,7 @@ pub struct GovernanceActionV2 {
     pub can_execute: bool,
 }
 
-/// V2 Response for governance confirmations endpoint
+/// Response for governance confirmations endpoint
 #[derive(Serialize)]
 pub struct GovernanceResponseV2 {
     pub actions: Vec<GovernanceActionV2>,

@@ -185,15 +185,16 @@ export interface AuthTestResponse {
   results: AuthTestResult[];
 }
 
-// Governance types
+// Governance types (V2 with structured actions)
 export interface GovernanceConfirmation {
   contract_id: string;
-  action: string;
+  action: ActionType;
   confirming_party: string;
 }
 
 export interface GovernanceAction {
-  action_id: string;
+  action_hash: string;
+  action: ActionType;
   confirmations: GovernanceConfirmation[];
   confirmation_count: number;
   can_execute: boolean;
@@ -204,31 +205,19 @@ export interface GovernanceResponse {
   threshold: number;
 }
 
-export interface ConfirmActionRequest {
-  party_id: string;
-  action_id: string;
-  rules_contract_id: string;
-}
-
-export interface ExecuteActionRequest {
-  party_id: string;
-  action_id: string;
-  rules_contract_id: string;
-}
-
 // ============================================================================
 // V2 Structured Action Types for Vault Governance
 // ============================================================================
 
 export interface InstrumentId {
-  issuer: string;
-  symbol: string;
+  admin: string;
+  id: string;
 }
 
 export interface VaultLimits {
-  max_total_deposit: string;
-  min_deposit_amount: string;
-  min_withdrawal_amount: string;
+  max_total_deposit?: string;
+  min_deposit_amount?: string;
+  min_withdrawal_amount?: string;
 }
 
 export interface AppRewardBeneficiary {
@@ -239,6 +228,13 @@ export interface AppRewardBeneficiary {
 export interface FarConfig {
   featured_app_right_cid: string;
   beneficiaries: AppRewardBeneficiary[];
+}
+
+// Credential claim
+export interface Claim {
+  subject: string;
+  property: string;
+  value: string;
 }
 
 // Union type for all governance actions
@@ -266,18 +262,18 @@ export type ActionType =
   // Vault Deployment
   | {
       type: "vault_deployment";
+      vault_rules_cid: string;
       vault_name: string;
       share_symbol: string;
       asset_instrument_id: InstrumentId;
       limits: VaultLimits;
-      vault_manager: string;
       vault_backend_signatory: string;
-      vault_far_config: FarConfig;
+      vault_far_config?: FarConfig;
     }
   | {
       type: "yield_epoch_deployment";
+      vault_rules_cid: string;
       vault_cid: string;
-      vault_manager: string;
       asset_instrument_id: InstrumentId;
       vault_backend_signatory: string;
     }
@@ -310,10 +306,10 @@ export type ActionType =
   // Processor
   | {
       type: "processor_deployment_request";
-      authorized_vault_manager: string;
+      vault_processor_rules_cid: string;
       vault_backend_signatory: string;
       allocation_factory_cid: string;
-      processor_far_config: FarConfig;
+      processor_far_config?: FarConfig;
       initial_supported_vaults: string[];
     }
 
@@ -331,6 +327,35 @@ export type ActionType =
       operator: string;
       provider_service_cid: string;
       user_service_cid: string;
+    }
+  | {
+      type: "utility_accept_holder_service_request";
+      operator: string;
+      provider_service_cid: string;
+      holder_service_request_cid: string;
+      holder: string;
+    }
+  | {
+      type: "utility_create_transfer_rule";
+      operator: string;
+      registrar_service_cid: string;
+    }
+
+  // Credential Actions
+  | {
+      type: "credential_offer_free";
+      operator: string;
+      user_service_cid: string;
+      holder: string;
+      id: string;
+      description: string;
+      claims: Claim[];
+    }
+  | {
+      type: "credential_accept_free";
+      operator: string;
+      user_service_cid: string;
+      credential_offer_cid: string;
     }
 
   // DevNet

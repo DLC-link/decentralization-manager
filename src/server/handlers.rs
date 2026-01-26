@@ -4,8 +4,8 @@ use actix_web::{HttpResponse, Responder, get, post, web};
 use base64::Engine;
 use canton_proto_rs::com::{
     daml::ledger::api::v2::{
-        Command, Commands, ExerciseCommand, Identifier, Record, RecordField, SubmitAndWaitRequest,
-        Value,
+        Command, Commands, DisclosedContract, ExerciseCommand, Identifier, Record, RecordField,
+        SubmitAndWaitRequest, Value,
         admin::{
             ListUserRightsRequest,
             right::{CanActAs, CanReadAs, Kind},
@@ -31,14 +31,13 @@ use serde::Deserialize;
 use super::{
     AppState, action_serializer,
     queries::{
-        get_contracts, get_governance_confirmations, get_governance_confirmations_v2,
-        get_governance_state, get_party_metadata,
+        get_contracts, get_governance_confirmations,
+        get_governance_state as query_governance_state, get_party_metadata,
     },
     types::{
-        AuthStatus, AuthStatusResponse, AuthTestResponse, AuthTestResult, ConfirmActionRequest,
-        ConfirmActionRequestV2, ConnectionStatus, ContractsRequest, DecentralizedPartiesResponse,
-        DecentralizedParty, ExecuteActionRequest, ExecuteActionRequestV2,
-        ExpireConfirmationRequest, GovernanceResponse, GovernanceResponseV2,
+        AuthStatus, AuthStatusResponse, AuthTestResponse, AuthTestResult, ConfirmActionRequestV2,
+        ConnectionStatus, ContractsRequest, DecentralizedPartiesResponse, DecentralizedParty,
+        ExecuteActionRequestV2, ExpireConfirmationRequest, GovernanceResponseV2,
         GovernanceStateResponse, HttpWorkflowState, InvitationActionRequest, InvitationType,
         KeyStatusResponse, KickRequest, KickResponse, KickStatus, ListenerPauseGuard,
         OnboardingRequest, OnboardingResponse, OnboardingStatus, ParticipantInfo,
@@ -49,9 +48,11 @@ use super::{
 use crate::{
     auth::WorkflowAuth,
     config::{NetworkConfig, NodeConfig, Peer},
+    consts::VAULT_GOVERNANCE_PACKAGE_ID,
     error::Result,
     noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
     participant_id::CantonId,
+    server::ActionType,
     utils, workflow,
 };
 
@@ -1385,7 +1386,7 @@ pub struct GovernanceQuery {
     pub party_id: String,
 }
 
-/// Get governance confirmations for a decentralized party
+/// Get governance confirmations with parsed actions
 #[get("/governance/confirmations")]
 pub async fn get_governance(
     data: web::Data<AppState>,
@@ -1414,7 +1415,7 @@ pub async fn get_governance(
     match get_governance_confirmations(&data.config, &query.party_id, threshold, token, test_mode)
         .await
     {
-        Ok(actions) => HttpResponse::Ok().json(GovernanceResponse { actions, threshold }),
+        Ok(actions) => HttpResponse::Ok().json(GovernanceResponseV2 { actions, threshold }),
         Err(e) => {
             tracing::error!("Failed to fetch governance confirmations: {e}");
             HttpResponse::InternalServerError().json(serde_json::json!({
@@ -1424,54 +1425,9 @@ pub async fn get_governance(
     }
 }
 
-/// Get governance confirmations with parsed actions (V2)
-#[get("/governance/v2/confirmations")]
-pub async fn get_governance_v2(
-    data: web::Data<AppState>,
-    query: web::Query<GovernanceQuery>,
-) -> impl Responder {
-    let party_id = match CantonId::parse(&query.party_id) {
-        Ok(id) => id,
-        Err(e) => {
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": format!("Invalid party_id: {e}")
-            }));
-        }
-    };
-
-    // Get token for this party
-    let token = get_party_token(&data, &party_id).await;
-
-    // Check if we're in test mode (mock auth)
-    let test_mode = matches!(data.auth, Some(WorkflowAuth::Mock(_)));
-
-    // Get threshold for this party (default to 2 if not found)
-    let threshold = get_party_threshold(&data, &query.party_id)
-        .await
-        .unwrap_or(2);
-
-    match get_governance_confirmations_v2(
-        &data.config,
-        &query.party_id,
-        threshold,
-        token,
-        test_mode,
-    )
-    .await
-    {
-        Ok(actions) => HttpResponse::Ok().json(GovernanceResponseV2 { actions, threshold }),
-        Err(e) => {
-            tracing::error!("Failed to fetch V2 governance confirmations: {e}");
-            HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Failed to fetch governance confirmations: {e}")
-            }))
-        }
-    }
-}
-
 /// Get governance state (VaultGovernanceRules contract state)
-#[get("/governance/v2/state")]
-pub async fn get_governance_state_v2(
+#[get("/governance/state")]
+pub async fn get_governance_state(
     data: web::Data<AppState>,
     query: web::Query<GovernanceQuery>,
 ) -> impl Responder {
@@ -1490,7 +1446,7 @@ pub async fn get_governance_state_v2(
     // Check if we're in test mode (mock auth)
     let test_mode = matches!(data.auth, Some(WorkflowAuth::Mock(_)));
 
-    match get_governance_state(&data.config, &query.party_id, token, test_mode).await {
+    match query_governance_state(&data.config, &query.party_id, token, test_mode).await {
         Ok(state) => HttpResponse::Ok().json(GovernanceStateResponse { state }),
         Err(e) => {
             tracing::error!("Failed to fetch governance state: {e}");
@@ -1501,92 +1457,11 @@ pub async fn get_governance_state_v2(
     }
 }
 
-/// Submit a confirmation for a governance action
-#[post("/governance/confirm")]
-pub async fn confirm_action(
-    data: web::Data<AppState>,
-    body: web::Json<ConfirmActionRequest>,
-) -> impl Responder {
-    let party_id = &body.party_id;
-
-    // Get token and user_id for this party
-    let (token, user_id) = match get_party_credentials(&data, party_id).await {
-        Some(creds) => creds,
-        None => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "No credentials configured for party"
-            }));
-        }
-    };
-
-    match execute_confirm_action(&data.config, &body, &token, &user_id).await {
-        Ok(()) => HttpResponse::Ok().json(serde_json::json!({
-            "message": "Confirmation submitted successfully"
-        })),
-        Err(e) => {
-            tracing::error!("Failed to submit confirmation: {e}");
-            HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Failed to submit confirmation: {e}")
-            }))
-        }
-    }
-}
-
-/// Execute a confirmed governance action
-#[post("/governance/execute")]
-pub async fn execute_action(
-    data: web::Data<AppState>,
-    body: web::Json<ExecuteActionRequest>,
-) -> impl Responder {
-    let party_id = &body.party_id;
-
-    // Get token and user_id for this party
-    let (token, user_id) = match get_party_credentials(&data, party_id).await {
-        Some(creds) => creds,
-        None => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "No credentials configured for party"
-            }));
-        }
-    };
-
-    match execute_confirmed_action(&data.config, &body, &token, &user_id).await {
-        Ok(()) => HttpResponse::Ok().json(serde_json::json!({
-            "message": "Action executed successfully"
-        })),
-        Err(e) => {
-            tracing::error!("Failed to execute action: {e}");
-            HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Failed to execute action: {e}")
-            }))
-        }
-    }
-}
-
 /// Get token for a party from auth registry
 async fn get_party_token(data: &web::Data<AppState>, party_id: &CantonId) -> Option<String> {
     match &data.auth {
         Some(WorkflowAuth::Keycloak(registry)) => registry.get(party_id)?.get_token().await.ok(),
         Some(WorkflowAuth::Mock(mock_registry)) => Some(mock_registry.get(party_id).get_token()),
-        None => None,
-    }
-}
-
-/// Get token and user_id for a party
-async fn get_party_credentials(
-    data: &web::Data<AppState>,
-    party_id: &CantonId,
-) -> Option<(String, String)> {
-    match &data.auth {
-        Some(WorkflowAuth::Keycloak(registry)) => {
-            let tm = registry.get(party_id)?;
-            let token = tm.get_token().await.ok()?;
-            Some((token, tm.user_id().to_string()))
-        }
-        Some(WorkflowAuth::Mock(mock_registry)) => {
-            let mm = mock_registry.get(party_id);
-            Some((mm.get_token(), mm.user_id().to_string()))
-        }
         None => None,
     }
 }
@@ -1636,160 +1511,20 @@ async fn get_party_threshold(data: &web::Data<AppState>, party_id: &str) -> Opti
         .map(|item| item.threshold as usize)
 }
 
-/// Execute ConfirmAction choice on VaultGovernanceRules contract
-async fn execute_confirm_action(
-    config: &NodeConfig,
-    request: &ConfirmActionRequest,
-    token: &str,
-    user_id: &str,
-) -> Result {
-    let channel = tonic::transport::Channel::from_shared(config.ledger_api_url())?
-        .connect()
-        .await?;
-
-    let mut client =
-        CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
-
-    let template_id = Identifier {
-        package_id: "#bitsafe-vault-governance-v0".to_string(),
-        module_name: "BitsafeVault.VaultGovernance".to_string(),
-        entity_name: "VaultGovernanceRules".to_string(),
-    };
-
-    // Build choice argument: ConfirmAction { action : Text }
-    let choice_argument = Value {
-        sum: Some(value::Sum::Record(Record {
-            record_id: None,
-            fields: vec![RecordField {
-                label: "action".to_string(),
-                value: Some(Value {
-                    sum: Some(value::Sum::Text(request.action_id.clone())),
-                }),
-            }],
-        })),
-    };
-
-    let cmd = Command {
-        command: Some(command::Command::Exercise(ExerciseCommand {
-            template_id: Some(template_id),
-            contract_id: request.rules_contract_id.clone(),
-            choice: "ConfirmAction".to_string(),
-            choice_argument: Some(choice_argument),
-        })),
-    };
-
-    let commands = Commands {
-        workflow_id: String::new(),
-        user_id: user_id.to_string(),
-        command_id: uuid::Uuid::new_v4().to_string(),
-        commands: vec![cmd],
-        deduplication_period: None,
-        min_ledger_time_abs: None,
-        min_ledger_time_rel: None,
-        act_as: vec![user_id.to_string()],
-        read_as: vec![request.party_id.to_string()],
-        submission_id: String::new(),
-        disclosed_contracts: vec![],
-        synchronizer_id: String::new(),
-        package_id_selection_preference: vec![],
-        prefetch_contract_keys: vec![],
-    };
-
-    let mut req = tonic::Request::new(SubmitAndWaitRequest {
-        commands: Some(commands),
-    });
-    req.metadata_mut()
-        .insert("authorization", format!("Bearer {token}").parse().unwrap());
-
-    client.submit_and_wait(req).await?;
-
-    Ok(())
-}
-
-/// Execute ExecuteConfirmedAction choice on VaultGovernanceRules contract
-async fn execute_confirmed_action(
-    config: &NodeConfig,
-    request: &ExecuteActionRequest,
-    token: &str,
-    user_id: &str,
-) -> Result {
-    let channel = tonic::transport::Channel::from_shared(config.ledger_api_url())?
-        .connect()
-        .await?;
-
-    let mut client =
-        CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
-
-    let template_id = Identifier {
-        package_id: "#bitsafe-vault-governance-v0".to_string(),
-        module_name: "BitsafeVault.VaultGovernance".to_string(),
-        entity_name: "VaultGovernanceRules".to_string(),
-    };
-
-    // Build choice argument: ExecuteConfirmedAction { action : Text }
-    let choice_argument = Value {
-        sum: Some(value::Sum::Record(Record {
-            record_id: None,
-            fields: vec![RecordField {
-                label: "action".to_string(),
-                value: Some(Value {
-                    sum: Some(value::Sum::Text(request.action_id.clone())),
-                }),
-            }],
-        })),
-    };
-
-    let cmd = Command {
-        command: Some(command::Command::Exercise(ExerciseCommand {
-            template_id: Some(template_id),
-            contract_id: request.rules_contract_id.clone(),
-            choice: "ExecuteConfirmedAction".to_string(),
-            choice_argument: Some(choice_argument),
-        })),
-    };
-
-    let commands = Commands {
-        workflow_id: String::new(),
-        user_id: user_id.to_string(),
-        command_id: uuid::Uuid::new_v4().to_string(),
-        commands: vec![cmd],
-        deduplication_period: None,
-        min_ledger_time_abs: None,
-        min_ledger_time_rel: None,
-        act_as: vec![user_id.to_string()],
-        read_as: vec![request.party_id.to_string()],
-        submission_id: String::new(),
-        disclosed_contracts: vec![],
-        synchronizer_id: String::new(),
-        package_id_selection_preference: vec![],
-        prefetch_contract_keys: vec![],
-    };
-
-    let mut req = tonic::Request::new(SubmitAndWaitRequest {
-        commands: Some(commands),
-    });
-    req.metadata_mut()
-        .insert("authorization", format!("Bearer {token}").parse().unwrap());
-
-    client.submit_and_wait(req).await?;
-
-    Ok(())
-}
-
 // ============================================================================
-// V2 Governance Endpoints (Structured Actions)
+// Governance Endpoints (Structured Actions)
 // ============================================================================
 
 /// Submit a confirmation for a governance action using structured ActionType
-#[post("/governance/v2/confirm")]
-pub async fn confirm_action_v2(
+#[post("/governance/confirm")]
+pub async fn confirm_action(
     data: web::Data<AppState>,
     body: web::Json<ConfirmActionRequestV2>,
 ) -> impl Responder {
     let party_id = &body.party_id;
 
     // Get token and credentials for this party
-    let (token, member_party_id) = match get_party_credentials_v2(&data, party_id).await {
+    let (token, member_party_id) = match get_party_credentials(&data, party_id).await {
         Some(creds) => creds,
         None => {
             return HttpResponse::Unauthorized().json(serde_json::json!({
@@ -1798,7 +1533,7 @@ pub async fn confirm_action_v2(
         }
     };
 
-    match execute_confirm_action_v2(&data.config, &body, &token, &member_party_id).await {
+    match execute_confirm_action(&data.config, &body, &token, &member_party_id).await {
         Ok(()) => HttpResponse::Ok().json(serde_json::json!({
             "message": "Confirmation submitted successfully"
         })),
@@ -1812,15 +1547,15 @@ pub async fn confirm_action_v2(
 }
 
 /// Execute a confirmed governance action using structured ActionType
-#[post("/governance/v2/execute")]
-pub async fn execute_action_v2(
+#[post("/governance/execute")]
+pub async fn execute_action(
     data: web::Data<AppState>,
     body: web::Json<ExecuteActionRequestV2>,
 ) -> impl Responder {
     let party_id = &body.party_id;
 
     // Get token and credentials for this party
-    let (token, member_party_id) = match get_party_credentials_v2(&data, party_id).await {
+    let (token, member_party_id) = match get_party_credentials(&data, party_id).await {
         Some(creds) => creds,
         None => {
             return HttpResponse::Unauthorized().json(serde_json::json!({
@@ -1829,7 +1564,7 @@ pub async fn execute_action_v2(
         }
     };
 
-    match execute_confirmed_action_v2(&data.config, &body, &token, &member_party_id).await {
+    match execute_confirmed_action(&data.config, &body, &token, &member_party_id).await {
         Ok(()) => HttpResponse::Ok().json(serde_json::json!({
             "message": "Action executed successfully"
         })),
@@ -1843,7 +1578,7 @@ pub async fn execute_action_v2(
 }
 
 /// Expire a stale governance confirmation
-#[post("/governance/v2/expire")]
+#[post("/governance/expire")]
 pub async fn expire_confirmation(
     data: web::Data<AppState>,
     body: web::Json<ExpireConfirmationRequest>,
@@ -1851,7 +1586,7 @@ pub async fn expire_confirmation(
     let party_id = &body.party_id;
 
     // Get token and credentials for this party
-    let (token, member_party_id) = match get_party_credentials_v2(&data, party_id).await {
+    let (token, member_party_id) = match get_party_credentials(&data, party_id).await {
         Some(creds) => creds,
         None => {
             return HttpResponse::Unauthorized().json(serde_json::json!({
@@ -1874,7 +1609,7 @@ pub async fn expire_confirmation(
 }
 
 /// Get token and member_party_id for a party (V2 version)
-async fn get_party_credentials_v2(
+async fn get_party_credentials(
     data: &web::Data<AppState>,
     party_id: &CantonId,
 ) -> Option<(String, String)> {
@@ -1893,7 +1628,7 @@ async fn get_party_credentials_v2(
 }
 
 /// Execute ConfirmAction choice on VaultGovernanceRules contract with structured action
-async fn execute_confirm_action_v2(
+async fn execute_confirm_action(
     config: &NodeConfig,
     request: &ConfirmActionRequestV2,
     token: &str,
@@ -1907,7 +1642,7 @@ async fn execute_confirm_action_v2(
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
 
     let template_id = Identifier {
-        package_id: "#bitsafe-vault-governance-v0".to_string(),
+        package_id: VAULT_GOVERNANCE_PACKAGE_ID.to_string(),
         module_name: "BitsafeVault.VaultGovernance".to_string(),
         entity_name: "VaultGovernanceRules".to_string(),
     };
@@ -1953,8 +1688,19 @@ async fn execute_confirm_action_v2(
     Ok(())
 }
 
+/*
+macro_rules! disclose {
+    ($contract_id:expr, $disclosed_contracts:expr) => DisclosedContract {
+        template_id: None,
+        contract_id: vault_rules_cid.clone(),
+        created_event_blob: base64::engine::general_purpose::STANDARD
+            .decode("CgMyLjES5gQKRQAZlM04PpOCb1MKGx+pYtIWrHhZ5I2jc8fHky5FNSAikcoSEiA7G+6/yN41XjcZEgveRn9rzMg+z2letvss/k9lgddSPhIUYml0c2FmZS12YXVsdC12MC1yYzIaaApAODkyZjdiNjRkMzgxNDI5N2ZhNTMwYjBhMDgzZDMwZjRiMDY0OWFlOTEzMzY0NTk3NDBlN2M2M2RjMGYyNmYyZBIMQml0c2FmZVZhdWx0EgpWYXVsdFJ1bGVzGgpWYXVsdFJ1bGVzIrsBargBClcKVTpTYml0c2FmZS1hZG1pbjo6MTIyMDk5OTUzOTM0ZDlmZTE2M2ZlZDA3ZGQzNzFmYTEzOTgyYjJiMzA3NDlkNmRmNTZlY2RiYTM4NWY4Yzc4YTg2N2EKXQpbWlkKVzpVdmF1bHQtbWFuYWdlci0wOjoxMjIwOTk5NTM5MzRkOWZlMTYzZmVkMDdkZDM3MWZhMTM5ODJiMmIzMDc0OWQ2ZGY1NmVjZGJhMzg1ZjhjNzhhODY3YSpTYml0c2FmZS1hZG1pbjo6MTIyMDk5OTUzOTM0ZDlmZTE2M2ZlZDA3ZGQzNzFmYTEzOTgyYjJiMzA3NDlkNmRmNTZlY2RiYTM4NWY4Yzc4YTg2N2EyVXZhdWx0LW1hbmFnZXItMDo6MTIyMDk5OTUzOTM0ZDlmZTE2M2ZlZDA3ZGQzNzFmYTEzOTgyYjJiMzA3NDlkNmRmNTZlY2RiYTM4NWY4Yzc4YTg2N2E5w/1sZ/xIBgBCKgomCiQIARIgTmYuGZgxVotyEsMCqSiw44/3agOtvJKn9BHynYzXZWoQHg==").expect("Invalid base64 blob"),
+        synchronizer_id: String::new(),
+    }
+}*/
+
 /// Execute ExecuteConfirmedAction choice on VaultGovernanceRules contract with structured action
-async fn execute_confirmed_action_v2(
+async fn execute_confirmed_action(
     config: &NodeConfig,
     request: &ExecuteActionRequestV2,
     token: &str,
@@ -1968,7 +1714,7 @@ async fn execute_confirmed_action_v2(
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
 
     let template_id = Identifier {
-        package_id: "#bitsafe-vault-governance-v0".to_string(),
+        package_id: VAULT_GOVERNANCE_PACKAGE_ID.to_string(),
         module_name: "BitsafeVault.VaultGovernance".to_string(),
         entity_name: "VaultGovernanceRules".to_string(),
     };
@@ -2001,7 +1747,45 @@ async fn execute_confirmed_action_v2(
         act_as: vec![member_party_id.to_string()],
         read_as: vec![request.party_id.to_string()],
         submission_id: String::new(),
-        disclosed_contracts: vec![],
+        disclosed_contracts: match &request.action {
+            ActionType::DevNetFeatureApp { amulet_rules_cid } => vec![DisclosedContract {
+                template_id: None,
+                contract_id: amulet_rules_cid.clone(),
+                created_event_blob: base64::engine::general_purpose::STANDARD
+                    .decode("CgMyLjESsQ4KRQCeWuQZiFi479pjMwp/p+/f0LM0lXW6CP/BNOhgF02MX8oSEiD6tnb4BtBzehw1XkegzSaSyNKmuNlguE/Jog0G0eM9VRINc3BsaWNlLWFtdWxldBpkCkAzY2ExMzQzYWIyNmI0NTNkMzhjOGFkYjcwZGNhNWYxZWFkODQ0MGM0MmI1OWI2OGYwNzA3ODY5NTVjYmY5ZWMxEgZTcGxpY2USC0FtdWxldFJ1bGVzGgtBbXVsZXRSdWxlcyLyC2rvCwpNCks6SURTTzo6MTIyMGJlNThjMjllNjVkZTQwYmYyNzNiZTFkYzJiMjY2ZDQzYTlhMDAyZWE1YjE4OTU1YWVlZjdhYWM4ODFiYjQ3MWEKlwsKlAtqkQsKiAsKhQtqggsKkgEKjwFqjAEKFgoUahIKEAoOMgwwLjAwMDAwMDAwMDAKFgoUahIKEAoOMgwwLjAwMDAxOTAyNTkKHAoaahgKEAoOMgwwLjAwMDAwMDAwMDAKBAoCWgAKFgoUahIKEAoOMgwwLjAwMDAwMDAwMDAKEAoOMgwxLjAwMDAwMDAwMDAKBQoDGMgBCgUKAxjIAQoECgIYZArhBgreBmrbBgqYAQqVAWqSAQoaChgyFjQwMDAwMDAwMDAwLjAwMDAwMDAwMDAKEAoOMgwwLjA1MDAwMDAwMDAKEAoOMgwwLjE1MDAwMDAwMDAKEAoOMgwwLjIwMDAwMDAwMDAKFAoSMhAyMDAwMC4wMDAwMDAwMDAwChAKDjIMMC42MDAwMDAwMDAwChYKFFISChAyDjU3MC4wMDAwMDAwMDAwCr0FCroFWrcFCq4BaqsBChAKDmoMCgoKCBiAwM/g6JUHCpYBCpMBapABChoKGDIWMjAwMDAwMDAwMDAuMDAwMDAwMDAwMAoQCg4yDDAuMTIwMDAwMDAwMAoQCg4yDDAuNDAwMDAwMDAwMAoQCg4yDDAuMjAwMDAwMDAwMAoUChIyEDIwMDAwLjAwMDAwMDAwMDAKEAoOMgwwLjYwMDAwMDAwMDAKFAoSUhAKDjIMMy4zMzAwMDAwMDAwCqoBaqcBChAKDmoMCgoKCBiAwO6husEVCpIBCo8BaowBChoKGDIWMTAwMDAwMDAwMDAuMDAwMDAwMDAwMAoQCg4yDDAuMTgwMDAwMDAwMAoQCg4yDDAuNjIwMDAwMDAwMAoQCg4yDDAuMjAwMDAwMDAwMAoQCg4yDDEuNTAwMDAwMDAwMAoQCg4yDDAuNjAwMDAwMDAwMAoUChJSEAoOMgwzLjMzMDAwMDAwMDAKqQFqpgEKEAoOagwKCgoIGICAm8aX2kcKkQEKjgFqiwEKGQoXMhU1MDAwMDAwMDAwLjAwMDAwMDAwMDAKEAoOMgwwLjIxMDAwMDAwMDAKEAoOMgwwLjY5MDAwMDAwMDAKEAoOMgwwLjIwMDAwMDAwMDAKEAoOMgwxLjUwMDAwMDAwMDAKEAoOMgwwLjYwMDAwMDAwMDAKFAoSUhAKDjIMMy4zMzAwMDAwMDAwCqoBaqcBChEKD2oNCgsKCRiAgLaMr7SPAQqRAQqOAWqLAQoZChcyFTI1MDAwMDAwMDAuMDAwMDAwMDAwMAoQCg4yDDAuMjAwMDAwMDAwMAoQCg4yDDAuNzUwMDAwMDAwMAoQCg4yDDAuMjAwMDAwMDAwMAoQCg4yDDEuNTAwMDAwMDAwMAoQCg4yDDAuNjAwMDAwMDAwMAoUChJSEAoOMgwzLjMzMDAwMDAwMDAKjQIKigJqhwIKZwplamMKYQpfYl0KWwpVQlNnbG9iYWwtZG9tYWluOjoxMjIwYmU1OGMyOWU2NWRlNDBiZjI3M2JlMWRjMmIyNjZkNDNhOWEwMDJlYTViMTg5NTVhZWVmN2FhYzg4MWJiNDcxYRICCgAKVwpVQlNnbG9iYWwtZG9tYWluOjoxMjIwYmU1OGMyOWU2NWRlNDBiZjI3M2JlMWRjMmIyNjZkNDNhOWEwMDJlYTViMTg5NTVhZWVmN2FhYzg4MWJiNDcxYQpDCkFqPwocChpqGAoGCgQYgOowCg4KDGoKCggKBhiAsLT4CAoRCg8yDTYwLjAwMDAwMDAwMDAKBAoCGAgKBgoEGIC1GAoOCgxqCgoICgYYgJiavAQKSwpJakcKCgoIQgYwLjEuMTQKCgoIQgYwLjEuMTUKCgoIQgYwLjEuMjAKCQoHQgUwLjEuNQoKCghCBjAuMS4xNAoKCghCBjAuMS4xNAoECgJSAAoUChJSEAoOMgwxLjAwMDAwMDAwMDAKBAoCWgAKBAoCEAEqSURTTzo6MTIyMGJlNThjMjllNjVkZTQwYmYyNzNiZTFkYzJiMjY2ZDQzYTlhMDAyZWE1YjE4OTU1YWVlZjdhYWM4ODFiYjQ3MWE5tgHghutIBgBCKgomCiQIARIg2Md4zgUbR/RJCvIxvewOt7EiYUX/d9m6BxFNwoaw4CYQHg==")
+                    .expect("Invalid base64 blob"),
+                synchronizer_id: String::new(),
+            }],
+            ActionType::VaultDeployment { vault_rules_cid, .. } => vec![DisclosedContract {
+                template_id: None,
+                contract_id: vault_rules_cid.clone(),
+                created_event_blob: base64::engine::general_purpose::STANDARD
+                    .decode("CgMyLjES5gQKRQAZlM04PpOCb1MKGx+pYtIWrHhZ5I2jc8fHky5FNSAikcoSEiA7G+6/yN41XjcZEgveRn9rzMg+z2letvss/k9lgddSPhIUYml0c2FmZS12YXVsdC12MC1yYzIaaApAODkyZjdiNjRkMzgxNDI5N2ZhNTMwYjBhMDgzZDMwZjRiMDY0OWFlOTEzMzY0NTk3NDBlN2M2M2RjMGYyNmYyZBIMQml0c2FmZVZhdWx0EgpWYXVsdFJ1bGVzGgpWYXVsdFJ1bGVzIrsBargBClcKVTpTYml0c2FmZS1hZG1pbjo6MTIyMDk5OTUzOTM0ZDlmZTE2M2ZlZDA3ZGQzNzFmYTEzOTgyYjJiMzA3NDlkNmRmNTZlY2RiYTM4NWY4Yzc4YTg2N2EKXQpbWlkKVzpVdmF1bHQtbWFuYWdlci0wOjoxMjIwOTk5NTM5MzRkOWZlMTYzZmVkMDdkZDM3MWZhMTM5ODJiMmIzMDc0OWQ2ZGY1NmVjZGJhMzg1ZjhjNzhhODY3YSpTYml0c2FmZS1hZG1pbjo6MTIyMDk5OTUzOTM0ZDlmZTE2M2ZlZDA3ZGQzNzFmYTEzOTgyYjJiMzA3NDlkNmRmNTZlY2RiYTM4NWY4Yzc4YTg2N2EyVXZhdWx0LW1hbmFnZXItMDo6MTIyMDk5OTUzOTM0ZDlmZTE2M2ZlZDA3ZGQzNzFmYTEzOTgyYjJiMzA3NDlkNmRmNTZlY2RiYTM4NWY4Yzc4YTg2N2E5w/1sZ/xIBgBCKgomCiQIARIgTmYuGZgxVotyEsMCqSiw44/3agOtvJKn9BHynYzXZWoQHg==").expect("Invalid base64 blob"),
+                synchronizer_id: String::new(),
+            }],
+            ActionType::ProcessorDeploymentRequest { vault_processor_rules_cid, allocation_factory_cid, .. } => vec![DisclosedContract {
+                template_id: None,
+                contract_id: vault_processor_rules_cid.clone(),
+                created_event_blob: base64::engine::general_purpose::STANDARD
+                    .decode("CgMyLjESgAUKRQADHdZlCEAiG5xShFOFTfCSepv/7WjbeNMgvLwKJrb9RcoSEiC8H2AVna89+k+JxAm3r6A92wsYLM7a15KpZOI81rjSihIUYml0c2FmZS12YXVsdC12MC1yYzIaegpAODkyZjdiNjRkMzgxNDI5N2ZhNTMwYjBhMDgzZDMwZjRiMDY0OWFlOTEzMzY0NTk3NDBlN2M2M2RjMGYyNmYyZBIMQml0c2FmZVZhdWx0EhNWYXVsdFByb2Nlc3NvclJ1bGVzGhNWYXVsdFByb2Nlc3NvclJ1bGVzIr8BarwBClcKVTpTYml0c2FmZS1hZG1pbjo6MTIyMDk5OTUzOTM0ZDlmZTE2M2ZlZDA3ZGQzNzFmYTEzOTgyYjJiMzA3NDlkNmRmNTZlY2RiYTM4NWY4Yzc4YTg2N2EKYQpfWl0KWzpZYmFja2VuZC1zaWduYXRvcnktMDo6MTIyMDk5OTUzOTM0ZDlmZTE2M2ZlZDA3ZGQzNzFmYTEzOTgyYjJiMzA3NDlkNmRmNTZlY2RiYTM4NWY4Yzc4YTg2N2EqU2JpdHNhZmUtYWRtaW46OjEyMjA5OTk1MzkzNGQ5ZmUxNjNmZWQwN2RkMzcxZmExMzk4MmIyYjMwNzQ5ZDZkZjU2ZWNkYmEzODVmOGM3OGE4NjdhMlliYWNrZW5kLXNpZ25hdG9yeS0wOjoxMjIwOTk5NTM5MzRkOWZlMTYzZmVkMDdkZDM3MWZhMTM5ODJiMmIzMDc0OWQ2ZGY1NmVjZGJhMzg1ZjhjNzhhODY3YTl7TANp/EgGAEIqCiYKJAgBEiBvGY3UmUCK4oP4XdA6mUK7vNQUtI/KXjSgwk0UK1icBBAe").expect("Invalid base64 blob"),
+                synchronizer_id: String::new()
+            },DisclosedContract {
+                template_id: None,
+                contract_id: allocation_factory_cid.clone(),
+                created_event_blob: base64::engine::general_purpose::STANDARD
+                    .decode("CgMyLjEShwYKRQDVil8GHwhrPEtAW1fKCPTO/LfzonomCJvmOI62LuYZqMoREiAJkdVl2qBMppGQG8BCOKhlXiwGgDkTDkwAAn6sJnXZ9BIXdXRpbGl0eS1yZWdpc3RyeS1hcHAtdjAajQEKQDgyNzk4ZGYwMTgzMDE4NTI3MDRmMjEwYjk3YWRhYWJmNzZkM2VjZDM3ZDg4OWUxYmY5NmI1ZjMxYTIwZWVhMzQSB1V0aWxpdHkSCFJlZ2lzdHJ5EgNBcHASAlYwEgdTZXJ2aWNlEhFBbGxvY2F0aW9uRmFjdG9yeRoRQWxsb2NhdGlvbkZhY3RvcnkioQJqngIKVgpUOlJjYnRjLW5ldHdvcms6OjEyMjAyYTgzYzZmNDA4MjIxN2MxNzVlMjliYzUzZGE1ZjI3MDNiYTI2NzU3NzhhYjk5MjE3YTVhODgxYTk0OTIwM2ZmClYKVDpSY2J0Yy1uZXR3b3JrOjoxMjIwMmE4M2M2ZjQwODIyMTdjMTc1ZTI5YmM1M2RhNWYyNzAzYmEyNjc1Nzc4YWI5OTIxN2E1YTg4MWE5NDkyMDNmZgpsCmo6aGF1dGgwXzAwN2M2NWY4NTdmMWMzZDU5OWNiNmRmNzM3NzU6OjEyMjBkMmQ3MzJkMDQyYzI4MWNlZTgwZjQ4M2FiODBmM2NiYWE0NzgyODYwZWQ1ZjRkYzIyOGFiMDNkZWRkMmVlOGY5KlJjYnRjLW5ldHdvcms6OjEyMjAyYTgzYzZmNDA4MjIxN2MxNzVlMjliYzUzZGE1ZjI3MDNiYTI2NzU3NzhhYjk5MjE3YTVhODgxYTk0OTIwM2ZmMmhhdXRoMF8wMDdjNjVmODU3ZjFjM2Q1OTljYjZkZjczNzc1OjoxMjIwZDJkNzMyZDA0MmMyODFjZWU4MGY0ODNhYjgwZjNjYmFhNDc4Mjg2MGVkNWY0ZGMyMjhhYjAzZGVkZDJlZThmOTlubOVh5DkGAEIqCiYKJAgBEiCdDhxHJbSFz7Snbvg8xLkPDPvaP3wl+HzTfq2LxHAGmRAe").expect("Invalid base64 blob"),
+                synchronizer_id: String::new()
+            },
+            // This is for the FAR config
+            DisclosedContract {
+                template_id: None,
+                contract_id: "009b9fcd0ec3e6340d7fd1d75c192f6d7056c237465d94995fd87b6b3bc9bd091bca12122029b8d78f42969f04b90508b8cb1574d7c7142d2027c39c65717ff37b5667ed6c".to_string(),
+                created_event_blob: base64::engine::general_purpose::STANDARD
+                    .decode("CgMyLjESywQKRQCbn80Ow+Y0DX/R11wZL21wVsI3Rl2UmV/Ye2s7yb0JG8oSEiApuNePQpafBLkFCLjLFXTXxxQtICfDnGVxf/N7VmftbBINc3BsaWNlLWFtdWxldBpkCkAzY2ExMzQzYWIyNmI0NTNkMzhjOGFkYjcwZGNhNWYxZWFkODQ0MGM0MmI1OWI2OGYwNzA3ODY5NTVjYmY5ZWMxEgZTcGxpY2USBkFtdWxldBoQRmVhdHVyZWRBcHBSaWdodCKxAWquAQpNCks6SURTTzo6MTIyMGJlNThjMjllNjVkZTQwYmYyNzNiZTFkYzJiMjY2ZDQzYTlhMDAyZWE1YjE4OTU1YWVlZjdhYWM4ODFiYjQ3MWEKXQpbOlliYWNrZW5kLXNpZ25hdG9yeS0wOjoxMjIwOTk5NTM5MzRkOWZlMTYzZmVkMDdkZDM3MWZhMTM5ODJiMmIzMDc0OWQ2ZGY1NmVjZGJhMzg1ZjhjNzhhODY3YSpJRFNPOjoxMjIwYmU1OGMyOWU2NWRlNDBiZjI3M2JlMWRjMmIyNjZkNDNhOWEwMDJlYTViMTg5NTVhZWVmN2FhYzg4MWJiNDcxYTJZYmFja2VuZC1zaWduYXRvcnktMDo6MTIyMDk5OTUzOTM0ZDlmZTE2M2ZlZDA3ZGQzNzFmYTEzOTgyYjJiMzA3NDlkNmRmNTZlY2RiYTM4NWY4Yzc4YTg2N2E5StpTtehIBgBCKgomCiQIARIgte09TNtngfU2IfZ5PIabI5+a9HM9ZLsg728k5xjF0GMQHg==").expect("Invalid base64 blob"),
+                synchronizer_id: String::new()
+            }],
+            _ => vec![],
+        },
         synchronizer_id: String::new(),
         package_id_selection_preference: vec![],
         prefetch_contract_keys: vec![],
@@ -2033,7 +1817,7 @@ async fn execute_expire_confirmation(
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
 
     let template_id = Identifier {
-        package_id: "#bitsafe-vault-governance-v0".to_string(),
+        package_id: VAULT_GOVERNANCE_PACKAGE_ID.to_string(),
         module_name: "BitsafeVault.VaultGovernance".to_string(),
         entity_name: "VaultGovernanceRules".to_string(),
     };

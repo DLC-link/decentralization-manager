@@ -10,7 +10,7 @@ use canton_proto_rs::com::daml::ledger::api::v2::{
 
 use crate::error::Result;
 
-use super::types::{ActionType, AppRewardBeneficiary, FarConfig, InstrumentId, VaultLimits};
+use super::types::{ActionType, AppRewardBeneficiary, Claim, FarConfig, InstrumentId, VaultLimits};
 
 // ============================================================================
 // Helper Functions
@@ -84,19 +84,41 @@ fn make_list(values: Vec<Value>) -> Value {
 
 fn serialize_instrument_id(id: &InstrumentId) -> Value {
     make_record(vec![
-        field("issuer", make_party(&id.issuer)),
-        field("symbol", make_text(&id.symbol)),
+        field("admin", make_party(&id.admin)),
+        field("id", make_text(&id.id)),
     ])
+}
+
+fn make_optional_numeric(opt: &Option<String>) -> Value {
+    Value {
+        sum: Some(value::Sum::Optional(Box::new(Optional {
+            value: opt.as_ref().map(|n| Box::new(make_numeric(n))),
+        }))),
+    }
 }
 
 fn serialize_vault_limits(limits: &VaultLimits) -> Value {
     make_record(vec![
-        field("maxTotalDeposit", make_numeric(&limits.max_total_deposit)),
-        field("minDepositAmount", make_numeric(&limits.min_deposit_amount)),
+        field(
+            "maxTotalDeposit",
+            make_optional_numeric(&limits.max_total_deposit),
+        ),
+        field(
+            "minDepositAmount",
+            make_optional_numeric(&limits.min_deposit_amount),
+        ),
         field(
             "minWithdrawalAmount",
-            make_numeric(&limits.min_withdrawal_amount),
+            make_optional_numeric(&limits.min_withdrawal_amount),
         ),
+    ])
+}
+
+fn serialize_claim(claim: &Claim) -> Value {
+    make_record(vec![
+        field("subject", make_text(&claim.subject)),
+        field("property", make_text(&claim.property)),
+        field("value", make_text(&claim.value)),
     ])
 }
 
@@ -367,6 +389,87 @@ pub fn serialize_action(action: &ActionType) -> Value {
             ),
         ),
 
+        ActionType::UtilityAcceptHolderServiceRequest {
+            operator,
+            provider_service_cid,
+            holder_service_request_cid,
+            holder,
+        } => make_variant(
+            "UtilityOnboardingAction",
+            make_variant(
+                "UtilityOnboarding_AcceptHolderServiceRequest",
+                make_record(vec![
+                    field("operator", make_party(operator)),
+                    field("providerServiceCid", make_contract_id(provider_service_cid)),
+                    field(
+                        "holderServiceRequestCid",
+                        make_contract_id(holder_service_request_cid),
+                    ),
+                    // Note: payload field is complex (HolderServiceRequest_Accept) - simplified here
+                    field("holder", make_party(holder)),
+                ]),
+            ),
+        ),
+
+        ActionType::UtilityCreateTransferRule {
+            operator,
+            registrar_service_cid,
+        } => make_variant(
+            "UtilityOnboardingAction",
+            make_variant(
+                "UtilityOnboarding_CreateTransferRule",
+                make_record(vec![
+                    field("operator", make_party(operator)),
+                    field(
+                        "registrarServiceCid",
+                        make_contract_id(registrar_service_cid),
+                    ),
+                ]),
+            ),
+        ),
+
+        // Credential Actions
+        ActionType::CredentialOfferFree {
+            operator,
+            user_service_cid,
+            holder,
+            id,
+            description,
+            claims,
+        } => make_variant(
+            "CredentialAction",
+            make_variant(
+                "Credential_OfferFreeCredential",
+                make_record(vec![
+                    field("operator", make_party(operator)),
+                    field("userServiceCid", make_contract_id(user_service_cid)),
+                    field("holder", make_party(holder)),
+                    field("id", make_text(id)),
+                    field("description", make_text(description)),
+                    field(
+                        "claims",
+                        make_list(claims.iter().map(serialize_claim).collect()),
+                    ),
+                ]),
+            ),
+        ),
+
+        ActionType::CredentialAcceptFree {
+            operator,
+            user_service_cid,
+            credential_offer_cid,
+        } => make_variant(
+            "CredentialAction",
+            make_variant(
+                "Credential_AcceptFreeCredential",
+                make_record(vec![
+                    field("operator", make_party(operator)),
+                    field("userServiceCid", make_contract_id(user_service_cid)),
+                    field("credentialOfferCid", make_contract_id(credential_offer_cid)),
+                ]),
+            ),
+        ),
+
         // DevNet
         ActionType::DevNetFeatureApp { amulet_rules_cid } => make_variant(
             "DevNetFeatureAppAction",
@@ -484,17 +587,39 @@ fn get_field<'a>(record: &'a Record, label: &str) -> Result<&'a Value> {
 fn deserialize_instrument_id(value: &Value) -> Result<InstrumentId> {
     let record = extract_record(value)?;
     Ok(InstrumentId {
-        issuer: extract_party(get_field(record, "issuer")?)?,
-        symbol: extract_text(get_field(record, "symbol")?)?,
+        admin: extract_party(get_field(record, "admin")?)?,
+        id: extract_text(get_field(record, "id")?)?,
     })
+}
+
+fn deserialize_optional_numeric(value: &Value) -> Result<Option<String>> {
+    match &value.sum {
+        Some(value::Sum::Optional(opt)) => match opt.value.as_ref() {
+            Some(inner) => Ok(Some(extract_numeric(inner)?)),
+            None => Ok(None),
+        },
+        _ => anyhow::bail!("Expected Optional value for numeric"),
+    }
 }
 
 fn deserialize_vault_limits(value: &Value) -> Result<VaultLimits> {
     let record = extract_record(value)?;
     Ok(VaultLimits {
-        max_total_deposit: extract_numeric(get_field(record, "maxTotalDeposit")?)?,
-        min_deposit_amount: extract_numeric(get_field(record, "minDepositAmount")?)?,
-        min_withdrawal_amount: extract_numeric(get_field(record, "minWithdrawalAmount")?)?,
+        max_total_deposit: deserialize_optional_numeric(get_field(record, "maxTotalDeposit")?)?,
+        min_deposit_amount: deserialize_optional_numeric(get_field(record, "minDepositAmount")?)?,
+        min_withdrawal_amount: deserialize_optional_numeric(get_field(
+            record,
+            "minWithdrawalAmount",
+        )?)?,
+    })
+}
+
+fn deserialize_claim(value: &Value) -> Result<Claim> {
+    let record = extract_record(value)?;
+    Ok(Claim {
+        subject: extract_text(get_field(record, "subject")?)?,
+        property: extract_text(get_field(record, "property")?)?,
+        value: extract_text(get_field(record, "value")?)?,
     })
 }
 
@@ -627,7 +752,75 @@ pub fn deserialize_action(value: &Value) -> Result<ActionType> {
                     )?)?,
                     user_service_cid: extract_contract_id(get_field(record, "userServiceCid")?)?,
                 }),
+                "UtilityOnboarding_AcceptHolderServiceRequest" => {
+                    Ok(ActionType::UtilityAcceptHolderServiceRequest {
+                        operator: extract_party(get_field(record, "operator")?)?,
+                        provider_service_cid: extract_contract_id(get_field(
+                            record,
+                            "providerServiceCid",
+                        )?)?,
+                        holder_service_request_cid: extract_contract_id(get_field(
+                            record,
+                            "holderServiceRequestCid",
+                        )?)?,
+                        holder: extract_party(get_field(record, "holder")?)?,
+                    })
+                }
+                "UtilityOnboarding_CreateTransferRule" => {
+                    Ok(ActionType::UtilityCreateTransferRule {
+                        operator: extract_party(get_field(record, "operator")?)?,
+                        registrar_service_cid: extract_contract_id(get_field(
+                            record,
+                            "registrarServiceCid",
+                        )?)?,
+                    })
+                }
                 other => anyhow::bail!("Unknown UtilityOnboardingAction constructor: {other}"),
+            }
+        }
+
+        // Credential Actions - nested variant structure
+        "CredentialAction" => {
+            let inner_variant = match &inner.sum {
+                Some(value::Sum::Variant(v)) => v,
+                _ => anyhow::bail!("Expected nested Variant for CredentialAction"),
+            };
+            let inner_value = inner_variant
+                .value
+                .as_ref()
+                .context("CredentialAction inner variant has no value")?;
+            let record = extract_record(inner_value)?;
+
+            match inner_variant.constructor.as_str() {
+                "Credential_OfferFreeCredential" => {
+                    let claims_list = extract_list(get_field(record, "claims")?)?;
+                    let claims = claims_list
+                        .elements
+                        .iter()
+                        .map(deserialize_claim)
+                        .collect::<Result<Vec<_>>>()?;
+
+                    Ok(ActionType::CredentialOfferFree {
+                        operator: extract_party(get_field(record, "operator")?)?,
+                        user_service_cid: extract_contract_id(get_field(
+                            record,
+                            "userServiceCid",
+                        )?)?,
+                        holder: extract_party(get_field(record, "holder")?)?,
+                        id: extract_text(get_field(record, "id")?)?,
+                        description: extract_text(get_field(record, "description")?)?,
+                        claims,
+                    })
+                }
+                "Credential_AcceptFreeCredential" => Ok(ActionType::CredentialAcceptFree {
+                    operator: extract_party(get_field(record, "operator")?)?,
+                    user_service_cid: extract_contract_id(get_field(record, "userServiceCid")?)?,
+                    credential_offer_cid: extract_contract_id(get_field(
+                        record,
+                        "credentialOfferCid",
+                    )?)?,
+                }),
+                other => anyhow::bail!("Unknown CredentialAction constructor: {other}"),
             }
         }
 

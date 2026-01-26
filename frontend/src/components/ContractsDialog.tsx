@@ -29,7 +29,7 @@ import UploadFileIcon from "@mui/icons-material/UploadFile";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import AccountBalanceIcon from "@mui/icons-material/AccountBalance";
 import StorageIcon from "@mui/icons-material/Storage";
-import { API_BASE } from "../constants";
+import { API_BASE, VAULT_GOVERNANCE_PACKAGE_ID } from "../constants";
 import type {
   ContractsStatusResponse,
   ContractsRequest,
@@ -144,7 +144,7 @@ const getVaultContracts = (participantCount: number = 3): ContractDefinition[] =
     {
       id: "create-vault-governance-rules",
       name: "VaultGovernanceRules",
-      package_id: "#bitsafe-vault-governance-v0-rc2",
+      package_id: VAULT_GOVERNANCE_PACKAGE_ID,
       module_name: "BitsafeVault.VaultGovernance",
       entity_name: "VaultGovernanceRules",
       fields: [

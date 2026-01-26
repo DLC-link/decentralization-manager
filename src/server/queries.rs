@@ -7,13 +7,12 @@ use canton_proto_rs::com::daml::ledger::api::v2::{
     get_active_contracts_response::ContractEntry, value,
 };
 
-use crate::{config::NodeConfig, error::Result, utils};
+use crate::{config::NodeConfig, consts::VAULT_GOVERNANCE_PACKAGE_ID, error::Result, utils};
 
 use super::{
     action_serializer,
     types::{
-        ActionType, ContractInfo, GovernanceAction, GovernanceActionV2, GovernanceConfirmation,
-        GovernanceConfirmationV2, PartyMetadata,
+        ActionType, ContractInfo, GovernanceActionV2, GovernanceConfirmationV2, PartyMetadata,
     },
 };
 
@@ -55,7 +54,7 @@ const CONTRACT_TEMPLATES: &[TemplateId] = &[
     },
     // Vault contracts
     TemplateId {
-        package_id: "#bitsafe-vault-governance-v0-rc2",
+        package_id: VAULT_GOVERNANCE_PACKAGE_ID,
         module_name: "BitsafeVault.VaultGovernance",
         entity_name: "VaultGovernanceRules",
     },
@@ -65,7 +64,7 @@ const CONTRACT_TEMPLATES: &[TemplateId] = &[
 /// Each template is queried separately to handle cases where packages may not exist
 const GOVERNANCE_TEMPLATES: &[TemplateId] = &[
     TemplateId {
-        package_id: "#bitsafe-vault-governance-v0",
+        package_id: VAULT_GOVERNANCE_PACKAGE_ID,
         module_name: "BitsafeVault.VaultGovernance",
         entity_name: "VaultGovernanceConfirmation",
     },
@@ -313,294 +312,15 @@ fn is_governance_template(module_name: &str, entity_name: &str) -> bool {
         .any(|t| t.module_name == module_name && t.entity_name == entity_name)
 }
 
-/// Get governance confirmations for a decentralized party
-///
-/// Fetches active contracts filtered by governance confirmation templates,
-/// then extracts action field and groups by action.
-///
-/// When `test_mode` is true, uses WildcardFilter with in-memory filtering
-/// (mock auth doesn't have TemplateFilter permissions).
-///
-/// In production mode, queries each template separately to gracefully handle
-/// cases where some packages may not be deployed on the participant.
-pub async fn get_governance_confirmations(
-    config: &NodeConfig,
-    party_id: &str,
-    threshold: usize,
-    token: Option<String>,
-    test_mode: bool,
-) -> Result<Vec<GovernanceAction>> {
-    // Collect confirmations grouped by action
-    let mut confirmations_by_action: HashMap<String, Vec<GovernanceConfirmation>> = HashMap::new();
-
-    if test_mode {
-        // Test mode: use WildcardFilter with in-memory filtering
-        tracing::debug!("Using WildcardFilter for governance query (test mode)");
-        fetch_governance_with_wildcard(config, party_id, token, &mut confirmations_by_action)
-            .await?;
-    } else {
-        // Production mode: query each template separately to handle missing packages
-        tracing::debug!("Using TemplateFilter for governance query (per-template)");
-        for t in GOVERNANCE_TEMPLATES {
-            match fetch_governance_for_template(
-                config,
-                party_id,
-                token.clone(),
-                t,
-                &mut confirmations_by_action,
-            )
-            .await
-            {
-                Ok(()) => {
-                    tracing::debug!("Successfully queried {}:{}", t.module_name, t.entity_name);
-                }
-                Err(e) => {
-                    // Log but continue - package might not exist on this participant
-                    let err_str = e.to_string();
-                    if err_str.contains("PACKAGE_NAMES_NOT_FOUND") {
-                        tracing::debug!(
-                            "Package {} not found, skipping {}:{}",
-                            t.package_id,
-                            t.module_name,
-                            t.entity_name
-                        );
-                    } else {
-                        tracing::warn!(
-                            "Failed to query {}:{}: {e}, continuing...",
-                            t.module_name,
-                            t.entity_name
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    // Convert to GovernanceAction list
-    let actions: Vec<GovernanceAction> = confirmations_by_action
-        .into_iter()
-        .map(|(action_id, confirmations)| {
-            let confirmation_count = confirmations.len();
-            GovernanceAction {
-                action_id,
-                confirmations,
-                confirmation_count,
-                can_execute: confirmation_count >= threshold,
-            }
-        })
-        .collect();
-
-    Ok(actions)
-}
-
-/// Fetch governance confirmations using WildcardFilter (for test mode)
-async fn fetch_governance_with_wildcard(
-    config: &NodeConfig,
-    party_id: &str,
-    token: Option<String>,
-    confirmations_by_action: &mut HashMap<String, Vec<GovernanceConfirmation>>,
-) -> Result {
-    let mut state_client = utils::create_state_client(config, token).await?;
-
-    let ledger_end = state_client
-        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
-        .await?
-        .into_inner()
-        .offset;
-
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
-                    WildcardFilter {
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
-    );
-
-    let acs_request = GetActiveContractsRequest {
-        active_at_offset: ledger_end,
-        event_format: Some(EventFormat {
-            filters_by_party,
-            filters_for_any_party: None,
-            verbose: true,
-        }),
-    };
-
-    let mut stream = state_client
-        .get_active_contracts(tonic::Request::new(acs_request))
-        .await?
-        .into_inner();
-
-    while let Some(response) = stream.message().await? {
-        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
-            && let Some(created) = active.created_event
-        {
-            // Filter in-memory for governance templates
-            let template = created.template_id.as_ref();
-            let is_governance = template
-                .map(|t| is_governance_template(&t.module_name, &t.entity_name))
-                .unwrap_or(false);
-
-            if !is_governance {
-                continue;
-            }
-
-            extract_and_add_confirmation(&created, confirmations_by_action);
-        }
-    }
-
-    Ok(())
-}
-
-/// Fetch governance confirmations for a specific template
-async fn fetch_governance_for_template(
-    config: &NodeConfig,
-    party_id: &str,
-    token: Option<String>,
-    template: &TemplateId,
-    confirmations_by_action: &mut HashMap<String, Vec<GovernanceConfirmation>>,
-) -> Result {
-    let mut state_client = utils::create_state_client(config, token).await?;
-
-    let ledger_end = state_client
-        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
-        .await?
-        .into_inner()
-        .offset;
-
-    let mut filters_by_party = HashMap::new();
-    filters_by_party.insert(
-        party_id.to_string(),
-        Filters {
-            cumulative: vec![CumulativeFilter {
-                identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
-                    TemplateFilter {
-                        template_id: Some(Identifier {
-                            package_id: template.package_id.to_string(),
-                            module_name: template.module_name.to_string(),
-                            entity_name: template.entity_name.to_string(),
-                        }),
-                        include_created_event_blob: false,
-                    },
-                )),
-            }],
-        },
-    );
-
-    let acs_request = GetActiveContractsRequest {
-        active_at_offset: ledger_end,
-        event_format: Some(EventFormat {
-            filters_by_party,
-            filters_for_any_party: None,
-            verbose: true,
-        }),
-    };
-
-    let mut stream = state_client
-        .get_active_contracts(tonic::Request::new(acs_request))
-        .await?
-        .into_inner();
-
-    while let Some(response) = stream.message().await? {
-        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
-            && let Some(created) = active.created_event
-        {
-            extract_and_add_confirmation(&created, confirmations_by_action);
-        }
-    }
-
-    Ok(())
-}
-
-/// Extract a string representation of an action value (handles both Text and Variant)
-fn extract_action_string(value: &Value) -> Option<String> {
-    match &value.sum {
-        // Direct text value (legacy format)
-        Some(value::Sum::Text(s)) => Some(s.clone()),
-        // Variant value (structured format) - extract nested constructor names
-        Some(value::Sum::Variant(variant)) => {
-            let outer = &variant.constructor;
-            // Check if there's a nested variant (e.g., GovernanceAction(Governance_SelfDestruct))
-            if let Some(inner_value) = variant.value.as_ref() {
-                if let Some(value::Sum::Variant(inner_variant)) = &inner_value.sum {
-                    // Nested variant: "OuterVariant(InnerVariant)"
-                    Some(format!("{}({})", outer, inner_variant.constructor))
-                } else {
-                    // Single variant with record payload
-                    Some(outer.clone())
-                }
-            } else {
-                Some(outer.clone())
-            }
-        }
-        _ => None,
-    }
-}
-
-/// Extract action and confirming_party from a created event and add to the map
-fn extract_and_add_confirmation(
-    created: &CreatedEvent,
-    confirmations_by_action: &mut HashMap<String, Vec<GovernanceConfirmation>>,
-) {
-    // Extract action field from create_arguments (handles both Text and Variant)
-    let action = created
-        .create_arguments
-        .as_ref()
-        .and_then(|record| {
-            record.fields.iter().find_map(|field| {
-                if field.label == "action" {
-                    field.value.as_ref().and_then(extract_action_string)
-                } else {
-                    None
-                }
-            })
-        })
-        .unwrap_or_else(|| "unknown".to_string());
-
-    // Extract confirming party from create_arguments
-    let confirming_party = created
-        .create_arguments
-        .as_ref()
-        .and_then(|record| {
-            record.fields.iter().find_map(|field| {
-                if field.label == "confirmingParty" || field.label == "confirmer" {
-                    field.value.as_ref().and_then(|v| match &v.sum {
-                        Some(value::Sum::Party(p)) => Some(p.clone()),
-                        _ => None,
-                    })
-                } else {
-                    None
-                }
-            })
-        })
-        .unwrap_or_else(|| "unknown".to_string());
-
-    let confirmation = GovernanceConfirmation {
-        contract_id: created.contract_id.clone(),
-        action: action.clone(),
-        confirming_party,
-    };
-
-    confirmations_by_action
-        .entry(action)
-        .or_default()
-        .push(confirmation);
-}
-
 // ============================================================================
-// V2 Governance Queries (with parsed actions)
+// Governance Queries (with parsed actions)
 // ============================================================================
 
-/// Get governance confirmations for a decentralized party with parsed actions (V2)
+/// Get governance confirmations for a decentralized party with parsed actions
 ///
 /// Similar to get_governance_confirmations but parses the action field into ActionType
 /// and groups by deterministic action hash.
-pub async fn get_governance_confirmations_v2(
+pub async fn get_governance_confirmations(
     config: &NodeConfig,
     party_id: &str,
     threshold: usize,
@@ -651,15 +371,22 @@ pub async fn get_governance_confirmations_v2(
         }
     }
 
-    // Convert to GovernanceActionV2 list
+    // Convert to GovernanceActionV2 list, deduplicating confirmations by confirming_party
     let actions: Vec<GovernanceActionV2> = confirmations_by_hash
         .into_iter()
         .map(|(action_hash, (action, confirmations))| {
-            let confirmation_count = confirmations.len();
+            // Deduplicate by confirming_party - keep only one confirmation per member
+            let mut seen_parties = std::collections::HashSet::new();
+            let unique_confirmations: Vec<GovernanceConfirmationV2> = confirmations
+                .into_iter()
+                .filter(|c| seen_parties.insert(c.confirming_party.clone()))
+                .collect();
+
+            let confirmation_count = unique_confirmations.len();
             GovernanceActionV2 {
                 action_hash,
                 action,
-                confirmations,
+                confirmations: unique_confirmations,
                 confirmation_count,
                 can_execute: confirmation_count >= threshold,
             }
@@ -862,7 +589,7 @@ use super::types::GovernanceState;
 
 /// VaultGovernanceRules template identifier
 const VAULT_GOVERNANCE_RULES: TemplateId = TemplateId {
-    package_id: "#bitsafe-vault-governance-v0-rc2",
+    package_id: VAULT_GOVERNANCE_PACKAGE_ID,
     module_name: "BitsafeVault.VaultGovernance",
     entity_name: "VaultGovernanceRules",
 };
