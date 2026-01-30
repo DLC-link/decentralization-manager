@@ -28,6 +28,7 @@ import ExpandLessIcon from "@mui/icons-material/ExpandLess";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import AddIcon from "@mui/icons-material/Add";
+import UndoIcon from "@mui/icons-material/Undo";
 import {
   API_BASE,
   MAINNET_DEMO,
@@ -49,6 +50,7 @@ import type {
   ActionType,
   ConfirmActionRequest,
   ExecuteActionRequest,
+  ExpireConfirmationRequest,
   InstrumentId,
   VaultLimits,
   FarConfig,
@@ -121,6 +123,7 @@ const formatActionType = (action: ActionType): string => {
 interface GovernanceSectionProps {
   partyId: string;
   rulesContractId?: string;
+  memberPartyId?: string;
 }
 
 // Default values for action form
@@ -137,23 +140,7 @@ const defaultVaultLimits: VaultLimits = {
 };
 const defaultFarConfig: FarConfig = {
   featured_app_right_cid: DEVNET_FEATURED_APP_RIGHT_CID,
-  beneficiaries: [
-    {
-      beneficiary:
-        "attestor-1::1220fa8543db6c66fe3a55b1f180c8dfc7f876265c76684fbc1d35d89e02c8aafe8e",
-      weight: "0.34",
-    },
-    {
-      beneficiary:
-        "attestor-2::122099953934d9fe163fed07dd371fa13982b2b30749d6df56ecdba385f8c78a867a",
-      weight: "0.33",
-    },
-    {
-      beneficiary:
-        "attestor-3::1220d544125d3619e9c4d7340466a78a85f738e75a740837fa6283a1051494f5df23",
-      weight: "0.33",
-    },
-  ],
+  beneficiaries: [],
 };
 const defaultVaultRulesCid = DEVNET_VAULT_RULES_CID;
 const defaultVaultBackendSignatory = DEVNET_VAULT_BACKEND_SIGNATORY;
@@ -161,6 +148,7 @@ const defaultVaultBackendSignatory = DEVNET_VAULT_BACKEND_SIGNATORY;
 export const GovernanceSection = ({
   partyId,
   rulesContractId: initialRulesContractId,
+  memberPartyId,
 }: GovernanceSectionProps) => {
   const [expanded, setExpanded] = useState(true);
   const [loading, setLoading] = useState(true);
@@ -202,8 +190,8 @@ export const GovernanceSection = ({
 
   // New fields for additional action types
   const [operatorParty, setOperatorParty] = useState(DEVNET_OPERATOR);
-  const [providerServiceCid, setProviderServiceCid] = useState(""); // TODO
-  const [userServiceCid, setUserServiceCid] = useState(""); // TODO
+  const [providerServiceCid, setProviderServiceCid] = useState("");
+  const [userServiceCid, setUserServiceCid] = useState("");
   const [amuletRulesCid, setAmuletRulesCid] = useState(DEVNET_AMULET_RULES_CID);
   const [allocationFactoryCid, setAllocationFactoryCid] = useState(
     DEVNET_ALLOCATION_FACTORY_CID,
@@ -231,7 +219,9 @@ export const GovernanceSection = ({
   const [vaultsLoading, setVaultsLoading] = useState(false);
 
   // Available services from ACS
-  const [providerServices, setProviderServices] = useState<ProviderServiceInfo[]>([]);
+  const [providerServices, setProviderServices] = useState<
+    ProviderServiceInfo[]
+  >([]);
   const [userServices, setUserServices] = useState<UserServiceInfo[]>([]);
   const [servicesLoading, setServicesLoading] = useState(false);
 
@@ -309,8 +299,12 @@ export const GovernanceSection = ({
     setServicesLoading(true);
     try {
       const [providerRes, userRes] = await Promise.all([
-        fetch(`${API_BASE}/services/provider?party_id=${encodeURIComponent(partyId)}`),
-        fetch(`${API_BASE}/services/user?party_id=${encodeURIComponent(partyId)}`),
+        fetch(
+          `${API_BASE}/services/provider?party_id=${encodeURIComponent(partyId)}`,
+        ),
+        fetch(
+          `${API_BASE}/services/user?party_id=${encodeURIComponent(partyId)}`,
+        ),
       ]);
 
       if (providerRes.ok) {
@@ -417,6 +411,51 @@ export const GovernanceSection = ({
     } finally {
       setActionLoading(null);
     }
+  };
+
+  const handleRevoke = async (action: GovernanceAction, confirmationCid: string) => {
+    if (!rulesContractId) {
+      setError("Please enter the VaultGovernanceRules contract ID");
+      return;
+    }
+
+    setActionLoading(action.action_hash);
+    setError(null);
+
+    try {
+      const request: ExpireConfirmationRequest = {
+        party_id: partyId,
+        rules_contract_id: rulesContractId,
+        confirmation_cid: confirmationCid,
+      };
+
+      const res = await fetch(`${API_BASE}/governance/expire`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(request),
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || "Failed to revoke confirmation");
+      }
+
+      // Refresh data
+      await fetchGovernance();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to revoke confirmation");
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  // Helper to find the current user's confirmation for an action
+  // confirming_party is the member party ID, not the decentralized party ID
+  // Use member_party_id from response (primary) or prop (fallback)
+  const getUserConfirmation = (action: GovernanceAction) => {
+    const myMemberPartyId = data?.member_party_id || memberPartyId;
+    if (!myMemberPartyId) return undefined;
+    return action.confirmations.find((c) => c.confirming_party === myMemberPartyId);
   };
 
   // Build ActionType from form state
@@ -1178,7 +1217,9 @@ export const GovernanceSection = ({
               Initial Supported Vaults
             </Typography>
             {vaultsLoading ? (
-              <Box sx={{ display: "flex", alignItems: "center", gap: 1, my: 1 }}>
+              <Box
+                sx={{ display: "flex", alignItems: "center", gap: 1, my: 1 }}
+              >
                 <CircularProgress size={16} />
                 <Typography variant="body2">Loading vaults...</Typography>
               </Box>
@@ -1190,7 +1231,9 @@ export const GovernanceSection = ({
                     control={
                       <Checkbox
                         size="small"
-                        checked={initialSupportedVaults.includes(vault.contract_id)}
+                        checked={initialSupportedVaults.includes(
+                          vault.contract_id,
+                        )}
                         onChange={(e) => {
                           if (e.target.checked) {
                             setInitialSupportedVaults([
@@ -1212,10 +1255,19 @@ export const GovernanceSection = ({
                         <Typography variant="body2">
                           {vault.vault_name} ({vault.share_symbol})
                           {vault.is_paused && (
-                            <Chip size="small" label="Paused" color="warning" sx={{ ml: 1 }} />
+                            <Chip
+                              size="small"
+                              label="Paused"
+                              color="warning"
+                              sx={{ ml: 1 }}
+                            />
                           )}
                         </Typography>
-                        <Typography variant="caption" color="text.secondary" sx={{ fontFamily: "monospace" }}>
+                        <Typography
+                          variant="caption"
+                          color="text.secondary"
+                          sx={{ fontFamily: "monospace" }}
+                        >
                           {vault.contract_id.slice(0, 20)}...
                         </Typography>
                       </Box>
@@ -1662,25 +1714,53 @@ export const GovernanceSection = ({
                           justifyContent: "flex-end",
                         }}
                       >
-                        <Button
-                          size="small"
-                          variant="outlined"
-                          startIcon={
-                            actionLoading === action.action_hash ? (
-                              <CircularProgress size={16} />
-                            ) : (
-                              <CheckCircleIcon />
-                            )
-                          }
-                          onClick={() => handleConfirm(action)}
-                          disabled={
-                            MAINNET_DEMO ||
-                            !rulesContractId ||
-                            actionLoading === action.action_hash
-                          }
-                        >
-                          Confirm
-                        </Button>
+                        {getUserConfirmation(action) ? (
+                          <Button
+                            size="small"
+                            variant="outlined"
+                            color="warning"
+                            startIcon={
+                              actionLoading === action.action_hash ? (
+                                <CircularProgress size={16} />
+                              ) : (
+                                <UndoIcon />
+                              )
+                            }
+                            onClick={() => {
+                              const confirmation = getUserConfirmation(action);
+                              if (confirmation) {
+                                handleRevoke(action, confirmation.contract_id);
+                              }
+                            }}
+                            disabled={
+                              MAINNET_DEMO ||
+                              !rulesContractId ||
+                              actionLoading === action.action_hash
+                            }
+                          >
+                            Revoke
+                          </Button>
+                        ) : (
+                          <Button
+                            size="small"
+                            variant="outlined"
+                            startIcon={
+                              actionLoading === action.action_hash ? (
+                                <CircularProgress size={16} />
+                              ) : (
+                                <CheckCircleIcon />
+                              )
+                            }
+                            onClick={() => handleConfirm(action)}
+                            disabled={
+                              MAINNET_DEMO ||
+                              !rulesContractId ||
+                              actionLoading === action.action_hash
+                            }
+                          >
+                            Confirm
+                          </Button>
+                        )}
                         {action.can_execute && (
                           <Button
                             size="small"

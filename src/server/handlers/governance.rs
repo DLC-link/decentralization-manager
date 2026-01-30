@@ -87,10 +87,17 @@ pub async fn get_governance(
         .await
         .unwrap_or(2);
 
+    // Get member_party_id from config (used by frontend to identify own confirmations)
+    let member_party_id = get_member_party_id(&data, &party_id);
+
     match get_governance_confirmations(&data.config, &query.party_id, threshold, token, test_mode)
         .await
     {
-        Ok(actions) => HttpResponse::Ok().json(GovernanceResponse { actions, threshold }),
+        Ok(actions) => HttpResponse::Ok().json(GovernanceResponse {
+            actions,
+            threshold,
+            member_party_id,
+        }),
         Err(e) => {
             tracing::error!("Failed to fetch governance confirmations: {e}");
             HttpResponse::InternalServerError().json(serde_json::json!({
@@ -377,6 +384,15 @@ async fn get_party_threshold(data: &web::Data<AppState>, party_id: &str) -> Opti
         .map(|item| item.threshold as usize)
 }
 
+/// Get member_party_id for a decentralized party from config
+fn get_member_party_id(data: &web::Data<AppState>, party_id: &CantonId) -> Option<String> {
+    data.config
+        .parties
+        .iter()
+        .find(|p| &p.dec_party_id == party_id)
+        .map(|p| p.member_party_id.to_string())
+}
+
 /// Get token and member_party_id for a party
 async fn get_party_credentials(
     data: &web::Data<AppState>,
@@ -582,16 +598,24 @@ async fn execute_expire_confirmation(
         entity_name: "VaultGovernanceRules".to_string(),
     };
 
-    // Build choice argument: ExpireConfirmation { confirmationCid : ContractId VaultGovernanceConfirmation }
+    // Build choice argument: ExpireConfirmation { member : Party, confirmationCid : ContractId VaultGovernanceConfirmation }
     let choice_argument = Value {
         sum: Some(value::Sum::Record(Record {
             record_id: None,
-            fields: vec![RecordField {
-                label: "confirmationCid".to_string(),
-                value: Some(Value {
-                    sum: Some(value::Sum::ContractId(request.confirmation_cid.clone())),
-                }),
-            }],
+            fields: vec![
+                RecordField {
+                    label: "member".to_string(),
+                    value: Some(Value {
+                        sum: Some(value::Sum::Party(member_party_id.to_string())),
+                    }),
+                },
+                RecordField {
+                    label: "staleConfirmationCid".to_string(),
+                    value: Some(Value {
+                        sum: Some(value::Sum::ContractId(request.confirmation_cid.clone())),
+                    }),
+                },
+            ],
         })),
     };
 

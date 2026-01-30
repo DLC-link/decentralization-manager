@@ -248,6 +248,7 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
         <GovernanceSection
           partyId={party.party_id}
           rulesContractId={vaultGovernanceRulesContract?.contract_id}
+          memberPartyId={authStatus?.member_party_id}
         />
       </CardContent>
 

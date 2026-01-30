@@ -203,6 +203,7 @@ export interface GovernanceAction {
 export interface GovernanceResponse {
   actions: GovernanceAction[];
   threshold: number;
+  member_party_id?: string;
 }
 
 // ============================================================================
@@ -376,6 +377,12 @@ export interface ExecuteActionRequest {
   rules_contract_id: string;
   action: ActionType;
   confirmation_cids: string[];
+}
+
+export interface ExpireConfirmationRequest {
+  party_id: string;
+  rules_contract_id: string;
+  confirmation_cid: string;
 }
 
 // Vault types

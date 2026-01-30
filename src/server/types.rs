@@ -535,6 +535,9 @@ pub struct GovernanceAction {
 pub struct GovernanceResponse {
     pub actions: Vec<GovernanceAction>,
     pub threshold: usize,
+    /// The member party ID for the requesting party (used to identify own confirmations)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub member_party_id: Option<String>,
 }
 
 /// Request to expire a stale confirmation
