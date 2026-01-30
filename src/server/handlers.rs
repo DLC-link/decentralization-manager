@@ -33,16 +33,18 @@ use super::{
     queries::{
         get_contracts, get_governance_confirmations,
         get_governance_state as query_governance_state, get_party_metadata,
+        get_provider_services, get_user_services, get_vaults,
     },
     types::{
-        AuthStatus, AuthStatusResponse, AuthTestResponse, AuthTestResult, ConfirmActionRequestV2,
+        AuthStatus, AuthStatusResponse, AuthTestResponse, AuthTestResult, ConfirmActionRequest,
         ConnectionStatus, ContractsRequest, DecentralizedPartiesResponse, DecentralizedParty,
-        ExecuteActionRequestV2, ExpireConfirmationRequest, GovernanceResponseV2,
+        ExecuteActionRequest, ExpireConfirmationRequest, GovernanceResponse,
         GovernanceStateResponse, HttpWorkflowState, InvitationActionRequest, InvitationType,
         KeyStatusResponse, KickRequest, KickResponse, KickStatus, ListenerPauseGuard,
         OnboardingRequest, OnboardingResponse, OnboardingStatus, ParticipantInfo,
         ParticipantStatus, ParticipantsStatusResponse, PartyAuthStatus, PendingInvitation,
-        PendingInvitationsResponse, Permission, RightsStatus, WorkflowProgress, WorkflowResponse,
+        PendingInvitationsResponse, Permission, ProviderServicesResponse, RightsStatus,
+        UserServicesResponse, VaultsResponse, WorkflowProgress, WorkflowResponse,
     },
 };
 use crate::{
@@ -1415,7 +1417,7 @@ pub async fn get_governance(
     match get_governance_confirmations(&data.config, &query.party_id, threshold, token, test_mode)
         .await
     {
-        Ok(actions) => HttpResponse::Ok().json(GovernanceResponseV2 { actions, threshold }),
+        Ok(actions) => HttpResponse::Ok().json(GovernanceResponse { actions, threshold }),
         Err(e) => {
             tracing::error!("Failed to fetch governance confirmations: {e}");
             HttpResponse::InternalServerError().json(serde_json::json!({
@@ -1452,6 +1454,96 @@ pub async fn get_governance_state(
             tracing::error!("Failed to fetch governance state: {e}");
             HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": format!("Failed to fetch governance state: {e}")
+            }))
+        }
+    }
+}
+
+/// Get deployed Vault contracts
+#[get("/vaults")]
+pub async fn get_vaults_handler(
+    data: web::Data<AppState>,
+    query: web::Query<GovernanceQuery>,
+) -> impl Responder {
+    let party_id = match CantonId::parse(&query.party_id) {
+        Ok(id) => id,
+        Err(e) => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Invalid party_id: {e}")
+            }));
+        }
+    };
+
+    // Get token for this party
+    let token = get_party_token(&data, &party_id).await;
+
+    // Check if we're in test mode (mock auth)
+    let test_mode = matches!(data.auth, Some(WorkflowAuth::Mock(_)));
+
+    match get_vaults(&data.config, &query.party_id, token, test_mode).await {
+        Ok(vaults) => HttpResponse::Ok().json(VaultsResponse { vaults }),
+        Err(e) => {
+            tracing::error!("Failed to fetch vaults: {e}");
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to fetch vaults: {e}")
+            }))
+        }
+    }
+}
+
+/// Get ProviderService contracts
+#[get("/services/provider")]
+pub async fn get_provider_services_handler(
+    data: web::Data<AppState>,
+    query: web::Query<GovernanceQuery>,
+) -> impl Responder {
+    let party_id = match CantonId::parse(&query.party_id) {
+        Ok(id) => id,
+        Err(e) => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Invalid party_id: {e}")
+            }));
+        }
+    };
+
+    let token = get_party_token(&data, &party_id).await;
+    let test_mode = matches!(data.auth, Some(WorkflowAuth::Mock(_)));
+
+    match get_provider_services(&data.config, &query.party_id, token, test_mode).await {
+        Ok(services) => HttpResponse::Ok().json(ProviderServicesResponse { services }),
+        Err(e) => {
+            tracing::error!("Failed to fetch provider services: {e}");
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to fetch provider services: {e}")
+            }))
+        }
+    }
+}
+
+/// Get UserService contracts
+#[get("/services/user")]
+pub async fn get_user_services_handler(
+    data: web::Data<AppState>,
+    query: web::Query<GovernanceQuery>,
+) -> impl Responder {
+    let party_id = match CantonId::parse(&query.party_id) {
+        Ok(id) => id,
+        Err(e) => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Invalid party_id: {e}")
+            }));
+        }
+    };
+
+    let token = get_party_token(&data, &party_id).await;
+    let test_mode = matches!(data.auth, Some(WorkflowAuth::Mock(_)));
+
+    match get_user_services(&data.config, &query.party_id, token, test_mode).await {
+        Ok(services) => HttpResponse::Ok().json(UserServicesResponse { services }),
+        Err(e) => {
+            tracing::error!("Failed to fetch user services: {e}");
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to fetch user services: {e}")
             }))
         }
     }
@@ -1519,7 +1611,7 @@ async fn get_party_threshold(data: &web::Data<AppState>, party_id: &str) -> Opti
 #[post("/governance/confirm")]
 pub async fn confirm_action(
     data: web::Data<AppState>,
-    body: web::Json<ConfirmActionRequestV2>,
+    body: web::Json<ConfirmActionRequest>,
 ) -> impl Responder {
     let party_id = &body.party_id;
 
@@ -1538,7 +1630,7 @@ pub async fn confirm_action(
             "message": "Confirmation submitted successfully"
         })),
         Err(e) => {
-            tracing::error!("Failed to submit V2 confirmation: {e}");
+            tracing::error!("Failed to submit confirmation: {e}");
             HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": format!("Failed to submit confirmation: {e}")
             }))
@@ -1550,7 +1642,7 @@ pub async fn confirm_action(
 #[post("/governance/execute")]
 pub async fn execute_action(
     data: web::Data<AppState>,
-    body: web::Json<ExecuteActionRequestV2>,
+    body: web::Json<ExecuteActionRequest>,
 ) -> impl Responder {
     let party_id = &body.party_id;
 
@@ -1569,7 +1661,7 @@ pub async fn execute_action(
             "message": "Action executed successfully"
         })),
         Err(e) => {
-            tracing::error!("Failed to execute V2 action: {e}");
+            tracing::error!("Failed to execute action: {e}");
             HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": format!("Failed to execute action: {e}")
             }))
@@ -1608,7 +1700,7 @@ pub async fn expire_confirmation(
     }
 }
 
-/// Get token and member_party_id for a party (V2 version)
+/// Get token and member_party_id for a party
 async fn get_party_credentials(
     data: &web::Data<AppState>,
     party_id: &CantonId,
@@ -1630,7 +1722,7 @@ async fn get_party_credentials(
 /// Execute ConfirmAction choice on VaultGovernanceRules contract with structured action
 async fn execute_confirm_action(
     config: &NodeConfig,
-    request: &ConfirmActionRequestV2,
+    request: &ConfirmActionRequest,
     token: &str,
     member_party_id: &str,
 ) -> Result {
@@ -1702,7 +1794,7 @@ macro_rules! disclose {
 /// Execute ExecuteConfirmedAction choice on VaultGovernanceRules contract with structured action
 async fn execute_confirmed_action(
     config: &NodeConfig,
-    request: &ExecuteActionRequestV2,
+    request: &ExecuteActionRequest,
     token: &str,
     member_party_id: &str,
 ) -> Result {
@@ -1760,7 +1852,7 @@ async fn execute_confirmed_action(
                 template_id: None,
                 contract_id: vault_rules_cid.clone(),
                 created_event_blob: base64::engine::general_purpose::STANDARD
-                    .decode("CgMyLjES5gQKRQAZlM04PpOCb1MKGx+pYtIWrHhZ5I2jc8fHky5FNSAikcoSEiA7G+6/yN41XjcZEgveRn9rzMg+z2letvss/k9lgddSPhIUYml0c2FmZS12YXVsdC12MC1yYzIaaApAODkyZjdiNjRkMzgxNDI5N2ZhNTMwYjBhMDgzZDMwZjRiMDY0OWFlOTEzMzY0NTk3NDBlN2M2M2RjMGYyNmYyZBIMQml0c2FmZVZhdWx0EgpWYXVsdFJ1bGVzGgpWYXVsdFJ1bGVzIrsBargBClcKVTpTYml0c2FmZS1hZG1pbjo6MTIyMDk5OTUzOTM0ZDlmZTE2M2ZlZDA3ZGQzNzFmYTEzOTgyYjJiMzA3NDlkNmRmNTZlY2RiYTM4NWY4Yzc4YTg2N2EKXQpbWlkKVzpVdmF1bHQtbWFuYWdlci0wOjoxMjIwOTk5NTM5MzRkOWZlMTYzZmVkMDdkZDM3MWZhMTM5ODJiMmIzMDc0OWQ2ZGY1NmVjZGJhMzg1ZjhjNzhhODY3YSpTYml0c2FmZS1hZG1pbjo6MTIyMDk5OTUzOTM0ZDlmZTE2M2ZlZDA3ZGQzNzFmYTEzOTgyYjJiMzA3NDlkNmRmNTZlY2RiYTM4NWY4Yzc4YTg2N2EyVXZhdWx0LW1hbmFnZXItMDo6MTIyMDk5OTUzOTM0ZDlmZTE2M2ZlZDA3ZGQzNzFmYTEzOTgyYjJiMzA3NDlkNmRmNTZlY2RiYTM4NWY4Yzc4YTg2N2E5w/1sZ/xIBgBCKgomCiQIARIgTmYuGZgxVotyEsMCqSiw44/3agOtvJKn9BHynYzXZWoQHg==").expect("Invalid base64 blob"),
+                    .decode("CgMyLjESjwYKRQCMHFjbebg9gs894ojdp4mvHetxBGZJlb4bsG31+th3w8oSEiCYneqOgmkJLin8CWoocGruD6KiiDGIKysaY7nbvnC2LBIUYml0c2FmZS12YXVsdC12MC1yYzIaaApAODkyZjdiNjRkMzgxNDI5N2ZhNTMwYjBhMDgzZDMwZjRiMDY0OWFlOTEzMzY0NTk3NDBlN2M2M2RjMGYyNmYyZBIMQml0c2FmZVZhdWx0EgpWYXVsdFJ1bGVzGgpWYXVsdFJ1bGVzIpICao8CClcKVTpTYml0c2FmZS1hZG1pbjo6MTIyMDk5OTUzOTM0ZDlmZTE2M2ZlZDA3ZGQzNzFmYTEzOTgyYjJiMzA3NDlkNmRmNTZlY2RiYTM4NWY4Yzc4YTg2N2EKswEKsAFarQEKUjpQdmF1bHQtdGVzdDo6MTIyMGQxMmI4YTRlMmY0NDBkODZmNDY3NjRhZmNmYzhkOTkwOGRlMzVmOTBiMzZiYzE5ZWZjZDhlMTk4NjA2Yzk0ZDIKVzpVdmF1bHQtbWFuYWdlci0wOjoxMjIwOTk5NTM5MzRkOWZlMTYzZmVkMDdkZDM3MWZhMTM5ODJiMmIzMDc0OWQ2ZGY1NmVjZGJhMzg1ZjhjNzhhODY3YSpTYml0c2FmZS1hZG1pbjo6MTIyMDk5OTUzOTM0ZDlmZTE2M2ZlZDA3ZGQzNzFmYTEzOTgyYjJiMzA3NDlkNmRmNTZlY2RiYTM4NWY4Yzc4YTg2N2EyVXZhdWx0LW1hbmFnZXItMDo6MTIyMDk5OTUzOTM0ZDlmZTE2M2ZlZDA3ZGQzNzFmYTEzOTgyYjJiMzA3NDlkNmRmNTZlY2RiYTM4NWY4Yzc4YTg2N2EyUHZhdWx0LXRlc3Q6OjEyMjBkMTJiOGE0ZTJmNDQwZDg2ZjQ2NzY0YWZjZmM4ZDk5MDhkZTM1ZjkwYjM2YmMxOWVmY2Q4ZTE5ODYwNmM5NGQyOdjHx9KSSQYAQioKJgokCAESIG1VKCv3bAsT+BjxtNifG0ZEndE86Q7i1nMXyUktduQSEB4=").expect("Invalid base64 blob"),
                 synchronizer_id: String::new(),
             }],
             ActionType::ProcessorDeploymentRequest { vault_processor_rules_cid, allocation_factory_cid, .. } => vec![DisclosedContract {

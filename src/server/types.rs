@@ -359,7 +359,7 @@ pub struct VaultLimits {
 /// Featured App Right beneficiary
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AppRewardBeneficiary {
-    pub beneficiary: String,
+    pub beneficiary: CantonId,
     pub weight: String,
 }
 
@@ -376,11 +376,11 @@ pub struct FarConfig {
 pub enum ActionType {
     // Governance (4)
     GovernanceAddMember {
-        member: String,
+        member: CantonId,
         new_threshold: i64,
     },
     GovernanceRemoveMember {
-        member: String,
+        member: CantonId,
         new_threshold: i64,
     },
     GovernanceSetThreshold {
@@ -397,7 +397,7 @@ pub enum ActionType {
         share_symbol: String,
         asset_instrument_id: InstrumentId,
         limits: VaultLimits,
-        vault_backend_signatory: String,
+        vault_backend_signatory: CantonId,
         #[serde(default)]
         vault_far_config: Option<FarConfig>,
     },
@@ -405,7 +405,7 @@ pub enum ActionType {
         vault_rules_cid: String,
         vault_cid: String,
         asset_instrument_id: InstrumentId,
-        vault_backend_signatory: String,
+        vault_backend_signatory: CantonId,
     },
 
     // Vault Operations (5)
@@ -421,7 +421,7 @@ pub enum ActionType {
     },
     VaultUpdateBackend {
         vault_id: String,
-        new_backend_signatory: String,
+        new_backend_signatory: CantonId,
     },
     VaultUpdateFarBeneficiaries {
         vault_id: String,
@@ -431,7 +431,7 @@ pub enum ActionType {
     // Processor (1)
     ProcessorDeploymentRequest {
         vault_processor_rules_cid: String,
-        vault_backend_signatory: String,
+        vault_backend_signatory: CantonId,
         allocation_factory_cid: String,
         #[serde(default)]
         processor_far_config: Option<FarConfig>,
@@ -440,21 +440,21 @@ pub enum ActionType {
 
     // Utility Onboarding (5)
     UtilityCreateProviderRequest {
-        operator: String,
+        operator: CantonId,
     },
     UtilityCreateUserRequest {
-        operator: String,
+        operator: CantonId,
     },
     UtilitySetup {
-        operator: String,
+        operator: CantonId,
         provider_service_cid: String,
         user_service_cid: String,
     },
     UtilityAcceptHolderServiceRequest {
-        operator: String,
+        operator: CantonId,
         provider_service_cid: String,
         holder_service_request_cid: String,
-        holder: String,
+        holder: CantonId,
     },
     UtilityCreateTransferRule {
         operator: String,
@@ -463,15 +463,15 @@ pub enum ActionType {
 
     // Credential Actions (2)
     CredentialOfferFree {
-        operator: String,
+        operator: CantonId,
         user_service_cid: String,
-        holder: String,
+        holder: CantonId,
         id: String,
         description: String,
         claims: Vec<Claim>,
     },
     CredentialAcceptFree {
-        operator: String,
+        operator: CantonId,
         user_service_cid: String,
         credential_offer_cid: String,
     },
@@ -492,7 +492,7 @@ pub struct Claim {
 
 /// Request to submit a confirmation for an action with structured type
 #[derive(Clone, Debug, Deserialize)]
-pub struct ConfirmActionRequestV2 {
+pub struct ConfirmActionRequest {
     pub party_id: CantonId,
     pub rules_contract_id: String,
     pub action: ActionType,
@@ -500,7 +500,7 @@ pub struct ConfirmActionRequestV2 {
 
 /// Request to execute a confirmed action with structured type
 #[derive(Clone, Debug, Deserialize)]
-pub struct ExecuteActionRequestV2 {
+pub struct ExecuteActionRequest {
     pub party_id: CantonId,
     pub rules_contract_id: String,
     pub action: ActionType,
@@ -509,7 +509,7 @@ pub struct ExecuteActionRequestV2 {
 
 /// A single governance confirmation with parsed action
 #[derive(Clone, Debug, Serialize)]
-pub struct GovernanceConfirmationV2 {
+pub struct GovernanceConfirmation {
     pub contract_id: String,
     pub action: ActionType,
     pub confirming_party: String,
@@ -517,13 +517,13 @@ pub struct GovernanceConfirmationV2 {
 
 /// A governance action with its confirmations, grouped by action hash
 #[derive(Clone, Debug, Serialize)]
-pub struct GovernanceActionV2 {
+pub struct GovernanceAction {
     /// Deterministic hash of the serialized action for grouping
     pub action_hash: String,
     /// The parsed action type
     pub action: ActionType,
     /// List of confirmations for this action
-    pub confirmations: Vec<GovernanceConfirmationV2>,
+    pub confirmations: Vec<GovernanceConfirmation>,
     /// Number of confirmations
     pub confirmation_count: usize,
     /// Whether threshold is met for execution
@@ -532,8 +532,8 @@ pub struct GovernanceActionV2 {
 
 /// Response for governance confirmations endpoint
 #[derive(Serialize)]
-pub struct GovernanceResponseV2 {
-    pub actions: Vec<GovernanceActionV2>,
+pub struct GovernanceResponse {
+    pub actions: Vec<GovernanceAction>,
     pub threshold: usize,
 }
 
@@ -549,8 +549,8 @@ pub struct ExpireConfirmationRequest {
 #[derive(Clone, Debug, Serialize)]
 pub struct GovernanceState {
     pub contract_id: String,
-    pub vault_manager: String,
-    pub members: Vec<String>,
+    pub vault_manager: CantonId,
+    pub members: Vec<CantonId>,
     pub threshold: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub action_confirmation_timeout_microseconds: Option<i64>,
@@ -560,4 +560,48 @@ pub struct GovernanceState {
 #[derive(Serialize)]
 pub struct GovernanceStateResponse {
     pub state: Option<GovernanceState>,
+}
+
+/// Information about a deployed Vault contract
+#[derive(Clone, Debug, Serialize)]
+pub struct VaultInfo {
+    pub contract_id: String,
+    pub vault_name: String,
+    pub share_symbol: String,
+    pub is_paused: bool,
+    pub vault_manager: CantonId,
+}
+
+/// Response for the vaults endpoint
+#[derive(Serialize)]
+pub struct VaultsResponse {
+    pub vaults: Vec<VaultInfo>,
+}
+
+/// Information about a ProviderService contract
+#[derive(Clone, Debug, Serialize)]
+pub struct ProviderServiceInfo {
+    pub contract_id: String,
+    pub operator: CantonId,
+    pub provider: CantonId,
+}
+
+/// Response for the provider services endpoint
+#[derive(Serialize)]
+pub struct ProviderServicesResponse {
+    pub services: Vec<ProviderServiceInfo>,
+}
+
+/// Information about a UserService contract
+#[derive(Clone, Debug, Serialize)]
+pub struct UserServiceInfo {
+    pub contract_id: String,
+    pub operator: CantonId,
+    pub user: CantonId,
+}
+
+/// Response for the user services endpoint
+#[derive(Serialize)]
+pub struct UserServicesResponse {
+    pub services: Vec<UserServiceInfo>,
 }

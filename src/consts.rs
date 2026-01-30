@@ -138,3 +138,9 @@ pub const SIGNATURES_DIR: &str = "signatures";
 // Daml package identifiers
 /// Vault governance package ID
 pub const VAULT_GOVERNANCE_PACKAGE_ID: &str = "#bitsafe-vault-governance-v0-rc2";
+/// Vault core package ID
+pub const VAULT_PACKAGE_ID: &str = "#bitsafe-vault-v0-rc2";
+/// Utility Registry App package ID
+pub const UTILITY_REGISTRY_APP_PACKAGE_ID: &str = "#utility-registry-app-v0";
+/// Utility Credential App package ID
+pub const UTILITY_CREDENTIAL_APP_PACKAGE_ID: &str = "#utility-credential-app-v0";

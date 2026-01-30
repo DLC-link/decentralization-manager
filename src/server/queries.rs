@@ -7,12 +7,22 @@ use canton_proto_rs::com::daml::ledger::api::v2::{
     get_active_contracts_response::ContractEntry, value,
 };
 
-use crate::{config::NodeConfig, consts::VAULT_GOVERNANCE_PACKAGE_ID, error::Result, utils};
+use crate::{
+    config::NodeConfig,
+    consts::{
+        UTILITY_CREDENTIAL_APP_PACKAGE_ID, UTILITY_REGISTRY_APP_PACKAGE_ID,
+        VAULT_GOVERNANCE_PACKAGE_ID, VAULT_PACKAGE_ID,
+    },
+    error::Result,
+    participant_id::CantonId,
+    utils,
+};
 
 use super::{
     action_serializer,
     types::{
-        ActionType, ContractInfo, GovernanceActionV2, GovernanceConfirmationV2, PartyMetadata,
+        ActionType, ContractInfo, GovernanceAction, GovernanceConfirmation, GovernanceState,
+        PartyMetadata, ProviderServiceInfo, UserServiceInfo, VaultInfo,
     },
 };
 
@@ -326,19 +336,19 @@ pub async fn get_governance_confirmations(
     threshold: usize,
     token: Option<String>,
     test_mode: bool,
-) -> Result<Vec<GovernanceActionV2>> {
+) -> Result<Vec<GovernanceAction>> {
     // Collect confirmations grouped by action hash
-    let mut confirmations_by_hash: HashMap<String, (ActionType, Vec<GovernanceConfirmationV2>)> =
+    let mut confirmations_by_hash: HashMap<String, (ActionType, Vec<GovernanceConfirmation>)> =
         HashMap::new();
 
     if test_mode {
-        tracing::debug!("Using WildcardFilter for governance V2 query (test mode)");
-        fetch_governance_v2_with_wildcard(config, party_id, token, &mut confirmations_by_hash)
+        tracing::debug!("Using WildcardFilter for governance query (test mode)");
+        fetch_governance_with_wildcard(config, party_id, token, &mut confirmations_by_hash)
             .await?;
     } else {
-        tracing::debug!("Using TemplateFilter for governance V2 query (per-template)");
+        tracing::debug!("Using TemplateFilter for governance query (per-template)");
         for t in GOVERNANCE_TEMPLATES {
-            match fetch_governance_v2_for_template(
+            match fetch_governance_for_template(
                 config,
                 party_id,
                 token.clone(),
@@ -371,19 +381,19 @@ pub async fn get_governance_confirmations(
         }
     }
 
-    // Convert to GovernanceActionV2 list, deduplicating confirmations by confirming_party
-    let actions: Vec<GovernanceActionV2> = confirmations_by_hash
+    // Convert to GovernanceAction list, deduplicating confirmations by confirming_party
+    let actions: Vec<GovernanceAction> = confirmations_by_hash
         .into_iter()
         .map(|(action_hash, (action, confirmations))| {
             // Deduplicate by confirming_party - keep only one confirmation per member
             let mut seen_parties = std::collections::HashSet::new();
-            let unique_confirmations: Vec<GovernanceConfirmationV2> = confirmations
+            let unique_confirmations: Vec<GovernanceConfirmation> = confirmations
                 .into_iter()
                 .filter(|c| seen_parties.insert(c.confirming_party.clone()))
                 .collect();
 
             let confirmation_count = unique_confirmations.len();
-            GovernanceActionV2 {
+            GovernanceAction {
                 action_hash,
                 action,
                 confirmations: unique_confirmations,
@@ -396,12 +406,12 @@ pub async fn get_governance_confirmations(
     Ok(actions)
 }
 
-/// Fetch V2 governance confirmations using WildcardFilter (for test mode)
-async fn fetch_governance_v2_with_wildcard(
+/// Fetch governance confirmations using WildcardFilter (for test mode)
+async fn fetch_governance_with_wildcard(
     config: &NodeConfig,
     party_id: &str,
     token: Option<String>,
-    confirmations_by_hash: &mut HashMap<String, (ActionType, Vec<GovernanceConfirmationV2>)>,
+    confirmations_by_hash: &mut HashMap<String, (ActionType, Vec<GovernanceConfirmation>)>,
 ) -> Result {
     let mut state_client = utils::create_state_client(config, token).await?;
 
@@ -447,7 +457,7 @@ async fn fetch_governance_v2_with_wildcard(
             if let Some(ref template_id) = created.template_id
                 && is_governance_template(&template_id.module_name, &template_id.entity_name)
             {
-                extract_and_add_confirmation_v2(&created, confirmations_by_hash);
+                extract_and_add_confirmation(&created, confirmations_by_hash);
             }
         }
     }
@@ -455,13 +465,13 @@ async fn fetch_governance_v2_with_wildcard(
     Ok(())
 }
 
-/// Fetch V2 governance confirmations for a specific template
-async fn fetch_governance_v2_for_template(
+/// Fetch governance confirmations for a specific template
+async fn fetch_governance_for_template(
     config: &NodeConfig,
     party_id: &str,
     token: Option<String>,
     template: &TemplateId,
-    confirmations_by_hash: &mut HashMap<String, (ActionType, Vec<GovernanceConfirmationV2>)>,
+    confirmations_by_hash: &mut HashMap<String, (ActionType, Vec<GovernanceConfirmation>)>,
 ) -> Result {
     let mut state_client = utils::create_state_client(config, token).await?;
 
@@ -508,17 +518,17 @@ async fn fetch_governance_v2_for_template(
         if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
             && let Some(created) = active.created_event
         {
-            extract_and_add_confirmation_v2(&created, confirmations_by_hash);
+            extract_and_add_confirmation(&created, confirmations_by_hash);
         }
     }
 
     Ok(())
 }
 
-/// Extract action and confirming_party from a created event, parse action, and add to map (V2)
-fn extract_and_add_confirmation_v2(
+/// Extract action and confirming_party from a created event, parse action, and add to map
+fn extract_and_add_confirmation(
     created: &CreatedEvent,
-    confirmations_by_hash: &mut HashMap<String, (ActionType, Vec<GovernanceConfirmationV2>)>,
+    confirmations_by_hash: &mut HashMap<String, (ActionType, Vec<GovernanceConfirmation>)>,
 ) {
     let Some(record) = &created.create_arguments else {
         return;
@@ -555,7 +565,7 @@ fn extract_and_add_confirmation_v2(
     // Compute action hash for grouping (JSON serialization is deterministic enough)
     let action_hash = compute_action_hash(&action);
 
-    let confirmation = GovernanceConfirmationV2 {
+    let confirmation = GovernanceConfirmation {
         contract_id: created.contract_id.clone(),
         action: action.clone(),
         confirming_party,
@@ -582,10 +592,8 @@ fn compute_action_hash(action: &ActionType) -> String {
 }
 
 // ============================================================================
-// V2 Governance State Query
+// Governance State Query
 // ============================================================================
-
-use super::types::GovernanceState;
 
 /// VaultGovernanceRules template identifier
 const VAULT_GOVERNANCE_RULES: TemplateId = TemplateId {
@@ -730,24 +738,27 @@ fn extract_governance_state(created: &CreatedEvent) -> Option<GovernanceState> {
     let record = created.create_arguments.as_ref()?;
 
     // Extract vaultManager (Party)
-    let vault_manager = record
+    let vault_manager: CantonId = record
         .fields
         .iter()
         .find(|f| f.label == "vaultManager")
         .and_then(|f| f.value.as_ref())
         .and_then(|v| match &v.sum {
-            Some(value::Sum::Party(p)) => Some(p.clone()),
+            Some(value::Sum::Party(p)) => p.parse().ok(),
             _ => None,
         })?;
 
     // Extract members (Set Party - stored as GenMap<Party, Unit> inside a Record)
-    let members = record
+    let members: Vec<CantonId> = record
         .fields
         .iter()
         .find(|f| f.label == "members")
         .and_then(|f| f.value.as_ref())
         .and_then(extract_party_set)
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|s| s.parse().ok())
+        .collect();
 
     // Extract threshold (Int)
     let threshold = record
@@ -853,4 +864,579 @@ fn extract_reltime(value: &Value) -> Option<i64> {
         Some(value::Sum::Int64(i)) => Some(*i),
         _ => None,
     }
+}
+
+// ============================================================================
+// Vault Contracts Query
+// ============================================================================
+
+/// Vault template identifier
+const VAULT_TEMPLATE: TemplateId = TemplateId {
+    package_id: VAULT_PACKAGE_ID,
+    module_name: "BitsafeVault.Vault",
+    entity_name: "Vault",
+};
+
+/// Get all Vault contracts for a party
+pub async fn get_vaults(
+    config: &NodeConfig,
+    party_id: &str,
+    token: Option<String>,
+    test_mode: bool,
+) -> Result<Vec<VaultInfo>> {
+    if test_mode {
+        fetch_vaults_with_wildcard(config, party_id, token).await
+    } else {
+        fetch_vaults_for_template(config, party_id, token).await
+    }
+}
+
+/// Fetch vaults using WildcardFilter (for test mode)
+async fn fetch_vaults_with_wildcard(
+    config: &NodeConfig,
+    party_id: &str,
+    token: Option<String>,
+) -> Result<Vec<VaultInfo>> {
+    let mut state_client = utils::create_state_client(config, token).await?;
+
+    let ledger_end = state_client
+        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
+        .await?
+        .into_inner()
+        .offset;
+
+    let mut filters_by_party = HashMap::new();
+    filters_by_party.insert(
+        party_id.to_string(),
+        Filters {
+            cumulative: vec![CumulativeFilter {
+                identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
+                    WildcardFilter {
+                        include_created_event_blob: false,
+                    },
+                )),
+            }],
+        },
+    );
+
+    let acs_request = GetActiveContractsRequest {
+        active_at_offset: ledger_end,
+        event_format: Some(EventFormat {
+            filters_by_party,
+            filters_for_any_party: None,
+            verbose: true,
+        }),
+    };
+
+    let mut stream = state_client
+        .get_active_contracts(acs_request)
+        .await?
+        .into_inner();
+
+    let mut vaults = Vec::new();
+    while let Some(response) = stream.message().await? {
+        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
+            && let Some(created) = active.created_event
+        {
+            // Check if this is the Vault template
+            if let Some(template_id) = &created.template_id
+                && template_id.module_name == VAULT_TEMPLATE.module_name
+                && template_id.entity_name == VAULT_TEMPLATE.entity_name
+            {
+                if let Some(vault_info) = extract_vault_info(&created) {
+                    vaults.push(vault_info);
+                }
+            }
+        }
+    }
+
+    Ok(vaults)
+}
+
+/// Fetch vaults using TemplateFilter
+async fn fetch_vaults_for_template(
+    config: &NodeConfig,
+    party_id: &str,
+    token: Option<String>,
+) -> Result<Vec<VaultInfo>> {
+    let mut state_client = utils::create_state_client(config, token).await?;
+
+    let ledger_end = state_client
+        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
+        .await?
+        .into_inner()
+        .offset;
+
+    let mut filters_by_party = HashMap::new();
+    filters_by_party.insert(
+        party_id.to_string(),
+        Filters {
+            cumulative: vec![CumulativeFilter {
+                identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
+                    TemplateFilter {
+                        template_id: Some(Identifier {
+                            package_id: VAULT_TEMPLATE.package_id.to_string(),
+                            module_name: VAULT_TEMPLATE.module_name.to_string(),
+                            entity_name: VAULT_TEMPLATE.entity_name.to_string(),
+                        }),
+                        include_created_event_blob: false,
+                    },
+                )),
+            }],
+        },
+    );
+
+    let acs_request = GetActiveContractsRequest {
+        active_at_offset: ledger_end,
+        event_format: Some(EventFormat {
+            filters_by_party,
+            filters_for_any_party: None,
+            verbose: true,
+        }),
+    };
+
+    let mut stream = state_client
+        .get_active_contracts(acs_request)
+        .await?
+        .into_inner();
+
+    let mut vaults = Vec::new();
+    while let Some(response) = stream.message().await? {
+        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
+            && let Some(created) = active.created_event
+        {
+            if let Some(vault_info) = extract_vault_info(&created) {
+                vaults.push(vault_info);
+            }
+        }
+    }
+
+    Ok(vaults)
+}
+
+/// Extract VaultInfo from a Vault created event
+fn extract_vault_info(created: &CreatedEvent) -> Option<VaultInfo> {
+    let record = created.create_arguments.as_ref()?;
+
+    // Extract vaultConfig (Record with name and shareSymbol)
+    let vault_config = record
+        .fields
+        .iter()
+        .find(|f| f.label == "vaultConfig")
+        .and_then(|f| f.value.as_ref())?;
+
+    let (vault_name, share_symbol) = extract_vault_config(vault_config)?;
+
+    // Extract isPaused (Bool)
+    let is_paused = record
+        .fields
+        .iter()
+        .find(|f| f.label == "isPaused")
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Bool(b)) => Some(*b),
+            _ => None,
+        })
+        .unwrap_or(false);
+
+    // Extract vaultManager (Party)
+    let vault_manager: CantonId = record
+        .fields
+        .iter()
+        .find(|f| f.label == "vaultManager")
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Party(p)) => p.parse().ok(),
+            _ => None,
+        })?;
+
+    Some(VaultInfo {
+        contract_id: created.contract_id.clone(),
+        vault_name,
+        share_symbol,
+        is_paused,
+        vault_manager,
+    })
+}
+
+/// Extract vault name and share symbol from VaultConfig record
+fn extract_vault_config(value: &Value) -> Option<(String, String)> {
+    match &value.sum {
+        Some(value::Sum::Record(record)) => {
+            let name = record
+                .fields
+                .iter()
+                .find(|f| f.label == "name")
+                .and_then(|f| f.value.as_ref())
+                .and_then(|v| match &v.sum {
+                    Some(value::Sum::Text(t)) => Some(t.clone()),
+                    _ => None,
+                })?;
+
+            let share_symbol = record
+                .fields
+                .iter()
+                .find(|f| f.label == "shareSymbol")
+                .and_then(|f| f.value.as_ref())
+                .and_then(|v| match &v.sum {
+                    Some(value::Sum::Text(t)) => Some(t.clone()),
+                    _ => None,
+                })?;
+
+            Some((name, share_symbol))
+        }
+        _ => None,
+    }
+}
+
+// ============================================================================
+// Utility Service Queries
+// ============================================================================
+
+/// ProviderService template identifier
+const PROVIDER_SERVICE_TEMPLATE: TemplateId = TemplateId {
+    package_id: UTILITY_REGISTRY_APP_PACKAGE_ID,
+    module_name: "Utility.Registry.App.V0.Service.Provider",
+    entity_name: "ProviderService",
+};
+
+/// UserService template identifier
+const USER_SERVICE_TEMPLATE: TemplateId = TemplateId {
+    package_id: UTILITY_CREDENTIAL_APP_PACKAGE_ID,
+    module_name: "Utility.Credential.App.V0.Service.User",
+    entity_name: "UserService",
+};
+
+/// Get all ProviderService contracts for a party
+pub async fn get_provider_services(
+    config: &NodeConfig,
+    party_id: &str,
+    token: Option<String>,
+    test_mode: bool,
+) -> Result<Vec<ProviderServiceInfo>> {
+    if test_mode {
+        fetch_provider_services_with_wildcard(config, party_id, token).await
+    } else {
+        fetch_provider_services_for_template(config, party_id, token).await
+    }
+}
+
+/// Fetch provider services using WildcardFilter (for test mode)
+async fn fetch_provider_services_with_wildcard(
+    config: &NodeConfig,
+    party_id: &str,
+    token: Option<String>,
+) -> Result<Vec<ProviderServiceInfo>> {
+    let mut state_client = utils::create_state_client(config, token).await?;
+
+    let ledger_end = state_client
+        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
+        .await?
+        .into_inner()
+        .offset;
+
+    let mut filters_by_party = HashMap::new();
+    filters_by_party.insert(
+        party_id.to_string(),
+        Filters {
+            cumulative: vec![CumulativeFilter {
+                identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
+                    WildcardFilter {
+                        include_created_event_blob: false,
+                    },
+                )),
+            }],
+        },
+    );
+
+    let acs_request = GetActiveContractsRequest {
+        active_at_offset: ledger_end,
+        event_format: Some(EventFormat {
+            filters_by_party,
+            filters_for_any_party: None,
+            verbose: true,
+        }),
+    };
+
+    let mut stream = state_client
+        .get_active_contracts(acs_request)
+        .await?
+        .into_inner();
+
+    let mut services = Vec::new();
+    while let Some(response) = stream.message().await? {
+        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
+            && let Some(created) = active.created_event
+        {
+            if let Some(template_id) = &created.template_id
+                && template_id.module_name == PROVIDER_SERVICE_TEMPLATE.module_name
+                && template_id.entity_name == PROVIDER_SERVICE_TEMPLATE.entity_name
+            {
+                if let Some(info) = extract_provider_service_info(&created) {
+                    services.push(info);
+                }
+            }
+        }
+    }
+
+    Ok(services)
+}
+
+/// Fetch provider services using TemplateFilter
+async fn fetch_provider_services_for_template(
+    config: &NodeConfig,
+    party_id: &str,
+    token: Option<String>,
+) -> Result<Vec<ProviderServiceInfo>> {
+    let mut state_client = utils::create_state_client(config, token).await?;
+
+    let ledger_end = state_client
+        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
+        .await?
+        .into_inner()
+        .offset;
+
+    let mut filters_by_party = HashMap::new();
+    filters_by_party.insert(
+        party_id.to_string(),
+        Filters {
+            cumulative: vec![CumulativeFilter {
+                identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
+                    TemplateFilter {
+                        template_id: Some(Identifier {
+                            package_id: PROVIDER_SERVICE_TEMPLATE.package_id.to_string(),
+                            module_name: PROVIDER_SERVICE_TEMPLATE.module_name.to_string(),
+                            entity_name: PROVIDER_SERVICE_TEMPLATE.entity_name.to_string(),
+                        }),
+                        include_created_event_blob: false,
+                    },
+                )),
+            }],
+        },
+    );
+
+    let acs_request = GetActiveContractsRequest {
+        active_at_offset: ledger_end,
+        event_format: Some(EventFormat {
+            filters_by_party,
+            filters_for_any_party: None,
+            verbose: true,
+        }),
+    };
+
+    let mut stream = state_client
+        .get_active_contracts(acs_request)
+        .await?
+        .into_inner();
+
+    let mut services = Vec::new();
+    while let Some(response) = stream.message().await? {
+        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
+            && let Some(created) = active.created_event
+        {
+            if let Some(info) = extract_provider_service_info(&created) {
+                services.push(info);
+            }
+        }
+    }
+
+    Ok(services)
+}
+
+/// Extract ProviderServiceInfo from a ProviderService created event
+fn extract_provider_service_info(created: &CreatedEvent) -> Option<ProviderServiceInfo> {
+    let record = created.create_arguments.as_ref()?;
+
+    let operator: CantonId = record
+        .fields
+        .iter()
+        .find(|f| f.label == "operator")
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Party(p)) => p.parse().ok(),
+            _ => None,
+        })?;
+
+    let provider: CantonId = record
+        .fields
+        .iter()
+        .find(|f| f.label == "provider")
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Party(p)) => p.parse().ok(),
+            _ => None,
+        })?;
+
+    Some(ProviderServiceInfo {
+        contract_id: created.contract_id.clone(),
+        operator,
+        provider,
+    })
+}
+
+/// Get all UserService contracts for a party
+pub async fn get_user_services(
+    config: &NodeConfig,
+    party_id: &str,
+    token: Option<String>,
+    test_mode: bool,
+) -> Result<Vec<UserServiceInfo>> {
+    if test_mode {
+        fetch_user_services_with_wildcard(config, party_id, token).await
+    } else {
+        fetch_user_services_for_template(config, party_id, token).await
+    }
+}
+
+/// Fetch user services using WildcardFilter (for test mode)
+async fn fetch_user_services_with_wildcard(
+    config: &NodeConfig,
+    party_id: &str,
+    token: Option<String>,
+) -> Result<Vec<UserServiceInfo>> {
+    let mut state_client = utils::create_state_client(config, token).await?;
+
+    let ledger_end = state_client
+        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
+        .await?
+        .into_inner()
+        .offset;
+
+    let mut filters_by_party = HashMap::new();
+    filters_by_party.insert(
+        party_id.to_string(),
+        Filters {
+            cumulative: vec![CumulativeFilter {
+                identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
+                    WildcardFilter {
+                        include_created_event_blob: false,
+                    },
+                )),
+            }],
+        },
+    );
+
+    let acs_request = GetActiveContractsRequest {
+        active_at_offset: ledger_end,
+        event_format: Some(EventFormat {
+            filters_by_party,
+            filters_for_any_party: None,
+            verbose: true,
+        }),
+    };
+
+    let mut stream = state_client
+        .get_active_contracts(acs_request)
+        .await?
+        .into_inner();
+
+    let mut services = Vec::new();
+    while let Some(response) = stream.message().await? {
+        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
+            && let Some(created) = active.created_event
+        {
+            if let Some(template_id) = &created.template_id
+                && template_id.module_name == USER_SERVICE_TEMPLATE.module_name
+                && template_id.entity_name == USER_SERVICE_TEMPLATE.entity_name
+            {
+                if let Some(info) = extract_user_service_info(&created) {
+                    services.push(info);
+                }
+            }
+        }
+    }
+
+    Ok(services)
+}
+
+/// Fetch user services using TemplateFilter
+async fn fetch_user_services_for_template(
+    config: &NodeConfig,
+    party_id: &str,
+    token: Option<String>,
+) -> Result<Vec<UserServiceInfo>> {
+    let mut state_client = utils::create_state_client(config, token).await?;
+
+    let ledger_end = state_client
+        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
+        .await?
+        .into_inner()
+        .offset;
+
+    let mut filters_by_party = HashMap::new();
+    filters_by_party.insert(
+        party_id.to_string(),
+        Filters {
+            cumulative: vec![CumulativeFilter {
+                identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
+                    TemplateFilter {
+                        template_id: Some(Identifier {
+                            package_id: USER_SERVICE_TEMPLATE.package_id.to_string(),
+                            module_name: USER_SERVICE_TEMPLATE.module_name.to_string(),
+                            entity_name: USER_SERVICE_TEMPLATE.entity_name.to_string(),
+                        }),
+                        include_created_event_blob: false,
+                    },
+                )),
+            }],
+        },
+    );
+
+    let acs_request = GetActiveContractsRequest {
+        active_at_offset: ledger_end,
+        event_format: Some(EventFormat {
+            filters_by_party,
+            filters_for_any_party: None,
+            verbose: true,
+        }),
+    };
+
+    let mut stream = state_client
+        .get_active_contracts(acs_request)
+        .await?
+        .into_inner();
+
+    let mut services = Vec::new();
+    while let Some(response) = stream.message().await? {
+        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
+            && let Some(created) = active.created_event
+        {
+            if let Some(info) = extract_user_service_info(&created) {
+                services.push(info);
+            }
+        }
+    }
+
+    Ok(services)
+}
+
+/// Extract UserServiceInfo from a UserService created event
+fn extract_user_service_info(created: &CreatedEvent) -> Option<UserServiceInfo> {
+    let record = created.create_arguments.as_ref()?;
+
+    let operator: CantonId = record
+        .fields
+        .iter()
+        .find(|f| f.label == "operator")
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Party(p)) => p.parse().ok(),
+            _ => None,
+        })?;
+
+    let user: CantonId = record
+        .fields
+        .iter()
+        .find(|f| f.label == "user")
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Party(p)) => p.parse().ok(),
+            _ => None,
+        })?;
+
+    Some(UserServiceInfo {
+        contract_id: created.contract_id.clone(),
+        operator,
+        user,
+    })
 }

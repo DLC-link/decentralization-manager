@@ -185,7 +185,7 @@ export interface AuthTestResponse {
   results: AuthTestResult[];
 }
 
-// Governance types (V2 with structured actions)
+// Governance types
 export interface GovernanceConfirmation {
   contract_id: string;
   action: ActionType;
@@ -206,7 +206,7 @@ export interface GovernanceResponse {
 }
 
 // ============================================================================
-// V2 Structured Action Types for Vault Governance
+// Structured Action Types for Vault Governance
 // ============================================================================
 
 export interface InstrumentId {
@@ -364,16 +364,50 @@ export type ActionType =
       amulet_rules_cid: string;
     };
 
-// V2 request types
-export interface ConfirmActionRequestV2 {
+// Request types
+export interface ConfirmActionRequest {
   party_id: string;
   rules_contract_id: string;
   action: ActionType;
 }
 
-export interface ExecuteActionRequestV2 {
+export interface ExecuteActionRequest {
   party_id: string;
   rules_contract_id: string;
   action: ActionType;
   confirmation_cids: string[];
+}
+
+// Vault types
+export interface VaultInfo {
+  contract_id: string;
+  vault_name: string;
+  share_symbol: string;
+  is_paused: boolean;
+  vault_manager: string;
+}
+
+export interface VaultsResponse {
+  vaults: VaultInfo[];
+}
+
+// Service types
+export interface ProviderServiceInfo {
+  contract_id: string;
+  operator: string;
+  provider: string;
+}
+
+export interface ProviderServicesResponse {
+  services: ProviderServiceInfo[];
+}
+
+export interface UserServiceInfo {
+  contract_id: string;
+  operator: string;
+  user: string;
+}
+
+export interface UserServicesResponse {
+  services: UserServiceInfo[];
 }

@@ -8,7 +8,7 @@ use canton_proto_rs::com::daml::ledger::api::v2::{
     List, Optional, Record, RecordField, Value, Variant, value,
 };
 
-use crate::error::Result;
+use crate::{error::Result, participant_id::CantonId};
 
 use super::types::{ActionType, AppRewardBeneficiary, Claim, FarConfig, InstrumentId, VaultLimits};
 
@@ -16,7 +16,7 @@ use super::types::{ActionType, AppRewardBeneficiary, Claim, FarConfig, Instrumen
 // Helper Functions
 // ============================================================================
 
-fn make_party(p: &str) -> Value {
+fn make_party(p: impl std::fmt::Display) -> Value {
     Value {
         sum: Some(value::Sum::Party(p.to_string())),
     }
@@ -533,6 +533,11 @@ fn extract_party(value: &Value) -> Result<String> {
     }
 }
 
+fn extract_party_id(value: &Value) -> Result<CantonId> {
+    let party_str = extract_party(value)?;
+    party_str.parse().context("Failed to parse party as CantonId")
+}
+
 fn extract_text(value: &Value) -> Result<String> {
     match &value.sum {
         Some(value::Sum::Text(t)) => Ok(t.clone()),
@@ -626,7 +631,7 @@ fn deserialize_claim(value: &Value) -> Result<Claim> {
 fn deserialize_app_reward_beneficiary(value: &Value) -> Result<AppRewardBeneficiary> {
     let record = extract_record(value)?;
     Ok(AppRewardBeneficiary {
-        beneficiary: extract_party(get_field(record, "beneficiary")?)?,
+        beneficiary: extract_party_id(get_field(record, "beneficiary")?)?,
         weight: extract_numeric(get_field(record, "weight")?)?,
     })
 }
@@ -698,12 +703,12 @@ pub fn deserialize_action(value: &Value) -> Result<ActionType> {
 
             match inner_variant.constructor.as_str() {
                 "Governance_AddMemberAndSetThreshold" => Ok(ActionType::GovernanceAddMember {
-                    member: extract_party(get_field(record, "member")?)?,
+                    member: extract_party_id(get_field(record, "member")?)?,
                     new_threshold: extract_int64(get_field(record, "newThreshold")?)?,
                 }),
                 "Governance_RemoveMemberAndSetThreshold" => {
                     Ok(ActionType::GovernanceRemoveMember {
-                        member: extract_party(get_field(record, "member")?)?,
+                        member: extract_party_id(get_field(record, "member")?)?,
                         new_threshold: extract_int64(get_field(record, "newThreshold")?)?,
                     })
                 }
@@ -736,16 +741,16 @@ pub fn deserialize_action(value: &Value) -> Result<ActionType> {
             match inner_variant.constructor.as_str() {
                 "UtilityOnboarding_CreateProviderServiceRequest" => {
                     Ok(ActionType::UtilityCreateProviderRequest {
-                        operator: extract_party(get_field(record, "operator")?)?,
+                        operator: extract_party_id(get_field(record, "operator")?)?,
                     })
                 }
                 "UtilityOnboarding_CreateUserServiceRequest" => {
                     Ok(ActionType::UtilityCreateUserRequest {
-                        operator: extract_party(get_field(record, "operator")?)?,
+                        operator: extract_party_id(get_field(record, "operator")?)?,
                     })
                 }
                 "UtilityOnboarding_SetupUtility" => Ok(ActionType::UtilitySetup {
-                    operator: extract_party(get_field(record, "operator")?)?,
+                    operator: extract_party_id(get_field(record, "operator")?)?,
                     provider_service_cid: extract_contract_id(get_field(
                         record,
                         "providerServiceCid",
@@ -754,7 +759,7 @@ pub fn deserialize_action(value: &Value) -> Result<ActionType> {
                 }),
                 "UtilityOnboarding_AcceptHolderServiceRequest" => {
                     Ok(ActionType::UtilityAcceptHolderServiceRequest {
-                        operator: extract_party(get_field(record, "operator")?)?,
+                        operator: extract_party_id(get_field(record, "operator")?)?,
                         provider_service_cid: extract_contract_id(get_field(
                             record,
                             "providerServiceCid",
@@ -763,7 +768,7 @@ pub fn deserialize_action(value: &Value) -> Result<ActionType> {
                             record,
                             "holderServiceRequestCid",
                         )?)?,
-                        holder: extract_party(get_field(record, "holder")?)?,
+                        holder: extract_party_id(get_field(record, "holder")?)?,
                     })
                 }
                 "UtilityOnboarding_CreateTransferRule" => {
@@ -801,19 +806,19 @@ pub fn deserialize_action(value: &Value) -> Result<ActionType> {
                         .collect::<Result<Vec<_>>>()?;
 
                     Ok(ActionType::CredentialOfferFree {
-                        operator: extract_party(get_field(record, "operator")?)?,
+                        operator: extract_party_id(get_field(record, "operator")?)?,
                         user_service_cid: extract_contract_id(get_field(
                             record,
                             "userServiceCid",
                         )?)?,
-                        holder: extract_party(get_field(record, "holder")?)?,
+                        holder: extract_party_id(get_field(record, "holder")?)?,
                         id: extract_text(get_field(record, "id")?)?,
                         description: extract_text(get_field(record, "description")?)?,
                         claims,
                     })
                 }
                 "Credential_AcceptFreeCredential" => Ok(ActionType::CredentialAcceptFree {
-                    operator: extract_party(get_field(record, "operator")?)?,
+                    operator: extract_party_id(get_field(record, "operator")?)?,
                     user_service_cid: extract_contract_id(get_field(record, "userServiceCid")?)?,
                     credential_offer_cid: extract_contract_id(get_field(
                         record,
@@ -836,7 +841,7 @@ pub fn deserialize_action(value: &Value) -> Result<ActionType> {
                     "assetInstrumentId",
                 )?)?,
                 limits: deserialize_vault_limits(get_field(record, "limits")?)?,
-                vault_backend_signatory: extract_party(get_field(
+                vault_backend_signatory: extract_party_id(get_field(
                     record,
                     "vaultBackendSignatory",
                 )?)?,
@@ -856,7 +861,7 @@ pub fn deserialize_action(value: &Value) -> Result<ActionType> {
                     record,
                     "assetInstrumentId",
                 )?)?,
-                vault_backend_signatory: extract_party(get_field(
+                vault_backend_signatory: extract_party_id(get_field(
                     record,
                     "vaultBackendSignatory",
                 )?)?,
@@ -890,7 +895,7 @@ pub fn deserialize_action(value: &Value) -> Result<ActionType> {
             let record = extract_record(inner)?;
             Ok(ActionType::VaultUpdateBackend {
                 vault_id: extract_contract_id(get_field(record, "backendVaultId")?)?,
-                new_backend_signatory: extract_party(get_field(record, "newBackendSignatory")?)?,
+                new_backend_signatory: extract_party_id(get_field(record, "newBackendSignatory")?)?,
             })
         }
 
@@ -924,7 +929,7 @@ pub fn deserialize_action(value: &Value) -> Result<ActionType> {
                     record,
                     "vaultProcessorRulesCid",
                 )?)?,
-                vault_backend_signatory: extract_party(get_field(
+                vault_backend_signatory: extract_party_id(get_field(
                     record,
                     "vaultBackendSignatory",
                 )?)?,

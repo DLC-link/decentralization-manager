@@ -19,6 +19,9 @@ import {
   FormControl,
   InputLabel,
   Divider,
+  Checkbox,
+  FormControlLabel,
+  FormGroup,
 } from "@mui/material";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import ExpandLessIcon from "@mui/icons-material/ExpandLess";
@@ -44,13 +47,19 @@ import type {
   GovernanceResponse,
   GovernanceAction,
   ActionType,
-  ConfirmActionRequestV2,
-  ExecuteActionRequestV2,
+  ConfirmActionRequest,
+  ExecuteActionRequest,
   InstrumentId,
   VaultLimits,
   FarConfig,
   AppRewardBeneficiary,
   Claim,
+  VaultInfo,
+  VaultsResponse,
+  ProviderServiceInfo,
+  ProviderServicesResponse,
+  UserServiceInfo,
+  UserServicesResponse,
 } from "../types";
 
 // Action type labels for display
@@ -162,12 +171,12 @@ export const GovernanceSection = ({
     initialRulesContractId || "",
   );
 
-  // V2 action form state
+  // Action form state
   const [showNewActionForm, setShowNewActionForm] = useState(false);
   const [selectedActionType, setSelectedActionType] = useState<ActionTypeKey>(
     "governance_add_member",
   );
-  const [v2Loading, setV2Loading] = useState(false);
+  const [formLoading, setFormLoading] = useState(false);
 
   // Form fields for various action types
   const [memberParty, setMemberParty] = useState("");
@@ -217,6 +226,15 @@ export const GovernanceSection = ({
   const [credentialOfferCid, setCredentialOfferCid] = useState("");
   const [claims, setClaims] = useState<Claim[]>([]);
 
+  // Available vaults from ACS
+  const [availableVaults, setAvailableVaults] = useState<VaultInfo[]>([]);
+  const [vaultsLoading, setVaultsLoading] = useState(false);
+
+  // Available services from ACS
+  const [providerServices, setProviderServices] = useState<ProviderServiceInfo[]>([]);
+  const [userServices, setUserServices] = useState<UserServiceInfo[]>([]);
+  const [servicesLoading, setServicesLoading] = useState(false);
+
   // Update rulesContractId when prop changes
   useEffect(() => {
     if (initialRulesContractId) {
@@ -252,6 +270,80 @@ export const GovernanceSection = ({
     return () => clearInterval(interval);
   }, [fetchGovernance]);
 
+  // Fetch available vaults from ACS
+  const fetchVaults = useCallback(async () => {
+    setVaultsLoading(true);
+    try {
+      const res = await fetch(
+        `${API_BASE}/vaults?party_id=${encodeURIComponent(partyId)}`,
+      );
+      if (res.ok) {
+        const response: VaultsResponse = await res.json();
+        setAvailableVaults(response.vaults);
+        // Auto-select all vaults for processor deployment
+        setInitialSupportedVaults(response.vaults.map((v) => v.contract_id));
+        // Auto-select first vault for yield epoch deployment
+        if (response.vaults.length > 0) {
+          setVaultCid(response.vaults[0].contract_id);
+        }
+      }
+    } catch (e) {
+      console.error("Failed to fetch vaults:", e);
+    } finally {
+      setVaultsLoading(false);
+    }
+  }, [partyId]);
+
+  // Fetch vaults when action type needs vault selection
+  useEffect(() => {
+    if (
+      selectedActionType === "processor_deployment_request" ||
+      selectedActionType === "yield_epoch_deployment"
+    ) {
+      fetchVaults();
+    }
+  }, [selectedActionType, fetchVaults]);
+
+  // Fetch available services from ACS
+  const fetchServices = useCallback(async () => {
+    setServicesLoading(true);
+    try {
+      const [providerRes, userRes] = await Promise.all([
+        fetch(`${API_BASE}/services/provider?party_id=${encodeURIComponent(partyId)}`),
+        fetch(`${API_BASE}/services/user?party_id=${encodeURIComponent(partyId)}`),
+      ]);
+
+      if (providerRes.ok) {
+        const response: ProviderServicesResponse = await providerRes.json();
+        setProviderServices(response.services);
+        // Auto-select first provider service
+        if (response.services.length > 0) {
+          setProviderServiceCid(response.services[0].contract_id);
+        }
+      }
+
+      if (userRes.ok) {
+        const response: UserServicesResponse = await userRes.json();
+        setUserServices(response.services);
+        // Auto-select first user service
+        if (response.services.length > 0) {
+          setUserServiceCid(response.services[0].contract_id);
+        }
+      }
+    } catch (e) {
+      console.error("Failed to fetch services:", e);
+    } finally {
+      setServicesLoading(false);
+    }
+  }, [partyId]);
+
+  // Fetch services when action type is utility_setup
+  useEffect(() => {
+    if (selectedActionType === "utility_setup") {
+      fetchServices();
+    }
+  }, [selectedActionType, fetchServices]);
+
   const handleConfirm = async (action: GovernanceAction) => {
     if (!rulesContractId) {
       setError("Please enter the VaultGovernanceRules contract ID");
@@ -262,7 +354,7 @@ export const GovernanceSection = ({
     setError(null);
 
     try {
-      const request: ConfirmActionRequestV2 = {
+      const request: ConfirmActionRequest = {
         party_id: partyId,
         rules_contract_id: rulesContractId,
         action: action.action,
@@ -300,7 +392,7 @@ export const GovernanceSection = ({
     setError(null);
 
     try {
-      const request: ExecuteActionRequestV2 = {
+      const request: ExecuteActionRequest = {
         party_id: partyId,
         rules_contract_id: rulesContractId,
         action: action.action,
@@ -465,7 +557,7 @@ export const GovernanceSection = ({
     }
   };
 
-  const handleSubmitV2Action = async () => {
+  const handleSubmitAction = async () => {
     if (!rulesContractId) {
       setError("Please enter the VaultGovernanceRules contract ID");
       return;
@@ -477,11 +569,11 @@ export const GovernanceSection = ({
       return;
     }
 
-    setV2Loading(true);
+    setFormLoading(true);
     setError(null);
 
     try {
-      const request: ConfirmActionRequestV2 = {
+      const request: ConfirmActionRequest = {
         party_id: partyId,
         rules_contract_id: rulesContractId,
         action,
@@ -495,7 +587,7 @@ export const GovernanceSection = ({
 
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.error || "Failed to submit V2 confirmation");
+        throw new Error(errData.error || "Failed to submit confirmation");
       }
 
       // Reset form and refresh data
@@ -503,10 +595,10 @@ export const GovernanceSection = ({
       await fetchGovernance();
     } catch (e) {
       setError(
-        e instanceof Error ? e.message : "Failed to submit V2 confirmation",
+        e instanceof Error ? e.message : "Failed to submit confirmation",
       );
     } finally {
-      setV2Loading(false);
+      setFormLoading(false);
     }
   };
 
@@ -851,14 +943,27 @@ export const GovernanceSection = ({
               sx={{ mb: 2 }}
               required
             />
-            <TextField
-              label="Vault Contract ID"
-              value={vaultCid}
-              onChange={(e) => setVaultCid(e.target.value)}
-              size="small"
-              fullWidth
-              sx={{ mb: 2 }}
-            />
+            <FormControl fullWidth size="small" sx={{ mb: 2 }}>
+              <InputLabel>Vault</InputLabel>
+              <Select
+                value={vaultCid}
+                label="Vault"
+                onChange={(e) => setVaultCid(e.target.value)}
+              >
+                {vaultsLoading ? (
+                  <MenuItem disabled>Loading vaults...</MenuItem>
+                ) : availableVaults.length > 0 ? (
+                  availableVaults.map((vault) => (
+                    <MenuItem key={vault.contract_id} value={vault.contract_id}>
+                      {vault.vault_name} ({vault.share_symbol})
+                      {vault.is_paused ? " [Paused]" : ""}
+                    </MenuItem>
+                  ))
+                ) : (
+                  <MenuItem disabled>No vaults found</MenuItem>
+                )}
+              </Select>
+            </FormControl>
             <Typography variant="caption" color="text.secondary">
               Asset Instrument ID
             </Typography>
@@ -1070,22 +1175,59 @@ export const GovernanceSection = ({
               Add Beneficiary
             </Button>
             <Typography variant="caption" color="text.secondary">
-              Initial Supported Vaults (comma-separated Contract IDs)
+              Initial Supported Vaults
             </Typography>
-            <TextField
-              value={initialSupportedVaults.join(", ")}
-              onChange={(e) =>
-                setInitialSupportedVaults(
-                  e.target.value
-                    .split(",")
-                    .map((s) => s.trim())
-                    .filter(Boolean),
-                )
-              }
-              size="small"
-              fullWidth
-              placeholder="vault-cid-1, vault-cid-2"
-            />
+            {vaultsLoading ? (
+              <Box sx={{ display: "flex", alignItems: "center", gap: 1, my: 1 }}>
+                <CircularProgress size={16} />
+                <Typography variant="body2">Loading vaults...</Typography>
+              </Box>
+            ) : availableVaults.length > 0 ? (
+              <FormGroup sx={{ ml: 1 }}>
+                {availableVaults.map((vault) => (
+                  <FormControlLabel
+                    key={vault.contract_id}
+                    control={
+                      <Checkbox
+                        size="small"
+                        checked={initialSupportedVaults.includes(vault.contract_id)}
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            setInitialSupportedVaults([
+                              ...initialSupportedVaults,
+                              vault.contract_id,
+                            ]);
+                          } else {
+                            setInitialSupportedVaults(
+                              initialSupportedVaults.filter(
+                                (id) => id !== vault.contract_id,
+                              ),
+                            );
+                          }
+                        }}
+                      />
+                    }
+                    label={
+                      <Box>
+                        <Typography variant="body2">
+                          {vault.vault_name} ({vault.share_symbol})
+                          {vault.is_paused && (
+                            <Chip size="small" label="Paused" color="warning" sx={{ ml: 1 }} />
+                          )}
+                        </Typography>
+                        <Typography variant="caption" color="text.secondary" sx={{ fontFamily: "monospace" }}>
+                          {vault.contract_id.slice(0, 20)}...
+                        </Typography>
+                      </Box>
+                    }
+                  />
+                ))}
+              </FormGroup>
+            ) : (
+              <Typography variant="body2" color="text.secondary" sx={{ my: 1 }}>
+                No vaults found. Deploy a vault first.
+              </Typography>
+            )}
           </>
         );
       case "utility_create_provider_request":
@@ -1110,21 +1252,46 @@ export const GovernanceSection = ({
               fullWidth
               sx={{ mb: 2 }}
             />
-            <TextField
-              label="Provider Service Contract ID"
-              value={providerServiceCid}
-              onChange={(e) => setProviderServiceCid(e.target.value)}
-              size="small"
-              fullWidth
-              sx={{ mb: 2 }}
-            />
-            <TextField
-              label="User Service Contract ID"
-              value={userServiceCid}
-              onChange={(e) => setUserServiceCid(e.target.value)}
-              size="small"
-              fullWidth
-            />
+            <FormControl fullWidth size="small" sx={{ mb: 2 }}>
+              <InputLabel>Provider Service</InputLabel>
+              <Select
+                value={providerServiceCid}
+                label="Provider Service"
+                onChange={(e) => setProviderServiceCid(e.target.value)}
+              >
+                {servicesLoading ? (
+                  <MenuItem disabled>Loading services...</MenuItem>
+                ) : providerServices.length > 0 ? (
+                  providerServices.map((svc) => (
+                    <MenuItem key={svc.contract_id} value={svc.contract_id}>
+                      Provider: {svc.provider.split("::")[0]}
+                    </MenuItem>
+                  ))
+                ) : (
+                  <MenuItem disabled>No provider services found</MenuItem>
+                )}
+              </Select>
+            </FormControl>
+            <FormControl fullWidth size="small">
+              <InputLabel>User Service</InputLabel>
+              <Select
+                value={userServiceCid}
+                label="User Service"
+                onChange={(e) => setUserServiceCid(e.target.value)}
+              >
+                {servicesLoading ? (
+                  <MenuItem disabled>Loading services...</MenuItem>
+                ) : userServices.length > 0 ? (
+                  userServices.map((svc) => (
+                    <MenuItem key={svc.contract_id} value={svc.contract_id}>
+                      User: {svc.user.split("::")[0]}
+                    </MenuItem>
+                  ))
+                ) : (
+                  <MenuItem disabled>No user services found</MenuItem>
+                )}
+              </Select>
+            </FormControl>
           </>
         );
       case "utility_accept_holder_service_request":
@@ -1380,7 +1547,7 @@ export const GovernanceSection = ({
           />
         </Box>
 
-        {/* V2 New Action Form */}
+        {/* New Action Form */}
         <Box sx={{ mb: 2 }}>
           <Button
             size="small"
@@ -1403,7 +1570,7 @@ export const GovernanceSection = ({
               }}
             >
               <Typography variant="subtitle2" sx={{ mb: 2 }}>
-                Create New Governance Action (V2)
+                Create New Governance Action
               </Typography>
 
               <FormControl fullWidth size="small" sx={{ mb: 2 }}>
@@ -1430,10 +1597,10 @@ export const GovernanceSection = ({
               <Box sx={{ mt: 2, display: "flex", gap: 1 }}>
                 <Button
                   variant="contained"
-                  onClick={handleSubmitV2Action}
-                  disabled={v2Loading || !rulesContractId}
+                  onClick={handleSubmitAction}
+                  disabled={formLoading || !rulesContractId}
                   startIcon={
-                    v2Loading ? (
+                    formLoading ? (
                       <CircularProgress size={16} />
                     ) : (
                       <CheckCircleIcon />
