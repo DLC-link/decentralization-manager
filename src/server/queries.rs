@@ -343,8 +343,7 @@ pub async fn get_governance_confirmations(
 
     if test_mode {
         tracing::debug!("Using WildcardFilter for governance query (test mode)");
-        fetch_governance_with_wildcard(config, party_id, token, &mut confirmations_by_hash)
-            .await?;
+        fetch_governance_with_wildcard(config, party_id, token, &mut confirmations_by_hash).await?;
     } else {
         tracing::debug!("Using TemplateFilter for governance query (per-template)");
         for t in GOVERNANCE_TEMPLATES {
@@ -937,16 +936,12 @@ async fn fetch_vaults_with_wildcard(
     while let Some(response) = stream.message().await? {
         if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
             && let Some(created) = active.created_event
+            && let Some(template_id) = &created.template_id
+            && template_id.module_name == VAULT_TEMPLATE.module_name
+            && template_id.entity_name == VAULT_TEMPLATE.entity_name
+            && let Some(vault_info) = extract_vault_info(&created)
         {
-            // Check if this is the Vault template
-            if let Some(template_id) = &created.template_id
-                && template_id.module_name == VAULT_TEMPLATE.module_name
-                && template_id.entity_name == VAULT_TEMPLATE.entity_name
-            {
-                if let Some(vault_info) = extract_vault_info(&created) {
-                    vaults.push(vault_info);
-                }
-            }
+            vaults.push(vault_info);
         }
     }
 
@@ -1004,10 +999,9 @@ async fn fetch_vaults_for_template(
     while let Some(response) = stream.message().await? {
         if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
             && let Some(created) = active.created_event
+            && let Some(vault_info) = extract_vault_info(&created)
         {
-            if let Some(vault_info) = extract_vault_info(&created) {
-                vaults.push(vault_info);
-            }
+            vaults.push(vault_info);
         }
     }
 
@@ -1167,15 +1161,12 @@ async fn fetch_provider_services_with_wildcard(
     while let Some(response) = stream.message().await? {
         if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
             && let Some(created) = active.created_event
+            && let Some(template_id) = &created.template_id
+            && template_id.module_name == PROVIDER_SERVICE_TEMPLATE.module_name
+            && template_id.entity_name == PROVIDER_SERVICE_TEMPLATE.entity_name
+            && let Some(info) = extract_provider_service_info(&created)
         {
-            if let Some(template_id) = &created.template_id
-                && template_id.module_name == PROVIDER_SERVICE_TEMPLATE.module_name
-                && template_id.entity_name == PROVIDER_SERVICE_TEMPLATE.entity_name
-            {
-                if let Some(info) = extract_provider_service_info(&created) {
-                    services.push(info);
-                }
-            }
+            services.push(info);
         }
     }
 
@@ -1233,10 +1224,9 @@ async fn fetch_provider_services_for_template(
     while let Some(response) = stream.message().await? {
         if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
             && let Some(created) = active.created_event
+            && let Some(info) = extract_provider_service_info(&created)
         {
-            if let Some(info) = extract_provider_service_info(&created) {
-                services.push(info);
-            }
+            services.push(info);
         }
     }
 
@@ -1334,15 +1324,12 @@ async fn fetch_user_services_with_wildcard(
     while let Some(response) = stream.message().await? {
         if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
             && let Some(created) = active.created_event
+            && let Some(template_id) = &created.template_id
+            && template_id.module_name == USER_SERVICE_TEMPLATE.module_name
+            && template_id.entity_name == USER_SERVICE_TEMPLATE.entity_name
+            && let Some(info) = extract_user_service_info(&created)
         {
-            if let Some(template_id) = &created.template_id
-                && template_id.module_name == USER_SERVICE_TEMPLATE.module_name
-                && template_id.entity_name == USER_SERVICE_TEMPLATE.entity_name
-            {
-                if let Some(info) = extract_user_service_info(&created) {
-                    services.push(info);
-                }
-            }
+            services.push(info);
         }
     }
 
@@ -1400,10 +1387,9 @@ async fn fetch_user_services_for_template(
     while let Some(response) = stream.message().await? {
         if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
             && let Some(created) = active.created_event
+            && let Some(info) = extract_user_service_info(&created)
         {
-            if let Some(info) = extract_user_service_info(&created) {
-                services.push(info);
-            }
+            services.push(info);
         }
     }
 

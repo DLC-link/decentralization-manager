@@ -32,8 +32,8 @@ use super::{
     AppState, action_serializer,
     queries::{
         get_contracts, get_governance_confirmations,
-        get_governance_state as query_governance_state, get_party_metadata,
-        get_provider_services, get_user_services, get_vaults,
+        get_governance_state as query_governance_state, get_party_metadata, get_provider_services,
+        get_user_services, get_vaults,
     },
     types::{
         AuthStatus, AuthStatusResponse, AuthTestResponse, AuthTestResult, ConfirmActionRequest,

@@ -535,7 +535,9 @@ fn extract_party(value: &Value) -> Result<String> {
 
 fn extract_party_id(value: &Value) -> Result<CantonId> {
     let party_str = extract_party(value)?;
-    party_str.parse().context("Failed to parse party as CantonId")
+    party_str
+        .parse()
+        .context("Failed to parse party as CantonId")
 }
 
 fn extract_text(value: &Value) -> Result<String> {
