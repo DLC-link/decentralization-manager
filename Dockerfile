@@ -1,7 +1,7 @@
 FROM rust:slim-bookworm AS builder
 
 RUN apt-get update
-RUN apt-get install -y cmake pkg-config libssl-dev git openssh-client protobuf-compiler nodejs npm -y
+RUN apt-get install -y cmake pkg-config libssl-dev git openssh-client protobuf-compiler nodejs npm
 
 WORKDIR /app
 

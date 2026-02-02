@@ -19,12 +19,11 @@ pub struct ContractsConfig {
     /// List of participant IDs that will sign submissions
     #[serde(default)]
     pub participant_ids: Vec<CantonId>,
-    /// Operator party ID (optional, can be allocated dynamically if not provided)
+    /// List of party IDs for each participant (must match participant_ids order)
     #[serde(default)]
-    pub operator_party: Option<String>,
-    /// Party hint for operator party allocation (used if operator_party not set)
-    #[serde(default = "default_operator_party_hint")]
-    pub operator_party_hint: String,
+    pub participant_parties: Vec<CantonId>,
+    /// Operator party ID
+    pub operator_party: CantonId,
     /// DAR files to upload (base64-encoded)
     #[serde(default)]
     pub dar_files: Vec<DarFile>,
@@ -36,16 +35,12 @@ pub struct ContractsConfig {
     pub instance_name: String,
 }
 
-fn default_operator_party_hint() -> String {
-    "operator".to_string()
-}
-
 impl ContractsConfig {
     pub fn new(
         decentralized_party_id: CantonId,
         participant_ids: Vec<CantonId>,
-        operator_party: Option<String>,
-        operator_party_hint: String,
+        participant_parties: Vec<CantonId>,
+        operator_party: CantonId,
         dar_files: Vec<DarFile>,
         contracts: Vec<ContractDefinition>,
         instance_name: String,
@@ -53,8 +48,8 @@ impl ContractsConfig {
         Self {
             decentralized_party_id,
             participant_ids,
+            participant_parties,
             operator_party,
-            operator_party_hint,
             dar_files,
             contracts,
             instance_name,
@@ -87,8 +82,8 @@ pub enum FieldDefinition {
     DecentralizedParty,
     /// The operator party ID
     OperatorParty,
-    /// A specific participant's party ID (0-indexed)
-    ParticipantParty { index: usize },
+    /// A specific party ID
+    ParticipantParty { id: CantonId },
     /// Static text value
     Text { value: String },
     /// Integer value
@@ -99,10 +94,14 @@ pub enum FieldDefinition {
     Instrument { id: String },
     /// Set of all participant parties (as GenMap<Party, Unit>)
     AttestorsSet,
+    /// Set of parties (as DA.Set.Types:Set Party - Record wrapped GenMap)
+    PartySet { parties: Vec<CantonId> },
+    /// Relative time value (as DA.Time.Types:RelTime - Record wrapped Int64 microseconds)
+    RelTime { microseconds: i64 },
     /// Optional wrapper around another field
     Optional { inner: Box<FieldDefinition> },
     /// Nested record with fields
     Record { fields: Vec<FieldDefinition> },
-    /// Governance threshold (calculated from participant count)
-    GovernanceThreshold,
+    /// Governance threshold value
+    GovernanceThreshold { value: Option<i64> },
 }

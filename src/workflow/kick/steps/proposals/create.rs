@@ -6,7 +6,9 @@ use canton_proto_rs::com::digitalasset::canton::{
         topology_mapping,
     },
     topology::admin::v30::{
-        AuthorizeRequest, StoreId, Synchronizer, authorize_request, store_id, synchronizer,
+        AuthorizeRequest, BaseQuery, ListPartyToParticipantRequest, StoreId, Synchronizer,
+        authorize_request, base_query, store_id, synchronizer,
+        topology_manager_read_service_client::TopologyManagerReadServiceClient,
         topology_manager_write_service_client::TopologyManagerWriteServiceClient,
     },
 };
@@ -234,11 +236,6 @@ async fn get_current_p2p_mapping(
     synchronizer_id: &str,
     party_id: &str,
 ) -> Result<PartyToParticipant> {
-    use canton_proto_rs::com::digitalasset::canton::topology::admin::v30::{
-        BaseQuery, ListPartyToParticipantRequest, StoreId, Synchronizer, base_query, store_id,
-        synchronizer, topology_manager_read_service_client::TopologyManagerReadServiceClient,
-    };
-
     let mut topology_read_client =
         TopologyManagerReadServiceClient::connect(config.admin_api_url()).await?;
 
