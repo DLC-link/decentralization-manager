@@ -1,32 +1,19 @@
-use anyhow::Context;
-use tokio::fs;
-
 use canton_proto_rs::com::daml::ledger::api::v2::{
-    Command, CreateCommand, GenMap, Identifier, Optional, Record, RecordField, Value,
-    admin::{
-        AllocatePartyRequest, CreateUserRequest, GrantUserRightsRequest, ListKnownPartiesRequest,
-        ObjectMeta, Right, User,
-        party_management_service_client::PartyManagementServiceClient,
-        right::{CanActAs, CanReadAs, Kind},
-    },
-    command, gen_map,
-    interactive::PrepareSubmissionRequest,
-    value,
+    Command, CreateCommand, GenMap, Identifier, Optional, Record, RecordField, Value, command,
+    gen_map, interactive::PrepareSubmissionRequest, value,
 };
+use tokio::fs;
 
 use crate::{
     config::{NetworkConfig, NodeConfig},
     consts::{
         LEDGER_SUBMISSIONS_DIR, MIN_PARTICIPANTS_CONTRACTS, PREPARED_DIR,
-        PREPARED_SUBMISSION_PREFIX, TOPOLOGY_RETRY_DELAY_SECS, TOPOLOGY_RETRY_MAX_ATTEMPTS,
+        PREPARED_SUBMISSION_PREFIX,
     },
     error::Result,
     utils,
     workflow::contracts::{ContractsConfig, ContractsDirs, FieldDefinition},
 };
-
-/// Default page size for listing operations (parties, keys, etc.)
-const DEFAULT_PAGE_SIZE: i32 = 1000;
 
 /// Prepare ledger submissions for governance contracts
 ///
@@ -54,66 +41,18 @@ pub async fn prepare_submissions(
     let decentralized_registrar = contracts_config.decentralized_party_id.to_string();
     tracing::debug!("Using decentralized party: {decentralized_registrar}");
 
-    // Step 2: Wait for party to be visible in Ledger API
-    tracing::info!("Waiting for decentralized party to be visible in Ledger API...");
     let token_opt = Some(token.to_string());
-    let mut party_client = utils::create_party_client(config, token_opt.clone()).await?;
 
-    let max_attempts = TOPOLOGY_RETRY_MAX_ATTEMPTS;
-    let retry_delay = tokio::time::Duration::from_secs(TOPOLOGY_RETRY_DELAY_SECS);
-
-    for attempt in 1..=max_attempts {
-        let response = party_client
-            .list_known_parties(tonic::Request::new(ListKnownPartiesRequest {
-                identity_provider_id: String::new(),
-                page_token: String::new(),
-                page_size: DEFAULT_PAGE_SIZE,
-            }))
-            .await?
-            .into_inner();
-
-        let party_found = response
-            .party_details
-            .iter()
-            .any(|pd| pd.party == decentralized_registrar);
-
-        if party_found {
-            tracing::info!("Decentralized party found in Ledger API after {attempt} attempt(s)");
-            break;
-        }
-
-        if attempt < max_attempts {
-            tracing::debug!(
-                "Party not yet visible in Ledger API, attempt {attempt}/{max_attempts}, retrying in {retry_delay:?}..."
-            );
-            tokio::time::sleep(retry_delay).await;
-        } else {
-            anyhow::bail!(
-                "Decentralized party not visible in Ledger API after {max_attempts} attempts"
-            );
-        }
-    }
-
-    // Step 3: Get parties for each participant
-    tracing::info!("Getting parties for participants...");
-    let mut participant_parties = Vec::new();
-    let synchronizer_id = utils::get_synchronizer_id(config).await?;
-
-    for participant_id in &contracts_config.participant_ids {
-        tracing::debug!("Finding party for participant {participant_id}");
-        let party = allocate_or_find_party(
-            &mut party_client,
-            &participant_id.to_string(),
-            &synchronizer_id,
-        )
-        .await?;
-        tracing::debug!("Party for {participant_id}: {party}");
-        participant_parties.push(party);
-    }
+    // Get participant parties from config (provided by API caller)
+    let participant_parties: Vec<String> = contracts_config
+        .participant_parties
+        .iter()
+        .map(|p| p.to_string())
+        .collect();
 
     // Validate participant count
     if participant_parties.is_empty() {
-        anyhow::bail!("No participants provided in contracts config");
+        anyhow::bail!("No participant parties provided in contracts config");
     }
 
     if participant_parties.len() < MIN_PARTICIPANTS_CONTRACTS {
@@ -129,93 +68,11 @@ pub async fn prepare_submissions(
         parties = participant_parties.join(", ")
     );
 
-    // Get operator party from config or allocate
-    let operator = if let Some(operator_party) = &contracts_config.operator_party {
-        tracing::debug!("Using operator party from config: {operator_party}");
-        operator_party.clone()
-    } else {
-        tracing::debug!("Allocating/finding operator party");
-        allocate_or_find_party(
-            &mut party_client,
-            &contracts_config.operator_party_hint,
-            &utils::get_synchronizer_id(config).await?,
-        )
-        .await?
-    };
+    // Get operator party from config
+    let operator = contracts_config.operator_party.to_string();
     tracing::info!("Operator party: {operator}");
 
-    // Step 4: Create ledger-api-user and grant rights
-    // Note: User ID must match JWT token's "sub" claim
-    tracing::info!("Setting up {user_id}...");
-    let mut user_client = utils::create_user_client(config, token_opt.clone()).await?;
-
-    // Try to create user (may already exist) - use first participant as primary party
-    let primary_party = participant_parties
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("No participants available for user creation"))?
-        .clone();
-
-    let create_user_result = user_client
-        .create_user(tonic::Request::new(CreateUserRequest {
-            user: Some(User {
-                id: user_id.to_string(),
-                primary_party: primary_party.clone(),
-                is_deactivated: false,
-                metadata: Some(ObjectMeta {
-                    resource_version: String::new(),
-                    annotations: [("description".to_string(), "Ledger API User".to_string())]
-                        .into_iter()
-                        .collect(),
-                }),
-                identity_provider_id: String::new(),
-            }),
-            rights: vec![
-                Right {
-                    kind: Some(Kind::CanActAs(CanActAs {
-                        party: primary_party.clone(),
-                    })),
-                },
-                Right {
-                    kind: Some(Kind::CanReadAs(CanReadAs {
-                        party: primary_party.clone(),
-                    })),
-                },
-            ],
-        }))
-        .await;
-
-    match create_user_result {
-        Ok(_) => tracing::info!("Created {user_id}"),
-        Err(e) if e.code() == tonic::Code::AlreadyExists => {
-            tracing::debug!("{user_id} already exists");
-        }
-        Err(e) => return Err(e.into()),
-    }
-
-    // Grant rights for the decentralized registrar
-    tracing::info!("Granting rights to {user_id} for decentralized party...");
-    user_client
-        .grant_user_rights(tonic::Request::new(GrantUserRightsRequest {
-            user_id: user_id.to_string(),
-            rights: vec![
-                Right {
-                    kind: Some(Kind::CanActAs(CanActAs {
-                        party: decentralized_registrar.clone(),
-                    })),
-                },
-                Right {
-                    kind: Some(Kind::CanReadAs(CanReadAs {
-                        party: decentralized_registrar.clone(),
-                    })),
-                },
-            ],
-            identity_provider_id: String::new(),
-        }))
-        .await?;
-
-    tracing::info!("{user_id} setup complete");
-
-    // Step 5: Build context for field value building
+    // Build context for field value building
     let context = SubmissionContext {
         decentralized_party: decentralized_registrar.clone(),
         operator_party: operator.clone(),
@@ -330,13 +187,7 @@ fn build_field_value(field_def: &FieldDefinition, context: &SubmissionContext) -
             value::Sum::Party(context.decentralized_party.clone())
         }
         FieldDefinition::OperatorParty => value::Sum::Party(context.operator_party.clone()),
-        FieldDefinition::ParticipantParty { index } => {
-            let party = context
-                .participant_parties
-                .get(*index)
-                .ok_or_else(|| anyhow::anyhow!("Participant index {index} out of bounds"))?;
-            value::Sum::Party(party.clone())
-        }
+        FieldDefinition::ParticipantParty { id } => value::Sum::Party(id.to_string()),
         FieldDefinition::Text { value: text } => value::Sum::Text(text.clone()),
         FieldDefinition::Int64 { value: num } => value::Sum::Int64(*num),
         FieldDefinition::Bool { value: b } => value::Sum::Bool(*b),
@@ -361,7 +212,7 @@ fn build_field_value(field_def: &FieldDefinition, context: &SubmissionContext) -
             })
         }
         FieldDefinition::AttestorsSet => {
-            // Set Party represented as GenMap<Party, Unit>
+            // Raw GenMap<Party, Unit> for CBTC-style contracts
             let unit = Value {
                 sum: Some(value::Sum::Unit(())),
             };
@@ -376,6 +227,44 @@ fn build_field_value(field_def: &FieldDefinition, context: &SubmissionContext) -
                         value: Some(unit.clone()),
                     })
                     .collect(),
+            })
+        }
+        FieldDefinition::PartySet { parties } => {
+            // DA.Set.Types:Set Party is a record containing a "map" field with GenMap<Party, Unit>
+            let unit = Value {
+                sum: Some(value::Sum::Unit(())),
+            };
+            let gen_map = GenMap {
+                entries: parties
+                    .iter()
+                    .map(|party| gen_map::Entry {
+                        key: Some(Value {
+                            sum: Some(value::Sum::Party(party.to_string())),
+                        }),
+                        value: Some(unit.clone()),
+                    })
+                    .collect(),
+            };
+            value::Sum::Record(Record {
+                record_id: None,
+                fields: vec![RecordField {
+                    label: "map".to_string(),
+                    value: Some(Value {
+                        sum: Some(value::Sum::GenMap(gen_map)),
+                    }),
+                }],
+            })
+        }
+        FieldDefinition::RelTime { microseconds } => {
+            // DA.Time.Types:RelTime is a record containing a "microseconds" field (Int64)
+            value::Sum::Record(Record {
+                record_id: None,
+                fields: vec![RecordField {
+                    label: "microseconds".to_string(),
+                    value: Some(Value {
+                        sum: Some(value::Sum::Int64(*microseconds)),
+                    }),
+                }],
             })
         }
         FieldDefinition::Optional { inner } => {
@@ -394,79 +283,11 @@ fn build_field_value(field_def: &FieldDefinition, context: &SubmissionContext) -
                 fields: record_fields,
             })
         }
-        FieldDefinition::GovernanceThreshold => value::Sum::Int64(context.governance_threshold),
+        FieldDefinition::GovernanceThreshold { value } => {
+            // Use provided value or fall back to calculated threshold
+            value::Sum::Int64(value.unwrap_or(context.governance_threshold))
+        }
     };
 
     Ok(Value { sum: Some(sum) })
-}
-
-/// Allocate a party with a given hint, or find if it already exists
-async fn allocate_or_find_party<T>(
-    client: &mut PartyManagementServiceClient<T>,
-    party_id_hint: &str,
-    synchronizer_id: &str,
-) -> Result<String>
-where
-    T: tonic::client::GrpcService<tonic::body::Body> + Send,
-    T::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
-    T::ResponseBody: tonic::codegen::Body<Data = tonic::codegen::Bytes> + Send + 'static,
-    <T::ResponseBody as tonic::codegen::Body>::Error:
-        Into<Box<dyn std::error::Error + Send + Sync>> + Send,
-    T::Future: Send,
-{
-    // First try to find existing party with this hint
-    let list_response = client
-        .list_known_parties(tonic::Request::new(ListKnownPartiesRequest {
-            identity_provider_id: String::new(),
-            page_token: String::new(),
-            page_size: DEFAULT_PAGE_SIZE,
-        }))
-        .await?
-        .into_inner();
-
-    // Check if party already exists (exact match or contains the hint)
-    for party_details in list_response.party_details {
-        if party_details.party.contains(party_id_hint) {
-            tracing::debug!("Found existing party: {party}", party = party_details.party);
-            return Ok(party_details.party);
-        }
-    }
-
-    // Party doesn't exist, allocate it
-    tracing::debug!("Allocating new party with hint: {party_id_hint}");
-
-    // Canton 3.4+ requires only the fingerprint portion of the synchronizer ID for party allocation
-    // Extract fingerprint from full ID format: alias::fingerprint::version -> fingerprint
-    let synchronizer_fingerprint = utils::extract_synchronizer_fingerprint(synchronizer_id)
-        .context("Failed to extract synchronizer fingerprint for party allocation")?;
-    tracing::debug!(
-        "Using synchronizer fingerprint for party allocation: {synchronizer_fingerprint}"
-    );
-
-    let allocate_response = client
-        .allocate_party(tonic::Request::new(AllocatePartyRequest {
-            party_id_hint: party_id_hint.to_string(),
-            local_metadata: Some(ObjectMeta {
-                resource_version: String::new(),
-                annotations: [(
-                    "description".to_string(),
-                    format!("Party for {party_id_hint}"),
-                )]
-                .into_iter()
-                .collect(),
-            }),
-            identity_provider_id: String::new(),
-            synchronizer_id: synchronizer_fingerprint,
-            user_id: String::new(),
-        }))
-        .await?
-        .into_inner();
-
-    let party_id = allocate_response
-        .party_details
-        .ok_or_else(|| anyhow::anyhow!("AllocateParty returned no party details"))?
-        .party;
-
-    tracing::debug!("Allocated new party: {party_id}");
-    Ok(party_id)
 }

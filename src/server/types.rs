@@ -187,22 +187,16 @@ pub struct ContractsRequest {
     pub decentralized_party_id: CantonId,
     /// List of participant IDs that will sign submissions
     pub participant_ids: Vec<CantonId>,
-    /// Operator party ID (optional, can be allocated dynamically if not provided)
-    #[serde(default)]
-    pub operator_party: Option<String>,
-    /// Party hint for operator party allocation (used if operator_party not set)
-    #[serde(default = "default_operator_party_hint")]
-    pub operator_party_hint: String,
+    /// List of party IDs for each participant (must match participant_ids order)
+    pub participant_parties: Vec<CantonId>,
+    /// Operator party ID
+    pub operator_party: CantonId,
     /// DAR files to upload (base64-encoded)
     #[serde(default)]
     pub dar_files: Vec<DarFile>,
     /// Contract definitions to create after decentralized party setup
     #[serde(default)]
     pub contracts: Vec<ContractDefinition>,
-}
-
-fn default_operator_party_hint() -> String {
-    "operator".to_string()
 }
 
 /// Progress status of a workflow (kick, onboarding, etc.)
@@ -341,23 +335,198 @@ pub struct AuthTestResponse {
 }
 
 // ============================================================================
-// Governance Types
+// Governance Types (Structured Actions)
 // ============================================================================
 
-/// A single governance confirmation contract
+/// Instrument identifier (admin + id)
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InstrumentId {
+    pub admin: String,
+    pub id: String,
+}
+
+/// Vault limits configuration (all fields are optional in DAML)
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VaultLimits {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_total_deposit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_deposit_amount: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_withdrawal_amount: Option<String>,
+}
+
+/// Featured App Right beneficiary
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AppRewardBeneficiary {
+    pub beneficiary: CantonId,
+    pub weight: String,
+}
+
+/// Featured App Right configuration
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FarConfig {
+    pub featured_app_right_cid: String,
+    pub beneficiaries: Vec<AppRewardBeneficiary>,
+}
+
+/// Structured action types for Vault governance
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ActionType {
+    // Governance (4)
+    GovernanceAddMember {
+        member: CantonId,
+        new_threshold: i64,
+    },
+    GovernanceRemoveMember {
+        member: CantonId,
+        new_threshold: i64,
+    },
+    GovernanceSetThreshold {
+        new_threshold: i64,
+    },
+    GovernanceSetTimeout {
+        new_timeout_microseconds: i64,
+    },
+
+    // Vault Deployment (2)
+    VaultDeployment {
+        vault_rules_cid: String,
+        vault_name: String,
+        share_symbol: String,
+        asset_instrument_id: InstrumentId,
+        limits: VaultLimits,
+        vault_backend_signatory: CantonId,
+        #[serde(default)]
+        vault_far_config: Option<FarConfig>,
+    },
+    YieldEpochDeployment {
+        vault_rules_cid: String,
+        vault_cid: String,
+        asset_instrument_id: InstrumentId,
+        vault_backend_signatory: CantonId,
+    },
+
+    // Vault Operations (5)
+    VaultPause {
+        vault_id: String,
+    },
+    VaultUnpause {
+        vault_id: String,
+    },
+    VaultUpdateLimits {
+        vault_id: String,
+        new_limits: VaultLimits,
+    },
+    VaultUpdateBackend {
+        vault_id: String,
+        new_backend_signatory: CantonId,
+    },
+    VaultUpdateFarBeneficiaries {
+        vault_id: String,
+        new_beneficiaries: Vec<AppRewardBeneficiary>,
+    },
+
+    // Processor (1)
+    ProcessorDeploymentRequest {
+        vault_processor_rules_cid: String,
+        vault_backend_signatory: CantonId,
+        allocation_factory_cid: String,
+        #[serde(default)]
+        processor_far_config: Option<FarConfig>,
+        initial_supported_vaults: Vec<String>,
+    },
+
+    // Utility Onboarding (5)
+    UtilityCreateProviderRequest {
+        operator: CantonId,
+    },
+    UtilityCreateUserRequest {
+        operator: CantonId,
+    },
+    UtilitySetup {
+        operator: CantonId,
+        provider_service_cid: String,
+        user_service_cid: String,
+    },
+    UtilityAcceptHolderServiceRequest {
+        operator: CantonId,
+        provider_service_cid: String,
+        holder_service_request_cid: String,
+        holder: CantonId,
+    },
+    UtilityCreateTransferRule {
+        operator: String,
+        registrar_service_cid: String,
+    },
+
+    // Credential Actions (2)
+    CredentialOfferFree {
+        operator: CantonId,
+        user_service_cid: String,
+        holder: CantonId,
+        id: String,
+        description: String,
+        claims: Vec<Claim>,
+    },
+    CredentialAcceptFree {
+        operator: CantonId,
+        user_service_cid: String,
+        credential_offer_cid: String,
+    },
+
+    // DevNet (1)
+    DevNetFeatureApp {
+        amulet_rules_cid: String,
+    },
+}
+
+/// Credential claim (subject, property, value)
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Claim {
+    pub subject: String,
+    pub property: String,
+    pub value: String,
+}
+
+/// Request to submit a confirmation for an action with structured type
+#[derive(Clone, Debug, Deserialize)]
+pub struct ConfirmActionRequest {
+    pub party_id: CantonId,
+    pub rules_contract_id: String,
+    pub action: ActionType,
+}
+
+/// Request to execute a confirmed action with structured type
+#[derive(Clone, Debug, Deserialize)]
+pub struct ExecuteActionRequest {
+    pub party_id: CantonId,
+    pub rules_contract_id: String,
+    pub action: ActionType,
+    pub confirmation_cids: Vec<String>,
+}
+
+/// A single governance confirmation with parsed action
 #[derive(Clone, Debug, Serialize)]
 pub struct GovernanceConfirmation {
     pub contract_id: String,
-    pub action: String,
+    pub action: ActionType,
     pub confirming_party: String,
 }
 
-/// A governance action with its confirmations
+/// A governance action with its confirmations, grouped by action hash
 #[derive(Clone, Debug, Serialize)]
 pub struct GovernanceAction {
-    pub action_id: String,
+    /// Deterministic hash of the serialized action for grouping
+    pub action_hash: String,
+    /// The parsed action type
+    pub action: ActionType,
+    /// List of confirmations for this action
     pub confirmations: Vec<GovernanceConfirmation>,
+    /// Number of confirmations
     pub confirmation_count: usize,
+    /// Whether threshold is met for execution
     pub can_execute: bool,
 }
 
@@ -366,20 +535,76 @@ pub struct GovernanceAction {
 pub struct GovernanceResponse {
     pub actions: Vec<GovernanceAction>,
     pub threshold: usize,
+    /// The member party ID for the requesting party (used to identify own confirmations)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub member_party_id: Option<String>,
 }
 
-/// Request to submit a confirmation for an action
+/// Request to expire a stale confirmation
 #[derive(Clone, Debug, Deserialize)]
-pub struct ConfirmActionRequest {
+pub struct ExpireConfirmationRequest {
     pub party_id: CantonId,
-    pub action_id: String,
     pub rules_contract_id: String,
+    pub confirmation_cid: String,
 }
 
-/// Request to execute a confirmed action
-#[derive(Clone, Debug, Deserialize)]
-pub struct ExecuteActionRequest {
-    pub party_id: CantonId,
-    pub action_id: String,
-    pub rules_contract_id: String,
+/// State of a VaultGovernanceRules contract
+#[derive(Clone, Debug, Serialize)]
+pub struct GovernanceState {
+    pub contract_id: String,
+    pub vault_manager: CantonId,
+    pub members: Vec<CantonId>,
+    pub threshold: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action_confirmation_timeout_microseconds: Option<i64>,
+}
+
+/// Response for the governance state endpoint
+#[derive(Serialize)]
+pub struct GovernanceStateResponse {
+    pub state: Option<GovernanceState>,
+}
+
+/// Information about a deployed Vault contract
+#[derive(Clone, Debug, Serialize)]
+pub struct VaultInfo {
+    pub contract_id: String,
+    pub vault_name: String,
+    pub share_symbol: String,
+    pub is_paused: bool,
+    pub vault_manager: CantonId,
+}
+
+/// Response for the vaults endpoint
+#[derive(Serialize)]
+pub struct VaultsResponse {
+    pub vaults: Vec<VaultInfo>,
+}
+
+/// Information about a ProviderService contract
+#[derive(Clone, Debug, Serialize)]
+pub struct ProviderServiceInfo {
+    pub contract_id: String,
+    pub operator: CantonId,
+    pub provider: CantonId,
+}
+
+/// Response for the provider services endpoint
+#[derive(Serialize)]
+pub struct ProviderServicesResponse {
+    pub services: Vec<ProviderServiceInfo>,
+}
+
+/// Information about a UserService contract
+#[derive(Clone, Debug, Serialize)]
+pub struct UserServiceInfo {
+    pub contract_id: String,
+    pub operator: CantonId,
+    pub user: CantonId,
+}
+
+/// Response for the user services endpoint
+#[derive(Serialize)]
+pub struct UserServicesResponse {
+    pub services: Vec<UserServiceInfo>,
 }

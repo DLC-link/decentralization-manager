@@ -38,6 +38,17 @@ data:
     realm = "canton-devnet"
     client_id = "attestor-1"
     client_secret = "***REDACTED-CLIENT-SECRET***"
+
+    [[parties]]
+    dec_party_id = "vault-test::1220d12b8a4e2f440d86f46764afcfc8d9908de35f90b36bc19efcd8e198606c94d2"
+    member_party_id = "attestor-1::1220fa8543db6c66fe3a55b1f180c8dfc7f876265c76684fbc1d35d89e02c8aafe8e"
+    user_id = "CoordinatorUser"
+
+    [parties.keycloak]
+    url = "https://keycloak.dev.canton.example.com"
+    realm = "canton-devnet"
+    client_id = "attestor-1"
+    client_secret = "***REDACTED-CLIENT-SECRET***"
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -93,7 +104,7 @@ spec:
               mountPath: /app
       containers:
         - name: dec-party-manager
-          image: public.ecr.aws/dlc-link/canton-decparty-manager:0.0.18
+          image: public.ecr.aws/dlc-link/canton-decparty-manager:0.0.28
           imagePullPolicy: Always
           command:
             [
@@ -123,6 +134,9 @@ spec:
             limits:
               memory: "512Mi"
               cpu: "500m"
+          env:
+            - name: RUST_LOG
+              value: dec_party_manager=debug,tokio_noise=error,hyper_noise=error
       volumes:
         - name: config
           configMap:

@@ -73,7 +73,7 @@ impl NetworkConfig {
     }
 
     /// Save network configuration to a CSV file
-    pub async fn save_to_file<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+    pub async fn save_to_file<P: AsRef<Path>>(&self, path: P) -> Result {
         let path = path.as_ref();
         let mut writer = csv::Writer::from_writer(Vec::new());
 
@@ -312,7 +312,7 @@ impl NodeConfig {
     }
 
     /// Save the peers configuration to peers.csv in the config directory
-    pub async fn save_network_config(&self, config: &NetworkConfig) -> Result<()> {
+    pub async fn save_network_config(&self, config: &NetworkConfig) -> Result {
         let peers_config_path = self.config_dir().join("peers.csv");
         config.save_to_file(&peers_config_path).await
     }
@@ -360,13 +360,13 @@ impl NodeConfig {
     }
 
     /// Set the participant_id and save the config to disk
-    pub async fn set_and_save_participant_id(&mut self, participant_id: CantonId) -> Result<()> {
+    pub async fn set_and_save_participant_id(&mut self, participant_id: CantonId) -> Result {
         self.node.participant_id = Some(participant_id);
         self.save_config().await
     }
 
     /// Save the current config to disk
-    async fn save_config(&self) -> Result<()> {
+    async fn save_config(&self) -> Result {
         let config_path = self.root_dir.join(CONFIG_DIR).join(NODE_CONFIG_FILENAME);
 
         // Create a serializable version without the root_dir field

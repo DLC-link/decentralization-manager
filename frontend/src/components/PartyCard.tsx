@@ -40,6 +40,11 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
   const [canScrollDown, setCanScrollDown] = useState(false);
   const contractsScrollRef = useRef<HTMLDivElement>(null);
 
+  // Find VaultGovernanceRules contract from party's contracts
+  const vaultGovernanceRulesContract = party.contracts?.find(
+    (c) => c.template_id.includes("VaultGovernanceRules") || c.template_id.includes("VaultGovernance")
+  );
+
   const updateScrollShadows = useCallback(() => {
     const el = contractsScrollRef.current;
     if (el) {
@@ -240,7 +245,11 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
 
       <CardContent sx={{ pt: 0 }}>
         <AuthSection partyId={party.party_id} authStatus={authStatus} onRefresh={onAuthRefresh} />
-        <GovernanceSection partyId={party.party_id} />
+        <GovernanceSection
+          partyId={party.party_id}
+          rulesContractId={vaultGovernanceRulesContract?.contract_id}
+          memberPartyId={authStatus?.member_party_id}
+        />
       </CardContent>
 
       <KickDialog
