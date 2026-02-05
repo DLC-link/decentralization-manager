@@ -174,7 +174,9 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &ContractsDirs) -> Resu
     let key_size = ED25519_PRIVATE_KEY_LENGTH as usize;
     let max_offset = exported_key_data.len().saturating_sub(key_size);
 
-    tracing::debug!("Searching for valid Ed25519 private key among {max_offset} possible positions");
+    tracing::debug!(
+        "Searching for valid Ed25519 private key among {max_offset} possible positions"
+    );
 
     let mut candidate_keys = Vec::new();
 

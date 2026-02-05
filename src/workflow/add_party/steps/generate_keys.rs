@@ -228,7 +228,9 @@ async fn propose_namespace_delegation(
             if status.contains("ALREADY_EXISTS") || status.contains("already exists") {
                 tracing::debug!("Namespace delegation already exists on synchronizer (this is OK)");
             } else {
-                return Err(anyhow::anyhow!("Failed to submit namespace delegation to synchronizer: {e}"));
+                return Err(anyhow::anyhow!(
+                    "Failed to submit namespace delegation to synchronizer: {e}"
+                ));
             }
         }
     }

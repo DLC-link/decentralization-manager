@@ -492,6 +492,63 @@ pub async fn start_attestor(node_config: NodeConfig, coordinator: Peer) -> Resul
                     tracing::error!("Failed to send add party signatures to coordinator: {e}");
                 }
             }
+            MessageType::ImportAcs => {
+                tracing::info!("Executing: Import ACS (new member only)");
+                // Payload contains: [config_json, acs_snapshot]
+                if payload.is_empty() {
+                    tracing::error!("No ACS import payload received from coordinator");
+                    continue;
+                }
+
+                // Decode config and ACS snapshot from payload
+                let items = match utils::decode_length_prefixed(&payload, 2) {
+                    Ok(items) => items,
+                    Err(e) => {
+                        tracing::error!("Failed to decode ImportAcs payload: {e}");
+                        continue;
+                    }
+                };
+
+                let add_party_config: add_party::AddPartyConfig =
+                    match serde_json::from_slice(&items[0]) {
+                        Ok(config) => config,
+                        Err(e) => {
+                            tracing::error!("Failed to deserialize add party config: {e}");
+                            continue;
+                        }
+                    };
+
+                // Only the new member imports ACS
+                if *node_config.participant_id() != add_party_config.new_participant_id {
+                    tracing::info!("Not the new member, skipping ACS import");
+                    if let Err(e) = client
+                        .send_status(b"Not new member, skipped ACS import".to_vec())
+                        .await
+                    {
+                        tracing::error!("Failed to send status: {e}");
+                    }
+                    continue;
+                }
+
+                let acs_snapshot = items[1].clone();
+                tracing::info!("Importing ACS snapshot ({} bytes)", acs_snapshot.len());
+
+                if let Err(e) = add_party::import_party_acs(&node_config, acs_snapshot).await {
+                    tracing::error!("ACS import failed: {e}");
+                    if let Err(e) = client
+                        .send_status(format!("ACS import failed: {e}").into_bytes())
+                        .await
+                    {
+                        tracing::error!("Failed to send error status: {e}");
+                    }
+                    continue;
+                }
+
+                tracing::info!("ACS import completed successfully");
+                if let Err(e) = client.send_status(b"ACS import completed".to_vec()).await {
+                    tracing::error!("Failed to send completion status: {e}");
+                }
+            }
             _ => {
                 tracing::warn!("Unexpected message type: {command:?}");
             }

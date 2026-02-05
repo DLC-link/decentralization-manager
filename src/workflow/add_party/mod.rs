@@ -6,7 +6,10 @@ pub mod steps;
 
 pub use config::AddPartyConfig;
 pub use dirs::AddPartyDirs;
-pub use steps::{create_proposals, export_state, generate_keys, sign_proposals, submit_add_party};
+pub use steps::{
+    create_proposals, export_state, generate_keys, import_party_acs, sign_proposals,
+    submit_add_party,
+};
 
 use crate::{noise::MessageType, workflow::state::WorkflowStep};
 
@@ -25,6 +28,8 @@ pub enum AddPartyStep {
     SignProposals,
     /// Coordinator submits add party
     SubmitAddParty,
+    /// Coordinator exports ACS (if party has contracts) and new member imports
+    SyncAcs,
     /// Workflow complete
     Complete,
 }
@@ -34,6 +39,7 @@ impl WorkflowStep for AddPartyStep {
         match self {
             Self::GenerateNewMemberKeys => Some(MessageType::GenerateAddPartyKeys),
             Self::SignProposals => Some(MessageType::SignAddParty),
+            Self::SyncAcs => Some(MessageType::ImportAcs),
             Self::Complete => Some(MessageType::Disconnect),
             Self::WaitingForAttestors
             | Self::ExportState
@@ -49,13 +55,17 @@ impl WorkflowStep for AddPartyStep {
             Self::ExportState => Some(Self::CreateProposals),
             Self::CreateProposals => Some(Self::SignProposals),
             Self::SignProposals => Some(Self::SubmitAddParty),
-            Self::SubmitAddParty => Some(Self::Complete),
+            // Note: SyncAcs step may be skipped if party has no contracts
+            Self::SubmitAddParty => Some(Self::SyncAcs),
+            Self::SyncAcs => Some(Self::Complete),
             Self::Complete => None,
         }
     }
 
     fn requires_attestors(&self) -> bool {
-        *self == Self::GenerateNewMemberKeys || *self == Self::SignProposals
+        *self == Self::GenerateNewMemberKeys
+            || *self == Self::SignProposals
+            || *self == Self::SyncAcs
     }
 
     fn is_waiting_for_attestors(&self) -> bool {

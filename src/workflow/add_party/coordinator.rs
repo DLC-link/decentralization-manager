@@ -16,7 +16,7 @@ use crate::{
 
 use super::{
     AddPartyConfig, AddPartyDirs, AddPartyStep,
-    steps::{create_proposals, export_state, submit_add_party},
+    steps::{create_proposals, export_party_acs, export_state, submit_add_party},
 };
 
 /// Decode combined keys+id payload and save to separate directories
@@ -164,15 +164,65 @@ pub async fn start_coordinator(
                         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                     }
                     AddPartyStep::SubmitAddParty => {
-                        tracing::info!("Coordinator executing: Submit add party");
-                        crate::workflow::save_attestor_data(
-                            &workflow_state,
-                            &dirs.add_party_signed_dir,
-                            SIGNED_ADD_PARTY_PROPOSALS_PREFIX,
-                        )
-                        .await?;
-                        submit_add_party(&node_config, &dirs).await?;
-                        workflow_state.advance_step().await;
+                        if !coordinator_completed_steps.contains(&AddPartyStep::SubmitAddParty) {
+                            tracing::info!("Coordinator executing: Submit add party");
+                            crate::workflow::save_attestor_data(
+                                &workflow_state,
+                                &dirs.add_party_signed_dir,
+                                SIGNED_ADD_PARTY_PROPOSALS_PREFIX,
+                            )
+                            .await?;
+                            submit_add_party(&node_config, &dirs).await?;
+                            coordinator_completed_steps.insert(AddPartyStep::SubmitAddParty);
+
+                            // Check if party has active contracts that need ACS sync
+                            let party_id = add_party_config.decentralized_party_id.to_string();
+                            let has_contracts =
+                                utils::party_has_active_contracts(&node_config, &party_id, None)
+                                    .await
+                                    .unwrap_or(false);
+
+                            if has_contracts {
+                                tracing::info!("Party has active contracts, preparing ACS sync");
+
+                                // Export ACS from coordinator
+                                let synchronizer_id = utils::get_synchronizer_id(&node_config)
+                                    .await
+                                    .context("Failed to get synchronizer ID for ACS export")?;
+
+                                let acs_snapshot =
+                                    export_party_acs(&node_config, &party_id, &synchronizer_id)
+                                        .await
+                                        .context("Failed to export ACS")?;
+
+                                tracing::info!(
+                                    "ACS exported: {} bytes, sending to new member",
+                                    acs_snapshot.len()
+                                );
+
+                                // Set config + ACS as payload for ImportAcs command
+                                // Format: [config_json, acs_snapshot]
+                                let config_data = serde_json::to_vec(&add_party_config)
+                                    .context("Failed to serialize add party config for ACS sync")?;
+                                let payload =
+                                    utils::encode_length_prefixed(&[&config_data, &acs_snapshot]);
+                                workflow_state.set_command_payload(payload).await;
+                                workflow_state.advance_step().await;
+                            } else {
+                                tracing::info!(
+                                    "Party {party_id} has no contracts, skipping ACS sync"
+                                );
+                                // Skip SyncAcs step and go directly to Complete
+                                workflow_state.advance_step().await; // -> SyncAcs
+                                workflow_state.advance_step().await; // -> Complete
+                            }
+                        }
+                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    }
+                    AddPartyStep::SyncAcs => {
+                        // ACS sync step - wait for new member to import ACS
+                        // The ImportAcs command with ACS payload was set in SubmitAddParty
+                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                     }
                     AddPartyStep::Complete => {
                         tracing::info!("Add party workflow complete!");

@@ -34,6 +34,7 @@ pub enum MessageType {
     Ping = 0x000A,
     GenerateAddPartyKeys = 0x000B,
     SignAddParty = 0x000C,
+    ImportAcs = 0x000D,
 
     // Invites (0x0010 - 0x001F)
     InviteOnboarding = 0x0010,
@@ -57,6 +58,8 @@ pub enum MessageType {
     KickSignatures = 0x0205,
     AddPartyKeysUpload = 0x0206,
     AddPartySignatures = 0x0207,
+    AcsSnapshot = 0x0208,
+    AcsImportComplete = 0x0209,
 
     // Chunked Transfer (0x0300 - 0x03FF)
     /// Command with chunked payload - payload contains: [command_type (2 bytes)] [total_size (4 bytes)] [chunk_count (4 bytes)]
@@ -90,6 +93,7 @@ impl TryFrom<u16> for MessageType {
             0x000A => Ok(Self::Ping),
             0x000B => Ok(Self::GenerateAddPartyKeys),
             0x000C => Ok(Self::SignAddParty),
+            0x000D => Ok(Self::ImportAcs),
             0x0010 => Ok(Self::InviteOnboarding),
             0x0011 => Ok(Self::InviteKick),
             0x0012 => Ok(Self::InviteContracts),
@@ -107,6 +111,8 @@ impl TryFrom<u16> for MessageType {
             0x0205 => Ok(Self::KickSignatures),
             0x0206 => Ok(Self::AddPartyKeysUpload),
             0x0207 => Ok(Self::AddPartySignatures),
+            0x0208 => Ok(Self::AcsSnapshot),
+            0x0209 => Ok(Self::AcsImportComplete),
             0x0300 => Ok(Self::ChunkedCommand),
             0x0301 => Ok(Self::GetChunk),
             0x0302 => Ok(Self::Chunk),

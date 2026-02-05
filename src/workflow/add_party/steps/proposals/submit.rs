@@ -201,7 +201,10 @@ pub async fn submit_add_party(config: &NodeConfig, dirs: &AddPartyDirs) -> Resul
     match &dns_result {
         Ok(response) => {
             tracing::debug!("DNS add party proposal submitted successfully");
-            tracing::debug!("DNS response (wait_to_become_effective): {:?}", response.get_ref());
+            tracing::debug!(
+                "DNS response (wait_to_become_effective): {:?}",
+                response.get_ref()
+            );
         }
         Err(e) => {
             // Log the full error including any gRPC status details
@@ -240,7 +243,13 @@ pub async fn submit_add_party(config: &NodeConfig, dirs: &AddPartyDirs) -> Resul
 
     // Wait for P2P to propagate with expected participant count
     tracing::debug!("Waiting for P2P add party to appear in topology...");
-    wait_for_p2p_in_topology(config, &synchronizer_id, &party_id, expected_participant_count).await?;
+    wait_for_p2p_in_topology(
+        config,
+        &synchronizer_id,
+        &party_id,
+        expected_participant_count,
+    )
+    .await?;
     tracing::debug!("P2P add party confirmed in topology");
 
     // Additional wait for topology propagation
@@ -305,21 +314,24 @@ async fn wait_for_dns_in_topology(
 
         // Also check proposals to see if it's pending
         if attempt == 1 || attempt == max_attempts {
-            let proposals_request = tonic::Request::new(ListDecentralizedNamespaceDefinitionRequest {
-                base_query: Some(BaseQuery {
-                    store: Some(StoreId {
-                        store: Some(store_id::Store::Synchronizer(Synchronizer {
-                            kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.to_string())),
-                        })),
+            let proposals_request =
+                tonic::Request::new(ListDecentralizedNamespaceDefinitionRequest {
+                    base_query: Some(BaseQuery {
+                        store: Some(StoreId {
+                            store: Some(store_id::Store::Synchronizer(Synchronizer {
+                                kind: Some(synchronizer::Kind::PhysicalId(
+                                    synchronizer_id.to_string(),
+                                )),
+                            })),
+                        }),
+                        proposals: true,
+                        operation: 0,
+                        time_query: Some(base_query::TimeQuery::HeadState(())),
+                        filter_signed_key: String::new(),
+                        protocol_version: None,
                     }),
-                    proposals: true,
-                    operation: 0,
-                    time_query: Some(base_query::TimeQuery::HeadState(())),
-                    filter_signed_key: String::new(),
-                    protocol_version: None,
-                }),
-                filter_namespace: namespace.to_string(),
-            });
+                    filter_namespace: namespace.to_string(),
+                });
 
             let proposals_response = topology_read_client
                 .list_decentralized_namespace_definition(proposals_request)

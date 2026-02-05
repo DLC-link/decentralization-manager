@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{collections::HashMap, path::Path};
 
 use bytes::{Buf, BufMut, BytesMut};
 use prost::Message;
@@ -7,10 +7,14 @@ use tokio::fs;
 use anyhow::Context;
 use canton_proto_rs::com::{
     daml::ledger::api::v2::{
+        CumulativeFilter, EventFormat, Filters, GetActiveContractsRequest, GetLedgerEndRequest,
+        WildcardFilter,
         admin::{
             party_management_service_client::PartyManagementServiceClient,
             user_management_service_client::UserManagementServiceClient,
         },
+        cumulative_filter,
+        get_active_contracts_response::ContractEntry,
         interactive::interactive_submission_service_client::InteractiveSubmissionServiceClient,
         state_service_client::StateServiceClient,
     },
@@ -445,6 +449,67 @@ define_client_creator!(create_party_client, PartyManagementServiceClient);
 define_client_creator!(create_user_client, UserManagementServiceClient);
 define_client_creator!(create_submission_client, InteractiveSubmissionServiceClient);
 define_client_creator!(create_state_client, StateServiceClient);
+
+/// Check if a party has any active contracts
+///
+/// This is used to determine if ACS synchronization is needed when adding
+/// a new member to a decentralized party. If the party has no contracts,
+/// simple replication is sufficient. If contracts exist, ACS export/import
+/// is required.
+pub async fn party_has_active_contracts(
+    config: &NodeConfig,
+    party_id: &str,
+    token: Option<String>,
+) -> Result<bool> {
+    let mut state_client = create_state_client(config, token).await?;
+
+    // Get current ledger offset
+    let ledger_end = state_client
+        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
+        .await?
+        .into_inner()
+        .offset;
+
+    // Query for any active contracts using wildcard filter
+    let mut filters_by_party = HashMap::new();
+    filters_by_party.insert(
+        party_id.to_string(),
+        Filters {
+            cumulative: vec![CumulativeFilter {
+                identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
+                    WildcardFilter {
+                        include_created_event_blob: false,
+                    },
+                )),
+            }],
+        },
+    );
+
+    let acs_request = GetActiveContractsRequest {
+        active_at_offset: ledger_end,
+        event_format: Some(EventFormat {
+            filters_by_party,
+            filters_for_any_party: None,
+            verbose: false,
+        }),
+    };
+
+    let mut stream = state_client
+        .get_active_contracts(tonic::Request::new(acs_request))
+        .await?
+        .into_inner();
+
+    // Check if at least one contract exists
+    while let Some(response) = stream.message().await? {
+        if let Some(ContractEntry::ActiveContract(_)) = response.contract_entry {
+            tracing::debug!("Party {party_id} has at least one active contract");
+            return Ok(true);
+        }
+    }
+
+    tracing::debug!("Party {party_id} has no active contracts");
+    Ok(false)
+}
 
 /// Create a directory with context for error messages
 pub async fn create_directory(path: &Path) -> Result {
