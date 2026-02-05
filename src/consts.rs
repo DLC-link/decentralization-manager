@@ -39,6 +39,9 @@ pub const SUBMISSION_SIGNATURES_PREFIX: &str = "submission-signatures";
 /// Prefix for signed kick proposal files
 pub const SIGNED_KICK_PROPOSALS_PREFIX: &str = "signed-kick-proposals";
 
+/// Prefix for signed add party proposal files
+pub const SIGNED_ADD_PARTY_PROPOSALS_PREFIX: &str = "signed-add-party-proposals";
+
 // File names
 /// Namespace definition file name
 pub const NAMESPACE_DEF_FILENAME: &str = "namespace_def.bin";
@@ -54,6 +57,12 @@ pub const DNS_KICK_PROTO_FILENAME: &str = "dns_kick_proto.bin";
 
 /// P2P kick proposal file name
 pub const P2P_KICK_PROTO_FILENAME: &str = "p2p_kick_proto.bin";
+
+/// DNS add party proposal file name
+pub const DNS_ADD_PARTY_PROTO_FILENAME: &str = "dns_add_party_proto.bin";
+
+/// P2P add party proposal file name
+pub const P2P_ADD_PARTY_PROTO_FILENAME: &str = "p2p_add_party_proto.bin";
 
 /// New namespace definition file name (for kick workflow)
 pub const NEW_NAMESPACE_DEF_FILENAME: &str = "newNamespaceDef.bin";
@@ -122,6 +131,12 @@ pub const KICK_PROPOSALS_DIR: &str = "kick-proposals";
 
 /// Kick signed directory name
 pub const KICK_SIGNED_DIR: &str = "kick-signed";
+
+/// Add party proposals directory name
+pub const ADD_PARTY_PROPOSALS_DIR: &str = "add-party-proposals";
+
+/// Add party signed directory name
+pub const ADD_PARTY_SIGNED_DIR: &str = "add-party-signed";
 
 /// Ledger submissions directory name
 pub const LEDGER_SUBMISSIONS_DIR: &str = "ledger-submissions";

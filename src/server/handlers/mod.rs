@@ -16,6 +16,7 @@ pub use invitations::{accept_invitation, decline_invitation, get_invitations};
 pub use keys::get_key_status;
 pub use parties::{get_decentralized_parties, get_participants_status};
 pub use workflows::{
-    ContractsWorkflowState, KickWorkflowState, OnboardingWorkflowState, get_contracts_status,
-    get_kick_status, get_onboarding_status, start_contracts, start_kick, start_onboarding,
+    AddPartyWorkflowState, ContractsWorkflowState, KickWorkflowState, OnboardingWorkflowState,
+    get_add_party_status, get_contracts_status, get_kick_status, get_onboarding_status,
+    start_add_party, start_contracts, start_kick, start_onboarding,
 };

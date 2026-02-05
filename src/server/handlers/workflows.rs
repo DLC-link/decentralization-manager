@@ -10,9 +10,9 @@ use crate::{
     server::{
         AppState,
         types::{
-            ContractsRequest, HttpWorkflowState, KickRequest, KickResponse, KickStatus,
-            ListenerPauseGuard, OnboardingRequest, OnboardingResponse, OnboardingStatus,
-            WorkflowProgress, WorkflowResponse,
+            AddPartyRequest, ContractsRequest, HttpWorkflowState, KickRequest, KickResponse,
+            KickStatus, ListenerPauseGuard, OnboardingRequest, OnboardingResponse,
+            OnboardingStatus, WorkflowProgress, WorkflowResponse,
         },
     },
     workflow,
@@ -30,6 +30,9 @@ pub type OnboardingWorkflowState = HttpWorkflowState<OnboardingStatus>;
 
 /// State for tracking contracts workflow
 pub type ContractsWorkflowState = HttpWorkflowState<WorkflowProgress>;
+
+/// State for tracking add party workflow
+pub type AddPartyWorkflowState = HttpWorkflowState<WorkflowProgress>;
 
 // ============================================================================
 // Kick Workflow
@@ -138,6 +141,7 @@ pub async fn start_kick(
             None, // No onboarding config
             Some(kick_config),
             None, // No contracts config
+            None, // No add party config
             None, // No auth registry for kick
         )
         .await;
@@ -340,6 +344,7 @@ pub async fn start_onboarding(
             Some(onboarding_config),
             None, // No kick config
             None, // No contracts config
+            None, // No add party config
             None, // No auth registry for onboarding
         )
         .await;
@@ -534,6 +539,7 @@ pub async fn start_contracts(
             None, // No onboarding config
             None, // No kick config
             Some(contracts_config),
+            None, // No add party config
             workflow_auth,
         )
         .await;
@@ -647,6 +653,241 @@ async fn send_contracts_invites(config: &NodeConfig) -> Result {
             Err(e) => {
                 tracing::error!(
                     "Failed to send contracts invite to {}: {e}",
+                    peer.participant_id
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// Add Party Workflow
+// ============================================================================
+
+/// Start an add party workflow to add a new participant to a decentralized party
+#[post("/add-party")]
+pub async fn start_add_party(
+    data: web::Data<AppState>,
+    add_party_state: web::Data<Arc<AddPartyWorkflowState>>,
+    body: web::Json<AddPartyRequest>,
+) -> impl Responder {
+    tracing::info!(
+        "Add party request received: party={}, new_participant={}, threshold={}",
+        body.decentralized_party_id,
+        body.new_participant_id,
+        body.new_threshold
+    );
+
+    // Parse IDs first for validation
+    let decentralized_party_id = match CantonId::parse(&body.decentralized_party_id) {
+        Ok(id) => id,
+        Err(e) => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Invalid decentralized_party_id: {e}")
+            }));
+        }
+    };
+
+    let new_participant_id = match CantonId::parse(&body.new_participant_id) {
+        Ok(id) => id,
+        Err(e) => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Invalid new_participant_id: {e}")
+            }));
+        }
+    };
+
+    // Check if an add party is already in progress
+    {
+        let status = add_party_state.status.read().await;
+        if *status == WorkflowProgress::InProgress {
+            return HttpResponse::Conflict().json(serde_json::json!({
+                "error": "An add party workflow is already in progress"
+            }));
+        }
+    }
+
+    // Update status to in progress
+    {
+        let mut status = add_party_state.status.write().await;
+        *status = WorkflowProgress::InProgress;
+        let mut error = add_party_state.error.write().await;
+        *error = None;
+    }
+
+    // Spawn the add party workflow in the background
+    let config = data.config.clone();
+    let add_party_state_clone = add_party_state.get_ref().clone();
+    let new_threshold = body.new_threshold;
+    let listener_control = data.noise_listener_control.clone();
+    let listener_notify = data.noise_listener_notify.clone();
+
+    tokio::spawn(async move {
+        let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
+
+        // Send add party invites to all peers (existing members + new member)
+        let invite_result = send_add_party_invites(&config, &new_participant_id).await;
+        if let Err(e) = invite_result {
+            tracing::error!("Failed to send add party invites: {e}");
+            guard.resume().await;
+            let mut status = add_party_state_clone.status.write().await;
+            let mut error = add_party_state_clone.error.write().await;
+            *status = WorkflowProgress::Failed;
+            *error = Some(format!("Failed to send invites: {e}"));
+            return;
+        }
+
+        // Give peers time to start their attestor workflows
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let instance_name = format!("{}-add-party-{timestamp}", decentralized_party_id.prefix);
+        let add_party_config = workflow::AddPartyConfig::new(
+            decentralized_party_id,
+            new_participant_id,
+            new_threshold,
+            instance_name,
+        );
+
+        let result = workflow::start_coordinator(
+            config,
+            workflow::WorkflowType::AddParty,
+            None, // No onboarding config
+            None, // No kick config
+            None, // No contracts config
+            Some(add_party_config),
+            None, // No auth registry for add party
+        )
+        .await;
+
+        guard.resume().await;
+
+        let mut status = add_party_state_clone.status.write().await;
+        let mut error = add_party_state_clone.error.write().await;
+
+        match result {
+            Ok(()) => {
+                *status = WorkflowProgress::Completed;
+                tracing::info!("Add party workflow completed successfully");
+            }
+            Err(e) => {
+                *status = WorkflowProgress::Failed;
+                *error = Some(format!("{e}"));
+                tracing::error!("Add party workflow failed: {e}");
+            }
+        }
+    });
+
+    HttpResponse::Accepted().json(WorkflowResponse {
+        status: WorkflowProgress::InProgress,
+        message: "Add party workflow started".to_string(),
+    })
+}
+
+/// Get the current status of the add party workflow
+#[get("/add-party/status")]
+pub async fn get_add_party_status(
+    add_party_state: web::Data<Arc<AddPartyWorkflowState>>,
+) -> impl Responder {
+    let status = add_party_state.status.read().await;
+    let error = add_party_state.error.read().await;
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "status": *status,
+        "error": *error,
+    }))
+}
+
+/// Send add party invites to all peers using Noise protocol (including new member)
+async fn send_add_party_invites(config: &NodeConfig, new_participant: &CantonId) -> Result {
+    let network_config = config.load_network_config().await?;
+    let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
+
+    let current_participant_id = config.participant_id();
+    let invite_message = Message::new_empty(MessageType::InviteAddParty);
+
+    tracing::info!(
+        "Add party invites: self={}, new_member={}",
+        current_participant_id,
+        new_participant
+    );
+
+    for peer in &network_config.peers {
+        tracing::debug!(
+            "Checking peer {}: self_match={}",
+            peer.participant_id,
+            peer.participant_id == *current_participant_id
+        );
+
+        // Skip self
+        if peer.participant_id == *current_participant_id {
+            tracing::debug!("Skipping {} - this is self", peer.participant_id);
+            continue;
+        }
+
+        if peer.public_key.is_empty() {
+            tracing::warn!(
+                "Skipping invite to {} - no public key configured",
+                peer.participant_id
+            );
+            continue;
+        }
+
+        let peer_pub_key = match parse_public_key(&peer.public_key) {
+            Ok(pk) => pk,
+            Err(e) => {
+                tracing::warn!(
+                    "Skipping invite to {} - invalid public key: {e}",
+                    peer.participant_id
+                );
+                continue;
+            }
+        };
+
+        let psk = keypair.derive_psk(&peer_pub_key);
+        // Use participant_id as identity (must match what server expects in peer_keys lookup)
+        let identity = config.participant_id().to_string();
+
+        tracing::info!(
+            "Sending add party invite to {} at {}:{}",
+            peer.participant_id,
+            peer.address,
+            peer.port
+        );
+
+        match send_noise_message(
+            &peer.address,
+            peer.port,
+            &psk,
+            identity.as_bytes(),
+            &invite_message,
+        )
+        .await
+        {
+            Ok(response) => {
+                if let Ok(msg) = Message::from_bytes(&response) {
+                    if msg.msg_type == MessageType::Ack {
+                        tracing::info!(
+                            "Peer {} acknowledged add party invite",
+                            peer.participant_id
+                        );
+                    } else {
+                        tracing::warn!(
+                            "Peer {} responded with {msg_type:?} instead of Ack",
+                            peer.participant_id,
+                            msg_type = msg.msg_type
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Failed to send add party invite to {}: {e}",
                     peer.participant_id
                 );
             }

@@ -1,3 +1,4 @@
+pub mod add_party;
 pub mod contracts;
 pub mod kick;
 pub mod onboarding;
@@ -16,6 +17,7 @@ use crate::{
     utils,
 };
 
+pub use add_party::{AddPartyConfig, AddPartyStep};
 pub use contracts::{ContractsConfig, ContractsStep};
 pub use kick::{KickConfig, KickStep};
 pub use onboarding::{OnboardingConfig, OnboardingStep};
@@ -27,6 +29,7 @@ pub enum WorkflowType {
     Onboarding,
     Contracts,
     Kick,
+    AddParty,
 }
 
 /// Start a coordinator workflow (called when this node initiates the workflow from UI)
@@ -36,6 +39,7 @@ pub async fn start_coordinator(
     onboarding_config: Option<OnboardingConfig>,
     kick_config: Option<KickConfig>,
     contracts_config: Option<ContractsConfig>,
+    add_party_config: Option<AddPartyConfig>,
     workflow_auth: Option<WorkflowAuth>,
 ) -> Result {
     tracing::info!("Loading network config...");
@@ -66,6 +70,12 @@ pub async fn start_coordinator(
             let config = kick_config
                 .ok_or_else(|| anyhow::anyhow!("KickConfig is required for Kick workflow"))?;
             kick::coordinator::start_coordinator(node_config, network_config, config).await
+        }
+        WorkflowType::AddParty => {
+            let config = add_party_config.ok_or_else(|| {
+                anyhow::anyhow!("AddPartyConfig is required for AddParty workflow")
+            })?;
+            add_party::coordinator::start_coordinator(node_config, network_config, config).await
         }
     }
 }
@@ -125,6 +135,7 @@ pub async fn start_attestor(node_config: NodeConfig, coordinator: Peer) -> Resul
 
     // Directories are created lazily when workflow config is received
     let mut onboarding_dirs: Option<onboarding::OnboardingDirs> = None;
+    let mut _add_party_dirs: Option<add_party::AddPartyDirs> = None;
 
     tracing::info!("Noise client initialized, entering command polling loop");
 
@@ -370,6 +381,115 @@ pub async fn start_attestor(node_config: NodeConfig, coordinator: Peer) -> Resul
                     kick::attestor::send_kick_signatures_to_coordinator(&client, &dirs).await
                 {
                     tracing::error!("Failed to send kick signatures to coordinator: {e}");
+                }
+            }
+            MessageType::GenerateAddPartyKeys => {
+                tracing::info!("Executing: Generate add party keys (new member)");
+                // Deserialize add party config from payload
+                let add_party_config: add_party::AddPartyConfig =
+                    match serde_json::from_slice(&payload) {
+                        Ok(config) => config,
+                        Err(e) => {
+                            tracing::error!("Failed to deserialize add party config: {e}");
+                            continue;
+                        }
+                    };
+
+                // Only the new member generates keys
+                if *node_config.participant_id() != add_party_config.new_participant_id {
+                    tracing::info!("Not the new member, skipping key generation");
+                    if let Err(e) = client
+                        .send_status(b"Not new member, skipped".to_vec())
+                        .await
+                    {
+                        tracing::error!("Failed to send status: {e}");
+                    }
+                    continue;
+                }
+
+                // Create directories lazily on first command with config
+                let dirs = add_party::AddPartyDirs::with_base(
+                    node_config.workflow_data_dir(),
+                    &add_party_config.instance_name,
+                );
+                if let Err(e) = dirs.create_dirs().await {
+                    tracing::error!("Failed to create add party dirs: {e}");
+                    continue;
+                }
+                _add_party_dirs = Some(dirs.clone());
+
+                if let Err(e) =
+                    add_party::generate_keys(&node_config, &dirs, &add_party_config).await
+                {
+                    tracing::error!("Step execution failed: {e}");
+                    continue;
+                }
+                if let Err(e) = add_party::attestor::send_keys_to_coordinator(&client, &dirs).await
+                {
+                    tracing::error!("Failed to send keys to coordinator: {e}");
+                }
+            }
+            MessageType::SignAddParty => {
+                tracing::info!("Executing: Sign add party proposals");
+                // Payload contains: [config_json, dns_add_party_data, p2p_add_party_data]
+                if payload.is_empty() {
+                    tracing::error!("No add party proposals payload received from coordinator");
+                    continue;
+                }
+
+                // Decode config and add party data from payload
+                let items = match utils::decode_length_prefixed(&payload, 3) {
+                    Ok(items) => items,
+                    Err(e) => {
+                        tracing::error!("Failed to decode SignAddParty payload: {e}");
+                        continue;
+                    }
+                };
+
+                let add_party_config: add_party::AddPartyConfig =
+                    match serde_json::from_slice(&items[0]) {
+                        Ok(config) => config,
+                        Err(e) => {
+                            tracing::error!("Failed to deserialize add party config: {e}");
+                            continue;
+                        }
+                    };
+
+                // Both existing members AND the new member sign
+                // The new member signs to prove consent to being added
+                let is_new_member =
+                    *node_config.participant_id() == add_party_config.new_participant_id;
+                if is_new_member {
+                    tracing::info!(
+                        "New member signing add party proposals (consent to being added)"
+                    );
+                } else {
+                    tracing::info!("Existing member signing add party proposals");
+                }
+
+                // Create directories lazily on first command with config
+                let dirs = add_party::AddPartyDirs::with_base(
+                    node_config.workflow_data_dir(),
+                    &add_party_config.instance_name,
+                );
+                if let Err(e) = dirs.create_dirs().await {
+                    tracing::error!("Failed to create add party dirs: {e}");
+                    continue;
+                }
+
+                // Re-encode the add party data (without config) for sign_proposals
+                let add_party_data = utils::encode_length_prefixed(&[&items[1], &items[2]]);
+                if let Err(e) =
+                    add_party::sign_proposals(&node_config, &dirs, &add_party_data).await
+                {
+                    tracing::error!("Step execution failed: {e}");
+                    continue;
+                }
+                if let Err(e) =
+                    add_party::attestor::send_add_party_signatures_to_coordinator(&client, &dirs)
+                        .await
+                {
+                    tracing::error!("Failed to send add party signatures to coordinator: {e}");
                 }
             }
             _ => {

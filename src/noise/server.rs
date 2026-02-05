@@ -210,6 +210,14 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                 self.handle_attestor_data(peer_id, message.payload, "kick signatures")
                     .await?
             }
+            MessageType::AddPartyKeysUpload => {
+                self.handle_attestor_data(peer_id, message.payload, "add party keys upload")
+                    .await?
+            }
+            MessageType::AddPartySignatures => {
+                self.handle_attestor_data(peer_id, message.payload, "add party signatures")
+                    .await?
+            }
             MessageType::StatusUpdate => {
                 self.handle_status_update(peer_id, message.payload).await?
             }

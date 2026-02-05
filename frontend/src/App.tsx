@@ -294,6 +294,7 @@ const App = () => {
                 selfParticipantId={nodeConfig?.node.participant_id}
                 authStatus={authStatuses.find((a) => a.dec_party_id === party.party_id)}
                 onAuthRefresh={refreshAuthStatus}
+                peers={networkConfig?.peers}
               />
             ))}
 

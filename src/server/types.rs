@@ -171,6 +171,14 @@ pub struct KickRequest {
     pub new_threshold: i32,
 }
 
+/// Request to add a new participant to a decentralized party
+#[derive(Clone, Debug, Deserialize)]
+pub struct AddPartyRequest {
+    pub decentralized_party_id: String,
+    pub new_participant_id: String,
+    pub new_threshold: i32,
+}
+
 /// Request to create a new decentralized party
 #[derive(Clone, Debug, Deserialize)]
 pub struct OnboardingRequest {
@@ -241,6 +249,7 @@ pub enum InvitationType {
     Onboarding,
     Kick,
     Contracts,
+    AddParty,
 }
 
 /// A pending invitation from a coordinator

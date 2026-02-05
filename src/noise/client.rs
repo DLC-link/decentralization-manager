@@ -190,6 +190,29 @@ impl NoiseClient {
         .await
     }
 
+    /// Upload add party keys to coordinator (for new member)
+    pub async fn upload_add_party_keys(&self, keys_data: Vec<u8>) -> Result<(), NoiseError> {
+        self.send_and_verify_ack(
+            MessageType::AddPartyKeysUpload,
+            keys_data,
+            "Uploading add party keys to coordinator",
+        )
+        .await
+    }
+
+    /// Send add party signatures to coordinator (for existing members)
+    pub async fn send_add_party_signatures(
+        &self,
+        signatures_data: Vec<u8>,
+    ) -> Result<(), NoiseError> {
+        self.send_and_verify_ack(
+            MessageType::AddPartySignatures,
+            signatures_data,
+            "Sending add party signatures to coordinator",
+        )
+        .await
+    }
+
     /// Send status update to coordinator
     pub async fn send_status(&self, status_data: Vec<u8>) -> Result<(), NoiseError> {
         self.send_and_verify_ack(

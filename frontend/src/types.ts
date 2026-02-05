@@ -71,6 +71,12 @@ export interface KickRequest {
   new_threshold: number;
 }
 
+export interface AddPartyRequest {
+  decentralized_party_id: string;
+  new_participant_id: string;
+  new_threshold: number;
+}
+
 export type WorkflowProgress = "idle" | "inprogress" | "completed" | "failed";
 
 // Type aliases for backwards compatibility
@@ -86,6 +92,7 @@ export interface WorkflowStatusResponse {
 export type KickStatusResponse = WorkflowStatusResponse;
 export type OnboardingStatusResponse = WorkflowStatusResponse;
 export type ContractsStatusResponse = WorkflowStatusResponse;
+export type AddPartyStatusResponse = WorkflowStatusResponse;
 
 export interface KeyStatusResponse {
   has_keys: boolean;
@@ -133,7 +140,7 @@ export interface ContractsRequest {
 }
 
 // Invitation types
-export type InvitationType = "Onboarding" | "Kick" | "Contracts";
+export type InvitationType = "Onboarding" | "Kick" | "Contracts" | "AddParty";
 
 export interface PendingInvitation {
   id: string;

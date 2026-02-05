@@ -15,13 +15,15 @@ import {
   Button,
 } from "@mui/material";
 import PersonRemoveIcon from "@mui/icons-material/PersonRemove";
+import PersonAddIcon from "@mui/icons-material/PersonAdd";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import { CopyableText } from "./CopyableText";
 import { KickDialog } from "./KickDialog";
+import { AddPartyDialog } from "./AddPartyDialog";
 import { ContractsDialog } from "./ContractsDialog";
 import { GovernanceSection } from "./GovernanceSection";
 import { AuthSection } from "./AuthSection";
-import type { DecentralizedParty, PartyAuthStatus } from "../types";
+import type { DecentralizedParty, PartyAuthStatus, Peer } from "../types";
 import { MAINNET_DEMO } from "../constants";
 
 interface PartyCardProps {
@@ -30,10 +32,12 @@ interface PartyCardProps {
   selfParticipantId?: string;
   authStatus?: PartyAuthStatus;
   onAuthRefresh?: () => void;
+  peers?: Peer[];
 }
 
-export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onAuthRefresh }: PartyCardProps) => {
+export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onAuthRefresh, peers = [] }: PartyCardProps) => {
   const [kickDialogOpen, setKickDialogOpen] = useState(false);
+  const [addPartyDialogOpen, setAddPartyDialogOpen] = useState(false);
   const [contractsDialogOpen, setContractsDialogOpen] = useState(false);
   const [selectedParticipant, setSelectedParticipant] = useState<string>("");
   const [canScrollUp, setCanScrollUp] = useState(false);
@@ -92,15 +96,26 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
             />
           )}
           {isOwner && (
-            <Button
-              variant="outlined"
-              size="small"
-              startIcon={<UploadFileIcon />}
-              onClick={() => setContractsDialogOpen(true)}
-              disabled={MAINNET_DEMO}
-            >
-              Deploy Contracts
-            </Button>
+            <>
+              <Button
+                variant="outlined"
+                size="small"
+                startIcon={<PersonAddIcon />}
+                onClick={() => setAddPartyDialogOpen(true)}
+                disabled={MAINNET_DEMO}
+              >
+                Add Member
+              </Button>
+              <Button
+                variant="outlined"
+                size="small"
+                startIcon={<UploadFileIcon />}
+                onClick={() => setContractsDialogOpen(true)}
+                disabled={MAINNET_DEMO}
+              >
+                Deploy Contracts
+              </Button>
+            </>
           )}
         </Box>
 
@@ -260,6 +275,17 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
         participantUid={selectedParticipant}
         currentThreshold={party.threshold}
         currentOwnerCount={party.owners.length}
+      />
+
+      <AddPartyDialog
+        open={addPartyDialogOpen}
+        onClose={() => setAddPartyDialogOpen(false)}
+        onAddComplete={onRefresh}
+        partyId={party.party_id}
+        currentThreshold={party.threshold}
+        currentOwnerCount={party.owners.length}
+        peers={peers}
+        currentParticipantIds={party.participants.map((p) => p.participant_uid)}
       />
 
       <ContractsDialog

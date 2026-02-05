@@ -28,6 +28,8 @@ const getInvitationTitle = (type: string): string => {
       return "Participant Removal";
     case "Contracts":
       return "Contract Deployment";
+    case "AddParty":
+      return "Add New Member";
     default:
       return "Workflow Invitation";
   }
@@ -41,12 +43,14 @@ const getInvitationDescription = (type: string): string => {
       return "A participant removal workflow has been initiated. Accepting will start the kick workflow on your node.";
     case "Contracts":
       return "A contract deployment workflow has been initiated. Accepting will start the contracts workflow on your node.";
+    case "AddParty":
+      return "A new member is being added to your decentralized party. Accepting will start the add party workflow on your node.";
     default:
       return "You have been invited to participate in a workflow.";
   }
 };
 
-const getChipColor = (type: string): "primary" | "warning" | "info" => {
+const getChipColor = (type: string): "primary" | "warning" | "info" | "success" => {
   switch (type) {
     case "Onboarding":
       return "primary";
@@ -54,6 +58,8 @@ const getChipColor = (type: string): "primary" | "warning" | "info" => {
       return "warning";
     case "Contracts":
       return "info";
+    case "AddParty":
+      return "success";
     default:
       return "primary";
   }
