@@ -49,7 +49,7 @@ impl NetworkConfig {
 
         // Create file with header if it doesn't exist
         if !path.exists() {
-            tracing::info!("Creating empty peers.csv at '{}'", path.display());
+            tracing::debug!("Creating empty peers.csv at '{}'", path.display());
             tokio::fs::write(path, "participant_id,name,address,port,public_key,party\n")
                 .await
                 .with_context(|| format!("Failed to create peers config '{}'", path.display()))?;

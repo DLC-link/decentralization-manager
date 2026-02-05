@@ -49,7 +49,7 @@ pub async fn execute_submissions(
     tracing::debug!("Decentralized party: {decentralized_party}");
 
     // Step 2: Dynamically load all prepared submissions
-    tracing::info!("Loading prepared submissions...");
+    tracing::debug!("Loading prepared submissions...");
     let ledger_submissions_dir = dirs.workflow_dir.join(LEDGER_SUBMISSIONS_DIR);
     let prepared_dir = ledger_submissions_dir.join(PREPARED_DIR);
 
@@ -76,7 +76,7 @@ pub async fn execute_submissions(
     tracing::debug!("Loaded {num_submissions} prepared submissions");
 
     // Step 3: Discover and load all signature files
-    tracing::info!("Loading attestor signatures...");
+    tracing::debug!("Loading attestor signatures...");
     let execution_dir = dirs.workflow_dir.join(EXECUTION_DIR);
     let signatures_dir = execution_dir.join(SIGNATURES_DIR);
 
@@ -118,7 +118,7 @@ pub async fn execute_submissions(
         );
     }
 
-    tracing::info!(
+    tracing::debug!(
         "Loaded signatures from {count} attestors",
         count = all_signatures.len()
     );
@@ -128,7 +128,7 @@ pub async fn execute_submissions(
     let mut submission_client = utils::create_submission_client(config, token_opt.clone()).await?;
 
     for (idx, prepared_response) in prepared_submissions.iter().enumerate() {
-        tracing::info!("Executing submission {index}...", index = idx + 1);
+        tracing::debug!("Executing submission {index}...", index = idx + 1);
 
         // Collect signatures for this submission from all attestors
         let mut signatures_for_submission = Vec::new();
@@ -191,11 +191,11 @@ pub async fn execute_submissions(
             .execute_submission_and_wait_for_transaction(tonic::Request::new(execute_request))
             .await?;
 
-        tracing::info!("Submission {index} executed successfully", index = idx + 1);
+        tracing::debug!("Submission {index} executed successfully", index = idx + 1);
     }
 
     // Step 5: Wait for contracts to appear in ACS
-    tracing::info!("Waiting for contracts to appear in ledger...");
+    tracing::debug!("Waiting for contracts to appear in ledger...");
     let mut state_client = utils::create_state_client(config, token_opt).await?;
 
     let max_attempts = TOPOLOGY_RETRY_MAX_ATTEMPTS;
@@ -252,7 +252,7 @@ pub async fn execute_submissions(
 
         // We expect at least as many contracts as submissions
         if contract_count >= num_submissions {
-            tracing::info!(
+            tracing::debug!(
                 "All contracts successfully created! Found {contract_count} contracts after {attempt} attempt(s)"
             );
             break;

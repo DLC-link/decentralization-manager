@@ -196,11 +196,11 @@ where
     for attempt in 1..=max_attempts {
         match check().await {
             Ok(true) => {
-                tracing::info!("Condition met after {attempt} attempt(s)");
+                tracing::debug!("Condition met after {attempt} attempt(s)");
                 return Ok(());
             }
             Ok(false) => {
-                tracing::debug!("Attempt {attempt}/{max_attempts}: condition not met, retrying...");
+                tracing::trace!("Attempt {attempt}/{max_attempts}: condition not met, retrying...");
             }
 
             Err(e) => {
@@ -356,16 +356,16 @@ pub async fn resolve_participant_id(config: &mut NodeConfig) -> Result {
         return Ok(());
     }
 
-    tracing::info!("Participant ID not configured, querying Canton...");
+    tracing::debug!("Participant ID not configured, querying Canton...");
     let participant_id = get_participant_id(config).await?;
-    tracing::info!("Got participant ID from Canton: {participant_id}");
+    tracing::debug!("Got participant ID from Canton: {participant_id}");
 
     config
         .set_and_save_participant_id(participant_id)
         .await
         .context("Failed to save participant ID to config")?;
 
-    tracing::info!("Saved participant ID to config file");
+    tracing::debug!("Saved participant ID to config file");
     Ok(())
 }
 

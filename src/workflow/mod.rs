@@ -170,7 +170,7 @@ pub async fn start_attestor(node_config: NodeConfig, coordinator: Peer) -> Resul
 
         let command = message.msg_type;
         let payload = message.payload;
-        tracing::info!("Received command: {command:?}");
+        tracing::debug!("Received command: {command:?}");
 
         match command {
             MessageType::Wait => {

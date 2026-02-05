@@ -122,7 +122,7 @@ impl NoiseClient {
         payload: Vec<u8>,
         action: &str,
     ) -> Result<(), NoiseError> {
-        tracing::info!("{action}");
+        tracing::debug!("{action}");
 
         let message = Message::new(msg_type, payload);
         let response = self.send_message(&message).await?;
@@ -134,7 +134,7 @@ impl NoiseClient {
             return Err(NoiseError::InvalidMessage);
         }
 
-        tracing::info!("{action} completed successfully");
+        tracing::debug!("{action} completed successfully");
         Ok(())
     }
 
@@ -231,7 +231,7 @@ impl NoiseClient {
 
     /// Poll coordinator for next command, returning full message with payload
     pub async fn get_next_command_with_payload(&self) -> Result<Message, NoiseError> {
-        tracing::debug!("Polling coordinator for next command");
+        tracing::trace!("Polling coordinator for next command");
 
         let message = Message::new_empty(MessageType::GetNextCommand);
         let response = self.send_message(&message).await?;
@@ -261,7 +261,7 @@ impl NoiseClient {
         let command =
             MessageType::try_from(command_type).map_err(|_| NoiseError::InvalidMessage)?;
 
-        tracing::info!(
+        tracing::debug!(
             "Receiving chunked payload for {command:?}: {total_size} bytes in {chunk_count} chunks"
         );
 
@@ -272,7 +272,7 @@ impl NoiseClient {
             payload.extend_from_slice(&chunk_data);
         }
 
-        tracing::info!(
+        tracing::debug!(
             "Received complete payload: {len} bytes",
             len = payload.len()
         );

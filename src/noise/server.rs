@@ -173,7 +173,7 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         peer_id: String,
         req: Request<Body>,
     ) -> Result<Response<Body>, NoiseError> {
-        tracing::debug!("Received request from peer: {peer_id}");
+        tracing::trace!("Received request from peer: {peer_id}");
 
         // Read request body
         let body_bytes = hyper::body::to_bytes(req.into_body()).await?;
@@ -181,7 +181,7 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         // Parse message
         let message = Message::from_bytes(&body_bytes).map_err(|_| NoiseError::InvalidMessage)?;
 
-        tracing::debug!(
+        tracing::trace!(
             "Received message type {:?} from {peer_id}",
             message.msg_type
         );
@@ -243,13 +243,13 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         let has_completed = self.workflow_state.has_attestor_completed(&peer_id).await;
         if has_completed {
             // Attestor has completed current step, tell them to wait
-            tracing::debug!("Sending Wait to {peer_id} (already completed current step)");
+            tracing::trace!("Sending Wait to {peer_id} (already completed current step)");
             return Ok(Message::new_empty(MessageType::Wait));
         }
 
         // Get current command from workflow state
         if let Some(command) = self.workflow_state.current_command().await {
-            tracing::info!("Sending command {command:?} to {peer_id}");
+            tracing::debug!("Sending command {command:?} to {peer_id}");
             // Include payload for commands that need data (e.g., SignDns, SignP2p)
             let payload = self.workflow_state.get_command_payload().await;
             if payload.is_empty() {
@@ -261,7 +261,7 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                 // Large payload - use chunked transfer
                 let total_size = payload.len() as u32;
                 let chunk_count = payload.len().div_ceil(CHUNK_SIZE) as u32;
-                tracing::info!(
+                tracing::debug!(
                     "Payload too large ({total_size} bytes), using chunked transfer ({chunk_count} chunks)"
                 );
 
@@ -275,7 +275,7 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
             }
         } else {
             // No command for attestors right now (coordinator-only step)
-            tracing::debug!("Sending Wait to {peer_id} (coordinator-only step)");
+            tracing::trace!("Sending Wait to {peer_id} (coordinator-only step)");
             Ok(Message::new_empty(MessageType::Wait))
         }
     }
@@ -323,7 +323,7 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         payload: Vec<u8>,
         data_type: &str,
     ) -> Result<Message, NoiseError> {
-        tracing::info!("Handling {data_type} from {peer_id}");
+        tracing::debug!("Handling {data_type} from {peer_id}");
 
         self.workflow_state
             .store_attestor_data(peer_id.clone(), payload)
@@ -341,7 +341,7 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         payload: Vec<u8>,
     ) -> Result<Message, NoiseError> {
         let status = String::from_utf8_lossy(&payload);
-        tracing::info!("Handling status update from {peer_id}: {status}");
+        tracing::debug!("Handling status update from {peer_id}: {status}");
 
         // Mark attestor as completed for this step
         self.workflow_state.attestor_completed(peer_id).await;

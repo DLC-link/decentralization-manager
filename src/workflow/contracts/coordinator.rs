@@ -160,11 +160,11 @@ async fn run_workflow(
 /// Encode DAR files from config for transmission to attestors
 fn encode_dars_payload(config: &ContractsConfig) -> Result<Vec<u8>> {
     if config.dar_files.is_empty() {
-        tracing::info!("No DAR files to distribute to attestors");
+        tracing::debug!("No DAR files to distribute to attestors");
         return Ok(Vec::new());
     }
 
-    tracing::info!(
+    tracing::debug!(
         "Encoding {count} DAR file(s) for distribution to attestors",
         count = config.dar_files.len()
     );
@@ -198,7 +198,7 @@ async fn load_prepared_submissions_payload(
         .join(LEDGER_SUBMISSIONS_DIR)
         .join(PREPARED_DIR);
 
-    tracing::info!(
+    tracing::debug!(
         "Loading prepared submissions from {path} for distribution",
         path = prepared_dir.display()
     );
@@ -226,7 +226,7 @@ async fn load_prepared_submissions_payload(
 
     files.sort_by(|a, b| a.0.cmp(&b.0));
 
-    tracing::info!(
+    tracing::debug!(
         "Loaded {count} prepared submission file(s) for distribution to attestors",
         count = files.len()
     );

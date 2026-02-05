@@ -191,8 +191,7 @@ async fn send_kick_invites(config: &NodeConfig, kicked_participant: &CantonId) -
     let invite_message = Message::new_empty(MessageType::InviteKick);
 
     tracing::info!(
-        "Kick invites: self={}, kicked={}",
-        current_participant_id,
+        "Kick invites: self={current_participant_id}, kicked={}",
         kicked_participant
     );
 

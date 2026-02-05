@@ -78,13 +78,13 @@ pub async fn generate_keys(
         &participant_id_str,
     )
     .await?;
-    tracing::info!("Keys exported successfully");
+    tracing::debug!("Keys exported successfully");
 
     // Get and export participant ID from Canton
     let participant_id = get_participant_id(config).await?;
-    tracing::info!("Participant ID: {participant_id}");
+    tracing::debug!("Participant ID: {participant_id}");
     export_participant_id(&dirs.ids_dir, &participant_id, &participant_id_str).await?;
-    tracing::info!("Participant ID exported successfully");
+    tracing::debug!("Participant ID exported successfully");
 
     Ok(())
 }
@@ -220,13 +220,13 @@ async fn propose_namespace_delegation(
 
     match topology_client.authorize(synchronizer_request).await {
         Ok(_) => {
-            tracing::info!("Namespace delegation submitted to synchronizer");
+            tracing::debug!("Namespace delegation submitted to synchronizer");
         }
         Err(e) => {
             // Check if the error is because it already exists (which is fine)
             let status = e.to_string();
             if status.contains("ALREADY_EXISTS") || status.contains("already exists") {
-                tracing::info!("Namespace delegation already exists on synchronizer (this is OK)");
+                tracing::debug!("Namespace delegation already exists on synchronizer (this is OK)");
             } else {
                 return Err(anyhow::anyhow!("Failed to submit namespace delegation to synchronizer: {e}"));
             }

@@ -26,7 +26,7 @@ pub async fn sign_proposals(config: &NodeConfig, dirs: &KickDirs, proposal_data:
 
     // Parse the combined proposal data from coordinator
     let items = utils::decode_length_prefixed(proposal_data, 2)?;
-    tracing::info!("Using kick proposals from coordinator payload");
+    tracing::debug!("Using kick proposals from coordinator payload");
 
     let dns_transaction: SignedTopologyTransaction =
         utils::read_first_message_from_bytes(&items[0])?;
@@ -66,7 +66,7 @@ pub async fn sign_proposals(config: &NodeConfig, dirs: &KickDirs, proposal_data:
     let output_file = dirs
         .kick_signed_dir
         .join(format!("{SIGNED_KICK_PROPOSALS_PREFIX}-{node_id}.bin"));
-    tracing::info!(
+    tracing::debug!(
         "Saving signed kick proposals to {path}",
         path = output_file.display()
     );

@@ -417,11 +417,11 @@ async fn handle_incoming_connection(
                 }
 
                 if let Ok(msg) = Message::from_bytes(&body_bytes) {
-                    tracing::debug!("Received message type {:?}", msg.msg_type);
+                    tracing::trace!("Received message type {:?}", msg.msg_type);
 
                     match msg.msg_type {
                         MessageType::Ping => {
-                            tracing::debug!("Received ping, responding with pong");
+                            tracing::trace!("Received ping, responding with pong");
                             let pong = Message::new(MessageType::Pong, our_pubkey.into_bytes());
                             return Ok(Response::builder()
                                 .status(StatusCode::OK)
@@ -532,7 +532,7 @@ async fn handle_incoming_connection(
                                 .unwrap());
                         }
                         _ => {
-                            tracing::debug!("Ignoring message type {:?}", msg.msg_type);
+                            tracing::trace!("Ignoring message type {:?}", msg.msg_type);
                         }
                     }
                 }
@@ -546,10 +546,10 @@ async fn handle_incoming_connection(
 
     match result {
         Ok(()) => {
-            tracing::debug!("Connection from {peer_addr} handled successfully");
+            tracing::trace!("Connection from {peer_addr} handled successfully");
         }
         Err(e) => {
-            tracing::debug!("Noise connection from {peer_addr} failed: {e}");
+            tracing::trace!("Noise connection from {peer_addr} failed: {e}");
         }
     }
 }
@@ -565,7 +565,7 @@ async fn run_peer_ping_loop(config: NodeConfig, peer_status: Arc<RwLock<HashMap<
         let network_config = match config.load_network_config().await {
             Ok(nc) => nc,
             Err(e) => {
-                tracing::debug!("Failed to load network config for heartbeat: {e}");
+                tracing::trace!("Failed to load network config for heartbeat: {e}");
                 continue;
             }
         };

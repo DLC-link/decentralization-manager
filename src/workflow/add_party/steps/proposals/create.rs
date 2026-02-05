@@ -40,14 +40,14 @@ pub async fn create_proposals(
 
     // Read current namespace definition
     let namespace_file = dirs.current_config_dir.join(NAMESPACE_DEF_FILENAME);
-    tracing::info!(
+    tracing::debug!(
         "Reading current namespace definition from {path}",
         path = namespace_file.display()
     );
     let current_namespace_def: DecentralizedNamespaceDefinition =
         utils::read_first_message_from_file(&namespace_file).await?;
 
-    tracing::info!(
+    tracing::debug!(
         "Current namespace: {namespace}, threshold: {threshold}, owners: {owners_count}",
         namespace = current_namespace_def.decentralized_namespace,
         threshold = current_namespace_def.threshold,
@@ -61,7 +61,7 @@ pub async fn create_proposals(
         .trim()
         .parse()
         .map_err(|e| anyhow::anyhow!("Failed to parse new threshold: {e}"))?;
-    tracing::info!("New threshold: {new_threshold}");
+    tracing::debug!("New threshold: {new_threshold}");
 
     // Read new member's keys
     let new_member_id = add_party_config.new_participant_id.to_string();
@@ -69,14 +69,14 @@ pub async fn create_proposals(
         read_new_member_keys(&dirs.keys_dir, &new_member_id).await?;
 
     let new_namespace_fingerprint = utils::compute_fingerprint(&new_namespace_key);
-    tracing::info!("New member namespace fingerprint: {new_namespace_fingerprint}");
+    tracing::debug!("New member namespace fingerprint: {new_namespace_fingerprint}");
 
     // Create new owner set with new member added
     let mut new_owners = current_namespace_def.owners.clone();
     new_owners.push(new_namespace_fingerprint.clone());
     new_owners.sort(); // Keep sorted for consistency
 
-    tracing::info!("New owners count: {count}", count = new_owners.len());
+    tracing::debug!("New owners count: {count}", count = new_owners.len());
 
     // Create new namespace definition (keeping the same namespace hash - this is critical!)
     let new_namespace_def = DecentralizedNamespaceDefinition {
@@ -91,7 +91,7 @@ pub async fn create_proposals(
         party_id_prefix = add_party_config.decentralized_party_id.prefix,
         namespace = current_namespace_def.decentralized_namespace
     );
-    tracing::info!("Party ID: {party_id}");
+    tracing::debug!("Party ID: {party_id}");
 
     // Read current P2P mapping to get the current state
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
@@ -100,7 +100,7 @@ pub async fn create_proposals(
     // Get current P2P mapping
     let current_p2p = get_current_p2p_mapping(config, &synchronizer_id, &party_id).await?;
 
-    tracing::info!(
+    tracing::debug!(
         "Current P2P mapping has {count} participant(s)",
         count = current_p2p.participants.len()
     );
@@ -113,7 +113,7 @@ pub async fn create_proposals(
         onboarding: None,
     });
 
-    tracing::info!(
+    tracing::debug!(
         "New P2P mapping will have {count} participant(s)",
         count = new_participants.len()
     );
@@ -208,7 +208,7 @@ pub async fn create_proposals(
     let dns_file = dirs
         .add_party_proposals_dir
         .join(DNS_ADD_PARTY_PROTO_FILENAME);
-    tracing::info!(
+    tracing::debug!(
         "Saving DNS add party proposal to {path}",
         path = dns_file.display()
     );
@@ -217,7 +217,7 @@ pub async fn create_proposals(
     let p2p_file = dirs
         .add_party_proposals_dir
         .join(P2P_ADD_PARTY_PROTO_FILENAME);
-    tracing::info!(
+    tracing::debug!(
         "Saving P2P add party proposal to {path}",
         path = p2p_file.display()
     );
@@ -227,7 +227,7 @@ pub async fn create_proposals(
     let new_namespace_file = dirs
         .add_party_proposals_dir
         .join(NEW_NAMESPACE_DEF_FILENAME);
-    tracing::info!(
+    tracing::debug!(
         "Saving new namespace definition to {path}",
         path = new_namespace_file.display()
     );

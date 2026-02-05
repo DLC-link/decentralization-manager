@@ -40,10 +40,10 @@ async fn sign_proposal(
 
     // Use provided proposal data or read from file
     let transaction: SignedTopologyTransaction = if let Some(data) = proposal_data {
-        tracing::info!("Using {proposal_type} proposal from coordinator payload");
+        tracing::debug!("Using {proposal_type} proposal from coordinator payload");
         utils::read_first_message_from_bytes(data)?
     } else {
-        tracing::info!(
+        tracing::debug!(
             "Reading {proposal_type} proposal from {path}",
             path = input_file.display()
         );
@@ -76,7 +76,7 @@ async fn sign_proposal(
 
     fs::create_dir_all(output_dir).await?;
     let output_file = output_dir.join(format!("{output_prefix}-{node_id}.bin"));
-    tracing::info!(
+    tracing::debug!(
         "Saving signed {proposal_type} proposal to {path}",
         path = output_file.display()
     );

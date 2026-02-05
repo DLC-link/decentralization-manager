@@ -29,7 +29,7 @@ pub async fn export_state(
     tracing::debug!("Using synchronizer ID: {synchronizer_id}");
 
     let namespace_hex = add_party_config.decentralized_party_id.namespace.to_hex();
-    tracing::info!("Querying namespace: {namespace_hex}");
+    tracing::debug!("Querying namespace: {namespace_hex}");
 
     let mut topology_read_client =
         TopologyManagerReadServiceClient::connect(config.admin_api_url()).await?;
@@ -65,7 +65,7 @@ pub async fn export_state(
         .and_then(|r| r.item.as_ref())
         .ok_or_else(|| anyhow::anyhow!("Namespace definition missing from response"))?;
 
-    tracing::info!(
+    tracing::debug!(
         "Found namespace with {count} owners, threshold {threshold}",
         count = namespace_def.owners.len(),
         threshold = namespace_def.threshold
@@ -77,7 +77,7 @@ pub async fn export_state(
 
     // Save namespace definition
     let namespace_file = dirs.current_config_dir.join(NAMESPACE_DEF_FILENAME);
-    tracing::info!(
+    tracing::debug!(
         "Saving namespace definition to {path}",
         path = namespace_file.display()
     );
@@ -86,7 +86,7 @@ pub async fn export_state(
     // Verify P2P mapping exists and validate the new participant is not already present
     let party_id_prefix = &add_party_config.decentralized_party_id.prefix;
     let party_id = format!("{party_id_prefix}::{namespace_hex}");
-    tracing::info!("Querying P2P mapping for party: {party_id}");
+    tracing::debug!("Querying P2P mapping for party: {party_id}");
 
     let p2p_request = tonic::Request::new(ListPartyToParticipantRequest {
         base_query: Some(BaseQuery {
@@ -117,7 +117,7 @@ pub async fn export_state(
         .ok_or_else(|| anyhow::anyhow!("No P2P mapping found for party {party_id}"))?;
 
     let new_participant = &add_party_config.new_participant_id;
-    tracing::info!("New participant to add: {new_participant}");
+    tracing::debug!("New participant to add: {new_participant}");
 
     // Verify the participant is not already in the mapping
     if p2p_mapping
@@ -132,8 +132,8 @@ pub async fn export_state(
     let new_member_count = namespace_def.owners.len() + 1;
     let new_threshold = add_party_config.new_threshold;
 
-    tracing::info!("New member count after add: {new_member_count}");
-    tracing::info!("New threshold (configured): {new_threshold}");
+    tracing::debug!("New member count after add: {new_member_count}");
+    tracing::debug!("New threshold (configured): {new_threshold}");
 
     // Validate threshold
     if new_threshold < 1 {
@@ -151,7 +151,7 @@ pub async fn export_state(
         .await
         .with_context(|| format!("Failed to write '{}'", threshold_file.display()))?;
 
-    tracing::info!(
+    tracing::debug!(
         "State exported successfully to {path}",
         path = dirs.current_config_dir.display()
     );

@@ -79,13 +79,13 @@ pub async fn generate_keys(
         &participant_id_str,
     )
     .await?;
-    tracing::info!("Keys exported successfully");
+    tracing::debug!("Keys exported successfully");
 
     // Get and export participant ID from Canton
     let participant_id = get_participant_id(config).await?;
-    tracing::info!("Participant ID: {participant_id}");
+    tracing::debug!("Participant ID: {participant_id}");
     export_participant_id(&dirs.ids_dir, &participant_id, &participant_id_str).await?;
-    tracing::info!("Participant ID exported successfully");
+    tracing::debug!("Participant ID exported successfully");
 
     Ok(())
 }

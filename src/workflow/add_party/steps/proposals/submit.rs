@@ -37,13 +37,13 @@ pub async fn submit_add_party(config: &NodeConfig, dirs: &AddPartyDirs) -> Resul
     let dns_file = dirs
         .add_party_proposals_dir
         .join(DNS_ADD_PARTY_PROTO_FILENAME);
-    tracing::info!(
+    tracing::debug!(
         "Reading original DNS proposal from {path}",
         path = dns_file.display()
     );
     let mut dns_transaction: SignedTopologyTransaction =
         utils::read_first_message_from_file(&dns_file).await?;
-    tracing::info!(
+    tracing::debug!(
         "Original DNS proposal has {count} signature(s) from coordinator",
         count = dns_transaction.signatures.len()
     );
@@ -52,7 +52,7 @@ pub async fn submit_add_party(config: &NodeConfig, dirs: &AddPartyDirs) -> Resul
     let p2p_file = dirs
         .add_party_proposals_dir
         .join(P2P_ADD_PARTY_PROTO_FILENAME);
-    tracing::info!(
+    tracing::debug!(
         "Reading original P2P proposal from {path}",
         path = p2p_file.display()
     );
@@ -66,7 +66,7 @@ pub async fn submit_add_party(config: &NodeConfig, dirs: &AddPartyDirs) -> Resul
         ".bin",
     )
     .await?;
-    tracing::info!(
+    tracing::debug!(
         "Found {count} signed proposal file(s)",
         count = signed_files.len()
     );
@@ -85,7 +85,7 @@ pub async fn submit_add_party(config: &NodeConfig, dirs: &AddPartyDirs) -> Resul
         .collect();
 
     for signed_file in &signed_files {
-        tracing::info!(
+        tracing::debug!(
             "Reading signatures from {path}",
             path = signed_file.display()
         );
@@ -100,7 +100,7 @@ pub async fn submit_add_party(config: &NodeConfig, dirs: &AddPartyDirs) -> Resul
             );
         }
 
-        tracing::info!(
+        tracing::debug!(
             "Attestor file has {dns_sigs} DNS signature(s) and {p2p_sigs} P2P signature(s)",
             dns_sigs = signed_transactions[0].signatures.len(),
             p2p_sigs = signed_transactions[1].signatures.len()
@@ -125,31 +125,31 @@ pub async fn submit_add_party(config: &NodeConfig, dirs: &AddPartyDirs) -> Resul
         }
     }
 
-    tracing::info!(
+    tracing::debug!(
         "Final DNS proposal has {count} unique signature(s)",
         count = dns_transaction.signatures.len()
     );
     for (i, sig) in dns_transaction.signatures.iter().enumerate() {
-        tracing::info!("  DNS signature {i}: signed_by={}", sig.signed_by);
+        tracing::debug!("  DNS signature {i}: signed_by={}", sig.signed_by);
     }
     // Log the transaction bytes for debugging
-    tracing::info!(
+    tracing::debug!(
         "DNS transaction: {} bytes",
         dns_transaction.transaction.len()
     );
-    tracing::info!(
+    tracing::debug!(
         "Final P2P proposal has {count} unique signature(s)",
         count = p2p_transaction.signatures.len()
     );
     for (i, sig) in p2p_transaction.signatures.iter().enumerate() {
-        tracing::info!("  P2P signature {i}: signed_by={}", sig.signed_by);
+        tracing::debug!("  P2P signature {i}: signed_by={}", sig.signed_by);
     }
 
     // Read new namespace definition for validation
     let new_namespace_file = dirs
         .add_party_proposals_dir
         .join(NEW_NAMESPACE_DEF_FILENAME);
-    tracing::info!(
+    tracing::debug!(
         "Reading new namespace definition from {path}",
         path = new_namespace_file.display()
     );
@@ -161,12 +161,12 @@ pub async fn submit_add_party(config: &NodeConfig, dirs: &AddPartyDirs) -> Resul
     // We're adding one participant, so expected = current + 1
     // The new_namespace_def.owners already includes the new member
     let expected_participant_count = expected_owner_count;
-    tracing::info!(
+    tracing::debug!(
         "Expected after update: {expected_owner_count} owners, {expected_participant_count} participants"
     );
-    tracing::info!("New namespace owners:");
+    tracing::debug!("New namespace owners:");
     for (i, owner) in new_namespace_def.owners.iter().enumerate() {
-        tracing::info!("  Owner {i}: {owner}");
+        tracing::debug!("  Owner {i}: {owner}");
     }
 
     // Read party ID
@@ -175,7 +175,7 @@ pub async fn submit_add_party(config: &NodeConfig, dirs: &AddPartyDirs) -> Resul
         .await?
         .trim()
         .to_string();
-    tracing::info!("Party ID: {party_id}");
+    tracing::debug!("Party ID: {party_id}");
 
     // Submit DNS proposal first
     tracing::info!("Submitting DNS add party proposal...");
@@ -200,8 +200,8 @@ pub async fn submit_add_party(config: &NodeConfig, dirs: &AddPartyDirs) -> Resul
     let dns_result = topology_write_client.add_transactions(dns_request).await;
     match &dns_result {
         Ok(response) => {
-            tracing::info!("DNS add party proposal submitted successfully");
-            tracing::info!("DNS response (wait_to_become_effective): {:?}", response.get_ref());
+            tracing::debug!("DNS add party proposal submitted successfully");
+            tracing::debug!("DNS response (wait_to_become_effective): {:?}", response.get_ref());
         }
         Err(e) => {
             // Log the full error including any gRPC status details
@@ -212,7 +212,7 @@ pub async fn submit_add_party(config: &NodeConfig, dirs: &AddPartyDirs) -> Resul
     }
 
     // Wait for DNS to propagate with expected owner count
-    tracing::info!("Waiting for DNS add party to appear in topology...");
+    tracing::debug!("Waiting for DNS add party to appear in topology...");
     wait_for_dns_in_topology(
         config,
         &synchronizer_id,
@@ -220,7 +220,7 @@ pub async fn submit_add_party(config: &NodeConfig, dirs: &AddPartyDirs) -> Resul
         expected_owner_count,
     )
     .await?;
-    tracing::info!("DNS add party confirmed in topology");
+    tracing::debug!("DNS add party confirmed in topology");
 
     // Submit P2P proposal
     tracing::info!("Submitting P2P add party proposal...");
@@ -236,16 +236,16 @@ pub async fn submit_add_party(config: &NodeConfig, dirs: &AddPartyDirs) -> Resul
     });
 
     topology_write_client.add_transactions(p2p_request).await?;
-    tracing::info!("P2P add party proposal submitted");
+    tracing::debug!("P2P add party proposal submitted");
 
     // Wait for P2P to propagate with expected participant count
-    tracing::info!("Waiting for P2P add party to appear in topology...");
+    tracing::debug!("Waiting for P2P add party to appear in topology...");
     wait_for_p2p_in_topology(config, &synchronizer_id, &party_id, expected_participant_count).await?;
-    tracing::info!("P2P add party confirmed in topology");
+    tracing::debug!("P2P add party confirmed in topology");
 
     // Additional wait for topology propagation
     let propagation_delay = time::Duration::from_secs(TOPOLOGY_PROPAGATION_DELAY_SECS);
-    tracing::info!("Waiting {propagation_delay:?} for Canton to propagate topology updates...");
+    tracing::debug!("Waiting {propagation_delay:?} for Canton to propagate topology updates...");
     time::sleep(propagation_delay).await;
 
     tracing::info!("Add party submitted and confirmed successfully");
@@ -293,7 +293,7 @@ async fn wait_for_dns_in_topology(
         {
             let current_count = dns.owners.len();
             if current_count == expected_owner_count {
-                tracing::info!(
+                tracing::debug!(
                     "DNS with {current_count} owners found in topology after {attempt} attempt(s)"
                 );
                 return Ok(());
@@ -405,7 +405,7 @@ async fn wait_for_p2p_in_topology(
         {
             let current_count = p2p.participants.len();
             if current_count == expected_participant_count {
-                tracing::info!(
+                tracing::debug!(
                     "P2P with {current_count} participants found in topology after {attempt} attempt(s)"
                 );
                 return Ok(());

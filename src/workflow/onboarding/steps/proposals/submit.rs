@@ -33,7 +33,7 @@ pub async fn submit_dns_proposals(config: &NodeConfig, dirs: &OnboardingDirs) ->
     tracing::debug!("Using synchronizer ID: {synchronizer_id}");
 
     let dns_file = dirs.dns_proposals_dir.join(DNS_PROTO_FILENAME);
-    tracing::info!(
+    tracing::debug!(
         "Reading original DNS proposal from {path}",
         path = dns_file.display()
     );
@@ -43,13 +43,13 @@ pub async fn submit_dns_proposals(config: &NodeConfig, dirs: &OnboardingDirs) ->
     let signed_files =
         utils::find_files_by_pattern(&dirs.dns_signed_dir, SIGNED_DNS_PROPOSAL_PREFIX, ".bin")
             .await?;
-    tracing::info!(
+    tracing::debug!(
         "Found {count} signed DNS proposal files",
         count = signed_files.len()
     );
 
     for signed_file in &signed_files {
-        tracing::info!(
+        tracing::debug!(
             "Reading signatures from {path}",
             path = signed_file.display()
         );
@@ -63,12 +63,12 @@ pub async fn submit_dns_proposals(config: &NodeConfig, dirs: &OnboardingDirs) ->
         }
     }
 
-    tracing::info!(
+    tracing::debug!(
         "Aggregated DNS proposal has {count} signature(s)",
         count = dns_transaction.signatures.len()
     );
 
-    tracing::info!("Submitting aggregated DNS proposal...");
+    tracing::debug!("Submitting aggregated DNS proposal...");
     let mut topology_write_client =
         TopologyManagerWriteServiceClient::connect(config.admin_api_url()).await?;
 
@@ -87,14 +87,14 @@ pub async fn submit_dns_proposals(config: &NodeConfig, dirs: &OnboardingDirs) ->
     tracing::info!("DNS proposal submitted to topology");
 
     let namespace_def_file = dirs.dns_submission_dir.join(NAMESPACE_DEF_FILENAME);
-    tracing::info!(
+    tracing::debug!(
         "Reading namespace definition from {path}",
         path = namespace_def_file.display()
     );
     let namespace_def: DecentralizedNamespaceDefinition =
         utils::read_first_message_from_file(&namespace_def_file).await?;
 
-    tracing::info!(
+    tracing::debug!(
         "Waiting for DNS to appear in topology for namespace {namespace}...",
         namespace = namespace_def.decentralized_namespace
     );
@@ -144,7 +144,7 @@ async fn wait_for_dns_in_topology(
             .into_inner();
 
         if !response.results.is_empty() {
-            tracing::info!("DNS found in topology after {attempt} attempt(s)");
+            tracing::debug!("DNS found in topology after {attempt} attempt(s)");
             return Ok(());
         }
 
@@ -180,7 +180,7 @@ pub async fn submit_final_proposals(
     tracing::debug!("Using synchronizer ID: {synchronizer_id}");
 
     let p2p_file = dirs.p2p_proposals_dir.join(P2P_PROTO_FILENAME);
-    tracing::info!(
+    tracing::debug!(
         "Reading original P2P proposal from {path}",
         path = p2p_file.display()
     );
@@ -190,13 +190,13 @@ pub async fn submit_final_proposals(
     let signed_files =
         utils::find_files_by_pattern(&dirs.final_signed_dir, SIGNED_P2P_PROPOSALS_PREFIX, ".bin")
             .await?;
-    tracing::info!(
+    tracing::debug!(
         "Found {count} signed P2P proposal files",
         count = signed_files.len()
     );
 
     for signed_file in &signed_files {
-        tracing::info!(
+        tracing::debug!(
             "Reading signatures from {path}",
             path = signed_file.display()
         );
@@ -216,13 +216,13 @@ pub async fn submit_final_proposals(
             .extend(signed_transactions[0].signatures.clone());
     }
 
-    tracing::info!(
+    tracing::debug!(
         "Aggregated P2P proposal has {count} signature(s)",
         count = p2p_transaction.signatures.len()
     );
 
     let namespace_file = dirs.dns_submission_dir.join(NAMESPACE_DEF_FILENAME);
-    tracing::info!(
+    tracing::debug!(
         "Reading namespace definition from {path}",
         path = namespace_file.display()
     );
@@ -233,9 +233,9 @@ pub async fn submit_final_proposals(
         "{party_id_prefix}::{namespace}",
         namespace = namespace_def.decentralized_namespace
     );
-    tracing::info!("Constructed party ID: {party_id}");
+    tracing::debug!("Constructed party ID: {party_id}");
 
-    tracing::info!("Submitting aggregated P2P proposal...");
+    tracing::debug!("Submitting aggregated P2P proposal...");
     let mut topology_write_client =
         TopologyManagerWriteServiceClient::connect(config.admin_api_url()).await?;
 
@@ -253,7 +253,7 @@ pub async fn submit_final_proposals(
     topology_write_client.add_transactions(request).await?;
     tracing::info!("P2P proposal submitted to topology");
 
-    tracing::info!("Waiting for P2P to appear in topology...");
+    tracing::debug!("Waiting for P2P to appear in topology...");
     let effective_time = wait_for_p2p_in_topology(config, &synchronizer_id, &party_id).await?;
 
     tracing::info!("P2P proposal submitted and confirmed in topology successfully");
@@ -264,19 +264,19 @@ pub async fn submit_final_proposals(
         + std::time::Duration::from_nanos(effective_time.nanos as u64);
 
     if let Ok(wait_duration) = effective_system_time.duration_since(now) {
-        tracing::info!(
+        tracing::debug!(
             "P2P mapping will become effective in {wait_duration:?}. Waiting for topology effective time..."
         );
         tokio::time::sleep(wait_duration).await;
-        tracing::info!("Topology is now effective");
+        tracing::debug!("Topology is now effective");
     } else {
-        tracing::info!("P2P mapping is already effective");
+        tracing::debug!("P2P mapping is already effective");
     }
 
     let propagation_delay = time::Duration::from_secs(TOPOLOGY_PROPAGATION_DELAY_SECS);
-    tracing::info!("Waiting {propagation_delay:?} for Canton to propagate topology updates...");
+    tracing::debug!("Waiting {propagation_delay:?} for Canton to propagate topology updates...");
     time::sleep(propagation_delay).await;
-    tracing::info!("Topology propagation wait complete");
+    tracing::debug!("Topology propagation wait complete");
 
     Ok(())
 }
@@ -318,7 +318,7 @@ async fn wait_for_p2p_in_topology(
             .into_inner();
 
         if let Some(result) = response.results.first() {
-            tracing::info!("P2P found in topology after {attempt} attempt(s)");
+            tracing::debug!("P2P found in topology after {attempt} attempt(s)");
 
             if let Some(context) = &result.context {
                 if let Some(valid_from) = &context.valid_from {

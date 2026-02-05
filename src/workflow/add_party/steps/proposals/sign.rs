@@ -32,7 +32,7 @@ pub async fn sign_proposals(
     // Parse the combined proposal data from coordinator
     // Payload format: [dns_proto, p2p_proto] (config was stripped by the attestor handler)
     let items = utils::decode_length_prefixed(proposal_data, 2)?;
-    tracing::info!("Using add party proposals from coordinator payload");
+    tracing::debug!("Using add party proposals from coordinator payload");
 
     let dns_transaction: SignedTopologyTransaction =
         utils::read_first_message_from_bytes(&items[0])?;
@@ -72,7 +72,7 @@ pub async fn sign_proposals(
     let output_file = dirs
         .add_party_signed_dir
         .join(format!("{SIGNED_ADD_PARTY_PROPOSALS_PREFIX}-{node_id}.bin"));
-    tracing::info!(
+    tracing::debug!(
         "Saving signed add party proposals to {path}",
         path = output_file.display()
     );

@@ -44,7 +44,7 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &ContractsDirs) -> Resu
 
     // Step 1: Load the DAML public key that was exported during onboarding
     // This ensures we use the newly generated key, not an old key from a previous run
-    tracing::info!("Loading DAML public key from exported file...");
+    tracing::debug!("Loading DAML public key from exported file...");
     let keys_file = dirs
         .keys_dir
         .join(format!("{ATTESTOR_KEYS_PREFIX}-{node_id}.bin"));
@@ -73,7 +73,7 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &ContractsDirs) -> Resu
     // Compute fingerprint of the newly generated DAML key
     let key_fingerprint = utils::compute_fingerprint(signing_public_key);
 
-    tracing::info!("Using DAML key with fingerprint: {key_fingerprint}");
+    tracing::debug!("Using DAML key with fingerprint: {key_fingerprint}");
     tracing::debug!("This is the key that was generated in step 1 and added to P2P mapping");
 
     // Verify this key exists in Canton's vault
@@ -104,7 +104,7 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &ContractsDirs) -> Resu
     );
 
     // Step 3: Dynamically load all prepared submissions
-    tracing::info!("Loading prepared submissions...");
+    tracing::debug!("Loading prepared submissions...");
     let ledger_submissions_dir = dirs.workflow_dir.join(LEDGER_SUBMISSIONS_DIR);
     let prepared_dir = ledger_submissions_dir.join(PREPARED_DIR);
 
@@ -133,7 +133,7 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &ContractsDirs) -> Resu
     );
 
     // Step 4: Export the private key
-    tracing::info!("Exporting private key from Canton...");
+    tracing::debug!("Exporting private key from Canton...");
     tracing::debug!("Key fingerprint: {key_fingerprint}");
 
     let export_response = vault_client
@@ -162,11 +162,11 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &ContractsDirs) -> Resu
 
     // Dump first 256 bytes of exported data for analysis
     let dump_len = exported_key_data.len().min(256);
-    tracing::debug!("First {dump_len} bytes of exported key data:");
+    tracing::trace!("First {dump_len} bytes of exported key data:");
     for chunk_start in (0..dump_len).step_by(32) {
         let chunk_end = (chunk_start + 32).min(dump_len);
         let chunk = &exported_key_data[chunk_start..chunk_end];
-        tracing::debug!("  [{chunk_start:03}-{:03}]: {chunk:02x?}", chunk_end - 1,);
+        tracing::trace!("  [{chunk_start:03}-{:03}]: {chunk:02x?}", chunk_end - 1,);
     }
 
     // Strategy: Try ALL possible 32-byte sequences and test each one
@@ -174,7 +174,7 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &ContractsDirs) -> Resu
     let key_size = ED25519_PRIVATE_KEY_LENGTH as usize;
     let max_offset = exported_key_data.len().saturating_sub(key_size);
 
-    tracing::info!("Searching for valid Ed25519 private key among {max_offset} possible positions");
+    tracing::debug!("Searching for valid Ed25519 private key among {max_offset} possible positions");
 
     let mut candidate_keys = Vec::new();
 
@@ -214,13 +214,13 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &ContractsDirs) -> Resu
         anyhow::bail!("Could not find any Ed25519 key candidates in exported data");
     }
 
-    tracing::info!(
+    tracing::debug!(
         "Found {count} candidate Ed25519 key positions to try",
         count = candidate_keys.len()
     );
 
     // Step 6: Try each candidate key and verify it produces the correct public key
-    tracing::info!("Verifying candidates against expected public key...");
+    tracing::debug!("Verifying candidates against expected public key...");
 
     // Get the public key bytes from Canton's metadata for verification
     // Canton stores Ed25519 public keys in DER format with this structure:
@@ -264,7 +264,7 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &ContractsDirs) -> Resu
 
         // Compare raw Ed25519 public keys (32 bytes)
         if derived_public_bytes.as_slice() == expected_raw_public_key {
-            tracing::info!("✅ Found matching private key at offset {offset} ({source})");
+            tracing::debug!("✅ Found matching private key at offset {offset} ({source})");
             tracing::debug!("Private key (first 16 bytes): {:02x?}", &key_bytes[..16]);
             verified_key_bytes = Some(*key_bytes);
             break;
@@ -279,10 +279,10 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &ContractsDirs) -> Resu
         )
     })?;
 
-    tracing::info!("Successfully verified Ed25519 private key");
+    tracing::debug!("Successfully verified Ed25519 private key");
 
     // Step 7: Sign transaction hashes with verified key
-    tracing::info!(
+    tracing::debug!(
         "Signing {count} transaction hashes...",
         count = prepared_submissions.len()
     );
@@ -330,7 +330,7 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &ContractsDirs) -> Resu
             .verify(&prepared_sub.prepared_transaction_hash, &sig)
             .is_ok()
         {
-            tracing::info!("✅ Signature {index} verified locally", index = idx + 1);
+            tracing::debug!("✅ Signature {index} verified locally", index = idx + 1);
         } else {
             tracing::error!(
                 "❌ Signature {index} failed local verification!",
@@ -360,13 +360,13 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &ContractsDirs) -> Resu
 
     let signatures_file =
         signatures_dir.join(format!("{SUBMISSION_SIGNATURES_PREFIX}-{node_id}.bin"));
-    tracing::info!(
+    tracing::debug!(
         "Saving signatures to {path}",
         path = signatures_file.display()
     );
 
     utils::write_messages_to_file(&signatures, &signatures_file).await?;
 
-    tracing::info!("Signatures saved successfully");
+    tracing::debug!("Signatures saved successfully");
     Ok(())
 }

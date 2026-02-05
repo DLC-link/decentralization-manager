@@ -415,8 +415,8 @@ pub async fn load_or_generate_keypair<P: AsRef<Path>>(path: P) -> Result<NoiseKe
         tracing::info!("No Noise keypair found, generating new one");
         let keypair = NoiseKeypair::generate();
         keypair.save_to_file(path).await?;
-        tracing::info!("Noise keypair saved to {path}", path = path.display());
-        tracing::info!("Public key: {key}", key = keypair.public_key_hex());
+        tracing::debug!("Noise keypair saved to {path}", path = path.display());
+        tracing::debug!("Public key: {key}", key = keypair.public_key_hex());
         Ok(keypair)
     }
 }

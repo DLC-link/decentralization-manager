@@ -34,7 +34,7 @@ pub async fn export_state(
     tracing::debug!("Using synchronizer ID: {synchronizer_id}");
 
     let namespace_hex = kick_config.decentralized_party_id.namespace.to_hex();
-    tracing::info!("Querying namespace: {namespace_hex}");
+    tracing::debug!("Querying namespace: {namespace_hex}");
 
     let mut topology_read_client =
         TopologyManagerReadServiceClient::connect(config.admin_api_url()).await?;
@@ -70,7 +70,7 @@ pub async fn export_state(
         .and_then(|r| r.item.as_ref())
         .ok_or_else(|| anyhow::anyhow!("Namespace definition missing from response"))?;
 
-    tracing::info!(
+    tracing::debug!(
         "Found namespace with {count} owners, threshold {threshold}",
         count = namespace_def.owners.len(),
         threshold = namespace_def.threshold
@@ -89,7 +89,7 @@ pub async fn export_state(
 
     // Save namespace definition
     let namespace_file = dirs.kick_config_dir.join(NAMESPACE_DEF_FILENAME);
-    tracing::info!(
+    tracing::debug!(
         "Saving namespace definition to {path}",
         path = namespace_file.display()
     );
@@ -99,7 +99,7 @@ pub async fn export_state(
     // Use the prefix from the decentralized party ID provided via UI
     let party_id_prefix = &kick_config.decentralized_party_id.prefix;
     let party_id = format!("{party_id_prefix}::{namespace_hex}");
-    tracing::info!("Querying P2P mapping for party: {party_id}");
+    tracing::debug!("Querying P2P mapping for party: {party_id}");
 
     let p2p_request = tonic::Request::new(ListPartyToParticipantRequest {
         base_query: Some(BaseQuery {
@@ -130,7 +130,7 @@ pub async fn export_state(
         .ok_or_else(|| anyhow::anyhow!("No P2P mapping found for party {party_id}"))?;
 
     let kick_participant = &kick_config.participant_id;
-    tracing::info!("Participant to kick: {kick_participant}");
+    tracing::debug!("Participant to kick: {kick_participant}");
 
     if !p2p_mapping
         .participants
@@ -143,7 +143,7 @@ pub async fn export_state(
     // Use the namespace fingerprint provided as parameter
     let kick_target_hex = &kick_config.namespace_fingerprint;
 
-    tracing::info!(
+    tracing::debug!(
         "Using provided namespace fingerprint for participant {kick_participant}: {kick_target_hex}"
     );
 
@@ -155,7 +155,7 @@ pub async fn export_state(
         );
     }
 
-    tracing::info!(
+    tracing::debug!(
         "Successfully mapped participant {kick_participant} to DNS owner {kick_target_hex}"
     );
 
@@ -175,8 +175,8 @@ pub async fn export_state(
     let remaining_members = namespace_def.owners.len() - 1;
     let new_threshold = kick_config.new_threshold;
 
-    tracing::info!("Remaining members after kick: {remaining_members}");
-    tracing::info!("New threshold (configured): {new_threshold}");
+    tracing::debug!("Remaining members after kick: {remaining_members}");
+    tracing::debug!("New threshold (configured): {new_threshold}");
 
     // Save new threshold
     let threshold_file = dirs.kick_config_dir.join(NEW_THRESHOLD_FILENAME);
@@ -184,7 +184,7 @@ pub async fn export_state(
         .await
         .with_context(|| format!("Failed to write '{}'", threshold_file.display()))?;
 
-    tracing::info!(
+    tracing::debug!(
         "State exported successfully to {path}",
         path = dirs.kick_config_dir.display()
     );

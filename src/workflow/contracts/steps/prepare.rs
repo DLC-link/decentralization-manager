@@ -62,7 +62,7 @@ pub async fn prepare_submissions(
         );
     }
 
-    tracing::info!(
+    tracing::debug!(
         "Parties for {count} participants: {parties}",
         count = participant_parties.len(),
         parties = participant_parties.join(", ")
@@ -70,7 +70,7 @@ pub async fn prepare_submissions(
 
     // Get operator party from config
     let operator = contracts_config.operator_party.to_string();
-    tracing::info!("Operator party: {operator}");
+    tracing::debug!("Operator party: {operator}");
 
     // Build context for field value building
     let context = SubmissionContext {
@@ -94,7 +94,7 @@ pub async fn prepare_submissions(
     }
 
     for (idx, contract_def) in contracts_config.contracts.iter().enumerate() {
-        tracing::info!(
+        tracing::debug!(
             "Preparing submission {idx}: {contract_name} ({contract_id})",
             idx = idx + 1,
             contract_name = contract_def.name,
@@ -154,7 +154,7 @@ pub async fn prepare_submissions(
         utils::write_messages_to_file(&[prepared_submission], &submission_file).await?;
     }
 
-    tracing::info!(
+    tracing::debug!(
         "{count} submissions prepared successfully",
         count = contracts_config.contracts.len()
     );

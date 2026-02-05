@@ -15,7 +15,7 @@ pub async fn upload_dars(config: &NodeConfig, contracts_config: &ContractsConfig
     let dar_files = &contracts_config.dar_files;
 
     if dar_files.is_empty() {
-        tracing::info!("No DAR files to upload, skipping");
+        tracing::debug!("No DAR files to upload, skipping");
         return Ok(());
     }
 
@@ -35,7 +35,7 @@ pub async fn upload_dars(config: &NodeConfig, contracts_config: &ContractsConfig
         upload_dar_bytes(&mut client, &dar_file.filename, dar_data).await?;
     }
 
-    tracing::info!("All DARs uploaded successfully");
+    tracing::debug!("All DARs uploaded successfully");
 
     Ok(())
 }
@@ -49,7 +49,7 @@ pub async fn upload_dars_from_bytes(
     dar_files: Vec<(String, Vec<u8>)>,
 ) -> Result {
     if dar_files.is_empty() {
-        tracing::info!("No DAR files to upload, skipping");
+        tracing::debug!("No DAR files to upload, skipping");
         return Ok(());
     }
 
@@ -61,7 +61,7 @@ pub async fn upload_dars_from_bytes(
         upload_dar_bytes(&mut client, &filename, data).await?;
     }
 
-    tracing::info!("All DARs uploaded successfully");
+    tracing::debug!("All DARs uploaded successfully");
 
     Ok(())
 }
@@ -89,9 +89,9 @@ async fn upload_dar_bytes(
         synchronizer_id: None, // Auto-detect if single synchronizer
     });
 
-    tracing::info!("Uploading {filename}...");
+    tracing::debug!("Uploading {filename}...");
     client.upload_dar(request).await?;
-    tracing::info!("Successfully uploaded {filename}");
+    tracing::debug!("Successfully uploaded {filename}");
 
     Ok(())
 }

@@ -33,7 +33,7 @@ pub async fn submit_kick(config: &NodeConfig, dirs: &KickDirs) -> Result {
 
     // Read original DNS proposal
     let dns_file = dirs.kick_proposals_dir.join(DNS_KICK_PROTO_FILENAME);
-    tracing::info!(
+    tracing::debug!(
         "Reading original DNS proposal from {path}",
         path = dns_file.display()
     );
@@ -42,7 +42,7 @@ pub async fn submit_kick(config: &NodeConfig, dirs: &KickDirs) -> Result {
 
     // Read original P2P proposal
     let p2p_file = dirs.kick_proposals_dir.join(P2P_KICK_PROTO_FILENAME);
-    tracing::info!(
+    tracing::debug!(
         "Reading original P2P proposal from {path}",
         path = p2p_file.display()
     );
@@ -53,14 +53,14 @@ pub async fn submit_kick(config: &NodeConfig, dirs: &KickDirs) -> Result {
     let signed_files =
         utils::find_files_by_pattern(&dirs.kick_signed_dir, SIGNED_KICK_PROPOSALS_PREFIX, ".bin")
             .await?;
-    tracing::info!(
+    tracing::debug!(
         "Found {count} signed proposal file(s)",
         count = signed_files.len()
     );
 
     // Aggregate signatures from all files
     for signed_file in &signed_files {
-        tracing::info!(
+        tracing::debug!(
             "Reading signatures from {path}",
             path = signed_file.display()
         );
@@ -84,18 +84,18 @@ pub async fn submit_kick(config: &NodeConfig, dirs: &KickDirs) -> Result {
             .extend(signed_transactions[1].signatures.clone());
     }
 
-    tracing::info!(
+    tracing::debug!(
         "Final DNS proposal has {count} signature(s)",
         count = dns_transaction.signatures.len()
     );
-    tracing::info!(
+    tracing::debug!(
         "Final P2P proposal has {count} signature(s)",
         count = p2p_transaction.signatures.len()
     );
 
     // Read new namespace definition for validation
     let new_namespace_file = dirs.kick_proposals_dir.join(NEW_NAMESPACE_DEF_FILENAME);
-    tracing::info!(
+    tracing::debug!(
         "Reading new namespace definition from {path}",
         path = new_namespace_file.display()
     );
@@ -108,7 +108,7 @@ pub async fn submit_kick(config: &NodeConfig, dirs: &KickDirs) -> Result {
         .await?
         .trim()
         .to_string();
-    tracing::info!("Party ID: {party_id}");
+    tracing::debug!("Party ID: {party_id}");
 
     // Submit DNS proposal first
     tracing::info!("Submitting DNS kick proposal...");
@@ -127,17 +127,17 @@ pub async fn submit_kick(config: &NodeConfig, dirs: &KickDirs) -> Result {
     });
 
     topology_write_client.add_transactions(dns_request).await?;
-    tracing::info!("DNS kick proposal submitted");
+    tracing::debug!("DNS kick proposal submitted");
 
     // Wait for DNS to propagate
-    tracing::info!("Waiting for DNS kick to appear in topology...");
+    tracing::debug!("Waiting for DNS kick to appear in topology...");
     wait_for_dns_in_topology(
         config,
         &synchronizer_id,
         &new_namespace_def.decentralized_namespace,
     )
     .await?;
-    tracing::info!("DNS kick confirmed in topology");
+    tracing::debug!("DNS kick confirmed in topology");
 
     // Submit P2P proposal
     tracing::info!("Submitting P2P kick proposal...");
@@ -153,16 +153,16 @@ pub async fn submit_kick(config: &NodeConfig, dirs: &KickDirs) -> Result {
     });
 
     topology_write_client.add_transactions(p2p_request).await?;
-    tracing::info!("P2P kick proposal submitted");
+    tracing::debug!("P2P kick proposal submitted");
 
     // Wait for P2P to propagate
-    tracing::info!("Waiting for P2P kick to appear in topology...");
+    tracing::debug!("Waiting for P2P kick to appear in topology...");
     wait_for_p2p_in_topology(config, &synchronizer_id, &party_id).await?;
-    tracing::info!("P2P kick confirmed in topology");
+    tracing::debug!("P2P kick confirmed in topology");
 
     // Additional wait for topology propagation
     let propagation_delay = time::Duration::from_secs(TOPOLOGY_PROPAGATION_DELAY_SECS);
-    tracing::info!("Waiting {propagation_delay:?} for Canton to propagate topology updates...");
+    tracing::debug!("Waiting {propagation_delay:?} for Canton to propagate topology updates...");
     time::sleep(propagation_delay).await;
 
     tracing::info!("Kick submitted and confirmed successfully");
@@ -204,7 +204,7 @@ async fn wait_for_dns_in_topology(
             .into_inner();
 
         if !response.results.is_empty() {
-            tracing::info!("DNS found in topology after {attempt} attempt(s)");
+            tracing::debug!("DNS found in topology after {attempt} attempt(s)");
             return Ok(());
         }
 
@@ -255,7 +255,7 @@ async fn wait_for_p2p_in_topology(
             .into_inner();
 
         if !response.results.is_empty() {
-            tracing::info!("P2P found in topology after {attempt} attempt(s)");
+            tracing::debug!("P2P found in topology after {attempt} attempt(s)");
             return Ok(());
         }
 
