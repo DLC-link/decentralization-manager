@@ -1,7 +1,5 @@
-# Node configuration for Participant 2
-
 [node]
-participant_id = "participant::12207ad94e6b7dfb8ccd976205729a9b7d23c24063966b7c2cf965a7455367d65415"
+participant_id = "participant::1220ab9d7b5c32b243912062f276c21c4af04d38c8649f3b4a4d26912e8e82b2ab96"
 listen_address = "0.0.0.0"
 port = 9002
 

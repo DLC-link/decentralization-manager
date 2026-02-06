@@ -150,6 +150,23 @@ accept_invitation() {
     done
 }
 
+# Helper to verify party participant count
+verify_participant_count() {
+    local expected=$1
+    local party_prefix=$2
+    local http_port=$3
+
+    PARTIES_RESPONSE=$(curl -s "http://localhost:$http_port/decentralized-parties?prefix=$party_prefix")
+    PARTY_JSON=$(echo "$PARTIES_RESPONSE" | jq '.parties[0]')
+    PARTICIPANT_COUNT=$(echo "$PARTY_JSON" | jq '.participants | length')
+
+    if [ "$PARTICIPANT_COUNT" != "$expected" ]; then
+        echo "ERROR: Expected $expected participants, got $PARTICIPANT_COUNT"
+        exit 1
+    fi
+    echo "Verified: party has $PARTICIPANT_COUNT participants"
+}
+
 # ==============================================================================
 # Phase 0: Build release
 # ==============================================================================
@@ -288,11 +305,11 @@ wait_for_server $P3_HTTP "participant-3" $P3_NOISE
 echo "Servers restarted with peer configuration"
 
 # ==============================================================================
-# Phase 3: Run onboarding workflow
+# Phase 3: Run onboarding workflow (P1 + P2 only)
 # ==============================================================================
 echo ""
 echo "=========================================="
-echo "Phase 3: Running onboarding workflow..."
+echo "Phase 3: Running onboarding workflow (P1 + P2)..."
 echo "=========================================="
 
 # Find the next available test-network index
@@ -302,34 +319,32 @@ NEXT_INDEX=$((MAX_INDEX + 1))
 PARTY_PREFIX="test-network-$NEXT_INDEX"
 echo "Using party ID prefix: $PARTY_PREFIX (next available index)"
 
+# Create party with only P1 and P2
 ONBOARDING_REQUEST=$(cat <<EOF
 {
   "party_id_prefix": "$PARTY_PREFIX",
-  "peer_ids": ["$P2_PARTICIPANT_ID", "$P3_PARTICIPANT_ID"]
+  "peer_ids": ["$P2_PARTICIPANT_ID"]
 }
 EOF
 )
 
-echo "Starting onboarding on participant-1..."
+echo "Starting onboarding on participant-1 (with participant-2 only)..."
 curl -s -X POST "http://localhost:$P1_HTTP/onboarding" \
     -H "Content-Type: application/json" \
     -d "$ONBOARDING_REQUEST"
 echo ""
 
-# Accept invitations on attestors
-accept_invitation $P2_HTTP "participant-2" "Onboarding" &
-PID1=$!
-accept_invitation $P3_HTTP "participant-3" "Onboarding" &
-PID2=$!
-wait $PID1 $PID2
+# Accept invitation on participant-2 only
+accept_invitation $P2_HTTP "participant-2" "Onboarding"
 
 poll_status $P1_HTTP "onboarding/status"
 
-# Get the created party ID (find by prefix since there may be old parties from previous runs)
+# Get the created party ID using prefix filter
 echo "Fetching created party..."
 sleep 2
-PARTIES_RESPONSE=$(curl -s "http://localhost:$P1_HTTP/decentralized-parties")
-PARTY_ID=$(echo "$PARTIES_RESPONSE" | jq -r --arg prefix "$PARTY_PREFIX" '.parties[] | select(.party_id | startswith($prefix)) | .party_id' | head -1)
+PARTIES_RESPONSE=$(curl -s "http://localhost:$P1_HTTP/decentralized-parties?prefix=$PARTY_PREFIX")
+PARTY_JSON=$(echo "$PARTIES_RESPONSE" | jq '.parties[0]')
+PARTY_ID=$(echo "$PARTY_JSON" | jq -r '.party_id // empty')
 
 if [ -z "$PARTY_ID" ]; then
     echo "ERROR: No party found after onboarding"
@@ -337,12 +352,8 @@ if [ -z "$PARTY_ID" ]; then
 fi
 
 echo "Created party: $PARTY_ID"
-
-# Get participant UIDs from the party for later use
-PARTY_JSON=$(echo "$PARTIES_RESPONSE" | jq --arg prefix "$PARTY_PREFIX" '.parties[] | select(.party_id | startswith($prefix))')
-PARTICIPANT_UIDS=$(echo "$PARTY_JSON" | jq -r '.participants[].participant_uid')
-echo "Participant UIDs in party:"
-echo "$PARTICIPANT_UIDS"
+echo "Initial participants: P1, P2 (threshold: 2)"
+verify_participant_count 2 "$PARTY_PREFIX" $P1_HTTP
 
 # ==============================================================================
 # Phase 4: Run contracts deployment workflow (SKIPPED - requires real Canton)
@@ -396,16 +407,58 @@ echo "=========================================="
 # poll_status $P1_HTTP "contracts/status"
 
 # ==============================================================================
-# Phase 5: Run kick workflow (kick participant 3)
+# Phase 5: Run add-party workflow (add participant-3)
 # ==============================================================================
 echo ""
 echo "=========================================="
-echo "Phase 5: Running kick workflow (removing participant-3)..."
+echo "Phase 5: Running add-party workflow (adding participant-3)..."
+echo "=========================================="
+
+# New threshold for 3 participants (majority = 2)
+ADD_PARTY_THRESHOLD=2
+
+echo "Adding participant: $P3_PARTICIPANT_ID"
+echo "New threshold: $ADD_PARTY_THRESHOLD"
+
+ADD_PARTY_REQUEST=$(cat <<EOF
+{
+  "decentralized_party_id": "$PARTY_ID",
+  "new_participant_id": "$P3_PARTICIPANT_ID",
+  "new_threshold": $ADD_PARTY_THRESHOLD
+}
+EOF
+)
+
+echo "Starting add-party workflow on participant-1..."
+curl -s -X POST "http://localhost:$P1_HTTP/add-party" \
+    -H "Content-Type: application/json" \
+    -d "$ADD_PARTY_REQUEST"
+echo ""
+
+# Accept invitations on participant-2 (existing member) and participant-3 (new member)
+accept_invitation $P2_HTTP "participant-2" "AddParty" &
+PID1=$!
+accept_invitation $P3_HTTP "participant-3" "AddParty" &
+PID2=$!
+wait $PID1 $PID2
+
+poll_status $P1_HTTP "add-party/status"
+
+echo "Verifying participant-3 was added..."
+sleep 2
+verify_participant_count 3 "$PARTY_PREFIX" $P1_HTTP
+
+# ==============================================================================
+# Phase 6: Run kick workflow (kick participant-3)
+# ==============================================================================
+echo ""
+echo "=========================================="
+echo "Phase 6: Running kick workflow (removing participant-3)..."
 echo "=========================================="
 
 # Refetch party details to find participant 3's UID and owner key
-PARTIES_RESPONSE=$(curl -s "http://localhost:$P1_HTTP/decentralized-parties")
-PARTY_JSON=$(echo "$PARTIES_RESPONSE" | jq --arg prefix "$PARTY_PREFIX" '.parties[] | select(.party_id | startswith($prefix))')
+PARTIES_RESPONSE=$(curl -s "http://localhost:$P1_HTTP/decentralized-parties?prefix=$PARTY_PREFIX")
+PARTY_JSON=$(echo "$PARTIES_RESPONSE" | jq '.parties[0]')
 PARTICIPANT_3_UID=$(echo "$PARTY_JSON" | jq -r '.participants[2].participant_uid // empty')
 OWNER_KEY_3=$(echo "$PARTY_JSON" | jq -r '.owners[2] // empty')
 CURRENT_THRESHOLD=$(echo "$PARTY_JSON" | jq -r '.threshold // 2')
@@ -416,19 +469,19 @@ if [ -z "$PARTICIPANT_3_UID" ]; then
 fi
 
 # Calculate new threshold (majority of remaining participants: 2 participants -> threshold 2)
-NEW_THRESHOLD=2
+KICK_THRESHOLD=2
 
 echo "Kicking participant: $PARTICIPANT_3_UID"
 echo "Owner key: $OWNER_KEY_3"
 echo "Current threshold: $CURRENT_THRESHOLD"
-echo "New threshold: $NEW_THRESHOLD"
+echo "New threshold: $KICK_THRESHOLD"
 
 KICK_REQUEST=$(cat <<EOF
 {
   "decentralized_party_id": "$PARTY_ID",
   "participant_id": "$PARTICIPANT_3_UID",
   "namespace_fingerprint": "$OWNER_KEY_3",
-  "new_threshold": $NEW_THRESHOLD
+  "new_threshold": $KICK_THRESHOLD
 }
 EOF
 )
@@ -440,11 +493,63 @@ curl -s -X POST "http://localhost:$P1_HTTP/kick" \
 echo ""
 
 # Accept invitation on participant-2 (participant-3 is being kicked, won't participate)
-accept_invitation $P2_HTTP "participant-2" "Kick" &
-PID1=$!
-wait $PID1
+accept_invitation $P2_HTTP "participant-2" "Kick"
 
 poll_status $P1_HTTP "kick/status"
+
+echo "Verifying participant-3 was removed..."
+verify_participant_count 2 "$PARTY_PREFIX" $P1_HTTP
+
+# ==============================================================================
+# Phase 7: Run add-party workflow again (add participant-3 back)
+# ==============================================================================
+echo ""
+echo "=========================================="
+echo "Phase 7: Running add-party workflow (adding participant-3 back)..."
+echo "=========================================="
+
+echo "Adding participant: $P3_PARTICIPANT_ID"
+echo "New threshold: $ADD_PARTY_THRESHOLD"
+
+ADD_PARTY_REQUEST=$(cat <<EOF
+{
+  "decentralized_party_id": "$PARTY_ID",
+  "new_participant_id": "$P3_PARTICIPANT_ID",
+  "new_threshold": $ADD_PARTY_THRESHOLD
+}
+EOF
+)
+
+echo "Starting add-party workflow on participant-1..."
+curl -s -X POST "http://localhost:$P1_HTTP/add-party" \
+    -H "Content-Type: application/json" \
+    -d "$ADD_PARTY_REQUEST"
+echo ""
+
+# Accept invitations on participant-2 (existing member) and participant-3 (new member)
+accept_invitation $P2_HTTP "participant-2" "AddParty" &
+PID1=$!
+accept_invitation $P3_HTTP "participant-3" "AddParty" &
+PID2=$!
+wait $PID1 $PID2
+
+poll_status $P1_HTTP "add-party/status"
+
+echo "Verifying participant-3 was added back..."
+sleep 2
+verify_participant_count 3 "$PARTY_PREFIX" $P1_HTTP
+
+# Verify final threshold
+PARTIES_RESPONSE=$(curl -s "http://localhost:$P1_HTTP/decentralized-parties?prefix=$PARTY_PREFIX")
+PARTY_JSON=$(echo "$PARTIES_RESPONSE" | jq '.parties[0]')
+FINAL_THRESHOLD=$(echo "$PARTY_JSON" | jq '.threshold')
+
+if [ "$FINAL_THRESHOLD" != "$ADD_PARTY_THRESHOLD" ]; then
+    echo "ERROR: Expected threshold $ADD_PARTY_THRESHOLD, got $FINAL_THRESHOLD"
+    exit 1
+fi
+
+echo "Final state: 3 participants with threshold $FINAL_THRESHOLD"
 
 # ==============================================================================
 # Complete
@@ -453,6 +558,12 @@ echo ""
 echo "=========================================="
 echo "Integration tests completed successfully!"
 echo "=========================================="
+echo ""
+echo "Summary:"
+echo "  - Phase 3: Created party with P1 + P2"
+echo "  - Phase 5: Added P3 (2 → 3 participants)"
+echo "  - Phase 6: Kicked P3 (3 → 2 participants)"
+echo "  - Phase 7: Added P3 back (2 → 3 participants)"
 
 # Keep running for inspection (optional)
 # echo "Press Ctrl+C to stop all nodes..."
