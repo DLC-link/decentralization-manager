@@ -217,7 +217,12 @@ const App = () => {
   }, [currentInvitation]);
 
   return (
-    <>
+    <Box
+      sx={{
+        minHeight: "100vh",
+        backgroundColor: (theme) => theme.palette.background.default,
+      }}
+    >
       <Header />
 
       <Container maxWidth="md" sx={{ pt: 16, pb: 6 }}>
@@ -311,7 +316,7 @@ const App = () => {
           </>
         )}
       </Container>
-    </>
+    </Box>
   );
 };
 
