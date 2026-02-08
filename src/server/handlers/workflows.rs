@@ -335,7 +335,8 @@ pub async fn start_onboarding(
         tokio::time::sleep(Duration::from_secs(2)).await;
 
         let instance_name = format!("{party_id_prefix}-creation");
-        let onboarding_config = workflow::OnboardingConfig::new(party_id_prefix, instance_name);
+        let onboarding_config =
+            workflow::OnboardingConfig::new(party_id_prefix, instance_name, peer_ids);
 
         let result = workflow::start_coordinator(
             config,

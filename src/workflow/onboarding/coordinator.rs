@@ -75,11 +75,26 @@ pub async fn start_coordinator(
 ) -> Result {
     tracing::info!("Initializing Noise server...");
 
+    // Compute excluded peers: all peers not in peer_ids
+    let peer_ids_set: HashSet<String> = onboarding_config.peer_ids.iter().cloned().collect();
+    let excluded: Vec<String> = network_config
+        .peers
+        .iter()
+        .map(|p| p.participant_id.to_string())
+        .filter(|id| *id != node_config.participant_id().to_string() && !peer_ids_set.contains(id))
+        .collect();
+
+    let excluded = if excluded.is_empty() {
+        None
+    } else {
+        Some(excluded)
+    };
+
     let server = NoiseServer::new(
         node_config.clone(),
         network_config.clone(),
         OnboardingStep::WaitingForAttestors,
-        None, // No excluded participants
+        excluded,
     )
     .await?;
     let server = Arc::new(server);

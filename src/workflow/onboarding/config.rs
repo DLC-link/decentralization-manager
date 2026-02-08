@@ -9,14 +9,17 @@ pub struct OnboardingConfig {
     pub party_id_prefix: String,
     /// Workflow instance name for directory organization (e.g., "xyz-network-creation")
     pub instance_name: String,
+    /// Peer IDs to include in the decentralized party
+    pub peer_ids: Vec<String>,
     _p: PhantomData<()>,
 }
 
 impl OnboardingConfig {
-    pub fn new(party_id_prefix: String, instance_name: String) -> Self {
+    pub fn new(party_id_prefix: String, instance_name: String, peer_ids: Vec<String>) -> Self {
         Self {
             party_id_prefix,
             instance_name,
+            peer_ids,
             _p: PhantomData,
         }
     }
