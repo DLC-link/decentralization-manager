@@ -498,6 +498,13 @@ pub struct ConfirmActionRequest {
     pub action: ActionType,
 }
 
+/// A disclosed contract to include in the ledger submission
+#[derive(Clone, Debug, Deserialize)]
+pub struct DisclosedContractInput {
+    pub contract_id: String,
+    pub blob: String, // base64-encoded created_event_blob
+}
+
 /// Request to execute a confirmed action with structured type
 #[derive(Clone, Debug, Deserialize)]
 pub struct ExecuteActionRequest {
@@ -505,6 +512,8 @@ pub struct ExecuteActionRequest {
     pub rules_contract_id: String,
     pub action: ActionType,
     pub confirmation_cids: Vec<String>,
+    #[serde(default)]
+    pub disclosed_contracts: Vec<DisclosedContractInput>,
 }
 
 /// A single governance confirmation with parsed action

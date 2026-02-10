@@ -365,6 +365,12 @@ export type ActionType =
       amulet_rules_cid: string;
     };
 
+// Disclosed contract for ledger submission
+export interface DisclosedContractInput {
+  contract_id: string;
+  blob: string; // base64-encoded created_event_blob
+}
+
 // Request types
 export interface ConfirmActionRequest {
   party_id: string;
@@ -377,6 +383,7 @@ export interface ExecuteActionRequest {
   rules_contract_id: string;
   action: ActionType;
   confirmation_cids: string[];
+  disclosed_contracts: DisclosedContractInput[];
 }
 
 export interface ExpireConfirmationRequest {

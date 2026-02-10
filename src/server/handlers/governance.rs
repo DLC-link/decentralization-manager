@@ -1,4 +1,5 @@
 use actix_web::{HttpResponse, Responder, get, post, web};
+use anyhow::Context;
 use base64::Engine;
 use canton_proto_rs::com::{
     daml::ledger::api::v2::{
@@ -20,7 +21,7 @@ use crate::{
     error::Result,
     participant_id::CantonId,
     server::{
-        ActionType, AppState, action_serializer,
+        AppState, action_serializer,
         queries::{
             get_governance_confirmations, get_governance_state as query_governance_state,
             get_provider_services, get_user_services, get_vaults,
@@ -33,19 +34,6 @@ use crate::{
     },
     utils,
 };
-
-macro_rules! disclose {
-    ($contract_id:expr, $blob:expr) => {
-        DisclosedContract {
-            template_id: None,
-            contract_id: $contract_id.clone(),
-            created_event_blob: base64::engine::general_purpose::STANDARD
-                .decode($blob)
-                .expect("Invalid base64 blob"),
-            synchronizer_id: String::new(),
-        }
-    };
-}
 
 // ============================================================================
 // Query Types
@@ -525,7 +513,20 @@ async fn execute_confirmed_action(
         act_as: vec![member_party_id.to_string()],
         read_as: vec![request.party_id.to_string()],
         submission_id: String::new(),
-        disclosed_contracts: build_disclosed_contracts(&request.action),
+        disclosed_contracts: request
+            .disclosed_contracts
+            .iter()
+            .map(|dc| {
+                Ok(DisclosedContract {
+                    template_id: None,
+                    contract_id: dc.contract_id.clone(),
+                    created_event_blob: base64::engine::general_purpose::STANDARD
+                        .decode(&dc.blob)
+                        .context("Invalid base64 in disclosed contract blob")?,
+                    synchronizer_id: String::new(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
         synchronizer_id: String::new(),
         package_id_selection_preference: vec![],
         prefetch_contract_keys: vec![],
@@ -540,42 +541,6 @@ async fn execute_confirmed_action(
     client.submit_and_wait(req).await?;
 
     Ok(())
-}
-
-/// Build disclosed contracts for specific action types
-fn build_disclosed_contracts(action: &ActionType) -> Vec<DisclosedContract> {
-    match action {
-        ActionType::DevNetFeatureApp { amulet_rules_cid } => vec![disclose!(
-            amulet_rules_cid,
-            "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"
-        )],
-        ActionType::VaultDeployment {
-            vault_rules_cid, ..
-        } => vec![disclose!(
-            vault_rules_cid,
-            "CgMyLjESjwYKRQCMHFjbebg9gs894ojdp4mvHetxBGZJlb4bsG31+th3w8oSEiCYneqOgmkJLin8CWoocGruD6KiiDGIKysaY7nbvnC2LBIUYml0c2FmZS12YXVsdC12MC1yYzIaaApAODkyZjdiNjRkMzgxNDI5N2ZhNTMwYjBhMDgzZDMwZjRiMDY0OWFlOTEzMzY0NTk3NDBlN2M2M2RjMGYyNmYyZBIMQml0c2FmZVZhdWx0EgpWYXVsdFJ1bGVzGgpWYXVsdFJ1bGVzIpICao8CClcKVTpTYml0c2FmZS1hZG1pbjo6MTIyMDk5OTUzOTM0ZDlmZTE2M2ZlZDA3ZGQzNzFmYTEzOTgyYjJiMzA3NDlkNmRmNTZlY2RiYTM4NWY4Yzc4YTg2N2EKswEKsAFarQEKUjpQdmF1bHQtdGVzdDo6MTIyMGQxMmI4YTRlMmY0NDBkODZmNDY3NjRhZmNmYzhkOTkwOGRlMzVmOTBiMzZiYzE5ZWZjZDhlMTk4NjA2Yzk0ZDIKVzpVdmF1bHQtbWFuYWdlci0wOjoxMjIwOTk5NTM5MzRkOWZlMTYzZmVkMDdkZDM3MWZhMTM5ODJiMmIzMDc0OWQ2ZGY1NmVjZGJhMzg1ZjhjNzhhODY3YSpTYml0c2FmZS1hZG1pbjo6MTIyMDk5OTUzOTM0ZDlmZTE2M2ZlZDA3ZGQzNzFmYTEzOTgyYjJiMzA3NDlkNmRmNTZlY2RiYTM4NWY4Yzc4YTg2N2EyVXZhdWx0LW1hbmFnZXItMDo6MTIyMDk5OTUzOTM0ZDlmZTE2M2ZlZDA3ZGQzNzFmYTEzOTgyYjJiMzA3NDlkNmRmNTZlY2RiYTM4NWY4Yzc4YTg2N2EyUHZhdWx0LXRlc3Q6OjEyMjBkMTJiOGE0ZTJmNDQwZDg2ZjQ2NzY0YWZjZmM4ZDk5MDhkZTM1ZjkwYjM2YmMxOWVmY2Q4ZTE5ODYwNmM5NGQyOdjHx9KSSQYAQioKJgokCAESIG1VKCv3bAsT+BjxtNifG0ZEndE86Q7i1nMXyUktduQSEB4="
-        )],
-        ActionType::ProcessorDeploymentRequest {
-            vault_processor_rules_cid,
-            allocation_factory_cid,
-            ..
-        } => vec![
-            disclose!(
-                vault_processor_rules_cid,
-                "CgMyLjESgAUKRQADHdZlCEAiG5xShFOFTfCSepv/7WjbeNMgvLwKJrb9RcoSEiC8H2AVna89+k+JxAm3r6A92wsYLM7a15KpZOI81rjSihIUYml0c2FmZS12YXVsdC12MC1yYzIaegpAODkyZjdiNjRkMzgxNDI5N2ZhNTMwYjBhMDgzZDMwZjRiMDY0OWFlOTEzMzY0NTk3NDBlN2M2M2RjMGYyNmYyZBIMQml0c2FmZVZhdWx0EhNWYXVsdFByb2Nlc3NvclJ1bGVzGhNWYXVsdFByb2Nlc3NvclJ1bGVzIr8BarwBClcKVTpTYml0c2FmZS1hZG1pbjo6MTIyMDk5OTUzOTM0ZDlmZTE2M2ZlZDA3ZGQzNzFmYTEzOTgyYjJiMzA3NDlkNmRmNTZlY2RiYTM4NWY4Yzc4YTg2N2EKYQpfWl0KWzpZYmFja2VuZC1zaWduYXRvcnktMDo6MTIyMDk5OTUzOTM0ZDlmZTE2M2ZlZDA3ZGQzNzFmYTEzOTgyYjJiMzA3NDlkNmRmNTZlY2RiYTM4NWY4Yzc4YTg2N2EqU2JpdHNhZmUtYWRtaW46OjEyMjA5OTk1MzkzNGQ5ZmUxNjNmZWQwN2RkMzcxZmExMzk4MmIyYjMwNzQ5ZDZkZjU2ZWNkYmEzODVmOGM3OGE4NjdhMlliYWNrZW5kLXNpZ25hdG9yeS0wOjoxMjIwOTk5NTM5MzRkOWZlMTYzZmVkMDdkZDM3MWZhMTM5ODJiMmIzMDc0OWQ2ZGY1NmVjZGJhMzg1ZjhjNzhhODY3YTl7TANp/EgGAEIqCiYKJAgBEiBvGY3UmUCK4oP4XdA6mUK7vNQUtI/KXjSgwk0UK1icBBAe"
-            ),
-            disclose!(
-                allocation_factory_cid,
-                "CgMyLjEShwYKRQDVil8GHwhrPEtAW1fKCPTO/LfzonomCJvmOI62LuYZqMoREiAJkdVl2qBMppGQG8BCOKhlXiwGgDkTDkwAAn6sJnXZ9BIXdXRpbGl0eS1yZWdpc3RyeS1hcHAtdjAajQEKQDgyNzk4ZGYwMTgzMDE4NTI3MDRmMjEwYjk3YWRhYWJmNzZkM2VjZDM3ZDg4OWUxYmY5NmI1ZjMxYTIwZWVhMzQSB1V0aWxpdHkSCFJlZ2lzdHJ5EgNBcHASAlYwEgdTZXJ2aWNlEhFBbGxvY2F0aW9uRmFjdG9yeRoRQWxsb2NhdGlvbkZhY3RvcnkioQJqngIKVgpUOlJjYnRjLW5ldHdvcms6OjEyMjAyYTgzYzZmNDA4MjIxN2MxNzVlMjliYzUzZGE1ZjI3MDNiYTI2NzU3NzhhYjk5MjE3YTVhODgxYTk0OTIwM2ZmClYKVDpSY2J0Yy1uZXR3b3JrOjoxMjIwMmE4M2M2ZjQwODIyMTdjMTc1ZTI5YmM1M2RhNWYyNzAzYmEyNjc1Nzc4YWI5OTIxN2E1YTg4MWE5NDkyMDNmZgpsCmo6aGF1dGgwXzAwN2M2NWY4NTdmMWMzZDU5OWNiNmRmNzM3NzU6OjEyMjBkMmQ3MzJkMDQyYzI4MWNlZTgwZjQ4M2FiODBmM2NiYWE0NzgyODYwZWQ1ZjRkYzIyOGFiMDNkZWRkMmVlOGY5KlJjYnRjLW5ldHdvcms6OjEyMjAyYTgzYzZmNDA4MjIxN2MxNzVlMjliYzUzZGE1ZjI3MDNiYTI2NzU3NzhhYjk5MjE3YTVhODgxYTk0OTIwM2ZmMmhhdXRoMF8wMDdjNjVmODU3ZjFjM2Q1OTljYjZkZjczNzc1OjoxMjIwZDJkNzMyZDA0MmMyODFjZWU4MGY0ODNhYjgwZjNjYmFhNDc4Mjg2MGVkNWY0ZGMyMjhhYjAzZGVkZDJlZThmOTlubOVh5DkGAEIqCiYKJAgBEiCdDhxHJbSFz7Snbvg8xLkPDPvaP3wl+HzTfq2LxHAGmRAe"
-            ),
-            // This is for the FAR config
-            disclose!(
-                "009b9fcd0ec3e6340d7fd1d75c192f6d7056c237465d94995fd87b6b3bc9bd091bca12122029b8d78f42969f04b90508b8cb1574d7c7142d2027c39c65717ff37b5667ed6c".to_string(),
-                "CgMyLjESywQKRQCbn80Ow+Y0DX/R11wZL21wVsI3Rl2UmV/Ye2s7yb0JG8oSEiApuNePQpafBLkFCLjLFXTXxxQtICfDnGVxf/N7VmftbBINc3BsaWNlLWFtdWxldBpkCkAzY2ExMzQzYWIyNmI0NTNkMzhjOGFkYjcwZGNhNWYxZWFkODQ0MGM0MmI1OWI2OGYwNzA3ODY5NTVjYmY5ZWMxEgZTcGxpY2USBkFtdWxldBoQRmVhdHVyZWRBcHBSaWdodCKxAWquAQpNCks6SURTTzo6MTIyMGJlNThjMjllNjVkZTQwYmYyNzNiZTFkYzJiMjY2ZDQzYTlhMDAyZWE1YjE4OTU1YWVlZjdhYWM4ODFiYjQ3MWEKXQpbOlliYWNrZW5kLXNpZ25hdG9yeS0wOjoxMjIwOTk5NTM5MzRkOWZlMTYzZmVkMDdkZDM3MWZhMTM5ODJiMmIzMDc0OWQ2ZGY1NmVjZGJhMzg1ZjhjNzhhODY3YSpJRFNPOjoxMjIwYmU1OGMyOWU2NWRlNDBiZjI3M2JlMWRjMmIyNjZkNDNhOWEwMDJlYTViMTg5NTVhZWVmN2FhYzg4MWJiNDcxYTJZYmFja2VuZC1zaWduYXRvcnktMDo6MTIyMDk5OTUzOTM0ZDlmZTE2M2ZlZDA3ZGQzNzFmYTEzOTgyYjJiMzA3NDlkNmRmNTZlY2RiYTM4NWY4Yzc4YTg2N2E5StpTtehIBgBCKgomCiQIARIgte09TNtngfU2IfZ5PIabI5+a9HM9ZLsg728k5xjF0GMQHg=="
-            ),
-        ],
-        _ => vec![],
-    }
 }
 
 /// Execute ExpireConfirmation choice on VaultGovernanceRules contract

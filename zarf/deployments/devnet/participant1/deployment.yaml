@@ -48,6 +48,17 @@ data:
     realm = "ibtc-catalyst-devnet"
     client_id = "attestor-1"
     client_secret = "5ruw8QZkWXPSJI39zDWsid9O41cM4TSr"
+
+    [[parties]]
+    dec_party_id = "vault-rc5::1220abfbb953c041001625bf3b4b9af34ca7a01bc7530c1a619d9e91e4995d039551"
+    member_party_id = "attestor-1::1220fa8543db6c66fe3a55b1f180c8dfc7f876265c76684fbc1d35d89e02c8aafe8e"
+    user_id = "CoordinatorUser"
+
+    [parties.keycloak]
+    url = "https://keycloak.dev.canton.ibtc.network"
+    realm = "ibtc-catalyst-devnet"
+    client_id = "attestor-1"
+    client_secret = "5ruw8QZkWXPSJI39zDWsid9O41cM4TSr"
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

@@ -29,6 +29,7 @@ import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import AddIcon from "@mui/icons-material/Add";
 import UndoIcon from "@mui/icons-material/Undo";
+import { ExecuteDialog } from "./ExecuteDialog";
 import {
   API_BASE,
   MAINNET_DEMO,
@@ -51,6 +52,7 @@ import type {
   ConfirmActionRequest,
   ExecuteActionRequest,
   ExpireConfirmationRequest,
+  DisclosedContractInput,
   InstrumentId,
   VaultLimits,
   FarConfig,
@@ -155,6 +157,9 @@ export const GovernanceSection = ({
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<GovernanceResponse | null>(null);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [executeDialogAction, setExecuteDialogAction] =
+    useState<GovernanceAction | null>(null);
+  const [executeError, setExecuteError] = useState<string | null>(null);
   const [rulesContractId, setRulesContractId] = useState(
     initialRulesContractId || "",
   );
@@ -376,14 +381,17 @@ export const GovernanceSection = ({
     }
   };
 
-  const handleExecute = async (action: GovernanceAction) => {
+  const handleExecute = async (
+    action: GovernanceAction,
+    disclosedContracts: DisclosedContractInput[],
+  ) => {
     if (!rulesContractId) {
-      setError("Please enter the VaultGovernanceRules contract ID");
+      setExecuteError("Please enter the VaultGovernanceRules contract ID");
       return;
     }
 
     setActionLoading(action.action_hash);
-    setError(null);
+    setExecuteError(null);
 
     try {
       const request: ExecuteActionRequest = {
@@ -391,6 +399,7 @@ export const GovernanceSection = ({
         rules_contract_id: rulesContractId,
         action: action.action,
         confirmation_cids: action.confirmations.map((c) => c.contract_id),
+        disclosed_contracts: disclosedContracts,
       };
 
       const res = await fetch(`${API_BASE}/governance/execute`, {
@@ -404,10 +413,13 @@ export const GovernanceSection = ({
         throw new Error(errData.error || "Failed to execute action");
       }
 
-      // Refresh data
+      // Close dialog and refresh data
+      setExecuteDialogAction(null);
       await fetchGovernance();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to execute action");
+      setExecuteError(
+        e instanceof Error ? e.message : "Failed to execute action",
+      );
     } finally {
       setActionLoading(null);
     }
@@ -1773,7 +1785,10 @@ export const GovernanceSection = ({
                                 <PlayArrowIcon />
                               )
                             }
-                            onClick={() => handleExecute(action)}
+                            onClick={() => {
+                              setExecuteError(null);
+                              setExecuteDialogAction(action);
+                            }}
                             disabled={
                               MAINNET_DEMO ||
                               !rulesContractId ||
@@ -1796,6 +1811,19 @@ export const GovernanceSection = ({
           </Typography>
         )}
       </Collapse>
+
+      <ExecuteDialog
+        open={executeDialogAction !== null}
+        onClose={() => setExecuteDialogAction(null)}
+        onExecute={(disclosedContracts) => {
+          if (executeDialogAction) {
+            handleExecute(executeDialogAction, disclosedContracts);
+          }
+        }}
+        action={executeDialogAction}
+        loading={actionLoading === executeDialogAction?.action_hash}
+        error={executeError}
+      />
     </Box>
   );
 };
