@@ -7,8 +7,11 @@ import {
   Button,
   TextField,
   InputAdornment,
+  LinearProgress,
+  IconButton,
 } from "@mui/material";
 import FilterListIcon from "@mui/icons-material/FilterList";
+import SearchIcon from "@mui/icons-material/Search";
 import AddIcon from "@mui/icons-material/Add";
 import { Header } from "./components/Header";
 import { PartyCard } from "./components/PartyCard";
@@ -51,6 +54,7 @@ const App = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [partyFilter, setPartyFilter] = useState("cbtc-network");
+  const [refreshingParties, setRefreshingParties] = useState(false);
   const { showSnackbar } = useSnackbar();
 
   useEffect(() => {
@@ -61,6 +65,7 @@ const App = () => {
   }, []);
 
   const refreshParties = useCallback(async () => {
+    setRefreshingParties(true);
     try {
       const params = partyFilter
         ? `?prefix=${encodeURIComponent(partyFilter)}`
@@ -76,6 +81,8 @@ const App = () => {
       showSnackbar(
         err instanceof Error ? err.message : "Failed to refresh parties",
       );
+    } finally {
+      setRefreshingParties(false);
     }
   }, [showSnackbar, partyFilter]);
 
@@ -269,26 +276,39 @@ const App = () => {
                   Create Party
                 </Button>
               </Box>
-              <TextField
-                size="small"
-                label="Filter by prefix"
-                value={partyFilter}
-                onChange={(e) => setPartyFilter(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    refreshParties();
-                  }
-                }}
-                InputProps={{
-                  startAdornment: (
-                    <InputAdornment position="start">
-                      <FilterListIcon fontSize="small" color="action" />
-                    </InputAdornment>
-                  ),
-                }}
-                sx={{ width: 300 }}
-                helperText="Press Enter to apply filter"
-              />
+              <Box sx={{ display: "flex", alignItems: "flex-start", gap: 1 }}>
+                <TextField
+                  size="small"
+                  label="Filter by prefix"
+                  value={partyFilter}
+                  onChange={(e) => setPartyFilter(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      refreshParties();
+                    }
+                  }}
+                  disabled={refreshingParties}
+                  InputProps={{
+                    startAdornment: (
+                      <InputAdornment position="start">
+                        <FilterListIcon fontSize="small" color="action" />
+                      </InputAdornment>
+                    ),
+                  }}
+                  sx={{ width: 300 }}
+                />
+                <IconButton
+                  onClick={refreshParties}
+                  disabled={refreshingParties}
+                  color="primary"
+                  sx={{ mt: "1px" }}
+                >
+                  <SearchIcon />
+                </IconButton>
+              </Box>
+              {refreshingParties && (
+                <LinearProgress sx={{ mt: 1, borderRadius: 1 }} />
+              )}
             </Box>
 
             {parties.map((party) => (
