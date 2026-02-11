@@ -14,6 +14,12 @@ A web application for managing decentralized parties in Canton blockchain networ
 - **Real-time Status**: Live peer connectivity monitoring and workflow progress tracking
 - **Canton Integration**: Native gRPC integration with Canton Admin and Ledger APIs
 
+## Documentation
+
+- [Architecture Overview](docs/ARCHITECTURE.md) -- System architecture, core concepts, communication protocol, and technical constraints
+- [Integration Guide](docs/INTEGRATION_GUIDE.md) -- Deployment, configuration, authentication setup, and full API reference
+- [Use Cases](docs/USE_CASES.md) -- Vault governance, FAR rewards, multi-sig wallet, and utility service walkthroughs
+
 ## Architecture
 
 The application runs as an HTTP server with an embedded React frontend. Multiple instances coordinate via the Noise Protocol:
