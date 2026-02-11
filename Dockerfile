@@ -29,6 +29,6 @@ COPY --from=builder /lib/x86_64-linux-gnu/libcrypto.so.3 /lib64/libcrypto.so.3
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=builder /app/target/release/dec-party-manager /usr/local/bin/
 
-EXPOSE 8080
+EXPOSE 8080 9000
 
 ENTRYPOINT ["dec-party-manager", "-d", "/", "serve", "--host", "0.0.0.0", "--port", "8080"]
