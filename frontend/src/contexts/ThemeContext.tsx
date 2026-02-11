@@ -20,30 +20,36 @@ export const useThemeMode = () => {
   return context;
 };
 
+// BitSafe Brand Colors
+// Primary: Orange #ff6633
+// Secondary: Charcoal #1a1a1a
+// Tertiary: White #ffffff
+// Accent: Light Gray #f3f3f3
+
 const getDesignTokens = (mode: "light" | "dark") => ({
   palette: {
     mode,
     primary: mode === "light"
       ? {
-          main: "#6366f1",
-          light: "#818cf8",
-          dark: "#4f46e5",
+          main: "#ff6633",
+          light: "#ff8559",
+          dark: "#e55a2b",
         }
       : {
-          main: "#a5b4fc",
-          light: "#c7d2fe",
-          dark: "#818cf8",
+          main: "#ff8559",
+          light: "#ffa37d",
+          dark: "#ff6633",
         },
     secondary: mode === "light"
       ? {
-          main: "#ec4899",
-          light: "#f472b6",
-          dark: "#db2777",
+          main: "#1a1a1a",
+          light: "#333333",
+          dark: "#000000",
         }
       : {
-          main: "#f9a8d4",
-          light: "#fbcfe8",
-          dark: "#f472b6",
+          main: "#f3f3f3",
+          light: "#ffffff",
+          dark: "#e0e0e0",
         },
     success: {
       main: "#10b981",
@@ -53,27 +59,27 @@ const getDesignTokens = (mode: "light" | "dark") => ({
     ...(mode === "light"
       ? {
           background: {
-            default: "#f8fafc",
+            default: "#f3f3f3",
             paper: "#ffffff",
           },
           text: {
-            primary: "#1e293b",
-            secondary: "#64748b",
+            primary: "#1a1a1a",
+            secondary: "#666666",
           },
         }
       : {
           background: {
-            default: "#0f172a",
-            paper: "#1e293b",
+            default: "#1a1a1a",
+            paper: "#2a2a2a",
           },
           text: {
-            primary: "#f1f5f9",
-            secondary: "#94a3b8",
+            primary: "#f3f3f3",
+            secondary: "#a0a0a0",
           },
         }),
   },
   typography: {
-    fontFamily: '"Inter", "SF Pro Display", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+    fontFamily: '"Space Grotesk", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
     h4: {
       fontWeight: 700,
       letterSpacing: "-0.02em",
@@ -87,7 +93,7 @@ const getDesignTokens = (mode: "light" | "dark") => ({
     },
     subtitle2: {
       fontWeight: 600,
-      color: mode === "light" ? "#64748b" : "#94a3b8",
+      color: mode === "light" ? "#666666" : "#a0a0a0",
       textTransform: "uppercase" as const,
       fontSize: "0.75rem",
       letterSpacing: "0.05em",
@@ -108,7 +114,7 @@ const getDesignTokens = (mode: "light" | "dark") => ({
           boxShadow: mode === "light"
             ? "0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1)"
             : "0 1px 3px 0 rgb(0 0 0 / 0.3), 0 1px 2px -1px rgb(0 0 0 / 0.3)",
-          border: `1px solid ${mode === "light" ? "#e2e8f0" : "#334155"}`,
+          border: `1px solid ${mode === "light" ? "#e0e0e0" : "#3a3a3a"}`,
         },
       },
     },
@@ -118,7 +124,7 @@ const getDesignTokens = (mode: "light" | "dark") => ({
           boxShadow: mode === "light"
             ? "0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1)"
             : "0 1px 3px 0 rgb(0 0 0 / 0.3), 0 1px 2px -1px rgb(0 0 0 / 0.3)",
-          border: `1px solid ${mode === "light" ? "#e2e8f0" : "#334155"}`,
+          border: `1px solid ${mode === "light" ? "#e0e0e0" : "#3a3a3a"}`,
           "&:before": {
             display: "none",
           },
@@ -132,7 +138,7 @@ const getDesignTokens = (mode: "light" | "dark") => ({
     MuiAccordionSummary: {
       styleOverrides: {
         root: {
-          backgroundColor: mode === "light" ? "#f8fafc" : "#1e293b",
+          backgroundColor: mode === "light" ? "#f3f3f3" : "#2a2a2a",
           borderRadius: "12px 12px 0 0",
           flexDirection: "row-reverse" as const,
           gap: 8,
@@ -158,11 +164,11 @@ const getDesignTokens = (mode: "light" | "dark") => ({
           borderRadius: 8,
         },
         colorDefault: {
-          backgroundColor: mode === "light" ? "#f1f5f9" : "#334155",
-          color: mode === "light" ? "#475569" : "#cbd5e1",
+          backgroundColor: mode === "light" ? "#e8e8e8" : "#3a3a3a",
+          color: mode === "light" ? "#4a4a4a" : "#d0d0d0",
         },
         colorPrimary: {
-          backgroundColor: "#6366f1",
+          backgroundColor: "#ff6633",
         },
         colorSuccess: {
           backgroundColor: "#10b981",
@@ -173,13 +179,13 @@ const getDesignTokens = (mode: "light" | "dark") => ({
       styleOverrides: {
         root: {
           "& .MuiTableCell-head": {
-            backgroundColor: mode === "light" ? "#f8fafc" : "#1e293b",
+            backgroundColor: mode === "light" ? "#f3f3f3" : "#2a2a2a",
             fontWeight: 600,
-            color: mode === "light" ? "#64748b" : "#94a3b8",
+            color: mode === "light" ? "#666666" : "#a0a0a0",
             textTransform: "uppercase" as const,
             fontSize: "0.75rem",
             letterSpacing: "0.05em",
-            borderBottom: `2px solid ${mode === "light" ? "#e2e8f0" : "#334155"}`,
+            borderBottom: `2px solid ${mode === "light" ? "#e0e0e0" : "#3a3a3a"}`,
           },
         },
       },
@@ -187,7 +193,7 @@ const getDesignTokens = (mode: "light" | "dark") => ({
     MuiTableCell: {
       styleOverrides: {
         root: {
-          borderBottom: `1px solid ${mode === "light" ? "#f1f5f9" : "#334155"}`,
+          borderBottom: `1px solid ${mode === "light" ? "#e8e8e8" : "#3a3a3a"}`,
           padding: "12px 16px",
         },
       },
@@ -196,7 +202,7 @@ const getDesignTokens = (mode: "light" | "dark") => ({
       styleOverrides: {
         root: {
           "&:hover": {
-            backgroundColor: mode === "light" ? "#f8fafc" : "#334155",
+            backgroundColor: mode === "light" ? "#f3f3f3" : "#3a3a3a",
           },
           "&:last-child td": {
             borderBottom: 0,
@@ -209,7 +215,7 @@ const getDesignTokens = (mode: "light" | "dark") => ({
         root: {
           transition: "all 0.2s ease-in-out",
           "&:hover": {
-            backgroundColor: mode === "light" ? "#f1f5f9" : "#334155",
+            backgroundColor: mode === "light" ? "#e8e8e8" : "#3a3a3a",
             transform: "scale(1.1)",
           },
         },
@@ -218,7 +224,16 @@ const getDesignTokens = (mode: "light" | "dark") => ({
     MuiCircularProgress: {
       styleOverrides: {
         root: {
-          color: "#6366f1",
+          color: "#ff6633",
+        },
+      },
+    },
+    MuiButton: {
+      styleOverrides: {
+        containedPrimary: {
+          "&:hover": {
+            backgroundColor: "#e55a2b",
+          },
         },
       },
     },

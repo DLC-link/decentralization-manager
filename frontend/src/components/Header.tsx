@@ -1,7 +1,13 @@
-import { Box, Container, Typography } from "@mui/material";
+import { Box, Container, Typography, useTheme } from "@mui/material";
+
+import BitSafeLogoDark from "../assets/bitsafe-logo-dark.svg";
+import BitSafeLogoLight from "../assets/bitsafe-logo-light.svg";
 import { ThemeSwitcher } from "./ThemeSwitcher";
 
 export const Header = () => {
+  const theme = useTheme();
+  const logo = theme.palette.mode === "light" ? BitSafeLogoDark : BitSafeLogoLight;
+
   return (
     <Box
       sx={{
@@ -13,10 +19,10 @@ export const Header = () => {
         backdropFilter: "blur(16px)",
         backgroundColor: (theme) =>
           theme.palette.mode === "light"
-            ? "rgba(248, 250, 252, 0.5)"
-            : "rgba(15, 23, 42, 0.5)",
+            ? "rgba(243, 243, 243, 0.5)"
+            : "rgba(26, 26, 26, 0.5)",
         borderBottom: (theme) =>
-          `1px solid ${theme.palette.mode === "light" ? "rgba(226, 232, 240, 0.5)" : "rgba(51, 65, 85, 0.5)"}`,
+          `1px solid ${theme.palette.mode === "light" ? "rgba(224, 224, 224, 0.5)" : "rgba(58, 58, 58, 0.5)"}`,
         py: 2.5,
         px: 3,
       }}
@@ -30,9 +36,12 @@ export const Header = () => {
         }}
       >
         <Box>
-          <Typography variant="h5" color="primary" sx={{ fontWeight: 700 }}>
-            Canton Decentralized Party Manager
-          </Typography>
+          <img
+            src={logo}
+            alt="BitSafe"
+            onClick={() => window.location.reload()}
+            style={{ height: 28, cursor: "pointer" }}
+          />
           <Typography variant="body2" color="text.secondary">
             Monitor and manage your decentralized parties
           </Typography>
@@ -41,4 +50,4 @@ export const Header = () => {
       </Container>
     </Box>
   );
-}
+};
