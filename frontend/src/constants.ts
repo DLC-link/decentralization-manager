@@ -1,6 +1,5 @@
 export const API_BASE = "";
 export const MAINNET_DEMO = import.meta.env.VITE_MAINNET_DEMO === "true";
-export const VAULT_GOVERNANCE_PACKAGE_ID = "#bitsafe-vault-governance-v0-rc2";
 
 // Limits
 export const MAX_TOTAL_DEPOSIT = 10000;

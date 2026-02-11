@@ -16,8 +16,7 @@ use serde::Deserialize;
 
 use crate::{
     auth::WorkflowAuth,
-    config::NodeConfig,
-    consts::VAULT_GOVERNANCE_PACKAGE_ID,
+    config::{NodeConfig, PackageConfig},
     error::Result,
     participant_id::CantonId,
     server::{
@@ -78,8 +77,17 @@ pub async fn get_governance(
     // Get member_party_id from config (used by frontend to identify own confirmations)
     let member_party_id = get_member_party_id(&data, &party_id);
 
-    match get_governance_confirmations(&data.config, &query.party_id, threshold, token, test_mode)
-        .await
+    let packages = data.config.get_packages(&query.party_id);
+
+    match get_governance_confirmations(
+        &data.config,
+        &query.party_id,
+        threshold,
+        token,
+        test_mode,
+        &packages,
+    )
+    .await
     {
         Ok(actions) => HttpResponse::Ok().json(GovernanceResponse {
             actions,
@@ -116,7 +124,9 @@ pub async fn get_governance_state(
     // Check if we're in test mode (mock auth)
     let test_mode = matches!(data.auth, Some(WorkflowAuth::Mock(_)));
 
-    match query_governance_state(&data.config, &query.party_id, token, test_mode).await {
+    let packages = data.config.get_packages(&query.party_id);
+
+    match query_governance_state(&data.config, &query.party_id, token, test_mode, &packages).await {
         Ok(state) => HttpResponse::Ok().json(GovernanceStateResponse { state }),
         Err(e) => {
             tracing::error!("Failed to fetch governance state: {e}");
@@ -148,7 +158,9 @@ pub async fn get_vaults_handler(
     // Check if we're in test mode (mock auth)
     let test_mode = matches!(data.auth, Some(WorkflowAuth::Mock(_)));
 
-    match get_vaults(&data.config, &query.party_id, token, test_mode).await {
+    let packages = data.config.get_packages(&query.party_id);
+
+    match get_vaults(&data.config, &query.party_id, token, test_mode, &packages).await {
         Ok(vaults) => HttpResponse::Ok().json(VaultsResponse { vaults }),
         Err(e) => {
             tracing::error!("Failed to fetch vaults: {e}");
@@ -177,7 +189,9 @@ pub async fn get_provider_services_handler(
     let token = get_party_token(&data, &party_id).await;
     let test_mode = matches!(data.auth, Some(WorkflowAuth::Mock(_)));
 
-    match get_provider_services(&data.config, &query.party_id, token, test_mode).await {
+    let packages = data.config.get_packages(&query.party_id);
+
+    match get_provider_services(&data.config, &query.party_id, token, test_mode, &packages).await {
         Ok(services) => HttpResponse::Ok().json(ProviderServicesResponse { services }),
         Err(e) => {
             tracing::error!("Failed to fetch provider services: {e}");
@@ -206,7 +220,9 @@ pub async fn get_user_services_handler(
     let token = get_party_token(&data, &party_id).await;
     let test_mode = matches!(data.auth, Some(WorkflowAuth::Mock(_)));
 
-    match get_user_services(&data.config, &query.party_id, token, test_mode).await {
+    let packages = data.config.get_packages(&query.party_id);
+
+    match get_user_services(&data.config, &query.party_id, token, test_mode, &packages).await {
         Ok(services) => HttpResponse::Ok().json(UserServicesResponse { services }),
         Err(e) => {
             tracing::error!("Failed to fetch user services: {e}");
@@ -239,7 +255,9 @@ pub async fn confirm_action(
         }
     };
 
-    match execute_confirm_action(&data.config, &body, &token, &member_party_id).await {
+    let packages = data.config.get_packages(&body.party_id.to_string());
+
+    match execute_confirm_action(&data.config, &body, &token, &member_party_id, &packages).await {
         Ok(()) => HttpResponse::Ok().json(serde_json::json!({
             "message": "Confirmation submitted successfully"
         })),
@@ -270,7 +288,9 @@ pub async fn execute_action(
         }
     };
 
-    match execute_confirmed_action(&data.config, &body, &token, &member_party_id).await {
+    let packages = data.config.get_packages(&body.party_id.to_string());
+
+    match execute_confirmed_action(&data.config, &body, &token, &member_party_id, &packages).await {
         Ok(()) => HttpResponse::Ok().json(serde_json::json!({
             "message": "Action executed successfully"
         })),
@@ -301,7 +321,11 @@ pub async fn expire_confirmation(
         }
     };
 
-    match execute_expire_confirmation(&data.config, &body, &token, &member_party_id).await {
+    let packages = data.config.get_packages(&body.party_id.to_string());
+
+    match execute_expire_confirmation(&data.config, &body, &token, &member_party_id, &packages)
+        .await
+    {
         Ok(()) => HttpResponse::Ok().json(serde_json::json!({
             "message": "Confirmation expired successfully"
         })),
@@ -312,6 +336,16 @@ pub async fn expire_confirmation(
             }))
         }
     }
+}
+
+/// Get package configuration for a party
+#[get("/packages")]
+pub async fn get_packages(
+    data: web::Data<AppState>,
+    query: web::Query<GovernanceQuery>,
+) -> impl Responder {
+    let packages = data.config.get_packages(&query.party_id);
+    HttpResponse::Ok().json(packages)
 }
 
 // ============================================================================
@@ -410,7 +444,13 @@ async fn execute_confirm_action(
     request: &ConfirmActionRequest,
     token: &str,
     member_party_id: &str,
+    packages: &PackageConfig,
 ) -> Result {
+    let vault_governance_pkg = packages
+        .vault_governance
+        .as_deref()
+        .context("vault_governance package not configured")?;
+
     let channel = tonic::transport::Channel::from_shared(config.ledger_api_url())?
         .connect()
         .await?;
@@ -419,7 +459,7 @@ async fn execute_confirm_action(
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
 
     let template_id = Identifier {
-        package_id: VAULT_GOVERNANCE_PACKAGE_ID.to_string(),
+        package_id: vault_governance_pkg.to_string(),
         module_name: "BitsafeVault.VaultGovernance".to_string(),
         entity_name: "VaultGovernanceRules".to_string(),
     };
@@ -471,7 +511,13 @@ async fn execute_confirmed_action(
     request: &ExecuteActionRequest,
     token: &str,
     member_party_id: &str,
+    packages: &PackageConfig,
 ) -> Result {
+    let vault_governance_pkg = packages
+        .vault_governance
+        .as_deref()
+        .context("vault_governance package not configured")?;
+
     let channel = tonic::transport::Channel::from_shared(config.ledger_api_url())?
         .connect()
         .await?;
@@ -480,7 +526,7 @@ async fn execute_confirmed_action(
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
 
     let template_id = Identifier {
-        package_id: VAULT_GOVERNANCE_PACKAGE_ID.to_string(),
+        package_id: vault_governance_pkg.to_string(),
         module_name: "BitsafeVault.VaultGovernance".to_string(),
         entity_name: "VaultGovernanceRules".to_string(),
     };
@@ -549,7 +595,13 @@ async fn execute_expire_confirmation(
     request: &ExpireConfirmationRequest,
     token: &str,
     member_party_id: &str,
+    packages: &PackageConfig,
 ) -> Result {
+    let vault_governance_pkg = packages
+        .vault_governance
+        .as_deref()
+        .context("vault_governance package not configured")?;
+
     let channel = tonic::transport::Channel::from_shared(config.ledger_api_url())?
         .connect()
         .await?;
@@ -558,7 +610,7 @@ async fn execute_expire_confirmation(
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
 
     let template_id = Identifier {
-        package_id: VAULT_GOVERNANCE_PACKAGE_ID.to_string(),
+        package_id: vault_governance_pkg.to_string(),
         module_name: "BitsafeVault.VaultGovernance".to_string(),
         entity_name: "VaultGovernanceRules".to_string(),
     };

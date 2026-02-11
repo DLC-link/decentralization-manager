@@ -9,6 +9,13 @@ export interface ContractInfo {
   package_id: string;
 }
 
+export interface PackageConfig {
+  vault_governance?: string;
+  vault?: string;
+  utility_registry?: string;
+  utility_credential?: string;
+}
+
 export interface PartyMetadata {
   annotations: Record<string, string>;
 }

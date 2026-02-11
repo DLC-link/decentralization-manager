@@ -28,3 +28,9 @@ url = "https://keycloak.dev.canton.ibtc.network"
 realm = "ibtc-catalyst-devnet"
 client_id = "attestor-1"
 client_secret = "5ruw8QZkWXPSJI39zDWsid9O41cM4TSr"
+
+[parties.packages]
+vault_governance = "#bitsafe-vault-governance-v0-rc5"
+vault = "#bitsafe-vault-v0-rc5"
+utility_registry = "#utility-registry-app-v0"
+utility_credential = "#utility-credential-app-v0"

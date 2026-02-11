@@ -15,7 +15,7 @@ use crate::{
             WorkflowProgress, WorkflowResponse,
         },
     },
-    workflow,
+    workflow::{self, ContractsConfig},
 };
 
 // ============================================================================
@@ -529,11 +529,11 @@ pub async fn start_contracts(
         tokio::time::sleep(Duration::from_secs(2)).await;
 
         let result = workflow::start_coordinator(
-            config,
+            config.clone(),
             workflow::WorkflowType::Contracts,
             None, // No onboarding config
             None, // No kick config
-            Some(contracts_config),
+            Some(contracts_config.clone()),
             workflow_auth,
         )
         .await;
@@ -547,6 +547,10 @@ pub async fn start_contracts(
             Ok(()) => {
                 *status = WorkflowProgress::Completed;
                 tracing::info!("Contracts workflow completed successfully");
+                // Save package IDs from deployed contracts to party config
+                if let Err(e) = save_deployed_packages(&config, &contracts_config).await {
+                    tracing::warn!("Failed to save package config: {e}");
+                }
             }
             Err(e) => {
                 *status = WorkflowProgress::Failed;
@@ -574,6 +578,37 @@ pub async fn get_contracts_status(
         "status": *status,
         "error": *error,
     }))
+}
+
+/// Save deployed package IDs to party config after successful contracts workflow
+async fn save_deployed_packages(config: &NodeConfig, contracts_config: &ContractsConfig) -> Result {
+    let mut fresh_config = NodeConfig::from_dir(config.root_dir()).await?;
+    let creds = fresh_config
+        .parties
+        .iter_mut()
+        .find(|p| p.dec_party_id == contracts_config.decentralized_party_id);
+    if let Some(creds) = creds {
+        for contract in &contracts_config.contracts {
+            match (contract.module_name.as_str(), contract.entity_name.as_str()) {
+                ("BitsafeVault.VaultGovernance", "VaultGovernanceRules") => {
+                    creds.packages.vault_governance = Some(contract.package_id.clone());
+                }
+                ("BitsafeVault.Vault", "Vault") => {
+                    creds.packages.vault = Some(contract.package_id.clone());
+                }
+                (m, _) if m.starts_with("Utility.Registry.App") => {
+                    creds.packages.utility_registry = Some(contract.package_id.clone());
+                }
+                (m, _) if m.starts_with("Utility.Credential.App") => {
+                    creds.packages.utility_credential = Some(contract.package_id.clone());
+                }
+                _ => {}
+            }
+        }
+        fresh_config.save_config().await?;
+        tracing::info!("Saved package IDs to party config");
+    }
+    Ok(())
 }
 
 /// Send contracts invites to all peers using Noise protocol

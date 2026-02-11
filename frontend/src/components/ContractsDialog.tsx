@@ -29,13 +29,14 @@ import UploadFileIcon from "@mui/icons-material/UploadFile";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import AccountBalanceIcon from "@mui/icons-material/AccountBalance";
 import StorageIcon from "@mui/icons-material/Storage";
-import { API_BASE, VAULT_GOVERNANCE_PACKAGE_ID } from "../constants";
+import { API_BASE } from "../constants";
 import type {
   ContractsStatusResponse,
   ContractsRequest,
   ContractDefinition,
   FieldDefinition,
   DarFile,
+  PackageConfig,
 } from "../types";
 
 interface ContractsDialogProps {
@@ -138,13 +139,13 @@ const getCbtcContracts = (): ContractDefinition[] => [
 ];
 
 // Vault contract definitions
-const getVaultContracts = (participantCount: number = 3): ContractDefinition[] => {
+const getVaultContracts = (participantCount: number = 3, vaultGovernancePkg: string = ""): ContractDefinition[] => {
   const defaultThreshold = Math.max(2, Math.ceil((participantCount * 2) / 3));
   return [
     {
       id: "create-vault-governance-rules",
       name: "VaultGovernanceRules",
-      package_id: VAULT_GOVERNANCE_PACKAGE_ID,
+      package_id: vaultGovernancePkg,
       module_name: "BitsafeVault.VaultGovernance",
       entity_name: "VaultGovernanceRules",
       fields: [
@@ -157,12 +158,12 @@ const getVaultContracts = (participantCount: number = 3): ContractDefinition[] =
   ];
 };
 
-const getContractsForType = (type: ContractType, participantCount: number = 3): ContractDefinition[] => {
+const getContractsForType = (type: ContractType, participantCount: number = 3, packages?: PackageConfig): ContractDefinition[] => {
   switch (type) {
     case "cbtc":
       return getCbtcContracts();
     case "vault":
-      return getVaultContracts(participantCount);
+      return getVaultContracts(participantCount, packages?.vault_governance ?? "");
     default:
       return [];
   }
@@ -716,11 +717,24 @@ export const ContractsDialog = ({
   const [status, setStatus] = useState<ContractsStatusResponse | null>(null);
   const [contractType, setContractType] = useState<ContractType>(null);
 
+  // Package config from API
+  const [packages, setPackages] = useState<PackageConfig>({});
+
   // Form state
   const [operatorParty, setOperatorParty] = useState(DEFAULT_OPERATOR_PARTY);
   const [participantParties, setParticipantParties] = useState<string[]>([]);
   const [darFiles, setDarFiles] = useState<DarFile[]>([]);
   const [contracts, setContracts] = useState<ContractDefinition[]>([]);
+
+  // Fetch packages config when dialog opens
+  useEffect(() => {
+    if (open && partyId) {
+      fetch(`${API_BASE}/packages?party_id=${encodeURIComponent(partyId)}`)
+        .then((res) => res.json())
+        .then((data: PackageConfig) => setPackages(data))
+        .catch((e) => console.warn("Failed to fetch packages:", e));
+    }
+  }, [open, partyId]);
 
   // Reset state when dialog opens/closes
   useEffect(() => {
@@ -733,15 +747,16 @@ export const ContractsDialog = ({
       setContracts([]);
       setOperatorParty(DEFAULT_OPERATOR_PARTY);
       setParticipantParties([]);
+      setPackages({});
     }
   }, [open]);
 
   // Initialize contracts when type is selected
   useEffect(() => {
     if (contractType) {
-      setContracts(getContractsForType(contractType, participantIds.length));
+      setContracts(getContractsForType(contractType, participantIds.length, packages));
     }
-  }, [contractType, participantIds.length]);
+  }, [contractType, participantIds.length, packages]);
 
   const pollStatus = useCallback(async () => {
     try {
