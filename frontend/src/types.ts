@@ -277,6 +277,8 @@ export type ActionType =
       limits: VaultLimits;
       vault_backend_signatory: string;
       vault_far_config?: FarConfig;
+      allocation_factory_cid: string;
+      registrar_service_cid: string;
     }
   | {
       type: "yield_epoch_deployment";
@@ -343,12 +345,6 @@ export type ActionType =
       holder_service_request_cid: string;
       holder: string;
     }
-  | {
-      type: "utility_create_transfer_rule";
-      operator: string;
-      registrar_service_cid: string;
-    }
-
   // Credential Actions
   | {
       type: "credential_offer_free";

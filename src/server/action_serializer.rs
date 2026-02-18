@@ -232,6 +232,8 @@ pub fn serialize_action(action: &ActionType) -> Value {
             limits,
             vault_backend_signatory,
             vault_far_config,
+            allocation_factory_cid,
+            registrar_service_cid,
         } => make_variant(
             "VaultDeploymentAction",
             make_record(vec![
@@ -247,6 +249,14 @@ pub fn serialize_action(action: &ActionType) -> Value {
                 field(
                     "vaultFarConfig",
                     serialize_optional_far_config(vault_far_config),
+                ),
+                field(
+                    "allocationFactoryCid",
+                    make_contract_id(allocation_factory_cid),
+                ),
+                field(
+                    "registrarServiceCid",
+                    make_contract_id(registrar_service_cid),
                 ),
             ]),
         ),
@@ -407,23 +417,6 @@ pub fn serialize_action(action: &ActionType) -> Value {
                     ),
                     // Note: payload field is complex (HolderServiceRequest_Accept) - simplified here
                     field("holder", make_party(holder)),
-                ]),
-            ),
-        ),
-
-        ActionType::UtilityCreateTransferRule {
-            operator,
-            registrar_service_cid,
-        } => make_variant(
-            "UtilityOnboardingAction",
-            make_variant(
-                "UtilityOnboarding_CreateTransferRule",
-                make_record(vec![
-                    field("operator", make_party(operator)),
-                    field(
-                        "registrarServiceCid",
-                        make_contract_id(registrar_service_cid),
-                    ),
                 ]),
             ),
         ),
@@ -773,15 +766,6 @@ pub fn deserialize_action(value: &Value) -> Result<ActionType> {
                         holder: extract_party_id(get_field(record, "holder")?)?,
                     })
                 }
-                "UtilityOnboarding_CreateTransferRule" => {
-                    Ok(ActionType::UtilityCreateTransferRule {
-                        operator: extract_party(get_field(record, "operator")?)?,
-                        registrar_service_cid: extract_contract_id(get_field(
-                            record,
-                            "registrarServiceCid",
-                        )?)?,
-                    })
-                }
                 other => anyhow::bail!("Unknown UtilityOnboardingAction constructor: {other}"),
             }
         }
@@ -850,6 +834,14 @@ pub fn deserialize_action(value: &Value) -> Result<ActionType> {
                 vault_far_config: deserialize_optional_far_config(get_field(
                     record,
                     "vaultFarConfig",
+                )?)?,
+                allocation_factory_cid: extract_contract_id(get_field(
+                    record,
+                    "allocationFactoryCid",
+                )?)?,
+                registrar_service_cid: extract_contract_id(get_field(
+                    record,
+                    "registrarServiceCid",
                 )?)?,
             })
         }

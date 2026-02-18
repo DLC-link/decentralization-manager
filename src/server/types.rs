@@ -400,6 +400,8 @@ pub enum ActionType {
         vault_backend_signatory: CantonId,
         #[serde(default)]
         vault_far_config: Option<FarConfig>,
+        allocation_factory_cid: String,
+        registrar_service_cid: String,
     },
     YieldEpochDeployment {
         vault_rules_cid: String,
@@ -438,7 +440,7 @@ pub enum ActionType {
         initial_supported_vaults: Vec<String>,
     },
 
-    // Utility Onboarding (5)
+    // Utility Onboarding (4)
     UtilityCreateProviderRequest {
         operator: CantonId,
     },
@@ -456,11 +458,6 @@ pub enum ActionType {
         holder_service_request_cid: String,
         holder: CantonId,
     },
-    UtilityCreateTransferRule {
-        operator: String,
-        registrar_service_cid: String,
-    },
-
     // Credential Actions (2)
     CredentialOfferFree {
         operator: CantonId,

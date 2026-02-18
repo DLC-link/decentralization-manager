@@ -101,10 +101,6 @@ const ACTION_TYPE_OPTIONS = [
     value: "utility_accept_holder_service_request",
     label: "Utility: Accept Holder Service",
   },
-  {
-    value: "utility_create_transfer_rule",
-    label: "Utility: Create Transfer Rule",
-  },
   // Credential Actions
   { value: "credential_offer_free", label: "Credential: Offer Free" },
   { value: "credential_accept_free", label: "Credential: Accept Free" },
@@ -509,6 +505,8 @@ export const GovernanceSection = ({
             vaultFarConfig.beneficiaries.length > 0
               ? vaultFarConfig
               : undefined,
+          allocation_factory_cid: allocationFactoryCid,
+          registrar_service_cid: registrarServiceCid,
         };
       case "yield_epoch_deployment":
         return {
@@ -574,12 +572,6 @@ export const GovernanceSection = ({
           provider_service_cid: providerServiceCid,
           holder_service_request_cid: holderServiceRequestCid,
           holder: holderParty,
-        };
-      case "utility_create_transfer_rule":
-        return {
-          type: "utility_create_transfer_rule",
-          operator: operatorParty,
-          registrar_service_cid: registrarServiceCid,
         };
       case "credential_offer_free":
         return {
@@ -977,9 +969,29 @@ export const GovernanceSection = ({
                   ],
                 })
               }
+              sx={{ mb: 2 }}
             >
               Add Beneficiary
             </Button>
+            <TextField
+              label="Allocation Factory Contract ID"
+              value={allocationFactoryCid}
+              onChange={(e) => setAllocationFactoryCid(e.target.value)}
+              size="small"
+              fullWidth
+              sx={{ mb: 2 }}
+              required
+              helperText="From SetupUtility result"
+            />
+            <TextField
+              label="Registrar Service Contract ID"
+              value={registrarServiceCid}
+              onChange={(e) => setRegistrarServiceCid(e.target.value)}
+              size="small"
+              fullWidth
+              required
+              helperText="From SetupUtility result"
+            />
           </>
         );
       case "yield_epoch_deployment":
@@ -1389,26 +1401,6 @@ export const GovernanceSection = ({
               label="Holder Party"
               value={holderParty}
               onChange={(e) => setHolderParty(e.target.value)}
-              size="small"
-              fullWidth
-            />
-          </>
-        );
-      case "utility_create_transfer_rule":
-        return (
-          <>
-            <TextField
-              label="Operator Party"
-              value={operatorParty}
-              onChange={(e) => setOperatorParty(e.target.value)}
-              size="small"
-              fullWidth
-              sx={{ mb: 2 }}
-            />
-            <TextField
-              label="Registrar Service Contract ID"
-              value={registrarServiceCid}
-              onChange={(e) => setRegistrarServiceCid(e.target.value)}
               size="small"
               fullWidth
             />

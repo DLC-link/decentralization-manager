@@ -159,10 +159,10 @@ pub async fn start_attestor(node_config: NodeConfig, coordinator: Peer) -> Resul
 
         let command = message.msg_type;
         let payload = message.payload;
-        tracing::info!("Received command: {command:?}");
 
         match command {
             MessageType::Wait => {
+                tracing::trace!("Received command: Wait");
                 // Coordinator says to wait, poll again after delay
                 tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
             }

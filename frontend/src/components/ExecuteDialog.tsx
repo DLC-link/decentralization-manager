@@ -45,7 +45,6 @@ const ACTION_TYPE_LABELS: Record<string, string> = {
   utility_create_user_request: "Create User Request",
   utility_setup: "Utility Setup",
   utility_accept_holder_service_request: "Accept Holder Service Request",
-  utility_create_transfer_rule: "Create Transfer Rule",
   credential_offer_free: "Offer Free Credential",
   credential_accept_free: "Accept Free Credential",
   dev_net_feature_app: "DevNet Feature App",
@@ -70,6 +69,10 @@ const getDefaultDisclosedContracts = (
         {
           contract_id: action.vault_rules_cid,
           blob: DEVNET_VAULT_RULES_BLOB,
+        },
+        {
+          contract_id: action.allocation_factory_cid,
+          blob: DEVNET_ALLOCATION_FACTORY_BLOB,
         },
       ];
     case "processor_deployment_request":
