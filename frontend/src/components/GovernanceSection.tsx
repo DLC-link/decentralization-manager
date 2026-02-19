@@ -64,6 +64,8 @@ import type {
   ProviderServicesResponse,
   UserServiceInfo,
   UserServicesResponse,
+  RegistrarServiceInfo,
+  RegistrarServicesResponse,
 } from "../types";
 
 // Action type labels for display
@@ -224,7 +226,12 @@ export const GovernanceSection = ({
     ProviderServiceInfo[]
   >([]);
   const [userServices, setUserServices] = useState<UserServiceInfo[]>([]);
+  const [registrarServices, setRegistrarServices] = useState<
+    RegistrarServiceInfo[]
+  >([]);
   const [servicesLoading, setServicesLoading] = useState(false);
+  const [registrarServicesLoading, setRegistrarServicesLoading] =
+    useState(false);
 
   // Update rulesContractId when prop changes
   useEffect(() => {
@@ -338,6 +345,35 @@ export const GovernanceSection = ({
       fetchServices();
     }
   }, [selectedActionType, fetchServices]);
+
+  // Fetch registrar services from ACS
+  const fetchRegistrarServices = useCallback(async () => {
+    setRegistrarServicesLoading(true);
+    try {
+      const res = await fetch(
+        `${API_BASE}/services/registrar?party_id=${encodeURIComponent(partyId)}`,
+      );
+      if (res.ok) {
+        const response: RegistrarServicesResponse = await res.json();
+        setRegistrarServices(response.services);
+        // Auto-select first registrar service
+        if (response.services.length > 0) {
+          setRegistrarServiceCid(response.services[0].contract_id);
+        }
+      }
+    } catch (e) {
+      console.error("Failed to fetch registrar services:", e);
+    } finally {
+      setRegistrarServicesLoading(false);
+    }
+  }, [partyId]);
+
+  // Fetch registrar services when action type is vault_deployment
+  useEffect(() => {
+    if (selectedActionType === "vault_deployment") {
+      fetchRegistrarServices();
+    }
+  }, [selectedActionType, fetchRegistrarServices]);
 
   const handleConfirm = async (action: GovernanceAction) => {
     if (!rulesContractId) {
@@ -983,15 +1019,29 @@ export const GovernanceSection = ({
               required
               helperText="From SetupUtility result"
             />
-            <TextField
-              label="Registrar Service Contract ID"
-              value={registrarServiceCid}
-              onChange={(e) => setRegistrarServiceCid(e.target.value)}
-              size="small"
-              fullWidth
-              required
-              helperText="From SetupUtility result"
-            />
+            <FormControl fullWidth size="small" required>
+              <InputLabel>Registrar Service</InputLabel>
+              <Select
+                value={registrarServiceCid}
+                label="Registrar Service"
+                onChange={(e) => setRegistrarServiceCid(e.target.value)}
+              >
+                {registrarServicesLoading ? (
+                  <MenuItem disabled>Loading registrar services...</MenuItem>
+                ) : registrarServices.length > 0 ? (
+                  registrarServices.map((service) => (
+                    <MenuItem
+                      key={service.contract_id}
+                      value={service.contract_id}
+                    >
+                      {service.contract_id.slice(0, 16)}...
+                    </MenuItem>
+                  ))
+                ) : (
+                  <MenuItem disabled>No registrar services found</MenuItem>
+                )}
+              </Select>
+            </FormControl>
           </>
         );
       case "yield_epoch_deployment":

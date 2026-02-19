@@ -18,7 +18,7 @@ use super::{
     action_serializer,
     types::{
         ActionType, ContractInfo, GovernanceAction, GovernanceConfirmation, GovernanceState,
-        PartyMetadata, ProviderServiceInfo, UserServiceInfo, VaultInfo,
+        PartyMetadata, ProviderServiceInfo, RegistrarServiceInfo, UserServiceInfo, VaultInfo,
     },
 };
 
@@ -123,6 +123,15 @@ fn user_service_template(packages: &PackageConfig) -> Option<TemplateId> {
         package_id: pkg.clone(),
         module_name: "Utility.Credential.App.V0.Service.User",
         entity_name: "UserService",
+    })
+}
+
+/// RegistrarService template identifier
+fn registrar_service_template(packages: &PackageConfig) -> Option<TemplateId> {
+    packages.utility_registry.as_ref().map(|pkg| TemplateId {
+        package_id: pkg.clone(),
+        module_name: "Utility.Registry.App.V0.Service.Registrar",
+        entity_name: "RegistrarService",
     })
 }
 
@@ -1485,4 +1494,237 @@ fn extract_user_service_info(created: &CreatedEvent) -> Option<UserServiceInfo> 
         operator,
         user,
     })
+}
+
+// ============================================================================
+// Registrar Service Queries
+// ============================================================================
+
+/// Get all RegistrarService contracts for a party
+pub async fn get_registrar_services(
+    config: &NodeConfig,
+    party_id: &str,
+    token: Option<String>,
+    test_mode: bool,
+    packages: &PackageConfig,
+) -> Result<Vec<RegistrarServiceInfo>> {
+    if test_mode {
+        fetch_registrar_services_with_wildcard(config, party_id, token).await
+    } else {
+        match registrar_service_template(packages) {
+            Some(template) => {
+                fetch_registrar_services_for_template(config, party_id, token, &template).await
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+}
+
+/// Fetch registrar services using WildcardFilter (for test mode)
+async fn fetch_registrar_services_with_wildcard(
+    config: &NodeConfig,
+    party_id: &str,
+    token: Option<String>,
+) -> Result<Vec<RegistrarServiceInfo>> {
+    let mut state_client = utils::create_state_client(config, token).await?;
+
+    let ledger_end = state_client
+        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
+        .await?
+        .into_inner()
+        .offset;
+
+    let mut filters_by_party = HashMap::new();
+    filters_by_party.insert(
+        party_id.to_string(),
+        Filters {
+            cumulative: vec![CumulativeFilter {
+                identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
+                    WildcardFilter {
+                        include_created_event_blob: false,
+                    },
+                )),
+            }],
+        },
+    );
+
+    let acs_request = GetActiveContractsRequest {
+        active_at_offset: ledger_end,
+        event_format: Some(EventFormat {
+            filters_by_party,
+            filters_for_any_party: None,
+            verbose: true,
+        }),
+    };
+
+    let mut stream = state_client
+        .get_active_contracts(acs_request)
+        .await?
+        .into_inner();
+
+    let mut services = Vec::new();
+    while let Some(response) = stream.message().await? {
+        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
+            && let Some(created) = active.created_event
+            && let Some(template_id) = &created.template_id
+            && template_id.module_name == "Utility.Registry.App.V0.Service.Registrar"
+            && template_id.entity_name == "RegistrarService"
+            && let Some(info) = extract_registrar_service_info(&created)
+        {
+            services.push(info);
+        }
+    }
+
+    Ok(services)
+}
+
+/// Fetch registrar services using TemplateFilter
+async fn fetch_registrar_services_for_template(
+    config: &NodeConfig,
+    party_id: &str,
+    token: Option<String>,
+    template: &TemplateId,
+) -> Result<Vec<RegistrarServiceInfo>> {
+    let mut state_client = utils::create_state_client(config, token).await?;
+
+    let ledger_end = state_client
+        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
+        .await?
+        .into_inner()
+        .offset;
+
+    let mut filters_by_party = HashMap::new();
+    filters_by_party.insert(
+        party_id.to_string(),
+        Filters {
+            cumulative: vec![CumulativeFilter {
+                identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
+                    TemplateFilter {
+                        template_id: Some(Identifier {
+                            package_id: template.package_id.clone(),
+                            module_name: template.module_name.to_string(),
+                            entity_name: template.entity_name.to_string(),
+                        }),
+                        include_created_event_blob: false,
+                    },
+                )),
+            }],
+        },
+    );
+
+    let acs_request = GetActiveContractsRequest {
+        active_at_offset: ledger_end,
+        event_format: Some(EventFormat {
+            filters_by_party,
+            filters_for_any_party: None,
+            verbose: true,
+        }),
+    };
+
+    let mut stream = state_client
+        .get_active_contracts(acs_request)
+        .await?
+        .into_inner();
+
+    let mut services = Vec::new();
+    while let Some(response) = stream.message().await? {
+        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
+            && let Some(created) = active.created_event
+            && let Some(info) = extract_registrar_service_info(&created)
+        {
+            services.push(info);
+        }
+    }
+
+    Ok(services)
+}
+
+/// Extract RegistrarServiceInfo from a RegistrarService created event
+fn extract_registrar_service_info(created: &CreatedEvent) -> Option<RegistrarServiceInfo> {
+    let record = created.create_arguments.as_ref()?;
+
+    let operator: CantonId = record
+        .fields
+        .iter()
+        .find(|f| f.label == "operator")
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Party(p)) => p.parse().ok(),
+            _ => None,
+        })?;
+
+    let registrar: CantonId = record
+        .fields
+        .iter()
+        .find(|f| f.label == "registrar")
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Party(p)) => p.parse().ok(),
+            _ => None,
+        })?;
+
+    Some(RegistrarServiceInfo {
+        contract_id: created.contract_id.clone(),
+        operator,
+        registrar,
+    })
+}
+
+// ============================================================================
+// Contract Blob Query
+// ============================================================================
+
+/// Get a contract's created_event_blob by contract ID
+///
+/// Searches all active contracts for the given contract ID and returns the blob
+pub async fn get_contract_blob(
+    config: &NodeConfig,
+    contract_id: &str,
+    token: Option<String>,
+) -> Result<Option<String>> {
+    let mut state_client = utils::create_state_client(config, token).await?;
+
+    let ledger_end = state_client
+        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
+        .await?
+        .into_inner()
+        .offset;
+
+    let acs_request = GetActiveContractsRequest {
+        active_at_offset: ledger_end,
+        event_format: Some(EventFormat {
+            filters_by_party: HashMap::new(),
+            filters_for_any_party: Some(Filters {
+                cumulative: vec![CumulativeFilter {
+                    identifier_filter: Some(
+                        cumulative_filter::IdentifierFilter::WildcardFilter(
+                            WildcardFilter {
+                                include_created_event_blob: true,
+                            },
+                        ),
+                    ),
+                }],
+            }),
+            verbose: false,
+        }),
+    };
+
+    let mut stream = state_client
+        .get_active_contracts(acs_request)
+        .await?
+        .into_inner();
+
+    while let Some(response) = stream.message().await? {
+        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
+            && let Some(created) = active.created_event
+            && created.contract_id == contract_id
+        {
+            // Return base64-encoded blob
+            use base64::Engine;
+            let blob = base64::engine::general_purpose::STANDARD.encode(&created.created_event_blob);
+            return Ok(Some(blob));
+        }
+    }
+
+    Ok(None)
 }

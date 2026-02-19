@@ -15,9 +15,13 @@ import {
 import DeleteIcon from "@mui/icons-material/Delete";
 import AddIcon from "@mui/icons-material/Add";
 import {
+  DEVNET_AMULET_RULES_CID,
   DEVNET_AMULET_RULES_BLOB,
+  DEVNET_VAULT_RULES_CID,
   DEVNET_VAULT_RULES_BLOB,
+  DEVNET_VAULT_PROCESSOR_RULES_CID,
   DEVNET_VAULT_PROCESSOR_RULES_BLOB,
+  DEVNET_ALLOCATION_FACTORY_CID,
   DEVNET_ALLOCATION_FACTORY_BLOB,
   DEVNET_FEATURED_APP_RIGHT_CID,
   DEVNET_FEATURED_APP_RIGHT_BLOB,
@@ -50,45 +54,29 @@ const ACTION_TYPE_LABELS: Record<string, string> = {
   dev_net_feature_app: "DevNet Feature App",
 };
 
+const BLOB_MAP: Record<string, string> = {
+  [DEVNET_AMULET_RULES_CID]: DEVNET_AMULET_RULES_BLOB,
+  [DEVNET_VAULT_RULES_CID]: DEVNET_VAULT_RULES_BLOB,
+  [DEVNET_VAULT_PROCESSOR_RULES_CID]: DEVNET_VAULT_PROCESSOR_RULES_BLOB,
+  [DEVNET_ALLOCATION_FACTORY_CID]: DEVNET_ALLOCATION_FACTORY_BLOB,
+  [DEVNET_FEATURED_APP_RIGHT_CID]: DEVNET_FEATURED_APP_RIGHT_BLOB,
+};
+
 const formatActionType = (action: ActionType): string =>
   ACTION_TYPE_LABELS[action.type] || action.type;
 
-const getDefaultDisclosedContracts = (
-  action: ActionType,
-): DisclosedContractInput[] => {
+// Get the contract IDs that need blobs for a given action
+const getRequiredContractIds = (action: ActionType): string[] => {
   switch (action.type) {
     case "dev_net_feature_app":
-      return [
-        {
-          contract_id: action.amulet_rules_cid,
-          blob: DEVNET_AMULET_RULES_BLOB,
-        },
-      ];
+      return [action.amulet_rules_cid];
     case "vault_deployment":
-      return [
-        {
-          contract_id: action.vault_rules_cid,
-          blob: DEVNET_VAULT_RULES_BLOB,
-        },
-        {
-          contract_id: action.allocation_factory_cid,
-          blob: DEVNET_ALLOCATION_FACTORY_BLOB,
-        },
-      ];
+      return [action.vault_rules_cid, action.allocation_factory_cid];
     case "processor_deployment_request":
       return [
-        {
-          contract_id: action.vault_processor_rules_cid,
-          blob: DEVNET_VAULT_PROCESSOR_RULES_BLOB,
-        },
-        {
-          contract_id: action.allocation_factory_cid,
-          blob: DEVNET_ALLOCATION_FACTORY_BLOB,
-        },
-        {
-          contract_id: DEVNET_FEATURED_APP_RIGHT_CID,
-          blob: DEVNET_FEATURED_APP_RIGHT_BLOB,
-        },
+        action.vault_processor_rules_cid,
+        action.allocation_factory_cid,
+        DEVNET_FEATURED_APP_RIGHT_CID,
       ];
     default:
       return [];
@@ -116,9 +104,16 @@ export const ExecuteDialog = ({
     DisclosedContractInput[]
   >([]);
 
+  // Populate disclosed contracts from hardcoded blobs when dialog opens
   useEffect(() => {
     if (open && action) {
-      setDisclosedContracts(getDefaultDisclosedContracts(action.action));
+      const contractIds = getRequiredContractIds(action.action);
+      setDisclosedContracts(
+        contractIds.map((cid) => ({
+          contract_id: cid,
+          blob: BLOB_MAP[cid] || "",
+        })),
+      );
     } else {
       setDisclosedContracts([]);
     }
@@ -145,16 +140,10 @@ export const ExecuteDialog = ({
     );
   };
 
-  const handleClose = () => {
-    if (!loading) {
-      onClose();
-    }
-  };
-
   if (!action) return null;
 
   return (
-    <Dialog open={open} onClose={handleClose} maxWidth="md" fullWidth>
+    <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth>
       <DialogTitle>Execute Governance Action</DialogTitle>
       <DialogContent>
         <Box sx={{ display: "flex", flexDirection: "column", gap: 2, mt: 1 }}>
@@ -268,7 +257,7 @@ export const ExecuteDialog = ({
         </Box>
       </DialogContent>
       <DialogActions>
-        <Button onClick={handleClose} disabled={loading}>
+        <Button onClick={onClose} disabled={loading}>
           Cancel
         </Button>
         <Button

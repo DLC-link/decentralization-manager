@@ -428,3 +428,18 @@ export interface UserServiceInfo {
 export interface UserServicesResponse {
   services: UserServiceInfo[];
 }
+
+export interface RegistrarServiceInfo {
+  contract_id: string;
+  operator: string;
+  registrar: string;
+}
+
+export interface RegistrarServicesResponse {
+  services: RegistrarServiceInfo[];
+}
+
+export interface ContractBlobResponse {
+  contract_id: string;
+  blob: string;
+}

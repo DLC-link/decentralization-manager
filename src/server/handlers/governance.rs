@@ -22,13 +22,15 @@ use crate::{
     server::{
         AppState, action_serializer,
         queries::{
-            get_governance_confirmations, get_governance_state as query_governance_state,
-            get_provider_services, get_user_services, get_vaults,
+            get_contract_blob, get_governance_confirmations,
+            get_governance_state as query_governance_state, get_provider_services,
+            get_registrar_services, get_user_services, get_vaults,
         },
         types::{
-            ConfirmActionRequest, ExecuteActionRequest, ExpireConfirmationRequest,
-            GovernanceResponse, GovernanceStateResponse, ProviderServicesResponse,
-            UserServicesResponse, VaultsResponse,
+            ConfirmActionRequest, ContractBlobResponse, ExecuteActionRequest,
+            ExpireConfirmationRequest, GovernanceResponse, GovernanceStateResponse,
+            ProviderServicesResponse, RegistrarServicesResponse, UserServicesResponse,
+            VaultsResponse,
         },
     },
     utils,
@@ -42,6 +44,13 @@ use crate::{
 #[derive(Debug, Deserialize)]
 pub struct GovernanceQuery {
     pub party_id: String,
+}
+
+/// Query parameters for contract blob endpoint
+#[derive(Debug, Deserialize)]
+pub struct ContractBlobQuery {
+    pub party_id: String,
+    pub contract_id: String,
 }
 
 // ============================================================================
@@ -228,6 +237,71 @@ pub async fn get_user_services_handler(
             tracing::error!("Failed to fetch user services: {e}");
             HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": format!("Failed to fetch user services: {e}")
+            }))
+        }
+    }
+}
+
+/// Get RegistrarService contracts
+#[get("/services/registrar")]
+pub async fn get_registrar_services_handler(
+    data: web::Data<AppState>,
+    query: web::Query<GovernanceQuery>,
+) -> impl Responder {
+    let party_id = match CantonId::parse(&query.party_id) {
+        Ok(id) => id,
+        Err(e) => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Invalid party_id: {e}")
+            }));
+        }
+    };
+
+    let token = get_party_token(&data, &party_id).await;
+    let test_mode = matches!(data.auth, Some(WorkflowAuth::Mock(_)));
+
+    let packages = data.config.get_packages(&query.party_id);
+
+    match get_registrar_services(&data.config, &query.party_id, token, test_mode, &packages).await {
+        Ok(services) => HttpResponse::Ok().json(RegistrarServicesResponse { services }),
+        Err(e) => {
+            tracing::error!("Failed to fetch registrar services: {e}");
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to fetch registrar services: {e}")
+            }))
+        }
+    }
+}
+
+/// Get a contract's created_event_blob by contract ID
+#[get("/contract/blob")]
+pub async fn get_contract_blob_handler(
+    data: web::Data<AppState>,
+    query: web::Query<ContractBlobQuery>,
+) -> impl Responder {
+    let party_id = match CantonId::parse(&query.party_id) {
+        Ok(id) => id,
+        Err(e) => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("Invalid party_id: {e}")
+            }));
+        }
+    };
+
+    let token = get_party_token(&data, &party_id).await;
+
+    match get_contract_blob(&data.config, &query.contract_id, token).await {
+        Ok(Some(blob)) => HttpResponse::Ok().json(ContractBlobResponse {
+            contract_id: query.contract_id.clone(),
+            blob,
+        }),
+        Ok(None) => HttpResponse::NotFound().json(serde_json::json!({
+            "error": format!("Contract not found: {}", query.contract_id)
+        })),
+        Err(e) => {
+            tracing::error!("Failed to fetch contract blob: {e}");
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to fetch contract blob: {e}")
             }))
         }
     }

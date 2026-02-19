@@ -614,3 +614,24 @@ pub struct UserServiceInfo {
 pub struct UserServicesResponse {
     pub services: Vec<UserServiceInfo>,
 }
+
+/// Information about a RegistrarService contract
+#[derive(Clone, Debug, Serialize)]
+pub struct RegistrarServiceInfo {
+    pub contract_id: String,
+    pub operator: CantonId,
+    pub registrar: CantonId,
+}
+
+/// Response for the registrar services endpoint
+#[derive(Serialize)]
+pub struct RegistrarServicesResponse {
+    pub services: Vec<RegistrarServiceInfo>,
+}
+
+/// Response for the contract blob endpoint
+#[derive(Serialize)]
+pub struct ContractBlobResponse {
+    pub contract_id: String,
+    pub blob: String,
+}

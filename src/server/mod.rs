@@ -209,6 +209,8 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig, test_mode: 
             .service(handlers::get_vaults_handler)
             .service(handlers::get_provider_services_handler)
             .service(handlers::get_user_services_handler)
+            .service(handlers::get_registrar_services_handler)
+            .service(handlers::get_contract_blob_handler)
             .service(handlers::get_packages)
             .service(handlers::confirm_action)
             .service(handlers::execute_action)
