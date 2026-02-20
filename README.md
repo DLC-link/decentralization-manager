@@ -14,6 +14,12 @@ A web application for managing decentralized parties in Canton blockchain networ
 - **Real-time Status**: Live peer connectivity monitoring and workflow progress tracking
 - **Canton Integration**: Native gRPC integration with Canton Admin and Ledger APIs
 
+## Documentation
+
+- [Architecture Overview](docs/ARCHITECTURE.md) -- System architecture, core concepts, communication protocol, and technical constraints
+- [Integration Guide](docs/INTEGRATION_GUIDE.md) -- Deployment, configuration, authentication setup, and full API reference
+- [Use Cases](docs/USE_CASES.md) -- Vault governance, FAR rewards, multi-sig wallet, and utility service walkthroughs
+
 ## Architecture
 
 The application runs as an HTTP server with an embedded React frontend. Multiple instances coordinate via the Noise Protocol:
@@ -90,16 +96,18 @@ participant-dir/
 │   ├── node.toml      # Node configuration
 │   └── peers.csv      # Network peer list
 └── data/
-    ├── keys/          # Auto-generated Noise keypair
-    └── workflow/      # Workflow data (proposals, signatures, etc.)
+    ├── noise.key      # Auto-generated Noise keypair
+    ├── dars/          # DAR files for contract deployment
+    └── workflow-data/ # Workflow data (proposals, signatures, etc.)
 ```
 
 ### Node Configuration (`config/node.toml`)
 
 ```toml
 [node]
-node_id = "participant-1"
+participant_id = "participant::1220..."  # Canton participant UID (auto-resolved from Canton if omitted)
 listen_address = "0.0.0.0"
+public_address = "your-public-ip-or-hostname"  # Address other peers use to connect (optional)
 port = 9001
 
 [canton]
@@ -107,7 +115,6 @@ admin_api_host = "localhost"
 admin_api_port = 5002
 ledger_api_host = "localhost"
 ledger_api_port = 5001
-ledger_api_user_id = "ledger-api-user"
 synchronizer = "global"
 
 [timeouts]
@@ -120,13 +127,13 @@ connection_retry_delay_secs = 5
 ### Network Peers (`config/peers.csv`)
 
 ```csv
-id,name,address,port,public_key,party
-participant-1,Participant 1,10.0.0.1,9001,03ab12cd...,
-participant-2,Participant 2,10.0.0.2,9002,02ef34ab...,
-participant-3,Participant 3,10.0.0.3,9003,03cd56ef...,
+participant_id,name,address,port,public_key,party
+participant::1220abc...,Participant 1,10.0.0.1,9001,03ab12cd...,
+participant::1220def...,Participant 2,10.0.0.2,9002,02ef34ab...,
+sv::1220ghi...,Participant 3,10.0.0.3,9003,03cd56ef...,
 ```
 
-- `id`: Unique identifier for the peer
+- `participant_id`: Canton participant UID (e.g., `participant::1220...`)
 - `name`: Display name
 - `address`: Hostname or IP address for Noise connections
 - `port`: Noise protocol port
@@ -175,7 +182,7 @@ participant-3,Participant 3,10.0.0.3,9003,03cd56ef...,
 | `/node-config` | GET | Returns node configuration |
 | `/network-config` | GET | Returns network peer list |
 | `/network-config` | POST | Updates network peer list |
-| `/decentralized-parties` | GET | Lists decentralized parties (filtered by template) |
+| `/decentralized-parties` | GET | Lists decentralized parties (filtered by `prefix` query param) |
 | `/participants-status` | GET | Returns peer connectivity status |
 | `/keys/status` | GET | Returns Noise keypair status |
 | `/onboarding` | POST | Starts onboarding workflow |
@@ -190,8 +197,13 @@ participant-3,Participant 3,10.0.0.3,9003,03cd56ef...,
 | `/auth/status` | GET | Returns authentication status for configured parties |
 | `/auth/test` | POST | Tests Keycloak authentication |
 | `/governance/confirmations` | GET | Returns governance confirmations grouped by action |
+| `/governance/state` | GET | Returns governance state (VaultGovernanceRules) |
 | `/governance/confirm` | POST | Submits a governance confirmation |
 | `/governance/execute` | POST | Executes a confirmed governance action |
+| `/governance/expire` | POST | Expires a stale governance confirmation |
+| `/vaults` | GET | Returns deployed Vault contracts |
+| `/services/provider` | GET | Returns ProviderService contracts |
+| `/services/user` | GET | Returns UserService contracts |
 
 ## Development
 
