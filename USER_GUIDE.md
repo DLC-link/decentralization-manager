@@ -20,7 +20,7 @@ Before running, create a `config/node.toml` file:
 
 ```toml
 [node]
-node_id = "my-participant"
+# participant_id is auto-resolved from Canton if omitted
 listen_address = "0.0.0.0"
 public_address = "your-public-ip-or-hostname"  # Address other peers will use to connect
 port = 9000
@@ -30,7 +30,6 @@ admin_api_host = "your-canton-node"
 admin_api_port = 5002
 ledger_api_host = "your-canton-node"
 ledger_api_port = 5001
-ledger_api_user_id = "ledger-api-user"
 synchronizer = "global"
 
 [timeouts]
@@ -40,7 +39,7 @@ connection_retry_attempts = 3
 connection_retry_delay_secs = 5
 ```
 
-**Note:** The `public_address` is used when sharing your peer info with others. Set it to your actual reachable IP address or hostname. The `listen_address` should remain `0.0.0.0` to listen on all interfaces.
+**Note:** The `public_address` is used when sharing your peer info with others. Set it to your actual reachable IP address or hostname. The `listen_address` should remain `0.0.0.0` to listen on all interfaces. The `participant_id` field is optional and will be auto-resolved from Canton on first startup.
 
 ## Port Requirements
 
@@ -61,7 +60,6 @@ metadata:
 data:
   node.toml: |
     [node]
-    node_id = "my-participant"
     listen_address = "0.0.0.0"
     public_address = "dec-party-manager.your-namespace.svc.cluster.local"
     port = 9000
@@ -71,7 +69,6 @@ data:
     admin_api_port = 5002
     ledger_api_host = "canton-node"
     ledger_api_port = 5001
-    ledger_api_user_id = "ledger-api-user"
     synchronizer = "global"
 
     [timeouts]
@@ -165,10 +162,10 @@ kubectl apply -f dec-party-manager.yaml
 3. Click **Add Peer**
 4. Paste a CSV row shared by the other participant - the fields will auto-fill:
    ```
-   participant-2,Participant 2,10.0.0.2,9000,03ab12cd...
+   participant::1220def...,Participant 2,10.0.0.2,9000,03ab12cd...,
    ```
 5. Alternatively, fill in the fields manually:
-   - **ID**: Peer's node ID
+   - **Participant ID**: Canton participant UID (e.g., `participant::1220...`)
    - **Name**: Display name
    - **Address**: IP or hostname
    - **Port**: P2P port (usually 9000)

@@ -9,7 +9,6 @@ metadata:
 data:
   node.toml: |
     [node]
-    node_id = "participant-ibtc-testnet"
     listen_address = "0.0.0.0"
     public_address = "ac4d02121799a43bc99dfbff9f919755-54386549.us-east-1.elb.amazonaws.com"
     port = 9000
@@ -19,7 +18,6 @@ data:
     admin_api_port = 5002
     ledger_api_host = "participant-ibtc-testnet.catalyst-canton.svc.cluster.local"
     ledger_api_port = 5001
-    ledger_api_user_id = "service-account-ibtc-testnet"
     synchronizer = "global"
 
     [timeouts]

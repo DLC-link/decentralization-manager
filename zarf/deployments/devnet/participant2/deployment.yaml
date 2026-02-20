@@ -19,7 +19,6 @@ data:
     admin_api_port = 5002
     ledger_api_host = "participant-devnet-2.catalyst-canton.svc.cluster.local"
     ledger_api_port = 5001
-    ledger_api_user_id = ""
     synchronizer = "global"
 
     [timeouts]
