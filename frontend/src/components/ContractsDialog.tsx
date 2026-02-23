@@ -25,7 +25,6 @@ import {
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import AddIcon from "@mui/icons-material/Add";
 import DeleteIcon from "@mui/icons-material/Delete";
-import UploadFileIcon from "@mui/icons-material/UploadFile";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import AccountBalanceIcon from "@mui/icons-material/AccountBalance";
 import StorageIcon from "@mui/icons-material/Storage";
@@ -35,7 +34,6 @@ import type {
   ContractsRequest,
   ContractDefinition,
   FieldDefinition,
-  DarFile,
   PackageConfig,
 } from "../types";
 
@@ -723,7 +721,6 @@ export const ContractsDialog = ({
   // Form state
   const [operatorParty, setOperatorParty] = useState(DEFAULT_OPERATOR_PARTY);
   const [participantParties, setParticipantParties] = useState<string[]>([]);
-  const [darFiles, setDarFiles] = useState<DarFile[]>([]);
   const [contracts, setContracts] = useState<ContractDefinition[]>([]);
 
   // Fetch packages config when dialog opens
@@ -743,7 +740,6 @@ export const ContractsDialog = ({
       setStatus(null);
       setLoading(false);
       setContractType(null);
-      setDarFiles([]);
       setContracts([]);
       setOperatorParty(DEFAULT_OPERATOR_PARTY);
       setParticipantParties([]);
@@ -789,39 +785,6 @@ export const ContractsDialog = ({
     };
   }, [status?.status, pollStatus]);
 
-  const handleFileSelect = async (
-    event: React.ChangeEvent<HTMLInputElement>,
-  ) => {
-    const files = event.target.files;
-    if (!files) return;
-
-    const newDarFiles: DarFile[] = [];
-
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
-      if (file.name.endsWith(".dar")) {
-        const arrayBuffer = await file.arrayBuffer();
-        const base64 = btoa(
-          new Uint8Array(arrayBuffer).reduce(
-            (data, byte) => data + String.fromCharCode(byte),
-            "",
-          ),
-        );
-        newDarFiles.push({
-          filename: file.name,
-          data: base64,
-        });
-      }
-    }
-
-    setDarFiles([...darFiles, ...newDarFiles]);
-    event.target.value = "";
-  };
-
-  const handleRemoveDarFile = (index: number) => {
-    setDarFiles(darFiles.filter((_, i) => i !== index));
-  };
-
   const handleAddContract = () => {
     setContracts([...contracts, createEmptyContract()]);
   };
@@ -862,7 +825,6 @@ export const ContractsDialog = ({
         participant_ids: participantIds,
         participant_parties: participantParties,
         operator_party: operatorParty,
-        dar_files: darFiles,
         contracts: contracts,
       };
 
@@ -893,7 +855,6 @@ export const ContractsDialog = ({
   const handleBack = () => {
     setContractType(null);
     setContracts([]);
-    setDarFiles([]);
   };
 
   const isInProgress = status?.status === "inprogress";
@@ -949,76 +910,8 @@ export const ContractsDialog = ({
               <Typography variant="body2" color="text.secondary">
                 Configure and deploy contracts for the decentralized party. This
                 will coordinate with other participants to sign and execute the
-                submissions.
+                submissions. Make sure DARs have been uploaded first.
               </Typography>
-
-              <Divider />
-              <Typography variant="subtitle1">DAR Files</Typography>
-              <Box
-                sx={{
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: 1,
-                }}
-              >
-                <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-                  <Button
-                    component="label"
-                    variant="outlined"
-                    startIcon={<UploadFileIcon />}
-                  >
-                    Select DAR Files
-                    <input
-                      type="file"
-                      hidden
-                      multiple
-                      accept=".dar"
-                      onChange={handleFileSelect}
-                    />
-                  </Button>
-                  <Typography variant="body2" color="text.secondary">
-                    {darFiles.length === 0
-                      ? "No files selected"
-                      : `${darFiles.length} file(s) selected`}
-                  </Typography>
-                </Box>
-                {darFiles.length > 0 && (
-                  <Box
-                    sx={{
-                      display: "flex",
-                      flexWrap: "wrap",
-                      gap: 1,
-                      p: 1,
-                      border: "1px solid",
-                      borderColor: "divider",
-                      borderRadius: 1,
-                    }}
-                  >
-                    {darFiles.map((file, index) => (
-                      <Box
-                        key={index}
-                        sx={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 0.5,
-                          px: 1,
-                          py: 0.5,
-                          bgcolor: "action.hover",
-                          borderRadius: 1,
-                        }}
-                      >
-                        <Typography variant="body2">{file.filename}</Typography>
-                        <IconButton
-                          size="small"
-                          onClick={() => handleRemoveDarFile(index)}
-                        >
-                          <DeleteIcon fontSize="small" />
-                        </IconButton>
-                      </Box>
-                    ))}
-                  </Box>
-                )}
-              </Box>
 
               <Divider />
               <Typography variant="subtitle1">Party Configuration</Typography>

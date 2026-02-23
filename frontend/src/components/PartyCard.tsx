@@ -16,9 +16,11 @@ import {
 } from "@mui/material";
 import PersonRemoveIcon from "@mui/icons-material/PersonRemove";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
+import CloudUploadIcon from "@mui/icons-material/CloudUpload";
 import { CopyableText } from "./CopyableText";
 import { KickDialog } from "./KickDialog";
 import { ContractsDialog } from "./ContractsDialog";
+import { DarsDialog } from "./DarsDialog";
 import { GovernanceSection } from "./GovernanceSection";
 import { AuthSection } from "./AuthSection";
 import type { DecentralizedParty, PartyAuthStatus } from "../types";
@@ -35,6 +37,7 @@ interface PartyCardProps {
 export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onAuthRefresh }: PartyCardProps) => {
   const [kickDialogOpen, setKickDialogOpen] = useState(false);
   const [contractsDialogOpen, setContractsDialogOpen] = useState(false);
+  const [darsDialogOpen, setDarsDialogOpen] = useState(false);
   const [selectedParticipant, setSelectedParticipant] = useState<string>("");
   const [canScrollUp, setCanScrollUp] = useState(false);
   const [canScrollDown, setCanScrollDown] = useState(false);
@@ -92,15 +95,26 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
             />
           )}
           {isOwner && (
-            <Button
-              variant="outlined"
-              size="small"
-              startIcon={<UploadFileIcon />}
-              onClick={() => setContractsDialogOpen(true)}
-              disabled={MAINNET_DEMO}
-            >
-              Deploy Contracts
-            </Button>
+            <>
+              <Button
+                variant="outlined"
+                size="small"
+                startIcon={<CloudUploadIcon />}
+                onClick={() => setDarsDialogOpen(true)}
+                disabled={MAINNET_DEMO}
+              >
+                Upload DARs
+              </Button>
+              <Button
+                variant="outlined"
+                size="small"
+                startIcon={<UploadFileIcon />}
+                onClick={() => setContractsDialogOpen(true)}
+                disabled={MAINNET_DEMO}
+              >
+                Deploy Contracts
+              </Button>
+            </>
           )}
         </Box>
 
@@ -268,6 +282,12 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
         onComplete={onRefresh}
         partyId={party.party_id}
         participantIds={party.participants.map((p) => p.participant_uid)}
+      />
+
+      <DarsDialog
+        open={darsDialogOpen}
+        onClose={() => setDarsDialogOpen(false)}
+        onComplete={onRefresh}
       />
     </Card>
   );

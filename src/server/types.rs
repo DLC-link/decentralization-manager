@@ -191,12 +191,16 @@ pub struct ContractsRequest {
     pub participant_parties: Vec<CantonId>,
     /// Operator party ID
     pub operator_party: CantonId,
-    /// DAR files to upload (base64-encoded)
-    #[serde(default)]
-    pub dar_files: Vec<DarFile>,
     /// Contract definitions to create after decentralized party setup
     #[serde(default)]
     pub contracts: Vec<ContractDefinition>,
+}
+
+/// Request to upload DARs across all participants
+#[derive(Clone, Debug, Deserialize)]
+pub struct DarsRequest {
+    /// DAR files to upload (base64-encoded)
+    pub dar_files: Vec<DarFile>,
 }
 
 /// Progress status of a workflow (kick, onboarding, etc.)
@@ -241,6 +245,7 @@ pub enum InvitationType {
     Onboarding,
     Kick,
     Contracts,
+    Dars,
 }
 
 /// A pending invitation from a coordinator

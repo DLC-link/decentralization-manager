@@ -135,12 +135,17 @@ export interface ContractsRequest {
   participant_ids: string[];
   participant_parties: string[];
   operator_party: string;
-  dar_files: DarFile[];
   contracts: ContractDefinition[];
 }
 
+export interface DarsRequest {
+  dar_files: DarFile[];
+}
+
+export type DarsStatusResponse = WorkflowStatusResponse;
+
 // Invitation types
-export type InvitationType = "Onboarding" | "Kick" | "Contracts";
+export type InvitationType = "Onboarding" | "Kick" | "Contracts" | "Dars";
 
 export interface PendingInvitation {
   id: string;
