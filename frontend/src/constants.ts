@@ -1,5 +1,12 @@
 export const API_BASE = "";
-export const MAINNET_DEMO = import.meta.env.VITE_MAINNET_DEMO === "true";
+export const ADMIN_ACCESS = import.meta.env.VITE_ADMIN_ACCESS === "true";
+export const CHAIN_TYPE = import.meta.env.VITE_CHAIN_TYPE || "";
+
+export const OPERATOR_API_URLS: Record<string, string> = {
+  MAINNET: "https://api.utilities.digitalasset.com/api/utilities/v0/operator",
+  TESTNET: "https://api.utilities.digitalasset-staging.com/api/utilities/v0/operator",
+  DEVNET: "https://api.utilities.digitalasset-dev.com/api/utilities/v0/operator",
+};
 
 // Limits
 export const MAX_TOTAL_DEPOSIT = 10000;

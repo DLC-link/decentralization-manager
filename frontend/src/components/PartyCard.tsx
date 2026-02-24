@@ -24,7 +24,7 @@ import { DarsDialog } from "./DarsDialog";
 import { GovernanceSection } from "./GovernanceSection";
 import { AuthSection } from "./AuthSection";
 import type { DecentralizedParty, PartyAuthStatus } from "../types";
-import { MAINNET_DEMO } from "../constants";
+import { ADMIN_ACCESS } from "../constants";
 
 interface PartyCardProps {
   party: DecentralizedParty;
@@ -32,9 +32,10 @@ interface PartyCardProps {
   selfParticipantId?: string;
   authStatus?: PartyAuthStatus;
   onAuthRefresh?: () => void;
+  operatorParty?: string;
 }
 
-export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onAuthRefresh }: PartyCardProps) => {
+export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onAuthRefresh, operatorParty }: PartyCardProps) => {
   const [kickDialogOpen, setKickDialogOpen] = useState(false);
   const [contractsDialogOpen, setContractsDialogOpen] = useState(false);
   const [darsDialogOpen, setDarsDialogOpen] = useState(false);
@@ -101,7 +102,7 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
                 size="small"
                 startIcon={<CloudUploadIcon />}
                 onClick={() => setDarsDialogOpen(true)}
-                disabled={MAINNET_DEMO}
+                disabled={!ADMIN_ACCESS}
               >
                 Upload DARs
               </Button>
@@ -110,7 +111,7 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
                 size="small"
                 startIcon={<UploadFileIcon />}
                 onClick={() => setContractsDialogOpen(true)}
-                disabled={MAINNET_DEMO}
+                disabled={!ADMIN_ACCESS}
               >
                 Deploy Contracts
               </Button>
@@ -170,7 +171,7 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
                         size="small"
                         color="error"
                         onClick={() => handleKickClick(p.participant_uid)}
-                        disabled={MAINNET_DEMO || p.participant_uid === selfParticipantId}
+                        disabled={!ADMIN_ACCESS || p.participant_uid === selfParticipantId}
                       >
                         <PersonRemoveIcon fontSize="small" />
                       </IconButton>
@@ -263,6 +264,7 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
           partyId={party.party_id}
           rulesContractId={vaultGovernanceRulesContract?.contract_id}
           memberPartyId={authStatus?.member_party_id}
+          defaultOperatorParty={operatorParty}
         />
       </CardContent>
 
@@ -282,6 +284,7 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
         onComplete={onRefresh}
         partyId={party.party_id}
         participantIds={party.participants.map((p) => p.participant_uid)}
+        defaultOperatorParty={operatorParty}
       />
 
       <DarsDialog

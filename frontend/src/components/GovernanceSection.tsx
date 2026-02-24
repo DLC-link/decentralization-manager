@@ -32,7 +32,7 @@ import UndoIcon from "@mui/icons-material/Undo";
 import { ExecuteDialog } from "./ExecuteDialog";
 import {
   API_BASE,
-  MAINNET_DEMO,
+  ADMIN_ACCESS,
   MAX_TOTAL_DEPOSIT,
   MIN_DEPOSIT_AMOUNT,
   MIN_WITHDRAWAL_AMOUNT,
@@ -124,6 +124,7 @@ interface GovernanceSectionProps {
   partyId: string;
   rulesContractId?: string;
   memberPartyId?: string;
+  defaultOperatorParty?: string;
 }
 
 // Default values for action form
@@ -149,6 +150,7 @@ export const GovernanceSection = ({
   partyId,
   rulesContractId: initialRulesContractId,
   memberPartyId,
+  defaultOperatorParty,
 }: GovernanceSectionProps) => {
   const [expanded, setExpanded] = useState(true);
   const [loading, setLoading] = useState(true);
@@ -192,7 +194,7 @@ export const GovernanceSection = ({
   );
 
   // New fields for additional action types
-  const [operatorParty, setOperatorParty] = useState(DEVNET_OPERATOR);
+  const [operatorParty, setOperatorParty] = useState(defaultOperatorParty || DEVNET_OPERATOR);
   const [providerServiceCid, setProviderServiceCid] = useState("");
   const [userServiceCid, setUserServiceCid] = useState("");
   const [amuletRulesCid, setAmuletRulesCid] = useState(DEVNET_AMULET_RULES_CID);
@@ -1649,7 +1651,7 @@ export const GovernanceSection = ({
             size="small"
             fullWidth
             placeholder="Enter contract ID to enable confirm/execute"
-            disabled={MAINNET_DEMO}
+            disabled={!ADMIN_ACCESS}
           />
         </Box>
 
@@ -1660,7 +1662,7 @@ export const GovernanceSection = ({
             variant="outlined"
             startIcon={showNewActionForm ? <ExpandLessIcon /> : <AddIcon />}
             onClick={() => setShowNewActionForm(!showNewActionForm)}
-            disabled={MAINNET_DEMO || !rulesContractId}
+            disabled={!ADMIN_ACCESS || !rulesContractId}
           >
             {showNewActionForm ? "Hide Form" : "New Governance Action"}
           </Button>
@@ -1787,7 +1789,7 @@ export const GovernanceSection = ({
                               }
                             }}
                             disabled={
-                              MAINNET_DEMO ||
+                              !ADMIN_ACCESS ||
                               !rulesContractId ||
                               actionLoading === action.action_hash
                             }
@@ -1807,7 +1809,7 @@ export const GovernanceSection = ({
                             }
                             onClick={() => handleConfirm(action)}
                             disabled={
-                              MAINNET_DEMO ||
+                              !ADMIN_ACCESS ||
                               !rulesContractId ||
                               actionLoading === action.action_hash
                             }
@@ -1832,7 +1834,7 @@ export const GovernanceSection = ({
                               setExecuteDialogAction(action);
                             }}
                             disabled={
-                              MAINNET_DEMO ||
+                              !ADMIN_ACCESS ||
                               !rulesContractId ||
                               actionLoading === action.action_hash
                             }

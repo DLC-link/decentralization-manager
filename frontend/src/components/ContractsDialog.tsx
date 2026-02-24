@@ -43,6 +43,7 @@ interface ContractsDialogProps {
   onComplete: () => void;
   partyId: string;
   participantIds: string[];
+  defaultOperatorParty?: string;
 }
 
 type ContractType = "cbtc" | "vault" | null;
@@ -92,7 +93,6 @@ const createEmptyContract = (): ContractDefinition => ({
   fields: [],
 });
 
-const DEFAULT_OPERATOR_PARTY = "";
 
 // CBTC contract definitions
 const getCbtcContracts = (): ContractDefinition[] => [
@@ -709,6 +709,7 @@ export const ContractsDialog = ({
   onComplete,
   partyId,
   participantIds,
+  defaultOperatorParty,
 }: ContractsDialogProps) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -719,7 +720,7 @@ export const ContractsDialog = ({
   const [packages, setPackages] = useState<PackageConfig>({});
 
   // Form state
-  const [operatorParty, setOperatorParty] = useState(DEFAULT_OPERATOR_PARTY);
+  const [operatorParty, setOperatorParty] = useState(defaultOperatorParty || "");
   const [participantParties, setParticipantParties] = useState<string[]>([]);
   const [contracts, setContracts] = useState<ContractDefinition[]>([]);
 
@@ -741,7 +742,7 @@ export const ContractsDialog = ({
       setLoading(false);
       setContractType(null);
       setContracts([]);
-      setOperatorParty(DEFAULT_OPERATOR_PARTY);
+      setOperatorParty(defaultOperatorParty || "");
       setParticipantParties([]);
       setPackages({});
     }

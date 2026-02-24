@@ -21,7 +21,7 @@ import { LoadingSkeleton } from "./components/LoadingSkeleton";
 import { OnboardingDialog } from "./components/OnboardingDialog";
 import { InvitationModal } from "./components/InvitationModal";
 import { useSnackbar } from "./contexts";
-import { API_BASE, MAINNET_DEMO } from "./constants";
+import { API_BASE, ADMIN_ACCESS, CHAIN_TYPE, OPERATOR_API_URLS } from "./constants";
 import type {
   DecentralizedParty,
   NodeConfig,
@@ -55,6 +55,7 @@ const App = () => {
   const [error, setError] = useState<string | null>(null);
   const [partyFilter, setPartyFilter] = useState("cbtc-network");
   const [refreshingParties, setRefreshingParties] = useState(false);
+  const [operatorParty, setOperatorParty] = useState("");
   const { showSnackbar } = useSnackbar();
 
   useEffect(() => {
@@ -62,6 +63,15 @@ const App = () => {
       history.scrollRestoration = "manual";
     }
     window.scrollTo(0, 0);
+  }, []);
+
+  useEffect(() => {
+    const url = OPERATOR_API_URLS[CHAIN_TYPE];
+    if (!url) return;
+    fetch(url)
+      .then((res) => res.json())
+      .then((data: { partyId: string }) => setOperatorParty(data.partyId))
+      .catch(() => {});
   }, []);
 
   const refreshParties = useCallback(async () => {
@@ -271,7 +281,7 @@ const App = () => {
                   variant="contained"
                   startIcon={<AddIcon />}
                   onClick={() => setOnboardingDialogOpen(true)}
-                  disabled={MAINNET_DEMO}
+                  disabled={!ADMIN_ACCESS}
                 >
                   Create Party
                 </Button>
@@ -319,6 +329,7 @@ const App = () => {
                 selfParticipantId={nodeConfig?.node.participant_id}
                 authStatus={authStatuses.find((a) => a.dec_party_id === party.party_id)}
                 onAuthRefresh={refreshAuthStatus}
+                operatorParty={operatorParty}
               />
             ))}
 
