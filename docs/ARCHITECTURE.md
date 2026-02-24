@@ -473,8 +473,8 @@ The governance system depends on the following Daml packages:
 
 | Package ID | Purpose |
 |------------|---------|
-| `#bitsafe-vault-governance-v0-rc2` | VaultGovernanceRules contract templates |
-| `#bitsafe-vault-v0-rc2` | VaultRules and Vault contract templates |
+| `#bitsafe-vault-governance-v0-rc8` | VaultGovernanceRules contract templates |
+| `#bitsafe-vault-v0-rc8` | VaultRules and Vault contract templates |
 | `#utility-registry-app-v0` | ProviderService, UserService, AllocationFactory |
 | `#utility-credential-app-v0` | Credential offer/accept templates |
 

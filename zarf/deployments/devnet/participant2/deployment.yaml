@@ -45,7 +45,7 @@ data:
     utility_credential = "#utility-credential-app-v0"
 
     [[parties]]
-    dec_party_id = "vault-rc7::1220035d9e6a3871bfb29e814222ba9842930b47874fde5d4983827f8fbbc7540ecf"
+    dec_party_id = "vault-rc7-2::12203b31aa3e95e6b930ac2205fb389df47492c79a55a26624ac4d1167115250a3f7"
     member_party_id = "attestor-2::122099953934d9fe163fed07dd371fa13982b2b30749d6df56ecdba385f8c78a867a"
     user_id = "attestorUser2"
 
@@ -56,8 +56,8 @@ data:
     client_secret = "FbhvorMHEMrjUipxrfnwLjMBkFOzaIZ5"
 
     [parties.packages]
-    vault_governance = "#bitsafe-vault-governance-v0-rc7"
-    vault = "#bitsafe-vault-v0-rc7"
+    vault_governance = "#bitsafe-vault-governance-v0-rc8"
+    vault = "#bitsafe-vault-v0-rc8"
     utility_registry = "#utility-registry-app-v0"
     utility_credential = "#utility-credential-app-v0"
 
