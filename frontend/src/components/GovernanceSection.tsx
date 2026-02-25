@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import {
+  Autocomplete,
   Box,
   Typography,
   Table,
@@ -42,7 +43,6 @@ import {
   DEVNET_AMULET_RULES_CID,
   DEVNET_CBTC_DEC_PARTY,
   DEVNET_VAULT_PROCESSOR_RULES_CID,
-  DEVNET_OPERATOR,
   DEVNET_ALLOCATION_FACTORY_CID,
 } from "../constants";
 import type {
@@ -68,46 +68,76 @@ import type {
   RegistrarServicesResponse,
 } from "../types";
 
-// Action type labels for display
+// Action types — ordered per GOVERNANCE_CLIENT_MIGRATION.md vault launch sequence
+// Hidden entries are kept for type safety and display of existing actions
 const ACTION_TYPE_OPTIONS = [
-  // Governance
-  { value: "governance_add_member", label: "Add Governance Member" },
-  { value: "governance_remove_member", label: "Remove Governance Member" },
-  { value: "governance_set_threshold", label: "Set Governance Threshold" },
-  { value: "governance_set_timeout", label: "Set Governance Timeout" },
-  // Vault Deployment
-  { value: "vault_deployment", label: "Deploy Vault" },
-  { value: "yield_epoch_deployment", label: "Deploy YieldEpoch" },
-  // Vault Operations
-  { value: "vault_pause", label: "Pause Vault" },
-  { value: "vault_unpause", label: "Unpause Vault" },
-  { value: "vault_update_limits", label: "Update Vault Limits" },
-  { value: "vault_update_backend", label: "Update Vault Backend" },
+  // Step 1: Utility Registry Onboarding
   {
-    value: "vault_update_far_beneficiaries",
-    label: "Update FAR Beneficiaries",
+    value: "utility_create_provider_request",
+    label: "Create Provider Service",
   },
-  // Processor
+  { value: "utility_create_user_request", label: "Create User Service" },
+  { value: "utility_setup", label: "Setup Utility" },
+  // Feature App (needed before vault deployment for FAR config)
+  { value: "dev_net_feature_app", label: "DevNet: Feature App" },
+  // Deploy Vault
+  { value: "vault_deployment", label: "Deploy Vault" },
+  // Deploy YieldEpoch
+  { value: "yield_epoch_deployment", label: "Deploy YieldEpoch" },
+  // Request Processor Deployment
   {
     value: "processor_deployment_request",
     label: "Request Processor Deployment",
   },
-  // Utility Onboarding
-  {
-    value: "utility_create_provider_request",
-    label: "Utility: Create Provider",
-  },
-  { value: "utility_create_user_request", label: "Utility: Create User" },
-  { value: "utility_setup", label: "Utility: Setup" },
+  // Accept Holder Service Requests
   {
     value: "utility_accept_holder_service_request",
-    label: "Utility: Accept Holder Service",
+    label: "Accept Holder Service",
+    hidden: true,
   },
-  // Credential Actions
-  { value: "credential_offer_free", label: "Credential: Offer Free" },
-  { value: "credential_accept_free", label: "Credential: Accept Free" },
-  // DevNet
-  { value: "dev_net_feature_app", label: "DevNet: Feature App" },
+  // Hidden — not in current vault launch sequence
+  {
+    value: "governance_add_member",
+    label: "Add Governance Member",
+    hidden: true,
+  },
+  {
+    value: "governance_remove_member",
+    label: "Remove Governance Member",
+    hidden: true,
+  },
+  {
+    value: "governance_set_threshold",
+    label: "Set Governance Threshold",
+    hidden: true,
+  },
+  {
+    value: "governance_set_timeout",
+    label: "Set Governance Timeout",
+    hidden: true,
+  },
+  { value: "vault_pause", label: "Pause Vault", hidden: true },
+  { value: "vault_unpause", label: "Unpause Vault", hidden: true },
+  { value: "vault_update_limits", label: "Update Vault Limits", hidden: true },
+  {
+    value: "vault_update_backend",
+    label: "Update Vault Backend",
+    hidden: true,
+  },
+  {
+    value: "vault_update_far_beneficiaries",
+    label: "Update FAR Beneficiaries",
+    hidden: true,
+  },
+  {
+    value: "credential_offer_free",
+    label: "Credential: Offer Free",
+    hidden: true,
+  },
+  {
+    value: "credential_accept_free",
+    label: "Credential: Accept Free",
+  },
 ] as const;
 
 type ActionTypeKey = (typeof ACTION_TYPE_OPTIONS)[number]["value"];
@@ -123,6 +153,7 @@ const formatActionType = (action: ActionType): string => {
 interface GovernanceSectionProps {
   partyId: string;
   rulesContractId?: string;
+  governanceContractIds?: string[];
   memberPartyId?: string;
   defaultOperatorParty?: string;
 }
@@ -149,6 +180,7 @@ const defaultVaultBackendSignatory = DEVNET_VAULT_BACKEND_SIGNATORY;
 export const GovernanceSection = ({
   partyId,
   rulesContractId: initialRulesContractId,
+  governanceContractIds = [],
   memberPartyId,
   defaultOperatorParty,
 }: GovernanceSectionProps) => {
@@ -167,7 +199,7 @@ export const GovernanceSection = ({
   // Action form state
   const [showNewActionForm, setShowNewActionForm] = useState(false);
   const [selectedActionType, setSelectedActionType] = useState<ActionTypeKey>(
-    "governance_add_member",
+    "utility_create_provider_request",
   );
   const [formLoading, setFormLoading] = useState(false);
 
@@ -194,7 +226,9 @@ export const GovernanceSection = ({
   );
 
   // New fields for additional action types
-  const [operatorParty, setOperatorParty] = useState(defaultOperatorParty || DEVNET_OPERATOR);
+  const [operatorParty, setOperatorParty] = useState(
+    defaultOperatorParty || "",
+  );
   const [providerServiceCid, setProviderServiceCid] = useState("");
   const [userServiceCid, setUserServiceCid] = useState("");
   const [amuletRulesCid, setAmuletRulesCid] = useState(DEVNET_AMULET_RULES_CID);
@@ -459,7 +493,10 @@ export const GovernanceSection = ({
     }
   };
 
-  const handleRevoke = async (action: GovernanceAction, confirmationCid: string) => {
+  const handleRevoke = async (
+    action: GovernanceAction,
+    confirmationCid: string,
+  ) => {
     if (!rulesContractId) {
       setError("Please enter the VaultGovernanceRules contract ID");
       return;
@@ -489,7 +526,9 @@ export const GovernanceSection = ({
       // Refresh data
       await fetchGovernance();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to revoke confirmation");
+      setError(
+        e instanceof Error ? e.message : "Failed to revoke confirmation",
+      );
     } finally {
       setActionLoading(null);
     }
@@ -501,7 +540,9 @@ export const GovernanceSection = ({
   const getUserConfirmation = (action: GovernanceAction) => {
     const myMemberPartyId = data?.member_party_id || memberPartyId;
     if (!myMemberPartyId) return undefined;
-    return action.confirmations.find((c) => c.confirming_party === myMemberPartyId);
+    return action.confirmations.find(
+      (c) => c.confirming_party === myMemberPartyId,
+    );
   };
 
   // Build ActionType from form state
@@ -1644,14 +1685,21 @@ export const GovernanceSection = ({
         )}
 
         <Box sx={{ mb: 2 }}>
-          <TextField
-            label="VaultGovernanceRules Contract ID"
+          <Autocomplete
+            freeSolo
+            options={governanceContractIds}
             value={rulesContractId}
-            onChange={(e) => setRulesContractId(e.target.value)}
-            size="small"
-            fullWidth
-            placeholder="Enter contract ID to enable confirm/execute"
+            onChange={(_e, value) => setRulesContractId(value || "")}
+            onInputChange={(_e, value) => setRulesContractId(value)}
             disabled={!ADMIN_ACCESS}
+            size="small"
+            renderInput={(params) => (
+              <TextField
+                {...params}
+                label="VaultGovernanceRules Contract ID"
+                placeholder="Enter or select contract ID"
+              />
+            )}
           />
         </Box>
 
@@ -1690,11 +1738,13 @@ export const GovernanceSection = ({
                     setSelectedActionType(e.target.value as ActionTypeKey)
                   }
                 >
-                  {ACTION_TYPE_OPTIONS.map((opt) => (
-                    <MenuItem key={opt.value} value={opt.value}>
-                      {opt.label}
-                    </MenuItem>
-                  ))}
+                  {ACTION_TYPE_OPTIONS.filter((opt) => !("hidden" in opt)).map(
+                    (opt) => (
+                      <MenuItem key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </MenuItem>
+                    ),
+                  )}
                 </Select>
               </FormControl>
 

@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import {
+  Autocomplete,
   Dialog,
   DialogTitle,
   DialogContent,
@@ -44,6 +45,7 @@ interface ContractsDialogProps {
   partyId: string;
   participantIds: string[];
   defaultOperatorParty?: string;
+  knownPackageIds?: string[];
 }
 
 type ContractType = "cbtc" | "vault" | null;
@@ -511,6 +513,7 @@ interface ContractEditorProps {
   index: number;
   participantCount: number;
   partyId: string;
+  knownPackageIds: string[];
 }
 
 const ContractEditor = ({
@@ -520,6 +523,7 @@ const ContractEditor = ({
   index,
   participantCount,
   partyId,
+  knownPackageIds,
 }: ContractEditorProps) => {
   const handleFieldChange = (fieldIndex: number, newField: FieldDefinition) => {
     const newFields = [...contract.fields];
@@ -579,14 +583,24 @@ const ContractEditor = ({
       </AccordionSummary>
       <AccordionDetails sx={{ p: 3 }}>
         <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
-          <TextField
-            size="small"
-            label="Package ID"
+          <Autocomplete
+            freeSolo
+            options={knownPackageIds}
             value={contract.package_id}
-            onChange={(e) =>
-              onChange({ ...contract, package_id: e.target.value })
+            onChange={(_e, value) =>
+              onChange({ ...contract, package_id: value || "" })
             }
-            fullWidth
+            onInputChange={(_e, value) =>
+              onChange({ ...contract, package_id: value })
+            }
+            size="small"
+            renderInput={(params) => (
+              <TextField
+                {...params}
+                label="Package ID"
+                placeholder="Enter or select package ID"
+              />
+            )}
           />
           <Box sx={{ display: "flex", gap: 2 }}>
             <TextField
@@ -710,6 +724,7 @@ export const ContractsDialog = ({
   partyId,
   participantIds,
   defaultOperatorParty,
+  knownPackageIds = [],
 }: ContractsDialogProps) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -723,6 +738,16 @@ export const ContractsDialog = ({
   const [operatorParty, setOperatorParty] = useState(defaultOperatorParty || "");
   const [participantParties, setParticipantParties] = useState<string[]>([]);
   const [contracts, setContracts] = useState<ContractDefinition[]>([]);
+
+  // Combine package IDs from config + known contracts for dropdown
+  const allPackageIds = useMemo(() => {
+    const ids = new Set(knownPackageIds);
+    if (packages.vault_governance) ids.add(packages.vault_governance);
+    if (packages.vault) ids.add(packages.vault);
+    if (packages.utility_registry) ids.add(packages.utility_registry);
+    if (packages.utility_credential) ids.add(packages.utility_credential);
+    return [...ids].sort();
+  }, [knownPackageIds, packages]);
 
   // Fetch packages config when dialog opens
   useEffect(() => {
@@ -1021,6 +1046,7 @@ export const ContractsDialog = ({
                     index={index}
                     participantCount={participantIds.length}
                     partyId={partyId}
+                    knownPackageIds={allPackageIds}
                   />
                 ))
               )}

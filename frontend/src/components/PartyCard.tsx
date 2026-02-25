@@ -44,10 +44,11 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
   const [canScrollDown, setCanScrollDown] = useState(false);
   const contractsScrollRef = useRef<HTMLDivElement>(null);
 
-  // Find VaultGovernanceRules contract from party's contracts
-  const vaultGovernanceRulesContract = party.contracts?.find(
+  // Find VaultGovernanceRules contracts from party's contracts
+  const governanceContracts = party.contracts?.filter(
     (c) => c.template_id.includes("VaultGovernanceRules") || c.template_id.includes("VaultGovernance")
-  );
+  ) ?? [];
+  const vaultGovernanceRulesContract = governanceContracts[0];
 
   const updateScrollShadows = useCallback(() => {
     const el = contractsScrollRef.current;
@@ -263,6 +264,7 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
         <GovernanceSection
           partyId={party.party_id}
           rulesContractId={vaultGovernanceRulesContract?.contract_id}
+          governanceContractIds={governanceContracts.map((c) => c.contract_id)}
           memberPartyId={authStatus?.member_party_id}
           defaultOperatorParty={operatorParty}
         />
@@ -285,6 +287,7 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
         partyId={party.party_id}
         participantIds={party.participants.map((p) => p.participant_uid)}
         defaultOperatorParty={operatorParty}
+        knownPackageIds={[...new Set(party.contracts?.map((c) => c.package_id) ?? [])]}
       />
 
       <DarsDialog
