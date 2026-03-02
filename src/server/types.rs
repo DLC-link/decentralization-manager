@@ -109,6 +109,14 @@ pub struct ContractInfo {
     pub package_id: String,
 }
 
+/// Vetted package information
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct VettedPackageInfo {
+    pub package_id: String,
+    pub package_name: String,
+    pub package_version: String,
+}
+
 /// Party metadata from Ledger API
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct PartyMetadata {
@@ -134,6 +142,8 @@ pub struct DecentralizedParty {
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct DecentralizedPartiesResponse {
     pub parties: Vec<DecentralizedParty>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub vetted_packages: Vec<VettedPackageInfo>,
 }
 
 /// Connection status for a participant

@@ -43,6 +43,12 @@ export interface PartyConfigResponse {
   packages: PackageConfig;
 }
 
+export interface VettedPackageInfo {
+  package_id: string;
+  package_name: string;
+  package_version: string;
+}
+
 export interface PartyMetadata {
   annotations: Record<string, string>;
 }
@@ -55,6 +61,11 @@ export interface DecentralizedParty {
   participants: ParticipantInfo[];
   contracts?: ContractInfo[];
   local_metadata?: PartyMetadata;
+}
+
+export interface DecentralizedPartiesResponse {
+  parties: DecentralizedParty[];
+  vetted_packages?: VettedPackageInfo[];
 }
 
 export interface NodeConfig {
