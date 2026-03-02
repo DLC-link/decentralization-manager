@@ -13,10 +13,13 @@ import {
   IconButton,
   Tooltip,
   Button,
+  Collapse,
 } from "@mui/material";
 import PersonRemoveIcon from "@mui/icons-material/PersonRemove";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import CloudUploadIcon from "@mui/icons-material/CloudUpload";
+import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
+import ExpandLessIcon from "@mui/icons-material/ExpandLess";
 import { CopyableText } from "./CopyableText";
 import { KickDialog } from "./KickDialog";
 import { ContractsDialog } from "./ContractsDialog";
@@ -41,6 +44,7 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
   const [contractsDialogOpen, setContractsDialogOpen] = useState(false);
   const [darsDialogOpen, setDarsDialogOpen] = useState(false);
   const [selectedParticipant, setSelectedParticipant] = useState<string>("");
+  const [contractsExpanded, setContractsExpanded] = useState(true);
   const [canScrollUp, setCanScrollUp] = useState(false);
   const [canScrollDown, setCanScrollDown] = useState(false);
   const contractsScrollRef = useRef<HTMLDivElement>(null);
@@ -189,74 +193,95 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
       {party.contracts && party.contracts.length > 0 && (
         <>
           <CardContent sx={{ pb: 0, "&:last-child": { pb: 0 } }}>
-            <Typography variant="subtitle2" sx={{ mb: 1.5 }}>
-              Contracts
-            </Typography>
-          </CardContent>
-          <Box sx={{ position: "relative" }}>
-            {/* Top shadow */}
             <Box
               sx={{
-                position: "absolute",
-                top: 0,
-                left: 0,
-                right: 0,
-                height: 16,
-                background: "linear-gradient(to bottom, rgba(0,0,0,0.08), transparent)",
-                pointerEvents: "none",
-                opacity: canScrollUp ? 1 : 0,
-                transition: "opacity 0.2s",
-                zIndex: 1,
+                display: "flex",
+                alignItems: "center",
+                cursor: "pointer",
+                mb: 1,
               }}
-            />
-            {/* Scrollable container */}
-            <Box
-              ref={contractsScrollRef}
-              sx={{
-                maxHeight: 180, // ~4-5 rows
-                overflowY: "auto",
-                overflowX: "auto",
-              }}
+              onClick={() => setContractsExpanded(!contractsExpanded)}
             >
-              <Table size="small">
-                <TableHead>
-                  <TableRow>
-                    <TableCell sx={{ py: 1 }}>Template</TableCell>
-                    <TableCell sx={{ py: 1 }}>Contract ID</TableCell>
-                  </TableRow>
-                </TableHead>
-                <TableBody>
-                  {party.contracts.map((c) => (
-                    <TableRow key={c.contract_id}>
-                      <TableCell sx={{ py: 1 }}>{c.template_id}</TableCell>
-                      <TableCell sx={{ py: 1 }}>
-                        <CopyableText
-                          text={c.contract_id}
-                          truncate={{ start: 16, end: 16 }}
-                          variant="caption"
-                        />
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
+              <IconButton size="small">
+                {contractsExpanded ? <ExpandLessIcon /> : <ExpandMoreIcon />}
+              </IconButton>
+              <Typography variant="subtitle2">
+                Contracts
+                <Chip
+                  label={party.contracts.length}
+                  size="small"
+                  sx={{ ml: 1 }}
+                  color="primary"
+                />
+              </Typography>
             </Box>
-            {/* Bottom shadow */}
-            <Box
-              sx={{
-                position: "absolute",
-                bottom: 0,
-                left: 0,
-                right: 0,
-                height: 16,
-                background: "linear-gradient(to top, rgba(0,0,0,0.08), transparent)",
-                pointerEvents: "none",
-                opacity: canScrollDown ? 1 : 0,
-                transition: "opacity 0.2s",
-                zIndex: 1,
-              }}
-            />
-          </Box>
+          </CardContent>
+          <Collapse in={contractsExpanded}>
+            <Box sx={{ position: "relative" }}>
+              {/* Top shadow */}
+              <Box
+                sx={{
+                  position: "absolute",
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  height: 16,
+                  background: "linear-gradient(to bottom, rgba(0,0,0,0.08), transparent)",
+                  pointerEvents: "none",
+                  opacity: canScrollUp ? 1 : 0,
+                  transition: "opacity 0.2s",
+                  zIndex: 1,
+                }}
+              />
+              {/* Scrollable container */}
+              <Box
+                ref={contractsScrollRef}
+                sx={{
+                  maxHeight: 180, // ~4-5 rows
+                  overflowY: "auto",
+                  overflowX: "auto",
+                }}
+              >
+                <Table size="small">
+                  <TableHead>
+                    <TableRow>
+                      <TableCell sx={{ py: 1 }}>Template</TableCell>
+                      <TableCell sx={{ py: 1 }}>Contract ID</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {party.contracts.map((c) => (
+                      <TableRow key={c.contract_id}>
+                        <TableCell sx={{ py: 1 }}>{c.template_id}</TableCell>
+                        <TableCell sx={{ py: 1 }}>
+                          <CopyableText
+                            text={c.contract_id}
+                            truncate={{ start: 16, end: 16 }}
+                            variant="caption"
+                          />
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </Box>
+              {/* Bottom shadow */}
+              <Box
+                sx={{
+                  position: "absolute",
+                  bottom: 0,
+                  left: 0,
+                  right: 0,
+                  height: 16,
+                  background: "linear-gradient(to top, rgba(0,0,0,0.08), transparent)",
+                  pointerEvents: "none",
+                  opacity: canScrollDown ? 1 : 0,
+                  transition: "opacity 0.2s",
+                  zIndex: 1,
+                }}
+              />
+            </Box>
+          </Collapse>
         </>
       )}
 

@@ -17,6 +17,7 @@ import { Header } from "./components/Header";
 import { PartyCard } from "./components/PartyCard";
 import { NodeConfigAccordion } from "./components/NodeConfigAccordion";
 import { NetworkConfigAccordion } from "./components/NetworkConfigAccordion";
+import { VettedPackagesAccordion } from "./components/VettedPackagesAccordion";
 import { LoadingSkeleton } from "./components/LoadingSkeleton";
 import { OnboardingDialog } from "./components/OnboardingDialog";
 import { InvitationModal } from "./components/InvitationModal";
@@ -24,6 +25,8 @@ import { useSnackbar } from "./contexts";
 import { API_BASE, ADMIN_ACCESS, OPERATOR_API_URLS } from "./constants";
 import type {
   DecentralizedParty,
+  DecentralizedPartiesResponse,
+  VettedPackageInfo,
   NodeConfig,
   NetworkConfig,
   ParticipantStatus,
@@ -36,6 +39,7 @@ import type {
 
 const App = () => {
   const [parties, setParties] = useState<DecentralizedParty[]>([]);
+  const [vettedPackages, setVettedPackages] = useState<VettedPackageInfo[]>([]);
   const [nodeConfig, setNodeConfig] = useState<NodeConfig | null>(null);
   const [networkConfig, setNetworkConfig] = useState<NetworkConfig | null>(
     null,
@@ -83,8 +87,9 @@ const App = () => {
         : "";
       const res = await fetch(`${API_BASE}/decentralized-parties${params}`);
       if (res.ok) {
-        const data = await res.json();
+        const data: DecentralizedPartiesResponse = await res.json();
         setParties(data.parties);
+        setVettedPackages(data.vetted_packages ?? []);
       } else {
         showSnackbar("Failed to refresh parties");
       }
@@ -150,11 +155,12 @@ const App = () => {
           throw new Error("Failed to fetch data");
         }
 
-        const partiesData = await partiesRes.json();
+        const partiesData: DecentralizedPartiesResponse = await partiesRes.json();
         const nodeData = await nodeRes.json();
         const networkData = await networkRes.json();
 
         setParties(partiesData.parties);
+        setVettedPackages(partiesData.vetted_packages ?? []);
         setNodeConfig(nodeData);
         setNetworkConfig(networkData);
 
@@ -259,6 +265,9 @@ const App = () => {
                 participantStatuses={participantStatuses}
                 onSave={savePeers}
               />
+            )}
+            {vettedPackages.length > 0 && (
+              <VettedPackagesAccordion packages={vettedPackages} />
             )}
 
             <Box sx={{ mt: 5, mb: 3 }}>
