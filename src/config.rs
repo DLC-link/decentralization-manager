@@ -263,6 +263,8 @@ pub struct CantonConfig {
     pub ledger_api_port: u16,
     #[serde(default = "default_synchronizer")]
     pub synchronizer: String,
+    /// Validator API base URL for scan-proxy queries (e.g. "http://localhost:5003")
+    pub validator_url: Option<String>,
 }
 
 fn default_synchronizer() -> String {

@@ -484,6 +484,42 @@ pub enum ActionType {
     },
 }
 
+impl ActionType {
+    /// Validate the action's fields. Returns an error message if invalid.
+    pub fn validate(&self) -> Result<(), String> {
+        match self {
+            ActionType::VaultDeployment {
+                vault_far_config: Some(far),
+                ..
+            }
+            | ActionType::ProcessorDeploymentRequest {
+                processor_far_config: Some(far),
+                ..
+            } => validate_beneficiary_weights(&far.beneficiaries),
+            ActionType::VaultUpdateFarBeneficiaries {
+                new_beneficiaries, ..
+            } => validate_beneficiary_weights(new_beneficiaries),
+            _ => Ok(()),
+        }
+    }
+}
+
+fn validate_beneficiary_weights(beneficiaries: &[AppRewardBeneficiary]) -> Result<(), String> {
+    if beneficiaries.is_empty() {
+        return Ok(());
+    }
+    let sum: f64 = beneficiaries
+        .iter()
+        .map(|b| b.weight.parse::<f64>().unwrap_or(0.0))
+        .sum();
+    if (sum - 1.0).abs() > 1e-9 {
+        return Err(format!(
+            "FAR beneficiary weights must sum to exactly 1.0, got {sum}"
+        ));
+    }
+    Ok(())
+}
+
 /// Credential claim (subject, property, value)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Claim {
@@ -556,6 +592,13 @@ pub struct GovernanceResponse {
 pub struct ExpireConfirmationRequest {
     pub party_id: CantonId,
     pub rules_contract_id: String,
+    pub confirmation_cid: String,
+}
+
+/// Request to cancel (revoke) own confirmation
+#[derive(Clone, Debug, Deserialize)]
+pub struct CancelConfirmationRequest {
+    pub party_id: CantonId,
     pub confirmation_cid: String,
 }
 
@@ -634,9 +677,16 @@ pub struct RegistrarServicesResponse {
     pub services: Vec<RegistrarServiceInfo>,
 }
 
-/// Response for the contract blob endpoint
+/// A contract ID with its blob
 #[derive(Serialize)]
-pub struct ContractBlobResponse {
+pub struct ContractWithBlob {
     pub contract_id: String,
     pub blob: String,
 }
+
+/// Response for the generic contract query endpoint
+#[derive(Serialize)]
+pub struct ContractQueryResponse {
+    pub contracts: Vec<ContractWithBlob>,
+}
+

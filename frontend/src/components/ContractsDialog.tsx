@@ -66,23 +66,43 @@ const FIELD_TYPES = [
   { value: "record", label: "Record" },
 ];
 
-const createDefaultField = (type: string, participantCount: number = 3): FieldDefinition => {
+const createDefaultField = (
+  type: string,
+  participantCount: number = 3,
+): FieldDefinition => {
   const defaultThreshold = Math.max(2, Math.ceil((participantCount * 2) / 3));
   switch (type) {
-    case "decentralized_party": return { type: "decentralized_party" };
-    case "operator_party": return { type: "operator_party" };
-    case "participant_party": return { type: "participant_party", id: "" };
-    case "party_set": return { type: "party_set", parties: [] };
-    case "attestors_set": return { type: "attestors_set" };
-    case "governance_threshold": return { type: "governance_threshold", value: defaultThreshold };
-    case "rel_time": return { type: "rel_time", microseconds: 3600000000 };
-    case "optional": return { type: "optional", inner: { type: "rel_time", microseconds: 3600000000 } };
-    case "instrument": return { type: "instrument", id: "" };
-    case "text": return { type: "text", value: "" };
-    case "int64": return { type: "int64", value: 0 };
-    case "bool": return { type: "bool", value: false };
-    case "record": return { type: "record", fields: [] };
-    default: return { type: "text", value: "" };
+    case "decentralized_party":
+      return { type: "decentralized_party" };
+    case "operator_party":
+      return { type: "operator_party" };
+    case "participant_party":
+      return { type: "participant_party", id: "" };
+    case "party_set":
+      return { type: "party_set", parties: [] };
+    case "attestors_set":
+      return { type: "attestors_set" };
+    case "governance_threshold":
+      return { type: "governance_threshold", value: defaultThreshold };
+    case "rel_time":
+      return { type: "rel_time", microseconds: 3600000000 };
+    case "optional":
+      return {
+        type: "optional",
+        inner: { type: "rel_time", microseconds: 3600000000 },
+      };
+    case "instrument":
+      return { type: "instrument", id: "" };
+    case "text":
+      return { type: "text", value: "" };
+    case "int64":
+      return { type: "int64", value: 0 };
+    case "bool":
+      return { type: "bool", value: false };
+    case "record":
+      return { type: "record", fields: [] };
+    default:
+      return { type: "text", value: "" };
   }
 };
 
@@ -94,7 +114,6 @@ const createEmptyContract = (): ContractDefinition => ({
   entity_name: "",
   fields: [],
 });
-
 
 // CBTC contract definitions
 const getCbtcContracts = (): ContractDefinition[] => [
@@ -139,7 +158,10 @@ const getCbtcContracts = (): ContractDefinition[] => [
 ];
 
 // Vault contract definitions
-const getVaultContracts = (participantCount: number = 3, vaultGovernancePkg: string = ""): ContractDefinition[] => {
+const getVaultContracts = (
+  participantCount: number = 3,
+  vaultGovernancePkg: string = "",
+): ContractDefinition[] => {
   const defaultThreshold = Math.max(2, Math.ceil((participantCount * 2) / 3));
   return [
     {
@@ -152,18 +174,28 @@ const getVaultContracts = (participantCount: number = 3, vaultGovernancePkg: str
         { type: "decentralized_party" }, // vaultManager : Party
         { type: "party_set", parties: [] }, // members : Set Party - add parties manually
         { type: "governance_threshold", value: defaultThreshold }, // threshold : Int
-        { type: "optional", inner: { type: "rel_time", microseconds: 86400000000 } }, // actionConfirmationTimeout : Optional RelTime (24 hours)
+        {
+          type: "optional",
+          inner: { type: "rel_time", microseconds: 86400000000 },
+        }, // actionConfirmationTimeout : Optional RelTime (24 hours)
       ],
     },
   ];
 };
 
-const getContractsForType = (type: ContractType, participantCount: number = 3, packages?: PackageConfig): ContractDefinition[] => {
+const getContractsForType = (
+  type: ContractType,
+  participantCount: number = 3,
+  packages?: PackageConfig,
+): ContractDefinition[] => {
   switch (type) {
     case "cbtc":
       return getCbtcContracts();
     case "vault":
-      return getVaultContracts(participantCount, packages?.vault_governance ?? "");
+      return getVaultContracts(
+        participantCount,
+        packages?.vault_governance ?? "",
+      );
     default:
       return [];
   }
@@ -177,7 +209,13 @@ interface FieldEditorProps {
   partyId?: string;
 }
 
-const FieldEditor = ({ field, onChange, onDelete, participantCount = 3, partyId }: FieldEditorProps) => {
+const FieldEditor = ({
+  field,
+  onChange,
+  onDelete,
+  participantCount = 3,
+  partyId,
+}: FieldEditorProps) => {
   const defaultThreshold = Math.max(2, Math.ceil((participantCount * 2) / 3));
 
   const renderValueInput = () => {
@@ -201,13 +239,21 @@ const FieldEditor = ({ field, onChange, onDelete, participantCount = 3, partyId 
         );
       case "operator_party":
         return (
-          <Typography variant="body2" color="text.secondary" sx={{ fontStyle: "italic" }}>
+          <Typography
+            variant="body2"
+            color="text.secondary"
+            sx={{ fontStyle: "italic" }}
+          >
             (auto-allocated)
           </Typography>
         );
       case "attestors_set":
         return (
-          <Typography variant="body2" color="text.secondary" sx={{ fontStyle: "italic" }}>
+          <Typography
+            variant="body2"
+            color="text.secondary"
+            sx={{ fontStyle: "italic" }}
+          >
             (all {participantCount} participants)
           </Typography>
         );
@@ -225,7 +271,9 @@ const FieldEditor = ({ field, onChange, onDelete, participantCount = 3, partyId 
 
       case "party_set":
         return (
-          <Box sx={{ display: "flex", flexDirection: "column", gap: 1, flex: 1 }}>
+          <Box
+            sx={{ display: "flex", flexDirection: "column", gap: 1, flex: 1 }}
+          >
             <TextField
               size="small"
               placeholder="Paste party ID, press Enter"
@@ -256,12 +304,20 @@ const FieldEditor = ({ field, onChange, onDelete, participantCount = 3, partyId 
                       py: 0.25,
                     }}
                   >
-                    <Typography variant="caption" sx={{ flex: 1, fontFamily: "monospace" }}>
+                    <Typography
+                      variant="caption"
+                      sx={{ flex: 1, fontFamily: "monospace" }}
+                    >
                       {party}
                     </Typography>
                     <IconButton
                       size="small"
-                      onClick={() => onChange({ ...field, parties: field.parties.filter((_, i) => i !== idx) })}
+                      onClick={() =>
+                        onChange({
+                          ...field,
+                          parties: field.parties.filter((_, i) => i !== idx),
+                        })
+                      }
                       sx={{ p: 0.25 }}
                     >
                       <DeleteIcon sx={{ fontSize: 14 }} />
@@ -280,7 +336,12 @@ const FieldEditor = ({ field, onChange, onDelete, participantCount = 3, partyId 
             label="Value"
             type="number"
             value={field.value ?? defaultThreshold}
-            onChange={(e) => onChange({ ...field, value: parseInt(e.target.value) || defaultThreshold })}
+            onChange={(e) =>
+              onChange({
+                ...field,
+                value: parseInt(e.target.value) || defaultThreshold,
+              })
+            }
             sx={{ width: 100 }}
           />
         );
@@ -290,7 +351,9 @@ const FieldEditor = ({ field, onChange, onDelete, participantCount = 3, partyId 
           <FormControl size="small" sx={{ width: 130 }}>
             <Select
               value={field.microseconds || 3600000000}
-              onChange={(e) => onChange({ ...field, microseconds: Number(e.target.value) })}
+              onChange={(e) =>
+                onChange({ ...field, microseconds: Number(e.target.value) })
+              }
             >
               <MenuItem value={180000000}>3 min</MenuItem>
               <MenuItem value={600000000}>10 min</MenuItem>
@@ -303,24 +366,44 @@ const FieldEditor = ({ field, onChange, onDelete, participantCount = 3, partyId 
         );
 
       case "optional": {
-        const innerTypes = FIELD_TYPES.filter(t => t.value !== "optional" && t.value !== "record");
+        const innerTypes = FIELD_TYPES.filter(
+          (t) => t.value !== "optional" && t.value !== "record",
+        );
         return (
           <Box sx={{ display: "flex", gap: 1, alignItems: "center", flex: 1 }}>
             <FormControl size="small" sx={{ width: 140 }}>
               <Select
                 value={field.inner?.type || "rel_time"}
-                onChange={(e) => onChange({ ...field, inner: createDefaultField(e.target.value, participantCount) })}
+                onChange={(e) =>
+                  onChange({
+                    ...field,
+                    inner: createDefaultField(e.target.value, participantCount),
+                  })
+                }
               >
                 {innerTypes.map((t) => (
-                  <MenuItem key={t.value} value={t.value}>{t.label}</MenuItem>
+                  <MenuItem key={t.value} value={t.value}>
+                    {t.label}
+                  </MenuItem>
                 ))}
               </Select>
             </FormControl>
             {field.inner?.type === "rel_time" && (
               <FormControl size="small" sx={{ width: 130 }}>
                 <Select
-                  value={(field.inner as { microseconds: number }).microseconds || 3600000000}
-                  onChange={(e) => onChange({ ...field, inner: { type: "rel_time", microseconds: Number(e.target.value) } })}
+                  value={
+                    (field.inner as { microseconds: number }).microseconds ||
+                    3600000000
+                  }
+                  onChange={(e) =>
+                    onChange({
+                      ...field,
+                      inner: {
+                        type: "rel_time",
+                        microseconds: Number(e.target.value),
+                      },
+                    })
+                  }
                 >
                   <MenuItem value={180000000}>3 min</MenuItem>
                   <MenuItem value={600000000}>10 min</MenuItem>
@@ -336,8 +419,18 @@ const FieldEditor = ({ field, onChange, onDelete, participantCount = 3, partyId 
                 size="small"
                 label="Value"
                 type="number"
-                value={(field.inner as { value?: number }).value ?? defaultThreshold}
-                onChange={(e) => onChange({ ...field, inner: { type: "governance_threshold", value: parseInt(e.target.value) || defaultThreshold } })}
+                value={
+                  (field.inner as { value?: number }).value ?? defaultThreshold
+                }
+                onChange={(e) =>
+                  onChange({
+                    ...field,
+                    inner: {
+                      type: "governance_threshold",
+                      value: parseInt(e.target.value) || defaultThreshold,
+                    },
+                  })
+                }
                 sx={{ width: 100 }}
               />
             )}
@@ -346,7 +439,12 @@ const FieldEditor = ({ field, onChange, onDelete, participantCount = 3, partyId 
                 size="small"
                 label="Value"
                 value={(field.inner as { value: string }).value}
-                onChange={(e) => onChange({ ...field, inner: { type: "text", value: e.target.value } })}
+                onChange={(e) =>
+                  onChange({
+                    ...field,
+                    inner: { type: "text", value: e.target.value },
+                  })
+                }
                 sx={{ flex: 1 }}
               />
             )}
@@ -356,7 +454,15 @@ const FieldEditor = ({ field, onChange, onDelete, participantCount = 3, partyId 
                 label="Value"
                 type="number"
                 value={(field.inner as { value: number }).value}
-                onChange={(e) => onChange({ ...field, inner: { type: "int64", value: parseInt(e.target.value) || 0 } })}
+                onChange={(e) =>
+                  onChange({
+                    ...field,
+                    inner: {
+                      type: "int64",
+                      value: parseInt(e.target.value) || 0,
+                    },
+                  })
+                }
                 sx={{ width: 100 }}
               />
             )}
@@ -393,7 +499,9 @@ const FieldEditor = ({ field, onChange, onDelete, participantCount = 3, partyId 
             label="Value"
             type="number"
             value={field.value}
-            onChange={(e) => onChange({ ...field, value: parseInt(e.target.value) || 0 })}
+            onChange={(e) =>
+              onChange({ ...field, value: parseInt(e.target.value) || 0 })
+            }
             sx={{ width: 120 }}
           />
         );
@@ -403,7 +511,9 @@ const FieldEditor = ({ field, onChange, onDelete, participantCount = 3, partyId 
           <FormControl size="small" sx={{ width: 100 }}>
             <Select
               value={field.value ? "true" : "false"}
-              onChange={(e) => onChange({ ...field, value: e.target.value === "true" })}
+              onChange={(e) =>
+                onChange({ ...field, value: e.target.value === "true" })
+              }
             >
               <MenuItem value="true">True</MenuItem>
               <MenuItem value="false">False</MenuItem>
@@ -413,7 +523,9 @@ const FieldEditor = ({ field, onChange, onDelete, participantCount = 3, partyId 
 
       case "record":
         return (
-          <Box sx={{ display: "flex", flexDirection: "column", gap: 1, flex: 1 }}>
+          <Box
+            sx={{ display: "flex", flexDirection: "column", gap: 1, flex: 1 }}
+          >
             <Box
               sx={{
                 border: "1px solid",
@@ -424,31 +536,47 @@ const FieldEditor = ({ field, onChange, onDelete, participantCount = 3, partyId 
               }}
             >
               {field.fields.length === 0 ? (
-                <Typography variant="body2" color="text.secondary" sx={{ fontStyle: "italic" }}>
+                <Typography
+                  variant="body2"
+                  color="text.secondary"
+                  sx={{ fontStyle: "italic" }}
+                >
                   Empty record
                 </Typography>
               ) : (
                 <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
                   {field.fields.map((nestedField, idx) => (
-                    <Box key={idx} sx={{ display: "flex", gap: 1, alignItems: "center" }}>
+                    <Box
+                      key={idx}
+                      sx={{ display: "flex", gap: 1, alignItems: "center" }}
+                    >
                       <FormControl size="small" sx={{ width: 130 }}>
                         <Select
                           value={nestedField.type}
                           onChange={(e) => {
                             const newFields = [...field.fields];
-                            newFields[idx] = createDefaultField(e.target.value, participantCount);
+                            newFields[idx] = createDefaultField(
+                              e.target.value,
+                              participantCount,
+                            );
                             onChange({ ...field, fields: newFields });
                           }}
                         >
-                          {FIELD_TYPES.filter(t => t.value !== "record").map((t) => (
-                            <MenuItem key={t.value} value={t.value}>{t.label}</MenuItem>
-                          ))}
+                          {FIELD_TYPES.filter((t) => t.value !== "record").map(
+                            (t) => (
+                              <MenuItem key={t.value} value={t.value}>
+                                {t.label}
+                              </MenuItem>
+                            ),
+                          )}
                         </Select>
                       </FormControl>
                       <IconButton
                         size="small"
                         onClick={() => {
-                          const newFields = field.fields.filter((_, i) => i !== idx);
+                          const newFields = field.fields.filter(
+                            (_, i) => i !== idx,
+                          );
                           onChange({ ...field, fields: newFields });
                         }}
                         color="error"
@@ -462,7 +590,12 @@ const FieldEditor = ({ field, onChange, onDelete, participantCount = 3, partyId 
               <Button
                 size="small"
                 startIcon={<AddIcon />}
-                onClick={() => onChange({ ...field, fields: [...field.fields, { type: "text", value: "" }] })}
+                onClick={() =>
+                  onChange({
+                    ...field,
+                    fields: [...field.fields, { type: "text", value: "" }],
+                  })
+                }
                 sx={{ mt: 1 }}
               >
                 Add
@@ -489,10 +622,14 @@ const FieldEditor = ({ field, onChange, onDelete, participantCount = 3, partyId 
       <FormControl size="small" fullWidth>
         <Select
           value={field.type}
-          onChange={(e) => onChange(createDefaultField(e.target.value, participantCount))}
+          onChange={(e) =>
+            onChange(createDefaultField(e.target.value, participantCount))
+          }
         >
           {FIELD_TYPES.map((t) => (
-            <MenuItem key={t.value} value={t.value}>{t.label}</MenuItem>
+            <MenuItem key={t.value} value={t.value}>
+              {t.label}
+            </MenuItem>
           ))}
         </Select>
       </FormControl>
@@ -735,7 +872,9 @@ export const ContractsDialog = ({
   const [packages, setPackages] = useState<PackageConfig>({});
 
   // Form state
-  const [operatorParty, setOperatorParty] = useState(defaultOperatorParty || "");
+  const [operatorParty, setOperatorParty] = useState(
+    defaultOperatorParty || "",
+  );
   const [participantParties, setParticipantParties] = useState<string[]>([]);
   const [contracts, setContracts] = useState<ContractDefinition[]>([]);
 
@@ -776,7 +915,9 @@ export const ContractsDialog = ({
   // Initialize contracts when type is selected
   useEffect(() => {
     if (contractType) {
-      setContracts(getContractsForType(contractType, participantIds.length, packages));
+      setContracts(
+        getContractsForType(contractType, participantIds.length, packages),
+      );
     }
   }, [contractType, participantIds.length, packages]);
 
@@ -833,14 +974,19 @@ export const ContractsDialog = ({
     setError(null);
 
     // Validate required fields
-    if (!operatorParty) {
+    if (contractType !== "vault" && !operatorParty) {
       setError("Operator party ID is required");
       setLoading(false);
       return;
     }
 
-    if (participantParties.length !== participantIds.length) {
-      setError(`Please provide party IDs for all ${participantIds.length} participants`);
+    if (
+      contractType !== "vault" &&
+      participantParties.length !== participantIds.length
+    ) {
+      setError(
+        `Please provide party IDs for all ${participantIds.length} participants`,
+      );
       setLoading(false);
       return;
     }
@@ -939,76 +1085,119 @@ export const ContractsDialog = ({
                 submissions. Make sure DARs have been uploaded first.
               </Typography>
 
-              <Divider />
-              <Typography variant="subtitle1">Party Configuration</Typography>
+              {contractType !== "vault" && (
+                <>
+                  <Divider />
+                  <Typography variant="subtitle1">
+                    Party Configuration
+                  </Typography>
+                </>
+              )}
 
-              <TextField
-                size="small"
-                label="Operator Party ID"
-                value={operatorParty}
-                onChange={(e) => setOperatorParty(e.target.value)}
-                fullWidth
-                required
-                error={!operatorParty}
-                helperText="Full party ID for the operator (e.g., operator::1220...)"
-              />
-
-              <Typography variant="subtitle2" sx={{ mt: 1 }}>
-                Participant Party IDs ({participantParties.length}/{participantIds.length})
-              </Typography>
-              <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-                Enter the party ID for each participant. Must match the order of participant IDs.
-              </Typography>
-              <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+              {contractType !== "vault" && (
                 <TextField
                   size="small"
-                  placeholder="Paste party ID, press Enter"
+                  label="Operator Party ID"
+                  value={operatorParty}
+                  onChange={(e) => setOperatorParty(e.target.value)}
                   fullWidth
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      const input = e.target as HTMLInputElement;
-                      const value = input.value.trim();
-                      if (value && participantParties.length < participantIds.length) {
-                        setParticipantParties([...participantParties, value]);
-                        input.value = "";
-                      }
-                      e.preventDefault();
-                    }
-                  }}
-                  disabled={participantParties.length >= participantIds.length}
+                  required
+                  error={!operatorParty}
+                  helperText="Full party ID for the operator (e.g., operator::1220...)"
                 />
-                {participantParties.length > 0 && (
-                  <Box sx={{ display: "flex", flexDirection: "column", gap: 0.5 }}>
-                    {participantParties.map((party, idx) => (
-                      <Box
-                        key={idx}
-                        sx={{
-                          display: "flex",
-                          alignItems: "center",
-                          bgcolor: "action.hover",
-                          borderRadius: 1,
-                          px: 1,
-                          py: 0.5,
-                        }}
-                      >
-                        <Typography variant="caption" color="text.secondary" sx={{ mr: 1, minWidth: 20 }}>
-                          {idx + 1}.
-                        </Typography>
-                        <Typography variant="caption" sx={{ flex: 1, fontFamily: "monospace", overflow: "hidden", textOverflow: "ellipsis" }}>
-                          {party}
-                        </Typography>
-                        <IconButton
-                          size="small"
-                          onClick={() => setParticipantParties(participantParties.filter((_, i) => i !== idx))}
-                          sx={{ p: 0.25 }}
+              )}
+
+              <>
+                <Typography variant="subtitle2" sx={{ mt: 1 }}>
+                  Participant Party IDs ({participantParties.length}/
+                  {participantIds.length})
+                </Typography>
+                <Typography
+                  variant="body2"
+                  color="text.secondary"
+                  sx={{ mb: 1 }}
+                >
+                  Enter the party ID for each participant. Must match the order
+                  of participant IDs.
+                </Typography>
+                <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+                  <TextField
+                    size="small"
+                    placeholder="Paste party ID, press Enter"
+                    fullWidth
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        const input = e.target as HTMLInputElement;
+                        const value = input.value.trim();
+                        if (
+                          value &&
+                          participantParties.length < participantIds.length
+                        ) {
+                          setParticipantParties([...participantParties, value]);
+                          input.value = "";
+                        }
+                        e.preventDefault();
+                      }
+                    }}
+                    disabled={
+                      participantParties.length >= participantIds.length
+                    }
+                  />
+                  {participantParties.length > 0 && (
+                    <Box
+                      sx={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 0.5,
+                      }}
+                    >
+                      {participantParties.map((party, idx) => (
+                        <Box
+                          key={idx}
+                          sx={{
+                            display: "flex",
+                            alignItems: "center",
+                            bgcolor: "action.hover",
+                            borderRadius: 1,
+                            px: 1,
+                            py: 0.5,
+                          }}
                         >
-                          <DeleteIcon sx={{ fontSize: 14 }} />
-                        </IconButton>
-                      </Box>
-                    ))}
-                  </Box>
-                )}
-              </Box>
+                          <Typography
+                            variant="caption"
+                            color="text.secondary"
+                            sx={{ mr: 1, minWidth: 20 }}
+                          >
+                            {idx + 1}.
+                          </Typography>
+                          <Typography
+                            variant="caption"
+                            sx={{
+                              flex: 1,
+                              fontFamily: "monospace",
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                            }}
+                          >
+                            {party}
+                          </Typography>
+                          <IconButton
+                            size="small"
+                            onClick={() =>
+                              setParticipantParties(
+                                participantParties.filter((_, i) => i !== idx),
+                              )
+                            }
+                            sx={{ p: 0.25 }}
+                          >
+                            <DeleteIcon sx={{ fontSize: 14 }} />
+                          </IconButton>
+                        </Box>
+                      ))}
+                    </Box>
+                  )}
+                </Box>
+              </>
 
               <Divider />
               <Box

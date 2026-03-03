@@ -373,11 +373,14 @@ export type ActionType =
       amulet_rules_cid: string;
     };
 
-// Disclosed contract for ledger submission
-export interface DisclosedContractInput {
+// Disclosed contract (contract_id + base64-encoded created_event_blob)
+export interface DisclosedContract {
   contract_id: string;
-  blob: string; // base64-encoded created_event_blob
+  blob: string;
 }
+
+// Disclosed contract for ledger submission (same shape, used in requests)
+export type DisclosedContractInput = DisclosedContract;
 
 // Request types
 export interface ConfirmActionRequest {
@@ -397,6 +400,11 @@ export interface ExecuteActionRequest {
 export interface ExpireConfirmationRequest {
   party_id: string;
   rules_contract_id: string;
+  confirmation_cid: string;
+}
+
+export interface CancelConfirmationRequest {
+  party_id: string;
   confirmation_cid: string;
 }
 
@@ -444,7 +452,13 @@ export interface RegistrarServicesResponse {
   services: RegistrarServiceInfo[];
 }
 
-export interface ContractBlobResponse {
+export interface ContractWithBlob {
   contract_id: string;
   blob: string;
 }
+
+export interface ContractQueryResponse {
+  contracts: ContractWithBlob[];
+}
+
+export type ChainType = "LOCAL" | "DEVNET" | "TESTNET" | "MAINNET";

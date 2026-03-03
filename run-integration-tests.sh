@@ -3,8 +3,8 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DEV_DIR="$SCRIPT_DIR/development"
-DARS_DIR="$DEV_DIR/dars"
+DEV_DIR="$SCRIPT_DIR/development/local"
+DARS_DIR="$SCRIPT_DIR/development/dars"
 
 # Ports
 P1_HTTP=8081

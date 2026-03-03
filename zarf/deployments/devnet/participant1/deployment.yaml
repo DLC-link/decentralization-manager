@@ -45,7 +45,7 @@ data:
     utility_credential = "#utility-credential-app-v0"
 
     [[parties]]
-    dec_party_id = "vault-rc7-2::12203b31aa3e95e6b930ac2205fb389df47492c79a55a26624ac4d1167115250a3f7"
+    dec_party_id = "vault-test-3::1220a840c4b8c9433447f7c86e90908a8cfc6145ce2abfc7e104d5afc60b8ebb3a83"
     member_party_id = "attestor-1::1220fa8543db6c66fe3a55b1f180c8dfc7f876265c76684fbc1d35d89e02c8aafe8e"
     user_id = "CoordinatorUser"
 

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use canton_proto_rs::com::daml::ledger::api::v2::{
     CreatedEvent, CumulativeFilter, EventFormat, Filters, GetActiveContractsRequest,
-    GetLedgerEndRequest, Identifier, TemplateFilter, Value, WildcardFilter,
+    GetLedgerEndRequest, Identifier, InterfaceFilter, TemplateFilter, Value, WildcardFilter,
     admin::ListKnownPartiesRequest, cumulative_filter,
     get_active_contracts_response::ContractEntry, value,
 };
@@ -17,8 +17,9 @@ use crate::{
 use super::{
     action_serializer,
     types::{
-        ActionType, ContractInfo, GovernanceAction, GovernanceConfirmation, GovernanceState,
-        PartyMetadata, ProviderServiceInfo, RegistrarServiceInfo, UserServiceInfo, VaultInfo,
+        ActionType, ContractInfo, ContractWithBlob, GovernanceAction, GovernanceConfirmation,
+        GovernanceState, PartyMetadata, ProviderServiceInfo, RegistrarServiceInfo, UserServiceInfo,
+        VaultInfo,
     },
 };
 
@@ -1671,17 +1672,30 @@ fn extract_registrar_service_info(created: &CreatedEvent) -> Option<RegistrarSer
 }
 
 // ============================================================================
-// Contract Blob Query
+// Generic Contract ID Query
 // ============================================================================
 
-/// Get a contract's created_event_blob by contract ID
+/// Query contracts by template (module_name + entity_name)
 ///
-/// Searches all active contracts for the given contract ID and returns the blob
-pub async fn get_contract_blob(
+/// Returns contract IDs with their base64-encoded created_event_blob.
+/// Parameters for querying contracts by template or interface
+pub struct ContractQueryParams {
+    pub package_id: String,
+    pub module_name: String,
+    pub entity_name: String,
+    pub use_interface_filter: bool,
+}
+
+/// Uses WildcardFilter in test mode, TemplateFilter or InterfaceFilter in production.
+pub async fn query_contracts_by_template(
     config: &NodeConfig,
-    contract_id: &str,
+    party_id: &str,
     token: Option<String>,
-) -> Result<Option<String>> {
+    test_mode: bool,
+    params: &ContractQueryParams,
+) -> Result<Vec<ContractWithBlob>> {
+    use base64::Engine;
+
     let mut state_client = utils::create_state_client(config, token).await?;
 
     let ledger_end = state_client
@@ -1690,22 +1704,45 @@ pub async fn get_contract_blob(
         .into_inner()
         .offset;
 
+    let identifier = Identifier {
+        package_id: params.package_id.clone(),
+        module_name: params.module_name.clone(),
+        entity_name: params.entity_name.clone(),
+    };
+
+    let identifier_filter = if test_mode {
+        cumulative_filter::IdentifierFilter::WildcardFilter(WildcardFilter {
+            include_created_event_blob: true,
+        })
+    } else if params.use_interface_filter {
+        cumulative_filter::IdentifierFilter::InterfaceFilter(InterfaceFilter {
+            interface_id: Some(identifier),
+            include_interface_view: true,
+            include_created_event_blob: true,
+        })
+    } else {
+        cumulative_filter::IdentifierFilter::TemplateFilter(TemplateFilter {
+            template_id: Some(identifier),
+            include_created_event_blob: true,
+        })
+    };
+
+    let mut filters_by_party = HashMap::new();
+    filters_by_party.insert(
+        party_id.to_string(),
+        Filters {
+            cumulative: vec![CumulativeFilter {
+                identifier_filter: Some(identifier_filter),
+            }],
+        },
+    );
+
     let acs_request = GetActiveContractsRequest {
         active_at_offset: ledger_end,
         event_format: Some(EventFormat {
-            filters_by_party: HashMap::new(),
-            filters_for_any_party: Some(Filters {
-                cumulative: vec![CumulativeFilter {
-                    identifier_filter: Some(
-                        cumulative_filter::IdentifierFilter::WildcardFilter(
-                            WildcardFilter {
-                                include_created_event_blob: true,
-                            },
-                        ),
-                    ),
-                }],
-            }),
-            verbose: false,
+            filters_by_party,
+            filters_for_any_party: None,
+            verbose: true,
         }),
     };
 
@@ -1714,17 +1751,30 @@ pub async fn get_contract_blob(
         .await?
         .into_inner();
 
+    let mut contracts = Vec::new();
     while let Some(response) = stream.message().await? {
         if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
             && let Some(created) = active.created_event
-            && created.contract_id == contract_id
         {
-            // Return base64-encoded blob
-            use base64::Engine;
-            let blob = base64::engine::general_purpose::STANDARD.encode(&created.created_event_blob);
-            return Ok(Some(blob));
+            let matches = if test_mode {
+                created.template_id.as_ref().is_some_and(|t| {
+                    t.module_name == params.module_name && t.entity_name == params.entity_name
+                })
+            } else {
+                true
+            };
+
+            if matches {
+                let blob =
+                    base64::engine::general_purpose::STANDARD.encode(&created.created_event_blob);
+                contracts.push(ContractWithBlob {
+                    contract_id: created.contract_id,
+                    blob,
+                });
+            }
         }
     }
 
-    Ok(None)
+    Ok(contracts)
 }
+

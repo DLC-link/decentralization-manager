@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import {
   Dialog,
   DialogTitle,
@@ -15,16 +15,8 @@ import {
 import DeleteIcon from "@mui/icons-material/Delete";
 import AddIcon from "@mui/icons-material/Add";
 import {
-  DEVNET_AMULET_RULES_CID,
-  DEVNET_AMULET_RULES_BLOB,
-  DEVNET_VAULT_RULES_CID,
-  DEVNET_VAULT_RULES_BLOB,
-  DEVNET_VAULT_PROCESSOR_RULES_CID,
-  DEVNET_VAULT_PROCESSOR_RULES_BLOB,
-  DEVNET_ALLOCATION_FACTORY_CID,
-  DEVNET_ALLOCATION_FACTORY_BLOB,
-  DEVNET_FEATURED_APP_RIGHT_CID,
-  DEVNET_FEATURED_APP_RIGHT_BLOB,
+  DEVNET_VAULT_RULES,
+  DEVNET_VAULT_PROCESSOR_RULES,
 } from "../constants";
 import type {
   GovernanceAction,
@@ -54,13 +46,11 @@ const ACTION_TYPE_LABELS: Record<string, string> = {
   dev_net_feature_app: "DevNet Feature App",
 };
 
-const BLOB_MAP: Record<string, string> = {
-  [DEVNET_AMULET_RULES_CID]: DEVNET_AMULET_RULES_BLOB,
-  [DEVNET_VAULT_RULES_CID]: DEVNET_VAULT_RULES_BLOB,
-  [DEVNET_VAULT_PROCESSOR_RULES_CID]: DEVNET_VAULT_PROCESSOR_RULES_BLOB,
-  [DEVNET_ALLOCATION_FACTORY_CID]: DEVNET_ALLOCATION_FACTORY_BLOB,
-  [DEVNET_FEATURED_APP_RIGHT_CID]: DEVNET_FEATURED_APP_RIGHT_BLOB,
-};
+const STATIC_BLOB_MAP: Record<string, string> = Object.fromEntries(
+  [DEVNET_VAULT_RULES, DEVNET_VAULT_PROCESSOR_RULES].map(
+    (c) => [c.contract_id, c.blob],
+  ),
+);
 
 const formatActionType = (action: ActionType): string =>
   ACTION_TYPE_LABELS[action.type] || action.type;
@@ -70,14 +60,20 @@ const getRequiredContractIds = (action: ActionType): string[] => {
   switch (action.type) {
     case "dev_net_feature_app":
       return [action.amulet_rules_cid];
-    case "vault_deployment":
-      return [action.vault_rules_cid, action.allocation_factory_cid];
-    case "processor_deployment_request":
-      return [
-        action.vault_processor_rules_cid,
-        action.allocation_factory_cid,
-        DEVNET_FEATURED_APP_RIGHT_CID,
-      ];
+    case "vault_deployment": {
+      const ids = [action.vault_rules_cid, action.allocation_factory_cid];
+      if (action.vault_far_config) {
+        ids.push(action.vault_far_config.featured_app_right_cid);
+      }
+      return ids;
+    }
+    case "processor_deployment_request": {
+      const ids = [action.vault_processor_rules_cid, action.allocation_factory_cid];
+      if (action.processor_far_config) {
+        ids.push(action.processor_far_config.featured_app_right_cid);
+      }
+      return ids;
+    }
     default:
       return [];
   }
@@ -90,6 +86,7 @@ interface ExecuteDialogProps {
   action: GovernanceAction | null;
   loading: boolean;
   error: string | null;
+  blobMap?: Record<string, string>;
 }
 
 export const ExecuteDialog = ({
@@ -99,25 +96,30 @@ export const ExecuteDialog = ({
   action,
   loading,
   error,
+  blobMap = {},
 }: ExecuteDialogProps) => {
+  const fullBlobMap = useMemo(
+    () => ({ ...STATIC_BLOB_MAP, ...blobMap }),
+    [blobMap],
+  );
   const [disclosedContracts, setDisclosedContracts] = useState<
     DisclosedContractInput[]
   >([]);
 
-  // Populate disclosed contracts from hardcoded blobs when dialog opens
+  // Populate disclosed contracts from blob map when dialog opens
   useEffect(() => {
     if (open && action) {
       const contractIds = getRequiredContractIds(action.action);
       setDisclosedContracts(
         contractIds.map((cid) => ({
           contract_id: cid,
-          blob: BLOB_MAP[cid] || "",
+          blob: fullBlobMap[cid] || "",
         })),
       );
     } else {
       setDisclosedContracts([]);
     }
-  }, [open, action]);
+  }, [open, action, fullBlobMap]);
 
   const handleAdd = () => {
     setDisclosedContracts((prev) => [

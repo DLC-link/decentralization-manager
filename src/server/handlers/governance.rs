@@ -22,13 +22,15 @@ use crate::{
     server::{
         AppState, action_serializer,
         queries::{
-            get_contract_blob, get_governance_confirmations,
+            get_governance_confirmations,
             get_governance_state as query_governance_state, get_provider_services,
             get_registrar_services, get_user_services, get_vaults,
+            query_contracts_by_template, ContractQueryParams as QueryContractParams,
         },
         types::{
-            ConfirmActionRequest, ContractBlobResponse, ExecuteActionRequest,
-            ExpireConfirmationRequest, GovernanceResponse, GovernanceStateResponse,
+            CancelConfirmationRequest, ConfirmActionRequest, ContractQueryResponse,
+            ContractWithBlob, ExecuteActionRequest, ExpireConfirmationRequest, GovernanceResponse,
+            GovernanceStateResponse,
             ProviderServicesResponse, RegistrarServicesResponse, UserServicesResponse,
             VaultsResponse,
         },
@@ -43,14 +45,19 @@ use crate::{
 /// Query parameters for governance endpoints
 #[derive(Debug, Deserialize)]
 pub struct GovernanceQuery {
-    pub party_id: String,
+    pub party_id: CantonId,
 }
 
-/// Query parameters for contract blob endpoint
+/// Query parameters for generic contract query endpoint
 #[derive(Debug, Deserialize)]
-pub struct ContractBlobQuery {
-    pub party_id: String,
-    pub contract_id: String,
+pub struct ContractQueryParams {
+    pub party_id: CantonId,
+    pub package_id: String,
+    pub module_name: String,
+    pub entity_name: String,
+    /// Use InterfaceFilter instead of TemplateFilter (for querying by interface)
+    #[serde(default)]
+    pub interface: bool,
 }
 
 // ============================================================================
@@ -63,34 +70,22 @@ pub async fn get_governance(
     data: web::Data<AppState>,
     query: web::Query<GovernanceQuery>,
 ) -> impl Responder {
-    let party_id = match CantonId::parse(&query.party_id) {
-        Ok(id) => id,
-        Err(e) => {
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": format!("Invalid party_id: {e}")
-            }));
-        }
-    };
+    let party_id = &query.party_id;
+    let party_id_str = party_id.to_string();
 
-    // Get token for this party
-    let token = get_party_token(&data, &party_id).await;
-
-    // Check if we're in test mode (mock auth)
+    let token = get_party_token(&data, party_id).await;
     let test_mode = matches!(data.auth, Some(WorkflowAuth::Mock(_)));
 
-    // Get threshold for this party (default to 2 if not found)
-    let threshold = get_party_threshold(&data, &query.party_id)
+    let threshold = get_party_threshold(&data, &party_id_str)
         .await
         .unwrap_or(2);
 
-    // Get member_party_id from config (used by frontend to identify own confirmations)
-    let member_party_id = get_member_party_id(&data, &party_id);
-
-    let packages = data.config.get_packages(&query.party_id);
+    let member_party_id = get_member_party_id(&data, party_id);
+    let packages = data.config.get_packages(&party_id_str);
 
     match get_governance_confirmations(
         &data.config,
-        &query.party_id,
+        &party_id_str,
         threshold,
         token,
         test_mode,
@@ -118,24 +113,14 @@ pub async fn get_governance_state(
     data: web::Data<AppState>,
     query: web::Query<GovernanceQuery>,
 ) -> impl Responder {
-    let party_id = match CantonId::parse(&query.party_id) {
-        Ok(id) => id,
-        Err(e) => {
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": format!("Invalid party_id: {e}")
-            }));
-        }
-    };
+    let party_id = &query.party_id;
+    let party_id_str = party_id.to_string();
 
-    // Get token for this party
-    let token = get_party_token(&data, &party_id).await;
-
-    // Check if we're in test mode (mock auth)
+    let token = get_party_token(&data, party_id).await;
     let test_mode = matches!(data.auth, Some(WorkflowAuth::Mock(_)));
+    let packages = data.config.get_packages(&party_id_str);
 
-    let packages = data.config.get_packages(&query.party_id);
-
-    match query_governance_state(&data.config, &query.party_id, token, test_mode, &packages).await {
+    match query_governance_state(&data.config, &party_id_str, token, test_mode, &packages).await {
         Ok(state) => HttpResponse::Ok().json(GovernanceStateResponse { state }),
         Err(e) => {
             tracing::error!("Failed to fetch governance state: {e}");
@@ -152,24 +137,14 @@ pub async fn get_vaults_handler(
     data: web::Data<AppState>,
     query: web::Query<GovernanceQuery>,
 ) -> impl Responder {
-    let party_id = match CantonId::parse(&query.party_id) {
-        Ok(id) => id,
-        Err(e) => {
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": format!("Invalid party_id: {e}")
-            }));
-        }
-    };
+    let party_id = &query.party_id;
+    let party_id_str = party_id.to_string();
 
-    // Get token for this party
-    let token = get_party_token(&data, &party_id).await;
-
-    // Check if we're in test mode (mock auth)
+    let token = get_party_token(&data, party_id).await;
     let test_mode = matches!(data.auth, Some(WorkflowAuth::Mock(_)));
+    let packages = data.config.get_packages(&party_id_str);
 
-    let packages = data.config.get_packages(&query.party_id);
-
-    match get_vaults(&data.config, &query.party_id, token, test_mode, &packages).await {
+    match get_vaults(&data.config, &party_id_str, token, test_mode, &packages).await {
         Ok(vaults) => HttpResponse::Ok().json(VaultsResponse { vaults }),
         Err(e) => {
             tracing::error!("Failed to fetch vaults: {e}");
@@ -186,21 +161,14 @@ pub async fn get_provider_services_handler(
     data: web::Data<AppState>,
     query: web::Query<GovernanceQuery>,
 ) -> impl Responder {
-    let party_id = match CantonId::parse(&query.party_id) {
-        Ok(id) => id,
-        Err(e) => {
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": format!("Invalid party_id: {e}")
-            }));
-        }
-    };
+    let party_id = &query.party_id;
+    let party_id_str = party_id.to_string();
 
-    let token = get_party_token(&data, &party_id).await;
+    let token = get_party_token(&data, party_id).await;
     let test_mode = matches!(data.auth, Some(WorkflowAuth::Mock(_)));
+    let packages = data.config.get_packages(&party_id_str);
 
-    let packages = data.config.get_packages(&query.party_id);
-
-    match get_provider_services(&data.config, &query.party_id, token, test_mode, &packages).await {
+    match get_provider_services(&data.config, &party_id_str, token, test_mode, &packages).await {
         Ok(services) => HttpResponse::Ok().json(ProviderServicesResponse { services }),
         Err(e) => {
             tracing::error!("Failed to fetch provider services: {e}");
@@ -217,21 +185,14 @@ pub async fn get_user_services_handler(
     data: web::Data<AppState>,
     query: web::Query<GovernanceQuery>,
 ) -> impl Responder {
-    let party_id = match CantonId::parse(&query.party_id) {
-        Ok(id) => id,
-        Err(e) => {
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": format!("Invalid party_id: {e}")
-            }));
-        }
-    };
+    let party_id = &query.party_id;
+    let party_id_str = party_id.to_string();
 
-    let token = get_party_token(&data, &party_id).await;
+    let token = get_party_token(&data, party_id).await;
     let test_mode = matches!(data.auth, Some(WorkflowAuth::Mock(_)));
+    let packages = data.config.get_packages(&party_id_str);
 
-    let packages = data.config.get_packages(&query.party_id);
-
-    match get_user_services(&data.config, &query.party_id, token, test_mode, &packages).await {
+    match get_user_services(&data.config, &party_id_str, token, test_mode, &packages).await {
         Ok(services) => HttpResponse::Ok().json(UserServicesResponse { services }),
         Err(e) => {
             tracing::error!("Failed to fetch user services: {e}");
@@ -248,21 +209,14 @@ pub async fn get_registrar_services_handler(
     data: web::Data<AppState>,
     query: web::Query<GovernanceQuery>,
 ) -> impl Responder {
-    let party_id = match CantonId::parse(&query.party_id) {
-        Ok(id) => id,
-        Err(e) => {
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": format!("Invalid party_id: {e}")
-            }));
-        }
-    };
+    let party_id = &query.party_id;
+    let party_id_str = party_id.to_string();
 
-    let token = get_party_token(&data, &party_id).await;
+    let token = get_party_token(&data, party_id).await;
     let test_mode = matches!(data.auth, Some(WorkflowAuth::Mock(_)));
+    let packages = data.config.get_packages(&party_id_str);
 
-    let packages = data.config.get_packages(&query.party_id);
-
-    match get_registrar_services(&data.config, &query.party_id, token, test_mode, &packages).await {
+    match get_registrar_services(&data.config, &party_id_str, token, test_mode, &packages).await {
         Ok(services) => HttpResponse::Ok().json(RegistrarServicesResponse { services }),
         Err(e) => {
             tracing::error!("Failed to fetch registrar services: {e}");
@@ -273,35 +227,33 @@ pub async fn get_registrar_services_handler(
     }
 }
 
-/// Get a contract's created_event_blob by contract ID
-#[get("/contract/blob")]
-pub async fn get_contract_blob_handler(
+/// Query contract IDs by template
+#[get("/contracts/query")]
+pub async fn query_contracts_handler(
     data: web::Data<AppState>,
-    query: web::Query<ContractBlobQuery>,
+    query: web::Query<ContractQueryParams>,
 ) -> impl Responder {
-    let party_id = match CantonId::parse(&query.party_id) {
-        Ok(id) => id,
-        Err(e) => {
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": format!("Invalid party_id: {e}")
-            }));
-        }
+    let party_id = &query.party_id;
+    let party_id_str = party_id.to_string();
+
+    let token = get_party_token(&data, party_id).await;
+    let test_mode = matches!(data.auth, Some(WorkflowAuth::Mock(_)));
+
+    let contract_params = QueryContractParams {
+        package_id: query.package_id.clone(),
+        module_name: query.module_name.clone(),
+        entity_name: query.entity_name.clone(),
+        use_interface_filter: query.interface,
     };
 
-    let token = get_party_token(&data, &party_id).await;
-
-    match get_contract_blob(&data.config, &query.contract_id, token).await {
-        Ok(Some(blob)) => HttpResponse::Ok().json(ContractBlobResponse {
-            contract_id: query.contract_id.clone(),
-            blob,
-        }),
-        Ok(None) => HttpResponse::NotFound().json(serde_json::json!({
-            "error": format!("Contract not found: {}", query.contract_id)
-        })),
+    match query_contracts_by_template(&data.config, &party_id_str, token, test_mode, &contract_params)
+        .await
+    {
+        Ok(contracts) => HttpResponse::Ok().json(ContractQueryResponse { contracts }),
         Err(e) => {
-            tracing::error!("Failed to fetch contract blob: {e}");
+            tracing::error!("Failed to query contracts: {e}");
             HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Failed to fetch contract blob: {e}")
+                "error": format!("Failed to query contracts: {e}")
             }))
         }
     }
@@ -317,6 +269,10 @@ pub async fn confirm_action(
     data: web::Data<AppState>,
     body: web::Json<ConfirmActionRequest>,
 ) -> impl Responder {
+    if let Err(msg) = body.action.validate() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": msg }));
+    }
+
     let party_id = &body.party_id;
 
     // Get token and credentials for this party
@@ -350,6 +306,10 @@ pub async fn execute_action(
     data: web::Data<AppState>,
     body: web::Json<ExecuteActionRequest>,
 ) -> impl Responder {
+    if let Err(msg) = body.action.validate() {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": msg }));
+    }
+
     let party_id = &body.party_id;
 
     // Get token and credentials for this party
@@ -412,14 +372,139 @@ pub async fn expire_confirmation(
     }
 }
 
+/// Cancel (revoke) own governance confirmation
+#[post("/governance/cancel")]
+pub async fn cancel_confirmation(
+    data: web::Data<AppState>,
+    body: web::Json<CancelConfirmationRequest>,
+) -> impl Responder {
+    let party_id = &body.party_id;
+
+    let (token, member_party_id) = match get_party_credentials(&data, party_id).await {
+        Some(creds) => creds,
+        None => {
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "No credentials configured for party"
+            }));
+        }
+    };
+
+    let packages = data.config.get_packages(&body.party_id.to_string());
+
+    match execute_cancel_confirmation(&data.config, &body, &token, &member_party_id, &packages)
+        .await
+    {
+        Ok(()) => HttpResponse::Ok().json(serde_json::json!({
+            "message": "Confirmation cancelled successfully"
+        })),
+        Err(e) => {
+            tracing::error!("Failed to cancel confirmation: {e}");
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": format!("Failed to cancel confirmation: {e}")
+            }))
+        }
+    }
+}
+
 /// Get package configuration for a party
 #[get("/packages")]
 pub async fn get_packages(
     data: web::Data<AppState>,
     query: web::Query<GovernanceQuery>,
 ) -> impl Responder {
-    let packages = data.config.get_packages(&query.party_id);
+    let packages = data.config.get_packages(&query.party_id.to_string());
     HttpResponse::Ok().json(packages)
+}
+
+/// Fetch AmuletRules contract from the validator scan-proxy API
+#[get("/amulet-rules")]
+pub async fn get_amulet_rules(
+    data: web::Data<AppState>,
+    query: web::Query<GovernanceQuery>,
+) -> impl Responder {
+    let validator_url = match &data.config.canton.validator_url {
+        Some(url) => url,
+        None => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "validator_url not configured in node.toml"
+            }));
+        }
+    };
+
+    let token = get_party_token(&data, &query.party_id).await;
+
+    let url = format!("{validator_url}/api/validator/v0/scan-proxy/amulet-rules");
+    let client = reqwest::Client::new();
+    let mut req = client.get(&url);
+    if let Some(token) = token {
+        req = req.bearer_auth(token);
+    }
+
+    match req.send().await {
+        Ok(res) if res.status().is_success() => {
+            match res.json::<serde_json::Value>().await {
+                Ok(json) => {
+                    // Extract contract_id and created_event_blob from the response
+                    let contract_id = json
+                        .pointer("/amulet_rules/contract/contract_id")
+                        .and_then(|v| v.as_str());
+                    let blob = json
+                        .pointer("/amulet_rules/contract/created_event_blob")
+                        .and_then(|v| v.as_str());
+
+                    match (contract_id, blob) {
+                        (Some(cid), Some(blob)) => {
+                            HttpResponse::Ok().json(ContractWithBlob {
+                                contract_id: cid.to_string(),
+                                blob: blob.to_string(),
+                            })
+                        }
+                        _ => {
+                            tracing::warn!("Unexpected amulet-rules response format: {json}");
+                            HttpResponse::BadGateway().json(serde_json::json!({
+                                "error": "Unexpected response format from scan-proxy"
+                            }))
+                        }
+                    }
+                }
+                Err(e) => HttpResponse::BadGateway().json(serde_json::json!({
+                    "error": format!("Failed to parse amulet-rules response: {e}")
+                })),
+            }
+        }
+        Ok(res) => {
+            let status = res.status();
+            let body = res.text().await.unwrap_or_default();
+            tracing::error!("Validator scan-proxy returned {status}: {body}");
+            HttpResponse::BadGateway().json(serde_json::json!({
+                "error": format!("Validator scan-proxy returned {status}: {body}")
+            }))
+        }
+        Err(e) => HttpResponse::BadGateway().json(serde_json::json!({
+            "error": format!("Failed to reach validator scan-proxy: {e}")
+        })),
+    }
+}
+
+/// Proxy request to fetch token standard contracts (avoids CORS)
+#[post("/token-standard-contracts")]
+pub async fn get_token_standard_contracts(
+    body: web::Json<serde_json::Value>,
+) -> impl Responder {
+    let client = reqwest::Client::new();
+    let url = "https://devnet.dlc.link/attestor-2/app/get-token-standard-contracts";
+
+    match client.post(url).json(&body.into_inner()).send().await {
+        Ok(res) => match res.json::<serde_json::Value>().await {
+            Ok(json) => HttpResponse::Ok().json(json),
+            Err(e) => HttpResponse::BadGateway().json(serde_json::json!({
+                "error": format!("Failed to parse response: {e}")
+            })),
+        },
+        Err(e) => HttpResponse::BadGateway().json(serde_json::json!({
+            "error": format!("Failed to fetch token standard contracts: {e}")
+        })),
+    }
 }
 
 // ============================================================================
@@ -715,6 +800,77 @@ async fn execute_expire_confirmation(
             template_id: Some(template_id),
             contract_id: request.rules_contract_id.clone(),
             choice: "VaultGovernanceRules_ExpireConfirmation".to_string(),
+            choice_argument: Some(choice_argument),
+        })),
+    };
+
+    let commands = Commands {
+        workflow_id: String::new(),
+        user_id: String::new(),
+        command_id: uuid::Uuid::new_v4().to_string(),
+        commands: vec![cmd],
+        deduplication_period: None,
+        min_ledger_time_abs: None,
+        min_ledger_time_rel: None,
+        act_as: vec![member_party_id.to_string()],
+        read_as: vec![request.party_id.to_string()],
+        submission_id: String::new(),
+        disclosed_contracts: vec![],
+        synchronizer_id: String::new(),
+        package_id_selection_preference: vec![],
+        prefetch_contract_keys: vec![],
+    };
+
+    let mut req = tonic::Request::new(SubmitAndWaitRequest {
+        commands: Some(commands),
+    });
+    req.metadata_mut()
+        .insert("authorization", format!("Bearer {token}").parse().unwrap());
+
+    client.submit_and_wait(req).await?;
+
+    Ok(())
+}
+
+/// Execute Cancel choice directly on VaultGovernanceConfirmation contract
+async fn execute_cancel_confirmation(
+    config: &NodeConfig,
+    request: &CancelConfirmationRequest,
+    token: &str,
+    member_party_id: &str,
+    packages: &PackageConfig,
+) -> Result {
+    let vault_governance_pkg = packages
+        .vault_governance
+        .as_deref()
+        .context("vault_governance package not configured")?;
+
+    let channel = tonic::transport::Channel::from_shared(config.ledger_api_url())?
+        .connect()
+        .await?;
+
+    let mut client =
+        CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
+
+    let template_id = Identifier {
+        package_id: vault_governance_pkg.to_string(),
+        module_name: "BitsafeVault.VaultGovernance".to_string(),
+        entity_name: "VaultGovernanceConfirmation".to_string(),
+    };
+
+    // Cancel takes no arguments
+    let choice_argument = Value {
+        sum: Some(value::Sum::Record(Record {
+            record_id: None,
+            fields: vec![],
+        })),
+    };
+
+    let cmd = Command {
+        command: Some(command::Command::Exercise(ExerciseCommand {
+            template_id: Some(template_id),
+            contract_id: request.confirmation_cid.clone(),
+            choice: "VaultGovernanceConfirmation_Cancel".to_string(),
             choice_argument: Some(choice_argument),
         })),
     };

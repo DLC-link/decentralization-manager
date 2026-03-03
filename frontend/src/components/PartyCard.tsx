@@ -261,13 +261,15 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
 
       <CardContent sx={{ pt: 0 }}>
         <AuthSection partyId={party.party_id} authStatus={authStatus} onRefresh={onAuthRefresh} />
-        <GovernanceSection
-          partyId={party.party_id}
-          rulesContractId={vaultGovernanceRulesContract?.contract_id}
-          governanceContractIds={governanceContracts.map((c) => c.contract_id)}
-          memberPartyId={authStatus?.member_party_id}
-          defaultOperatorParty={operatorParty}
-        />
+        {authStatus?.rights?.dec_party_act_as && (
+          <GovernanceSection
+            partyId={party.party_id}
+            rulesContractId={vaultGovernanceRulesContract?.contract_id}
+            governanceContractIds={governanceContracts.map((c) => c.contract_id)}
+            memberPartyId={authStatus?.member_party_id}
+            defaultOperatorParty={operatorParty}
+          />
+        )}
       </CardContent>
 
       <KickDialog
