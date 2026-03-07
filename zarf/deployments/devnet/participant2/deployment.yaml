@@ -20,6 +20,7 @@ data:
     ledger_api_host = "participant-ibtc-devnet-2.catalyst-canton.svc.cluster.local"
     ledger_api_port = 5001
     synchronizer = "global"
+    network = "devnet"
 
     [timeouts]
     handshake_timeout_secs = 30

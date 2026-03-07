@@ -781,10 +781,7 @@ async fn send_dars_invites(config: &NodeConfig) -> Result {
             Ok(response) => {
                 if let Ok(msg) = Message::from_bytes(&response) {
                     if msg.msg_type == MessageType::Ack {
-                        tracing::info!(
-                            "Peer {} acknowledged DARs invite",
-                            peer.participant_id
-                        );
+                        tracing::info!("Peer {} acknowledged DARs invite", peer.participant_id);
                     } else {
                         tracing::warn!(
                             "Peer {} responded with {msg_type:?} instead of Ack",
@@ -795,10 +792,7 @@ async fn send_dars_invites(config: &NodeConfig) -> Result {
                 }
             }
             Err(e) => {
-                tracing::error!(
-                    "Failed to send DARs invite to {}: {e}",
-                    peer.participant_id
-                );
+                tracing::error!("Failed to send DARs invite to {}: {e}", peer.participant_id);
             }
         }
     }

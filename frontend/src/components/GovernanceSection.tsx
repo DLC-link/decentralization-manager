@@ -36,7 +36,6 @@ import { ExecuteDialog } from "./ExecuteDialog";
 import {
   API_BASE,
   ADMIN_ACCESS,
-  CHAIN_TYPE,
   MAX_TOTAL_DEPOSIT,
   MIN_DEPOSIT_AMOUNT,
   MIN_WITHDRAWAL_AMOUNT,
@@ -71,15 +70,14 @@ import type {
   UserServicesResponse,
   ContractWithBlob,
   ContractQueryResponse,
+  Network,
 } from "../types";
 
 // Action types — ordered per GOVERNANCE_CLIENT_MIGRATION.md vault launch sequence
 // Hidden entries are kept for type safety and display of existing actions
-const ACTION_TYPE_OPTIONS: {
-  value: ActionType["type"];
-  label: string;
-  hidden?: boolean;
-}[] = [
+const getActionTypeOptions = (
+  network?: Network,
+): { value: ActionType["type"]; label: string; hidden?: boolean }[] => [
   // Step 1: Utility Registry Onboarding
   {
     value: "utility_create_provider_request",
@@ -91,7 +89,7 @@ const ACTION_TYPE_OPTIONS: {
   {
     value: "dev_net_feature_app",
     label: "DevNet: Feature App",
-    hidden: CHAIN_TYPE !== "DEVNET",
+    hidden: network !== "devnet",
   },
   // Deploy Vault
   { value: "vault_deployment", label: "Deploy Vault" },
@@ -155,10 +153,13 @@ const ACTION_TYPE_OPTIONS: {
 
 type ActionTypeKey = ActionType["type"];
 
+// All action type options (network-independent, for label lookup)
+const ALL_ACTION_TYPE_OPTIONS = getActionTypeOptions();
+
 // Format an ActionType for display
 const formatActionType = (action: ActionType): string => {
   const label =
-    ACTION_TYPE_OPTIONS.find((opt) => opt.value === action.type)?.label ||
+    ALL_ACTION_TYPE_OPTIONS.find((opt) => opt.value === action.type)?.label ||
     action.type;
   return label;
 };
@@ -169,6 +170,7 @@ interface GovernanceSectionProps {
   governanceContractIds?: string[];
   memberPartyId?: string;
   defaultOperatorParty?: string;
+  network?: Network;
 }
 
 // Default values for action form
@@ -196,6 +198,7 @@ export const GovernanceSection = ({
   governanceContractIds = [],
   memberPartyId,
   defaultOperatorParty,
+  network,
 }: GovernanceSectionProps) => {
   const [expanded, setExpanded] = useState(true);
   const [loading, setLoading] = useState(true);
@@ -491,12 +494,11 @@ export const GovernanceSection = ({
     }
   }, []);
 
-  // Fetch amulet rules from validator scan-proxy API
+  // Fetch amulet rules from DSO API
   const fetchAmuletRules = useCallback(async () => {
     setAmuletRulesLoading(true);
     try {
-      const params = new URLSearchParams({ party_id: partyId });
-      const res = await fetch(`${API_BASE}/amulet-rules?${params}`);
+      const res = await fetch(`${API_BASE}/amulet-rules`);
       if (res.ok) {
         const data: ContractWithBlob = await res.json();
         setAmuletRulesContract(data);
@@ -507,7 +509,7 @@ export const GovernanceSection = ({
     } finally {
       setAmuletRulesLoading(false);
     }
-  }, [partyId]);
+  }, []);
 
   // Fetch deployment contracts when action type needs contract CIDs
   useEffect(() => {
@@ -2288,7 +2290,7 @@ export const GovernanceSection = ({
                   }
                   MenuProps={{ disableScrollLock: true }}
                 >
-                  {ACTION_TYPE_OPTIONS.filter((opt) => !opt.hidden).map(
+                  {getActionTypeOptions(network).filter((opt) => !opt.hidden).map(
                     (opt) => (
                       <MenuItem key={opt.value} value={opt.value}>
                         {opt.label}

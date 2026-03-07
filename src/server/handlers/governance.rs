@@ -22,17 +22,15 @@ use crate::{
     server::{
         AppState, action_serializer,
         queries::{
-            get_governance_confirmations,
+            ContractQueryParams as QueryContractParams, get_governance_confirmations,
             get_governance_state as query_governance_state, get_provider_services,
-            get_registrar_services, get_user_services, get_vaults,
-            query_contracts_by_template, ContractQueryParams as QueryContractParams,
+            get_registrar_services, get_user_services, get_vaults, query_contracts_by_template,
         },
         types::{
             CancelConfirmationRequest, ConfirmActionRequest, ContractQueryResponse,
             ContractWithBlob, ExecuteActionRequest, ExpireConfirmationRequest, GovernanceResponse,
-            GovernanceStateResponse,
-            ProviderServicesResponse, RegistrarServicesResponse, UserServicesResponse,
-            VaultsResponse,
+            GovernanceStateResponse, ProviderServicesResponse, RegistrarServicesResponse,
+            UserServicesResponse, VaultsResponse,
         },
     },
     utils,
@@ -76,9 +74,7 @@ pub async fn get_governance(
     let token = get_party_token(&data, party_id).await;
     let test_mode = matches!(data.auth, Some(WorkflowAuth::Mock(_)));
 
-    let threshold = get_party_threshold(&data, &party_id_str)
-        .await
-        .unwrap_or(2);
+    let threshold = get_party_threshold(&data, &party_id_str).await.unwrap_or(2);
 
     let member_party_id = get_member_party_id(&data, party_id);
     let packages = data.config.get_packages(&party_id_str);
@@ -246,8 +242,14 @@ pub async fn query_contracts_handler(
         use_interface_filter: query.interface,
     };
 
-    match query_contracts_by_template(&data.config, &party_id_str, token, test_mode, &contract_params)
-        .await
+    match query_contracts_by_template(
+        &data.config,
+        &party_id_str,
+        token,
+        test_mode,
+        &contract_params,
+    )
+    .await
     {
         Ok(contracts) => HttpResponse::Ok().json(ContractQueryResponse { contracts }),
         Err(e) => {
@@ -416,81 +418,56 @@ pub async fn get_packages(
     HttpResponse::Ok().json(packages)
 }
 
-/// Fetch AmuletRules contract from the validator scan-proxy API
+/// Fetch AmuletRules contract from the DSO API
 #[get("/amulet-rules")]
-pub async fn get_amulet_rules(
-    data: web::Data<AppState>,
-    query: web::Query<GovernanceQuery>,
-) -> impl Responder {
-    let validator_url = match &data.config.canton.validator_url {
-        Some(url) => url,
-        None => {
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": "validator_url not configured in node.toml"
-            }));
-        }
-    };
-
-    let token = get_party_token(&data, &query.party_id).await;
-
-    let url = format!("{validator_url}/api/validator/v0/scan-proxy/amulet-rules");
+pub async fn get_amulet_rules(data: web::Data<AppState>) -> impl Responder {
+    let url = data.config.canton.network.dso_url();
     let client = reqwest::Client::new();
-    let mut req = client.get(&url);
-    if let Some(token) = token {
-        req = req.bearer_auth(token);
-    }
 
-    match req.send().await {
-        Ok(res) if res.status().is_success() => {
-            match res.json::<serde_json::Value>().await {
-                Ok(json) => {
-                    // Extract contract_id and created_event_blob from the response
-                    let contract_id = json
-                        .pointer("/amulet_rules/contract/contract_id")
-                        .and_then(|v| v.as_str());
-                    let blob = json
-                        .pointer("/amulet_rules/contract/created_event_blob")
-                        .and_then(|v| v.as_str());
+    match client.get(url).send().await {
+        Ok(res) if res.status().is_success() => match res.json::<serde_json::Value>().await {
+            Ok(json) => {
+                let contract_id = json
+                    .pointer("/amulet_rules/contract/contract_id")
+                    .and_then(|v| v.as_str());
+                let blob = json
+                    .pointer("/amulet_rules/contract/created_event_blob")
+                    .and_then(|v| v.as_str());
 
-                    match (contract_id, blob) {
-                        (Some(cid), Some(blob)) => {
-                            HttpResponse::Ok().json(ContractWithBlob {
-                                contract_id: cid.to_string(),
-                                blob: blob.to_string(),
-                            })
-                        }
-                        _ => {
-                            tracing::warn!("Unexpected amulet-rules response format: {json}");
-                            HttpResponse::BadGateway().json(serde_json::json!({
-                                "error": "Unexpected response format from scan-proxy"
-                            }))
-                        }
+                match (contract_id, blob) {
+                    (Some(cid), Some(blob)) => HttpResponse::Ok().json(ContractWithBlob {
+                        contract_id: cid.to_string(),
+                        blob: blob.to_string(),
+                    }),
+                    _ => {
+                        tracing::warn!("Unexpected amulet-rules response format: {json}");
+                        HttpResponse::BadGateway().json(serde_json::json!({
+                            "error": "Unexpected response format from DSO API"
+                        }))
                     }
                 }
-                Err(e) => HttpResponse::BadGateway().json(serde_json::json!({
-                    "error": format!("Failed to parse amulet-rules response: {e}")
-                })),
             }
-        }
+            Err(e) => HttpResponse::BadGateway().json(serde_json::json!({
+                "error": format!("Failed to parse amulet-rules response: {e}")
+            })),
+        },
         Ok(res) => {
             let status = res.status();
             let body = res.text().await.unwrap_or_default();
-            tracing::error!("Validator scan-proxy returned {status}: {body}");
+            tracing::error!("DSO API returned {status}: {body}");
             HttpResponse::BadGateway().json(serde_json::json!({
-                "error": format!("Validator scan-proxy returned {status}: {body}")
+                "error": format!("DSO API returned {status}: {body}")
             }))
         }
         Err(e) => HttpResponse::BadGateway().json(serde_json::json!({
-            "error": format!("Failed to reach validator scan-proxy: {e}")
+            "error": format!("Failed to reach DSO API: {e}")
         })),
     }
 }
 
 /// Proxy request to fetch token standard contracts (avoids CORS)
 #[post("/token-standard-contracts")]
-pub async fn get_token_standard_contracts(
-    body: web::Json<serde_json::Value>,
-) -> impl Responder {
+pub async fn get_token_standard_contracts(body: web::Json<serde_json::Value>) -> impl Responder {
     let client = reqwest::Client::new();
     let url = "https://devnet.dlc.link/attestor-2/app/get-token-standard-contracts";
 

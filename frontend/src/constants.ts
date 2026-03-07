@@ -1,14 +1,13 @@
-import type { ChainType, DisclosedContract } from "./types";
+import type { DisclosedContract, Network } from "./types";
 
 export const API_BASE = "";
 export const ADMIN_ACCESS = import.meta.env.VITE_ADMIN_ACCESS === "true";
-export const CHAIN_TYPE: ChainType = import.meta.env.VITE_CHAIN_TYPE || "LOCAL";
 
-export const OPERATOR_API_URLS: Record<string, string> = {
-  MAINNET: "https://api.utilities.digitalasset.com/api/utilities/v0/operator",
-  TESTNET:
+export const OPERATOR_API_URLS: Record<Network, string> = {
+  mainnet: "https://api.utilities.digitalasset.com/api/utilities/v0/operator",
+  testnet:
     "https://api.utilities.digitalasset-staging.com/api/utilities/v0/operator",
-  DEVNET:
+  devnet:
     "https://api.utilities.digitalasset-dev.com/api/utilities/v0/operator",
 };
 

@@ -21,7 +21,7 @@ import { LoadingSkeleton } from "./components/LoadingSkeleton";
 import { OnboardingDialog } from "./components/OnboardingDialog";
 import { InvitationModal } from "./components/InvitationModal";
 import { useSnackbar } from "./contexts";
-import { API_BASE, ADMIN_ACCESS, CHAIN_TYPE, OPERATOR_API_URLS } from "./constants";
+import { API_BASE, ADMIN_ACCESS, OPERATOR_API_URLS } from "./constants";
 import type {
   DecentralizedParty,
   NodeConfig,
@@ -66,13 +66,14 @@ const App = () => {
   }, []);
 
   useEffect(() => {
-    const url = OPERATOR_API_URLS[CHAIN_TYPE];
-    if (!url) return;
+    const network = nodeConfig?.canton.network;
+    if (!network) return;
+    const url = OPERATOR_API_URLS[network];
     fetch(url)
       .then((res) => res.json())
       .then((data: { partyId: string }) => setOperatorParty(data.partyId))
       .catch(() => {});
-  }, []);
+  }, [nodeConfig]);
 
   const refreshParties = useCallback(async () => {
     setRefreshingParties(true);
@@ -330,6 +331,7 @@ const App = () => {
                 authStatus={authStatuses.find((a) => a.dec_party_id === party.party_id)}
                 onAuthRefresh={refreshAuthStatus}
                 operatorParty={operatorParty}
+                network={nodeConfig?.canton.network}
               />
             ))}
 

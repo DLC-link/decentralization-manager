@@ -23,7 +23,7 @@ import { ContractsDialog } from "./ContractsDialog";
 import { DarsDialog } from "./DarsDialog";
 import { GovernanceSection } from "./GovernanceSection";
 import { AuthSection } from "./AuthSection";
-import type { DecentralizedParty, PartyAuthStatus } from "../types";
+import type { DecentralizedParty, Network, PartyAuthStatus } from "../types";
 import { ADMIN_ACCESS } from "../constants";
 
 interface PartyCardProps {
@@ -33,9 +33,10 @@ interface PartyCardProps {
   authStatus?: PartyAuthStatus;
   onAuthRefresh?: () => void;
   operatorParty?: string;
+  network?: Network;
 }
 
-export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onAuthRefresh, operatorParty }: PartyCardProps) => {
+export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onAuthRefresh, operatorParty, network }: PartyCardProps) => {
   const [kickDialogOpen, setKickDialogOpen] = useState(false);
   const [contractsDialogOpen, setContractsDialogOpen] = useState(false);
   const [darsDialogOpen, setDarsDialogOpen] = useState(false);
@@ -268,6 +269,7 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
             governanceContractIds={governanceContracts.map((c) => c.contract_id)}
             memberPartyId={authStatus?.member_party_id}
             defaultOperatorParty={operatorParty}
+            network={network}
           />
         )}
       </CardContent>

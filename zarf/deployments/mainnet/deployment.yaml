@@ -19,6 +19,7 @@ data:
     ledger_api_host = "participant-ibtc-mainnet.catalyst-canton.svc.cluster.local"
     ledger_api_port = 5001
     synchronizer = "global"
+    network = "mainnet"
 
     [timeouts]
     handshake_timeout_secs = 30

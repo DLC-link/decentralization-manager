@@ -44,6 +44,7 @@ export interface NodeConfig {
     ledger_api_host: string;
     ledger_api_port: number;
     synchronizer: string;
+    network: Network;
   };
 }
 
@@ -461,4 +462,4 @@ export interface ContractQueryResponse {
   contracts: ContractWithBlob[];
 }
 
-export type ChainType = "LOCAL" | "DEVNET" | "TESTNET" | "MAINNET";
+export type Network = "devnet" | "testnet" | "mainnet";

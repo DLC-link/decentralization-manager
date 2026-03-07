@@ -512,9 +512,7 @@ async fn handle_incoming_connection(
                                 .unwrap());
                         }
                         MessageType::InviteDars => {
-                            tracing::info!(
-                                "Received DARs invite, storing as pending invitation"
-                            );
+                            tracing::info!("Received DARs invite, storing as pending invitation");
                             if let Some(ref pubkey) = peer_pubkey_hex {
                                 let invitation = PendingInvitation {
                                     id: format!("dars-{}", &pubkey[..16]),

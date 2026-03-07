@@ -689,4 +689,3 @@ pub struct ContractWithBlob {
 pub struct ContractQueryResponse {
     pub contracts: Vec<ContractWithBlob>,
 }
-

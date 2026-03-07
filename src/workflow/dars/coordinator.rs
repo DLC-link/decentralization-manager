@@ -62,8 +62,7 @@ async fn run_workflow(
             DarsStep::UploadDars => {
                 if !coordinator_completed {
                     tracing::info!("Coordinator executing: Upload DARs");
-                    contracts::upload_dars(&node_config, &config.dar_files)
-                        .await?;
+                    contracts::upload_dars(&node_config, &config.dar_files).await?;
                     coordinator_completed = true;
                 }
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;

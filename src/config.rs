@@ -254,6 +254,26 @@ fn default_noise_port() -> u16 {
     9000
 }
 
+/// Canton Network environment
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Network {
+    Devnet,
+    Testnet,
+    Mainnet,
+}
+
+impl Network {
+    /// Get the DSO API base URL for this network
+    pub fn dso_url(&self) -> &str {
+        match self {
+            Network::Devnet => "https://docs.dev.global.canton.network.sync.global/dso",
+            Network::Testnet => "https://docs.test.global.canton.network.sync.global/dso",
+            Network::Mainnet => "https://docs.global.canton.network.sync.global/dso",
+        }
+    }
+}
+
 /// Canton participant configuration
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CantonConfig {
@@ -263,8 +283,8 @@ pub struct CantonConfig {
     pub ledger_api_port: u16,
     #[serde(default = "default_synchronizer")]
     pub synchronizer: String,
-    /// Validator API base URL for scan-proxy queries (e.g. "http://localhost:5003")
-    pub validator_url: Option<String>,
+    /// Canton Network environment (devnet, testnet, mainnet)
+    pub network: Network,
 }
 
 fn default_synchronizer() -> String {

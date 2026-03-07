@@ -1777,4 +1777,3 @@ pub async fn query_contracts_by_template(
 
     Ok(contracts)
 }
-
