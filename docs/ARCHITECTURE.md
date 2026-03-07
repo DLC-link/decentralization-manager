@@ -24,7 +24,7 @@ result = "1220" + hex(hash)   // Multihash SHA-256 prefix
 Key properties:
 - The hash is **immutable** -- it is computed once from the initial set of owners and never changes
 - Owners are sorted lexicographically before hashing for determinism
-- The threshold (minimum signers required) is `ceil(n/2)` by default
+- The threshold (minimum signers required) is `floor(n/2) + 1` (strict majority) by default
 - Adding or removing members updates the `DecentralizedNamespaceDefinition` mapping but does not change the namespace hash itself
 
 ### PartyToParticipant (P2P)
@@ -41,7 +41,7 @@ The system uses a majority threshold for both topology changes and governance ac
 
 | Operation | Threshold |
 |-----------|-----------|
-| Topology changes (DNS/P2P) | `ceil(n/2)` of namespace owners must sign |
+| Topology changes (DNS/P2P) | `floor(n/2) + 1` (strict majority) of namespace owners must sign |
 | Governance actions (vault ops) | Configurable per `VaultGovernanceRules` contract |
 
 ### Key Types
@@ -80,7 +80,7 @@ The system manages three distinct key types:
 
 ### HTTP Server (actix-web)
 
-The HTTP server serves the embedded React frontend and exposes 25 REST endpoints for managing decentralized parties. Key responsibilities:
+The HTTP server serves the embedded React frontend and exposes REST endpoints for managing decentralized parties. Key responsibilities:
 - Serving the single-page application (embedded at compile time via `build.rs`)
 - Proxying topology and governance queries to Canton APIs
 - Triggering and monitoring multi-party workflows
@@ -212,6 +212,7 @@ Minimum message size: 6 bytes (type + length with zero payload).
 | 0x0010 | InviteOnboarding | Invite to onboarding workflow |
 | 0x0011 | InviteKick | Invite to kick workflow |
 | 0x0012 | InviteContracts | Invite to contracts workflow |
+| 0x0013 | InviteDars | Invite to DARs upload workflow |
 
 **Responses (0x0100 - 0x01FF):** Replies from coordinator or attestor.
 
@@ -322,6 +323,23 @@ Deploys DAR packages and creates Daml contracts on the ledger.
 
 **Minimum participants:** 3
 
+### DARs (DAR Upload Only)
+
+Uploads DAR packages to all participants without deploying contracts.
+
+**Steps:**
+
+| # | Step | Actor | Description |
+|---|------|-------|-------------|
+| 1 | WaitingForAttestors | Coordinator | Wait for all participants to connect |
+| 2 | UploadDars | All | Each participant uploads DAR files to their local Canton node |
+| 3 | Complete | All | Disconnect attestors |
+
+**Canton API calls:**
+- `PackageService.UploadDarFile` -- Upload DAR packages (step 2)
+
+**Minimum participants:** 2
+
 ## Governance System
 
 The governance system provides multi-party approval workflows for vault operations, built on Daml smart contracts.
@@ -366,7 +384,7 @@ Available choices on `VaultGovernanceRules`:
 
 ### Action Types
 
-The governance system supports 20 action types across 7 categories:
+The governance system supports 18 action types across 7 categories:
 
 **Governance (4 actions):**
 | Action | Parameters | Description |
@@ -379,7 +397,7 @@ The governance system supports 20 action types across 7 categories:
 **Vault Deployment (2 actions):**
 | Action | Parameters | Description |
 |--------|------------|-------------|
-| `VaultDeployment` | vault_rules_cid, vault_name, share_symbol, asset_instrument_id, limits, vault_backend_signatory, vault_far_config | Deploy a new BitsafeVault |
+| `VaultDeployment` | vault_rules_cid, vault_name, share_symbol, asset_instrument_id, limits, vault_backend_signatory, vault_far_config, allocation_factory_cid, registrar_service_cid | Deploy a new BitsafeVault |
 | `YieldEpochDeployment` | vault_rules_cid, vault_cid, asset_instrument_id, vault_backend_signatory | Deploy a yield epoch |
 
 **Vault Operations (5 actions):**
@@ -396,14 +414,12 @@ The governance system supports 20 action types across 7 categories:
 |--------|------------|-------------|
 | `ProcessorDeploymentRequest` | vault_processor_rules_cid, vault_backend_signatory, allocation_factory_cid, processor_far_config, initial_supported_vaults | Deploy a vault processor |
 
-**Utility Onboarding (5 actions):**
+**Utility Onboarding (3 actions):**
 | Action | Parameters | Description |
 |--------|------------|-------------|
 | `UtilityCreateProviderRequest` | operator | Create a ProviderService |
 | `UtilityCreateUserRequest` | operator | Create a UserService |
 | `UtilitySetup` | operator, provider_service_cid, user_service_cid | Link provider and user services |
-| `UtilityAcceptHolderServiceRequest` | operator, provider_service_cid, holder_service_request_cid, holder | Accept a holder service request |
-| `UtilityCreateTransferRule` | operator, registrar_service_cid | Create a transfer rule |
 
 **Credentials (2 actions):**
 | Action | Parameters | Description |
@@ -459,6 +475,7 @@ FAR configuration is used in:
 | Onboarding | 2 |
 | Kick | 2 (remaining members) |
 | Contracts | 3 |
+| DARs | 2 |
 
 ### Known Limitations
 

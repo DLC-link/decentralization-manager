@@ -226,6 +226,7 @@ admin_api_port = 5002                # Canton Admin API port
 ledger_api_host = "localhost"        # Canton Ledger API host
 ledger_api_port = 5001               # Canton Ledger API port
 synchronizer = "global"              # Synchronizer name (default: "global")
+validator_url = "http://localhost:5003"  # Validator API URL for scan-proxy (optional, needed for /amulet-rules)
 
 [timeouts]
 handshake_timeout_secs = 30          # Noise handshake timeout (default: 30)
@@ -263,6 +264,7 @@ client_secret = "your-secret"
 | `[canton]` | `ledger_api_host` | string | required | Canton Ledger API host |
 | `[canton]` | `ledger_api_port` | u16 | required | Canton Ledger API port |
 | `[canton]` | `synchronizer` | string | `global` | Synchronizer name |
+| `[canton]` | `validator_url` | string | none | Validator API base URL for scan-proxy queries (e.g., `http://localhost:5003`). Required for `/amulet-rules` endpoint |
 | `[timeouts]` | `handshake_timeout_secs` | u64 | `30` | Noise handshake timeout |
 | `[timeouts]` | `message_timeout_secs` | u64 | `120` | Noise message timeout |
 | `[timeouts]` | `connection_retry_attempts` | u32 | `3` | Max connection retries |
@@ -283,14 +285,14 @@ CSV format with header row:
 
 ```csv
 participant_id,name,address,port,public_key,party
-PAR::node1::1220abc...,Node 1,10.0.0.1,9000,03ab12cd...,
-PAR::node2::1220def...,Node 2,10.0.0.2,9000,02ef34ab...,
-SV::node3::1220ghi...,Node 3,10.0.0.3,9000,03cd56ef...,
+node1::1220abc...,Node 1,10.0.0.1,9000,03ab12cd...,
+node2::1220def...,Node 2,10.0.0.2,9000,02ef34ab...,
+node3::1220ghi...,Node 3,10.0.0.3,9000,03cd56ef...,
 ```
 
 | Column | Description |
 |--------|-------------|
-| `participant_id` | Canton participant UID (e.g., `PAR::node1::1220...`) |
+| `participant_id` | Canton participant UID (e.g., `node1::1220...`) |
 | `name` | Human-readable display name |
 | `address` | Hostname or IP for Noise connections |
 | `port` | Noise protocol port |
@@ -428,14 +430,14 @@ curl -X POST http://localhost:8080/network-config \
   -d '{
     "peers": [
       {
-        "participant_id": "PAR::node1::1220abc...",
+        "participant_id": "node1::1220abc...",
         "name": "Node 1",
         "address": "10.0.0.1",
         "port": 9000,
         "public_key": "03ab12cd..."
       },
       {
-        "participant_id": "PAR::node2::1220def...",
+        "participant_id": "node2::1220def...",
         "name": "Node 2",
         "address": "10.0.0.2",
         "port": 9000,
@@ -455,9 +457,9 @@ Response:
 ```json
 {
   "statuses": [
-    { "id": "PAR::node1::1220abc...", "status": "CurrentNode" },
-    { "id": "PAR::node2::1220def...", "status": "Connected" },
-    { "id": "PAR::node3::1220ghi...", "status": "Unreachable" }
+    { "id": "node1::1220abc...", "status": "CurrentNode" },
+    { "id": "node2::1220def...", "status": "Connected" },
+    { "id": "node3::1220ghi...", "status": "Unreachable" }
   ]
 }
 ```
@@ -486,8 +488,8 @@ curl -X POST http://localhost:8080/onboarding \
   -d '{
     "party_id_prefix": "my-vault-network",
     "peer_ids": [
-      "PAR::node2::1220def...",
-      "PAR::node3::1220ghi..."
+      "node2::1220def...",
+      "node3::1220ghi..."
     ]
   }'
 ```
@@ -564,9 +566,9 @@ curl "http://localhost:8080/decentralized-parties?prefix=my-vault-network"
       "owners": ["1220aaa...", "1220bbb...", "1220ccc..."],
       "my_owner_key": "1220aaa...",
       "participants": [
-        { "participant_uid": "PAR::node1::1220...", "permission": "submission" },
-        { "participant_uid": "PAR::node2::1220...", "permission": "submission" },
-        { "participant_uid": "PAR::node3::1220...", "permission": "submission" }
+        { "participant_uid": "node1::1220...", "permission": "submission" },
+        { "participant_uid": "node2::1220...", "permission": "submission" },
+        { "participant_uid": "node3::1220...", "permission": "submission" }
       ],
       "contracts": []
     }
@@ -612,9 +614,9 @@ curl -X POST http://localhost:8080/contracts \
   -d '{
     "decentralized_party_id": "my-vault-network::1220abc...",
     "participant_ids": [
-      "PAR::node1::1220...",
-      "PAR::node2::1220...",
-      "PAR::node3::1220..."
+      "node1::1220...",
+      "node2::1220...",
+      "node3::1220..."
     ],
     "participant_parties": [
       "member1::1220...",
@@ -632,7 +634,7 @@ curl -X POST http://localhost:8080/contracts \
       {
         "id": "vault-governance-rules",
         "name": "VaultGovernanceRules",
-        "package_id": "#bitsafe-vault-governance-v0-rc2",
+        "package_id": "#bitsafe-vault-governance-v0-rc8",
         "module_name": "BitsafeVault.VaultGovernance",
         "entity_name": "VaultGovernanceRules",
         "fields": [
@@ -720,6 +722,8 @@ Each participant's Ledger API user needs:
 | GET | `/kick/status` | Get kick progress | -- |
 | POST | `/contracts` | Start contracts workflow | `{ "decentralized_party_id": "...", "participant_ids": [...], ... }` |
 | GET | `/contracts/status` | Get contracts progress | -- |
+| POST | `/dars` | Start DARs upload workflow | `{ "decentralized_party_id": "...", "participant_ids": [...], "dar_files": [...] }` |
+| GET | `/dars/status` | Get DARs workflow progress | -- |
 
 ### Invitations
 
@@ -745,6 +749,7 @@ Each participant's Ledger API user needs:
 | POST | `/governance/confirm` | Submit a governance confirmation | `{ "party_id": "...", "rules_contract_id": "...", "action": { "type": "...", ... } }` |
 | POST | `/governance/execute` | Execute a confirmed action | `{ "party_id": "...", "rules_contract_id": "...", "action": { ... }, "confirmation_cids": [...] }` |
 | POST | `/governance/expire` | Expire stale confirmation | `{ "party_id": "...", "rules_contract_id": "...", "confirmation_cid": "..." }` |
+| POST | `/governance/cancel` | Cancel a governance confirmation | `{ "party_id": "...", "rules_contract_id": "...", "confirmation_cid": "..." }` |
 
 ### Contracts and Services
 
@@ -753,6 +758,11 @@ Each participant's Ledger API user needs:
 | GET | `/vaults` | List deployed Vault contracts | `?party_id=...` |
 | GET | `/services/provider` | List ProviderService contracts | `?party_id=...` |
 | GET | `/services/user` | List UserService contracts | `?party_id=...` |
+| GET | `/services/registrar` | List RegistrarService contracts | `?party_id=...` |
+| GET | `/contracts/query` | Query active contracts by template | `?party_id=...&package_id=...&module_name=...&entity_name=...&interface=false` |
+| GET | `/packages` | Get configured package IDs for a party | `?party_id=...` |
+| GET | `/amulet-rules` | Get AmuletRules contract | `?party_id=...` |
+| POST | `/token-standard-contracts` | CORS proxy to devnet token standard contracts endpoint | JSON body (forwarded as-is) |
 
 ### Response Formats
 

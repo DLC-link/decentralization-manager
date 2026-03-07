@@ -201,9 +201,17 @@ sv::1220ghi...,Participant 3,10.0.0.3,9003,03cd56ef...,
 | `/governance/confirm` | POST | Submits a governance confirmation |
 | `/governance/execute` | POST | Executes a confirmed governance action |
 | `/governance/expire` | POST | Expires a stale governance confirmation |
+| `/governance/cancel` | POST | Cancels a governance confirmation |
 | `/vaults` | GET | Returns deployed Vault contracts |
 | `/services/provider` | GET | Returns ProviderService contracts |
 | `/services/user` | GET | Returns UserService contracts |
+| `/services/registrar` | GET | Returns RegistrarService contracts |
+| `/contracts/query` | GET | Queries active contracts by template |
+| `/packages` | GET | Returns configured package IDs for a party |
+| `/amulet-rules` | GET | Returns AmuletRules contract |
+| `/token-standard-contracts` | POST | Queries token standard contracts |
+| `/dars` | POST | Starts DARs upload workflow |
+| `/dars/status` | GET | Returns DARs workflow progress |
 
 ## Development
 
