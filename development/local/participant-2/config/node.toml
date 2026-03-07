@@ -30,7 +30,7 @@ client_id = "attestor-2"
 client_secret = "FbhvorMHEMrjUipxrfnwLjMBkFOzaIZ5"
 
 [parties.packages]
-vault_governance = "#bitsafe-vault-governance-v0-rc5"
-vault = "#bitsafe-vault-v0-rc5"
+vault_governance = "#bitsafe-vault-governance-v0-rc8"
+vault = "#bitsafe-vault-v0-rc8"
 utility_registry = "#utility-registry-app-v0"
 utility_credential = "#utility-credential-app-v0"
