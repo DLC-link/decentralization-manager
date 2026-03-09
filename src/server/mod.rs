@@ -31,6 +31,7 @@ pub struct AppState {
     pub onboarding_trigger: Arc<Notify>,
     pub kick_trigger: Arc<Notify>,
     pub contracts_trigger: Arc<Notify>,
+    pub dars_trigger: Arc<Notify>,
     /// Coordinator's public key (set when invite is received)
     pub coordinator_pubkey: Arc<RwLock<Option<String>>>,
     /// Pending invitations awaiting user acceptance
@@ -77,6 +78,7 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig, test_mode: 
     let onboarding_trigger = Arc::new(Notify::new());
     let kick_trigger = Arc::new(Notify::new());
     let contracts_trigger = Arc::new(Notify::new());
+    let dars_trigger = Arc::new(Notify::new());
     let coordinator_pubkey = Arc::new(RwLock::new(None));
     let pending_invitations = Arc::new(RwLock::new(Vec::new()));
 
@@ -88,6 +90,7 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig, test_mode: 
         onboarding_trigger: onboarding_trigger.clone(),
         kick_trigger: kick_trigger.clone(),
         contracts_trigger: contracts_trigger.clone(),
+        dars_trigger: dars_trigger.clone(),
         coordinator_pubkey: coordinator_pubkey.clone(),
         pending_invitations: pending_invitations.clone(),
         auth,
@@ -95,6 +98,7 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig, test_mode: 
     let kick_state = web::Data::new(Arc::new(handlers::KickWorkflowState::new()));
     let onboarding_state = web::Data::new(Arc::new(handlers::OnboardingWorkflowState::new()));
     let contracts_state = web::Data::new(Arc::new(handlers::ContractsWorkflowState::new()));
+    let dars_state = web::Data::new(Arc::new(handlers::DarsWorkflowState::new()));
 
     // Start heartbeat background task (pings peers and listens for invites)
     let heartbeat_config = config.clone();
@@ -169,6 +173,24 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig, test_mode: 
         .await;
     });
 
+    // Start attestor trigger listener for DARs (starts attestor workflow when DARs invite received)
+    let dars_attestor_config = config.clone();
+    let dars_attestor_control = listener_control.clone();
+    let dars_attestor_notify = listener_notify.clone();
+    let dars_attestor_state = dars_state.clone();
+    let dars_coordinator_pubkey = coordinator_pubkey.clone();
+    tokio::spawn(async move {
+        run_dars_attestor_listener(
+            dars_attestor_config,
+            dars_attestor_control,
+            dars_attestor_notify,
+            dars_attestor_state,
+            dars_trigger,
+            dars_coordinator_pubkey,
+        )
+        .await;
+    });
+
     tracing::info!("Starting HTTP server on {host}:{port}");
     tracing::info!("Frontend available at http://{host}:{port}/");
 
@@ -187,6 +209,7 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig, test_mode: 
             .app_data(kick_state.clone())
             .app_data(onboarding_state.clone())
             .app_data(contracts_state.clone())
+            .app_data(dars_state.clone())
             .service(handlers::get_network_config)
             .service(handlers::save_network_config)
             .service(handlers::get_node_config)
@@ -198,6 +221,8 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig, test_mode: 
             .service(handlers::get_onboarding_status)
             .service(handlers::start_contracts)
             .service(handlers::get_contracts_status)
+            .service(handlers::start_dars)
+            .service(handlers::get_dars_status)
             .service(handlers::get_key_status)
             .service(handlers::get_invitations)
             .service(handlers::accept_invitation)
@@ -209,9 +234,15 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig, test_mode: 
             .service(handlers::get_vaults_handler)
             .service(handlers::get_provider_services_handler)
             .service(handlers::get_user_services_handler)
+            .service(handlers::get_registrar_services_handler)
+            .service(handlers::query_contracts_handler)
+            .service(handlers::get_packages)
             .service(handlers::confirm_action)
             .service(handlers::execute_action)
             .service(handlers::expire_confirmation)
+            .service(handlers::cancel_confirmation)
+            .service(handlers::get_token_standard_contracts)
+            .service(handlers::get_amulet_rules)
             .service(assets::serve_frontend)
     })
     .bind((host, port))?
@@ -462,6 +493,30 @@ async fn handle_incoming_connection(
                                 let invitation = PendingInvitation {
                                     id: format!("contracts-{}", &pubkey[..16]),
                                     invitation_type: InvitationType::Contracts,
+                                    coordinator_pubkey: pubkey.clone(),
+                                    coordinator_name: None,
+                                    received_at: std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|d| d.as_secs() as i64)
+                                        .unwrap_or(0),
+                                };
+                                let mut invitations = triggers.pending_invitations.write().await;
+                                invitations.retain(|i| i.id != invitation.id);
+                                invitations.push(invitation);
+                            }
+
+                            let ack = Message::new_empty(MessageType::Ack);
+                            return Ok(Response::builder()
+                                .status(StatusCode::OK)
+                                .body(Body::from(ack.to_bytes()))
+                                .unwrap());
+                        }
+                        MessageType::InviteDars => {
+                            tracing::info!("Received DARs invite, storing as pending invitation");
+                            if let Some(ref pubkey) = peer_pubkey_hex {
+                                let invitation = PendingInvitation {
+                                    id: format!("dars-{}", &pubkey[..16]),
+                                    invitation_type: InvitationType::Dars,
                                     coordinator_pubkey: pubkey.clone(),
                                     coordinator_name: None,
                                     received_at: std::time::SystemTime::now()
@@ -822,6 +877,97 @@ async fn run_contracts_attestor_listener(
                 *status = types::WorkflowProgress::Failed;
                 *error = Some(format!("{e}"));
                 tracing::error!("Contracts attestor workflow failed: {e}");
+            }
+        }
+    }
+}
+
+/// Background task that starts DARs attestor workflow when triggered by an invite
+async fn run_dars_attestor_listener(
+    config: NodeConfig,
+    listener_control: Arc<RwLock<ListenerControl>>,
+    listener_notify: Arc<Notify>,
+    dars_state: web::Data<Arc<handlers::DarsWorkflowState>>,
+    dars_trigger: Arc<Notify>,
+    coordinator_pubkey: Arc<RwLock<Option<String>>>,
+) {
+    loop {
+        // Wait for trigger
+        dars_trigger.notified().await;
+
+        tracing::info!("Received DARs invite, starting DARs attestor workflow...");
+
+        // Check if already in progress
+        {
+            let status = dars_state.status.read().await;
+            if *status == types::WorkflowProgress::InProgress {
+                tracing::warn!("Already in DARs workflow, ignoring invite");
+                continue;
+            }
+        }
+
+        // Get coordinator from stored public key
+        let coordinator = {
+            let pubkey_guard = coordinator_pubkey.read().await;
+            let pubkey = match pubkey_guard.as_ref() {
+                Some(pk) => pk.clone(),
+                None => {
+                    tracing::error!("No coordinator public key stored, cannot start attestor");
+                    continue;
+                }
+            };
+            drop(pubkey_guard);
+
+            match config.load_network_config().await {
+                Ok(nc) => match nc.peers.iter().find(|p| p.public_key == pubkey) {
+                    Some(peer) => peer.clone(),
+                    None => {
+                        tracing::error!(
+                            "Coordinator with pubkey {pubkey} not found in network config"
+                        );
+                        continue;
+                    }
+                },
+                Err(e) => {
+                    tracing::error!("Failed to load network config: {e}");
+                    continue;
+                }
+            }
+        };
+
+        tracing::info!("Coordinator identified: {}", coordinator.participant_id);
+
+        // Update status
+        {
+            let mut status = dars_state.status.write().await;
+            *status = types::WorkflowProgress::InProgress;
+            let mut error = dars_state.error.write().await;
+            *error = None;
+        }
+
+        let guard =
+            types::ListenerPauseGuard::pause(listener_control.clone(), listener_notify.clone())
+                .await;
+
+        // Start DARs attestor workflow
+        let workflow_config = config.clone();
+        let result = workflow::start_attestor(workflow_config, coordinator).await;
+
+        guard.resume().await;
+
+        // Update status
+        let mut status = dars_state.status.write().await;
+        let mut error = dars_state.error.write().await;
+
+        match result {
+            Ok(()) => {
+                *status = types::WorkflowProgress::Completed;
+                tracing::info!("DARs attestor workflow completed successfully");
+            }
+            Err(e) => {
+                *status = types::WorkflowProgress::Failed;
+                *error = Some(format!("{e}"));
+                tracing::error!("DARs attestor workflow failed: {e}");
             }
         }
     }

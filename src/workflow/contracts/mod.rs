@@ -12,13 +12,11 @@ pub use steps::{
 
 use crate::{noise::MessageType, workflow::state::WorkflowStep};
 
-/// Contracts workflow steps (DAR upload and contract creation)
+/// Contracts workflow steps (contract deployment only)
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ContractsStep {
     /// Waiting for all attestors to connect
     WaitingForAttestors,
-    /// Upload DARs
-    UploadDars,
     /// Coordinator prepares submissions
     PrepareSubmissions,
     /// Sign submissions
@@ -32,7 +30,6 @@ pub enum ContractsStep {
 impl WorkflowStep for ContractsStep {
     fn to_command(&self) -> Option<MessageType> {
         match self {
-            Self::UploadDars => Some(MessageType::UploadDars),
             Self::SignSubmissions => Some(MessageType::SignSubmissions),
             Self::Complete => Some(MessageType::Disconnect),
             Self::WaitingForAttestors | Self::PrepareSubmissions | Self::ExecuteSubmissions => None,
@@ -41,8 +38,7 @@ impl WorkflowStep for ContractsStep {
 
     fn next(&self) -> Option<Self> {
         match self {
-            Self::WaitingForAttestors => Some(Self::UploadDars),
-            Self::UploadDars => Some(Self::PrepareSubmissions),
+            Self::WaitingForAttestors => Some(Self::PrepareSubmissions),
             Self::PrepareSubmissions => Some(Self::SignSubmissions),
             Self::SignSubmissions => Some(Self::ExecuteSubmissions),
             Self::ExecuteSubmissions => Some(Self::Complete),
@@ -51,7 +47,7 @@ impl WorkflowStep for ContractsStep {
     }
 
     fn requires_attestors(&self) -> bool {
-        *self == Self::UploadDars || *self == Self::SignSubmissions
+        *self == Self::SignSubmissions
     }
 
     fn is_waiting_for_attestors(&self) -> bool {

@@ -191,12 +191,16 @@ pub struct ContractsRequest {
     pub participant_parties: Vec<CantonId>,
     /// Operator party ID
     pub operator_party: CantonId,
-    /// DAR files to upload (base64-encoded)
-    #[serde(default)]
-    pub dar_files: Vec<DarFile>,
     /// Contract definitions to create after decentralized party setup
     #[serde(default)]
     pub contracts: Vec<ContractDefinition>,
+}
+
+/// Request to upload DARs across all participants
+#[derive(Clone, Debug, Deserialize)]
+pub struct DarsRequest {
+    /// DAR files to upload (base64-encoded)
+    pub dar_files: Vec<DarFile>,
 }
 
 /// Progress status of a workflow (kick, onboarding, etc.)
@@ -241,6 +245,7 @@ pub enum InvitationType {
     Onboarding,
     Kick,
     Contracts,
+    Dars,
 }
 
 /// A pending invitation from a coordinator
@@ -400,6 +405,8 @@ pub enum ActionType {
         vault_backend_signatory: CantonId,
         #[serde(default)]
         vault_far_config: Option<FarConfig>,
+        allocation_factory_cid: String,
+        registrar_service_cid: String,
     },
     YieldEpochDeployment {
         vault_rules_cid: String,
@@ -438,7 +445,7 @@ pub enum ActionType {
         initial_supported_vaults: Vec<String>,
     },
 
-    // Utility Onboarding (5)
+    // Utility Onboarding (4)
     UtilityCreateProviderRequest {
         operator: CantonId,
     },
@@ -456,11 +463,6 @@ pub enum ActionType {
         holder_service_request_cid: String,
         holder: CantonId,
     },
-    UtilityCreateTransferRule {
-        operator: String,
-        registrar_service_cid: String,
-    },
-
     // Credential Actions (2)
     CredentialOfferFree {
         operator: CantonId,
@@ -482,6 +484,42 @@ pub enum ActionType {
     },
 }
 
+impl ActionType {
+    /// Validate the action's fields. Returns an error message if invalid.
+    pub fn validate(&self) -> Result<(), String> {
+        match self {
+            ActionType::VaultDeployment {
+                vault_far_config: Some(far),
+                ..
+            }
+            | ActionType::ProcessorDeploymentRequest {
+                processor_far_config: Some(far),
+                ..
+            } => validate_beneficiary_weights(&far.beneficiaries),
+            ActionType::VaultUpdateFarBeneficiaries {
+                new_beneficiaries, ..
+            } => validate_beneficiary_weights(new_beneficiaries),
+            _ => Ok(()),
+        }
+    }
+}
+
+fn validate_beneficiary_weights(beneficiaries: &[AppRewardBeneficiary]) -> Result<(), String> {
+    if beneficiaries.is_empty() {
+        return Ok(());
+    }
+    let sum: f64 = beneficiaries
+        .iter()
+        .map(|b| b.weight.parse::<f64>().unwrap_or(0.0))
+        .sum();
+    if (sum - 1.0).abs() > 1e-9 {
+        return Err(format!(
+            "FAR beneficiary weights must sum to exactly 1.0, got {sum}"
+        ));
+    }
+    Ok(())
+}
+
 /// Credential claim (subject, property, value)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Claim {
@@ -498,6 +536,13 @@ pub struct ConfirmActionRequest {
     pub action: ActionType,
 }
 
+/// A disclosed contract to include in the ledger submission
+#[derive(Clone, Debug, Deserialize)]
+pub struct DisclosedContractInput {
+    pub contract_id: String,
+    pub blob: String, // base64-encoded created_event_blob
+}
+
 /// Request to execute a confirmed action with structured type
 #[derive(Clone, Debug, Deserialize)]
 pub struct ExecuteActionRequest {
@@ -505,6 +550,8 @@ pub struct ExecuteActionRequest {
     pub rules_contract_id: String,
     pub action: ActionType,
     pub confirmation_cids: Vec<String>,
+    #[serde(default)]
+    pub disclosed_contracts: Vec<DisclosedContractInput>,
 }
 
 /// A single governance confirmation with parsed action
@@ -545,6 +592,13 @@ pub struct GovernanceResponse {
 pub struct ExpireConfirmationRequest {
     pub party_id: CantonId,
     pub rules_contract_id: String,
+    pub confirmation_cid: String,
+}
+
+/// Request to cancel (revoke) own confirmation
+#[derive(Clone, Debug, Deserialize)]
+pub struct CancelConfirmationRequest {
+    pub party_id: CantonId,
     pub confirmation_cid: String,
 }
 
@@ -607,4 +661,31 @@ pub struct UserServiceInfo {
 #[derive(Serialize)]
 pub struct UserServicesResponse {
     pub services: Vec<UserServiceInfo>,
+}
+
+/// Information about a RegistrarService contract
+#[derive(Clone, Debug, Serialize)]
+pub struct RegistrarServiceInfo {
+    pub contract_id: String,
+    pub operator: CantonId,
+    pub registrar: CantonId,
+}
+
+/// Response for the registrar services endpoint
+#[derive(Serialize)]
+pub struct RegistrarServicesResponse {
+    pub services: Vec<RegistrarServiceInfo>,
+}
+
+/// A contract ID with its blob
+#[derive(Serialize)]
+pub struct ContractWithBlob {
+    pub contract_id: String,
+    pub blob: String,
+}
+
+/// Response for the generic contract query endpoint
+#[derive(Serialize)]
+pub struct ContractQueryResponse {
+    pub contracts: Vec<ContractWithBlob>,
 }

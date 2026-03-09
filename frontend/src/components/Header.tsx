@@ -1,12 +1,26 @@
+import { useRef, useState } from "react";
 import { Box, Container, Typography, useTheme } from "@mui/material";
 
 import BitSafeLogoDark from "../assets/bitsafe-logo-dark.svg";
 import BitSafeLogoLight from "../assets/bitsafe-logo-light.svg";
 import { ThemeSwitcher } from "./ThemeSwitcher";
 
+declare const __BUILD_DATE__: string;
+
 export const Header = () => {
   const theme = useTheme();
-  const logo = theme.palette.mode === "light" ? BitSafeLogoDark : BitSafeLogoLight;
+  const logo =
+    theme.palette.mode === "light" ? BitSafeLogoDark : BitSafeLogoLight;
+  const [showBuildDate, setShowBuildDate] = useState(false);
+  const clickCount = useRef(0);
+
+  const handleSubtitleClick = () => {
+    clickCount.current += 1;
+    if (clickCount.current >= 5) {
+      setShowBuildDate((prev) => !prev);
+      clickCount.current = 0;
+    }
+  };
 
   return (
     <Box
@@ -42,8 +56,15 @@ export const Header = () => {
             onClick={() => window.location.reload()}
             style={{ height: 28, cursor: "pointer" }}
           />
-          <Typography variant="body2" color="text.secondary">
-            Monitor and manage your decentralized parties
+          <Typography
+            variant="body2"
+            color="text.secondary"
+            onClick={handleSubtitleClick}
+            sx={{ cursor: "default", userSelect: "none" }}
+          >
+            {showBuildDate
+              ? `Build date: ${new Date(__BUILD_DATE__).toLocaleString("hu-HU", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false })}`
+              : "Monitor and manage your decentralized parties"}
           </Typography>
         </Box>
         <ThemeSwitcher />

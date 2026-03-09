@@ -9,6 +9,13 @@ export interface ContractInfo {
   package_id: string;
 }
 
+export interface PackageConfig {
+  vault_governance?: string;
+  vault?: string;
+  utility_registry?: string;
+  utility_credential?: string;
+}
+
 export interface PartyMetadata {
   annotations: Record<string, string>;
 }
@@ -37,6 +44,7 @@ export interface NodeConfig {
     ledger_api_host: string;
     ledger_api_port: number;
     synchronizer: string;
+    network: Network;
   };
 }
 
@@ -128,12 +136,17 @@ export interface ContractsRequest {
   participant_ids: string[];
   participant_parties: string[];
   operator_party: string;
-  dar_files: DarFile[];
   contracts: ContractDefinition[];
 }
 
+export interface DarsRequest {
+  dar_files: DarFile[];
+}
+
+export type DarsStatusResponse = WorkflowStatusResponse;
+
 // Invitation types
-export type InvitationType = "Onboarding" | "Kick" | "Contracts";
+export type InvitationType = "Onboarding" | "Kick" | "Contracts" | "Dars";
 
 export interface PendingInvitation {
   id: string;
@@ -270,6 +283,8 @@ export type ActionType =
       limits: VaultLimits;
       vault_backend_signatory: string;
       vault_far_config?: FarConfig;
+      allocation_factory_cid: string;
+      registrar_service_cid: string;
     }
   | {
       type: "yield_epoch_deployment";
@@ -336,12 +351,6 @@ export type ActionType =
       holder_service_request_cid: string;
       holder: string;
     }
-  | {
-      type: "utility_create_transfer_rule";
-      operator: string;
-      registrar_service_cid: string;
-    }
-
   // Credential Actions
   | {
       type: "credential_offer_free";
@@ -365,6 +374,15 @@ export type ActionType =
       amulet_rules_cid: string;
     };
 
+// Disclosed contract (contract_id + base64-encoded created_event_blob)
+export interface DisclosedContract {
+  contract_id: string;
+  blob: string;
+}
+
+// Disclosed contract for ledger submission (same shape, used in requests)
+export type DisclosedContractInput = DisclosedContract;
+
 // Request types
 export interface ConfirmActionRequest {
   party_id: string;
@@ -377,11 +395,17 @@ export interface ExecuteActionRequest {
   rules_contract_id: string;
   action: ActionType;
   confirmation_cids: string[];
+  disclosed_contracts: DisclosedContractInput[];
 }
 
 export interface ExpireConfirmationRequest {
   party_id: string;
   rules_contract_id: string;
+  confirmation_cid: string;
+}
+
+export interface CancelConfirmationRequest {
+  party_id: string;
   confirmation_cid: string;
 }
 
@@ -418,3 +442,24 @@ export interface UserServiceInfo {
 export interface UserServicesResponse {
   services: UserServiceInfo[];
 }
+
+export interface RegistrarServiceInfo {
+  contract_id: string;
+  operator: string;
+  registrar: string;
+}
+
+export interface RegistrarServicesResponse {
+  services: RegistrarServiceInfo[];
+}
+
+export interface ContractWithBlob {
+  contract_id: string;
+  blob: string;
+}
+
+export interface ContractQueryResponse {
+  contracts: ContractWithBlob[];
+}
+
+export type Network = "devnet" | "testnet" | "mainnet";

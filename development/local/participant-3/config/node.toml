@@ -11,6 +11,7 @@ admin_api_port = 4902
 ledger_api_host = "0.0.0.0"
 ledger_api_port = 4901
 synchronizer = "global"
+network = "devnet"
 
 [timeouts]
 handshake_timeout_secs = 30
@@ -28,3 +29,9 @@ url = "https://keycloak.dev.canton.example.com"
 realm = "canton-devnet"
 client_id = "attestor-3"
 client_secret = "***REDACTED-CLIENT-SECRET***"
+
+[parties.packages]
+vault_governance = "#bitsafe-vault-governance-v0-rc8"
+vault = "#bitsafe-vault-v0-rc8"
+utility_registry = "#utility-registry-app-v0"
+utility_credential = "#utility-credential-app-v0"

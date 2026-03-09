@@ -140,6 +140,15 @@ pub struct KeycloakConfig {
     pub password: Option<String>,
 }
 
+/// Package identifiers for Daml contracts (configurable per party)
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct PackageConfig {
+    pub vault_governance: Option<String>,
+    pub vault: Option<String>,
+    pub utility_registry: Option<String>,
+    pub utility_credential: Option<String>,
+}
+
 /// Credentials for a specific decentralized party
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PartyCredentials {
@@ -151,6 +160,9 @@ pub struct PartyCredentials {
     pub user_id: String,
     /// Keycloak authentication configuration
     pub keycloak: KeycloakConfig,
+    /// Package identifiers for deployed Daml contracts
+    #[serde(default)]
+    pub packages: PackageConfig,
 }
 
 /// Timeout configuration
@@ -242,6 +254,26 @@ fn default_noise_port() -> u16 {
     9000
 }
 
+/// Canton Network environment
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Network {
+    Devnet,
+    Testnet,
+    Mainnet,
+}
+
+impl Network {
+    /// Get the DSO API base URL for this network
+    pub fn dso_url(&self) -> &str {
+        match self {
+            Network::Devnet => "https://docs.dev.global.canton.network.sync.global/dso",
+            Network::Testnet => "https://docs.test.global.canton.network.sync.global/dso",
+            Network::Mainnet => "https://docs.global.canton.network.sync.global/dso",
+        }
+    }
+}
+
 /// Canton participant configuration
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CantonConfig {
@@ -251,6 +283,8 @@ pub struct CantonConfig {
     pub ledger_api_port: u16,
     #[serde(default = "default_synchronizer")]
     pub synchronizer: String,
+    /// Canton Network environment (devnet, testnet, mainnet)
+    pub network: Network,
 }
 
 fn default_synchronizer() -> String {
@@ -337,11 +371,25 @@ impl NodeConfig {
         self.data_dir().join(DARS_DIR)
     }
 
+    /// Get the root directory
+    pub fn root_dir(&self) -> &Path {
+        &self.root_dir
+    }
+
     /// Get party credentials by decentralized party ID
     pub fn get_party_credentials(&self, dec_party_id: &CantonId) -> Option<&PartyCredentials> {
         self.parties
             .iter()
             .find(|p| &p.dec_party_id == dec_party_id)
+    }
+
+    /// Get package config for a decentralized party
+    pub fn get_packages(&self, dec_party_id: &str) -> PackageConfig {
+        CantonId::parse(dec_party_id)
+            .ok()
+            .and_then(|id| self.get_party_credentials(&id))
+            .map(|c| c.packages.clone())
+            .unwrap_or_default()
     }
 
     /// Get the participant ID, panicking if not resolved
@@ -366,7 +414,7 @@ impl NodeConfig {
     }
 
     /// Save the current config to disk
-    async fn save_config(&self) -> Result {
+    pub async fn save_config(&self) -> Result {
         let config_path = self.root_dir.join(CONFIG_DIR).join(NODE_CONFIG_FILENAME);
 
         // Create a serializable version without the root_dir field

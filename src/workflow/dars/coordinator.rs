@@ -1,0 +1,109 @@
+use std::sync::Arc;
+
+use base64::{Engine, engine::general_purpose::STANDARD};
+
+use crate::{
+    config::{NetworkConfig, NodeConfig},
+    error::Result,
+    noise::server::NoiseServer,
+    utils,
+    workflow::contracts,
+};
+
+use super::{DarsConfig, DarsDirs, DarsStep};
+
+pub async fn start_coordinator(
+    node_config: NodeConfig,
+    network_config: NetworkConfig,
+    config: DarsConfig,
+) -> Result {
+    tracing::info!("Initializing Noise server for DARs upload...");
+
+    let server = NoiseServer::new(
+        node_config.clone(),
+        network_config,
+        DarsStep::WaitingForAttestors,
+        None, // No excluded participants
+    )
+    .await?;
+    let server = Arc::new(server);
+
+    let dirs = DarsDirs::with_base(node_config.workflow_data_dir(), &config.instance_name);
+    dirs.create_dirs().await?;
+
+    tracing::info!("Noise server initialized, listening for connections");
+
+    let workflow_state = server.get_workflow_state();
+    let node_config_clone = node_config.clone();
+    let workflow_handle =
+        tokio::spawn(async move { run_workflow(workflow_state, node_config_clone, config).await });
+
+    crate::workflow::run_server_with_workflow(server, workflow_handle).await
+}
+
+async fn run_workflow(
+    workflow_state: Arc<crate::workflow::state::WorkflowState<DarsStep>>,
+    node_config: NodeConfig,
+    config: DarsConfig,
+) -> Result {
+    // Encode DAR files to send to attestors with UploadDars command
+    let dar_payload = encode_dars_payload(&config)?;
+    workflow_state.set_command_payload(dar_payload).await;
+
+    let mut coordinator_completed = false;
+
+    loop {
+        let current_step = workflow_state.current_step().await;
+
+        match current_step {
+            DarsStep::WaitingForAttestors => {
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            }
+            DarsStep::UploadDars => {
+                if !coordinator_completed {
+                    tracing::info!("Coordinator executing: Upload DARs");
+                    contracts::upload_dars(&node_config, &config.dar_files).await?;
+                    coordinator_completed = true;
+                }
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            }
+            DarsStep::Complete => {
+                tracing::info!("DARs upload workflow complete!");
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Encode DAR files from config for transmission to attestors
+fn encode_dars_payload(config: &DarsConfig) -> Result<Vec<u8>> {
+    if config.dar_files.is_empty() {
+        tracing::info!("No DAR files to distribute to attestors");
+        return Ok(Vec::new());
+    }
+
+    tracing::info!(
+        "Encoding {count} DAR file(s) for distribution to attestors",
+        count = config.dar_files.len()
+    );
+
+    let mut dar_files = Vec::new();
+
+    for dar_file in &config.dar_files {
+        let data = STANDARD.decode(&dar_file.data).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to decode base64 DAR data for {}: {e}",
+                dar_file.filename
+            )
+        })?;
+        dar_files.push((dar_file.filename.clone(), data));
+    }
+
+    // Sort for consistent ordering
+    dar_files.sort_by(|a, b| a.0.cmp(&b.0));
+
+    Ok(utils::encode_files(&dar_files))
+}

@@ -188,10 +188,11 @@ async fn fetch_decentralized_parties(
                     None => None,
                 };
 
+                let packages = config.get_packages(&party_id_str);
                 let token_clone = token.clone();
                 let (contracts, local_metadata) = tokio::join!(
                     async {
-                        get_contracts(&config, &party_id_str, token, test_mode)
+                        get_contracts(&config, &party_id_str, token, test_mode, &packages)
                             .await
                             .unwrap_or_else(|e| {
                                 tracing::warn!("Failed to get contracts for {party_id_str}: {e}");

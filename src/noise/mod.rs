@@ -37,6 +37,7 @@ pub enum MessageType {
     InviteOnboarding = 0x0010,
     InviteKick = 0x0011,
     InviteContracts = 0x0012,
+    InviteDars = 0x0013,
 
     // Responses (0x0100 - 0x01FF)
     Ack = 0x0101,
@@ -86,6 +87,7 @@ impl TryFrom<u16> for MessageType {
             0x0010 => Ok(Self::InviteOnboarding),
             0x0011 => Ok(Self::InviteKick),
             0x0012 => Ok(Self::InviteContracts),
+            0x0013 => Ok(Self::InviteDars),
             0x0101 => Ok(Self::Ack),
             0x0102 => Ok(Self::Data),
             0x0103 => Ok(Self::Error),
