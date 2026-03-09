@@ -116,6 +116,7 @@ admin_api_port = 5002
 ledger_api_host = "localhost"
 ledger_api_port = 5001
 synchronizer = "global"
+network = "devnet"
 
 [timeouts]
 handshake_timeout_secs = 30

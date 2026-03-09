@@ -87,6 +87,7 @@ data:
     ledger_api_host = "canton-participant.default.svc.cluster.local"
     ledger_api_port = 5001
     synchronizer = "global"
+    network = "devnet"
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -226,7 +227,7 @@ admin_api_port = 5002                # Canton Admin API port
 ledger_api_host = "localhost"        # Canton Ledger API host
 ledger_api_port = 5001               # Canton Ledger API port
 synchronizer = "global"              # Synchronizer name (default: "global")
-validator_url = "http://localhost:5003"  # Validator API URL for scan-proxy (optional, needed for /amulet-rules)
+network = "devnet"                   # Canton network environment (devnet, testnet, mainnet)
 
 [timeouts]
 handshake_timeout_secs = 30          # Noise handshake timeout (default: 30)
@@ -264,7 +265,7 @@ client_secret = "your-secret"
 | `[canton]` | `ledger_api_host` | string | required | Canton Ledger API host |
 | `[canton]` | `ledger_api_port` | u16 | required | Canton Ledger API port |
 | `[canton]` | `synchronizer` | string | `global` | Synchronizer name |
-| `[canton]` | `validator_url` | string | none | Validator API base URL for scan-proxy queries (e.g., `http://localhost:5003`). Required for `/amulet-rules` endpoint |
+| `[canton]` | `network` | string | required | Canton network environment (`devnet`, `testnet`, `mainnet`). Determines DSO API URL for AmuletRules queries |
 | `[timeouts]` | `handshake_timeout_secs` | u64 | `30` | Noise handshake timeout |
 | `[timeouts]` | `message_timeout_secs` | u64 | `120` | Noise message timeout |
 | `[timeouts]` | `connection_retry_attempts` | u32 | `3` | Max connection retries |
@@ -722,7 +723,7 @@ Each participant's Ledger API user needs:
 | GET | `/kick/status` | Get kick progress | -- |
 | POST | `/contracts` | Start contracts workflow | `{ "decentralized_party_id": "...", "participant_ids": [...], ... }` |
 | GET | `/contracts/status` | Get contracts progress | -- |
-| POST | `/dars` | Start DARs upload workflow | `{ "decentralized_party_id": "...", "participant_ids": [...], "dar_files": [...] }` |
+| POST | `/dars` | Start DARs upload workflow | `{ "dar_files": [{ "filename": "...", "data": "<base64>" }] }` |
 | GET | `/dars/status` | Get DARs workflow progress | -- |
 
 ### Invitations
@@ -749,7 +750,7 @@ Each participant's Ledger API user needs:
 | POST | `/governance/confirm` | Submit a governance confirmation | `{ "party_id": "...", "rules_contract_id": "...", "action": { "type": "...", ... } }` |
 | POST | `/governance/execute` | Execute a confirmed action | `{ "party_id": "...", "rules_contract_id": "...", "action": { ... }, "confirmation_cids": [...] }` |
 | POST | `/governance/expire` | Expire stale confirmation | `{ "party_id": "...", "rules_contract_id": "...", "confirmation_cid": "..." }` |
-| POST | `/governance/cancel` | Cancel a governance confirmation | `{ "party_id": "...", "rules_contract_id": "...", "confirmation_cid": "..." }` |
+| POST | `/governance/cancel` | Cancel a governance confirmation | `{ "party_id": "...", "confirmation_cid": "..." }` |
 
 ### Contracts and Services
 
@@ -761,7 +762,7 @@ Each participant's Ledger API user needs:
 | GET | `/services/registrar` | List RegistrarService contracts | `?party_id=...` |
 | GET | `/contracts/query` | Query active contracts by template | `?party_id=...&package_id=...&module_name=...&entity_name=...&interface=false` |
 | GET | `/packages` | Get configured package IDs for a party | `?party_id=...` |
-| GET | `/amulet-rules` | Get AmuletRules contract | `?party_id=...` |
+| GET | `/amulet-rules` | Get AmuletRules contract from DSO API | -- |
 | POST | `/token-standard-contracts` | CORS proxy to devnet token standard contracts endpoint | JSON body (forwarded as-is) |
 
 ### Response Formats

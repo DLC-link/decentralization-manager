@@ -526,22 +526,6 @@ After both services are created, link them:
 }
 ```
 
-**4. Accept Holder Service Requests:**
-
-When a holder requests service access:
-
-```json
-{
-  "action": {
-    "type": "utility_accept_holder_service_request",
-    "operator": "operator::1220...",
-    "provider_service_cid": "<provider-service-contract-id>",
-    "holder_service_request_cid": "<request-contract-id>",
-    "holder": "holder-party::1220..."
-  }
-}
-```
-
 ### Querying Services
 
 **List ProviderServices:**
