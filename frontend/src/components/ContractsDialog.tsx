@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import {
+  Autocomplete,
   Dialog,
   DialogTitle,
   DialogContent,
@@ -25,17 +26,16 @@ import {
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import AddIcon from "@mui/icons-material/Add";
 import DeleteIcon from "@mui/icons-material/Delete";
-import UploadFileIcon from "@mui/icons-material/UploadFile";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import AccountBalanceIcon from "@mui/icons-material/AccountBalance";
 import StorageIcon from "@mui/icons-material/Storage";
-import { API_BASE, VAULT_GOVERNANCE_PACKAGE_ID } from "../constants";
+import { API_BASE } from "../constants";
 import type {
   ContractsStatusResponse,
   ContractsRequest,
   ContractDefinition,
   FieldDefinition,
-  DarFile,
+  PackageConfig,
 } from "../types";
 
 interface ContractsDialogProps {
@@ -44,6 +44,8 @@ interface ContractsDialogProps {
   onComplete: () => void;
   partyId: string;
   participantIds: string[];
+  defaultOperatorParty?: string;
+  knownPackageIds?: string[];
 }
 
 type ContractType = "cbtc" | "vault" | null;
@@ -64,23 +66,43 @@ const FIELD_TYPES = [
   { value: "record", label: "Record" },
 ];
 
-const createDefaultField = (type: string, participantCount: number = 3): FieldDefinition => {
+const createDefaultField = (
+  type: string,
+  participantCount: number = 3,
+): FieldDefinition => {
   const defaultThreshold = Math.max(2, Math.ceil((participantCount * 2) / 3));
   switch (type) {
-    case "decentralized_party": return { type: "decentralized_party" };
-    case "operator_party": return { type: "operator_party" };
-    case "participant_party": return { type: "participant_party", id: "" };
-    case "party_set": return { type: "party_set", parties: [] };
-    case "attestors_set": return { type: "attestors_set" };
-    case "governance_threshold": return { type: "governance_threshold", value: defaultThreshold };
-    case "rel_time": return { type: "rel_time", microseconds: 3600000000 };
-    case "optional": return { type: "optional", inner: { type: "rel_time", microseconds: 3600000000 } };
-    case "instrument": return { type: "instrument", id: "" };
-    case "text": return { type: "text", value: "" };
-    case "int64": return { type: "int64", value: 0 };
-    case "bool": return { type: "bool", value: false };
-    case "record": return { type: "record", fields: [] };
-    default: return { type: "text", value: "" };
+    case "decentralized_party":
+      return { type: "decentralized_party" };
+    case "operator_party":
+      return { type: "operator_party" };
+    case "participant_party":
+      return { type: "participant_party", id: "" };
+    case "party_set":
+      return { type: "party_set", parties: [] };
+    case "attestors_set":
+      return { type: "attestors_set" };
+    case "governance_threshold":
+      return { type: "governance_threshold", value: defaultThreshold };
+    case "rel_time":
+      return { type: "rel_time", microseconds: 3600000000 };
+    case "optional":
+      return {
+        type: "optional",
+        inner: { type: "rel_time", microseconds: 3600000000 },
+      };
+    case "instrument":
+      return { type: "instrument", id: "" };
+    case "text":
+      return { type: "text", value: "" };
+    case "int64":
+      return { type: "int64", value: 0 };
+    case "bool":
+      return { type: "bool", value: false };
+    case "record":
+      return { type: "record", fields: [] };
+    default:
+      return { type: "text", value: "" };
   }
 };
 
@@ -92,8 +114,6 @@ const createEmptyContract = (): ContractDefinition => ({
   entity_name: "",
   fields: [],
 });
-
-const DEFAULT_OPERATOR_PARTY = "";
 
 // CBTC contract definitions
 const getCbtcContracts = (): ContractDefinition[] => [
@@ -138,31 +158,44 @@ const getCbtcContracts = (): ContractDefinition[] => [
 ];
 
 // Vault contract definitions
-const getVaultContracts = (participantCount: number = 3): ContractDefinition[] => {
+const getVaultContracts = (
+  participantCount: number = 3,
+  vaultGovernancePkg: string = "",
+): ContractDefinition[] => {
   const defaultThreshold = Math.max(2, Math.ceil((participantCount * 2) / 3));
   return [
     {
       id: "create-vault-governance-rules",
       name: "VaultGovernanceRules",
-      package_id: VAULT_GOVERNANCE_PACKAGE_ID,
+      package_id: vaultGovernancePkg,
       module_name: "BitsafeVault.VaultGovernance",
       entity_name: "VaultGovernanceRules",
       fields: [
         { type: "decentralized_party" }, // vaultManager : Party
         { type: "party_set", parties: [] }, // members : Set Party - add parties manually
         { type: "governance_threshold", value: defaultThreshold }, // threshold : Int
-        { type: "optional", inner: { type: "rel_time", microseconds: 86400000000 } }, // actionConfirmationTimeout : Optional RelTime (24 hours)
+        {
+          type: "optional",
+          inner: { type: "rel_time", microseconds: 86400000000 },
+        }, // actionConfirmationTimeout : Optional RelTime (24 hours)
       ],
     },
   ];
 };
 
-const getContractsForType = (type: ContractType, participantCount: number = 3): ContractDefinition[] => {
+const getContractsForType = (
+  type: ContractType,
+  participantCount: number = 3,
+  packages?: PackageConfig,
+): ContractDefinition[] => {
   switch (type) {
     case "cbtc":
       return getCbtcContracts();
     case "vault":
-      return getVaultContracts(participantCount);
+      return getVaultContracts(
+        participantCount,
+        packages?.vault_governance ?? "",
+      );
     default:
       return [];
   }
@@ -176,7 +209,13 @@ interface FieldEditorProps {
   partyId?: string;
 }
 
-const FieldEditor = ({ field, onChange, onDelete, participantCount = 3, partyId }: FieldEditorProps) => {
+const FieldEditor = ({
+  field,
+  onChange,
+  onDelete,
+  participantCount = 3,
+  partyId,
+}: FieldEditorProps) => {
   const defaultThreshold = Math.max(2, Math.ceil((participantCount * 2) / 3));
 
   const renderValueInput = () => {
@@ -200,13 +239,21 @@ const FieldEditor = ({ field, onChange, onDelete, participantCount = 3, partyId 
         );
       case "operator_party":
         return (
-          <Typography variant="body2" color="text.secondary" sx={{ fontStyle: "italic" }}>
+          <Typography
+            variant="body2"
+            color="text.secondary"
+            sx={{ fontStyle: "italic" }}
+          >
             (auto-allocated)
           </Typography>
         );
       case "attestors_set":
         return (
-          <Typography variant="body2" color="text.secondary" sx={{ fontStyle: "italic" }}>
+          <Typography
+            variant="body2"
+            color="text.secondary"
+            sx={{ fontStyle: "italic" }}
+          >
             (all {participantCount} participants)
           </Typography>
         );
@@ -224,7 +271,9 @@ const FieldEditor = ({ field, onChange, onDelete, participantCount = 3, partyId 
 
       case "party_set":
         return (
-          <Box sx={{ display: "flex", flexDirection: "column", gap: 1, flex: 1 }}>
+          <Box
+            sx={{ display: "flex", flexDirection: "column", gap: 1, flex: 1 }}
+          >
             <TextField
               size="small"
               placeholder="Paste party ID, press Enter"
@@ -255,12 +304,20 @@ const FieldEditor = ({ field, onChange, onDelete, participantCount = 3, partyId 
                       py: 0.25,
                     }}
                   >
-                    <Typography variant="caption" sx={{ flex: 1, fontFamily: "monospace" }}>
+                    <Typography
+                      variant="caption"
+                      sx={{ flex: 1, fontFamily: "monospace" }}
+                    >
                       {party}
                     </Typography>
                     <IconButton
                       size="small"
-                      onClick={() => onChange({ ...field, parties: field.parties.filter((_, i) => i !== idx) })}
+                      onClick={() =>
+                        onChange({
+                          ...field,
+                          parties: field.parties.filter((_, i) => i !== idx),
+                        })
+                      }
                       sx={{ p: 0.25 }}
                     >
                       <DeleteIcon sx={{ fontSize: 14 }} />
@@ -279,7 +336,12 @@ const FieldEditor = ({ field, onChange, onDelete, participantCount = 3, partyId 
             label="Value"
             type="number"
             value={field.value ?? defaultThreshold}
-            onChange={(e) => onChange({ ...field, value: parseInt(e.target.value) || defaultThreshold })}
+            onChange={(e) =>
+              onChange({
+                ...field,
+                value: parseInt(e.target.value) || defaultThreshold,
+              })
+            }
             sx={{ width: 100 }}
           />
         );
@@ -289,7 +351,9 @@ const FieldEditor = ({ field, onChange, onDelete, participantCount = 3, partyId 
           <FormControl size="small" sx={{ width: 130 }}>
             <Select
               value={field.microseconds || 3600000000}
-              onChange={(e) => onChange({ ...field, microseconds: Number(e.target.value) })}
+              onChange={(e) =>
+                onChange({ ...field, microseconds: Number(e.target.value) })
+              }
             >
               <MenuItem value={180000000}>3 min</MenuItem>
               <MenuItem value={600000000}>10 min</MenuItem>
@@ -302,24 +366,44 @@ const FieldEditor = ({ field, onChange, onDelete, participantCount = 3, partyId 
         );
 
       case "optional": {
-        const innerTypes = FIELD_TYPES.filter(t => t.value !== "optional" && t.value !== "record");
+        const innerTypes = FIELD_TYPES.filter(
+          (t) => t.value !== "optional" && t.value !== "record",
+        );
         return (
           <Box sx={{ display: "flex", gap: 1, alignItems: "center", flex: 1 }}>
             <FormControl size="small" sx={{ width: 140 }}>
               <Select
                 value={field.inner?.type || "rel_time"}
-                onChange={(e) => onChange({ ...field, inner: createDefaultField(e.target.value, participantCount) })}
+                onChange={(e) =>
+                  onChange({
+                    ...field,
+                    inner: createDefaultField(e.target.value, participantCount),
+                  })
+                }
               >
                 {innerTypes.map((t) => (
-                  <MenuItem key={t.value} value={t.value}>{t.label}</MenuItem>
+                  <MenuItem key={t.value} value={t.value}>
+                    {t.label}
+                  </MenuItem>
                 ))}
               </Select>
             </FormControl>
             {field.inner?.type === "rel_time" && (
               <FormControl size="small" sx={{ width: 130 }}>
                 <Select
-                  value={(field.inner as { microseconds: number }).microseconds || 3600000000}
-                  onChange={(e) => onChange({ ...field, inner: { type: "rel_time", microseconds: Number(e.target.value) } })}
+                  value={
+                    (field.inner as { microseconds: number }).microseconds ||
+                    3600000000
+                  }
+                  onChange={(e) =>
+                    onChange({
+                      ...field,
+                      inner: {
+                        type: "rel_time",
+                        microseconds: Number(e.target.value),
+                      },
+                    })
+                  }
                 >
                   <MenuItem value={180000000}>3 min</MenuItem>
                   <MenuItem value={600000000}>10 min</MenuItem>
@@ -335,8 +419,18 @@ const FieldEditor = ({ field, onChange, onDelete, participantCount = 3, partyId 
                 size="small"
                 label="Value"
                 type="number"
-                value={(field.inner as { value?: number }).value ?? defaultThreshold}
-                onChange={(e) => onChange({ ...field, inner: { type: "governance_threshold", value: parseInt(e.target.value) || defaultThreshold } })}
+                value={
+                  (field.inner as { value?: number }).value ?? defaultThreshold
+                }
+                onChange={(e) =>
+                  onChange({
+                    ...field,
+                    inner: {
+                      type: "governance_threshold",
+                      value: parseInt(e.target.value) || defaultThreshold,
+                    },
+                  })
+                }
                 sx={{ width: 100 }}
               />
             )}
@@ -345,7 +439,12 @@ const FieldEditor = ({ field, onChange, onDelete, participantCount = 3, partyId 
                 size="small"
                 label="Value"
                 value={(field.inner as { value: string }).value}
-                onChange={(e) => onChange({ ...field, inner: { type: "text", value: e.target.value } })}
+                onChange={(e) =>
+                  onChange({
+                    ...field,
+                    inner: { type: "text", value: e.target.value },
+                  })
+                }
                 sx={{ flex: 1 }}
               />
             )}
@@ -355,7 +454,15 @@ const FieldEditor = ({ field, onChange, onDelete, participantCount = 3, partyId 
                 label="Value"
                 type="number"
                 value={(field.inner as { value: number }).value}
-                onChange={(e) => onChange({ ...field, inner: { type: "int64", value: parseInt(e.target.value) || 0 } })}
+                onChange={(e) =>
+                  onChange({
+                    ...field,
+                    inner: {
+                      type: "int64",
+                      value: parseInt(e.target.value) || 0,
+                    },
+                  })
+                }
                 sx={{ width: 100 }}
               />
             )}
@@ -392,7 +499,9 @@ const FieldEditor = ({ field, onChange, onDelete, participantCount = 3, partyId 
             label="Value"
             type="number"
             value={field.value}
-            onChange={(e) => onChange({ ...field, value: parseInt(e.target.value) || 0 })}
+            onChange={(e) =>
+              onChange({ ...field, value: parseInt(e.target.value) || 0 })
+            }
             sx={{ width: 120 }}
           />
         );
@@ -402,7 +511,9 @@ const FieldEditor = ({ field, onChange, onDelete, participantCount = 3, partyId 
           <FormControl size="small" sx={{ width: 100 }}>
             <Select
               value={field.value ? "true" : "false"}
-              onChange={(e) => onChange({ ...field, value: e.target.value === "true" })}
+              onChange={(e) =>
+                onChange({ ...field, value: e.target.value === "true" })
+              }
             >
               <MenuItem value="true">True</MenuItem>
               <MenuItem value="false">False</MenuItem>
@@ -412,7 +523,9 @@ const FieldEditor = ({ field, onChange, onDelete, participantCount = 3, partyId 
 
       case "record":
         return (
-          <Box sx={{ display: "flex", flexDirection: "column", gap: 1, flex: 1 }}>
+          <Box
+            sx={{ display: "flex", flexDirection: "column", gap: 1, flex: 1 }}
+          >
             <Box
               sx={{
                 border: "1px solid",
@@ -423,31 +536,47 @@ const FieldEditor = ({ field, onChange, onDelete, participantCount = 3, partyId 
               }}
             >
               {field.fields.length === 0 ? (
-                <Typography variant="body2" color="text.secondary" sx={{ fontStyle: "italic" }}>
+                <Typography
+                  variant="body2"
+                  color="text.secondary"
+                  sx={{ fontStyle: "italic" }}
+                >
                   Empty record
                 </Typography>
               ) : (
                 <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
                   {field.fields.map((nestedField, idx) => (
-                    <Box key={idx} sx={{ display: "flex", gap: 1, alignItems: "center" }}>
+                    <Box
+                      key={idx}
+                      sx={{ display: "flex", gap: 1, alignItems: "center" }}
+                    >
                       <FormControl size="small" sx={{ width: 130 }}>
                         <Select
                           value={nestedField.type}
                           onChange={(e) => {
                             const newFields = [...field.fields];
-                            newFields[idx] = createDefaultField(e.target.value, participantCount);
+                            newFields[idx] = createDefaultField(
+                              e.target.value,
+                              participantCount,
+                            );
                             onChange({ ...field, fields: newFields });
                           }}
                         >
-                          {FIELD_TYPES.filter(t => t.value !== "record").map((t) => (
-                            <MenuItem key={t.value} value={t.value}>{t.label}</MenuItem>
-                          ))}
+                          {FIELD_TYPES.filter((t) => t.value !== "record").map(
+                            (t) => (
+                              <MenuItem key={t.value} value={t.value}>
+                                {t.label}
+                              </MenuItem>
+                            ),
+                          )}
                         </Select>
                       </FormControl>
                       <IconButton
                         size="small"
                         onClick={() => {
-                          const newFields = field.fields.filter((_, i) => i !== idx);
+                          const newFields = field.fields.filter(
+                            (_, i) => i !== idx,
+                          );
                           onChange({ ...field, fields: newFields });
                         }}
                         color="error"
@@ -461,7 +590,12 @@ const FieldEditor = ({ field, onChange, onDelete, participantCount = 3, partyId 
               <Button
                 size="small"
                 startIcon={<AddIcon />}
-                onClick={() => onChange({ ...field, fields: [...field.fields, { type: "text", value: "" }] })}
+                onClick={() =>
+                  onChange({
+                    ...field,
+                    fields: [...field.fields, { type: "text", value: "" }],
+                  })
+                }
                 sx={{ mt: 1 }}
               >
                 Add
@@ -488,10 +622,14 @@ const FieldEditor = ({ field, onChange, onDelete, participantCount = 3, partyId 
       <FormControl size="small" fullWidth>
         <Select
           value={field.type}
-          onChange={(e) => onChange(createDefaultField(e.target.value, participantCount))}
+          onChange={(e) =>
+            onChange(createDefaultField(e.target.value, participantCount))
+          }
         >
           {FIELD_TYPES.map((t) => (
-            <MenuItem key={t.value} value={t.value}>{t.label}</MenuItem>
+            <MenuItem key={t.value} value={t.value}>
+              {t.label}
+            </MenuItem>
           ))}
         </Select>
       </FormControl>
@@ -512,6 +650,7 @@ interface ContractEditorProps {
   index: number;
   participantCount: number;
   partyId: string;
+  knownPackageIds: string[];
 }
 
 const ContractEditor = ({
@@ -521,6 +660,7 @@ const ContractEditor = ({
   index,
   participantCount,
   partyId,
+  knownPackageIds,
 }: ContractEditorProps) => {
   const handleFieldChange = (fieldIndex: number, newField: FieldDefinition) => {
     const newFields = [...contract.fields];
@@ -580,14 +720,24 @@ const ContractEditor = ({
       </AccordionSummary>
       <AccordionDetails sx={{ p: 3 }}>
         <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
-          <TextField
-            size="small"
-            label="Package ID"
+          <Autocomplete
+            freeSolo
+            options={knownPackageIds}
             value={contract.package_id}
-            onChange={(e) =>
-              onChange({ ...contract, package_id: e.target.value })
+            onChange={(_e, value) =>
+              onChange({ ...contract, package_id: value || "" })
             }
-            fullWidth
+            onInputChange={(_e, value) =>
+              onChange({ ...contract, package_id: value })
+            }
+            size="small"
+            renderInput={(params) => (
+              <TextField
+                {...params}
+                label="Package ID"
+                placeholder="Enter or select package ID"
+              />
+            )}
           />
           <Box sx={{ display: "flex", gap: 2 }}>
             <TextField
@@ -710,17 +860,43 @@ export const ContractsDialog = ({
   onComplete,
   partyId,
   participantIds,
+  defaultOperatorParty,
+  knownPackageIds = [],
 }: ContractsDialogProps) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<ContractsStatusResponse | null>(null);
   const [contractType, setContractType] = useState<ContractType>(null);
 
+  // Package config from API
+  const [packages, setPackages] = useState<PackageConfig>({});
+
   // Form state
-  const [operatorParty, setOperatorParty] = useState(DEFAULT_OPERATOR_PARTY);
+  const [operatorParty, setOperatorParty] = useState(
+    defaultOperatorParty || "",
+  );
   const [participantParties, setParticipantParties] = useState<string[]>([]);
-  const [darFiles, setDarFiles] = useState<DarFile[]>([]);
   const [contracts, setContracts] = useState<ContractDefinition[]>([]);
+
+  // Combine package IDs from config + known contracts for dropdown
+  const allPackageIds = useMemo(() => {
+    const ids = new Set(knownPackageIds);
+    if (packages.vault_governance) ids.add(packages.vault_governance);
+    if (packages.vault) ids.add(packages.vault);
+    if (packages.utility_registry) ids.add(packages.utility_registry);
+    if (packages.utility_credential) ids.add(packages.utility_credential);
+    return [...ids].sort();
+  }, [knownPackageIds, packages]);
+
+  // Fetch packages config when dialog opens
+  useEffect(() => {
+    if (open && partyId) {
+      fetch(`${API_BASE}/packages?party_id=${encodeURIComponent(partyId)}`)
+        .then((res) => res.json())
+        .then((data: PackageConfig) => setPackages(data))
+        .catch((e) => console.warn("Failed to fetch packages:", e));
+    }
+  }, [open, partyId]);
 
   // Reset state when dialog opens/closes
   useEffect(() => {
@@ -729,19 +905,21 @@ export const ContractsDialog = ({
       setStatus(null);
       setLoading(false);
       setContractType(null);
-      setDarFiles([]);
       setContracts([]);
-      setOperatorParty(DEFAULT_OPERATOR_PARTY);
+      setOperatorParty(defaultOperatorParty || "");
       setParticipantParties([]);
+      setPackages({});
     }
   }, [open]);
 
   // Initialize contracts when type is selected
   useEffect(() => {
     if (contractType) {
-      setContracts(getContractsForType(contractType, participantIds.length));
+      setContracts(
+        getContractsForType(contractType, participantIds.length, packages),
+      );
     }
-  }, [contractType, participantIds.length]);
+  }, [contractType, participantIds.length, packages]);
 
   const pollStatus = useCallback(async () => {
     try {
@@ -774,39 +952,6 @@ export const ContractsDialog = ({
     };
   }, [status?.status, pollStatus]);
 
-  const handleFileSelect = async (
-    event: React.ChangeEvent<HTMLInputElement>,
-  ) => {
-    const files = event.target.files;
-    if (!files) return;
-
-    const newDarFiles: DarFile[] = [];
-
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
-      if (file.name.endsWith(".dar")) {
-        const arrayBuffer = await file.arrayBuffer();
-        const base64 = btoa(
-          new Uint8Array(arrayBuffer).reduce(
-            (data, byte) => data + String.fromCharCode(byte),
-            "",
-          ),
-        );
-        newDarFiles.push({
-          filename: file.name,
-          data: base64,
-        });
-      }
-    }
-
-    setDarFiles([...darFiles, ...newDarFiles]);
-    event.target.value = "";
-  };
-
-  const handleRemoveDarFile = (index: number) => {
-    setDarFiles(darFiles.filter((_, i) => i !== index));
-  };
-
   const handleAddContract = () => {
     setContracts([...contracts, createEmptyContract()]);
   };
@@ -829,14 +974,19 @@ export const ContractsDialog = ({
     setError(null);
 
     // Validate required fields
-    if (!operatorParty) {
+    if (contractType !== "vault" && !operatorParty) {
       setError("Operator party ID is required");
       setLoading(false);
       return;
     }
 
-    if (participantParties.length !== participantIds.length) {
-      setError(`Please provide party IDs for all ${participantIds.length} participants`);
+    if (
+      contractType !== "vault" &&
+      participantParties.length !== participantIds.length
+    ) {
+      setError(
+        `Please provide party IDs for all ${participantIds.length} participants`,
+      );
       setLoading(false);
       return;
     }
@@ -847,7 +997,6 @@ export const ContractsDialog = ({
         participant_ids: participantIds,
         participant_parties: participantParties,
         operator_party: operatorParty,
-        dar_files: darFiles,
         contracts: contracts,
       };
 
@@ -878,7 +1027,6 @@ export const ContractsDialog = ({
   const handleBack = () => {
     setContractType(null);
     setContracts([]);
-    setDarFiles([]);
   };
 
   const isInProgress = status?.status === "inprogress";
@@ -934,147 +1082,122 @@ export const ContractsDialog = ({
               <Typography variant="body2" color="text.secondary">
                 Configure and deploy contracts for the decentralized party. This
                 will coordinate with other participants to sign and execute the
-                submissions.
+                submissions. Make sure DARs have been uploaded first.
               </Typography>
 
-              <Divider />
-              <Typography variant="subtitle1">DAR Files</Typography>
-              <Box
-                sx={{
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: 1,
-                }}
-              >
-                <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-                  <Button
-                    component="label"
-                    variant="outlined"
-                    startIcon={<UploadFileIcon />}
-                  >
-                    Select DAR Files
-                    <input
-                      type="file"
-                      hidden
-                      multiple
-                      accept=".dar"
-                      onChange={handleFileSelect}
-                    />
-                  </Button>
-                  <Typography variant="body2" color="text.secondary">
-                    {darFiles.length === 0
-                      ? "No files selected"
-                      : `${darFiles.length} file(s) selected`}
+              {contractType !== "vault" && (
+                <>
+                  <Divider />
+                  <Typography variant="subtitle1">
+                    Party Configuration
                   </Typography>
-                </Box>
-                {darFiles.length > 0 && (
-                  <Box
-                    sx={{
-                      display: "flex",
-                      flexWrap: "wrap",
-                      gap: 1,
-                      p: 1,
-                      border: "1px solid",
-                      borderColor: "divider",
-                      borderRadius: 1,
-                    }}
-                  >
-                    {darFiles.map((file, index) => (
-                      <Box
-                        key={index}
-                        sx={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 0.5,
-                          px: 1,
-                          py: 0.5,
-                          bgcolor: "action.hover",
-                          borderRadius: 1,
-                        }}
-                      >
-                        <Typography variant="body2">{file.filename}</Typography>
-                        <IconButton
-                          size="small"
-                          onClick={() => handleRemoveDarFile(index)}
-                        >
-                          <DeleteIcon fontSize="small" />
-                        </IconButton>
-                      </Box>
-                    ))}
-                  </Box>
-                )}
-              </Box>
+                </>
+              )}
 
-              <Divider />
-              <Typography variant="subtitle1">Party Configuration</Typography>
-
-              <TextField
-                size="small"
-                label="Operator Party ID"
-                value={operatorParty}
-                onChange={(e) => setOperatorParty(e.target.value)}
-                fullWidth
-                required
-                error={!operatorParty}
-                helperText="Full party ID for the operator (e.g., operator::1220...)"
-              />
-
-              <Typography variant="subtitle2" sx={{ mt: 1 }}>
-                Participant Party IDs ({participantParties.length}/{participantIds.length})
-              </Typography>
-              <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-                Enter the party ID for each participant. Must match the order of participant IDs.
-              </Typography>
-              <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+              {contractType !== "vault" && (
                 <TextField
                   size="small"
-                  placeholder="Paste party ID, press Enter"
+                  label="Operator Party ID"
+                  value={operatorParty}
+                  onChange={(e) => setOperatorParty(e.target.value)}
                   fullWidth
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      const input = e.target as HTMLInputElement;
-                      const value = input.value.trim();
-                      if (value && participantParties.length < participantIds.length) {
-                        setParticipantParties([...participantParties, value]);
-                        input.value = "";
-                      }
-                      e.preventDefault();
-                    }
-                  }}
-                  disabled={participantParties.length >= participantIds.length}
+                  required
+                  error={!operatorParty}
+                  helperText="Full party ID for the operator (e.g., operator::1220...)"
                 />
-                {participantParties.length > 0 && (
-                  <Box sx={{ display: "flex", flexDirection: "column", gap: 0.5 }}>
-                    {participantParties.map((party, idx) => (
-                      <Box
-                        key={idx}
-                        sx={{
-                          display: "flex",
-                          alignItems: "center",
-                          bgcolor: "action.hover",
-                          borderRadius: 1,
-                          px: 1,
-                          py: 0.5,
-                        }}
-                      >
-                        <Typography variant="caption" color="text.secondary" sx={{ mr: 1, minWidth: 20 }}>
-                          {idx + 1}.
-                        </Typography>
-                        <Typography variant="caption" sx={{ flex: 1, fontFamily: "monospace", overflow: "hidden", textOverflow: "ellipsis" }}>
-                          {party}
-                        </Typography>
-                        <IconButton
-                          size="small"
-                          onClick={() => setParticipantParties(participantParties.filter((_, i) => i !== idx))}
-                          sx={{ p: 0.25 }}
+              )}
+
+              <>
+                <Typography variant="subtitle2" sx={{ mt: 1 }}>
+                  Participant Party IDs ({participantParties.length}/
+                  {participantIds.length})
+                </Typography>
+                <Typography
+                  variant="body2"
+                  color="text.secondary"
+                  sx={{ mb: 1 }}
+                >
+                  Enter the party ID for each participant. Must match the order
+                  of participant IDs.
+                </Typography>
+                <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+                  <TextField
+                    size="small"
+                    placeholder="Paste party ID, press Enter"
+                    fullWidth
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        const input = e.target as HTMLInputElement;
+                        const value = input.value.trim();
+                        if (
+                          value &&
+                          participantParties.length < participantIds.length
+                        ) {
+                          setParticipantParties([...participantParties, value]);
+                          input.value = "";
+                        }
+                        e.preventDefault();
+                      }
+                    }}
+                    disabled={
+                      participantParties.length >= participantIds.length
+                    }
+                  />
+                  {participantParties.length > 0 && (
+                    <Box
+                      sx={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 0.5,
+                      }}
+                    >
+                      {participantParties.map((party, idx) => (
+                        <Box
+                          key={idx}
+                          sx={{
+                            display: "flex",
+                            alignItems: "center",
+                            bgcolor: "action.hover",
+                            borderRadius: 1,
+                            px: 1,
+                            py: 0.5,
+                          }}
                         >
-                          <DeleteIcon sx={{ fontSize: 14 }} />
-                        </IconButton>
-                      </Box>
-                    ))}
-                  </Box>
-                )}
-              </Box>
+                          <Typography
+                            variant="caption"
+                            color="text.secondary"
+                            sx={{ mr: 1, minWidth: 20 }}
+                          >
+                            {idx + 1}.
+                          </Typography>
+                          <Typography
+                            variant="caption"
+                            sx={{
+                              flex: 1,
+                              fontFamily: "monospace",
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                            }}
+                          >
+                            {party}
+                          </Typography>
+                          <IconButton
+                            size="small"
+                            onClick={() =>
+                              setParticipantParties(
+                                participantParties.filter((_, i) => i !== idx),
+                              )
+                            }
+                            sx={{ p: 0.25 }}
+                          >
+                            <DeleteIcon sx={{ fontSize: 14 }} />
+                          </IconButton>
+                        </Box>
+                      ))}
+                    </Box>
+                  )}
+                </Box>
+              </>
 
               <Divider />
               <Box
@@ -1112,6 +1235,7 @@ export const ContractsDialog = ({
                     index={index}
                     participantCount={participantIds.length}
                     partyId={partyId}
+                    knownPackageIds={allPackageIds}
                   />
                 ))
               )}

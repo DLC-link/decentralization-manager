@@ -24,9 +24,6 @@ pub struct ContractsConfig {
     pub participant_parties: Vec<CantonId>,
     /// Operator party ID
     pub operator_party: CantonId,
-    /// DAR files to upload (base64-encoded)
-    #[serde(default)]
-    pub dar_files: Vec<DarFile>,
     /// Contract definitions to create after decentralized party setup
     #[serde(default)]
     pub contracts: Vec<ContractDefinition>,
@@ -41,7 +38,6 @@ impl ContractsConfig {
         participant_ids: Vec<CantonId>,
         participant_parties: Vec<CantonId>,
         operator_party: CantonId,
-        dar_files: Vec<DarFile>,
         contracts: Vec<ContractDefinition>,
         instance_name: String,
     ) -> Self {
@@ -50,7 +46,6 @@ impl ContractsConfig {
             participant_ids,
             participant_parties,
             operator_party,
-            dar_files,
             contracts,
             instance_name,
         }

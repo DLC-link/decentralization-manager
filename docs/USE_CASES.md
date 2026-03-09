@@ -48,7 +48,7 @@ curl -X POST http://custodian-a:8080/contracts \
       {
         "id": "governance-rules",
         "name": "VaultGovernanceRules",
-        "package_id": "#bitsafe-vault-governance-v0-rc5",
+        "package_id": "#bitsafe-vault-governance-v0-rc8",
         "module_name": "BitsafeVault.VaultGovernance",
         "entity_name": "VaultGovernanceRules",
         "fields": [

@@ -73,6 +73,10 @@ pub async fn accept_invitation(
             tracing::info!("Accepting contracts invitation, triggering attestor workflow");
             data.contracts_trigger.notify_one();
         }
+        InvitationType::Dars => {
+            tracing::info!("Accepting DARs invitation, triggering attestor workflow");
+            data.dars_trigger.notify_one();
+        }
     }
 
     HttpResponse::Ok().json(serde_json::json!({

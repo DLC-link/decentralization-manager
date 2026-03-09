@@ -7,8 +7,11 @@ import {
   Button,
   TextField,
   InputAdornment,
+  LinearProgress,
+  IconButton,
 } from "@mui/material";
 import FilterListIcon from "@mui/icons-material/FilterList";
+import SearchIcon from "@mui/icons-material/Search";
 import AddIcon from "@mui/icons-material/Add";
 import { Header } from "./components/Header";
 import { PartyCard } from "./components/PartyCard";
@@ -18,7 +21,7 @@ import { LoadingSkeleton } from "./components/LoadingSkeleton";
 import { OnboardingDialog } from "./components/OnboardingDialog";
 import { InvitationModal } from "./components/InvitationModal";
 import { useSnackbar } from "./contexts";
-import { API_BASE, MAINNET_DEMO } from "./constants";
+import { API_BASE, ADMIN_ACCESS, OPERATOR_API_URLS } from "./constants";
 import type {
   DecentralizedParty,
   NodeConfig,
@@ -51,6 +54,8 @@ const App = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [partyFilter, setPartyFilter] = useState("cbtc-network");
+  const [refreshingParties, setRefreshingParties] = useState(false);
+  const [operatorParty, setOperatorParty] = useState("");
   const { showSnackbar } = useSnackbar();
 
   useEffect(() => {
@@ -60,7 +65,18 @@ const App = () => {
     window.scrollTo(0, 0);
   }, []);
 
+  useEffect(() => {
+    const network = nodeConfig?.canton.network;
+    if (!network) return;
+    const url = OPERATOR_API_URLS[network];
+    fetch(url)
+      .then((res) => res.json())
+      .then((data: { partyId: string }) => setOperatorParty(data.partyId))
+      .catch(() => {});
+  }, [nodeConfig]);
+
   const refreshParties = useCallback(async () => {
+    setRefreshingParties(true);
     try {
       const params = partyFilter
         ? `?prefix=${encodeURIComponent(partyFilter)}`
@@ -76,6 +92,8 @@ const App = () => {
       showSnackbar(
         err instanceof Error ? err.message : "Failed to refresh parties",
       );
+    } finally {
+      setRefreshingParties(false);
     }
   }, [showSnackbar, partyFilter]);
 
@@ -264,31 +282,44 @@ const App = () => {
                   variant="contained"
                   startIcon={<AddIcon />}
                   onClick={() => setOnboardingDialogOpen(true)}
-                  disabled={MAINNET_DEMO}
+                  disabled={!ADMIN_ACCESS}
                 >
                   Create Party
                 </Button>
               </Box>
-              <TextField
-                size="small"
-                label="Filter by prefix"
-                value={partyFilter}
-                onChange={(e) => setPartyFilter(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    refreshParties();
-                  }
-                }}
-                InputProps={{
-                  startAdornment: (
-                    <InputAdornment position="start">
-                      <FilterListIcon fontSize="small" color="action" />
-                    </InputAdornment>
-                  ),
-                }}
-                sx={{ width: 300 }}
-                helperText="Press Enter to apply filter"
-              />
+              <Box sx={{ display: "flex", alignItems: "flex-start", gap: 1 }}>
+                <TextField
+                  size="small"
+                  label="Filter by prefix"
+                  value={partyFilter}
+                  onChange={(e) => setPartyFilter(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      refreshParties();
+                    }
+                  }}
+                  disabled={refreshingParties}
+                  InputProps={{
+                    startAdornment: (
+                      <InputAdornment position="start">
+                        <FilterListIcon fontSize="small" color="action" />
+                      </InputAdornment>
+                    ),
+                  }}
+                  sx={{ width: 300 }}
+                />
+                <IconButton
+                  onClick={refreshParties}
+                  disabled={refreshingParties}
+                  color="primary"
+                  sx={{ mt: "1px" }}
+                >
+                  <SearchIcon />
+                </IconButton>
+              </Box>
+              {refreshingParties && (
+                <LinearProgress sx={{ mt: 1, borderRadius: 1 }} />
+              )}
             </Box>
 
             {parties.map((party) => (
@@ -299,6 +330,8 @@ const App = () => {
                 selfParticipantId={nodeConfig?.node.participant_id}
                 authStatus={authStatuses.find((a) => a.dec_party_id === party.party_id)}
                 onAuthRefresh={refreshAuthStatus}
+                operatorParty={operatorParty}
+                network={nodeConfig?.canton.network}
               />
             ))}
 

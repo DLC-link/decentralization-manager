@@ -1,7 +1,6 @@
-use std::{collections::HashSet, sync::Arc};
+use std::sync::Arc;
 
 use anyhow::Context;
-use base64::{Engine, engine::general_purpose::STANDARD};
 use tokio::fs;
 
 use crate::{
@@ -19,7 +18,7 @@ use crate::{
 
 use super::{
     ContractsConfig, ContractsDirs, ContractsStep,
-    steps::{execute_submissions, prepare_submissions, sign_submissions, upload_dars},
+    steps::{execute_submissions, prepare_submissions, sign_submissions},
 };
 
 pub async fn start_coordinator(
@@ -84,25 +83,11 @@ async fn run_workflow(
     let token = creds.token;
     let user_id = creds.user_id;
 
-    let mut coordinator_completed_steps = HashSet::new();
-
-    // Encode DAR files to send to attestors with UploadDars command
-    let dar_payload = encode_dars_payload(&config)?;
-    workflow_state.set_command_payload(dar_payload).await;
-
     loop {
         let current_step = workflow_state.current_step().await;
 
         match current_step {
             ContractsStep::WaitingForAttestors => {
-                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-            }
-            ContractsStep::UploadDars => {
-                if !coordinator_completed_steps.contains(&ContractsStep::UploadDars) {
-                    tracing::info!("Coordinator executing: Upload DARs");
-                    upload_dars(&node_config, &config).await?;
-                    coordinator_completed_steps.insert(ContractsStep::UploadDars);
-                }
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             }
             ContractsStep::PrepareSubmissions => {
@@ -155,36 +140,6 @@ async fn run_workflow(
     }
 
     Ok(())
-}
-
-/// Encode DAR files from config for transmission to attestors
-fn encode_dars_payload(config: &ContractsConfig) -> Result<Vec<u8>> {
-    if config.dar_files.is_empty() {
-        tracing::info!("No DAR files to distribute to attestors");
-        return Ok(Vec::new());
-    }
-
-    tracing::info!(
-        "Encoding {count} DAR file(s) for distribution to attestors",
-        count = config.dar_files.len()
-    );
-
-    let mut dar_files = Vec::new();
-
-    for dar_file in &config.dar_files {
-        let data = STANDARD.decode(&dar_file.data).map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to decode base64 DAR data for {}: {e}",
-                dar_file.filename
-            )
-        })?;
-        dar_files.push((dar_file.filename.clone(), data));
-    }
-
-    // Sort for consistent ordering
-    dar_files.sort_by(|a, b| a.0.cmp(&b.0));
-
-    Ok(utils::encode_files(&dar_files))
 }
 
 /// Load all prepared submission files and encode them for transmission

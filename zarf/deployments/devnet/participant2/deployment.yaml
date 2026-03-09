@@ -20,6 +20,7 @@ data:
     ledger_api_host = "participant-ibtc-devnet-2.catalyst-canton.svc.cluster.local"
     ledger_api_port = 5001
     synchronizer = "global"
+    network = "devnet"
 
     [timeouts]
     handshake_timeout_secs = 30
@@ -38,8 +39,14 @@ data:
     client_id = "attestor-2"
     client_secret = "FbhvorMHEMrjUipxrfnwLjMBkFOzaIZ5"
 
+    [parties.packages]
+    vault_governance = "#bitsafe-vault-governance-v0-rc8"
+    vault = "#bitsafe-vault-v0-rc8"
+    utility_registry = "#utility-registry-app-v0"
+    utility_credential = "#utility-credential-app-v0"
+
     [[parties]]
-    dec_party_id = "vault-test::1220d12b8a4e2f440d86f46764afcfc8d9908de35f90b36bc19efcd8e198606c94d2"
+    dec_party_id = "vault-test-3::1220a840c4b8c9433447f7c86e90908a8cfc6145ce2abfc7e104d5afc60b8ebb3a83"
     member_party_id = "attestor-2::122099953934d9fe163fed07dd371fa13982b2b30749d6df56ecdba385f8c78a867a"
     user_id = "attestorUser2"
 
@@ -48,6 +55,13 @@ data:
     realm = "ibtc-catalyst-devnet"
     client_id = "attestor-2"
     client_secret = "FbhvorMHEMrjUipxrfnwLjMBkFOzaIZ5"
+
+    [parties.packages]
+    vault_governance = "#bitsafe-vault-governance-v0-rc8"
+    vault = "#bitsafe-vault-v0-rc8"
+    utility_registry = "#utility-registry-app-v0"
+    utility_credential = "#utility-credential-app-v0"
+
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

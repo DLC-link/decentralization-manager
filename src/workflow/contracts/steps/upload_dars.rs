@@ -5,15 +5,13 @@ use canton_proto_rs::com::digitalasset::canton::admin::participant::v30::{
     upload_dar_request::UploadDarData,
 };
 
-use crate::{config::NodeConfig, error::Result, workflow::contracts::ContractsConfig};
+use crate::{config::NodeConfig, error::Result, workflow::contracts::DarFile};
 
-/// Upload DAR files to the participant from ContractsConfig
+/// Upload DAR files to the participant
 ///
-/// Takes DAR files from the contracts config (base64-encoded) and uploads them
-/// to the Canton participant. Used by the coordinator.
-pub async fn upload_dars(config: &NodeConfig, contracts_config: &ContractsConfig) -> Result {
-    let dar_files = &contracts_config.dar_files;
-
+/// Takes DAR files (base64-encoded) and uploads them to the Canton participant.
+/// Used by the coordinator.
+pub async fn upload_dars(config: &NodeConfig, dar_files: &[DarFile]) -> Result {
     if dar_files.is_empty() {
         tracing::info!("No DAR files to upload, skipping");
         return Ok(());

@@ -10,12 +10,12 @@ use crate::{
     server::{
         AppState,
         types::{
-            ContractsRequest, HttpWorkflowState, KickRequest, KickResponse, KickStatus,
-            ListenerPauseGuard, OnboardingRequest, OnboardingResponse, OnboardingStatus,
-            WorkflowProgress, WorkflowResponse,
+            ContractsRequest, DarsRequest, HttpWorkflowState, KickRequest, KickResponse,
+            KickStatus, ListenerPauseGuard, OnboardingRequest, OnboardingResponse,
+            OnboardingStatus, WorkflowProgress, WorkflowResponse,
         },
     },
-    workflow,
+    workflow::{self, ContractsConfig},
 };
 
 // ============================================================================
@@ -30,6 +30,9 @@ pub type OnboardingWorkflowState = HttpWorkflowState<OnboardingStatus>;
 
 /// State for tracking contracts workflow
 pub type ContractsWorkflowState = HttpWorkflowState<WorkflowProgress>;
+
+/// State for tracking DARs upload workflow
+pub type DarsWorkflowState = HttpWorkflowState<WorkflowProgress>;
 
 // ============================================================================
 // Kick Workflow
@@ -138,6 +141,7 @@ pub async fn start_kick(
             None, // No onboarding config
             Some(kick_config),
             None, // No contracts config
+            None, // No dars config
             None, // No auth registry for kick
         )
         .await;
@@ -340,6 +344,7 @@ pub async fn start_onboarding(
             Some(onboarding_config),
             None, // No kick config
             None, // No contracts config
+            None, // No dars config
             None, // No auth registry for onboarding
         )
         .await;
@@ -498,7 +503,6 @@ pub async fn start_contracts(
         body.participant_ids.clone(),
         body.participant_parties.clone(),
         body.operator_party.clone(),
-        body.dar_files.clone(),
         body.contracts.clone(),
         instance_name,
     );
@@ -529,11 +533,12 @@ pub async fn start_contracts(
         tokio::time::sleep(Duration::from_secs(2)).await;
 
         let result = workflow::start_coordinator(
-            config,
+            config.clone(),
             workflow::WorkflowType::Contracts,
             None, // No onboarding config
             None, // No kick config
-            Some(contracts_config),
+            Some(contracts_config.clone()),
+            None, // No dars config
             workflow_auth,
         )
         .await;
@@ -547,6 +552,10 @@ pub async fn start_contracts(
             Ok(()) => {
                 *status = WorkflowProgress::Completed;
                 tracing::info!("Contracts workflow completed successfully");
+                // Save package IDs from deployed contracts to party config
+                if let Err(e) = save_deployed_packages(&config, &contracts_config).await {
+                    tracing::warn!("Failed to save package config: {e}");
+                }
             }
             Err(e) => {
                 *status = WorkflowProgress::Failed;
@@ -574,6 +583,221 @@ pub async fn get_contracts_status(
         "status": *status,
         "error": *error,
     }))
+}
+
+/// Save deployed package IDs to party config after successful contracts workflow
+async fn save_deployed_packages(config: &NodeConfig, contracts_config: &ContractsConfig) -> Result {
+    let mut fresh_config = NodeConfig::from_dir(config.root_dir()).await?;
+    let creds = fresh_config
+        .parties
+        .iter_mut()
+        .find(|p| p.dec_party_id == contracts_config.decentralized_party_id);
+    if let Some(creds) = creds {
+        for contract in &contracts_config.contracts {
+            match (contract.module_name.as_str(), contract.entity_name.as_str()) {
+                ("BitsafeVault.VaultGovernance", "VaultGovernanceRules") => {
+                    creds.packages.vault_governance = Some(contract.package_id.clone());
+                }
+                ("BitsafeVault.Vault", "Vault") => {
+                    creds.packages.vault = Some(contract.package_id.clone());
+                }
+                (m, _) if m.starts_with("Utility.Registry.App") => {
+                    creds.packages.utility_registry = Some(contract.package_id.clone());
+                }
+                (m, _) if m.starts_with("Utility.Credential.App") => {
+                    creds.packages.utility_credential = Some(contract.package_id.clone());
+                }
+                _ => {}
+            }
+        }
+        fresh_config.save_config().await?;
+        tracing::info!("Saved package IDs to party config");
+    }
+    Ok(())
+}
+
+// ============================================================================
+// DARs Upload Workflow
+// ============================================================================
+
+/// Start a DARs upload workflow to distribute DARs across all participants
+#[post("/dars")]
+pub async fn start_dars(
+    data: web::Data<AppState>,
+    dars_state: web::Data<Arc<DarsWorkflowState>>,
+    body: web::Json<DarsRequest>,
+) -> impl Responder {
+    // Check if a DARs workflow is already in progress
+    {
+        let status = dars_state.status.read().await;
+        if *status == WorkflowProgress::InProgress {
+            return HttpResponse::Conflict().json(serde_json::json!({
+                "error": "A DARs upload workflow is already in progress"
+            }));
+        }
+    }
+
+    // Update status to in progress
+    {
+        let mut status = dars_state.status.write().await;
+        *status = WorkflowProgress::InProgress;
+        let mut error = dars_state.error.write().await;
+        *error = None;
+    }
+
+    // Create DARs config from request
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let instance_name = format!("dars-upload-{timestamp}");
+    let dars_config = workflow::DarsConfig {
+        dar_files: body.dar_files.clone(),
+        instance_name,
+    };
+
+    // Spawn the DARs workflow in the background
+    let config = data.config.clone();
+    let dars_state_clone = dars_state.get_ref().clone();
+    let listener_control = data.noise_listener_control.clone();
+    let listener_notify = data.noise_listener_notify.clone();
+
+    tokio::spawn(async move {
+        let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
+
+        // Send invites to all peers before starting coordinator workflow
+        let invite_result = send_dars_invites(&config).await;
+        if let Err(e) = invite_result {
+            tracing::error!("Failed to send DARs invites: {e}");
+            guard.resume().await;
+            let mut status = dars_state_clone.status.write().await;
+            let mut error = dars_state_clone.error.write().await;
+            *status = WorkflowProgress::Failed;
+            *error = Some(format!("Failed to send invites: {e}"));
+            return;
+        }
+
+        // Give peers time to start their attestor workflows
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        let result = workflow::start_coordinator(
+            config,
+            workflow::WorkflowType::Dars,
+            None, // No onboarding config
+            None, // No kick config
+            None, // No contracts config
+            Some(dars_config),
+            None, // No auth
+        )
+        .await;
+
+        guard.resume().await;
+
+        let mut status = dars_state_clone.status.write().await;
+        let mut error = dars_state_clone.error.write().await;
+
+        match result {
+            Ok(()) => {
+                *status = WorkflowProgress::Completed;
+                tracing::info!("DARs upload workflow completed successfully");
+            }
+            Err(e) => {
+                *status = WorkflowProgress::Failed;
+                *error = Some(format!("{e}"));
+                tracing::error!("DARs upload workflow failed: {e}");
+            }
+        }
+    });
+
+    HttpResponse::Accepted().json(WorkflowResponse {
+        status: WorkflowProgress::InProgress,
+        message: "DARs upload workflow started".to_string(),
+    })
+}
+
+/// Get the current status of the DARs upload workflow
+#[get("/dars/status")]
+pub async fn get_dars_status(dars_state: web::Data<Arc<DarsWorkflowState>>) -> impl Responder {
+    let status = dars_state.status.read().await;
+    let error = dars_state.error.read().await;
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "status": *status,
+        "error": *error,
+    }))
+}
+
+/// Send DARs invites to all peers using Noise protocol
+async fn send_dars_invites(config: &NodeConfig) -> Result {
+    let network_config = config.load_network_config().await?;
+    let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
+
+    let current_participant_id = config.participant_id();
+    let invite_message = Message::new_empty(MessageType::InviteDars);
+
+    for peer in &network_config.peers {
+        if peer.participant_id == *current_participant_id {
+            continue;
+        }
+
+        if peer.public_key.is_empty() {
+            tracing::warn!(
+                "Skipping invite to {} - no public key configured",
+                peer.participant_id
+            );
+            continue;
+        }
+
+        let peer_pub_key = match parse_public_key(&peer.public_key) {
+            Ok(pk) => pk,
+            Err(e) => {
+                tracing::warn!(
+                    "Skipping invite to {} - invalid public key: {e}",
+                    peer.participant_id
+                );
+                continue;
+            }
+        };
+
+        let psk = keypair.derive_psk(&peer_pub_key);
+        let identity = config.participant_id().to_string();
+
+        tracing::info!(
+            "Sending DARs invite to {} at {}:{}",
+            peer.participant_id,
+            peer.address,
+            peer.port
+        );
+
+        match send_noise_message(
+            &peer.address,
+            peer.port,
+            &psk,
+            identity.as_bytes(),
+            &invite_message,
+        )
+        .await
+        {
+            Ok(response) => {
+                if let Ok(msg) = Message::from_bytes(&response) {
+                    if msg.msg_type == MessageType::Ack {
+                        tracing::info!("Peer {} acknowledged DARs invite", peer.participant_id);
+                    } else {
+                        tracing::warn!(
+                            "Peer {} responded with {msg_type:?} instead of Ack",
+                            peer.participant_id,
+                            msg_type = msg.msg_type
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to send DARs invite to {}: {e}", peer.participant_id);
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Send contracts invites to all peers using Noise protocol

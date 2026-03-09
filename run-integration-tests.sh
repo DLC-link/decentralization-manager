@@ -3,8 +3,8 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DEV_DIR="$SCRIPT_DIR/development"
-DARS_DIR="$DEV_DIR/dars"
+DEV_DIR="$SCRIPT_DIR/development/local"
+DARS_DIR="$SCRIPT_DIR/development/dars"
 
 # Ports
 P1_HTTP=8081
@@ -345,37 +345,70 @@ echo "Participant UIDs in party:"
 echo "$PARTICIPANT_UIDS"
 
 # ==============================================================================
-# Phase 4: Run contracts deployment workflow (SKIPPED - requires real Canton)
+# Phase 4: Run DARs upload workflow
 # ==============================================================================
 echo ""
 echo "=========================================="
-echo "Phase 4: Skipping contracts deployment (requires real Canton with party IDs)..."
+echo "Phase 4: Running DARs upload workflow..."
+echo "=========================================="
+
+# Create temp file for the large JSON payload
+DARS_REQUEST_FILE=$(mktemp)
+TEMP_FILES+=("$DARS_REQUEST_FILE")
+
+# Read and base64 encode DAR files
+DAR1_B64=$(base64 -i "$DARS_DIR/cbtc-1.0.0.dar")
+DAR2_B64=$(base64 -i "$DARS_DIR/cbtc-governance-1.0.0.dar")
+
+# Write JSON to temp file (avoids "argument list too long" error)
+cat > "$DARS_REQUEST_FILE" <<EOF
+{
+  "dar_files": [
+    {"filename": "cbtc-1.0.0.dar", "data": "$DAR1_B64"},
+    {"filename": "cbtc-governance-1.0.0.dar", "data": "$DAR2_B64"}
+  ]
+}
+EOF
+
+echo "Starting DARs upload on participant-1..."
+curl -s -X POST "http://localhost:$P1_HTTP/dars" \
+    -H "Content-Type: application/json" \
+    -d @"$DARS_REQUEST_FILE"
+echo ""
+
+# Accept invitations on attestors
+accept_invitation $P2_HTTP "participant-2" "Dars" &
+PID1=$!
+accept_invitation $P3_HTTP "participant-3" "Dars" &
+PID2=$!
+wait $PID1 $PID2
+
+poll_status $P1_HTTP "dars/status"
+
+# ==============================================================================
+# Phase 5: Run contracts deployment workflow (SKIPPED - requires real Canton)
+# ==============================================================================
+echo ""
+echo "=========================================="
+echo "Phase 5: Skipping contracts deployment (requires real Canton with party IDs)..."
 echo "=========================================="
 
 # # Create temp file for the large JSON payload
 # CONTRACTS_REQUEST_FILE=$(mktemp)
 # TEMP_FILES+=("$CONTRACTS_REQUEST_FILE")
 #
-# # Read and base64 encode DAR files
-# DAR1_B64=$(base64 -i "$DARS_DIR/cbtc-1.0.0.dar")
-# DAR2_B64=$(base64 -i "$DARS_DIR/cbtc-governance-1.0.0.dar")
-#
 # # Get participant UIDs as JSON array for the request
 # PARTICIPANT_IDS_JSON=$(echo "$PARTY_JSON" | jq '[.participants[].participant_uid]')
 # PARTICIPANT_PARTIES_JSON=$(echo "$PARTY_JSON" | jq '[.participants[].party_id]')  # TODO: needs real party IDs
 # OPERATOR_PARTY="operator::..."  # TODO: needs real operator party ID
 #
-# # Write JSON to temp file (avoids "argument list too long" error)
+# # Write JSON to temp file
 # cat > "$CONTRACTS_REQUEST_FILE" <<EOF
 # {
 #   "decentralized_party_id": "$PARTY_ID",
 #   "participant_ids": $PARTICIPANT_IDS_JSON,
 #   "participant_parties": $PARTICIPANT_PARTIES_JSON,
 #   "operator_party": "$OPERATOR_PARTY",
-#   "dar_files": [
-#     {"filename": "cbtc-1.0.0.dar", "data": "$DAR1_B64"},
-#     {"filename": "cbtc-governance-1.0.0.dar", "data": "$DAR2_B64"}
-#   ],
 #   "contracts": [...]
 # }
 # EOF
@@ -396,11 +429,11 @@ echo "=========================================="
 # poll_status $P1_HTTP "contracts/status"
 
 # ==============================================================================
-# Phase 5: Run kick workflow (kick participant 3)
+# Phase 6: Run kick workflow (kick participant 3)
 # ==============================================================================
 echo ""
 echo "=========================================="
-echo "Phase 5: Running kick workflow (removing participant-3)..."
+echo "Phase 6: Running kick workflow (removing participant-3)..."
 echo "=========================================="
 
 # Refetch party details to find participant 3's UID and owner key

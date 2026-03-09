@@ -16,13 +16,15 @@ import {
 } from "@mui/material";
 import PersonRemoveIcon from "@mui/icons-material/PersonRemove";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
+import CloudUploadIcon from "@mui/icons-material/CloudUpload";
 import { CopyableText } from "./CopyableText";
 import { KickDialog } from "./KickDialog";
 import { ContractsDialog } from "./ContractsDialog";
+import { DarsDialog } from "./DarsDialog";
 import { GovernanceSection } from "./GovernanceSection";
 import { AuthSection } from "./AuthSection";
-import type { DecentralizedParty, PartyAuthStatus } from "../types";
-import { MAINNET_DEMO } from "../constants";
+import type { DecentralizedParty, Network, PartyAuthStatus } from "../types";
+import { ADMIN_ACCESS } from "../constants";
 
 interface PartyCardProps {
   party: DecentralizedParty;
@@ -30,20 +32,24 @@ interface PartyCardProps {
   selfParticipantId?: string;
   authStatus?: PartyAuthStatus;
   onAuthRefresh?: () => void;
+  operatorParty?: string;
+  network?: Network;
 }
 
-export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onAuthRefresh }: PartyCardProps) => {
+export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onAuthRefresh, operatorParty, network }: PartyCardProps) => {
   const [kickDialogOpen, setKickDialogOpen] = useState(false);
   const [contractsDialogOpen, setContractsDialogOpen] = useState(false);
+  const [darsDialogOpen, setDarsDialogOpen] = useState(false);
   const [selectedParticipant, setSelectedParticipant] = useState<string>("");
   const [canScrollUp, setCanScrollUp] = useState(false);
   const [canScrollDown, setCanScrollDown] = useState(false);
   const contractsScrollRef = useRef<HTMLDivElement>(null);
 
-  // Find VaultGovernanceRules contract from party's contracts
-  const vaultGovernanceRulesContract = party.contracts?.find(
+  // Find VaultGovernanceRules contracts from party's contracts
+  const governanceContracts = party.contracts?.filter(
     (c) => c.template_id.includes("VaultGovernanceRules") || c.template_id.includes("VaultGovernance")
-  );
+  ) ?? [];
+  const vaultGovernanceRulesContract = governanceContracts[0];
 
   const updateScrollShadows = useCallback(() => {
     const el = contractsScrollRef.current;
@@ -92,15 +98,26 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
             />
           )}
           {isOwner && (
-            <Button
-              variant="outlined"
-              size="small"
-              startIcon={<UploadFileIcon />}
-              onClick={() => setContractsDialogOpen(true)}
-              disabled={MAINNET_DEMO}
-            >
-              Deploy Contracts
-            </Button>
+            <>
+              <Button
+                variant="outlined"
+                size="small"
+                startIcon={<CloudUploadIcon />}
+                onClick={() => setDarsDialogOpen(true)}
+                disabled={!ADMIN_ACCESS}
+              >
+                Upload DARs
+              </Button>
+              <Button
+                variant="outlined"
+                size="small"
+                startIcon={<UploadFileIcon />}
+                onClick={() => setContractsDialogOpen(true)}
+                disabled={!ADMIN_ACCESS}
+              >
+                Deploy Contracts
+              </Button>
+            </>
           )}
         </Box>
 
@@ -156,7 +173,7 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
                         size="small"
                         color="error"
                         onClick={() => handleKickClick(p.participant_uid)}
-                        disabled={MAINNET_DEMO || p.participant_uid === selfParticipantId}
+                        disabled={!ADMIN_ACCESS || p.participant_uid === selfParticipantId}
                       >
                         <PersonRemoveIcon fontSize="small" />
                       </IconButton>
@@ -245,11 +262,16 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
 
       <CardContent sx={{ pt: 0 }}>
         <AuthSection partyId={party.party_id} authStatus={authStatus} onRefresh={onAuthRefresh} />
-        <GovernanceSection
-          partyId={party.party_id}
-          rulesContractId={vaultGovernanceRulesContract?.contract_id}
-          memberPartyId={authStatus?.member_party_id}
-        />
+        {authStatus?.rights?.dec_party_act_as && (
+          <GovernanceSection
+            partyId={party.party_id}
+            rulesContractId={vaultGovernanceRulesContract?.contract_id}
+            governanceContractIds={governanceContracts.map((c) => c.contract_id)}
+            memberPartyId={authStatus?.member_party_id}
+            defaultOperatorParty={operatorParty}
+            network={network}
+          />
+        )}
       </CardContent>
 
       <KickDialog
@@ -268,6 +290,14 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
         onComplete={onRefresh}
         partyId={party.party_id}
         participantIds={party.participants.map((p) => p.participant_uid)}
+        defaultOperatorParty={operatorParty}
+        knownPackageIds={[...new Set(party.contracts?.map((c) => c.package_id) ?? [])]}
+      />
+
+      <DarsDialog
+        open={darsDialogOpen}
+        onClose={() => setDarsDialogOpen(false)}
+        onComplete={onRefresh}
       />
     </Card>
   );

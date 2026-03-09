@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import {
+  Autocomplete,
   Box,
   Typography,
   Table,
@@ -29,20 +30,23 @@ import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import AddIcon from "@mui/icons-material/Add";
 import UndoIcon from "@mui/icons-material/Undo";
+import RefreshIcon from "@mui/icons-material/Refresh";
+import TimerOffIcon from "@mui/icons-material/TimerOff";
+import { ExecuteDialog } from "./ExecuteDialog";
 import {
   API_BASE,
-  MAINNET_DEMO,
+  ADMIN_ACCESS,
   MAX_TOTAL_DEPOSIT,
   MIN_DEPOSIT_AMOUNT,
   MIN_WITHDRAWAL_AMOUNT,
-  DEVNET_VAULT_RULES_CID,
-  DEVNET_FEATURED_APP_RIGHT_CID,
+  DEVNET_VAULT_RULES,
   DEVNET_VAULT_BACKEND_SIGNATORY,
-  DEVNET_AMULET_RULES_CID,
   DEVNET_CBTC_DEC_PARTY,
-  DEVNET_VAULT_PROCESSOR_RULES_CID,
-  DEVNET_OPERATOR,
-  DEVNET_ALLOCATION_FACTORY_CID,
+  DEVNET_VAULT_PROCESSOR_RULES,
+  TEMPLATE_VAULT_RULES,
+  TEMPLATE_ALLOCATION_FACTORY,
+  INTERFACE_FEATURED_APP_RIGHT,
+  TEMPLATE_REGISTRAR_SERVICE,
 } from "../constants";
 import type {
   GovernanceResponse,
@@ -50,7 +54,9 @@ import type {
   ActionType,
   ConfirmActionRequest,
   ExecuteActionRequest,
+  CancelConfirmationRequest,
   ExpireConfirmationRequest,
+  DisclosedContractInput,
   InstrumentId,
   VaultLimits,
   FarConfig,
@@ -62,60 +68,98 @@ import type {
   ProviderServicesResponse,
   UserServiceInfo,
   UserServicesResponse,
+  ContractWithBlob,
+  ContractQueryResponse,
+  Network,
 } from "../types";
 
-// Action type labels for display
-const ACTION_TYPE_OPTIONS = [
-  // Governance
-  { value: "governance_add_member", label: "Add Governance Member" },
-  { value: "governance_remove_member", label: "Remove Governance Member" },
-  { value: "governance_set_threshold", label: "Set Governance Threshold" },
-  { value: "governance_set_timeout", label: "Set Governance Timeout" },
-  // Vault Deployment
-  { value: "vault_deployment", label: "Deploy Vault" },
-  { value: "yield_epoch_deployment", label: "Deploy YieldEpoch" },
-  // Vault Operations
-  { value: "vault_pause", label: "Pause Vault" },
-  { value: "vault_unpause", label: "Unpause Vault" },
-  { value: "vault_update_limits", label: "Update Vault Limits" },
-  { value: "vault_update_backend", label: "Update Vault Backend" },
+// Action types — ordered per GOVERNANCE_CLIENT_MIGRATION.md vault launch sequence
+// Hidden entries are kept for type safety and display of existing actions
+const getActionTypeOptions = (
+  network?: Network,
+): { value: ActionType["type"]; label: string; hidden?: boolean }[] => [
+  // Step 1: Utility Registry Onboarding
   {
-    value: "vault_update_far_beneficiaries",
-    label: "Update FAR Beneficiaries",
+    value: "utility_create_provider_request",
+    label: "Create Provider Service",
   },
-  // Processor
+  { value: "utility_create_user_request", label: "Create User Service" },
+  { value: "utility_setup", label: "Setup Utility" },
+  // Feature App (needed before vault deployment for FAR config, devnet only)
+  {
+    value: "dev_net_feature_app",
+    label: "DevNet: Feature App",
+    hidden: network !== "devnet",
+  },
+  // Deploy Vault
+  { value: "vault_deployment", label: "Deploy Vault" },
+  // Deploy YieldEpoch
+  { value: "yield_epoch_deployment", label: "Deploy YieldEpoch" },
+  // Request Processor Deployment
   {
     value: "processor_deployment_request",
     label: "Request Processor Deployment",
   },
-  // Utility Onboarding
-  {
-    value: "utility_create_provider_request",
-    label: "Utility: Create Provider",
-  },
-  { value: "utility_create_user_request", label: "Utility: Create User" },
-  { value: "utility_setup", label: "Utility: Setup" },
+  // Accept Holder Service Requests
   {
     value: "utility_accept_holder_service_request",
-    label: "Utility: Accept Holder Service",
+    label: "Accept Holder Service",
+    hidden: true,
+  },
+  // Hidden — not in current vault launch sequence
+  {
+    value: "governance_add_member",
+    label: "Add Governance Member",
+    hidden: true,
   },
   {
-    value: "utility_create_transfer_rule",
-    label: "Utility: Create Transfer Rule",
+    value: "governance_remove_member",
+    label: "Remove Governance Member",
+    hidden: true,
   },
-  // Credential Actions
-  { value: "credential_offer_free", label: "Credential: Offer Free" },
-  { value: "credential_accept_free", label: "Credential: Accept Free" },
-  // DevNet
-  { value: "dev_net_feature_app", label: "DevNet: Feature App" },
-] as const;
+  {
+    value: "governance_set_threshold",
+    label: "Set Governance Threshold",
+    hidden: true,
+  },
+  {
+    value: "governance_set_timeout",
+    label: "Set Governance Timeout",
+    hidden: true,
+  },
+  { value: "vault_pause", label: "Pause Vault" },
+  { value: "vault_unpause", label: "Unpause Vault" },
+  { value: "vault_update_limits", label: "Update Vault Limits", hidden: true },
+  {
+    value: "vault_update_backend",
+    label: "Update Vault Backend",
+    hidden: true,
+  },
+  {
+    value: "vault_update_far_beneficiaries",
+    label: "Update FAR Beneficiaries",
+    hidden: true,
+  },
+  {
+    value: "credential_offer_free",
+    label: "Credential: Offer Free",
+    hidden: true,
+  },
+  {
+    value: "credential_accept_free",
+    label: "Credential: Accept Free",
+  },
+];
 
-type ActionTypeKey = (typeof ACTION_TYPE_OPTIONS)[number]["value"];
+type ActionTypeKey = ActionType["type"];
+
+// All action type options (network-independent, for label lookup)
+const ALL_ACTION_TYPE_OPTIONS = getActionTypeOptions();
 
 // Format an ActionType for display
 const formatActionType = (action: ActionType): string => {
   const label =
-    ACTION_TYPE_OPTIONS.find((opt) => opt.value === action.type)?.label ||
+    ALL_ACTION_TYPE_OPTIONS.find((opt) => opt.value === action.type)?.label ||
     action.type;
   return label;
 };
@@ -123,7 +167,10 @@ const formatActionType = (action: ActionType): string => {
 interface GovernanceSectionProps {
   partyId: string;
   rulesContractId?: string;
+  governanceContractIds?: string[];
   memberPartyId?: string;
+  defaultOperatorParty?: string;
+  network?: Network;
 }
 
 // Default values for action form
@@ -139,22 +186,28 @@ const defaultVaultLimits: VaultLimits = {
   min_withdrawal_amount: MIN_WITHDRAWAL_AMOUNT.toString(),
 };
 const defaultFarConfig: FarConfig = {
-  featured_app_right_cid: DEVNET_FEATURED_APP_RIGHT_CID,
+  featured_app_right_cid: "",
   beneficiaries: [],
 };
-const defaultVaultRulesCid = DEVNET_VAULT_RULES_CID;
+const defaultVaultRulesCid = DEVNET_VAULT_RULES.contract_id;
 const defaultVaultBackendSignatory = DEVNET_VAULT_BACKEND_SIGNATORY;
 
 export const GovernanceSection = ({
   partyId,
   rulesContractId: initialRulesContractId,
+  governanceContractIds = [],
   memberPartyId,
+  defaultOperatorParty,
+  network,
 }: GovernanceSectionProps) => {
   const [expanded, setExpanded] = useState(true);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<GovernanceResponse | null>(null);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [executeDialogAction, setExecuteDialogAction] =
+    useState<GovernanceAction | null>(null);
+  const [executeError, setExecuteError] = useState<string | null>(null);
   const [rulesContractId, setRulesContractId] = useState(
     initialRulesContractId || "",
   );
@@ -162,7 +215,7 @@ export const GovernanceSection = ({
   // Action form state
   const [showNewActionForm, setShowNewActionForm] = useState(false);
   const [selectedActionType, setSelectedActionType] = useState<ActionTypeKey>(
-    "governance_add_member",
+    "utility_create_provider_request",
   );
   const [formLoading, setFormLoading] = useState(false);
 
@@ -181,21 +234,21 @@ export const GovernanceSection = ({
   );
   const [vaultFarConfig, setVaultFarConfig] =
     useState<FarConfig>(defaultFarConfig);
-  const [vaultCid, setVaultCid] = useState(DEVNET_VAULT_RULES_CID);
+  const [vaultCid, setVaultCid] = useState(DEVNET_VAULT_RULES.contract_id);
   const [vaultId, setVaultId] = useState("");
   const [vaultRulesCid, setVaultRulesCid] = useState(defaultVaultRulesCid);
   const [vaultProcessorRulesCid, setVaultProcessorRulesCid] = useState(
-    DEVNET_VAULT_PROCESSOR_RULES_CID,
+    DEVNET_VAULT_PROCESSOR_RULES.contract_id,
   );
 
   // New fields for additional action types
-  const [operatorParty, setOperatorParty] = useState(DEVNET_OPERATOR);
+  const [operatorParty, setOperatorParty] = useState(
+    defaultOperatorParty || "",
+  );
   const [providerServiceCid, setProviderServiceCid] = useState("");
   const [userServiceCid, setUserServiceCid] = useState("");
-  const [amuletRulesCid, setAmuletRulesCid] = useState(DEVNET_AMULET_RULES_CID);
-  const [allocationFactoryCid, setAllocationFactoryCid] = useState(
-    DEVNET_ALLOCATION_FACTORY_CID,
-  );
+  const [amuletRulesCid, setAmuletRulesCid] = useState("");
+  const [allocationFactoryCid, setAllocationFactoryCid] = useState("");
   const [initialSupportedVaults, setInitialSupportedVaults] = useState<
     string[]
   >([]);
@@ -223,7 +276,20 @@ export const GovernanceSection = ({
     ProviderServiceInfo[]
   >([]);
   const [userServices, setUserServices] = useState<UserServiceInfo[]>([]);
+  const [registrarServiceContracts, setRegistrarServiceContracts] = useState<ContractWithBlob[]>([]);
   const [servicesLoading, setServicesLoading] = useState(false);
+
+  // Contracts fetched by template (with blobs)
+  const [vaultRulesContracts, setVaultRulesContracts] = useState<ContractWithBlob[]>([]);
+  const [allocationFactoryContracts, setAllocationFactoryContracts] = useState<ContractWithBlob[]>([]);
+  const [featuredAppRightContracts, setFeaturedAppRightContracts] = useState<ContractWithBlob[]>([]);
+  const [amuletRulesContract, setAmuletRulesContract] = useState<ContractWithBlob | null>(null);
+  const [amuletRulesLoading, setAmuletRulesLoading] = useState(false);
+  const [deployContractsLoading, setDeployContractsLoading] = useState(false);
+
+  // Burn Mint Factory (from external API, used for processor deployment)
+  const [burnMintFactory, setBurnMintFactory] = useState<ContractWithBlob | null>(null);
+  const [burnMintFactoryLoading, setBurnMintFactoryLoading] = useState(false);
 
   // Update rulesContractId when prop changes
   useEffect(() => {
@@ -288,7 +354,12 @@ export const GovernanceSection = ({
   useEffect(() => {
     if (
       selectedActionType === "processor_deployment_request" ||
-      selectedActionType === "yield_epoch_deployment"
+      selectedActionType === "yield_epoch_deployment" ||
+      selectedActionType === "vault_pause" ||
+      selectedActionType === "vault_unpause" ||
+      selectedActionType === "vault_update_limits" ||
+      selectedActionType === "vault_update_backend" ||
+      selectedActionType === "vault_update_far_beneficiaries"
     ) {
       fetchVaults();
     }
@@ -331,12 +402,151 @@ export const GovernanceSection = ({
     }
   }, [partyId]);
 
-  // Fetch services when action type is utility_setup
+  // Fetch services when action type needs service selection
   useEffect(() => {
-    if (selectedActionType === "utility_setup") {
+    if (
+      selectedActionType === "utility_setup" ||
+      selectedActionType === "utility_accept_holder_service_request" ||
+      selectedActionType === "credential_offer_free" ||
+      selectedActionType === "credential_accept_free"
+    ) {
       fetchServices();
     }
   }, [selectedActionType, fetchServices]);
+
+  // Fetch contracts by template (returns CID + blob)
+  const fetchContractsByTemplate = useCallback(
+    async (template: {
+      package_ref: string;
+      module: string;
+      entity: string;
+      interface?: boolean;
+    }) => {
+      const params = new URLSearchParams({
+        party_id: partyId,
+        package_id: template.package_ref,
+        module_name: template.module,
+        entity_name: template.entity,
+      });
+      if (template.interface) params.set("interface", "true");
+      const res = await fetch(`${API_BASE}/contracts/query?${params}`);
+      if (res.ok) {
+        const data: ContractQueryResponse = await res.json();
+        return data.contracts;
+      }
+      return [];
+    },
+    [partyId],
+  );
+
+  // Fetch all deployment-related contracts for vault_deployment
+  const fetchDeployContracts = useCallback(async () => {
+    setDeployContractsLoading(true);
+    try {
+      const [vaultRules, allocFactory, featAppRight, registrar] = await Promise.all([
+        fetchContractsByTemplate(TEMPLATE_VAULT_RULES),
+        fetchContractsByTemplate(TEMPLATE_ALLOCATION_FACTORY),
+        fetchContractsByTemplate(INTERFACE_FEATURED_APP_RIGHT),
+        fetchContractsByTemplate(TEMPLATE_REGISTRAR_SERVICE),
+      ]);
+      setVaultRulesContracts(vaultRules);
+      if (vaultRules.length > 0) setVaultRulesCid(vaultRules[0].contract_id);
+      setAllocationFactoryContracts(allocFactory);
+      if (allocFactory.length > 0) setAllocationFactoryCid(allocFactory[0].contract_id);
+      setFeaturedAppRightContracts(featAppRight);
+      if (featAppRight.length > 0) {
+        setVaultFarConfig((prev) => ({
+          ...prev,
+          featured_app_right_cid: featAppRight[0].contract_id,
+        }));
+      }
+      setRegistrarServiceContracts(registrar);
+      if (registrar.length > 0) setRegistrarServiceCid(registrar[0].contract_id);
+    } catch (e) {
+      console.error("Failed to fetch deployment contracts:", e);
+    } finally {
+      setDeployContractsLoading(false);
+    }
+  }, [fetchContractsByTemplate]);
+
+  // Fetch burn mint factory from external API (for processor deployment)
+  const fetchBurnMintFactory = useCallback(async () => {
+    setBurnMintFactoryLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/token-standard-contracts`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chain: "canton-devnet" }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.burn_mint_factory) {
+          setBurnMintFactory({
+            contract_id: data.burn_mint_factory.contract_id,
+            blob: data.burn_mint_factory.created_event_blob,
+          });
+        }
+      }
+    } catch (e) {
+      console.error("Failed to fetch burn mint factory:", e);
+    } finally {
+      setBurnMintFactoryLoading(false);
+    }
+  }, []);
+
+  // Fetch amulet rules from DSO API
+  const fetchAmuletRules = useCallback(async () => {
+    setAmuletRulesLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/amulet-rules`);
+      if (res.ok) {
+        const data: ContractWithBlob = await res.json();
+        setAmuletRulesContract(data);
+        setAmuletRulesCid(data.contract_id);
+      }
+    } catch (e) {
+      console.error("Failed to fetch amulet rules:", e);
+    } finally {
+      setAmuletRulesLoading(false);
+    }
+  }, []);
+
+  // Fetch deployment contracts when action type needs contract CIDs
+  useEffect(() => {
+    if (
+      selectedActionType === "vault_deployment" ||
+      selectedActionType === "processor_deployment_request" ||
+      selectedActionType === "yield_epoch_deployment"
+    ) {
+      fetchDeployContracts();
+    }
+    if (selectedActionType === "processor_deployment_request") {
+      fetchBurnMintFactory();
+    }
+    if (selectedActionType === "dev_net_feature_app") {
+      fetchAmuletRules();
+    }
+  }, [selectedActionType, fetchDeployContracts, fetchBurnMintFactory, fetchAmuletRules]);
+
+  // Build dynamic blob map from queried contracts (for ExecuteDialog)
+  const contractBlobMap = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const c of [
+      ...vaultRulesContracts,
+      ...allocationFactoryContracts,
+      ...featuredAppRightContracts,
+      ...registrarServiceContracts,
+    ]) {
+      if (c.blob) map[c.contract_id] = c.blob;
+    }
+    if (burnMintFactory?.blob) {
+      map[burnMintFactory.contract_id] = burnMintFactory.blob;
+    }
+    if (amuletRulesContract?.blob) {
+      map[amuletRulesContract.contract_id] = amuletRulesContract.blob;
+    }
+    return map;
+  }, [vaultRulesContracts, allocationFactoryContracts, featuredAppRightContracts, registrarServiceContracts, burnMintFactory, amuletRulesContract]);
 
   const handleConfirm = async (action: GovernanceAction) => {
     if (!rulesContractId) {
@@ -376,14 +586,17 @@ export const GovernanceSection = ({
     }
   };
 
-  const handleExecute = async (action: GovernanceAction) => {
+  const handleExecute = async (
+    action: GovernanceAction,
+    disclosedContracts: DisclosedContractInput[],
+  ) => {
     if (!rulesContractId) {
-      setError("Please enter the VaultGovernanceRules contract ID");
+      setExecuteError("Please enter the VaultGovernanceRules contract ID");
       return;
     }
 
     setActionLoading(action.action_hash);
-    setError(null);
+    setExecuteError(null);
 
     try {
       const request: ExecuteActionRequest = {
@@ -391,6 +604,7 @@ export const GovernanceSection = ({
         rules_contract_id: rulesContractId,
         action: action.action,
         confirmation_cids: action.confirmations.map((c) => c.contract_id),
+        disclosed_contracts: disclosedContracts,
       };
 
       const res = await fetch(`${API_BASE}/governance/execute`, {
@@ -404,16 +618,57 @@ export const GovernanceSection = ({
         throw new Error(errData.error || "Failed to execute action");
       }
 
-      // Refresh data
+      // Close dialog and refresh data
+      setExecuteDialogAction(null);
       await fetchGovernance();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to execute action");
+      setExecuteError(
+        e instanceof Error ? e.message : "Failed to execute action",
+      );
     } finally {
       setActionLoading(null);
     }
   };
 
-  const handleRevoke = async (action: GovernanceAction, confirmationCid: string) => {
+  const handleRevoke = async (
+    action: GovernanceAction,
+    confirmationCid: string,
+  ) => {
+    setActionLoading(action.action_hash);
+    setError(null);
+
+    try {
+      const request: CancelConfirmationRequest = {
+        party_id: partyId,
+        confirmation_cid: confirmationCid,
+      };
+
+      const res = await fetch(`${API_BASE}/governance/cancel`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(request),
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || "Failed to revoke confirmation");
+      }
+
+      // Refresh data
+      await fetchGovernance();
+    } catch (e) {
+      setError(
+        e instanceof Error ? e.message : "Failed to revoke confirmation",
+      );
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleExpire = async (
+    action: GovernanceAction,
+    confirmationCid: string,
+  ) => {
     if (!rulesContractId) {
       setError("Please enter the VaultGovernanceRules contract ID");
       return;
@@ -437,13 +692,14 @@ export const GovernanceSection = ({
 
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.error || "Failed to revoke confirmation");
+        throw new Error(errData.error || "Failed to expire confirmation");
       }
 
-      // Refresh data
       await fetchGovernance();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to revoke confirmation");
+      setError(
+        e instanceof Error ? e.message : "Failed to expire confirmation",
+      );
     } finally {
       setActionLoading(null);
     }
@@ -455,7 +711,9 @@ export const GovernanceSection = ({
   const getUserConfirmation = (action: GovernanceAction) => {
     const myMemberPartyId = data?.member_party_id || memberPartyId;
     if (!myMemberPartyId) return undefined;
-    return action.confirmations.find((c) => c.confirming_party === myMemberPartyId);
+    return action.confirmations.find(
+      (c) => c.confirming_party === myMemberPartyId,
+    );
   };
 
   // Build ActionType from form state
@@ -497,6 +755,8 @@ export const GovernanceSection = ({
             vaultFarConfig.beneficiaries.length > 0
               ? vaultFarConfig
               : undefined,
+          allocation_factory_cid: allocationFactoryCid,
+          registrar_service_cid: registrarServiceCid,
         };
       case "yield_epoch_deployment":
         return {
@@ -533,7 +793,7 @@ export const GovernanceSection = ({
           type: "processor_deployment_request",
           vault_processor_rules_cid: vaultProcessorRulesCid,
           vault_backend_signatory: vaultBackendSignatory,
-          allocation_factory_cid: allocationFactoryCid,
+          allocation_factory_cid: burnMintFactory?.contract_id || "",
           processor_far_config:
             vaultFarConfig.featured_app_right_cid ||
             vaultFarConfig.beneficiaries.length > 0
@@ -563,12 +823,6 @@ export const GovernanceSection = ({
           holder_service_request_cid: holderServiceRequestCid,
           holder: holderParty,
         };
-      case "utility_create_transfer_rule":
-        return {
-          type: "utility_create_transfer_rule",
-          operator: operatorParty,
-          registrar_service_cid: registrarServiceCid,
-        };
       case "credential_offer_free":
         return {
           type: "credential_offer_free",
@@ -596,6 +850,20 @@ export const GovernanceSection = ({
     }
   };
 
+  const validateBeneficiaryWeights = (
+    beneficiaries: AppRewardBeneficiary[],
+  ): string | null => {
+    if (beneficiaries.length === 0) return null;
+    const sum = beneficiaries.reduce(
+      (acc, b) => acc + (parseFloat(b.weight) || 0),
+      0,
+    );
+    if (Math.abs(sum - 1.0) > 1e-9) {
+      return `FAR beneficiary weights must sum to exactly 1.0, got ${sum}`;
+    }
+    return null;
+  };
+
   const handleSubmitAction = async () => {
     if (!rulesContractId) {
       setError("Please enter the VaultGovernanceRules contract ID");
@@ -605,6 +873,30 @@ export const GovernanceSection = ({
     const action = buildActionFromForm();
     if (!action) {
       setError("Invalid action type");
+      return;
+    }
+
+    // Validate beneficiary weights
+    let weightsError: string | null = null;
+    if (
+      action.type === "vault_deployment" &&
+      action.vault_far_config
+    ) {
+      weightsError = validateBeneficiaryWeights(
+        action.vault_far_config.beneficiaries,
+      );
+    } else if (
+      action.type === "processor_deployment_request" &&
+      action.processor_far_config
+    ) {
+      weightsError = validateBeneficiaryWeights(
+        action.processor_far_config.beneficiaries,
+      );
+    } else if (action.type === "vault_update_far_beneficiaries") {
+      weightsError = validateBeneficiaryWeights(action.new_beneficiaries);
+    }
+    if (weightsError) {
+      setError(weightsError);
       return;
     }
 
@@ -694,25 +986,54 @@ export const GovernanceSection = ({
       case "vault_pause":
       case "vault_unpause":
         return (
-          <TextField
-            label="Vault Contract ID"
-            value={vaultId}
-            onChange={(e) => setVaultId(e.target.value)}
-            size="small"
-            fullWidth
-          />
+          <FormControl fullWidth size="small">
+            <InputLabel>Vault</InputLabel>
+            <Select
+              value={vaultId}
+              label="Vault"
+              onChange={(e) => setVaultId(e.target.value)}
+              MenuProps={{ disableScrollLock: true }}
+            >
+              {vaultsLoading ? (
+                <MenuItem disabled>Loading vaults...</MenuItem>
+              ) : availableVaults.length > 0 ? (
+                availableVaults.map((vault) => (
+                  <MenuItem key={vault.contract_id} value={vault.contract_id}>
+                    {vault.vault_name} ({vault.share_symbol})
+                    {vault.is_paused ? " [Paused]" : ""}
+                  </MenuItem>
+                ))
+              ) : (
+                <MenuItem disabled>No vaults found</MenuItem>
+              )}
+            </Select>
+          </FormControl>
         );
       case "vault_update_limits":
         return (
           <>
-            <TextField
-              label="Vault Contract ID"
-              value={vaultId}
-              onChange={(e) => setVaultId(e.target.value)}
-              size="small"
-              fullWidth
-              sx={{ mb: 2 }}
-            />
+            <FormControl fullWidth size="small" sx={{ mb: 2 }}>
+              <InputLabel>Vault</InputLabel>
+              <Select
+                value={vaultId}
+                label="Vault"
+                onChange={(e) => setVaultId(e.target.value)}
+                MenuProps={{ disableScrollLock: true }}
+              >
+                {vaultsLoading ? (
+                  <MenuItem disabled>Loading vaults...</MenuItem>
+                ) : availableVaults.length > 0 ? (
+                  availableVaults.map((vault) => (
+                    <MenuItem key={vault.contract_id} value={vault.contract_id}>
+                      {vault.vault_name} ({vault.share_symbol})
+                      {vault.is_paused ? " [Paused]" : ""}
+                    </MenuItem>
+                  ))
+                ) : (
+                  <MenuItem disabled>No vaults found</MenuItem>
+                )}
+              </Select>
+            </FormControl>
             <Typography variant="caption" color="text.secondary">
               Vault Limits (Optional - leave empty for no limit)
             </Typography>
@@ -762,14 +1083,28 @@ export const GovernanceSection = ({
       case "vault_update_backend":
         return (
           <>
-            <TextField
-              label="Vault Contract ID"
-              value={vaultId}
-              onChange={(e) => setVaultId(e.target.value)}
-              size="small"
-              fullWidth
-              sx={{ mb: 2 }}
-            />
+            <FormControl fullWidth size="small" sx={{ mb: 2 }}>
+              <InputLabel>Vault</InputLabel>
+              <Select
+                value={vaultId}
+                label="Vault"
+                onChange={(e) => setVaultId(e.target.value)}
+                MenuProps={{ disableScrollLock: true }}
+              >
+                {vaultsLoading ? (
+                  <MenuItem disabled>Loading vaults...</MenuItem>
+                ) : availableVaults.length > 0 ? (
+                  availableVaults.map((vault) => (
+                    <MenuItem key={vault.contract_id} value={vault.contract_id}>
+                      {vault.vault_name} ({vault.share_symbol})
+                      {vault.is_paused ? " [Paused]" : ""}
+                    </MenuItem>
+                  ))
+                ) : (
+                  <MenuItem disabled>No vaults found</MenuItem>
+                )}
+              </Select>
+            </FormControl>
             <TextField
               label="New Backend Signatory"
               value={vaultBackendSignatory}
@@ -782,15 +1117,36 @@ export const GovernanceSection = ({
       case "vault_deployment":
         return (
           <>
-            <TextField
-              label="Vault Rules Contract ID"
-              value={vaultRulesCid}
-              onChange={(e) => setVaultRulesCid(e.target.value)}
-              size="small"
-              fullWidth
-              sx={{ mb: 2 }}
-              required
-            />
+            <Box sx={{ display: "flex", gap: 1, alignItems: "center", mb: 2 }}>
+              <FormControl fullWidth size="small" required>
+                <InputLabel>Vault Rules</InputLabel>
+                <Select
+                  value={vaultRulesCid}
+                  label="Vault Rules"
+                  onChange={(e) => setVaultRulesCid(e.target.value)}
+                  MenuProps={{ disableScrollLock: true }}
+                >
+                  {deployContractsLoading ? (
+                    <MenuItem disabled>Loading...</MenuItem>
+                  ) : vaultRulesContracts.length > 0 ? (
+                    vaultRulesContracts.map((c) => (
+                      <MenuItem key={c.contract_id} value={c.contract_id}>
+                        {c.contract_id}
+                      </MenuItem>
+                    ))
+                  ) : (
+                    <MenuItem disabled>No vault rules found</MenuItem>
+                  )}
+                </Select>
+              </FormControl>
+              <IconButton
+                size="small"
+                onClick={fetchDeployContracts}
+                disabled={deployContractsLoading}
+              >
+                {deployContractsLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
+              </IconButton>
+            </Box>
             <TextField
               label="Vault Name"
               value={vaultName}
@@ -889,105 +1245,227 @@ export const GovernanceSection = ({
               fullWidth
               sx={{ mb: 2 }}
             />
-            <Typography variant="caption" color="text.secondary">
+            <Typography variant="caption" display="block" color="text.secondary">
               FAR Config (Optional)
             </Typography>
-            <TextField
-              label="Featured App Right Contract ID"
-              value={vaultFarConfig.featured_app_right_cid}
-              onChange={(e) =>
-                setVaultFarConfig({
-                  ...vaultFarConfig,
-                  featured_app_right_cid: e.target.value,
-                })
-              }
-              size="small"
-              fullWidth
-              sx={{ mb: 1 }}
-            />
-            <Typography variant="caption" color="text.secondary" sx={{ mt: 1 }}>
-              FAR Beneficiaries (who receives app rewards)
-            </Typography>
-            {vaultFarConfig.beneficiaries.map((b, idx) => (
-              <Box key={idx} sx={{ display: "flex", gap: 1, mb: 1 }}>
-                <TextField
-                  label="Beneficiary Party"
-                  value={b.beneficiary}
-                  onChange={(e) => {
-                    const updated = [...vaultFarConfig.beneficiaries];
-                    updated[idx] = { ...b, beneficiary: e.target.value };
+            <Box sx={{ display: "flex", gap: 1, alignItems: "center", mb: 1 }}>
+              <FormControl fullWidth size="small">
+                <InputLabel>Featured App Right</InputLabel>
+                <Select
+                  value={vaultFarConfig.featured_app_right_cid}
+                  label="Featured App Right"
+                  onChange={(e) =>
                     setVaultFarConfig({
                       ...vaultFarConfig,
-                      beneficiaries: updated,
-                    });
-                  }}
-                  size="small"
-                  sx={{ flex: 2 }}
-                />
-                <TextField
-                  label="Weight"
-                  value={b.weight}
-                  onChange={(e) => {
-                    const updated = [...vaultFarConfig.beneficiaries];
-                    updated[idx] = { ...b, weight: e.target.value };
-                    setVaultFarConfig({
-                      ...vaultFarConfig,
-                      beneficiaries: updated,
-                    });
-                  }}
-                  size="small"
-                  sx={{ flex: 1 }}
-                />
+                      featured_app_right_cid: e.target.value,
+                    })
+                  }
+                  MenuProps={{ disableScrollLock: true }}
+                >
+                  {deployContractsLoading ? (
+                    <MenuItem disabled>Loading...</MenuItem>
+                  ) : featuredAppRightContracts.length > 0 ? (
+                    featuredAppRightContracts.map((c) => (
+                      <MenuItem key={c.contract_id} value={c.contract_id}>
+                        {c.contract_id}
+                      </MenuItem>
+                    ))
+                  ) : (
+                    <MenuItem disabled>No featured app rights found</MenuItem>
+                  )}
+                </Select>
+              </FormControl>
+              <IconButton
+                size="small"
+                onClick={fetchDeployContracts}
+                disabled={deployContractsLoading}
+              >
+                {deployContractsLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
+              </IconButton>
+            </Box>
+            <Box sx={{ mb: 2 }}>
+              <Typography variant="caption" display="block" color="text.secondary" sx={{ mb: 1 }}>
+                FAR Beneficiaries (who receives app rewards)
+              </Typography>
+              {vaultFarConfig.beneficiaries.map((b, idx) => (
+                <Box key={idx} sx={{ display: "flex", gap: 1, mb: 1 }}>
+                  <TextField
+                    label="Beneficiary Party"
+                    value={b.beneficiary}
+                    onChange={(e) => {
+                      const updated = [...vaultFarConfig.beneficiaries];
+                      updated[idx] = { ...b, beneficiary: e.target.value };
+                      setVaultFarConfig({
+                        ...vaultFarConfig,
+                        beneficiaries: updated,
+                      });
+                    }}
+                    size="small"
+                    sx={{ flex: 2 }}
+                  />
+                  <TextField
+                    label="Weight"
+                    value={b.weight}
+                    onChange={(e) => {
+                      const updated = [...vaultFarConfig.beneficiaries];
+                      updated[idx] = { ...b, weight: e.target.value };
+                      setVaultFarConfig({
+                        ...vaultFarConfig,
+                        beneficiaries: updated,
+                      });
+                    }}
+                    size="small"
+                    sx={{ flex: 1 }}
+                  />
+                  <Button
+                    size="small"
+                    color="error"
+                    onClick={() =>
+                      setVaultFarConfig({
+                        ...vaultFarConfig,
+                        beneficiaries: vaultFarConfig.beneficiaries.filter(
+                          (_, i) => i !== idx,
+                        ),
+                      })
+                    }
+                  >
+                    Remove
+                  </Button>
+                </Box>
+              ))}
+              <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
                 <Button
                   size="small"
-                  color="error"
                   onClick={() =>
                     setVaultFarConfig({
                       ...vaultFarConfig,
-                      beneficiaries: vaultFarConfig.beneficiaries.filter(
-                        (_, i) => i !== idx,
-                      ),
+                      beneficiaries: [
+                        ...vaultFarConfig.beneficiaries,
+                        { beneficiary: "", weight: "1.0" },
+                      ],
                     })
                   }
                 >
-                  Remove
+                  Add Beneficiary
                 </Button>
+                {vaultFarConfig.beneficiaries.length > 0 && (() => {
+                  const sum = vaultFarConfig.beneficiaries.reduce(
+                    (acc, b) => acc + (parseFloat(b.weight) || 0), 0,
+                  );
+                  const isValid = Math.abs(sum - 1.0) < 1e-9;
+                  return (
+                    <Typography
+                      variant="caption"
+                      color={isValid ? "success.main" : "error.main"}
+                    >
+                      Sum: {sum.toFixed(4)} {isValid ? "" : "(must be 1.0)"}
+                    </Typography>
+                  );
+                })()}
               </Box>
-            ))}
-            <Button
-              size="small"
-              onClick={() =>
-                setVaultFarConfig({
-                  ...vaultFarConfig,
-                  beneficiaries: [
-                    ...vaultFarConfig.beneficiaries,
-                    { beneficiary: "", weight: "1.0" },
-                  ],
-                })
-              }
-            >
-              Add Beneficiary
-            </Button>
+            </Box>
+            <Box sx={{ display: "flex", gap: 1, alignItems: "center", mb: 2 }}>
+              <FormControl fullWidth size="small" required>
+                <InputLabel>Allocation Factory</InputLabel>
+                <Select
+                  value={allocationFactoryCid}
+                  label="Allocation Factory"
+                  onChange={(e) => setAllocationFactoryCid(e.target.value)}
+                  MenuProps={{ disableScrollLock: true }}
+                >
+                  {deployContractsLoading ? (
+                    <MenuItem disabled>Loading...</MenuItem>
+                  ) : allocationFactoryContracts.length > 0 ? (
+                    allocationFactoryContracts.map((c) => (
+                      <MenuItem key={c.contract_id} value={c.contract_id}>
+                        {c.contract_id}
+                      </MenuItem>
+                    ))
+                  ) : (
+                    <MenuItem disabled>No allocation factories found</MenuItem>
+                  )}
+                </Select>
+              </FormControl>
+              <IconButton
+                size="small"
+                onClick={fetchDeployContracts}
+                disabled={deployContractsLoading}
+              >
+                {deployContractsLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
+              </IconButton>
+            </Box>
+            <Box sx={{ display: "flex", gap: 1, alignItems: "center" }}>
+              <FormControl fullWidth size="small" required>
+                <InputLabel>Registrar Service</InputLabel>
+                <Select
+                  value={registrarServiceCid}
+                  label="Registrar Service"
+                  onChange={(e) => setRegistrarServiceCid(e.target.value)}
+                  MenuProps={{ disableScrollLock: true }}
+                >
+                  {deployContractsLoading ? (
+                    <MenuItem disabled>Loading...</MenuItem>
+                  ) : registrarServiceContracts.length > 0 ? (
+                    registrarServiceContracts.map((c) => (
+                      <MenuItem key={c.contract_id} value={c.contract_id}>
+                        {c.contract_id}
+                      </MenuItem>
+                    ))
+                  ) : (
+                    <MenuItem disabled>No registrar services found</MenuItem>
+                  )}
+                </Select>
+              </FormControl>
+              <IconButton
+                size="small"
+                onClick={fetchDeployContracts}
+                disabled={deployContractsLoading}
+              >
+                {deployContractsLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
+              </IconButton>
+            </Box>
           </>
         );
       case "yield_epoch_deployment":
         return (
           <>
-            <TextField
-              label="Vault Rules Contract ID"
-              value={vaultRulesCid}
-              onChange={(e) => setVaultRulesCid(e.target.value)}
-              size="small"
-              fullWidth
-              sx={{ mb: 2 }}
-              required
-            />
+            <Box sx={{ display: "flex", gap: 1, alignItems: "center", mb: 2 }}>
+              <FormControl fullWidth size="small" required>
+                <InputLabel>Vault Rules</InputLabel>
+                <Select
+                  value={vaultRulesCid}
+                  label="Vault Rules"
+                  onChange={(e) => setVaultRulesCid(e.target.value)}
+                  MenuProps={{ disableScrollLock: true }}
+                >
+                  {deployContractsLoading ? (
+                    <MenuItem disabled>Loading...</MenuItem>
+                  ) : vaultRulesContracts.length > 0 ? (
+                    vaultRulesContracts.map((c) => (
+                      <MenuItem key={c.contract_id} value={c.contract_id}>
+                        {c.contract_id}
+                      </MenuItem>
+                    ))
+                  ) : (
+                    <MenuItem disabled>No vault rules found</MenuItem>
+                  )}
+                </Select>
+              </FormControl>
+              <IconButton
+                size="small"
+                onClick={fetchDeployContracts}
+                disabled={deployContractsLoading}
+              >
+                {deployContractsLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
+              </IconButton>
+            </Box>
             <FormControl fullWidth size="small" sx={{ mb: 2 }}>
               <InputLabel>Vault</InputLabel>
               <Select
                 value={vaultCid}
                 label="Vault"
                 onChange={(e) => setVaultCid(e.target.value)}
+                MenuProps={{ disableScrollLock: true }}
               >
                 {vaultsLoading ? (
                   <MenuItem disabled>Loading vaults...</MenuItem>
@@ -1044,15 +1522,29 @@ export const GovernanceSection = ({
       case "vault_update_far_beneficiaries":
         return (
           <>
-            <TextField
-              label="Vault Contract ID"
-              value={vaultId}
-              onChange={(e) => setVaultId(e.target.value)}
-              size="small"
-              fullWidth
-              sx={{ mb: 2 }}
-            />
-            <Typography variant="caption" color="text.secondary">
+            <FormControl fullWidth size="small" sx={{ mb: 2 }}>
+              <InputLabel>Vault</InputLabel>
+              <Select
+                value={vaultId}
+                label="Vault"
+                onChange={(e) => setVaultId(e.target.value)}
+                MenuProps={{ disableScrollLock: true }}
+              >
+                {vaultsLoading ? (
+                  <MenuItem disabled>Loading vaults...</MenuItem>
+                ) : availableVaults.length > 0 ? (
+                  availableVaults.map((vault) => (
+                    <MenuItem key={vault.contract_id} value={vault.contract_id}>
+                      {vault.vault_name} ({vault.share_symbol})
+                      {vault.is_paused ? " [Paused]" : ""}
+                    </MenuItem>
+                  ))
+                ) : (
+                  <MenuItem disabled>No vaults found</MenuItem>
+                )}
+              </Select>
+            </FormControl>
+            <Typography variant="caption" display="block" color="text.secondary">
               FAR Beneficiaries (add beneficiary party + weight)
             </Typography>
             {farBeneficiaries.map((b, idx) => (
@@ -1092,17 +1584,33 @@ export const GovernanceSection = ({
                 </Button>
               </Box>
             ))}
-            <Button
-              size="small"
-              onClick={() =>
-                setFarBeneficiaries([
-                  ...farBeneficiaries,
-                  { beneficiary: "", weight: "1" },
-                ])
-              }
-            >
-              Add Beneficiary
-            </Button>
+            <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
+              <Button
+                size="small"
+                onClick={() =>
+                  setFarBeneficiaries([
+                    ...farBeneficiaries,
+                    { beneficiary: "", weight: "1" },
+                  ])
+                }
+              >
+                Add Beneficiary
+              </Button>
+              {farBeneficiaries.length > 0 && (() => {
+                const sum = farBeneficiaries.reduce(
+                  (acc, b) => acc + (parseFloat(b.weight) || 0), 0,
+                );
+                const isValid = Math.abs(sum - 1.0) < 1e-9;
+                return (
+                  <Typography
+                    variant="caption"
+                    color={isValid ? "success.main" : "error.main"}
+                  >
+                    Sum: {sum.toFixed(4)} {isValid ? "" : "(must be 1.0)"}
+                  </Typography>
+                );
+              })()}
+            </Box>
           </>
         );
       case "processor_deployment_request":
@@ -1125,95 +1633,156 @@ export const GovernanceSection = ({
               fullWidth
               sx={{ mb: 2 }}
             />
-            <TextField
-              label="Allocation Factory Contract ID"
-              value={allocationFactoryCid}
-              onChange={(e) => setAllocationFactoryCid(e.target.value)}
-              size="small"
-              fullWidth
-              sx={{ mb: 2 }}
-            />
-            <Typography variant="caption" color="text.secondary">
+            <Box sx={{ display: "flex", gap: 1, alignItems: "center", mb: 2 }}>
+              <TextField
+                label="Burn Mint Factory"
+                value={burnMintFactory?.contract_id || ""}
+                onChange={(e) =>
+                  setBurnMintFactory(
+                    e.target.value
+                      ? { contract_id: e.target.value, blob: burnMintFactory?.blob || "" }
+                      : null,
+                  )
+                }
+                size="small"
+                fullWidth
+                required
+                helperText={
+                  burnMintFactoryLoading
+                    ? "Loading..."
+                    : !burnMintFactory
+                      ? "Not available"
+                      : undefined
+                }
+              />
+              <IconButton
+                size="small"
+                onClick={fetchBurnMintFactory}
+                disabled={burnMintFactoryLoading}
+              >
+                {burnMintFactoryLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
+              </IconButton>
+            </Box>
+            <Typography variant="caption" display="block" color="text.secondary">
               FAR Config (Optional)
             </Typography>
-            <TextField
-              label="Featured App Right Contract ID"
-              value={vaultFarConfig.featured_app_right_cid}
-              onChange={(e) =>
-                setVaultFarConfig({
-                  ...vaultFarConfig,
-                  featured_app_right_cid: e.target.value,
-                })
-              }
-              size="small"
-              fullWidth
-              sx={{ mb: 1 }}
-            />
-            <Typography variant="caption" color="text.secondary" sx={{ mt: 1 }}>
-              FAR Beneficiaries
-            </Typography>
-            {vaultFarConfig.beneficiaries.map((b, idx) => (
-              <Box key={idx} sx={{ display: "flex", gap: 1, mb: 1 }}>
-                <TextField
-                  label="Beneficiary Party"
-                  value={b.beneficiary}
-                  onChange={(e) => {
-                    const updated = [...vaultFarConfig.beneficiaries];
-                    updated[idx] = { ...b, beneficiary: e.target.value };
+            <Box sx={{ display: "flex", gap: 1, alignItems: "center", mb: 1 }}>
+              <FormControl fullWidth size="small">
+                <InputLabel>Featured App Right</InputLabel>
+                <Select
+                  value={vaultFarConfig.featured_app_right_cid}
+                  label="Featured App Right"
+                  onChange={(e) =>
                     setVaultFarConfig({
                       ...vaultFarConfig,
-                      beneficiaries: updated,
-                    });
-                  }}
-                  size="small"
-                  sx={{ flex: 2 }}
-                />
-                <TextField
-                  label="Weight"
-                  value={b.weight}
-                  onChange={(e) => {
-                    const updated = [...vaultFarConfig.beneficiaries];
-                    updated[idx] = { ...b, weight: e.target.value };
-                    setVaultFarConfig({
-                      ...vaultFarConfig,
-                      beneficiaries: updated,
-                    });
-                  }}
-                  size="small"
-                  sx={{ flex: 1 }}
-                />
+                      featured_app_right_cid: e.target.value,
+                    })
+                  }
+                  MenuProps={{ disableScrollLock: true }}
+                >
+                  {deployContractsLoading ? (
+                    <MenuItem disabled>Loading...</MenuItem>
+                  ) : featuredAppRightContracts.length > 0 ? (
+                    featuredAppRightContracts.map((c) => (
+                      <MenuItem key={c.contract_id} value={c.contract_id}>
+                        {c.contract_id}
+                      </MenuItem>
+                    ))
+                  ) : (
+                    <MenuItem disabled>No featured app rights found</MenuItem>
+                  )}
+                </Select>
+              </FormControl>
+              <IconButton
+                size="small"
+                onClick={fetchDeployContracts}
+                disabled={deployContractsLoading}
+              >
+                {deployContractsLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
+              </IconButton>
+            </Box>
+            <Box sx={{ mb: 2 }}>
+              <Typography variant="caption" display="block" color="text.secondary" sx={{ mb: 1 }}>
+                FAR Beneficiaries
+              </Typography>
+              {vaultFarConfig.beneficiaries.map((b, idx) => (
+                <Box key={idx} sx={{ display: "flex", gap: 1, mb: 1 }}>
+                  <TextField
+                    label="Beneficiary Party"
+                    value={b.beneficiary}
+                    onChange={(e) => {
+                      const updated = [...vaultFarConfig.beneficiaries];
+                      updated[idx] = { ...b, beneficiary: e.target.value };
+                      setVaultFarConfig({
+                        ...vaultFarConfig,
+                        beneficiaries: updated,
+                      });
+                    }}
+                    size="small"
+                    sx={{ flex: 2 }}
+                  />
+                  <TextField
+                    label="Weight"
+                    value={b.weight}
+                    onChange={(e) => {
+                      const updated = [...vaultFarConfig.beneficiaries];
+                      updated[idx] = { ...b, weight: e.target.value };
+                      setVaultFarConfig({
+                        ...vaultFarConfig,
+                        beneficiaries: updated,
+                      });
+                    }}
+                    size="small"
+                    sx={{ flex: 1 }}
+                  />
+                  <Button
+                    size="small"
+                    color="error"
+                    onClick={() =>
+                      setVaultFarConfig({
+                        ...vaultFarConfig,
+                        beneficiaries: vaultFarConfig.beneficiaries.filter(
+                          (_, i) => i !== idx,
+                        ),
+                      })
+                    }
+                  >
+                    Remove
+                  </Button>
+                </Box>
+              ))}
+              <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
                 <Button
                   size="small"
-                  color="error"
                   onClick={() =>
                     setVaultFarConfig({
                       ...vaultFarConfig,
-                      beneficiaries: vaultFarConfig.beneficiaries.filter(
-                        (_, i) => i !== idx,
-                      ),
+                      beneficiaries: [
+                        ...vaultFarConfig.beneficiaries,
+                        { beneficiary: "", weight: "1.0" },
+                      ],
                     })
                   }
                 >
-                  Remove
+                  Add Beneficiary
                 </Button>
+                {vaultFarConfig.beneficiaries.length > 0 && (() => {
+                  const sum = vaultFarConfig.beneficiaries.reduce(
+                    (acc, b) => acc + (parseFloat(b.weight) || 0), 0,
+                  );
+                  const isValid = Math.abs(sum - 1.0) < 1e-9;
+                  return (
+                    <Typography
+                      variant="caption"
+                      color={isValid ? "success.main" : "error.main"}
+                    >
+                      Sum: {sum.toFixed(4)} {isValid ? "" : "(must be 1.0)"}
+                    </Typography>
+                  );
+                })()}
               </Box>
-            ))}
-            <Button
-              size="small"
-              onClick={() =>
-                setVaultFarConfig({
-                  ...vaultFarConfig,
-                  beneficiaries: [
-                    ...vaultFarConfig.beneficiaries,
-                    { beneficiary: "", weight: "1.0" },
-                  ],
-                })
-              }
-              sx={{ mb: 2 }}
-            >
-              Add Beneficiary
-            </Button>
-            <Typography variant="caption" color="text.secondary">
+            </Box>
+            <Typography variant="caption" display="block" color="text.secondary">
               Initial Supported Vaults
             </Typography>
             {vaultsLoading ? (
@@ -1266,9 +1835,12 @@ export const GovernanceSection = ({
                         <Typography
                           variant="caption"
                           color="text.secondary"
-                          sx={{ fontFamily: "monospace" }}
+                          sx={{
+                            fontFamily: "monospace",
+                            wordBreak: "break-all",
+                          }}
                         >
-                          {vault.contract_id.slice(0, 20)}...
+                          {vault.contract_id}
                         </Typography>
                       </Box>
                     }
@@ -1304,46 +1876,66 @@ export const GovernanceSection = ({
               fullWidth
               sx={{ mb: 2 }}
             />
-            <FormControl fullWidth size="small" sx={{ mb: 2 }}>
-              <InputLabel>Provider Service</InputLabel>
-              <Select
-                value={providerServiceCid}
-                label="Provider Service"
-                onChange={(e) => setProviderServiceCid(e.target.value)}
+            <Box sx={{ display: "flex", gap: 1, alignItems: "center", mb: 2 }}>
+              <FormControl fullWidth size="small">
+                <InputLabel>Provider Service</InputLabel>
+                <Select
+                  value={providerServiceCid}
+                  label="Provider Service"
+                  onChange={(e) => setProviderServiceCid(e.target.value)}
+                  MenuProps={{ disableScrollLock: true }}
+                >
+                  {servicesLoading ? (
+                    <MenuItem disabled>Loading services...</MenuItem>
+                  ) : providerServices.length > 0 ? (
+                    providerServices.map((svc) => (
+                      <MenuItem key={svc.contract_id} value={svc.contract_id}>
+                        {svc.contract_id}
+                      </MenuItem>
+                    ))
+                  ) : (
+                    <MenuItem disabled>No provider services found</MenuItem>
+                  )}
+                </Select>
+              </FormControl>
+              <IconButton
+                size="small"
+                onClick={fetchServices}
+                disabled={servicesLoading}
               >
-                {servicesLoading ? (
-                  <MenuItem disabled>Loading services...</MenuItem>
-                ) : providerServices.length > 0 ? (
-                  providerServices.map((svc) => (
-                    <MenuItem key={svc.contract_id} value={svc.contract_id}>
-                      Provider: {svc.provider.split("::")[0]}
-                    </MenuItem>
-                  ))
-                ) : (
-                  <MenuItem disabled>No provider services found</MenuItem>
-                )}
-              </Select>
-            </FormControl>
-            <FormControl fullWidth size="small">
-              <InputLabel>User Service</InputLabel>
-              <Select
-                value={userServiceCid}
-                label="User Service"
-                onChange={(e) => setUserServiceCid(e.target.value)}
+                {servicesLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
+              </IconButton>
+            </Box>
+            <Box sx={{ display: "flex", gap: 1, alignItems: "center" }}>
+              <FormControl fullWidth size="small">
+                <InputLabel>User Service</InputLabel>
+                <Select
+                  value={userServiceCid}
+                  label="User Service"
+                  onChange={(e) => setUserServiceCid(e.target.value)}
+                  MenuProps={{ disableScrollLock: true }}
+                >
+                  {servicesLoading ? (
+                    <MenuItem disabled>Loading services...</MenuItem>
+                  ) : userServices.length > 0 ? (
+                    userServices.map((svc) => (
+                      <MenuItem key={svc.contract_id} value={svc.contract_id}>
+                        {svc.contract_id}
+                      </MenuItem>
+                    ))
+                  ) : (
+                    <MenuItem disabled>No user services found</MenuItem>
+                  )}
+                </Select>
+              </FormControl>
+              <IconButton
+                size="small"
+                onClick={fetchServices}
+                disabled={servicesLoading}
               >
-                {servicesLoading ? (
-                  <MenuItem disabled>Loading services...</MenuItem>
-                ) : userServices.length > 0 ? (
-                  userServices.map((svc) => (
-                    <MenuItem key={svc.contract_id} value={svc.contract_id}>
-                      User: {svc.user.split("::")[0]}
-                    </MenuItem>
-                  ))
-                ) : (
-                  <MenuItem disabled>No user services found</MenuItem>
-                )}
-              </Select>
-            </FormControl>
+                {servicesLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
+              </IconButton>
+            </Box>
           </>
         );
       case "utility_accept_holder_service_request":
@@ -1357,14 +1949,36 @@ export const GovernanceSection = ({
               fullWidth
               sx={{ mb: 2 }}
             />
-            <TextField
-              label="Provider Service Contract ID"
-              value={providerServiceCid}
-              onChange={(e) => setProviderServiceCid(e.target.value)}
-              size="small"
-              fullWidth
-              sx={{ mb: 2 }}
-            />
+            <Box sx={{ display: "flex", gap: 1, alignItems: "center", mb: 2 }}>
+              <FormControl fullWidth size="small">
+                <InputLabel>Provider Service</InputLabel>
+                <Select
+                  value={providerServiceCid}
+                  label="Provider Service"
+                  onChange={(e) => setProviderServiceCid(e.target.value)}
+                  MenuProps={{ disableScrollLock: true }}
+                >
+                  {servicesLoading ? (
+                    <MenuItem disabled>Loading services...</MenuItem>
+                  ) : providerServices.length > 0 ? (
+                    providerServices.map((svc) => (
+                      <MenuItem key={svc.contract_id} value={svc.contract_id}>
+                        {svc.contract_id}
+                      </MenuItem>
+                    ))
+                  ) : (
+                    <MenuItem disabled>No provider services found</MenuItem>
+                  )}
+                </Select>
+              </FormControl>
+              <IconButton
+                size="small"
+                onClick={fetchServices}
+                disabled={servicesLoading}
+              >
+                {servicesLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
+              </IconButton>
+            </Box>
             <TextField
               label="Holder Service Request Contract ID"
               value={holderServiceRequestCid}
@@ -1382,26 +1996,6 @@ export const GovernanceSection = ({
             />
           </>
         );
-      case "utility_create_transfer_rule":
-        return (
-          <>
-            <TextField
-              label="Operator Party"
-              value={operatorParty}
-              onChange={(e) => setOperatorParty(e.target.value)}
-              size="small"
-              fullWidth
-              sx={{ mb: 2 }}
-            />
-            <TextField
-              label="Registrar Service Contract ID"
-              value={registrarServiceCid}
-              onChange={(e) => setRegistrarServiceCid(e.target.value)}
-              size="small"
-              fullWidth
-            />
-          </>
-        );
       case "credential_offer_free":
         return (
           <>
@@ -1413,14 +2007,36 @@ export const GovernanceSection = ({
               fullWidth
               sx={{ mb: 2 }}
             />
-            <TextField
-              label="User Service Contract ID"
-              value={userServiceCid}
-              onChange={(e) => setUserServiceCid(e.target.value)}
-              size="small"
-              fullWidth
-              sx={{ mb: 2 }}
-            />
+            <Box sx={{ display: "flex", gap: 1, alignItems: "center", mb: 2 }}>
+              <FormControl fullWidth size="small">
+                <InputLabel>User Service</InputLabel>
+                <Select
+                  value={userServiceCid}
+                  label="User Service"
+                  onChange={(e) => setUserServiceCid(e.target.value)}
+                  MenuProps={{ disableScrollLock: true }}
+                >
+                  {servicesLoading ? (
+                    <MenuItem disabled>Loading services...</MenuItem>
+                  ) : userServices.length > 0 ? (
+                    userServices.map((svc) => (
+                      <MenuItem key={svc.contract_id} value={svc.contract_id}>
+                        {svc.contract_id}
+                      </MenuItem>
+                    ))
+                  ) : (
+                    <MenuItem disabled>No user services found</MenuItem>
+                  )}
+                </Select>
+              </FormControl>
+              <IconButton
+                size="small"
+                onClick={fetchServices}
+                disabled={servicesLoading}
+              >
+                {servicesLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
+              </IconButton>
+            </Box>
             <TextField
               label="Holder Party"
               value={holderParty}
@@ -1513,14 +2129,36 @@ export const GovernanceSection = ({
               fullWidth
               sx={{ mb: 2 }}
             />
-            <TextField
-              label="User Service Contract ID"
-              value={userServiceCid}
-              onChange={(e) => setUserServiceCid(e.target.value)}
-              size="small"
-              fullWidth
-              sx={{ mb: 2 }}
-            />
+            <Box sx={{ display: "flex", gap: 1, alignItems: "center", mb: 2 }}>
+              <FormControl fullWidth size="small">
+                <InputLabel>User Service</InputLabel>
+                <Select
+                  value={userServiceCid}
+                  label="User Service"
+                  onChange={(e) => setUserServiceCid(e.target.value)}
+                  MenuProps={{ disableScrollLock: true }}
+                >
+                  {servicesLoading ? (
+                    <MenuItem disabled>Loading services...</MenuItem>
+                  ) : userServices.length > 0 ? (
+                    userServices.map((svc) => (
+                      <MenuItem key={svc.contract_id} value={svc.contract_id}>
+                        {svc.contract_id}
+                      </MenuItem>
+                    ))
+                  ) : (
+                    <MenuItem disabled>No user services found</MenuItem>
+                  )}
+                </Select>
+              </FormControl>
+              <IconButton
+                size="small"
+                onClick={fetchServices}
+                disabled={servicesLoading}
+              >
+                {servicesLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
+              </IconButton>
+            </Box>
             <TextField
               label="Credential Offer Contract ID"
               value={credentialOfferCid}
@@ -1532,13 +2170,23 @@ export const GovernanceSection = ({
         );
       case "dev_net_feature_app":
         return (
-          <TextField
-            label="Amulet Rules Contract ID"
-            value={amuletRulesCid}
-            onChange={(e) => setAmuletRulesCid(e.target.value)}
-            size="small"
-            fullWidth
-          />
+          <Box sx={{ display: "flex", gap: 1, alignItems: "center" }}>
+            <TextField
+              label="Amulet Rules CID"
+              value={amuletRulesCid}
+              onChange={(e) => setAmuletRulesCid(e.target.value)}
+              fullWidth
+              size="small"
+              required
+            />
+            <IconButton
+              size="small"
+              onClick={fetchAmuletRules}
+              disabled={amuletRulesLoading}
+            >
+              {amuletRulesLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
+            </IconButton>
+          </Box>
         );
       default:
         return null;
@@ -1588,14 +2236,21 @@ export const GovernanceSection = ({
         )}
 
         <Box sx={{ mb: 2 }}>
-          <TextField
-            label="VaultGovernanceRules Contract ID"
+          <Autocomplete
+            freeSolo
+            options={governanceContractIds}
             value={rulesContractId}
-            onChange={(e) => setRulesContractId(e.target.value)}
+            onChange={(_e, value) => setRulesContractId(value || "")}
+            onInputChange={(_e, value) => setRulesContractId(value)}
+            disabled={!ADMIN_ACCESS}
             size="small"
-            fullWidth
-            placeholder="Enter contract ID to enable confirm/execute"
-            disabled={MAINNET_DEMO}
+            renderInput={(params) => (
+              <TextField
+                {...params}
+                label="VaultGovernanceRules Contract ID"
+                placeholder="Enter or select contract ID"
+              />
+            )}
           />
         </Box>
 
@@ -1606,7 +2261,7 @@ export const GovernanceSection = ({
             variant="outlined"
             startIcon={showNewActionForm ? <ExpandLessIcon /> : <AddIcon />}
             onClick={() => setShowNewActionForm(!showNewActionForm)}
-            disabled={MAINNET_DEMO || !rulesContractId}
+            disabled={!ADMIN_ACCESS || !rulesContractId}
           >
             {showNewActionForm ? "Hide Form" : "New Governance Action"}
           </Button>
@@ -1633,12 +2288,15 @@ export const GovernanceSection = ({
                   onChange={(e) =>
                     setSelectedActionType(e.target.value as ActionTypeKey)
                   }
+                  MenuProps={{ disableScrollLock: true }}
                 >
-                  {ACTION_TYPE_OPTIONS.map((opt) => (
-                    <MenuItem key={opt.value} value={opt.value}>
-                      {opt.label}
-                    </MenuItem>
-                  ))}
+                  {getActionTypeOptions(network).filter((opt) => !opt.hidden).map(
+                    (opt) => (
+                      <MenuItem key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </MenuItem>
+                    ),
+                  )}
                 </Select>
               </FormControl>
 
@@ -1700,11 +2358,46 @@ export const GovernanceSection = ({
                       </Typography>
                     </TableCell>
                     <TableCell sx={{ py: 1 }}>
-                      <Chip
-                        label={`${action.confirmation_count} / ${data.threshold}`}
-                        size="small"
-                        color={action.can_execute ? "success" : "default"}
-                      />
+                      <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: action.confirmations.length > 0 ? 0.5 : 0 }}>
+                        <Chip
+                          label={`${action.confirmation_count} / ${data.threshold}`}
+                          size="small"
+                          color={action.can_execute ? "success" : "default"}
+                        />
+                      </Box>
+                      {action.confirmations.map((conf) => {
+                        const isOwn = conf.confirming_party === (data?.member_party_id || memberPartyId);
+                        return (
+                          <Box
+                            key={conf.contract_id}
+                            sx={{ display: "flex", alignItems: "center", gap: 0.5, mt: 0.5 }}
+                          >
+                            <Typography
+                              variant="caption"
+                              sx={{
+                                fontFamily: "monospace",
+                                color: isOwn ? "primary.main" : "text.secondary",
+                              }}
+                            >
+                              {conf.confirming_party.length > 20
+                                ? `${conf.confirming_party.slice(0, 10)}...${conf.confirming_party.slice(-8)}`
+                                : conf.confirming_party}
+                              {isOwn ? " (you)" : ""}
+                            </Typography>
+                            {!isOwn && ADMIN_ACCESS && rulesContractId && (
+                              <IconButton
+                                size="small"
+                                title="Expire confirmation"
+                                onClick={() => handleExpire(action, conf.contract_id)}
+                                disabled={actionLoading === action.action_hash}
+                                sx={{ p: 0.25 }}
+                              >
+                                <TimerOffIcon sx={{ fontSize: 14 }} />
+                              </IconButton>
+                            )}
+                          </Box>
+                        );
+                      })}
                     </TableCell>
                     <TableCell sx={{ py: 1 }} align="right">
                       <Box
@@ -1733,8 +2426,7 @@ export const GovernanceSection = ({
                               }
                             }}
                             disabled={
-                              MAINNET_DEMO ||
-                              !rulesContractId ||
+                              !ADMIN_ACCESS ||
                               actionLoading === action.action_hash
                             }
                           >
@@ -1753,7 +2445,7 @@ export const GovernanceSection = ({
                             }
                             onClick={() => handleConfirm(action)}
                             disabled={
-                              MAINNET_DEMO ||
+                              !ADMIN_ACCESS ||
                               !rulesContractId ||
                               actionLoading === action.action_hash
                             }
@@ -1773,9 +2465,12 @@ export const GovernanceSection = ({
                                 <PlayArrowIcon />
                               )
                             }
-                            onClick={() => handleExecute(action)}
+                            onClick={() => {
+                              setExecuteError(null);
+                              setExecuteDialogAction(action);
+                            }}
                             disabled={
-                              MAINNET_DEMO ||
+                              !ADMIN_ACCESS ||
                               !rulesContractId ||
                               actionLoading === action.action_hash
                             }
@@ -1796,6 +2491,20 @@ export const GovernanceSection = ({
           </Typography>
         )}
       </Collapse>
+
+      <ExecuteDialog
+        open={executeDialogAction !== null}
+        onClose={() => setExecuteDialogAction(null)}
+        onExecute={(disclosedContracts) => {
+          if (executeDialogAction) {
+            handleExecute(executeDialogAction, disclosedContracts);
+          }
+        }}
+        action={executeDialogAction}
+        loading={actionLoading === executeDialogAction?.action_hash}
+        error={executeError}
+        blobMap={contractBlobMap}
+      />
     </Box>
   );
 };

@@ -28,6 +28,8 @@ const getInvitationTitle = (type: string): string => {
       return "Participant Removal";
     case "Contracts":
       return "Contract Deployment";
+    case "Dars":
+      return "DAR Upload";
     default:
       return "Workflow Invitation";
   }
@@ -41,6 +43,8 @@ const getInvitationDescription = (type: string): string => {
       return "A participant removal workflow has been initiated. Accepting will start the kick workflow on your node.";
     case "Contracts":
       return "A contract deployment workflow has been initiated. Accepting will start the contracts workflow on your node.";
+    case "Dars":
+      return "A DAR upload workflow has been initiated. Accepting will install the DAR packages on your node.";
     default:
       return "You have been invited to participate in a workflow.";
   }
@@ -53,6 +57,7 @@ const getChipColor = (type: string): "primary" | "warning" | "info" => {
     case "Kick":
       return "warning";
     case "Contracts":
+    case "Dars":
       return "info";
     default:
       return "primary";

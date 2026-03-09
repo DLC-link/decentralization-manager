@@ -1,4 +1,5 @@
 pub mod contracts;
+pub mod dars;
 pub mod kick;
 pub mod onboarding;
 pub mod state;
@@ -17,6 +18,7 @@ use crate::{
 };
 
 pub use contracts::{ContractsConfig, ContractsStep};
+pub use dars::{DarsConfig, DarsStep};
 pub use kick::{KickConfig, KickStep};
 pub use onboarding::{OnboardingConfig, OnboardingStep};
 pub use state::WorkflowState;
@@ -26,6 +28,7 @@ pub use state::WorkflowState;
 pub enum WorkflowType {
     Onboarding,
     Contracts,
+    Dars,
     Kick,
 }
 
@@ -36,6 +39,7 @@ pub async fn start_coordinator(
     onboarding_config: Option<OnboardingConfig>,
     kick_config: Option<KickConfig>,
     contracts_config: Option<ContractsConfig>,
+    dars_config: Option<DarsConfig>,
     workflow_auth: Option<WorkflowAuth>,
 ) -> Result {
     tracing::info!("Loading network config...");
@@ -61,6 +65,11 @@ pub async fn start_coordinator(
                 workflow_auth,
             )
             .await
+        }
+        WorkflowType::Dars => {
+            let config = dars_config
+                .ok_or_else(|| anyhow::anyhow!("DarsConfig is required for Dars workflow"))?;
+            dars::coordinator::start_coordinator(node_config, network_config, config).await
         }
         WorkflowType::Kick => {
             let config = kick_config
@@ -159,10 +168,10 @@ pub async fn start_attestor(node_config: NodeConfig, coordinator: Peer) -> Resul
 
         let command = message.msg_type;
         let payload = message.payload;
-        tracing::info!("Received command: {command:?}");
 
         match command {
             MessageType::Wait => {
+                tracing::trace!("Received command: Wait");
                 // Coordinator says to wait, poll again after delay
                 tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
             }

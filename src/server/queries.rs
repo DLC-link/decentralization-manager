@@ -2,17 +2,13 @@ use std::collections::HashMap;
 
 use canton_proto_rs::com::daml::ledger::api::v2::{
     CreatedEvent, CumulativeFilter, EventFormat, Filters, GetActiveContractsRequest,
-    GetLedgerEndRequest, Identifier, TemplateFilter, Value, WildcardFilter,
+    GetLedgerEndRequest, Identifier, InterfaceFilter, TemplateFilter, Value, WildcardFilter,
     admin::ListKnownPartiesRequest, cumulative_filter,
     get_active_contracts_response::ContractEntry, value,
 };
 
 use crate::{
-    config::NodeConfig,
-    consts::{
-        UTILITY_CREDENTIAL_APP_PACKAGE_ID, UTILITY_REGISTRY_APP_PACKAGE_ID,
-        VAULT_GOVERNANCE_PACKAGE_ID, VAULT_PACKAGE_ID,
-    },
+    config::{NodeConfig, PackageConfig},
     error::Result,
     participant_id::CantonId,
     utils,
@@ -21,76 +17,150 @@ use crate::{
 use super::{
     action_serializer,
     types::{
-        ActionType, ContractInfo, GovernanceAction, GovernanceConfirmation, GovernanceState,
-        PartyMetadata, ProviderServiceInfo, UserServiceInfo, VaultInfo,
+        ActionType, ContractInfo, ContractWithBlob, GovernanceAction, GovernanceConfirmation,
+        GovernanceState, PartyMetadata, ProviderServiceInfo, RegistrarServiceInfo, UserServiceInfo,
+        VaultInfo,
     },
 };
 
 /// Template identifier for DAML contracts
 struct TemplateId {
-    package_id: &'static str,
+    package_id: String,
     module_name: &'static str,
     entity_name: &'static str,
 }
 
 /// Contract template identifiers for the contracts list
 /// Each template is queried separately to handle cases where packages may not exist
-const CONTRACT_TEMPLATES: &[TemplateId] = &[
-    // CBTC contracts
-    TemplateId {
-        package_id: "#cbtc-governance",
-        module_name: "CBTC.Governance",
-        entity_name: "CBTCGovernanceRules",
-    },
-    TemplateId {
-        package_id: "#cbtc",
-        module_name: "CBTC.DepositAccount",
-        entity_name: "CBTCDepositAccountRules",
-    },
-    TemplateId {
-        package_id: "#cbtc",
-        module_name: "CBTC.DepositAccount",
-        entity_name: "CBTCDepositAccount",
-    },
-    TemplateId {
-        package_id: "#cbtc",
-        module_name: "CBTC.WithdrawAccount",
-        entity_name: "CBTCWithdrawAccountRules",
-    },
-    TemplateId {
-        package_id: "#cbtc",
-        module_name: "CBTC.WithdrawAccount",
-        entity_name: "CBTCWithdrawAccount",
-    },
-    // Vault contracts
-    TemplateId {
-        package_id: VAULT_GOVERNANCE_PACKAGE_ID,
-        module_name: "BitsafeVault.VaultGovernance",
-        entity_name: "VaultGovernanceRules",
-    },
-];
+fn contract_templates(packages: &PackageConfig) -> Vec<TemplateId> {
+    let mut templates = vec![
+        // CBTC contracts (hardcoded package IDs)
+        TemplateId {
+            package_id: "#cbtc-governance".to_string(),
+            module_name: "CBTC.Governance",
+            entity_name: "CBTCGovernanceRules",
+        },
+        TemplateId {
+            package_id: "#cbtc".to_string(),
+            module_name: "CBTC.DepositAccount",
+            entity_name: "CBTCDepositAccountRules",
+        },
+        TemplateId {
+            package_id: "#cbtc".to_string(),
+            module_name: "CBTC.DepositAccount",
+            entity_name: "CBTCDepositAccount",
+        },
+        TemplateId {
+            package_id: "#cbtc".to_string(),
+            module_name: "CBTC.WithdrawAccount",
+            entity_name: "CBTCWithdrawAccountRules",
+        },
+        TemplateId {
+            package_id: "#cbtc".to_string(),
+            module_name: "CBTC.WithdrawAccount",
+            entity_name: "CBTCWithdrawAccount",
+        },
+    ];
+    // Vault contracts (configurable package ID)
+    if let Some(ref pkg) = packages.vault_governance {
+        templates.push(TemplateId {
+            package_id: pkg.clone(),
+            module_name: "BitsafeVault.VaultGovernance",
+            entity_name: "VaultGovernanceRules",
+        });
+    }
+    templates
+}
 
 /// Governance confirmation template identifiers
 /// Each template is queried separately to handle cases where packages may not exist
-const GOVERNANCE_TEMPLATES: &[TemplateId] = &[
-    TemplateId {
-        package_id: VAULT_GOVERNANCE_PACKAGE_ID,
-        module_name: "BitsafeVault.VaultGovernance",
-        entity_name: "VaultGovernanceConfirmation",
-    },
-    TemplateId {
-        package_id: "#cbtc-governance",
+fn governance_templates(packages: &PackageConfig) -> Vec<TemplateId> {
+    let mut templates = Vec::new();
+    if let Some(ref pkg) = packages.vault_governance {
+        templates.push(TemplateId {
+            package_id: pkg.clone(),
+            module_name: "BitsafeVault.VaultGovernance",
+            entity_name: "VaultGovernanceConfirmation",
+        });
+    }
+    templates.push(TemplateId {
+        package_id: "#cbtc-governance".to_string(),
         module_name: "CBTC.Governance",
         entity_name: "Confirmation",
-    },
+    });
+    templates
+}
+
+/// Governance state template identifier
+fn governance_state_template(packages: &PackageConfig) -> Option<TemplateId> {
+    packages.vault_governance.as_ref().map(|pkg| TemplateId {
+        package_id: pkg.clone(),
+        module_name: "BitsafeVault.VaultGovernance",
+        entity_name: "VaultGovernanceRules",
+    })
+}
+
+/// Vault template identifier
+fn vault_template(packages: &PackageConfig) -> Option<TemplateId> {
+    packages.vault.as_ref().map(|pkg| TemplateId {
+        package_id: pkg.clone(),
+        module_name: "BitsafeVault.Vault",
+        entity_name: "Vault",
+    })
+}
+
+/// ProviderService template identifier
+fn provider_service_template(packages: &PackageConfig) -> Option<TemplateId> {
+    packages.utility_registry.as_ref().map(|pkg| TemplateId {
+        package_id: pkg.clone(),
+        module_name: "Utility.Registry.App.V0.Service.Provider",
+        entity_name: "ProviderService",
+    })
+}
+
+/// UserService template identifier
+fn user_service_template(packages: &PackageConfig) -> Option<TemplateId> {
+    packages.utility_credential.as_ref().map(|pkg| TemplateId {
+        package_id: pkg.clone(),
+        module_name: "Utility.Credential.App.V0.Service.User",
+        entity_name: "UserService",
+    })
+}
+
+/// RegistrarService template identifier
+fn registrar_service_template(packages: &PackageConfig) -> Option<TemplateId> {
+    packages.utility_registry.as_ref().map(|pkg| TemplateId {
+        package_id: pkg.clone(),
+        module_name: "Utility.Registry.App.V0.Service.Registrar",
+        entity_name: "RegistrarService",
+    })
+}
+
+/// Module/entity names for contract templates (used for wildcard filtering)
+const CONTRACT_TEMPLATE_NAMES: &[(&str, &str)] = &[
+    ("CBTC.Governance", "CBTCGovernanceRules"),
+    ("CBTC.DepositAccount", "CBTCDepositAccountRules"),
+    ("CBTC.DepositAccount", "CBTCDepositAccount"),
+    ("CBTC.WithdrawAccount", "CBTCWithdrawAccountRules"),
+    ("CBTC.WithdrawAccount", "CBTCWithdrawAccount"),
+    ("BitsafeVault.VaultGovernance", "VaultGovernanceRules"),
 ];
 
 /// Check if a template matches any contract template we want to display
 fn is_contract_template(module_name: &str, entity_name: &str) -> bool {
-    CONTRACT_TEMPLATES
+    CONTRACT_TEMPLATE_NAMES
         .iter()
-        .any(|t| t.module_name == module_name && t.entity_name == entity_name)
+        .any(|(m, e)| *m == module_name && *e == entity_name)
 }
+
+/// Module/entity names for governance templates (used for wildcard filtering)
+const GOVERNANCE_TEMPLATE_NAMES: &[(&str, &str)] = &[
+    (
+        "BitsafeVault.VaultGovernance",
+        "VaultGovernanceConfirmation",
+    ),
+    ("CBTC.Governance", "Confirmation"),
+];
 
 /// Get active contracts for a party
 ///
@@ -104,6 +174,7 @@ pub async fn get_contracts(
     party_id: &str,
     token: Option<String>,
     test_mode: bool,
+    packages: &PackageConfig,
 ) -> Result<Vec<ContractInfo>> {
     let mut contracts = Vec::new();
 
@@ -114,7 +185,7 @@ pub async fn get_contracts(
     } else {
         // Production mode: query each template separately to handle missing packages
         tracing::debug!("Using TemplateFilter for contracts query (per-template)");
-        for t in CONTRACT_TEMPLATES {
+        for t in &contract_templates(packages) {
             match fetch_contracts_for_template(config, party_id, token.clone(), t, &mut contracts)
                 .await
             {
@@ -317,9 +388,9 @@ pub async fn get_party_metadata(
 
 /// Check if a template matches any governance confirmation template
 fn is_governance_template(module_name: &str, entity_name: &str) -> bool {
-    GOVERNANCE_TEMPLATES
+    GOVERNANCE_TEMPLATE_NAMES
         .iter()
-        .any(|t| t.module_name == module_name && t.entity_name == entity_name)
+        .any(|(m, e)| *m == module_name && *e == entity_name)
 }
 
 // ============================================================================
@@ -336,6 +407,7 @@ pub async fn get_governance_confirmations(
     threshold: usize,
     token: Option<String>,
     test_mode: bool,
+    packages: &PackageConfig,
 ) -> Result<Vec<GovernanceAction>> {
     // Collect confirmations grouped by action hash
     let mut confirmations_by_hash: HashMap<String, (ActionType, Vec<GovernanceConfirmation>)> =
@@ -346,7 +418,7 @@ pub async fn get_governance_confirmations(
         fetch_governance_with_wildcard(config, party_id, token, &mut confirmations_by_hash).await?;
     } else {
         tracing::debug!("Using TemplateFilter for governance query (per-template)");
-        for t in GOVERNANCE_TEMPLATES {
+        for t in &governance_templates(packages) {
             match fetch_governance_for_template(
                 config,
                 party_id,
@@ -594,24 +666,23 @@ fn compute_action_hash(action: &ActionType) -> String {
 // Governance State Query
 // ============================================================================
 
-/// VaultGovernanceRules template identifier
-const VAULT_GOVERNANCE_RULES: TemplateId = TemplateId {
-    package_id: VAULT_GOVERNANCE_PACKAGE_ID,
-    module_name: "BitsafeVault.VaultGovernance",
-    entity_name: "VaultGovernanceRules",
-};
-
 /// Get the state of the VaultGovernanceRules contract for a party
 pub async fn get_governance_state(
     config: &NodeConfig,
     party_id: &str,
     token: Option<String>,
     test_mode: bool,
+    packages: &PackageConfig,
 ) -> Result<Option<GovernanceState>> {
     if test_mode {
         fetch_governance_state_with_wildcard(config, party_id, token).await
     } else {
-        fetch_governance_state_for_template(config, party_id, token).await
+        match governance_state_template(packages) {
+            Some(template) => {
+                fetch_governance_state_for_template(config, party_id, token, &template).await
+            }
+            None => Ok(None),
+        }
     }
 }
 
@@ -663,8 +734,8 @@ async fn fetch_governance_state_with_wildcard(
         {
             // Check if this is the VaultGovernanceRules template
             if let Some(ref template_id) = created.template_id
-                && template_id.module_name == VAULT_GOVERNANCE_RULES.module_name
-                && template_id.entity_name == VAULT_GOVERNANCE_RULES.entity_name
+                && template_id.module_name == "BitsafeVault.VaultGovernance"
+                && template_id.entity_name == "VaultGovernanceRules"
             {
                 return Ok(extract_governance_state(&created));
             }
@@ -679,6 +750,7 @@ async fn fetch_governance_state_for_template(
     config: &NodeConfig,
     party_id: &str,
     token: Option<String>,
+    template: &TemplateId,
 ) -> Result<Option<GovernanceState>> {
     let mut state_client = utils::create_state_client(config, token).await?;
 
@@ -696,9 +768,9 @@ async fn fetch_governance_state_for_template(
                 identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
                     TemplateFilter {
                         template_id: Some(Identifier {
-                            package_id: VAULT_GOVERNANCE_RULES.package_id.to_string(),
-                            module_name: VAULT_GOVERNANCE_RULES.module_name.to_string(),
-                            entity_name: VAULT_GOVERNANCE_RULES.entity_name.to_string(),
+                            package_id: template.package_id.clone(),
+                            module_name: template.module_name.to_string(),
+                            entity_name: template.entity_name.to_string(),
                         }),
                         include_created_event_blob: false,
                     },
@@ -869,24 +941,21 @@ fn extract_reltime(value: &Value) -> Option<i64> {
 // Vault Contracts Query
 // ============================================================================
 
-/// Vault template identifier
-const VAULT_TEMPLATE: TemplateId = TemplateId {
-    package_id: VAULT_PACKAGE_ID,
-    module_name: "BitsafeVault.Vault",
-    entity_name: "Vault",
-};
-
 /// Get all Vault contracts for a party
 pub async fn get_vaults(
     config: &NodeConfig,
     party_id: &str,
     token: Option<String>,
     test_mode: bool,
+    packages: &PackageConfig,
 ) -> Result<Vec<VaultInfo>> {
     if test_mode {
         fetch_vaults_with_wildcard(config, party_id, token).await
     } else {
-        fetch_vaults_for_template(config, party_id, token).await
+        match vault_template(packages) {
+            Some(template) => fetch_vaults_for_template(config, party_id, token, &template).await,
+            None => Ok(Vec::new()),
+        }
     }
 }
 
@@ -937,8 +1006,8 @@ async fn fetch_vaults_with_wildcard(
         if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
             && let Some(created) = active.created_event
             && let Some(template_id) = &created.template_id
-            && template_id.module_name == VAULT_TEMPLATE.module_name
-            && template_id.entity_name == VAULT_TEMPLATE.entity_name
+            && template_id.module_name == "BitsafeVault.Vault"
+            && template_id.entity_name == "Vault"
             && let Some(vault_info) = extract_vault_info(&created)
         {
             vaults.push(vault_info);
@@ -953,6 +1022,7 @@ async fn fetch_vaults_for_template(
     config: &NodeConfig,
     party_id: &str,
     token: Option<String>,
+    template: &TemplateId,
 ) -> Result<Vec<VaultInfo>> {
     let mut state_client = utils::create_state_client(config, token).await?;
 
@@ -970,9 +1040,9 @@ async fn fetch_vaults_for_template(
                 identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
                     TemplateFilter {
                         template_id: Some(Identifier {
-                            package_id: VAULT_TEMPLATE.package_id.to_string(),
-                            module_name: VAULT_TEMPLATE.module_name.to_string(),
-                            entity_name: VAULT_TEMPLATE.entity_name.to_string(),
+                            package_id: template.package_id.clone(),
+                            module_name: template.module_name.to_string(),
+                            entity_name: template.entity_name.to_string(),
                         }),
                         include_created_event_blob: false,
                     },
@@ -1087,31 +1157,23 @@ fn extract_vault_config(value: &Value) -> Option<(String, String)> {
 // Utility Service Queries
 // ============================================================================
 
-/// ProviderService template identifier
-const PROVIDER_SERVICE_TEMPLATE: TemplateId = TemplateId {
-    package_id: UTILITY_REGISTRY_APP_PACKAGE_ID,
-    module_name: "Utility.Registry.App.V0.Service.Provider",
-    entity_name: "ProviderService",
-};
-
-/// UserService template identifier
-const USER_SERVICE_TEMPLATE: TemplateId = TemplateId {
-    package_id: UTILITY_CREDENTIAL_APP_PACKAGE_ID,
-    module_name: "Utility.Credential.App.V0.Service.User",
-    entity_name: "UserService",
-};
-
 /// Get all ProviderService contracts for a party
 pub async fn get_provider_services(
     config: &NodeConfig,
     party_id: &str,
     token: Option<String>,
     test_mode: bool,
+    packages: &PackageConfig,
 ) -> Result<Vec<ProviderServiceInfo>> {
     if test_mode {
         fetch_provider_services_with_wildcard(config, party_id, token).await
     } else {
-        fetch_provider_services_for_template(config, party_id, token).await
+        match provider_service_template(packages) {
+            Some(template) => {
+                fetch_provider_services_for_template(config, party_id, token, &template).await
+            }
+            None => Ok(Vec::new()),
+        }
     }
 }
 
@@ -1162,8 +1224,8 @@ async fn fetch_provider_services_with_wildcard(
         if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
             && let Some(created) = active.created_event
             && let Some(template_id) = &created.template_id
-            && template_id.module_name == PROVIDER_SERVICE_TEMPLATE.module_name
-            && template_id.entity_name == PROVIDER_SERVICE_TEMPLATE.entity_name
+            && template_id.module_name == "Utility.Registry.App.V0.Service.Provider"
+            && template_id.entity_name == "ProviderService"
             && let Some(info) = extract_provider_service_info(&created)
         {
             services.push(info);
@@ -1178,6 +1240,7 @@ async fn fetch_provider_services_for_template(
     config: &NodeConfig,
     party_id: &str,
     token: Option<String>,
+    template: &TemplateId,
 ) -> Result<Vec<ProviderServiceInfo>> {
     let mut state_client = utils::create_state_client(config, token).await?;
 
@@ -1195,9 +1258,9 @@ async fn fetch_provider_services_for_template(
                 identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
                     TemplateFilter {
                         template_id: Some(Identifier {
-                            package_id: PROVIDER_SERVICE_TEMPLATE.package_id.to_string(),
-                            module_name: PROVIDER_SERVICE_TEMPLATE.module_name.to_string(),
-                            entity_name: PROVIDER_SERVICE_TEMPLATE.entity_name.to_string(),
+                            package_id: template.package_id.clone(),
+                            module_name: template.module_name.to_string(),
+                            entity_name: template.entity_name.to_string(),
                         }),
                         include_created_event_blob: false,
                     },
@@ -1270,11 +1333,17 @@ pub async fn get_user_services(
     party_id: &str,
     token: Option<String>,
     test_mode: bool,
+    packages: &PackageConfig,
 ) -> Result<Vec<UserServiceInfo>> {
     if test_mode {
         fetch_user_services_with_wildcard(config, party_id, token).await
     } else {
-        fetch_user_services_for_template(config, party_id, token).await
+        match user_service_template(packages) {
+            Some(template) => {
+                fetch_user_services_for_template(config, party_id, token, &template).await
+            }
+            None => Ok(Vec::new()),
+        }
     }
 }
 
@@ -1325,8 +1394,8 @@ async fn fetch_user_services_with_wildcard(
         if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
             && let Some(created) = active.created_event
             && let Some(template_id) = &created.template_id
-            && template_id.module_name == USER_SERVICE_TEMPLATE.module_name
-            && template_id.entity_name == USER_SERVICE_TEMPLATE.entity_name
+            && template_id.module_name == "Utility.Credential.App.V0.Service.User"
+            && template_id.entity_name == "UserService"
             && let Some(info) = extract_user_service_info(&created)
         {
             services.push(info);
@@ -1341,6 +1410,7 @@ async fn fetch_user_services_for_template(
     config: &NodeConfig,
     party_id: &str,
     token: Option<String>,
+    template: &TemplateId,
 ) -> Result<Vec<UserServiceInfo>> {
     let mut state_client = utils::create_state_client(config, token).await?;
 
@@ -1358,9 +1428,9 @@ async fn fetch_user_services_for_template(
                 identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
                     TemplateFilter {
                         template_id: Some(Identifier {
-                            package_id: USER_SERVICE_TEMPLATE.package_id.to_string(),
-                            module_name: USER_SERVICE_TEMPLATE.module_name.to_string(),
-                            entity_name: USER_SERVICE_TEMPLATE.entity_name.to_string(),
+                            package_id: template.package_id.clone(),
+                            module_name: template.module_name.to_string(),
+                            entity_name: template.entity_name.to_string(),
                         }),
                         include_created_event_blob: false,
                     },
@@ -1425,4 +1495,285 @@ fn extract_user_service_info(created: &CreatedEvent) -> Option<UserServiceInfo> 
         operator,
         user,
     })
+}
+
+// ============================================================================
+// Registrar Service Queries
+// ============================================================================
+
+/// Get all RegistrarService contracts for a party
+pub async fn get_registrar_services(
+    config: &NodeConfig,
+    party_id: &str,
+    token: Option<String>,
+    test_mode: bool,
+    packages: &PackageConfig,
+) -> Result<Vec<RegistrarServiceInfo>> {
+    if test_mode {
+        fetch_registrar_services_with_wildcard(config, party_id, token).await
+    } else {
+        match registrar_service_template(packages) {
+            Some(template) => {
+                fetch_registrar_services_for_template(config, party_id, token, &template).await
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+}
+
+/// Fetch registrar services using WildcardFilter (for test mode)
+async fn fetch_registrar_services_with_wildcard(
+    config: &NodeConfig,
+    party_id: &str,
+    token: Option<String>,
+) -> Result<Vec<RegistrarServiceInfo>> {
+    let mut state_client = utils::create_state_client(config, token).await?;
+
+    let ledger_end = state_client
+        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
+        .await?
+        .into_inner()
+        .offset;
+
+    let mut filters_by_party = HashMap::new();
+    filters_by_party.insert(
+        party_id.to_string(),
+        Filters {
+            cumulative: vec![CumulativeFilter {
+                identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
+                    WildcardFilter {
+                        include_created_event_blob: false,
+                    },
+                )),
+            }],
+        },
+    );
+
+    let acs_request = GetActiveContractsRequest {
+        active_at_offset: ledger_end,
+        event_format: Some(EventFormat {
+            filters_by_party,
+            filters_for_any_party: None,
+            verbose: true,
+        }),
+    };
+
+    let mut stream = state_client
+        .get_active_contracts(acs_request)
+        .await?
+        .into_inner();
+
+    let mut services = Vec::new();
+    while let Some(response) = stream.message().await? {
+        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
+            && let Some(created) = active.created_event
+            && let Some(template_id) = &created.template_id
+            && template_id.module_name == "Utility.Registry.App.V0.Service.Registrar"
+            && template_id.entity_name == "RegistrarService"
+            && let Some(info) = extract_registrar_service_info(&created)
+        {
+            services.push(info);
+        }
+    }
+
+    Ok(services)
+}
+
+/// Fetch registrar services using TemplateFilter
+async fn fetch_registrar_services_for_template(
+    config: &NodeConfig,
+    party_id: &str,
+    token: Option<String>,
+    template: &TemplateId,
+) -> Result<Vec<RegistrarServiceInfo>> {
+    let mut state_client = utils::create_state_client(config, token).await?;
+
+    let ledger_end = state_client
+        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
+        .await?
+        .into_inner()
+        .offset;
+
+    let mut filters_by_party = HashMap::new();
+    filters_by_party.insert(
+        party_id.to_string(),
+        Filters {
+            cumulative: vec![CumulativeFilter {
+                identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
+                    TemplateFilter {
+                        template_id: Some(Identifier {
+                            package_id: template.package_id.clone(),
+                            module_name: template.module_name.to_string(),
+                            entity_name: template.entity_name.to_string(),
+                        }),
+                        include_created_event_blob: false,
+                    },
+                )),
+            }],
+        },
+    );
+
+    let acs_request = GetActiveContractsRequest {
+        active_at_offset: ledger_end,
+        event_format: Some(EventFormat {
+            filters_by_party,
+            filters_for_any_party: None,
+            verbose: true,
+        }),
+    };
+
+    let mut stream = state_client
+        .get_active_contracts(acs_request)
+        .await?
+        .into_inner();
+
+    let mut services = Vec::new();
+    while let Some(response) = stream.message().await? {
+        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
+            && let Some(created) = active.created_event
+            && let Some(info) = extract_registrar_service_info(&created)
+        {
+            services.push(info);
+        }
+    }
+
+    Ok(services)
+}
+
+/// Extract RegistrarServiceInfo from a RegistrarService created event
+fn extract_registrar_service_info(created: &CreatedEvent) -> Option<RegistrarServiceInfo> {
+    let record = created.create_arguments.as_ref()?;
+
+    let operator: CantonId = record
+        .fields
+        .iter()
+        .find(|f| f.label == "operator")
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Party(p)) => p.parse().ok(),
+            _ => None,
+        })?;
+
+    let registrar: CantonId = record
+        .fields
+        .iter()
+        .find(|f| f.label == "registrar")
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Party(p)) => p.parse().ok(),
+            _ => None,
+        })?;
+
+    Some(RegistrarServiceInfo {
+        contract_id: created.contract_id.clone(),
+        operator,
+        registrar,
+    })
+}
+
+// ============================================================================
+// Generic Contract ID Query
+// ============================================================================
+
+/// Query contracts by template (module_name + entity_name)
+///
+/// Returns contract IDs with their base64-encoded created_event_blob.
+/// Parameters for querying contracts by template or interface
+pub struct ContractQueryParams {
+    pub package_id: String,
+    pub module_name: String,
+    pub entity_name: String,
+    pub use_interface_filter: bool,
+}
+
+/// Uses WildcardFilter in test mode, TemplateFilter or InterfaceFilter in production.
+pub async fn query_contracts_by_template(
+    config: &NodeConfig,
+    party_id: &str,
+    token: Option<String>,
+    test_mode: bool,
+    params: &ContractQueryParams,
+) -> Result<Vec<ContractWithBlob>> {
+    use base64::Engine;
+
+    let mut state_client = utils::create_state_client(config, token).await?;
+
+    let ledger_end = state_client
+        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
+        .await?
+        .into_inner()
+        .offset;
+
+    let identifier = Identifier {
+        package_id: params.package_id.clone(),
+        module_name: params.module_name.clone(),
+        entity_name: params.entity_name.clone(),
+    };
+
+    let identifier_filter = if test_mode {
+        cumulative_filter::IdentifierFilter::WildcardFilter(WildcardFilter {
+            include_created_event_blob: true,
+        })
+    } else if params.use_interface_filter {
+        cumulative_filter::IdentifierFilter::InterfaceFilter(InterfaceFilter {
+            interface_id: Some(identifier),
+            include_interface_view: true,
+            include_created_event_blob: true,
+        })
+    } else {
+        cumulative_filter::IdentifierFilter::TemplateFilter(TemplateFilter {
+            template_id: Some(identifier),
+            include_created_event_blob: true,
+        })
+    };
+
+    let mut filters_by_party = HashMap::new();
+    filters_by_party.insert(
+        party_id.to_string(),
+        Filters {
+            cumulative: vec![CumulativeFilter {
+                identifier_filter: Some(identifier_filter),
+            }],
+        },
+    );
+
+    let acs_request = GetActiveContractsRequest {
+        active_at_offset: ledger_end,
+        event_format: Some(EventFormat {
+            filters_by_party,
+            filters_for_any_party: None,
+            verbose: true,
+        }),
+    };
+
+    let mut stream = state_client
+        .get_active_contracts(acs_request)
+        .await?
+        .into_inner();
+
+    let mut contracts = Vec::new();
+    while let Some(response) = stream.message().await? {
+        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
+            && let Some(created) = active.created_event
+        {
+            let matches = if test_mode {
+                created.template_id.as_ref().is_some_and(|t| {
+                    t.module_name == params.module_name && t.entity_name == params.entity_name
+                })
+            } else {
+                true
+            };
+
+            if matches {
+                let blob =
+                    base64::engine::general_purpose::STANDARD.encode(&created.created_event_blob);
+                contracts.push(ContractWithBlob {
+                    contract_id: created.contract_id,
+                    blob,
+                });
+            }
+        }
+    }
+
+    Ok(contracts)
 }
