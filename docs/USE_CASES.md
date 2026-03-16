@@ -22,8 +22,8 @@ curl -X POST http://custodian-a:8080/onboarding \
   -d '{
     "party_id_prefix": "joint-vault",
     "peer_ids": [
-      "PAR::custodian-b::1220...",
-      "PAR::custodian-c::1220..."
+      "custodian-b::1220...",
+      "custodian-c::1220..."
     ]
   }'
 ```
@@ -37,7 +37,7 @@ curl -X POST http://custodian-a:8080/contracts \
   -H "Content-Type: application/json" \
   -d '{
     "decentralized_party_id": "joint-vault::1220...",
-    "participant_ids": ["PAR::a::1220...", "PAR::b::1220...", "PAR::c::1220..."],
+    "participant_ids": ["a::1220...", "b::1220...", "c::1220..."],
     "participant_parties": ["member-a::1220...", "member-b::1220...", "member-c::1220..."],
     "operator_party": "operator::1220...",
     "dar_files": [
@@ -63,6 +63,30 @@ curl -X POST http://custodian-a:8080/contracts \
 ```
 
 This deploys a `VaultGovernanceRules` contract with all 3 members, threshold 2, and a 24-hour confirmation timeout.
+
+### Full Deployment Flow
+
+The complete end-to-end deployment of a vault system follows these steps. Each governance action (steps 5-14) requires threshold confirmations before execution.
+
+| # | Step | Actor | Description |
+|---|------|-------|-------------|
+| 1 | Create decentralized party | DPM (onboarding workflow) | Create the shared party identity |
+| 2 | Configure party credentials | External (deployment config) | Add `[[parties]]` section to each node's `node.toml` with Keycloak credentials |
+| 3 | Grant Ledger API rights | External (Canton admin) | Grant `actAs`/`readAs` rights for member parties on the decentralized party |
+| 4 | Upload DARs | DPM (DARs workflow) | Upload DAR packages to all participant nodes |
+| 5 | Deploy VaultGovernance | DPM (contracts workflow) | Deploy `VaultGovernanceRules` contract with package `#bitsafe-vault-governance-v0-rc8` |
+| 6 | Create ProviderService | Governance action | `utility_create_provider_request` |
+| 7 | Create UserService | Governance action | `utility_create_user_request` |
+| 8 | Setup Utility | Governance action | `utility_setup` -- links provider and user services |
+| 9 | Request DevNet FAR | Governance action | `dev_net_feature_app` -- register as featured app |
+| 10 | Add VaultManager | External (Canton admin) | Grant VaultManager role to the decentralized party |
+| 11 | Deploy Vault | Governance action | `vault_deployment` -- add member parties as beneficiaries |
+| 12 | Deploy YieldEpoch | Governance action | `yield_epoch_deployment` |
+| 13 | Request Processor | Governance action | `processor_deployment_request` -- same beneficiaries as vault |
+| 14 | Accept Processor | External (Canton admin) | Accept the processor deployment |
+| 15 | Accept Free Credential | Governance action | `credential_accept_free` |
+
+Steps marked "External" are performed outside the DPM application (e.g., via Canton admin console or deployment tooling).
 
 ### Day-to-Day Operations
 
@@ -93,7 +117,9 @@ curl -X POST http://custodian-a:8080/governance/confirm \
         "min_withdrawal_amount": "0.001"
       },
       "vault_backend_signatory": "backend::1220...",
-      "vault_far_config": null
+      "vault_far_config": null,
+      "allocation_factory_cid": "<allocation-factory-cid>",
+      "registrar_service_cid": "<registrar-service-cid>"
     }
   }'
 ```
@@ -150,7 +176,9 @@ curl -X POST http://custodian-a:8080/governance/execute \
         "min_withdrawal_amount": "0.001"
       },
       "vault_backend_signatory": "backend::1220...",
-      "vault_far_config": null
+      "vault_far_config": null,
+      "allocation_factory_cid": "<allocation-factory-cid>",
+      "registrar_service_cid": "<registrar-service-cid>"
     },
     "confirmation_cids": ["confirm-cid-1", "confirm-cid-2"]
   }'
@@ -198,6 +226,35 @@ curl -X POST http://custodian-a:8080/governance/execute \
 }
 ```
 
+#### Deploy YieldEpoch
+
+```json
+{
+  "action": {
+    "type": "yield_epoch_deployment",
+    "vault_rules_cid": "<vault-rules-cid>",
+    "vault_cid": "<vault-contract-id>",
+    "asset_instrument_id": { "admin": "operator::1220...", "id": "btc-instrument" },
+    "vault_backend_signatory": "backend::1220..."
+  }
+}
+```
+
+#### Request Processor Deployment
+
+```json
+{
+  "action": {
+    "type": "processor_deployment_request",
+    "vault_processor_rules_cid": "<vault-processor-rules-cid>",
+    "vault_backend_signatory": "backend::1220...",
+    "allocation_factory_cid": "<allocation-factory-cid>",
+    "processor_far_config": null,
+    "initial_supported_vaults": ["<vault-contract-id>"]
+  }
+}
+```
+
 ### Membership Changes
 
 #### Add a New Custodian
@@ -239,7 +296,7 @@ Adding a 4th custodian involves both governance and topology:
       -H "Content-Type: application/json" \
       -d '{
         "decentralized_party_id": "joint-vault::1220...",
-        "participant_id": "PAR::custodian-c::1220...",
+        "participant_id": "custodian-c::1220...",
         "namespace_fingerprint": "1220...",
         "new_threshold": 2
       }'
@@ -331,7 +388,9 @@ FAR is a reward distribution mechanism for featured application participants in 
         { "beneficiary": "custodian-b::1220...", "weight": "0.30" },
         { "beneficiary": "custodian-c::1220...", "weight": "0.20" }
       ]
-    }
+    },
+    "allocation_factory_cid": "<allocation-factory-cid>",
+    "registrar_service_cid": "<registrar-service-cid>"
   }
 }
 ```
@@ -463,34 +522,6 @@ After both services are created, link them:
     "operator": "operator::1220...",
     "provider_service_cid": "<provider-service-contract-id>",
     "user_service_cid": "<user-service-contract-id>"
-  }
-}
-```
-
-**4. Accept Holder Service Requests:**
-
-When a holder requests service access:
-
-```json
-{
-  "action": {
-    "type": "utility_accept_holder_service_request",
-    "operator": "operator::1220...",
-    "provider_service_cid": "<provider-service-contract-id>",
-    "holder_service_request_cid": "<request-contract-id>",
-    "holder": "holder-party::1220..."
-  }
-}
-```
-
-**5. Create Transfer Rule:**
-
-```json
-{
-  "action": {
-    "type": "utility_create_transfer_rule",
-    "operator": "operator::1220...",
-    "registrar_service_cid": "<registrar-service-contract-id>"
   }
 }
 ```

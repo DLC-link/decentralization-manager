@@ -24,7 +24,7 @@ pub struct NetworkConfig {
 /// A peer in the network
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Peer {
-    /// Canton participant UID (e.g., "PAR::participant1::1220...")
+    /// Canton participant UID (e.g., "participant1::1220...")
     pub participant_id: CantonId,
     /// Human-readable name
     pub name: String,
