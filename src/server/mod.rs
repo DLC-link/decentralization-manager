@@ -11,6 +11,8 @@ use actix_web::{App, HttpServer, web};
 use hyper::{Body, Response, StatusCode};
 use tokio::sync::{Notify, RwLock};
 use tokio_noise::handshakes::nn_psk2::Responder;
+use utoipa_actix_web::AppExt;
+use utoipa_swagger_ui::SwaggerUi;
 
 use crate::{
     auth::{AuthRegistry, MockAuthRegistry, WorkflowAuth},
@@ -201,8 +203,11 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig, test_mode: 
         let json_config = web::JsonConfig::default().limit(100 * 1024 * 1024);
         let payload_config = web::PayloadConfig::default().limit(100 * 1024 * 1024);
 
-        App::new()
-            .wrap(cors)
+        // Build app with utoipa-actix-web: each .service() call both registers
+        // the actix route AND collects its OpenAPI path automatically.
+        // No separate path list to maintain.
+        let (app, api) = App::new()
+            .into_utoipa_app()
             .app_data(json_config)
             .app_data(payload_config)
             .app_data(app_state.clone())
@@ -243,6 +248,13 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig, test_mode: 
             .service(handlers::cancel_confirmation)
             .service(handlers::get_token_standard_contracts)
             .service(handlers::get_amulet_rules)
+            .split_for_parts();
+
+        app.wrap(cors)
+            .service(
+                SwaggerUi::new("/swagger-ui/{_:.*}")
+                    .url("/api-docs/openapi.json", api),
+            )
             .service(assets::serve_frontend)
     })
     .bind((host, port))?

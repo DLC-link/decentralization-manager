@@ -13,6 +13,7 @@ use crate::{
             ContractsRequest, DarsRequest, HttpWorkflowState, KickRequest, KickResponse,
             KickStatus, ListenerPauseGuard, OnboardingRequest, OnboardingResponse,
             OnboardingStatus, WorkflowProgress, WorkflowResponse,
+            WorkflowStatusResponse,
         },
     },
     workflow::{self, ContractsConfig},
@@ -39,6 +40,15 @@ pub type DarsWorkflowState = HttpWorkflowState<WorkflowProgress>;
 // ============================================================================
 
 /// Start a kick workflow to remove a participant from a decentralized party
+#[utoipa::path(
+    tag = "Workflows",
+    request_body = KickRequest,
+    responses(
+        (status = 202, description = "Kick workflow started", body = WorkflowResponse),
+        (status = 400, description = "Bad request"),
+        (status = 409, description = "Workflow already in progress")
+    )
+)]
 #[post("/kick")]
 pub async fn start_kick(
     data: web::Data<AppState>,
@@ -171,6 +181,12 @@ pub async fn start_kick(
 }
 
 /// Get the current status of the kick workflow
+#[utoipa::path(
+    tag = "Workflows",
+    responses(
+        (status = 200, description = "Kick workflow status", body = WorkflowStatusResponse)
+    )
+)]
 #[get("/kick/status")]
 pub async fn get_kick_status(kick_state: web::Data<Arc<KickWorkflowState>>) -> impl Responder {
     let status = kick_state.status.read().await;
@@ -285,6 +301,14 @@ async fn send_kick_invites(config: &NodeConfig, kicked_participant: &CantonId) -
 // ============================================================================
 
 /// Start an onboarding workflow to create a new decentralized party
+#[utoipa::path(
+    tag = "Workflows",
+    request_body = OnboardingRequest,
+    responses(
+        (status = 202, description = "Onboarding workflow started", body = WorkflowResponse),
+        (status = 409, description = "Workflow already in progress")
+    )
+)]
 #[post("/onboarding")]
 pub async fn start_onboarding(
     data: web::Data<AppState>,
@@ -374,6 +398,12 @@ pub async fn start_onboarding(
 }
 
 /// Get the current status of the onboarding workflow
+#[utoipa::path(
+    tag = "Workflows",
+    responses(
+        (status = 200, description = "Onboarding workflow status", body = WorkflowStatusResponse)
+    )
+)]
 #[get("/onboarding/status")]
 pub async fn get_onboarding_status(
     onboarding_state: web::Data<Arc<OnboardingWorkflowState>>,
@@ -465,6 +495,14 @@ async fn send_onboarding_invites(config: &NodeConfig, peer_ids: &[String]) -> Re
 // ============================================================================
 
 /// Start a contracts workflow to upload DARs and create contracts
+#[utoipa::path(
+    tag = "Workflows",
+    request_body = ContractsRequest,
+    responses(
+        (status = 202, description = "Contracts workflow started", body = WorkflowResponse),
+        (status = 409, description = "Workflow already in progress")
+    )
+)]
 #[post("/contracts")]
 pub async fn start_contracts(
     data: web::Data<AppState>,
@@ -572,6 +610,12 @@ pub async fn start_contracts(
 }
 
 /// Get the current status of the contracts workflow
+#[utoipa::path(
+    tag = "Workflows",
+    responses(
+        (status = 200, description = "Contracts workflow status", body = WorkflowStatusResponse)
+    )
+)]
 #[get("/contracts/status")]
 pub async fn get_contracts_status(
     contracts_state: web::Data<Arc<ContractsWorkflowState>>,
@@ -621,6 +665,14 @@ async fn save_deployed_packages(config: &NodeConfig, contracts_config: &Contract
 // ============================================================================
 
 /// Start a DARs upload workflow to distribute DARs across all participants
+#[utoipa::path(
+    tag = "Workflows",
+    request_body = DarsRequest,
+    responses(
+        (status = 202, description = "DARs upload workflow started", body = WorkflowResponse),
+        (status = 409, description = "Workflow already in progress")
+    )
+)]
 #[post("/dars")]
 pub async fn start_dars(
     data: web::Data<AppState>,
@@ -716,6 +768,12 @@ pub async fn start_dars(
 }
 
 /// Get the current status of the DARs upload workflow
+#[utoipa::path(
+    tag = "Workflows",
+    responses(
+        (status = 200, description = "DARs upload workflow status", body = WorkflowStatusResponse)
+    )
+)]
 #[get("/dars/status")]
 pub async fn get_dars_status(dars_state: web::Data<Arc<DarsWorkflowState>>) -> impl Responder {
     let status = dars_state.status.read().await;

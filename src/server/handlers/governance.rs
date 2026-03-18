@@ -41,13 +41,13 @@ use crate::{
 // ============================================================================
 
 /// Query parameters for governance endpoints
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
 pub struct GovernanceQuery {
     pub party_id: CantonId,
 }
 
 /// Query parameters for generic contract query endpoint
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
 pub struct ContractQueryParams {
     pub party_id: CantonId,
     pub package_id: String,
@@ -63,6 +63,14 @@ pub struct ContractQueryParams {
 // ============================================================================
 
 /// Get governance confirmations with parsed actions
+#[utoipa::path(
+    tag = "Governance",
+    params(GovernanceQuery),
+    responses(
+        (status = 200, description = "Governance confirmations", body = GovernanceResponse),
+        (status = 500, description = "Internal server error")
+    )
+)]
 #[get("/governance/confirmations")]
 pub async fn get_governance(
     data: web::Data<AppState>,
@@ -104,6 +112,14 @@ pub async fn get_governance(
 }
 
 /// Get governance state (VaultGovernanceRules contract state)
+#[utoipa::path(
+    tag = "Governance",
+    params(GovernanceQuery),
+    responses(
+        (status = 200, description = "Governance state", body = GovernanceStateResponse),
+        (status = 500, description = "Internal server error")
+    )
+)]
 #[get("/governance/state")]
 pub async fn get_governance_state(
     data: web::Data<AppState>,
@@ -128,6 +144,14 @@ pub async fn get_governance_state(
 }
 
 /// Get deployed Vault contracts
+#[utoipa::path(
+    tag = "Services",
+    params(GovernanceQuery),
+    responses(
+        (status = 200, description = "Deployed vaults", body = VaultsResponse),
+        (status = 500, description = "Internal server error")
+    )
+)]
 #[get("/vaults")]
 pub async fn get_vaults_handler(
     data: web::Data<AppState>,
@@ -152,6 +176,14 @@ pub async fn get_vaults_handler(
 }
 
 /// Get ProviderService contracts
+#[utoipa::path(
+    tag = "Services",
+    params(GovernanceQuery),
+    responses(
+        (status = 200, description = "Provider services", body = ProviderServicesResponse),
+        (status = 500, description = "Internal server error")
+    )
+)]
 #[get("/services/provider")]
 pub async fn get_provider_services_handler(
     data: web::Data<AppState>,
@@ -176,6 +208,14 @@ pub async fn get_provider_services_handler(
 }
 
 /// Get UserService contracts
+#[utoipa::path(
+    tag = "Services",
+    params(GovernanceQuery),
+    responses(
+        (status = 200, description = "User services", body = UserServicesResponse),
+        (status = 500, description = "Internal server error")
+    )
+)]
 #[get("/services/user")]
 pub async fn get_user_services_handler(
     data: web::Data<AppState>,
@@ -200,6 +240,14 @@ pub async fn get_user_services_handler(
 }
 
 /// Get RegistrarService contracts
+#[utoipa::path(
+    tag = "Services",
+    params(GovernanceQuery),
+    responses(
+        (status = 200, description = "Registrar services", body = RegistrarServicesResponse),
+        (status = 500, description = "Internal server error")
+    )
+)]
 #[get("/services/registrar")]
 pub async fn get_registrar_services_handler(
     data: web::Data<AppState>,
@@ -224,6 +272,14 @@ pub async fn get_registrar_services_handler(
 }
 
 /// Query contract IDs by template
+#[utoipa::path(
+    tag = "Services",
+    params(ContractQueryParams),
+    responses(
+        (status = 200, description = "Contract query results", body = ContractQueryResponse),
+        (status = 500, description = "Internal server error")
+    )
+)]
 #[get("/contracts/query")]
 pub async fn query_contracts_handler(
     data: web::Data<AppState>,
@@ -266,6 +322,16 @@ pub async fn query_contracts_handler(
 // ============================================================================
 
 /// Submit a confirmation for a governance action using structured ActionType
+#[utoipa::path(
+    tag = "Governance",
+    request_body = ConfirmActionRequest,
+    responses(
+        (status = 200, description = "Confirmation submitted"),
+        (status = 400, description = "Bad request"),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error")
+    )
+)]
 #[post("/governance/confirm")]
 pub async fn confirm_action(
     data: web::Data<AppState>,
@@ -303,6 +369,16 @@ pub async fn confirm_action(
 }
 
 /// Execute a confirmed governance action using structured ActionType
+#[utoipa::path(
+    tag = "Governance",
+    request_body = ExecuteActionRequest,
+    responses(
+        (status = 200, description = "Action executed"),
+        (status = 400, description = "Bad request"),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error")
+    )
+)]
 #[post("/governance/execute")]
 pub async fn execute_action(
     data: web::Data<AppState>,
@@ -340,6 +416,15 @@ pub async fn execute_action(
 }
 
 /// Expire a stale governance confirmation
+#[utoipa::path(
+    tag = "Governance",
+    request_body = ExpireConfirmationRequest,
+    responses(
+        (status = 200, description = "Confirmation expired"),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error")
+    )
+)]
 #[post("/governance/expire")]
 pub async fn expire_confirmation(
     data: web::Data<AppState>,
@@ -375,6 +460,15 @@ pub async fn expire_confirmation(
 }
 
 /// Cancel (revoke) own governance confirmation
+#[utoipa::path(
+    tag = "Governance",
+    request_body = CancelConfirmationRequest,
+    responses(
+        (status = 200, description = "Confirmation cancelled"),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error")
+    )
+)]
 #[post("/governance/cancel")]
 pub async fn cancel_confirmation(
     data: web::Data<AppState>,
@@ -409,6 +503,13 @@ pub async fn cancel_confirmation(
 }
 
 /// Get package configuration for a party
+#[utoipa::path(
+    tag = "Configuration",
+    params(GovernanceQuery),
+    responses(
+        (status = 200, description = "Package configuration", body = PackageConfig)
+    )
+)]
 #[get("/packages")]
 pub async fn get_packages(
     data: web::Data<AppState>,
@@ -419,6 +520,13 @@ pub async fn get_packages(
 }
 
 /// Fetch AmuletRules contract from the DSO API
+#[utoipa::path(
+    tag = "Proxy",
+    responses(
+        (status = 200, description = "AmuletRules contract", body = ContractWithBlob),
+        (status = 502, description = "Bad gateway")
+    )
+)]
 #[get("/amulet-rules")]
 pub async fn get_amulet_rules(data: web::Data<AppState>) -> impl Responder {
     let url = data.config.canton.network.dso_url();
@@ -466,6 +574,14 @@ pub async fn get_amulet_rules(data: web::Data<AppState>) -> impl Responder {
 }
 
 /// Proxy request to fetch token standard contracts (avoids CORS)
+#[utoipa::path(
+    tag = "Proxy",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Token standard contracts"),
+        (status = 502, description = "Bad gateway")
+    )
+)]
 #[post("/token-standard-contracts")]
 pub async fn get_token_standard_contracts(body: web::Json<serde_json::Value>) -> impl Responder {
     let client = reqwest::Client::new();

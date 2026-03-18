@@ -15,14 +15,14 @@ use crate::{
 };
 
 /// Network configuration - list of peers in the network
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, utoipa::ToSchema)]
 pub struct NetworkConfig {
     /// List of peers in the network
     pub peers: Vec<Peer>,
 }
 
 /// A peer in the network
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct Peer {
     /// Canton participant UID (e.g., "participant1::1220...")
     pub participant_id: CantonId,
@@ -121,7 +121,7 @@ impl NetworkConfig {
 /// Supports two authentication methods:
 /// 1. Client credentials (M2M): Set `client_id` and `client_secret`
 /// 2. Password flow: Set `client_id`, `username`, and `password`
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct KeycloakConfig {
     /// Keycloak server URL (e.g., "https://keycloak.example.com")
     pub url: String,
@@ -141,7 +141,7 @@ pub struct KeycloakConfig {
 }
 
 /// Package identifiers for Daml contracts (configurable per party)
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct PackageConfig {
     pub vault_governance: Option<String>,
     pub vault: Option<String>,
@@ -150,7 +150,7 @@ pub struct PackageConfig {
 }
 
 /// Credentials for a specific decentralized party
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct PartyCredentials {
     /// The decentralized party ID (shared among all members)
     pub dec_party_id: CantonId,
@@ -166,7 +166,7 @@ pub struct PartyCredentials {
 }
 
 /// Timeout configuration
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct Timeouts {
     #[serde(default = "default_handshake_timeout")]
     pub handshake_timeout_secs: u64,
@@ -203,7 +203,7 @@ impl Default for Timeouts {
 }
 
 /// Individual node configuration
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct NodeConfig {
     pub node: NodeInfo,
     pub canton: CantonConfig,
@@ -218,7 +218,7 @@ pub struct NodeConfig {
 }
 
 /// Node-specific information
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct NodeInfo {
     /// Canton participant ID for this node (e.g., "participant1::1220...")
     /// If not specified, it will be queried from Canton and saved to the config.
@@ -255,7 +255,7 @@ fn default_noise_port() -> u16 {
 }
 
 /// Canton Network environment
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Network {
     Devnet,
@@ -275,7 +275,7 @@ impl Network {
 }
 
 /// Canton participant configuration
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct CantonConfig {
     pub admin_api_host: String,
     pub admin_api_port: u16,

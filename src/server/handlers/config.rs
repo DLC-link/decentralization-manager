@@ -1,11 +1,18 @@
 use actix_web::{HttpResponse, Responder, get, post, web};
 
 use crate::{
-    config::{NetworkConfig, Peer},
+    config::{NetworkConfig, NodeConfig, Peer},
     server::AppState,
 };
 
 /// Get the network configuration
+#[utoipa::path(
+    tag = "Configuration",
+    responses(
+        (status = 200, description = "Network configuration", body = NetworkConfig),
+        (status = 500, description = "Internal server error")
+    )
+)]
 #[get("/network-config")]
 pub async fn get_network_config(data: web::Data<AppState>) -> impl Responder {
     match data.config.load_network_config().await {
@@ -20,6 +27,14 @@ pub async fn get_network_config(data: web::Data<AppState>) -> impl Responder {
 }
 
 /// Save the network configuration (peers list)
+#[utoipa::path(
+    tag = "Configuration",
+    request_body = Vec<Peer>,
+    responses(
+        (status = 200, description = "Network config saved"),
+        (status = 500, description = "Internal server error")
+    )
+)]
 #[post("/network-config")]
 pub async fn save_network_config(
     data: web::Data<AppState>,
@@ -47,6 +62,12 @@ pub async fn save_network_config(
 }
 
 /// Get the node configuration
+#[utoipa::path(
+    tag = "Configuration",
+    responses(
+        (status = 200, description = "Node configuration", body = NodeConfig)
+    )
+)]
 #[get("/node-config")]
 pub async fn get_node_config(data: web::Data<AppState>) -> impl Responder {
     HttpResponse::Ok().json(&data.config)

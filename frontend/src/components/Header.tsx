@@ -16,9 +16,12 @@ export const Header = () => {
 
   const handleSubtitleClick = () => {
     clickCount.current += 1;
-    if (clickCount.current >= 5) {
-      setShowBuildDate((prev) => !prev);
+    if (clickCount.current >= 10) {
       clickCount.current = 0;
+      setShowBuildDate(false);
+      window.location.href = "/swagger-ui/";
+    } else if (clickCount.current >= 5) {
+      setShowBuildDate(true);
     }
   };
 
