@@ -10,10 +10,9 @@ use crate::{
     server::{
         AppState,
         types::{
-            ContractsRequest, DarsRequest, HttpWorkflowState, KickRequest, KickResponse,
-            KickStatus, ListenerPauseGuard, OnboardingRequest, OnboardingResponse,
-            OnboardingStatus, WorkflowProgress, WorkflowResponse,
-            WorkflowStatusResponse,
+            ContractsRequest, DarsRequest, ErrorResponse, HttpWorkflowState, KickRequest,
+            KickResponse, KickStatus, ListenerPauseGuard, OnboardingRequest, OnboardingResponse,
+            OnboardingStatus, WorkflowProgress, WorkflowResponse, WorkflowStatusResponse,
         },
     },
     workflow::{self, ContractsConfig},
@@ -45,8 +44,8 @@ pub type DarsWorkflowState = HttpWorkflowState<WorkflowProgress>;
     request_body = KickRequest,
     responses(
         (status = 202, description = "Kick workflow started", body = WorkflowResponse),
-        (status = 400, description = "Bad request"),
-        (status = 409, description = "Workflow already in progress")
+        (status = 400, description = "Bad request", body = ErrorResponse),
+        (status = 409, description = "Workflow already in progress", body = ErrorResponse)
     )
 )]
 #[post("/kick")]
@@ -66,35 +65,35 @@ pub async fn start_kick(
     let decentralized_party_id = match CantonId::parse(&body.decentralized_party_id) {
         Ok(id) => id,
         Err(e) => {
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": format!("Invalid decentralized_party_id: {e}")
-            }));
+            return HttpResponse::BadRequest().json(ErrorResponse {
+                error: format!("Invalid decentralized_party_id: {e}"),
+            });
         }
     };
 
     let participant_id = match CantonId::parse(&body.participant_id) {
         Ok(id) => id,
         Err(e) => {
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": format!("Invalid participant_id: {e}")
-            }));
+            return HttpResponse::BadRequest().json(ErrorResponse {
+                error: format!("Invalid participant_id: {e}"),
+            });
         }
     };
 
     // Prevent kicking ourselves
     if participant_id == *data.config.participant_id() {
-        return HttpResponse::BadRequest().json(serde_json::json!({
-            "error": "Cannot kick yourself"
-        }));
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: "Cannot kick yourself".to_string(),
+        });
     }
 
     // Check if a kick is already in progress
     {
         let status = kick_state.status.read().await;
         if *status == KickStatus::InProgress {
-            return HttpResponse::Conflict().json(serde_json::json!({
-                "error": "A kick workflow is already in progress"
-            }));
+            return HttpResponse::Conflict().json(ErrorResponse {
+                error: "A kick workflow is already in progress".to_string(),
+            });
         }
     }
 
@@ -192,10 +191,10 @@ pub async fn get_kick_status(kick_state: web::Data<Arc<KickWorkflowState>>) -> i
     let status = kick_state.status.read().await;
     let error = kick_state.error.read().await;
 
-    HttpResponse::Ok().json(serde_json::json!({
-        "status": *status,
-        "error": *error,
-    }))
+    HttpResponse::Ok().json(WorkflowStatusResponse {
+        status: *status,
+        error: error.clone(),
+    })
 }
 
 /// Send kick invites to all peers using Noise protocol (excluding the peer being kicked)
@@ -306,7 +305,7 @@ async fn send_kick_invites(config: &NodeConfig, kicked_participant: &CantonId) -
     request_body = OnboardingRequest,
     responses(
         (status = 202, description = "Onboarding workflow started", body = WorkflowResponse),
-        (status = 409, description = "Workflow already in progress")
+        (status = 409, description = "Workflow already in progress", body = ErrorResponse)
     )
 )]
 #[post("/onboarding")]
@@ -319,9 +318,9 @@ pub async fn start_onboarding(
     {
         let status = onboarding_state.status.read().await;
         if *status == OnboardingStatus::InProgress {
-            return HttpResponse::Conflict().json(serde_json::json!({
-                "error": "An onboarding workflow is already in progress"
-            }));
+            return HttpResponse::Conflict().json(ErrorResponse {
+                error: "An onboarding workflow is already in progress".to_string(),
+            });
         }
     }
 
@@ -411,10 +410,10 @@ pub async fn get_onboarding_status(
     let status = onboarding_state.status.read().await;
     let error = onboarding_state.error.read().await;
 
-    HttpResponse::Ok().json(serde_json::json!({
-        "status": *status,
-        "error": *error,
-    }))
+    HttpResponse::Ok().json(WorkflowStatusResponse {
+        status: *status,
+        error: error.clone(),
+    })
 }
 
 /// Send onboarding invites to selected peers using Noise protocol
@@ -500,7 +499,7 @@ async fn send_onboarding_invites(config: &NodeConfig, peer_ids: &[String]) -> Re
     request_body = ContractsRequest,
     responses(
         (status = 202, description = "Contracts workflow started", body = WorkflowResponse),
-        (status = 409, description = "Workflow already in progress")
+        (status = 409, description = "Workflow already in progress", body = ErrorResponse)
     )
 )]
 #[post("/contracts")]
@@ -513,9 +512,9 @@ pub async fn start_contracts(
     {
         let status = contracts_state.status.read().await;
         if *status == WorkflowProgress::InProgress {
-            return HttpResponse::Conflict().json(serde_json::json!({
-                "error": "A contracts workflow is already in progress"
-            }));
+            return HttpResponse::Conflict().json(ErrorResponse {
+                error: "A contracts workflow is already in progress".to_string(),
+            });
         }
     }
 
@@ -623,10 +622,10 @@ pub async fn get_contracts_status(
     let status = contracts_state.status.read().await;
     let error = contracts_state.error.read().await;
 
-    HttpResponse::Ok().json(serde_json::json!({
-        "status": *status,
-        "error": *error,
-    }))
+    HttpResponse::Ok().json(WorkflowStatusResponse {
+        status: *status,
+        error: error.clone(),
+    })
 }
 
 /// Save deployed package IDs to party config after successful contracts workflow
@@ -670,7 +669,7 @@ async fn save_deployed_packages(config: &NodeConfig, contracts_config: &Contract
     request_body = DarsRequest,
     responses(
         (status = 202, description = "DARs upload workflow started", body = WorkflowResponse),
-        (status = 409, description = "Workflow already in progress")
+        (status = 409, description = "Workflow already in progress", body = ErrorResponse)
     )
 )]
 #[post("/dars")]
@@ -683,9 +682,9 @@ pub async fn start_dars(
     {
         let status = dars_state.status.read().await;
         if *status == WorkflowProgress::InProgress {
-            return HttpResponse::Conflict().json(serde_json::json!({
-                "error": "A DARs upload workflow is already in progress"
-            }));
+            return HttpResponse::Conflict().json(ErrorResponse {
+                error: "A DARs upload workflow is already in progress".to_string(),
+            });
         }
     }
 
@@ -779,10 +778,10 @@ pub async fn get_dars_status(dars_state: web::Data<Arc<DarsWorkflowState>>) -> i
     let status = dars_state.status.read().await;
     let error = dars_state.error.read().await;
 
-    HttpResponse::Ok().json(serde_json::json!({
-        "status": *status,
-        "error": *error,
-    }))
+    HttpResponse::Ok().json(WorkflowStatusResponse {
+        status: *status,
+        error: error.clone(),
+    })
 }
 
 /// Send DARs invites to all peers using Noise protocol

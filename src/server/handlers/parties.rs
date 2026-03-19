@@ -24,8 +24,8 @@ use crate::{
         AppState,
         queries::{get_contracts, get_party_metadata},
         types::{
-            ConnectionStatus, DecentralizedPartiesResponse, DecentralizedParty, ParticipantInfo,
-            ParticipantStatus, ParticipantsStatusResponse, Permission,
+            ConnectionStatus, DecentralizedPartiesResponse, DecentralizedParty, ErrorResponse,
+            ParticipantInfo, ParticipantStatus, ParticipantsStatusResponse, Permission,
         },
     },
     utils,
@@ -45,7 +45,7 @@ pub struct PartiesQuery {
     params(PartiesQuery),
     responses(
         (status = 200, description = "Decentralized parties", body = DecentralizedPartiesResponse),
-        (status = 500, description = "Internal server error")
+        (status = 500, description = "Internal server error", body = ErrorResponse)
     )
 )]
 #[get("/decentralized-parties")]
@@ -59,9 +59,9 @@ pub async fn get_decentralized_parties(
         Ok(response) => HttpResponse::Ok().json(response),
         Err(e) => {
             tracing::error!("Failed to fetch decentralized parties: {e}");
-            HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Failed to fetch decentralized parties: {e}")
-            }))
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch decentralized parties: {e}"),
+            })
         }
     }
 }
@@ -252,7 +252,7 @@ async fn fetch_decentralized_parties(
     tag = "Parties",
     responses(
         (status = 200, description = "Participants connection status", body = ParticipantsStatusResponse),
-        (status = 500, description = "Internal server error")
+        (status = 500, description = "Internal server error", body = ErrorResponse)
     )
 )]
 #[get("/participants-status")]
@@ -261,9 +261,9 @@ pub async fn get_participants_status(data: web::Data<AppState>) -> impl Responde
         Ok(response) => HttpResponse::Ok().json(response),
         Err(e) => {
             tracing::error!("Failed to check participants status: {e}");
-            HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Failed to check participants status: {e}")
-            }))
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to check participants status: {e}"),
+            })
         }
     }
 }

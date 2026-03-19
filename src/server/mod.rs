@@ -250,12 +250,12 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig, test_mode: 
             .service(handlers::get_amulet_rules)
             .split_for_parts();
 
-        app.wrap(cors)
-            .service(
-                SwaggerUi::new("/swagger-ui/{_:.*}")
-                    .url("/api-docs/openapi.json", api),
-            )
-            .service(assets::serve_frontend)
+        let mut app = app.wrap(cors);
+        if test_mode {
+            app = app
+                .service(SwaggerUi::new("/swagger-ui/{_:.*}").url("/api-docs/openapi.json", api));
+        }
+        app.service(assets::serve_frontend)
     })
     .bind((host, port))?
     .run()

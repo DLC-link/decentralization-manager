@@ -702,6 +702,12 @@ pub struct MessageResponse {
     pub message: String,
 }
 
+/// Generic success boolean response
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct SuccessResponse {
+    pub success: bool,
+}
+
 /// Response for workflow status check endpoints
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct WorkflowStatusResponse {

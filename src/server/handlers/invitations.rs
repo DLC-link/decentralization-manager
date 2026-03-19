@@ -3,7 +3,8 @@ use actix_web::{HttpResponse, Responder, get, post, web};
 use crate::server::{
     AppState,
     types::{
-        InvitationActionRequest, InvitationType, PendingInvitation, PendingInvitationsResponse,
+        ErrorResponse, InvitationActionRequest, InvitationType, MessageResponse, PendingInvitation,
+        PendingInvitationsResponse,
     },
 };
 
@@ -46,8 +47,8 @@ pub async fn get_invitations(data: web::Data<AppState>) -> impl Responder {
     tag = "Invitations",
     request_body = InvitationActionRequest,
     responses(
-        (status = 200, description = "Invitation accepted"),
-        (status = 404, description = "Invitation not found")
+        (status = 200, description = "Invitation accepted", body = MessageResponse),
+        (status = 404, description = "Invitation not found", body = ErrorResponse)
     )
 )]
 #[post("/invitations/accept")]
@@ -103,8 +104,8 @@ pub async fn accept_invitation(
     tag = "Invitations",
     request_body = InvitationActionRequest,
     responses(
-        (status = 200, description = "Invitation declined"),
-        (status = 404, description = "Invitation not found")
+        (status = 200, description = "Invitation declined", body = MessageResponse),
+        (status = 404, description = "Invitation not found", body = ErrorResponse)
     )
 )]
 #[post("/invitations/decline")]
