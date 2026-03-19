@@ -20,6 +20,12 @@ use crate::{
 };
 
 /// Check authentication status for all configured parties
+#[utoipa::path(
+    tag = "Authentication",
+    responses(
+        (status = 200, description = "Authentication status for all parties", body = AuthStatusResponse)
+    )
+)]
 #[get("/auth/status")]
 pub async fn get_auth_status(data: web::Data<AppState>) -> impl Responder {
     let mut party_statuses = Vec::new();
@@ -183,6 +189,12 @@ async fn check_user_rights(
 }
 
 /// Test authentication by attempting to get a fresh token
+#[utoipa::path(
+    tag = "Authentication",
+    responses(
+        (status = 200, description = "Authentication test results", body = AuthTestResponse)
+    )
+)]
 #[post("/auth/test")]
 pub async fn test_auth(data: web::Data<AppState>) -> impl Responder {
     let mut results = Vec::new();

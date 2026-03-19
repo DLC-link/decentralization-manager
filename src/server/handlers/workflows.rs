@@ -10,9 +10,9 @@ use crate::{
     server::{
         AppState,
         types::{
-            ContractsRequest, DarsRequest, HttpWorkflowState, KickRequest, KickResponse,
-            KickStatus, ListenerPauseGuard, OnboardingRequest, OnboardingResponse,
-            OnboardingStatus, WorkflowProgress, WorkflowResponse,
+            ContractsRequest, DarsRequest, ErrorResponse, HttpWorkflowState, KickRequest,
+            KickResponse, KickStatus, ListenerPauseGuard, OnboardingRequest, OnboardingResponse,
+            OnboardingStatus, WorkflowProgress, WorkflowResponse, WorkflowStatusResponse,
         },
     },
     workflow::{self, ContractsConfig},
@@ -39,6 +39,15 @@ pub type DarsWorkflowState = HttpWorkflowState<WorkflowProgress>;
 // ============================================================================
 
 /// Start a kick workflow to remove a participant from a decentralized party
+#[utoipa::path(
+    tag = "Workflows",
+    request_body = KickRequest,
+    responses(
+        (status = 202, description = "Kick workflow started", body = WorkflowResponse),
+        (status = 400, description = "Bad request", body = ErrorResponse),
+        (status = 409, description = "Workflow already in progress", body = ErrorResponse)
+    )
+)]
 #[post("/kick")]
 pub async fn start_kick(
     data: web::Data<AppState>,
@@ -56,35 +65,35 @@ pub async fn start_kick(
     let decentralized_party_id = match CantonId::parse(&body.decentralized_party_id) {
         Ok(id) => id,
         Err(e) => {
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": format!("Invalid decentralized_party_id: {e}")
-            }));
+            return HttpResponse::BadRequest().json(ErrorResponse {
+                error: format!("Invalid decentralized_party_id: {e}"),
+            });
         }
     };
 
     let participant_id = match CantonId::parse(&body.participant_id) {
         Ok(id) => id,
         Err(e) => {
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": format!("Invalid participant_id: {e}")
-            }));
+            return HttpResponse::BadRequest().json(ErrorResponse {
+                error: format!("Invalid participant_id: {e}"),
+            });
         }
     };
 
     // Prevent kicking ourselves
     if participant_id == *data.config.participant_id() {
-        return HttpResponse::BadRequest().json(serde_json::json!({
-            "error": "Cannot kick yourself"
-        }));
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: "Cannot kick yourself".to_string(),
+        });
     }
 
     // Check if a kick is already in progress
     {
         let status = kick_state.status.read().await;
         if *status == KickStatus::InProgress {
-            return HttpResponse::Conflict().json(serde_json::json!({
-                "error": "A kick workflow is already in progress"
-            }));
+            return HttpResponse::Conflict().json(ErrorResponse {
+                error: "A kick workflow is already in progress".to_string(),
+            });
         }
     }
 
@@ -171,15 +180,21 @@ pub async fn start_kick(
 }
 
 /// Get the current status of the kick workflow
+#[utoipa::path(
+    tag = "Workflows",
+    responses(
+        (status = 200, description = "Kick workflow status", body = WorkflowStatusResponse)
+    )
+)]
 #[get("/kick/status")]
 pub async fn get_kick_status(kick_state: web::Data<Arc<KickWorkflowState>>) -> impl Responder {
     let status = kick_state.status.read().await;
     let error = kick_state.error.read().await;
 
-    HttpResponse::Ok().json(serde_json::json!({
-        "status": *status,
-        "error": *error,
-    }))
+    HttpResponse::Ok().json(WorkflowStatusResponse {
+        status: *status,
+        error: error.clone(),
+    })
 }
 
 /// Send kick invites to all peers using Noise protocol (excluding the peer being kicked)
@@ -285,6 +300,14 @@ async fn send_kick_invites(config: &NodeConfig, kicked_participant: &CantonId) -
 // ============================================================================
 
 /// Start an onboarding workflow to create a new decentralized party
+#[utoipa::path(
+    tag = "Workflows",
+    request_body = OnboardingRequest,
+    responses(
+        (status = 202, description = "Onboarding workflow started", body = WorkflowResponse),
+        (status = 409, description = "Workflow already in progress", body = ErrorResponse)
+    )
+)]
 #[post("/onboarding")]
 pub async fn start_onboarding(
     data: web::Data<AppState>,
@@ -295,9 +318,9 @@ pub async fn start_onboarding(
     {
         let status = onboarding_state.status.read().await;
         if *status == OnboardingStatus::InProgress {
-            return HttpResponse::Conflict().json(serde_json::json!({
-                "error": "An onboarding workflow is already in progress"
-            }));
+            return HttpResponse::Conflict().json(ErrorResponse {
+                error: "An onboarding workflow is already in progress".to_string(),
+            });
         }
     }
 
@@ -374,6 +397,12 @@ pub async fn start_onboarding(
 }
 
 /// Get the current status of the onboarding workflow
+#[utoipa::path(
+    tag = "Workflows",
+    responses(
+        (status = 200, description = "Onboarding workflow status", body = WorkflowStatusResponse)
+    )
+)]
 #[get("/onboarding/status")]
 pub async fn get_onboarding_status(
     onboarding_state: web::Data<Arc<OnboardingWorkflowState>>,
@@ -381,10 +410,10 @@ pub async fn get_onboarding_status(
     let status = onboarding_state.status.read().await;
     let error = onboarding_state.error.read().await;
 
-    HttpResponse::Ok().json(serde_json::json!({
-        "status": *status,
-        "error": *error,
-    }))
+    HttpResponse::Ok().json(WorkflowStatusResponse {
+        status: *status,
+        error: error.clone(),
+    })
 }
 
 /// Send onboarding invites to selected peers using Noise protocol
@@ -465,6 +494,14 @@ async fn send_onboarding_invites(config: &NodeConfig, peer_ids: &[String]) -> Re
 // ============================================================================
 
 /// Start a contracts workflow to upload DARs and create contracts
+#[utoipa::path(
+    tag = "Workflows",
+    request_body = ContractsRequest,
+    responses(
+        (status = 202, description = "Contracts workflow started", body = WorkflowResponse),
+        (status = 409, description = "Workflow already in progress", body = ErrorResponse)
+    )
+)]
 #[post("/contracts")]
 pub async fn start_contracts(
     data: web::Data<AppState>,
@@ -475,9 +512,9 @@ pub async fn start_contracts(
     {
         let status = contracts_state.status.read().await;
         if *status == WorkflowProgress::InProgress {
-            return HttpResponse::Conflict().json(serde_json::json!({
-                "error": "A contracts workflow is already in progress"
-            }));
+            return HttpResponse::Conflict().json(ErrorResponse {
+                error: "A contracts workflow is already in progress".to_string(),
+            });
         }
     }
 
@@ -572,6 +609,12 @@ pub async fn start_contracts(
 }
 
 /// Get the current status of the contracts workflow
+#[utoipa::path(
+    tag = "Workflows",
+    responses(
+        (status = 200, description = "Contracts workflow status", body = WorkflowStatusResponse)
+    )
+)]
 #[get("/contracts/status")]
 pub async fn get_contracts_status(
     contracts_state: web::Data<Arc<ContractsWorkflowState>>,
@@ -579,10 +622,10 @@ pub async fn get_contracts_status(
     let status = contracts_state.status.read().await;
     let error = contracts_state.error.read().await;
 
-    HttpResponse::Ok().json(serde_json::json!({
-        "status": *status,
-        "error": *error,
-    }))
+    HttpResponse::Ok().json(WorkflowStatusResponse {
+        status: *status,
+        error: error.clone(),
+    })
 }
 
 /// Save deployed package IDs to party config after successful contracts workflow
@@ -621,6 +664,14 @@ async fn save_deployed_packages(config: &NodeConfig, contracts_config: &Contract
 // ============================================================================
 
 /// Start a DARs upload workflow to distribute DARs across all participants
+#[utoipa::path(
+    tag = "Workflows",
+    request_body = DarsRequest,
+    responses(
+        (status = 202, description = "DARs upload workflow started", body = WorkflowResponse),
+        (status = 409, description = "Workflow already in progress", body = ErrorResponse)
+    )
+)]
 #[post("/dars")]
 pub async fn start_dars(
     data: web::Data<AppState>,
@@ -631,9 +682,9 @@ pub async fn start_dars(
     {
         let status = dars_state.status.read().await;
         if *status == WorkflowProgress::InProgress {
-            return HttpResponse::Conflict().json(serde_json::json!({
-                "error": "A DARs upload workflow is already in progress"
-            }));
+            return HttpResponse::Conflict().json(ErrorResponse {
+                error: "A DARs upload workflow is already in progress".to_string(),
+            });
         }
     }
 
@@ -716,15 +767,21 @@ pub async fn start_dars(
 }
 
 /// Get the current status of the DARs upload workflow
+#[utoipa::path(
+    tag = "Workflows",
+    responses(
+        (status = 200, description = "DARs upload workflow status", body = WorkflowStatusResponse)
+    )
+)]
 #[get("/dars/status")]
 pub async fn get_dars_status(dars_state: web::Data<Arc<DarsWorkflowState>>) -> impl Responder {
     let status = dars_state.status.read().await;
     let error = dars_state.error.read().await;
 
-    HttpResponse::Ok().json(serde_json::json!({
-        "status": *status,
-        "error": *error,
-    }))
+    HttpResponse::Ok().json(WorkflowStatusResponse {
+        status: *status,
+        error: error.clone(),
+    })
 }
 
 /// Send DARs invites to all peers using Noise protocol

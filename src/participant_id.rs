@@ -149,6 +149,20 @@ impl fmt::Display for CantonId {
     }
 }
 
+impl utoipa::PartialSchema for CantonId {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+        utoipa::openapi::ObjectBuilder::new()
+            .schema_type(utoipa::openapi::schema::Type::String)
+            .description(Some("Canton ID in format 'prefix::hex_namespace'"))
+            .examples([Some(serde_json::json!(
+                "participant::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892"
+            ))])
+            .into()
+    }
+}
+
+impl utoipa::ToSchema for CantonId {}
+
 impl std::str::FromStr for CantonId {
     type Err = anyhow::Error;
 

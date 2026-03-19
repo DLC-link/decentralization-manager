@@ -6,6 +6,12 @@ use crate::{
 };
 
 /// Check if Noise keys exist for this node
+#[utoipa::path(
+    tag = "Keys",
+    responses(
+        (status = 200, description = "Key status", body = KeyStatusResponse)
+    )
+)]
 #[get("/keys/status")]
 pub async fn get_key_status(data: web::Data<AppState>) -> impl Responder {
     let key_file = data.config.key_file_path();

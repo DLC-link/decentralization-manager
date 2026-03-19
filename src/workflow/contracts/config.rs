@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::participant_id::CantonId;
 
 /// A DAR file to upload
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct DarFile {
     /// Filename (used as description when uploading)
     pub filename: String,
@@ -53,7 +53,7 @@ impl ContractsConfig {
 }
 
 /// Definition of a Daml contract to create on the ledger
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct ContractDefinition {
     /// Unique identifier for this contract (used as command ID)
     pub id: String,
@@ -70,7 +70,8 @@ pub struct ContractDefinition {
 }
 
 /// Definition of a field value in a Daml record
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
+#[schema(no_recursion)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum FieldDefinition {
     /// The decentralized party ID
