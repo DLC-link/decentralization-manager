@@ -73,7 +73,7 @@ impl ListenerPauseGuard {
 }
 
 /// Participant permission level
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Permission {
     Submission,
@@ -94,14 +94,14 @@ impl From<i32> for Permission {
 }
 
 /// Participant in a decentralized party
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct ParticipantInfo {
     pub participant_uid: CantonId,
     pub permission: Permission,
 }
 
 /// Contract information
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct ContractInfo {
     pub contract_id: String,
     pub template_id: String,
@@ -109,13 +109,13 @@ pub struct ContractInfo {
 }
 
 /// Party metadata from Ledger API
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct PartyMetadata {
     pub annotations: HashMap<String, String>,
 }
 
 /// Decentralized party information
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct DecentralizedParty {
     pub party_id: CantonId,
     pub threshold: i32,
@@ -130,13 +130,13 @@ pub struct DecentralizedParty {
 }
 
 /// Response for the decentralized parties endpoint
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct DecentralizedPartiesResponse {
     pub parties: Vec<DecentralizedParty>,
 }
 
 /// Connection status for a participant
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "PascalCase")]
 pub enum ConnectionStatus {
     /// Current node (always reachable)
@@ -150,20 +150,20 @@ pub enum ConnectionStatus {
 }
 
 /// Status of a single participant
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct ParticipantStatus {
     pub id: String,
     pub status: ConnectionStatus,
 }
 
 /// Response for the participants status endpoint
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct ParticipantsStatusResponse {
     pub statuses: Vec<ParticipantStatus>,
 }
 
 /// Request to kick a participant from a decentralized party
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
 pub struct KickRequest {
     pub decentralized_party_id: String,
     pub participant_id: String,
@@ -172,7 +172,7 @@ pub struct KickRequest {
 }
 
 /// Request to create a new decentralized party
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
 pub struct OnboardingRequest {
     /// Party ID prefix for the decentralized party (e.g., "xyz-network")
     pub party_id_prefix: String,
@@ -181,7 +181,7 @@ pub struct OnboardingRequest {
 }
 
 /// Request to deploy contracts for a decentralized party
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
 pub struct ContractsRequest {
     /// Decentralized party ID to deploy contracts for
     pub decentralized_party_id: CantonId,
@@ -197,14 +197,14 @@ pub struct ContractsRequest {
 }
 
 /// Request to upload DARs across all participants
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
 pub struct DarsRequest {
     /// DAR files to upload (base64-encoded)
     pub dar_files: Vec<DarFile>,
 }
 
 /// Progress status of a workflow (kick, onboarding, etc.)
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum WorkflowProgress {
     #[default]
@@ -221,7 +221,7 @@ pub type KickStatus = WorkflowProgress;
 pub type OnboardingStatus = WorkflowProgress;
 
 /// Response for workflow initiation (kick, onboarding, etc.)
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct WorkflowResponse {
     pub status: WorkflowProgress,
     pub message: String,
@@ -232,14 +232,14 @@ pub type KickResponse = WorkflowResponse;
 pub type OnboardingResponse = WorkflowResponse;
 
 /// Response for key status check
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct KeyStatusResponse {
     pub has_keys: bool,
     pub public_key: Option<String>,
 }
 
 /// Type of workflow invitation
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "PascalCase")]
 pub enum InvitationType {
     Onboarding,
@@ -249,7 +249,7 @@ pub enum InvitationType {
 }
 
 /// A pending invitation from a coordinator
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct PendingInvitation {
     pub id: String,
     pub invitation_type: InvitationType,
@@ -259,19 +259,19 @@ pub struct PendingInvitation {
 }
 
 /// Response for pending invitations endpoint
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct PendingInvitationsResponse {
     pub invitations: Vec<PendingInvitation>,
 }
 
 /// Request to accept or decline an invitation
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct InvitationActionRequest {
     pub id: String,
 }
 
 /// Authentication status for a party
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 #[serde(tag = "status", rename_all = "lowercase")]
 pub enum AuthStatus {
     Authenticated,
@@ -281,7 +281,7 @@ pub enum AuthStatus {
 }
 
 /// User rights validation result
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct RightsStatus {
     /// Whether user can actAs the member party
     pub member_party_act_as: bool,
@@ -304,7 +304,7 @@ impl RightsStatus {
 }
 
 /// Authentication status for a single party
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct PartyAuthStatus {
     pub dec_party_id: String,
     pub member_party_id: String,
@@ -319,13 +319,13 @@ pub struct PartyAuthStatus {
 }
 
 /// Response for the auth status endpoint
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct AuthStatusResponse {
     pub parties: Vec<PartyAuthStatus>,
 }
 
 /// Result of an authentication test
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct AuthTestResult {
     pub party_id: String,
     pub success: bool,
@@ -334,7 +334,7 @@ pub struct AuthTestResult {
 }
 
 /// Response for the auth test endpoint
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct AuthTestResponse {
     pub results: Vec<AuthTestResult>,
 }
@@ -344,14 +344,14 @@ pub struct AuthTestResponse {
 // ============================================================================
 
 /// Instrument identifier (admin + id)
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct InstrumentId {
     pub admin: String,
     pub id: String,
 }
 
 /// Vault limits configuration (all fields are optional in DAML)
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct VaultLimits {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_total_deposit: Option<String>,
@@ -362,21 +362,21 @@ pub struct VaultLimits {
 }
 
 /// Featured App Right beneficiary
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct AppRewardBeneficiary {
     pub beneficiary: CantonId,
     pub weight: String,
 }
 
 /// Featured App Right configuration
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct FarConfig {
     pub featured_app_right_cid: String,
     pub beneficiaries: Vec<AppRewardBeneficiary>,
 }
 
 /// Structured action types for Vault governance
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ActionType {
     // Governance (4)
@@ -521,7 +521,7 @@ fn validate_beneficiary_weights(beneficiaries: &[AppRewardBeneficiary]) -> Resul
 }
 
 /// Credential claim (subject, property, value)
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Claim {
     pub subject: String,
     pub property: String,
@@ -529,7 +529,7 @@ pub struct Claim {
 }
 
 /// Request to submit a confirmation for an action with structured type
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
 pub struct ConfirmActionRequest {
     pub party_id: CantonId,
     pub rules_contract_id: String,
@@ -537,14 +537,14 @@ pub struct ConfirmActionRequest {
 }
 
 /// A disclosed contract to include in the ledger submission
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
 pub struct DisclosedContractInput {
     pub contract_id: String,
     pub blob: String, // base64-encoded created_event_blob
 }
 
 /// Request to execute a confirmed action with structured type
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
 pub struct ExecuteActionRequest {
     pub party_id: CantonId,
     pub rules_contract_id: String,
@@ -555,7 +555,7 @@ pub struct ExecuteActionRequest {
 }
 
 /// A single governance confirmation with parsed action
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct GovernanceConfirmation {
     pub contract_id: String,
     pub action: ActionType,
@@ -563,7 +563,7 @@ pub struct GovernanceConfirmation {
 }
 
 /// A governance action with its confirmations, grouped by action hash
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct GovernanceAction {
     /// Deterministic hash of the serialized action for grouping
     pub action_hash: String,
@@ -578,7 +578,7 @@ pub struct GovernanceAction {
 }
 
 /// Response for governance confirmations endpoint
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct GovernanceResponse {
     pub actions: Vec<GovernanceAction>,
     pub threshold: usize,
@@ -588,7 +588,7 @@ pub struct GovernanceResponse {
 }
 
 /// Request to expire a stale confirmation
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
 pub struct ExpireConfirmationRequest {
     pub party_id: CantonId,
     pub rules_contract_id: String,
@@ -596,14 +596,14 @@ pub struct ExpireConfirmationRequest {
 }
 
 /// Request to cancel (revoke) own confirmation
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
 pub struct CancelConfirmationRequest {
     pub party_id: CantonId,
     pub confirmation_cid: String,
 }
 
 /// State of a VaultGovernanceRules contract
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct GovernanceState {
     pub contract_id: String,
     pub vault_manager: CantonId,
@@ -614,13 +614,13 @@ pub struct GovernanceState {
 }
 
 /// Response for the governance state endpoint
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct GovernanceStateResponse {
     pub state: Option<GovernanceState>,
 }
 
 /// Information about a deployed Vault contract
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct VaultInfo {
     pub contract_id: String,
     pub vault_name: String,
@@ -630,13 +630,13 @@ pub struct VaultInfo {
 }
 
 /// Response for the vaults endpoint
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct VaultsResponse {
     pub vaults: Vec<VaultInfo>,
 }
 
 /// Information about a ProviderService contract
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct ProviderServiceInfo {
     pub contract_id: String,
     pub operator: CantonId,
@@ -644,13 +644,13 @@ pub struct ProviderServiceInfo {
 }
 
 /// Response for the provider services endpoint
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct ProviderServicesResponse {
     pub services: Vec<ProviderServiceInfo>,
 }
 
 /// Information about a UserService contract
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct UserServiceInfo {
     pub contract_id: String,
     pub operator: CantonId,
@@ -658,13 +658,13 @@ pub struct UserServiceInfo {
 }
 
 /// Response for the user services endpoint
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct UserServicesResponse {
     pub services: Vec<UserServiceInfo>,
 }
 
 /// Information about a RegistrarService contract
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct RegistrarServiceInfo {
     pub contract_id: String,
     pub operator: CantonId,
@@ -672,20 +672,45 @@ pub struct RegistrarServiceInfo {
 }
 
 /// Response for the registrar services endpoint
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct RegistrarServicesResponse {
     pub services: Vec<RegistrarServiceInfo>,
 }
 
 /// A contract ID with its blob
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct ContractWithBlob {
     pub contract_id: String,
     pub blob: String,
 }
 
 /// Response for the generic contract query endpoint
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct ContractQueryResponse {
     pub contracts: Vec<ContractWithBlob>,
+}
+
+/// Generic error response
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct ErrorResponse {
+    pub error: String,
+}
+
+/// Generic success response
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct MessageResponse {
+    pub message: String,
+}
+
+/// Generic success boolean response
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct SuccessResponse {
+    pub success: bool,
+}
+
+/// Response for workflow status check endpoints
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct WorkflowStatusResponse {
+    pub status: WorkflowProgress,
+    pub error: Option<String>,
 }

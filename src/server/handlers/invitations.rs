@@ -3,11 +3,18 @@ use actix_web::{HttpResponse, Responder, get, post, web};
 use crate::server::{
     AppState,
     types::{
-        InvitationActionRequest, InvitationType, PendingInvitation, PendingInvitationsResponse,
+        ErrorResponse, InvitationActionRequest, InvitationType, MessageResponse, PendingInvitation,
+        PendingInvitationsResponse,
     },
 };
 
 /// Get all pending invitations
+#[utoipa::path(
+    tag = "Invitations",
+    responses(
+        (status = 200, description = "Pending invitations", body = PendingInvitationsResponse)
+    )
+)]
 #[get("/invitations")]
 pub async fn get_invitations(data: web::Data<AppState>) -> impl Responder {
     let invitations = data.pending_invitations.read().await;
@@ -36,6 +43,14 @@ pub async fn get_invitations(data: web::Data<AppState>) -> impl Responder {
 }
 
 /// Accept a pending invitation and trigger the workflow
+#[utoipa::path(
+    tag = "Invitations",
+    request_body = InvitationActionRequest,
+    responses(
+        (status = 200, description = "Invitation accepted", body = MessageResponse),
+        (status = 404, description = "Invitation not found", body = ErrorResponse)
+    )
+)]
 #[post("/invitations/accept")]
 pub async fn accept_invitation(
     data: web::Data<AppState>,
@@ -85,6 +100,14 @@ pub async fn accept_invitation(
 }
 
 /// Decline a pending invitation
+#[utoipa::path(
+    tag = "Invitations",
+    request_body = InvitationActionRequest,
+    responses(
+        (status = 200, description = "Invitation declined", body = MessageResponse),
+        (status = 404, description = "Invitation not found", body = ErrorResponse)
+    )
+)]
 #[post("/invitations/decline")]
 pub async fn decline_invitation(
     data: web::Data<AppState>,

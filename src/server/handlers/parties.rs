@@ -24,15 +24,15 @@ use crate::{
         AppState,
         queries::{get_contracts, get_party_metadata},
         types::{
-            ConnectionStatus, DecentralizedPartiesResponse, DecentralizedParty, ParticipantInfo,
-            ParticipantStatus, ParticipantsStatusResponse, Permission,
+            ConnectionStatus, DecentralizedPartiesResponse, DecentralizedParty, ErrorResponse,
+            ParticipantInfo, ParticipantStatus, ParticipantsStatusResponse, Permission,
         },
     },
     utils,
 };
 
 /// Query parameters for decentralized parties endpoint
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
 pub struct PartiesQuery {
     /// Filter parties by prefix (e.g., "cbtc-network")
     #[serde(default)]
@@ -40,6 +40,14 @@ pub struct PartiesQuery {
 }
 
 /// Get decentralized parties the current participant is a member of
+#[utoipa::path(
+    tag = "Parties",
+    params(PartiesQuery),
+    responses(
+        (status = 200, description = "Decentralized parties", body = DecentralizedPartiesResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
 #[get("/decentralized-parties")]
 pub async fn get_decentralized_parties(
     data: web::Data<AppState>,
@@ -51,9 +59,9 @@ pub async fn get_decentralized_parties(
         Ok(response) => HttpResponse::Ok().json(response),
         Err(e) => {
             tracing::error!("Failed to fetch decentralized parties: {e}");
-            HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Failed to fetch decentralized parties: {e}")
-            }))
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch decentralized parties: {e}"),
+            })
         }
     }
 }
@@ -240,15 +248,22 @@ async fn fetch_decentralized_parties(
 }
 
 /// Check connectivity status of all participants
+#[utoipa::path(
+    tag = "Parties",
+    responses(
+        (status = 200, description = "Participants connection status", body = ParticipantsStatusResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
 #[get("/participants-status")]
 pub async fn get_participants_status(data: web::Data<AppState>) -> impl Responder {
     match check_participants_status(&data.config).await {
         Ok(response) => HttpResponse::Ok().json(response),
         Err(e) => {
             tracing::error!("Failed to check participants status: {e}");
-            HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Failed to check participants status: {e}")
-            }))
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to check participants status: {e}"),
+            })
         }
     }
 }

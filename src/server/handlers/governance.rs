@@ -28,9 +28,9 @@ use crate::{
         },
         types::{
             CancelConfirmationRequest, ConfirmActionRequest, ContractQueryResponse,
-            ContractWithBlob, ExecuteActionRequest, ExpireConfirmationRequest, GovernanceResponse,
-            GovernanceStateResponse, ProviderServicesResponse, RegistrarServicesResponse,
-            UserServicesResponse, VaultsResponse,
+            ContractWithBlob, ErrorResponse, ExecuteActionRequest, ExpireConfirmationRequest,
+            GovernanceResponse, GovernanceStateResponse, MessageResponse, ProviderServicesResponse,
+            RegistrarServicesResponse, UserServicesResponse, VaultsResponse,
         },
     },
     utils,
@@ -41,13 +41,13 @@ use crate::{
 // ============================================================================
 
 /// Query parameters for governance endpoints
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
 pub struct GovernanceQuery {
     pub party_id: CantonId,
 }
 
 /// Query parameters for generic contract query endpoint
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
 pub struct ContractQueryParams {
     pub party_id: CantonId,
     pub package_id: String,
@@ -63,6 +63,14 @@ pub struct ContractQueryParams {
 // ============================================================================
 
 /// Get governance confirmations with parsed actions
+#[utoipa::path(
+    tag = "Governance",
+    params(GovernanceQuery),
+    responses(
+        (status = 200, description = "Governance confirmations", body = GovernanceResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
 #[get("/governance/confirmations")]
 pub async fn get_governance(
     data: web::Data<AppState>,
@@ -96,14 +104,22 @@ pub async fn get_governance(
         }),
         Err(e) => {
             tracing::error!("Failed to fetch governance confirmations: {e}");
-            HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Failed to fetch governance confirmations: {e}")
-            }))
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch governance confirmations: {e}"),
+            })
         }
     }
 }
 
 /// Get governance state (VaultGovernanceRules contract state)
+#[utoipa::path(
+    tag = "Governance",
+    params(GovernanceQuery),
+    responses(
+        (status = 200, description = "Governance state", body = GovernanceStateResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
 #[get("/governance/state")]
 pub async fn get_governance_state(
     data: web::Data<AppState>,
@@ -120,14 +136,22 @@ pub async fn get_governance_state(
         Ok(state) => HttpResponse::Ok().json(GovernanceStateResponse { state }),
         Err(e) => {
             tracing::error!("Failed to fetch governance state: {e}");
-            HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Failed to fetch governance state: {e}")
-            }))
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch governance state: {e}"),
+            })
         }
     }
 }
 
 /// Get deployed Vault contracts
+#[utoipa::path(
+    tag = "Services",
+    params(GovernanceQuery),
+    responses(
+        (status = 200, description = "Deployed vaults", body = VaultsResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
 #[get("/vaults")]
 pub async fn get_vaults_handler(
     data: web::Data<AppState>,
@@ -144,14 +168,22 @@ pub async fn get_vaults_handler(
         Ok(vaults) => HttpResponse::Ok().json(VaultsResponse { vaults }),
         Err(e) => {
             tracing::error!("Failed to fetch vaults: {e}");
-            HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Failed to fetch vaults: {e}")
-            }))
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch vaults: {e}"),
+            })
         }
     }
 }
 
 /// Get ProviderService contracts
+#[utoipa::path(
+    tag = "Services",
+    params(GovernanceQuery),
+    responses(
+        (status = 200, description = "Provider services", body = ProviderServicesResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
 #[get("/services/provider")]
 pub async fn get_provider_services_handler(
     data: web::Data<AppState>,
@@ -168,14 +200,22 @@ pub async fn get_provider_services_handler(
         Ok(services) => HttpResponse::Ok().json(ProviderServicesResponse { services }),
         Err(e) => {
             tracing::error!("Failed to fetch provider services: {e}");
-            HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Failed to fetch provider services: {e}")
-            }))
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch provider services: {e}"),
+            })
         }
     }
 }
 
 /// Get UserService contracts
+#[utoipa::path(
+    tag = "Services",
+    params(GovernanceQuery),
+    responses(
+        (status = 200, description = "User services", body = UserServicesResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
 #[get("/services/user")]
 pub async fn get_user_services_handler(
     data: web::Data<AppState>,
@@ -192,14 +232,22 @@ pub async fn get_user_services_handler(
         Ok(services) => HttpResponse::Ok().json(UserServicesResponse { services }),
         Err(e) => {
             tracing::error!("Failed to fetch user services: {e}");
-            HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Failed to fetch user services: {e}")
-            }))
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch user services: {e}"),
+            })
         }
     }
 }
 
 /// Get RegistrarService contracts
+#[utoipa::path(
+    tag = "Services",
+    params(GovernanceQuery),
+    responses(
+        (status = 200, description = "Registrar services", body = RegistrarServicesResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
 #[get("/services/registrar")]
 pub async fn get_registrar_services_handler(
     data: web::Data<AppState>,
@@ -216,14 +264,22 @@ pub async fn get_registrar_services_handler(
         Ok(services) => HttpResponse::Ok().json(RegistrarServicesResponse { services }),
         Err(e) => {
             tracing::error!("Failed to fetch registrar services: {e}");
-            HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Failed to fetch registrar services: {e}")
-            }))
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch registrar services: {e}"),
+            })
         }
     }
 }
 
 /// Query contract IDs by template
+#[utoipa::path(
+    tag = "Services",
+    params(ContractQueryParams),
+    responses(
+        (status = 200, description = "Contract query results", body = ContractQueryResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
 #[get("/contracts/query")]
 pub async fn query_contracts_handler(
     data: web::Data<AppState>,
@@ -254,9 +310,9 @@ pub async fn query_contracts_handler(
         Ok(contracts) => HttpResponse::Ok().json(ContractQueryResponse { contracts }),
         Err(e) => {
             tracing::error!("Failed to query contracts: {e}");
-            HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Failed to query contracts: {e}")
-            }))
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to query contracts: {e}"),
+            })
         }
     }
 }
@@ -266,13 +322,25 @@ pub async fn query_contracts_handler(
 // ============================================================================
 
 /// Submit a confirmation for a governance action using structured ActionType
+#[utoipa::path(
+    tag = "Governance",
+    request_body = ConfirmActionRequest,
+    responses(
+        (status = 200, description = "Confirmation submitted", body = MessageResponse),
+        (status = 400, description = "Bad request", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
 #[post("/governance/confirm")]
 pub async fn confirm_action(
     data: web::Data<AppState>,
     body: web::Json<ConfirmActionRequest>,
 ) -> impl Responder {
     if let Err(msg) = body.action.validate() {
-        return HttpResponse::BadRequest().json(serde_json::json!({ "error": msg }));
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: msg.to_string(),
+        });
     }
 
     let party_id = &body.party_id;
@@ -281,35 +349,47 @@ pub async fn confirm_action(
     let (token, member_party_id) = match get_party_credentials(&data, party_id).await {
         Some(creds) => creds,
         None => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "No credentials configured for party"
-            }));
+            return HttpResponse::Unauthorized().json(ErrorResponse {
+                error: "No credentials configured for party".to_string(),
+            });
         }
     };
 
     let packages = data.config.get_packages(&body.party_id.to_string());
 
     match execute_confirm_action(&data.config, &body, &token, &member_party_id, &packages).await {
-        Ok(()) => HttpResponse::Ok().json(serde_json::json!({
-            "message": "Confirmation submitted successfully"
-        })),
+        Ok(()) => HttpResponse::Ok().json(MessageResponse {
+            message: "Confirmation submitted successfully".to_string(),
+        }),
         Err(e) => {
             tracing::error!("Failed to submit confirmation: {e}");
-            HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Failed to submit confirmation: {e}")
-            }))
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to submit confirmation: {e}"),
+            })
         }
     }
 }
 
 /// Execute a confirmed governance action using structured ActionType
+#[utoipa::path(
+    tag = "Governance",
+    request_body = ExecuteActionRequest,
+    responses(
+        (status = 200, description = "Action executed", body = MessageResponse),
+        (status = 400, description = "Bad request", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
 #[post("/governance/execute")]
 pub async fn execute_action(
     data: web::Data<AppState>,
     body: web::Json<ExecuteActionRequest>,
 ) -> impl Responder {
     if let Err(msg) = body.action.validate() {
-        return HttpResponse::BadRequest().json(serde_json::json!({ "error": msg }));
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: msg.to_string(),
+        });
     }
 
     let party_id = &body.party_id;
@@ -318,28 +398,37 @@ pub async fn execute_action(
     let (token, member_party_id) = match get_party_credentials(&data, party_id).await {
         Some(creds) => creds,
         None => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "No credentials configured for party"
-            }));
+            return HttpResponse::Unauthorized().json(ErrorResponse {
+                error: "No credentials configured for party".to_string(),
+            });
         }
     };
 
     let packages = data.config.get_packages(&body.party_id.to_string());
 
     match execute_confirmed_action(&data.config, &body, &token, &member_party_id, &packages).await {
-        Ok(()) => HttpResponse::Ok().json(serde_json::json!({
-            "message": "Action executed successfully"
-        })),
+        Ok(()) => HttpResponse::Ok().json(MessageResponse {
+            message: "Action executed successfully".to_string(),
+        }),
         Err(e) => {
             tracing::error!("Failed to execute action: {e}");
-            HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Failed to execute action: {e}")
-            }))
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to execute action: {e}"),
+            })
         }
     }
 }
 
 /// Expire a stale governance confirmation
+#[utoipa::path(
+    tag = "Governance",
+    request_body = ExpireConfirmationRequest,
+    responses(
+        (status = 200, description = "Confirmation expired", body = MessageResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
 #[post("/governance/expire")]
 pub async fn expire_confirmation(
     data: web::Data<AppState>,
@@ -351,9 +440,9 @@ pub async fn expire_confirmation(
     let (token, member_party_id) = match get_party_credentials(&data, party_id).await {
         Some(creds) => creds,
         None => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "No credentials configured for party"
-            }));
+            return HttpResponse::Unauthorized().json(ErrorResponse {
+                error: "No credentials configured for party".to_string(),
+            });
         }
     };
 
@@ -362,19 +451,28 @@ pub async fn expire_confirmation(
     match execute_expire_confirmation(&data.config, &body, &token, &member_party_id, &packages)
         .await
     {
-        Ok(()) => HttpResponse::Ok().json(serde_json::json!({
-            "message": "Confirmation expired successfully"
-        })),
+        Ok(()) => HttpResponse::Ok().json(MessageResponse {
+            message: "Confirmation expired successfully".to_string(),
+        }),
         Err(e) => {
             tracing::error!("Failed to expire confirmation: {e}");
-            HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Failed to expire confirmation: {e}")
-            }))
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to expire confirmation: {e}"),
+            })
         }
     }
 }
 
 /// Cancel (revoke) own governance confirmation
+#[utoipa::path(
+    tag = "Governance",
+    request_body = CancelConfirmationRequest,
+    responses(
+        (status = 200, description = "Confirmation cancelled", body = MessageResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
 #[post("/governance/cancel")]
 pub async fn cancel_confirmation(
     data: web::Data<AppState>,
@@ -385,9 +483,9 @@ pub async fn cancel_confirmation(
     let (token, member_party_id) = match get_party_credentials(&data, party_id).await {
         Some(creds) => creds,
         None => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "No credentials configured for party"
-            }));
+            return HttpResponse::Unauthorized().json(ErrorResponse {
+                error: "No credentials configured for party".to_string(),
+            });
         }
     };
 
@@ -396,19 +494,26 @@ pub async fn cancel_confirmation(
     match execute_cancel_confirmation(&data.config, &body, &token, &member_party_id, &packages)
         .await
     {
-        Ok(()) => HttpResponse::Ok().json(serde_json::json!({
-            "message": "Confirmation cancelled successfully"
-        })),
+        Ok(()) => HttpResponse::Ok().json(MessageResponse {
+            message: "Confirmation cancelled successfully".to_string(),
+        }),
         Err(e) => {
             tracing::error!("Failed to cancel confirmation: {e}");
-            HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Failed to cancel confirmation: {e}")
-            }))
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to cancel confirmation: {e}"),
+            })
         }
     }
 }
 
 /// Get package configuration for a party
+#[utoipa::path(
+    tag = "Configuration",
+    params(GovernanceQuery),
+    responses(
+        (status = 200, description = "Package configuration", body = PackageConfig)
+    )
+)]
 #[get("/packages")]
 pub async fn get_packages(
     data: web::Data<AppState>,
@@ -419,6 +524,13 @@ pub async fn get_packages(
 }
 
 /// Fetch AmuletRules contract from the DSO API
+#[utoipa::path(
+    tag = "Proxy",
+    responses(
+        (status = 200, description = "AmuletRules contract", body = ContractWithBlob),
+        (status = 502, description = "Bad gateway", body = ErrorResponse)
+    )
+)]
 #[get("/amulet-rules")]
 pub async fn get_amulet_rules(data: web::Data<AppState>) -> impl Responder {
     let url = data.config.canton.network.dso_url();
@@ -441,31 +553,39 @@ pub async fn get_amulet_rules(data: web::Data<AppState>) -> impl Responder {
                     }),
                     _ => {
                         tracing::warn!("Unexpected amulet-rules response format: {json}");
-                        HttpResponse::BadGateway().json(serde_json::json!({
-                            "error": "Unexpected response format from DSO API"
-                        }))
+                        HttpResponse::BadGateway().json(ErrorResponse {
+                            error: "Unexpected response format from DSO API".to_string(),
+                        })
                     }
                 }
             }
-            Err(e) => HttpResponse::BadGateway().json(serde_json::json!({
-                "error": format!("Failed to parse amulet-rules response: {e}")
-            })),
+            Err(e) => HttpResponse::BadGateway().json(ErrorResponse {
+                error: format!("Failed to parse amulet-rules response: {e}"),
+            }),
         },
         Ok(res) => {
             let status = res.status();
             let body = res.text().await.unwrap_or_default();
             tracing::error!("DSO API returned {status}: {body}");
-            HttpResponse::BadGateway().json(serde_json::json!({
-                "error": format!("DSO API returned {status}: {body}")
-            }))
+            HttpResponse::BadGateway().json(ErrorResponse {
+                error: format!("DSO API returned {status}: {body}"),
+            })
         }
-        Err(e) => HttpResponse::BadGateway().json(serde_json::json!({
-            "error": format!("Failed to reach DSO API: {e}")
-        })),
+        Err(e) => HttpResponse::BadGateway().json(ErrorResponse {
+            error: format!("Failed to reach DSO API: {e}"),
+        }),
     }
 }
 
 /// Proxy request to fetch token standard contracts (avoids CORS)
+#[utoipa::path(
+    tag = "Proxy",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Token standard contracts"),
+        (status = 502, description = "Bad gateway", body = ErrorResponse)
+    )
+)]
 #[post("/token-standard-contracts")]
 pub async fn get_token_standard_contracts(body: web::Json<serde_json::Value>) -> impl Responder {
     let client = reqwest::Client::new();
@@ -474,13 +594,13 @@ pub async fn get_token_standard_contracts(body: web::Json<serde_json::Value>) ->
     match client.post(url).json(&body.into_inner()).send().await {
         Ok(res) => match res.json::<serde_json::Value>().await {
             Ok(json) => HttpResponse::Ok().json(json),
-            Err(e) => HttpResponse::BadGateway().json(serde_json::json!({
-                "error": format!("Failed to parse response: {e}")
-            })),
+            Err(e) => HttpResponse::BadGateway().json(ErrorResponse {
+                error: format!("Failed to parse response: {e}"),
+            }),
         },
-        Err(e) => HttpResponse::BadGateway().json(serde_json::json!({
-            "error": format!("Failed to fetch token standard contracts: {e}")
-        })),
+        Err(e) => HttpResponse::BadGateway().json(ErrorResponse {
+            error: format!("Failed to fetch token standard contracts: {e}"),
+        }),
     }
 }
 
