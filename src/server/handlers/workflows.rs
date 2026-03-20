@@ -1,10 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
 use actix_web::{HttpResponse, Responder, get, post, web};
-use canton_proto_rs::com::digitalasset::canton::topology::admin::v30::{
-    BaseQuery, ListPartyToParticipantRequest, StoreId, Synchronizer, base_query, store_id,
-    synchronizer, topology_manager_read_service_client::TopologyManagerReadServiceClient,
-};
 use tokio::sync::RwLock;
 
 use crate::{
@@ -21,7 +17,6 @@ use crate::{
             OnboardingStatus, WorkflowProgress, WorkflowResponse, WorkflowStatusResponse,
         },
     },
-    utils,
     workflow::{self, ContractsConfig},
 };
 
@@ -168,7 +163,7 @@ pub async fn start_kick(
         let mut error = kick_state_clone.error.write().await;
 
         match result {
-            Ok(()) => {
+            Ok(_) => {
                 *status = KickStatus::Completed;
                 tracing::info!("Kick workflow completed successfully");
             }
@@ -389,15 +384,15 @@ pub async fn start_onboarding(
         let mut error = onboarding_state_clone.error.write().await;
 
         match result {
-            Ok(()) => {
+            Ok(coordinator_result) => {
                 *status = OnboardingStatus::Completed;
                 tracing::info!("Onboarding workflow completed successfully");
 
-                // Auto-save default party config for the new dec party
                 if !is_test_mode
+                    && let Some(dec_party_id) = coordinator_result.created_party_id
                     && let Err(e) = save_default_party_config(
                         &config,
-                        &party_id_prefix,
+                        &dec_party_id,
                         &party_credentials,
                         &auth_lock,
                     )
@@ -611,7 +606,7 @@ pub async fn start_contracts(
         let mut error = contracts_state_clone.error.write().await;
 
         match result {
-            Ok(()) => {
+            Ok(_) => {
                 *status = WorkflowProgress::Completed;
                 tracing::info!("Contracts workflow completed successfully");
                 if let Err(e) =
@@ -787,7 +782,7 @@ pub async fn start_dars(
         let mut error = dars_state_clone.error.write().await;
 
         match result {
-            Ok(()) => {
+            Ok(_) => {
                 *status = WorkflowProgress::Completed;
                 tracing::info!("DARs upload workflow completed successfully");
             }
@@ -899,12 +894,11 @@ async fn send_dars_invites(config: &NodeConfig) -> Result {
 /// Auto-save default party config after successful onboarding
 async fn save_default_party_config(
     config: &NodeConfig,
-    party_id_prefix: &str,
+    dec_party_id: &CantonId,
     party_credentials: &Arc<RwLock<Vec<PartyCredentials>>>,
     auth_lock: &Arc<RwLock<Option<WorkflowAuth>>>,
 ) -> Result {
-    let dec_party_id = resolve_dec_party_id(config, party_id_prefix).await?;
-    tracing::info!("Resolved new dec party: {dec_party_id}");
+    tracing::info!("Saving default config for new dec party: {dec_party_id}");
 
     let kc_defaults = config.canton.network.keycloak_defaults();
     let creds = PartyCredentials {
@@ -929,7 +923,7 @@ async fn save_default_party_config(
     // Update in-memory state
     {
         let mut pc = party_credentials.write().await;
-        if let Some(existing) = pc.iter_mut().find(|p| p.dec_party_id == dec_party_id) {
+        if let Some(existing) = pc.iter_mut().find(|p| p.dec_party_id == *dec_party_id) {
             *existing = creds;
         } else {
             pc.push(creds);
@@ -950,52 +944,8 @@ async fn save_default_party_config(
         }
     }
 
-    tracing::info!("Default party config saved for {}", dec_party_id);
+    tracing::info!("Default party config saved for {dec_party_id}");
     Ok(())
-}
-
-/// Resolve the full dec party ID by querying Canton with the prefix
-async fn resolve_dec_party_id(config: &NodeConfig, prefix: &str) -> Result<CantonId> {
-    let channel = tonic::transport::Channel::from_shared(config.admin_api_url())?
-        .connect()
-        .await?;
-
-    let mut client = TopologyManagerReadServiceClient::new(channel)
-        .max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
-
-    let synchronizer_id = utils::get_synchronizer_id(config).await?;
-
-    let response = client
-        .list_party_to_participant(tonic::Request::new(ListPartyToParticipantRequest {
-            base_query: Some(BaseQuery {
-                store: Some(StoreId {
-                    store: Some(store_id::Store::Synchronizer(Synchronizer {
-                        kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id)),
-                    })),
-                }),
-                proposals: false,
-                operation: 0,
-                time_query: Some(base_query::TimeQuery::HeadState(())),
-                filter_signed_key: String::new(),
-                protocol_version: None,
-            }),
-            filter_party: prefix.to_string(),
-            filter_participant: String::new(),
-        }))
-        .await?
-        .into_inner();
-
-    // Find the party with the matching prefix that has multiple participants (dec party)
-    for result in &response.results {
-        if let Some(item) = &result.item
-            && item.party.starts_with(prefix)
-            && item.participants.len() > 1
-        {
-            return CantonId::parse(&item.party);
-        }
-    }
-
-    anyhow::bail!("Could not find decentralized party with prefix '{prefix}'")
 }
 
 /// Send contracts invites to all peers using Noise protocol

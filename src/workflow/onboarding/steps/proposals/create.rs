@@ -167,9 +167,12 @@ pub async fn create_proposals(
         owners: owners_vec,
     };
 
-    // Step 8: Create Party ID
     let party_id = format!("{party_id_prefix}::{decentralized_namespace}");
     tracing::info!("Party ID: {party_id}");
+
+    // Persist the created party ID so the HTTP handler can read it after workflow completion
+    let party_id_path = dirs.workflow_dir.join("party_id");
+    fs::write(&party_id_path, &party_id).await?;
 
     // Step 9: Create PartyToParticipant mapping
     // Canton 3.4: PartyToParticipant now includes signing keys (PartyToKeyMapping is deprecated)

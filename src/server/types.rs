@@ -694,18 +694,28 @@ pub struct ContractQueryResponse {
 /// Request to save or update party configuration
 #[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
 pub struct PartyConfigRequest {
-    pub dec_party_id: String,
-    pub member_party_id: String,
+    /// The decentralized party ID
+    pub dec_party_id: CantonId,
+    /// The member party ID (local to this node)
+    pub member_party_id: CantonId,
+    /// Canton/Ledger API user ID
     pub user_id: String,
+    /// Keycloak server URL
     pub keycloak_url: String,
+    /// Keycloak realm name
     pub keycloak_realm: String,
+    /// OAuth2 client ID
     pub keycloak_client_id: String,
+    /// Client secret for M2M flow (None = keep existing, "" = clear)
     #[serde(default)]
     pub keycloak_client_secret: Option<String>,
+    /// Username for password flow (None = keep existing, "" = clear)
     #[serde(default)]
     pub keycloak_username: Option<String>,
+    /// Password for password flow (None = keep existing, "" = clear)
     #[serde(default)]
     pub keycloak_password: Option<String>,
+    /// Package identifiers for deployed Daml contracts
     #[serde(default)]
     pub packages: PackageConfig,
 }
@@ -713,15 +723,25 @@ pub struct PartyConfigRequest {
 /// Response with party configuration (secrets masked)
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct PartyConfigResponse {
-    pub dec_party_id: String,
-    pub member_party_id: String,
+    /// The decentralized party ID
+    pub dec_party_id: CantonId,
+    /// The member party ID (local to this node)
+    pub member_party_id: CantonId,
+    /// Canton/Ledger API user ID
     pub user_id: String,
+    /// Keycloak server URL
     pub keycloak_url: String,
+    /// Keycloak realm name
     pub keycloak_realm: String,
+    /// OAuth2 client ID
     pub keycloak_client_id: String,
+    /// Whether a client secret is configured
     pub has_client_secret: bool,
+    /// Whether a username is configured
     pub has_username: bool,
+    /// Whether a password is configured
     pub has_password: bool,
+    /// Package identifiers for deployed Daml contracts
     pub packages: PackageConfig,
 }
 

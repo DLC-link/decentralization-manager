@@ -256,7 +256,9 @@ fn default_noise_port() -> u16 {
 
 /// Default Keycloak configuration values for a network
 pub struct KeycloakDefaults {
+    /// Keycloak server URL
     pub url: String,
+    /// Keycloak realm name
     pub realm: String,
 }
 

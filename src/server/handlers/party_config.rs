@@ -44,8 +44,8 @@ pub async fn get_party_config(
 
     match creds {
         Some(c) => HttpResponse::Ok().json(PartyConfigResponse {
-            dec_party_id: c.dec_party_id.to_string(),
-            member_party_id: c.member_party_id.to_string(),
+            dec_party_id: c.dec_party_id.clone(),
+            member_party_id: c.member_party_id.clone(),
             user_id: c.user_id.clone(),
             keycloak_url: c.keycloak.url.clone(),
             keycloak_realm: c.keycloak.realm.clone(),
@@ -59,8 +59,8 @@ pub async fn get_party_config(
             let kc_defaults = data.config.canton.network.keycloak_defaults();
             let packages = default_package_config();
             HttpResponse::Ok().json(PartyConfigResponse {
-                dec_party_id: dec_party_id_str,
-                member_party_id: String::new(),
+                dec_party_id: dec_party_id.clone(),
+                member_party_id: dec_party_id,
                 user_id: "CoordinatorUser".to_string(),
                 keycloak_url: kc_defaults.url,
                 keycloak_realm: kc_defaults.realm,
@@ -91,30 +91,12 @@ pub async fn save_party_config(
 ) -> impl Responder {
     let req = body.into_inner();
 
-    let dec_party_id = match CantonId::parse(&req.dec_party_id) {
-        Ok(id) => id,
-        Err(e) => {
-            return HttpResponse::BadRequest().json(ErrorResponse {
-                error: format!("Invalid dec_party_id: {e}"),
-            });
-        }
-    };
-
-    let member_party_id = match CantonId::parse(&req.member_party_id) {
-        Ok(id) => id,
-        Err(e) => {
-            return HttpResponse::BadRequest().json(ErrorResponse {
-                error: format!("Invalid member_party_id: {e}"),
-            });
-        }
-    };
-
     // Credential merge: None = keep existing, Some("") = clear, Some(val) = set
     let existing_keycloak = {
         let party_creds = data.party_credentials.read().await;
         party_creds
             .iter()
-            .find(|p| p.dec_party_id == dec_party_id)
+            .find(|p| p.dec_party_id == req.dec_party_id)
             .map(|p| p.keycloak.clone())
     };
 
@@ -139,14 +121,13 @@ pub async fn save_party_config(
     };
 
     let creds = PartyCredentials {
-        dec_party_id: dec_party_id.clone(),
-        member_party_id,
+        dec_party_id: req.dec_party_id.clone(),
+        member_party_id: req.member_party_id,
         user_id: req.user_id,
         keycloak,
         packages: req.packages,
     };
 
-    // Save to disk
     let mut fresh_config = match NodeConfig::from_dir(data.config.root_dir()).await {
         Ok(c) => c,
         Err(e) => {
@@ -162,17 +143,15 @@ pub async fn save_party_config(
         });
     }
 
-    // Update in-memory party credentials
     {
         let mut pc = data.party_credentials.write().await;
-        if let Some(existing) = pc.iter_mut().find(|p| p.dec_party_id == dec_party_id) {
+        if let Some(existing) = pc.iter_mut().find(|p| p.dec_party_id == req.dec_party_id) {
             *existing = creds;
         } else {
             pc.push(creds);
         }
     }
 
-    // Reinitialize auth registry
     if !data.test_mode
         && let Err(e) = reload_auth(&data.party_credentials, &data.auth).await
     {
