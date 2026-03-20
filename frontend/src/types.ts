@@ -72,6 +72,7 @@ export interface NodeConfig {
     synchronizer: string;
     network: Network;
   };
+  test_mode?: boolean;
 }
 
 export interface Peer {

@@ -1,4 +1,5 @@
 use actix_web::{HttpResponse, Responder, get, post, web};
+use serde::Serialize;
 
 use crate::{
     config::{NetworkConfig, NodeConfig, Peer},
@@ -64,6 +65,14 @@ pub async fn save_network_config(
     }
 }
 
+/// Node configuration response (includes runtime flags)
+#[derive(Serialize)]
+struct NodeConfigResponse<'a> {
+    #[serde(flatten)]
+    config: &'a NodeConfig,
+    test_mode: bool,
+}
+
 /// Get the node configuration
 #[utoipa::path(
     tag = "Configuration",
@@ -73,5 +82,8 @@ pub async fn save_network_config(
 )]
 #[get("/node-config")]
 pub async fn get_node_config(data: web::Data<AppState>) -> impl Responder {
-    HttpResponse::Ok().json(&data.config)
+    HttpResponse::Ok().json(NodeConfigResponse {
+        config: &data.config,
+        test_mode: data.test_mode,
+    })
 }

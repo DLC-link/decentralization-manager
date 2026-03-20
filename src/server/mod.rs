@@ -59,6 +59,13 @@ struct WorkflowTriggers {
 
 /// Start the HTTP server and a heartbeat system for peer status tracking
 pub async fn start_server(host: &str, port: u16, config: NodeConfig, test_mode: bool) -> Result {
+    if !test_mode {
+        tracing::warn!(
+            "Running without --test flag. Swagger UI is disabled. \
+             Use `serve --test` to enable mock auth and Swagger UI."
+        );
+    }
+
     // Initialize auth based on mode
     let auth = if test_mode {
         tracing::info!("Running in TEST MODE - using mock authentication");

@@ -134,28 +134,40 @@ const App = () => {
   useEffect(() => {
     const fetchData = async () => {
       try {
+        // Fetch node config first to check test_mode early
+        const nodeRes = await fetch(`${API_BASE}/node-config`);
+        if (!nodeRes.ok) throw new Error("Failed to fetch node config");
+        const nodeData = await nodeRes.json();
+        setNodeConfig(nodeData);
+
+        // If on /swagger-ui/ without test mode, skip loading everything else
+        if (
+          window.location.pathname.startsWith("/swagger-ui") &&
+          !nodeData.test_mode
+        ) {
+          setLoading(false);
+          return;
+        }
+
         const partiesParams = partyFilter
           ? `?prefix=${encodeURIComponent(partyFilter)}`
           : "";
-        const [partiesRes, nodeRes, networkRes, keyStatusRes, authStatusRes] =
+        const [partiesRes, networkRes, keyStatusRes, authStatusRes] =
           await Promise.all([
             fetch(`${API_BASE}/decentralized-parties${partiesParams}`),
-            fetch(`${API_BASE}/node-config`),
             fetch(`${API_BASE}/network-config`),
             fetch(`${API_BASE}/keys/status`),
             fetch(`${API_BASE}/auth/status`),
           ]);
 
-        if (!partiesRes.ok || !nodeRes.ok || !networkRes.ok) {
+        if (!partiesRes.ok || !networkRes.ok) {
           throw new Error("Failed to fetch data");
         }
 
         const partiesData = await partiesRes.json();
-        const nodeData = await nodeRes.json();
         const networkData = await networkRes.json();
 
         setParties(partiesData.parties);
-        setNodeConfig(nodeData);
         setNetworkConfig(networkData);
 
         if (keyStatusRes.ok) {
@@ -244,7 +256,15 @@ const App = () => {
       <Header />
 
       <Container maxWidth="md" sx={{ pt: 16, pb: 6 }}>
-        {loading ? (
+        {window.location.pathname.startsWith("/swagger-ui") &&
+        nodeConfig &&
+        !nodeConfig.test_mode ? (
+          <Alert severity="warning" sx={{ mt: 2 }}>
+            Swagger UI is disabled. Restart the server with{" "}
+            <strong>serve --test</strong> to enable Swagger UI and mock
+            authentication.
+          </Alert>
+        ) : loading ? (
           <LoadingSkeleton />
         ) : error ? (
           <Alert severity="error">{error}</Alert>
