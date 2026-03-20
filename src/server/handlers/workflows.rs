@@ -1,9 +1,15 @@
 use std::{sync::Arc, time::Duration};
 
 use actix_web::{HttpResponse, Responder, get, post, web};
+use canton_proto_rs::com::digitalasset::canton::topology::admin::v30::{
+    BaseQuery, ListPartyToParticipantRequest, StoreId, Synchronizer, base_query, store_id,
+    synchronizer, topology_manager_read_service_client::TopologyManagerReadServiceClient,
+};
+use tokio::sync::RwLock;
 
 use crate::{
-    config::NodeConfig,
+    auth::{AuthRegistry, WorkflowAuth},
+    config::{KeycloakConfig, NodeConfig, PartyCredentials, default_package_config},
     error::Result,
     noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
     participant_id::CantonId,
@@ -15,6 +21,7 @@ use crate::{
             OnboardingStatus, WorkflowProgress, WorkflowResponse, WorkflowStatusResponse,
         },
     },
+    utils,
     workflow::{self, ContractsConfig},
 };
 
@@ -339,6 +346,9 @@ pub async fn start_onboarding(
     let listener_notify = data.noise_listener_notify.clone();
     let party_id_prefix = body.party_id_prefix.clone();
     let peer_ids = body.peer_ids.clone();
+    let party_credentials = data.party_credentials.clone();
+    let auth_lock = data.auth.clone();
+    let is_test_mode = data.test_mode;
 
     tokio::spawn(async move {
         let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
@@ -359,10 +369,11 @@ pub async fn start_onboarding(
         tokio::time::sleep(Duration::from_secs(2)).await;
 
         let instance_name = format!("{party_id_prefix}-creation");
-        let onboarding_config = workflow::OnboardingConfig::new(party_id_prefix, instance_name);
+        let onboarding_config =
+            workflow::OnboardingConfig::new(party_id_prefix.clone(), instance_name);
 
         let result = workflow::start_coordinator(
-            config,
+            config.clone(),
             workflow::WorkflowType::Onboarding,
             Some(onboarding_config),
             None, // No kick config
@@ -381,6 +392,19 @@ pub async fn start_onboarding(
             Ok(()) => {
                 *status = OnboardingStatus::Completed;
                 tracing::info!("Onboarding workflow completed successfully");
+
+                // Auto-save default party config for the new dec party
+                if !is_test_mode
+                    && let Err(e) = save_default_party_config(
+                        &config,
+                        &party_id_prefix,
+                        &party_credentials,
+                        &auth_lock,
+                    )
+                    .await
+                {
+                    tracing::warn!("Failed to auto-save party config: {e}");
+                }
             }
             Err(e) => {
                 *status = OnboardingStatus::Failed;
@@ -546,7 +570,7 @@ pub async fn start_contracts(
 
     // Spawn the contracts workflow in the background
     let config = data.config.clone();
-    let workflow_auth = data.auth.clone();
+    let workflow_auth = data.auth.read().await.clone();
     let contracts_state_clone = contracts_state.get_ref().clone();
     let listener_control = data.noise_listener_control.clone();
     let listener_notify = data.noise_listener_notify.clone();
@@ -855,6 +879,108 @@ async fn send_dars_invites(config: &NodeConfig) -> Result {
     }
 
     Ok(())
+}
+
+/// Auto-save default party config after successful onboarding
+async fn save_default_party_config(
+    config: &NodeConfig,
+    party_id_prefix: &str,
+    party_credentials: &Arc<RwLock<Vec<PartyCredentials>>>,
+    auth_lock: &Arc<RwLock<Option<WorkflowAuth>>>,
+) -> Result {
+    let dec_party_id = resolve_dec_party_id(config, party_id_prefix).await?;
+    tracing::info!("Resolved new dec party: {dec_party_id}");
+
+    let kc_defaults = config.canton.network.keycloak_defaults();
+    let creds = PartyCredentials {
+        dec_party_id: dec_party_id.clone(),
+        // Placeholder — user must set the real member party ID via the config dialog
+        member_party_id: dec_party_id.clone(),
+        user_id: "CoordinatorUser".to_string(),
+        keycloak: KeycloakConfig {
+            url: kc_defaults.url,
+            realm: kc_defaults.realm,
+            client_id: String::new(),
+            client_secret: None,
+            username: None,
+            password: None,
+        },
+        packages: default_package_config(),
+    };
+
+    let mut fresh_config = NodeConfig::from_dir(config.root_dir()).await?;
+    fresh_config.upsert_party_credentials(creds.clone()).await?;
+
+    // Update in-memory state
+    {
+        let mut pc = party_credentials.write().await;
+        if let Some(existing) = pc.iter_mut().find(|p| p.dec_party_id == dec_party_id) {
+            *existing = creds;
+        } else {
+            pc.push(creds);
+        }
+    }
+
+    let party_creds = party_credentials.read().await;
+    if !party_creds.is_empty() {
+        match AuthRegistry::new(&party_creds).await {
+            Ok(registry) => {
+                let mut auth = auth_lock.write().await;
+                *auth = Some(WorkflowAuth::Keycloak(Arc::new(registry)));
+                tracing::info!("Auth registry reinitialized after onboarding");
+            }
+            Err(e) => {
+                tracing::warn!("Failed to reinitialize auth registry: {e}");
+            }
+        }
+    }
+
+    tracing::info!("Default party config saved for {}", dec_party_id);
+    Ok(())
+}
+
+/// Resolve the full dec party ID by querying Canton with the prefix
+async fn resolve_dec_party_id(config: &NodeConfig, prefix: &str) -> Result<CantonId> {
+    let channel = tonic::transport::Channel::from_shared(config.admin_api_url())?
+        .connect()
+        .await?;
+
+    let mut client = TopologyManagerReadServiceClient::new(channel)
+        .max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
+
+    let synchronizer_id = utils::get_synchronizer_id(config).await?;
+
+    let response = client
+        .list_party_to_participant(tonic::Request::new(ListPartyToParticipantRequest {
+            base_query: Some(BaseQuery {
+                store: Some(StoreId {
+                    store: Some(store_id::Store::Synchronizer(Synchronizer {
+                        kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id)),
+                    })),
+                }),
+                proposals: false,
+                operation: 0,
+                time_query: Some(base_query::TimeQuery::HeadState(())),
+                filter_signed_key: String::new(),
+                protocol_version: None,
+            }),
+            filter_party: prefix.to_string(),
+            filter_participant: String::new(),
+        }))
+        .await?
+        .into_inner();
+
+    // Find the party with the matching prefix that has multiple participants (dec party)
+    for result in &response.results {
+        if let Some(item) = &result.item
+            && item.party.starts_with(prefix)
+            && item.participants.len() > 1
+        {
+            return CantonId::parse(&item.party);
+        }
+    }
+
+    anyhow::bail!("Could not find decentralized party with prefix '{prefix}'")
 }
 
 /// Send contracts invites to all peers using Noise protocol

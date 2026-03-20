@@ -254,6 +254,12 @@ fn default_noise_port() -> u16 {
     9000
 }
 
+/// Default Keycloak configuration values for a network
+pub struct KeycloakDefaults {
+    pub url: String,
+    pub realm: String,
+}
+
 /// Canton Network environment
 #[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
@@ -271,6 +277,34 @@ impl Network {
             Network::Testnet => "https://docs.test.global.canton.network.sync.global/dso",
             Network::Mainnet => "https://docs.global.canton.network.sync.global/dso",
         }
+    }
+
+    /// Get default Keycloak configuration for this network
+    pub fn keycloak_defaults(&self) -> KeycloakDefaults {
+        match self {
+            Network::Devnet => KeycloakDefaults {
+                url: "https://keycloak.dev.canton.ibtc.network".to_string(),
+                realm: "ibtc-catalyst-devnet".to_string(),
+            },
+            Network::Testnet => KeycloakDefaults {
+                url: String::new(),
+                realm: String::new(),
+            },
+            Network::Mainnet => KeycloakDefaults {
+                url: String::new(),
+                realm: String::new(),
+            },
+        }
+    }
+}
+
+/// Default package identifiers used for new party configurations
+pub fn default_package_config() -> PackageConfig {
+    PackageConfig {
+        vault_governance: Some("#bitsafe-vault-governance-v0-rc8".to_string()),
+        vault: Some("#bitsafe-vault-v0-rc8".to_string()),
+        utility_registry: Some("#utility-registry-app-v0".to_string()),
+        utility_credential: Some("#utility-credential-app-v0".to_string()),
     }
 }
 
@@ -390,6 +424,20 @@ impl NodeConfig {
             .and_then(|id| self.get_party_credentials(&id))
             .map(|c| c.packages.clone())
             .unwrap_or_default()
+    }
+
+    /// Add or update party credentials in the config and save to disk
+    pub async fn upsert_party_credentials(&mut self, creds: PartyCredentials) -> Result {
+        if let Some(existing) = self
+            .parties
+            .iter_mut()
+            .find(|p| p.dec_party_id == creds.dec_party_id)
+        {
+            *existing = creds;
+        } else {
+            self.parties.push(creds);
+        }
+        self.save_config().await
     }
 
     /// Get the participant ID, panicking if not resolved

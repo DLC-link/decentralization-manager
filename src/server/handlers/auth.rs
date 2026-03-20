@@ -30,8 +30,10 @@ use crate::{
 pub async fn get_auth_status(data: web::Data<AppState>) -> impl Responder {
     let mut party_statuses = Vec::new();
 
+    let auth = data.auth.read().await;
+
     // Handle test mode - return mock status
-    if let Some(WorkflowAuth::Mock(ref mock_registry)) = data.auth {
+    if let Some(WorkflowAuth::Mock(ref mock_registry)) = *auth {
         let manager = mock_registry.get_by_str("");
         party_statuses.push(PartyAuthStatus {
             dec_party_id: "(test mode)".to_string(),
@@ -47,14 +49,16 @@ pub async fn get_auth_status(data: web::Data<AppState>) -> impl Responder {
         });
     }
 
+    let party_creds_list = data.party_credentials.read().await;
+
     // Check each configured party
-    for party_creds in &data.config.parties {
+    for party_creds in party_creds_list.iter() {
         let dec_party_id = party_creds.dec_party_id.to_string();
         let member_party_id = party_creds.member_party_id.to_string();
         let user_id = party_creds.user_id.clone();
 
         // Try to get a token from the auth registry
-        let (status, token) = match &data.auth {
+        let (status, token) = match &*auth {
             Some(WorkflowAuth::Keycloak(registry)) => {
                 match registry.get(&party_creds.dec_party_id) {
                     Some(tm) => match tm.get_token().await {
@@ -200,7 +204,8 @@ pub async fn test_auth(data: web::Data<AppState>) -> impl Responder {
     let mut results = Vec::new();
 
     // Handle test mode - mock auth always succeeds
-    if matches!(data.auth, Some(WorkflowAuth::Mock(_))) {
+    let auth = data.auth.read().await;
+    if matches!(*auth, Some(WorkflowAuth::Mock(_))) {
         results.push(AuthTestResult {
             party_id: "(test mode)".to_string(),
             success: true,
@@ -208,8 +213,10 @@ pub async fn test_auth(data: web::Data<AppState>) -> impl Responder {
         });
         return HttpResponse::Ok().json(AuthTestResponse { results });
     }
+    drop(auth);
 
-    for party_creds in &data.config.parties {
+    let party_creds_list = data.party_credentials.read().await;
+    for party_creds in party_creds_list.iter() {
         let dec_party_id = party_creds.dec_party_id.to_string();
 
         // Attempt fresh authentication

@@ -80,12 +80,12 @@ pub async fn get_governance(
     let party_id_str = party_id.to_string();
 
     let token = get_party_token(&data, party_id).await;
-    let test_mode = matches!(data.auth, Some(WorkflowAuth::Mock(_)));
+    let test_mode = data.test_mode;
 
     let threshold = get_party_threshold(&data, &party_id_str).await.unwrap_or(2);
 
-    let member_party_id = get_member_party_id(&data, party_id);
-    let packages = data.config.get_packages(&party_id_str);
+    let member_party_id = get_member_party_id(&data, party_id).await;
+    let packages = get_packages_for_party(&data, &party_id_str).await;
 
     match get_governance_confirmations(
         &data.config,
@@ -129,8 +129,8 @@ pub async fn get_governance_state(
     let party_id_str = party_id.to_string();
 
     let token = get_party_token(&data, party_id).await;
-    let test_mode = matches!(data.auth, Some(WorkflowAuth::Mock(_)));
-    let packages = data.config.get_packages(&party_id_str);
+    let test_mode = data.test_mode;
+    let packages = get_packages_for_party(&data, &party_id_str).await;
 
     match query_governance_state(&data.config, &party_id_str, token, test_mode, &packages).await {
         Ok(state) => HttpResponse::Ok().json(GovernanceStateResponse { state }),
@@ -161,8 +161,8 @@ pub async fn get_vaults_handler(
     let party_id_str = party_id.to_string();
 
     let token = get_party_token(&data, party_id).await;
-    let test_mode = matches!(data.auth, Some(WorkflowAuth::Mock(_)));
-    let packages = data.config.get_packages(&party_id_str);
+    let test_mode = data.test_mode;
+    let packages = get_packages_for_party(&data, &party_id_str).await;
 
     match get_vaults(&data.config, &party_id_str, token, test_mode, &packages).await {
         Ok(vaults) => HttpResponse::Ok().json(VaultsResponse { vaults }),
@@ -193,8 +193,8 @@ pub async fn get_provider_services_handler(
     let party_id_str = party_id.to_string();
 
     let token = get_party_token(&data, party_id).await;
-    let test_mode = matches!(data.auth, Some(WorkflowAuth::Mock(_)));
-    let packages = data.config.get_packages(&party_id_str);
+    let test_mode = data.test_mode;
+    let packages = get_packages_for_party(&data, &party_id_str).await;
 
     match get_provider_services(&data.config, &party_id_str, token, test_mode, &packages).await {
         Ok(services) => HttpResponse::Ok().json(ProviderServicesResponse { services }),
@@ -225,8 +225,8 @@ pub async fn get_user_services_handler(
     let party_id_str = party_id.to_string();
 
     let token = get_party_token(&data, party_id).await;
-    let test_mode = matches!(data.auth, Some(WorkflowAuth::Mock(_)));
-    let packages = data.config.get_packages(&party_id_str);
+    let test_mode = data.test_mode;
+    let packages = get_packages_for_party(&data, &party_id_str).await;
 
     match get_user_services(&data.config, &party_id_str, token, test_mode, &packages).await {
         Ok(services) => HttpResponse::Ok().json(UserServicesResponse { services }),
@@ -257,8 +257,8 @@ pub async fn get_registrar_services_handler(
     let party_id_str = party_id.to_string();
 
     let token = get_party_token(&data, party_id).await;
-    let test_mode = matches!(data.auth, Some(WorkflowAuth::Mock(_)));
-    let packages = data.config.get_packages(&party_id_str);
+    let test_mode = data.test_mode;
+    let packages = get_packages_for_party(&data, &party_id_str).await;
 
     match get_registrar_services(&data.config, &party_id_str, token, test_mode, &packages).await {
         Ok(services) => HttpResponse::Ok().json(RegistrarServicesResponse { services }),
@@ -289,7 +289,7 @@ pub async fn query_contracts_handler(
     let party_id_str = party_id.to_string();
 
     let token = get_party_token(&data, party_id).await;
-    let test_mode = matches!(data.auth, Some(WorkflowAuth::Mock(_)));
+    let test_mode = data.test_mode;
 
     let contract_params = QueryContractParams {
         package_id: query.package_id.clone(),
@@ -355,7 +355,7 @@ pub async fn confirm_action(
         }
     };
 
-    let packages = data.config.get_packages(&body.party_id.to_string());
+    let packages = get_packages_for_party(&data, &body.party_id.to_string()).await;
 
     match execute_confirm_action(&data.config, &body, &token, &member_party_id, &packages).await {
         Ok(()) => HttpResponse::Ok().json(MessageResponse {
@@ -404,7 +404,7 @@ pub async fn execute_action(
         }
     };
 
-    let packages = data.config.get_packages(&body.party_id.to_string());
+    let packages = get_packages_for_party(&data, &body.party_id.to_string()).await;
 
     match execute_confirmed_action(&data.config, &body, &token, &member_party_id, &packages).await {
         Ok(()) => HttpResponse::Ok().json(MessageResponse {
@@ -446,7 +446,7 @@ pub async fn expire_confirmation(
         }
     };
 
-    let packages = data.config.get_packages(&body.party_id.to_string());
+    let packages = get_packages_for_party(&data, &body.party_id.to_string()).await;
 
     match execute_expire_confirmation(&data.config, &body, &token, &member_party_id, &packages)
         .await
@@ -489,7 +489,7 @@ pub async fn cancel_confirmation(
         }
     };
 
-    let packages = data.config.get_packages(&body.party_id.to_string());
+    let packages = get_packages_for_party(&data, &body.party_id.to_string()).await;
 
     match execute_cancel_confirmation(&data.config, &body, &token, &member_party_id, &packages)
         .await
@@ -519,7 +519,7 @@ pub async fn get_packages(
     data: web::Data<AppState>,
     query: web::Query<GovernanceQuery>,
 ) -> impl Responder {
-    let packages = data.config.get_packages(&query.party_id.to_string());
+    let packages = get_packages_for_party(&data, &query.party_id.to_string()).await;
     HttpResponse::Ok().json(packages)
 }
 
@@ -610,7 +610,8 @@ pub async fn get_token_standard_contracts(body: web::Json<serde_json::Value>) ->
 
 /// Get token for a party from auth registry
 async fn get_party_token(data: &web::Data<AppState>, party_id: &CantonId) -> Option<String> {
-    match &data.auth {
+    let auth = data.auth.read().await;
+    match &*auth {
         Some(WorkflowAuth::Keycloak(registry)) => registry.get(party_id)?.get_token().await.ok(),
         Some(WorkflowAuth::Mock(mock_registry)) => Some(mock_registry.get(party_id).get_token()),
         None => None,
@@ -663,9 +664,9 @@ async fn get_party_threshold(data: &web::Data<AppState>, party_id: &str) -> Opti
 }
 
 /// Get member_party_id for a decentralized party from config
-fn get_member_party_id(data: &web::Data<AppState>, party_id: &CantonId) -> Option<String> {
-    data.config
-        .parties
+async fn get_member_party_id(data: &web::Data<AppState>, party_id: &CantonId) -> Option<String> {
+    let party_creds = data.party_credentials.read().await;
+    party_creds
         .iter()
         .find(|p| &p.dec_party_id == party_id)
         .map(|p| p.member_party_id.to_string())
@@ -676,7 +677,8 @@ async fn get_party_credentials(
     data: &web::Data<AppState>,
     party_id: &CantonId,
 ) -> Option<(String, String)> {
-    match &data.auth {
+    let auth = data.auth.read().await;
+    match &*auth {
         Some(WorkflowAuth::Keycloak(registry)) => {
             let tm = registry.get(party_id)?;
             let token = tm.get_token().await.ok()?;
@@ -688,6 +690,16 @@ async fn get_party_credentials(
         }
         None => None,
     }
+}
+
+/// Get package config for a party from the live party_credentials
+async fn get_packages_for_party(data: &web::Data<AppState>, dec_party_id: &str) -> PackageConfig {
+    let party_creds = data.party_credentials.read().await;
+    CantonId::parse(dec_party_id)
+        .ok()
+        .and_then(|id| party_creds.iter().find(|p| p.dec_party_id == id))
+        .map(|c| c.packages.clone())
+        .unwrap_or_default()
 }
 
 // ============================================================================

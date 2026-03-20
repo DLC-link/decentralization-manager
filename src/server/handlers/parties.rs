@@ -53,9 +53,8 @@ pub async fn get_decentralized_parties(
     data: web::Data<AppState>,
     query: web::Query<PartiesQuery>,
 ) -> impl Responder {
-    match fetch_decentralized_parties(&data.config, query.prefix.as_deref(), data.auth.clone())
-        .await
-    {
+    let auth = data.auth.read().await.clone();
+    match fetch_decentralized_parties(&data.config, query.prefix.as_deref(), auth).await {
         Ok(response) => HttpResponse::Ok().json(response),
         Err(e) => {
             tracing::error!("Failed to fetch decentralized parties: {e}");

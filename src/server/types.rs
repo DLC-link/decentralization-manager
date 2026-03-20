@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, RwLock};
 
 use crate::{
+    config::PackageConfig,
     participant_id::CantonId,
     workflow::contracts::{ContractDefinition, DarFile},
 };
@@ -688,6 +689,40 @@ pub struct ContractWithBlob {
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct ContractQueryResponse {
     pub contracts: Vec<ContractWithBlob>,
+}
+
+/// Request to save or update party configuration
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct PartyConfigRequest {
+    pub dec_party_id: String,
+    pub member_party_id: String,
+    pub user_id: String,
+    pub keycloak_url: String,
+    pub keycloak_realm: String,
+    pub keycloak_client_id: String,
+    #[serde(default)]
+    pub keycloak_client_secret: Option<String>,
+    #[serde(default)]
+    pub keycloak_username: Option<String>,
+    #[serde(default)]
+    pub keycloak_password: Option<String>,
+    #[serde(default)]
+    pub packages: PackageConfig,
+}
+
+/// Response with party configuration (secrets masked)
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct PartyConfigResponse {
+    pub dec_party_id: String,
+    pub member_party_id: String,
+    pub user_id: String,
+    pub keycloak_url: String,
+    pub keycloak_realm: String,
+    pub keycloak_client_id: String,
+    pub has_client_secret: bool,
+    pub has_username: bool,
+    pub has_password: bool,
+    pub packages: PackageConfig,
 }
 
 /// Generic error response
