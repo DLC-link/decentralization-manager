@@ -49,7 +49,8 @@ export const PartyConfigDialog = ({
   const [keycloakClientSecret, setKeycloakClientSecret] = useState("");
   const [keycloakUsername, setKeycloakUsername] = useState("");
   const [keycloakPassword, setKeycloakPassword] = useState("");
-  const [authMethod, setAuthMethod] = useState<AuthMethod>("client_credentials");
+  const [authMethod, setAuthMethod] =
+    useState<AuthMethod>("client_credentials");
   const [packages, setPackages] = useState<PackageConfig>({});
 
   const [canScrollUp, setCanScrollUp] = useState(false);
@@ -109,7 +110,6 @@ export const PartyConfigDialog = ({
         setKeycloakClientSecret("");
         setKeycloakUsername("");
         setKeycloakPassword("");
-
         setAuthMethod(
           data.has_username || data.has_password
             ? "password"
@@ -134,7 +134,8 @@ export const PartyConfigDialog = ({
       user_id: userId,
       keycloak_url: keycloakUrl,
       keycloak_realm: keycloakRealm,
-      keycloak_client_id: authMethod === "client_credentials" ? keycloakClientId : "",
+      keycloak_client_id:
+        authMethod === "client_credentials" ? keycloakClientId : "",
       packages,
     };
 
@@ -253,7 +254,11 @@ export const PartyConfigDialog = ({
               />
 
               <Box>
-                <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                <Typography
+                  variant="body2"
+                  color="text.secondary"
+                  sx={{ mb: 1 }}
+                >
                   Credentials
                 </Typography>
                 <ToggleButtonGroup

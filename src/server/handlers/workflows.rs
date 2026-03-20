@@ -574,6 +574,7 @@ pub async fn start_contracts(
     let contracts_state_clone = contracts_state.get_ref().clone();
     let listener_control = data.noise_listener_control.clone();
     let listener_notify = data.noise_listener_notify.clone();
+    let party_credentials = data.party_credentials.clone();
 
     tokio::spawn(async move {
         let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
@@ -613,8 +614,9 @@ pub async fn start_contracts(
             Ok(()) => {
                 *status = WorkflowProgress::Completed;
                 tracing::info!("Contracts workflow completed successfully");
-                // Save package IDs from deployed contracts to party config
-                if let Err(e) = save_deployed_packages(&config, &contracts_config).await {
+                if let Err(e) =
+                    save_deployed_packages(&config, &contracts_config, &party_credentials).await
+                {
                     tracing::warn!("Failed to save package config: {e}");
                 }
             }
@@ -653,7 +655,11 @@ pub async fn get_contracts_status(
 }
 
 /// Save deployed package IDs to party config after successful contracts workflow
-async fn save_deployed_packages(config: &NodeConfig, contracts_config: &ContractsConfig) -> Result {
+async fn save_deployed_packages(
+    config: &NodeConfig,
+    contracts_config: &ContractsConfig,
+    party_credentials: &Arc<RwLock<Vec<PartyCredentials>>>,
+) -> Result {
     let mut fresh_config = NodeConfig::from_dir(config.root_dir()).await?;
     let creds = fresh_config
         .parties
@@ -677,7 +683,16 @@ async fn save_deployed_packages(config: &NodeConfig, contracts_config: &Contract
                 _ => {}
             }
         }
+        let updated_packages = creds.packages.clone();
+        let dec_party_id = creds.dec_party_id.clone();
         fresh_config.save_config().await?;
+
+        // Sync in-memory party credentials
+        let mut pc = party_credentials.write().await;
+        if let Some(mem_creds) = pc.iter_mut().find(|p| p.dec_party_id == dec_party_id) {
+            mem_creds.packages = updated_packages;
+        }
+
         tracing::info!("Saved package IDs to party config");
     }
     Ok(())
@@ -921,9 +936,9 @@ async fn save_default_party_config(
         }
     }
 
-    let party_creds = party_credentials.read().await;
-    if !party_creds.is_empty() {
-        match AuthRegistry::new(&party_creds).await {
+    let creds_snapshot = party_credentials.read().await.clone();
+    if !creds_snapshot.is_empty() {
+        match AuthRegistry::new(&creds_snapshot).await {
             Ok(registry) => {
                 let mut auth = auth_lock.write().await;
                 *auth = Some(WorkflowAuth::Keycloak(Arc::new(registry)));

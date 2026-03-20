@@ -196,18 +196,19 @@ pub async fn reload_auth(
     party_credentials: &Arc<RwLock<Vec<PartyCredentials>>>,
     auth_lock: &Arc<RwLock<Option<WorkflowAuth>>>,
 ) -> Result {
-    let party_creds = party_credentials.read().await;
-    if party_creds.is_empty() {
+    let creds_snapshot = party_credentials.read().await.clone();
+
+    if creds_snapshot.is_empty() {
         let mut auth = auth_lock.write().await;
         *auth = None;
         tracing::info!("Auth registry cleared (no party credentials)");
     } else {
-        let registry = AuthRegistry::new(&party_creds).await?;
+        let registry = AuthRegistry::new(&creds_snapshot).await?;
         let mut auth = auth_lock.write().await;
         *auth = Some(WorkflowAuth::Keycloak(Arc::new(registry)));
         tracing::info!(
             "Auth registry reinitialized with {} parties",
-            party_creds.len()
+            creds_snapshot.len()
         );
     }
     Ok(())
