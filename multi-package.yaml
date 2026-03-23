@@ -1,0 +1,3 @@
+packages:
+  - daml/governance-core
+  - daml/governance-core-test

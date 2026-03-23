@@ -1,0 +1,189 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Tests for governance self-management actions (built-in path).
+module Governance.Test.SelfActionTest where
+
+import DA.Assert
+import DA.Set as Set hiding (filter)
+import DA.Time (minutes, seconds)
+import Daml.Script
+
+import Governance.Rules
+import Governance.TestUtils
+
+-- | Add a member via self-action confirm → execute flow.
+testAddMember = script do
+  parties <- allocateTestParties
+  rulesCid <- createTestGovernance parties
+  newMember <- allocateParty "NewMember"
+
+  let action = SelfAction_AddMemberAndSetThreshold with
+        newMember
+        newThresholdAfterAdd = 3
+
+  _newRulesCid <- confirmAndExecuteSelf parties rulesCid action
+    [parties.member1, parties.member2] parties.member1
+
+  [(_, rules)] <- query @GovernanceRules parties.governanceParty
+  assertMsg "New member should be in the set" (newMember `Set.member` rules.members)
+  rules.threshold === 3
+  Set.size rules.members === 4
+
+-- | Remove a member via self-action confirm → execute flow.
+testRemoveMember = script do
+  parties <- allocateTestParties
+  rulesCid <- createTestGovernance parties
+
+  let action = SelfAction_RemoveMemberAndSetThreshold with
+        removedMember = parties.member3
+        newThresholdAfterRemove = 2
+
+  _newRulesCid <- confirmAndExecuteSelf parties rulesCid action
+    [parties.member1, parties.member2] parties.member1
+
+  [(_, rules)] <- query @GovernanceRules parties.governanceParty
+  assertMsg "Removed member should not be in the set" (parties.member3 `Set.notMember` rules.members)
+  Set.size rules.members === 2
+
+-- | Set threshold via self-action.
+testSetThreshold = script do
+  parties <- allocateTestParties
+  rulesCid <- createTestGovernance parties
+
+  let action = SelfAction_SetThreshold with updatedThreshold = 3
+
+  _newRulesCid <- confirmAndExecuteSelf parties rulesCid action
+    [parties.member1, parties.member2] parties.member1
+
+  [(_, rules)] <- query @GovernanceRules parties.governanceParty
+  rules.threshold === 3
+
+-- | Reject threshold exceeding member count.
+testRejectThresholdExceedingMembers = script do
+  parties <- allocateTestParties
+  rulesCid <- createTestGovernance parties
+
+  let action = SelfAction_SetThreshold with updatedThreshold = 4
+
+  confirmationCids <- submitSelfConfirmations parties.governanceParty rulesCid action
+    [parties.member1, parties.member2]
+
+  submitMustFail (memberContext parties.member1 parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ExecuteGovernanceAction with
+      executor = parties.member1
+      action
+      confirmations = confirmationCids
+
+-- | Reject threshold less than 1 (zero or negative).
+testRejectThresholdLessThanOne = script do
+  parties <- allocateTestParties
+  rulesCid <- createTestGovernance parties
+
+  let action = SelfAction_SetThreshold with updatedThreshold = 0
+
+  confirmationCids <- submitSelfConfirmations parties.governanceParty rulesCid action
+    [parties.member1, parties.member2]
+
+  submitMustFail (memberContext parties.member1 parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ExecuteGovernanceAction with
+      executor = parties.member1
+      action
+      confirmations = confirmationCids
+
+-- | Set action confirmation timeout.
+testSetTimeout = script do
+  parties <- allocateTestParties
+  rulesCid <- createTestGovernance parties
+
+  let action = SelfAction_SetTimeout with updatedTimeout = minutes 60
+
+  _newRulesCid <- confirmAndExecuteSelf parties rulesCid action
+    [parties.member1, parties.member2] parties.member1
+
+  [(_, rules)] <- query @GovernanceRules parties.governanceParty
+  rules.actionConfirmationTimeout === minutes 60
+
+-- | Reject timeout less than 10 seconds.
+testRejectShortTimeout = script do
+  parties <- allocateTestParties
+  rulesCid <- createTestGovernance parties
+
+  let action = SelfAction_SetTimeout with updatedTimeout = seconds 5
+
+  confirmationCids <- submitSelfConfirmations parties.governanceParty rulesCid action
+    [parties.member1, parties.member2]
+
+  submitMustFail (memberContext parties.member1 parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ExecuteGovernanceAction with
+      executor = parties.member1
+      action
+      confirmations = confirmationCids
+
+-- | Non-member cannot confirm self-action.
+testNonMemberCannotConfirmSelfAction = script do
+  parties <- allocateTestParties
+  rulesCid <- createTestGovernance parties
+
+  let action = SelfAction_SetThreshold with updatedThreshold = 3
+
+  submitMustFail (memberContext parties.outsider parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ConfirmGovernanceAction with
+      confirmer = parties.outsider
+      action
+
+-- | Non-member cannot execute self-action.
+testNonMemberCannotExecuteSelfAction = script do
+  parties <- allocateTestParties
+  rulesCid <- createTestGovernance parties
+
+  let action = SelfAction_SetThreshold with updatedThreshold = 3
+
+  confirmationCids <- submitSelfConfirmations parties.governanceParty rulesCid action
+    [parties.member1, parties.member2]
+
+  submitMustFail (memberContext parties.outsider parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ExecuteGovernanceAction with
+      executor = parties.outsider
+      action
+      confirmations = confirmationCids
+
+-- | Insufficient confirmations for self-action.
+testInsufficientSelfConfirmations = script do
+  parties <- allocateTestParties
+  rulesCid <- createTestGovernance parties
+
+  let action = SelfAction_SetThreshold with updatedThreshold = 3
+
+  confirmationCids <- submitSelfConfirmations parties.governanceParty rulesCid action
+    [parties.member1]
+
+  submitMustFail (memberContext parties.member1 parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ExecuteGovernanceAction with
+      executor = parties.member1
+      action
+      confirmations = confirmationCids
+
+-- | Mismatched action in confirmations.
+testMismatchedSelfAction = script do
+  parties <- allocateTestParties
+  rulesCid <- createTestGovernance parties
+
+  let actionA = SelfAction_SetThreshold with updatedThreshold = 3
+  let actionB = SelfAction_SetThreshold with updatedThreshold = 2
+
+  confA <- submit (memberContext parties.member1 parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ConfirmGovernanceAction with
+      confirmer = parties.member1
+      action = actionA
+
+  confB <- submit (memberContext parties.member2 parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ConfirmGovernanceAction with
+      confirmer = parties.member2
+      action = actionB
+
+  submitMustFail (memberContext parties.member1 parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ExecuteGovernanceAction with
+      executor = parties.member1
+      action = actionA
+      confirmations = [confA, confB]

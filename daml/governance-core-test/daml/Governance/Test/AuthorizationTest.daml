@@ -1,0 +1,129 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Tests for authorization: authority propagation, non-member restrictions.
+module Governance.Test.AuthorizationTest where
+
+import DA.Assert
+import Daml.Script
+
+import Governance.Action (GovernableAction)
+import Governance.Rules
+import Governance.MockActions
+import Governance.TestUtils
+
+-- | Governance party authority flows through interface execution.
+-- MockAuthorityProposal exercises a choice on MockProtectedResource
+-- that requires governanceParty as controller. This only works if
+-- the governance exercise chain properly propagates authority.
+testAuthorityFlowsThroughInterface = script do
+  parties <- allocateTestParties
+  rulesCid <- createTestGovernance parties
+
+  resourceCid <- submit parties.governanceParty $ createCmd MockProtectedResource with
+    governanceParty = parties.governanceParty
+    value = "original"
+
+  proposalCid <- submit parties.member1 $ createCmd MockAuthorityProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    resourceCid
+    newValue = "updated via governance"
+
+  let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
+
+  confirmAndExecute parties rulesCid proposalIfaceCid
+    [parties.member1, parties.member2] parties.member3
+
+  [(_, resource)] <- query @MockProtectedResource parties.governanceParty
+  resource.value === "updated via governance"
+
+-- | Non-member can create a proposal (harmless — it's inert without confirmations).
+testNonMemberCanCreateProposal = script do
+  parties <- allocateTestParties
+  _rulesCid <- createTestGovernance parties
+
+  _proposalCid <- submit parties.outsider $ createCmd MockProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.outsider
+    label = "OutsiderProposal"
+    payload = "from outsider"
+
+  [(_, proposal)] <- query @MockProposal parties.outsider
+  proposal.label === "OutsiderProposal"
+
+-- | Non-member proposal can still be confirmed and executed by members.
+testNonMemberProposalCanBeExecutedByMembers = script do
+  parties <- allocateTestParties
+  rulesCid <- createTestGovernance parties
+
+  proposalCid <- submit parties.outsider $ createCmd MockProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.outsider
+    label = "OutsiderProposal"
+    payload = "from outsider"
+
+  let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
+
+  confirmAndExecute parties rulesCid proposalIfaceCid
+    [parties.member1, parties.member2] parties.member3
+
+  [(_, result)] <- query @MockActionResult parties.governanceParty
+  result.label === "OutsiderProposal"
+  result.payload === "from outsider"
+
+-- | Non-member cannot confirm, execute, or cancel via governance choices.
+testNonMemberCannotUseGovernanceChoices = script do
+  parties <- allocateTestParties
+  rulesCid <- createTestGovernance parties
+
+  proposalCid <- submit parties.member1 $ createCmd MockProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    label = "TestAction"
+    payload = "test"
+
+  let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
+
+  submitMustFail (memberContext parties.outsider parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ConfirmAction with
+      confirmer = parties.outsider
+      actionProposalCid = proposalIfaceCid
+
+  confirmationCids <- submitConfirmations parties.governanceParty rulesCid proposalIfaceCid
+    [parties.member1, parties.member2]
+
+  submitMustFail (memberContext parties.outsider parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ExecuteConfirmedAction with
+      executor = parties.outsider
+      actionProposalCid = proposalIfaceCid
+      confirmations = confirmationCids
+
+-- | Duplicate confirmations from the same member are rejected.
+testDuplicateConfirmationsRejected = script do
+  parties <- allocateTestParties
+  rulesCid <- createTestGovernance parties
+
+  proposalCid <- submit parties.member1 $ createCmd MockProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    label = "TestAction"
+    payload = "test"
+
+  let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
+
+  conf1 <- submit (memberContext parties.member1 parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ConfirmAction with
+      confirmer = parties.member1
+      actionProposalCid = proposalIfaceCid
+
+  conf2 <- submit (memberContext parties.member1 parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ConfirmAction with
+      confirmer = parties.member1
+      actionProposalCid = proposalIfaceCid
+
+  submitMustFail (memberContext parties.member1 parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ExecuteConfirmedAction with
+      executor = parties.member1
+      actionProposalCid = proposalIfaceCid
+      confirmations = [conf1, conf2]
