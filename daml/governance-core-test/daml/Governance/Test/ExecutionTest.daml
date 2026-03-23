@@ -1,0 +1,193 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Tests for the full confirm → execute flow for interface-based actions.
+module Governance.Test.ExecutionTest where
+
+import DA.Assert
+import DA.Time (minutes)
+import Daml.Script
+
+import Governance.Action (GovernableAction)
+import Governance.Rules
+import Governance.MockActions
+import Governance.TestUtils
+
+-- | Full flow: create proposal → confirm → execute → verify result.
+testFullExecutionFlow = script do
+  parties <- allocateTestParties
+  rulesCid <- createTestGovernance parties
+
+  proposalCid <- submit parties.member1 $ createCmd MockProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    label = "TestAction"
+    payload = "hello governance"
+
+  let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
+
+  confirmAndExecute parties rulesCid proposalIfaceCid
+    [parties.member1, parties.member2] parties.member3
+
+  [(_, result)] <- query @MockActionResult parties.governanceParty
+  result.label === "TestAction"
+  result.payload === "hello governance"
+
+  proposals <- query @MockProposal parties.governanceParty
+  proposals === []
+
+-- | Execution with all 3 members confirming (more than threshold).
+testExecutionWithExtraConfirmations = script do
+  parties <- allocateTestParties
+  rulesCid <- createTestGovernance parties
+
+  proposalCid <- submit parties.member1 $ createCmd MockProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    label = "ExtraConfs"
+    payload = "extra"
+
+  let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
+
+  confirmAndExecute parties rulesCid proposalIfaceCid
+    [parties.member1, parties.member2, parties.member3] parties.member1
+
+  [(_, result)] <- query @MockActionResult parties.governanceParty
+  result.label === "ExtraConfs"
+
+-- | Insufficient confirmations → execution fails.
+testInsufficientConfirmations : Script ()
+testInsufficientConfirmations = script do
+  parties <- allocateTestParties
+  rulesCid <- createTestGovernance parties
+
+  proposalCid <- submit parties.member1 $ createCmd MockProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    label = "TestAction"
+    payload = "test"
+
+  let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
+
+  confirmationCids <- submitConfirmations parties.governanceParty rulesCid proposalIfaceCid
+    [parties.member1]
+
+  submitMustFail (memberContext parties.member1 parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ExecuteConfirmedAction with
+      executor = parties.member1
+      actionProposalCid = proposalIfaceCid
+      confirmations = confirmationCids
+
+-- | Non-member cannot execute.
+testNonMemberCannotExecute = script do
+  parties <- allocateTestParties
+  rulesCid <- createTestGovernance parties
+
+  proposalCid <- submit parties.member1 $ createCmd MockProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    label = "TestAction"
+    payload = "test"
+
+  let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
+
+  confirmationCids <- submitConfirmations parties.governanceParty rulesCid proposalIfaceCid
+    [parties.member1, parties.member2]
+
+  submitMustFail (memberContext parties.outsider parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ExecuteConfirmedAction with
+      executor = parties.outsider
+      actionProposalCid = proposalIfaceCid
+      confirmations = confirmationCids
+
+-- | Expired confirmations are filtered out and don't count toward threshold.
+testExpiredConfirmationsDontCount = script do
+  parties <- allocateTestParties
+
+  rulesCid <- submit parties.governanceParty $ createCmd GovernanceRules with
+    governanceParty = parties.governanceParty
+    members = getMembers parties
+    threshold = 2
+    actionConfirmationTimeout = minutes 3
+
+  proposalCid <- submit parties.member1 $ createCmd MockProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    label = "TestAction"
+    payload = "test"
+
+  let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
+
+  conf1 <- submit (memberContext parties.member1 parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ConfirmAction with
+      confirmer = parties.member1
+      actionProposalCid = proposalIfaceCid
+
+  passTime (minutes 4)
+
+  conf2 <- submit (memberContext parties.member2 parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ConfirmAction with
+      confirmer = parties.member2
+      actionProposalCid = proposalIfaceCid
+
+  submitMustFail (memberContext parties.member2 parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ExecuteConfirmedAction with
+      executor = parties.member2
+      actionProposalCid = proposalIfaceCid
+      confirmations = [conf1, conf2]
+
+-- | Failing action: governance approves but execution fails.
+testFailingActionExecution = script do
+  parties <- allocateTestParties
+  rulesCid <- createTestGovernance parties
+
+  proposalCid <- submit parties.member1 $ createCmd MockFailingProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+
+  let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
+
+  confirmationCids <- submitConfirmations parties.governanceParty rulesCid proposalIfaceCid
+    [parties.member1, parties.member2]
+
+  submitMustFail (memberContext parties.member1 parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ExecuteConfirmedAction with
+      executor = parties.member1
+      actionProposalCid = proposalIfaceCid
+      confirmations = confirmationCids
+
+-- | Confirmations for different proposals cannot be mixed.
+testConfirmationsCannotBeMixed = script do
+  parties <- allocateTestParties
+  rulesCid <- createTestGovernance parties
+
+  proposalA <- submit parties.member1 $ createCmd MockProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    label = "ActionA"
+    payload = "a"
+
+  proposalB <- submit parties.member1 $ createCmd MockProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    label = "ActionB"
+    payload = "b"
+
+  let proposalACid = toInterfaceContractId @GovernableAction proposalA
+  let proposalBCid = toInterfaceContractId @GovernableAction proposalB
+
+  confA <- submit (memberContext parties.member1 parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ConfirmAction with
+      confirmer = parties.member1
+      actionProposalCid = proposalACid
+
+  confB <- submit (memberContext parties.member2 parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ConfirmAction with
+      confirmer = parties.member2
+      actionProposalCid = proposalBCid
+
+  submitMustFail (memberContext parties.member1 parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ExecuteConfirmedAction with
+      executor = parties.member1
+      actionProposalCid = proposalACid
+      confirmations = [confA, confB]

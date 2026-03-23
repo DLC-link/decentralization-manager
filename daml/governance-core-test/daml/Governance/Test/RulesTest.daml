@@ -1,0 +1,50 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Tests for GovernanceRules creation and validation.
+module Governance.Test.RulesTest where
+
+import DA.Assert
+import DA.Set as Set hiding (filter)
+import DA.Time (minutes)
+import Daml.Script
+
+import Governance.Rules
+import Governance.TestUtils
+
+-- | Valid governance rules creation.
+testGovernanceRulesCreation = script do
+  parties <- allocateTestParties
+
+  rulesCid <- createTestGovernance parties
+
+  [(foundCid, rules)] <- query @GovernanceRules parties.governanceParty
+  foundCid === rulesCid
+  rules.members === getMembers parties
+  rules.threshold === 2
+  rules.actionConfirmationTimeout === minutes 30
+
+-- | Reject creation with empty members.
+testRejectEmptyMembers = script do
+  parties <- allocateTestParties
+
+  submitMustFail parties.governanceParty $ createCmd GovernanceRules with
+    governanceParty = parties.governanceParty
+    members = Set.empty
+    threshold = 2
+    actionConfirmationTimeout = minutes 30
+
+-- | Governance with different timeout and threshold values.
+testCustomConfiguration = script do
+  parties <- allocateTestParties
+
+  _rulesCid <- submit parties.governanceParty $ createCmd GovernanceRules with
+    governanceParty = parties.governanceParty
+    members = getMembers parties
+    threshold = 3
+    actionConfirmationTimeout = minutes 60
+
+  [(_, rules)] <- query @GovernanceRules parties.governanceParty
+  rules.threshold === 3
+  rules.actionConfirmationTimeout === minutes 60
+

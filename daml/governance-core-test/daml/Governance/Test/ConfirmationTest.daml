@@ -1,0 +1,179 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Tests for confirmation lifecycle (create, expire, cancel).
+module Governance.Test.ConfirmationTest where
+
+import DA.Assert
+import DA.Time (minutes)
+import Daml.Script
+
+import Governance.Action (GovernableAction)
+import Governance.Confirmation
+import Governance.Rules
+import Governance.MockActions
+import Governance.TestUtils
+
+-- | Member can create a confirmation for an interface action.
+testMemberCanConfirm = script do
+  parties <- allocateTestParties
+  rulesCid <- createTestGovernance parties
+
+  proposalCid <- submit parties.member1 $ createCmd MockProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    label = "TestAction"
+    payload = "test"
+
+  let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
+
+  _confCid <- submit (memberContext parties.member1 parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ConfirmAction with
+      confirmer = parties.member1
+      actionProposalCid = proposalIfaceCid
+
+  [(_, conf)] <- query @GovernanceConfirmation parties.governanceParty
+  conf.confirmer === parties.member1
+  conf.actionLabel === "TestAction"
+
+-- | Non-member cannot create a confirmation.
+testNonMemberCannotConfirm = script do
+  parties <- allocateTestParties
+  rulesCid <- createTestGovernance parties
+
+  proposalCid <- submit parties.member1 $ createCmd MockProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    label = "TestAction"
+    payload = "test"
+
+  let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
+
+  submitMustFail (memberContext parties.outsider parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ConfirmAction with
+      confirmer = parties.outsider
+      actionProposalCid = proposalIfaceCid
+
+-- | Confirmer can cancel their own confirmation.
+testConfirmerCanCancel = script do
+  parties <- allocateTestParties
+  rulesCid <- createTestGovernance parties
+
+  proposalCid <- submit parties.member1 $ createCmd MockProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    label = "TestAction"
+    payload = "test"
+
+  let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
+
+  confCid <- submit (memberContext parties.member1 parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ConfirmAction with
+      confirmer = parties.member1
+      actionProposalCid = proposalIfaceCid
+
+  submit parties.member1 $ exerciseCmd confCid GovernanceConfirmation_Cancel
+
+  confs <- query @GovernanceConfirmation parties.governanceParty
+  confs === []
+
+-- | Member can expire a stale confirmation.
+testExpireStaleConfirmation = script do
+  parties <- allocateTestParties
+
+  rulesCid <- submit parties.governanceParty $ createCmd GovernanceRules with
+    governanceParty = parties.governanceParty
+    members = getMembers parties
+    threshold = 2
+    actionConfirmationTimeout = minutes 3
+
+  proposalCid <- submit parties.member1 $ createCmd MockProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    label = "TestAction"
+    payload = "test"
+
+  let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
+
+  confCid <- submit (memberContext parties.member1 parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ConfirmAction with
+      confirmer = parties.member1
+      actionProposalCid = proposalIfaceCid
+
+  passTime (minutes 4)
+
+  submit (memberContext parties.member2 parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ExpireConfirmation with
+      member = parties.member2
+      staleConfirmationCid = confCid
+
+  confs <- query @GovernanceConfirmation parties.governanceParty
+  confs === []
+
+-- | Cannot expire a non-expired confirmation.
+testCannotExpireValidConfirmation = script do
+  parties <- allocateTestParties
+  rulesCid <- createTestGovernance parties
+
+  proposalCid <- submit parties.member1 $ createCmd MockProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    label = "TestAction"
+    payload = "test"
+
+  let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
+
+  confCid <- submit (memberContext parties.member1 parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ConfirmAction with
+      confirmer = parties.member1
+      actionProposalCid = proposalIfaceCid
+
+  submitMustFail (memberContext parties.member2 parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ExpireConfirmation with
+      member = parties.member2
+      staleConfirmationCid = confCid
+
+-- | Non-member cannot expire confirmations.
+testNonMemberCannotExpire = script do
+  parties <- allocateTestParties
+  rulesCid <- createTestGovernance parties
+
+  proposalCid <- submit parties.member1 $ createCmd MockProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    label = "TestAction"
+    payload = "test"
+
+  let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
+
+  confCid <- submit (memberContext parties.member1 parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ConfirmAction with
+      confirmer = parties.member1
+      actionProposalCid = proposalIfaceCid
+
+  passTime (minutes 31)
+
+  submitMustFail (memberContext parties.outsider parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ExpireConfirmation with
+      member = parties.outsider
+      staleConfirmationCid = confCid
+
+-- | Proposal targeting wrong governance party is rejected at confirmation.
+testRejectWrongGovernanceParty = script do
+  parties <- allocateTestParties
+  rulesCid <- createTestGovernance parties
+
+  wrongParty <- allocateParty "WrongGovernance"
+
+  proposalCid <- submit parties.member1 $ createCmd MockProposal with
+    governanceParty = wrongParty
+    proposer = parties.member1
+    label = "TestAction"
+    payload = "test"
+
+  let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
+
+  submitMustFail (memberContext parties.member1 parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ConfirmAction with
+      confirmer = parties.member1
+      actionProposalCid = proposalIfaceCid

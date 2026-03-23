@@ -1,0 +1,97 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Mock action implementations for testing the governance-core.
+-- These templates implement GovernableAction without depending on any
+-- real domain packages (vault, cbtc, etc.).
+module Governance.MockActions where
+
+import Governance.Action
+
+
+-- | Witness contract that proves a mock action was executed.
+-- Tests can query for this to verify execution happened.
+template MockActionResult
+  with
+    governanceParty : Party
+    label : Text
+    payload : Text
+  where
+    signatory governanceParty
+
+-- | A simple mock action that creates a MockActionResult when executed.
+template MockProposal
+  with
+    governanceParty : Party
+    proposer : Party
+    label : Text
+    payload : Text
+  where
+    signatory proposer
+    observer governanceParty
+
+    interface instance GovernableAction for MockProposal where
+      view = GovernableActionView with
+        governanceParty
+        actionLabel = label
+
+      executeImpl = do
+        create MockActionResult with
+          governanceParty
+          label
+          payload
+        pure ()
+
+-- | A mock action whose executeImpl always fails.
+-- Used to test that governance correctly propagates execution failures.
+template MockFailingProposal
+  with
+    governanceParty : Party
+    proposer : Party
+  where
+    signatory proposer
+    observer governanceParty
+
+    interface instance GovernableAction for MockFailingProposal where
+      view = GovernableActionView with
+        governanceParty
+        actionLabel = "MockFailing"
+
+      executeImpl = do
+        abort "Mock action intentionally failed"
+
+-- | A mock contract that requires governanceParty as signatory.
+-- Used to test that governance authority flows correctly through the interface.
+template MockProtectedResource
+  with
+    governanceParty : Party
+    value : Text
+  where
+    signatory governanceParty
+
+    choice MockProtectedResource_Update : ContractId MockProtectedResource
+      with
+        newValue : Text
+      controller governanceParty
+      do create this with value = newValue
+
+-- | A mock action that exercises a choice on MockProtectedResource.
+-- This proves that governanceParty authority flows through the interface execution chain.
+template MockAuthorityProposal
+  with
+    governanceParty : Party
+    proposer : Party
+    resourceCid : ContractId MockProtectedResource
+    newValue : Text
+  where
+    signatory proposer
+    observer governanceParty
+
+    interface instance GovernableAction for MockAuthorityProposal where
+      view = GovernableActionView with
+        governanceParty
+        actionLabel = "MockAuthorityTest"
+
+      executeImpl = do
+        exercise resourceCid MockProtectedResource_Update with newValue
+        pure ()
