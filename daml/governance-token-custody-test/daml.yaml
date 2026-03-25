@@ -9,12 +9,18 @@ dependencies:
 data-dependencies:
   - ../governance-token-custody/.daml/dist/governance-token-custody-0.1.0.dar
   - ../governance-core/.daml/dist/governance-core-0.1.0.dar
+  - ../dars/splice-amulet-0.1.17.dar
+  - ../dars/splice-api-featured-app-v1-1.0.0.dar
+  - ../dars/splice-api-token-burn-mint-v1-1.0.0.dar
   - ../dars/splice-api-token-holding-v1-1.0.0.dar
   - ../dars/splice-api-token-metadata-v1-1.0.0.dar
   - ../dars/splice-api-token-transfer-instruction-v1-1.0.0.dar
   - ../dars/splice-util-0.1.4.dar
   - ../dars/splice-wallet-0.1.18.dar
+  - ../dars/utility-credential-v0-0.1.0.dar
   - ../dars/utility-registry-app-v0-0.7.0.dar
+  - ../dars/utility-registry-holding-v0-0.2.1.dar
+  - ../dars/utility-registry-v0-0.6.0.dar
 build-options:
   - --target=2.2
   - -Wno-upgrade-interfaces

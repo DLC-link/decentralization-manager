@@ -1,10 +1,14 @@
 -- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
--- | Governable action to send CIP-56 tokens via TransferFactory.
+-- | Governable action to send tokens via TransferFactory.
+--
+-- The transfer factory is typically a TransferPreapproval set up by the receiver,
+-- which pre-authorizes incoming transfers. This avoids requiring the receiver's
+-- active authorization during the governance execution flow.
 --
 -- UTXO Timing Risk:
--- The inputHoldingCids referenced in this proposal are captured at proposal
+-- The inputHoldingCids referenced in the transfer are captured at proposal
 -- creation time. If any holdings are consumed (spent, merged, split) between
 -- proposal creation and governance execution, the TransferFactory_Transfer
 -- exercise will fail. Mitigations:
@@ -13,13 +17,12 @@
 --   3. Monitor and re-propose if holdings change
 module Governance.TokenCustody.SendTokens where
 
-import Splice.Api.Token.HoldingV1 (Holding, InstrumentId)
-import Splice.Api.Token.MetadataV1 (ExtraArgs(..), Metadata, emptyChoiceContext, emptyMetadata)
-import Splice.Api.Token.TransferInstructionV1 (Transfer(..), TransferFactory, TransferFactory_Transfer(..))
+import Splice.Api.Token.MetadataV1 (ExtraArgs)
+import Splice.Api.Token.TransferInstructionV1 (Transfer, TransferFactory, TransferFactory_Transfer(..))
 
 import Governance.Action
 
--- | Proposal to send CIP-56 tokens from the governance party.
+-- | Proposal to send tokens from the governance party via a TransferFactory.
 -- The governance party acts as the sender; authority flows through the
 -- exercise chain: GovernanceRules → GovernableAction_Execute → executeImpl
 -- → TransferFactory_Transfer (controller: transfer.sender = governanceParty).
@@ -30,28 +33,18 @@ template SendTokensProposal
     proposer : Party
       -- ^ The member proposing this transfer.
     transferFactoryCid : ContractId TransferFactory
-      -- ^ The transfer factory to use for executing the transfer.
+      -- ^ The transfer factory to use (typically a TransferPreapproval).
     expectedAdmin : Party
       -- ^ The expected admin party of the transfer factory.
-    receiver : Party
-      -- ^ The party receiving the tokens.
-    amount : Decimal
-      -- ^ The amount of tokens to transfer.
-    instrumentId : InstrumentId
-      -- ^ The instrument identifier for the token.
-    requestedAt : Time
-      -- ^ Timestamp when the transfer was requested.
-    executeBefore : Time
-      -- ^ Deadline for executing the transfer.
-    inputHoldingCids : [ContractId Holding]
-      -- ^ Holdings to fund the transfer (UTXO inputs).
-    meta : Metadata
-      -- ^ Additional metadata for the transfer.
+    transfer : Transfer
+      -- ^ The transfer details (sender, receiver, amount, holdings, etc.).
+    extraArgs : ExtraArgs
+      -- ^ Extra arguments for the transfer factory (context, metadata).
   where
     signatory proposer
     observer governanceParty
 
-    ensure amount > 0.0
+    ensure transfer.amount > 0.0
 
     interface instance GovernableAction for SendTokensProposal where
       view = GovernableActionView with
@@ -61,16 +54,6 @@ template SendTokensProposal
       executeImpl = do
         exercise transferFactoryCid TransferFactory_Transfer with
           expectedAdmin
-          transfer = Transfer with
-            sender = governanceParty
-            receiver
-            amount
-            instrumentId
-            requestedAt
-            executeBefore
-            inputHoldingCids
-            meta
-          extraArgs = ExtraArgs with
-            context = emptyChoiceContext
-            meta = emptyMetadata
+          transfer
+          extraArgs
         pure ()

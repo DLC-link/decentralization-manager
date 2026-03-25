@@ -1,33 +1,24 @@
 -- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
--- | Tests for the SendTokensProposal governable action.
--- SendTokens uses TransferFactory_Transfer on a TransferPreapproval.
-module Governance.TokenCustody.Test.SendTokensTest where
+-- | Tests for the OfferTransferProposal governable action.
+-- OfferTransfer uses TransferRule_TwoStepTransfer to create a pending TransferOffer.
+module Governance.TokenCustody.Test.OfferTransferTest where
 
 import DA.Time (addRelTime, hours)
 import Daml.Script
 
 import Splice.Api.Token.HoldingV1 (Holding, InstrumentId)
 import Splice.Api.Token.MetadataV1 (ExtraArgs(..), emptyMetadata)
-import Splice.Api.Token.TransferInstructionV1 (Transfer(..), TransferFactory, TransferFactory_Transfer(..))
+import Splice.Api.Token.TransferInstructionV1 (Transfer(..))
 
-import Utility.Registry.App.V0.Model.TransferPreapproval (TransferPreapproval(..))
 import Utility.Registry.Holding.V0.Holding qualified as V0Holding
+import Utility.Registry.V0.Rule.Transfer (TransferRule_TwoStepTransfer(..))
 
 import Governance.Action (GovernableAction)
 import Governance.Rules (GovernanceRules_ConfirmAction(..), GovernanceRules_ExecuteConfirmedAction(..))
-import Governance.TokenCustody.SendTokens
+import Governance.TokenCustody.OfferTransfer
 import Governance.TokenCustody.TestUtils
-
--- | Create a TransferPreapproval for the receiver, usable as a TransferFactory.
-createReceiverPreapproval : TokenTestParties -> UtilityOnboardingResult -> Script (ContractId TransferPreapproval)
-createReceiverPreapproval parties onboarding =
-  submit parties.outsider $ createCmd TransferPreapproval with
-    operator = onboarding.operator
-    receiver = parties.outsider
-    instrumentAdmin = parties.registrar
-    instrumentAllowances = []
 
 -- | Build a standard Transfer from governance party to outsider.
 buildTestTransfer : TokenTestParties -> InstrumentId -> Time -> Decimal -> [ContractId Holding] -> Transfer
@@ -41,78 +32,78 @@ buildTestTransfer parties instrument now amount holdingCids = Transfer with
   inputHoldingCids = holdingCids
   meta = emptyMetadata
 
--- | Helper to create a SendTokensProposal with standard test fields.
-createSendProposal : TokenTestParties -> UtilityOnboardingResult -> Decimal -> Script (ContractId SendTokensProposal)
-createSendProposal parties onboarding amount = do
+-- | Build standard ExtraArgs for offer operations.
+buildOfferExtraArgs : UtilityOnboardingResult -> ExtraArgs
+buildOfferExtraArgs onboarding = ExtraArgs with
+  context = createTransferContext onboarding
+  meta = emptyMetadata
+
+-- | Helper to create an OfferTransferProposal with standard test fields.
+createOfferProposal : TokenTestParties -> UtilityOnboardingResult -> Decimal -> Script (ContractId OfferTransferProposal)
+createOfferProposal parties onboarding amount = do
   let instrument = testInstrumentId parties.registrar
   now <- getTime
-  preapprovalCid <- createReceiverPreapproval parties onboarding
-  submit parties.member1 $ createCmd SendTokensProposal with
+  submit parties.member1 $ createCmd OfferTransferProposal with
     governanceParty = parties.governanceParty
     proposer = parties.member1
-    transferFactoryCid = coerceContractId preapprovalCid
-    expectedAdmin = parties.registrar
+    transferRuleCid = onboarding.transferRuleCid
+    expectedOperator = onboarding.operator
+    expectedProvider = onboarding.provider
     transfer = buildTestTransfer parties instrument now amount []
-    extraArgs = ExtraArgs with
-      context = createTransferContext onboarding
-      meta = emptyMetadata
+    extraArgs = buildOfferExtraArgs onboarding
 
--- | Test real token transfer via TransferPreapproval acting as TransferFactory.
--- Exercises the transfer directly (not through governance chain) because
--- the underlying TransferRule requires receiver authorization via Canton topology.
+-- | Test real TransferRule_TwoStepTransfer to create a pending offer.
+-- Exercises the TransferRule directly because the choice controller
+-- requires registrar/provider authorization (provided via Canton topology in production).
 -- Governance confirm/execute logic is tested separately by the other tests.
-testSendTokensFullFlow : Script ()
-testSendTokensFullFlow = do
+testOfferTransferFullFlow : Script ()
+testOfferTransferFullFlow = do
   parties <- allocateTokenTestParties
   let instrument = testInstrumentId parties.registrar
   onboarding <- onboardToUtility parties instrument
-
-  holdingCids <- mintTokens parties.governanceParty 100.0 onboarding instrument
-
-  preapprovalCid <- createReceiverPreapproval parties onboarding
-  let factoryCid : ContractId TransferFactory = coerceContractId preapprovalCid
   now <- getTime
 
-  _ <- submit (actAs parties.governanceParty <> actAs parties.outsider
-    <> readAs parties.registrar <> readAs parties.operator <> readAs parties.dso) $
-    exerciseCmd factoryCid TransferFactory_Transfer with
-      expectedAdmin = parties.registrar
-      transfer = buildTestTransfer parties instrument now 50.0 holdingCids
-      extraArgs = ExtraArgs with
-        context = createTransferContext onboarding
-        meta = emptyMetadata
+  mintedCids <- mintTokens parties.governanceParty 100.0 onboarding instrument
+  holdingCids <- lockHoldings parties.governanceParty mintedCids onboarding
 
-  outsiderHoldings <- query @V0Holding.Holding parties.outsider
-  assertMsg "Outsider should have received a holding" (not (null outsiderHoldings))
+  submit (actAs parties.governanceParty <> actAs parties.outsider
+    <> readAs parties.registrar <> readAs parties.operator <> readAs parties.dso) $
+    exerciseCmd onboarding.transferRuleCid TransferRule_TwoStepTransfer with
+      transfer = buildTestTransfer parties instrument now 50.0 holdingCids
+      extraArgs = buildOfferExtraArgs onboarding
+      expectedOperator = onboarding.operator
+      expectedProvider = onboarding.provider
+
+  senderHoldings <- query @V0Holding.Holding parties.governanceParty
+  let totalRemaining = sum $ map ((.amount) . snd) senderHoldings
+  assertMsg "Sender should have 50.0 remaining" (totalRemaining == 50.0)
 
 -- | Proposal with zero amount is rejected by ensure.
-testSendTokensZeroAmountRejected : Script ()
-testSendTokensZeroAmountRejected = do
+testOfferTransferZeroAmountRejected : Script ()
+testOfferTransferZeroAmountRejected = do
   parties <- allocateTokenTestParties
   let instrument = testInstrumentId parties.registrar
   onboarding <- onboardToUtility parties instrument
-  preapprovalCid <- createReceiverPreapproval parties onboarding
   now <- getTime
 
-  submitMustFail parties.member1 $ createCmd SendTokensProposal with
+  submitMustFail parties.member1 $ createCmd OfferTransferProposal with
     governanceParty = parties.governanceParty
     proposer = parties.member1
-    transferFactoryCid = coerceContractId preapprovalCid
-    expectedAdmin = parties.registrar
+    transferRuleCid = onboarding.transferRuleCid
+    expectedOperator = onboarding.operator
+    expectedProvider = onboarding.provider
     transfer = buildTestTransfer parties instrument now 0.0 []
-    extraArgs = ExtraArgs with
-      context = createTransferContext onboarding
-      meta = emptyMetadata
+    extraArgs = buildOfferExtraArgs onboarding
 
 -- | Insufficient confirmations are rejected.
-testSendTokensInsufficientConfirmations : Script ()
-testSendTokensInsufficientConfirmations = do
+testOfferTransferInsufficientConfirmations : Script ()
+testOfferTransferInsufficientConfirmations = do
   parties <- allocateTokenTestParties
   let instrument = testInstrumentId parties.registrar
   onboarding <- onboardToUtility parties instrument
   rulesCid <- createTestGovernance parties
 
-  proposalCid <- createSendProposal parties onboarding 50.0
+  proposalCid <- createOfferProposal parties onboarding 50.0
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
 
   confirmationCids <- submitConfirmations parties.governanceParty rulesCid proposalInterfaceCid
@@ -124,15 +115,15 @@ testSendTokensInsufficientConfirmations = do
       actionProposalCid = proposalInterfaceCid
       confirmations = confirmationCids
 
--- | Non-member cannot confirm a SendTokens proposal.
-testSendTokensNonMemberCannotConfirm : Script ()
-testSendTokensNonMemberCannotConfirm = do
+-- | Non-member cannot confirm an OfferTransfer proposal.
+testOfferTransferNonMemberCannotConfirm : Script ()
+testOfferTransferNonMemberCannotConfirm = do
   parties <- allocateTokenTestParties
   let instrument = testInstrumentId parties.registrar
   onboarding <- onboardToUtility parties instrument
   rulesCid <- createTestGovernance parties
 
-  proposalCid <- createSendProposal parties onboarding 50.0
+  proposalCid <- createOfferProposal parties onboarding 50.0
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
 
   submitMustFail (memberContext parties.outsider parties.governanceParty) $

@@ -25,7 +25,7 @@ testSetupTokenPreapprovalFullFlow = do
     governanceParty = parties.governanceParty
     proposer = parties.member1
     operator = parties.outsider
-    instrumentAdmin = parties.instrumentAdmin
+    instrumentAdmin = parties.registrar
     instrumentAllowances = [InstrumentAllowance with id = "TEST-TOKEN"]
 
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
@@ -40,7 +40,7 @@ testSetupTokenPreapprovalFullFlow = do
   let (_, preapproval) = head preapprovals
   assertMsg "Receiver should be governanceParty" (preapproval.receiver == parties.governanceParty)
   assertMsg "Operator should match" (preapproval.operator == parties.outsider)
-  assertMsg "InstrumentAdmin should match" (preapproval.instrumentAdmin == parties.instrumentAdmin)
+  assertMsg "InstrumentAdmin should match" (preapproval.instrumentAdmin == parties.registrar)
   assertMsg "InstrumentAllowances should match" (length preapproval.instrumentAllowances == 1)
 
 -- | Non-member cannot confirm a SetupTokenPreapproval proposal.
@@ -53,7 +53,7 @@ testSetupTokenPreapprovalNonMemberCannotConfirm = do
     governanceParty = parties.governanceParty
     proposer = parties.member1
     operator = parties.outsider
-    instrumentAdmin = parties.instrumentAdmin
+    instrumentAdmin = parties.registrar
     instrumentAllowances = []
 
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
@@ -73,7 +73,7 @@ testSetupTokenPreapprovalAllInstruments = do
     governanceParty = parties.governanceParty
     proposer = parties.member1
     operator = parties.outsider
-    instrumentAdmin = parties.instrumentAdmin
+    instrumentAdmin = parties.registrar
     instrumentAllowances = []
 
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
