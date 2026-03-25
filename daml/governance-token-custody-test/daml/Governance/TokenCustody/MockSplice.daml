@@ -58,8 +58,11 @@ template MockHolding
 template MockTransferFactory
   with
     admin : Party
+    users : [Party]
+      -- ^ Parties that can see and use this factory (e.g., governanceParty).
   where
     signatory admin
+    observer users
 
     interface instance TransferFactory for MockTransferFactory where
       view = TransferFactoryView with

@@ -62,10 +62,10 @@ testInstrumentId admin = InstrumentId with
   admin
   id = "TEST-TOKEN"
 
--- | Create a mock transfer factory.
-createMockTransferFactory : Party -> Script (ContractId TransferFactory)
-createMockTransferFactory admin = do
-  cid <- submit admin $ createCmd MockTransferFactory with admin
+-- | Create a mock transfer factory visible to specified users.
+createMockTransferFactory : Party -> [Party] -> Script (ContractId TransferFactory)
+createMockTransferFactory admin users = do
+  cid <- submit admin $ createCmd MockTransferFactory with admin; users
   pure (toInterfaceContractId cid)
 
 -- | Create a mock holding.
