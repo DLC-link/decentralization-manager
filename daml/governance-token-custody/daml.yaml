@@ -1,0 +1,19 @@
+sdk-version: 3.4.11
+name: governance-token-custody
+version: 0.1.0
+source: daml
+dependencies:
+  - daml-prim
+  - daml-stdlib
+data-dependencies:
+  - ../governance-core/.daml/dist/governance-core-0.1.0.dar
+  - ../dars/splice-api-token-holding-v1-1.0.0.dar
+  - ../dars/splice-api-token-metadata-v1-1.0.0.dar
+  - ../dars/splice-api-token-transfer-instruction-v1-1.0.0.dar
+  - ../dars/splice-util-0.1.4.dar
+  - ../dars/splice-wallet-0.1.18.dar
+build-options:
+  - --target=2.1
+  - -Wupgrade-interfaces
+  - --ghc-option=-Wunused-binds
+  - --ghc-option=-Wunused-matches

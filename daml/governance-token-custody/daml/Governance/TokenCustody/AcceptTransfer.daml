@@ -1,0 +1,45 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Governable action to accept an incoming CIP-56 token transfer offer.
+-- The governance party acts as the receiver of the transfer.
+module Governance.TokenCustody.AcceptTransfer where
+
+import Splice.Api.Token.MetadataV1 (ExtraArgs(..), emptyChoiceContext, emptyMetadata)
+import Splice.Api.Token.TransferInstructionV1 (TransferInstruction, TransferInstruction_Accept(..))
+
+import Governance.Action
+import Governance.TokenCustody.Types (AcceptTransferResult(..))
+
+-- | Proposal to accept an incoming token transfer offer.
+-- The governance party must be the receiver on the TransferInstruction
+-- for the authority chain to work: GovernanceRules → GovernableAction_Execute
+-- → executeImpl → TransferInstruction_Accept (controller: transfer.receiver = governanceParty).
+--
+-- Note: The sender could withdraw the TransferInstruction before governance
+-- approval completes. In that case, execution will fail with a contract-not-found error.
+template AcceptTransferProposal
+  with
+    governanceParty : Party
+      -- ^ The governance party whose authority is required.
+    proposer : Party
+      -- ^ The member proposing to accept this transfer.
+    transferInstructionCid : ContractId TransferInstruction
+      -- ^ The pending transfer instruction to accept.
+  where
+    signatory proposer
+    observer governanceParty
+
+    interface instance GovernableAction for AcceptTransferProposal where
+      view = GovernableActionView with
+        governanceParty
+        actionLabel = "AcceptTransfer"
+
+      executeImpl = do
+        exercise transferInstructionCid TransferInstruction_Accept with
+          extraArgs = ExtraArgs with
+            context = emptyChoiceContext
+            meta = emptyMetadata
+        create AcceptTransferResult with
+          governanceParty
+        pure ()

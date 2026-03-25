@@ -1,0 +1,124 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Tests for the AcceptTransferProposal governable action.
+module Governance.TokenCustody.Test.AcceptTransferTest where
+
+import DA.Time (addRelTime, hours)
+import Daml.Script
+
+import Splice.Api.Token.MetadataV1 (ExtraArgs(..), emptyChoiceContext, emptyMetadata)
+import Splice.Api.Token.TransferInstructionV1 (TransferInstruction_Withdraw(..))
+
+import Governance.Action (GovernableAction)
+import Governance.Rules (GovernanceRules_ConfirmAction(..), GovernanceRules_ExecuteConfirmedAction(..))
+import Governance.TokenCustody.AcceptTransfer
+import Governance.TokenCustody.MockSplice (MockAcceptResult(..))
+import Governance.TokenCustody.Types (AcceptTransferResult(..))
+import Governance.TokenCustody.TestUtils
+
+-- | Full governance flow: propose → confirm → execute → verify acceptance.
+testAcceptTransferFullFlow : Script ()
+testAcceptTransferFullFlow = do
+  parties <- allocateTokenTestParties
+  rulesCid <- createTestGovernance parties
+  now <- getTime
+
+  -- Create a mock incoming transfer instruction (sender → governanceParty)
+  transferInstructionCid <- createMockTransferInstruction
+    parties.outsider
+    parties.governanceParty
+    parties.instrumentAdmin
+    "TEST-TOKEN"
+    75.0
+    now
+    (now `addRelTime` hours 24)
+
+  -- Proposer creates the accept proposal
+  proposalCid <- submit parties.member1 $ createCmd AcceptTransferProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    transferInstructionCid
+
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+
+  -- Confirm and execute
+  confirmAndExecute parties rulesCid proposalInterfaceCid
+    [parties.member1, parties.member2] parties.member2
+
+  -- Verify witnesses were created
+  results <- query @AcceptTransferResult parties.governanceParty
+  assertMsg "AcceptTransferResult should exist" (length results == 1)
+
+  -- Verify mock acceptance happened
+  acceptResults <- query @MockAcceptResult parties.governanceParty
+  assertMsg "MockAcceptResult should exist" (length acceptResults == 1)
+
+-- | Accepting a withdrawn (archived) transfer instruction fails.
+testAcceptTransferWithdrawnOffer : Script ()
+testAcceptTransferWithdrawnOffer = do
+  parties <- allocateTokenTestParties
+  rulesCid <- createTestGovernance parties
+  now <- getTime
+
+  transferInstructionCid <- createMockTransferInstruction
+    parties.outsider
+    parties.governanceParty
+    parties.instrumentAdmin
+    "TEST-TOKEN"
+    75.0
+    now
+    (now `addRelTime` hours 24)
+
+  -- Proposer creates the accept proposal
+  proposalCid <- submit parties.member1 $ createCmd AcceptTransferProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    transferInstructionCid
+
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+
+  -- Sender withdraws the transfer instruction before governance approves
+  submit parties.outsider $
+    exerciseCmd transferInstructionCid TransferInstruction_Withdraw with
+      extraArgs = ExtraArgs with
+        context = emptyChoiceContext
+        meta = emptyMetadata
+
+  -- Execution should fail because the transfer instruction is archived
+  confirmationCids <- submitConfirmations parties.governanceParty rulesCid proposalInterfaceCid
+    [parties.member1, parties.member2]
+
+  submitMustFail (memberContext parties.member1 parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ExecuteConfirmedAction with
+      executor = parties.member1
+      actionProposalCid = proposalInterfaceCid
+      confirmations = confirmationCids
+
+-- | Non-member cannot confirm an AcceptTransfer proposal.
+testAcceptTransferNonMemberCannotConfirm : Script ()
+testAcceptTransferNonMemberCannotConfirm = do
+  parties <- allocateTokenTestParties
+  rulesCid <- createTestGovernance parties
+  now <- getTime
+
+  transferInstructionCid <- createMockTransferInstruction
+    parties.outsider
+    parties.governanceParty
+    parties.instrumentAdmin
+    "TEST-TOKEN"
+    75.0
+    now
+    (now `addRelTime` hours 24)
+
+  proposalCid <- submit parties.member1 $ createCmd AcceptTransferProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    transferInstructionCid
+
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+
+  submitMustFail (memberContext parties.outsider parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ConfirmAction with
+      confirmer = parties.outsider
+      actionProposalCid = proposalInterfaceCid
