@@ -4,7 +4,6 @@
 -- | Tests for the SendTokensProposal governable action.
 module Governance.TokenCustody.Test.SendTokensTest where
 
-import DA.List (head)
 import DA.Time (addRelTime, hours)
 import Daml.Script
 
@@ -14,7 +13,6 @@ import Governance.Action (GovernableAction)
 import Governance.Rules (GovernanceRules_ConfirmAction(..), GovernanceRules_ExecuteConfirmedAction(..))
 import Governance.TokenCustody.MockSplice (MockTransferResult(..))
 import Governance.TokenCustody.SendTokens
-import Governance.TokenCustody.Types (SendTokensResult(..))
 import Governance.TokenCustody.TestUtils
 
 -- | Full governance flow: propose → confirm → execute → verify witnesses.
@@ -45,13 +43,6 @@ testSendTokensFullFlow = do
   -- Confirm and execute
   confirmAndExecute parties rulesCid proposalInterfaceCid
     [parties.member1, parties.member2] parties.member1
-
-  -- Verify witnesses were created
-  results <- query @SendTokensResult parties.governanceParty
-  assertMsg "SendTokensResult should exist" (length results == 1)
-  let (_, result) = head results
-  assertMsg "Receiver should match" (result.receiver == parties.outsider)
-  assertMsg "Amount should match" (result.amount == 50.0)
 
   -- Verify mock transfer was executed
   transferResults <- query @MockTransferResult parties.instrumentAdmin

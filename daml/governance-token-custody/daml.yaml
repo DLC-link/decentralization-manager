@@ -12,8 +12,9 @@ data-dependencies:
   - ../dars/splice-api-token-transfer-instruction-v1-1.0.0.dar
   - ../dars/splice-util-0.1.4.dar
   - ../dars/splice-wallet-0.1.18.dar
+  - ../dars/utility-registry-app-v0-0.7.0.dar
 build-options:
-  - --target=2.1
+  - --target=2.2
   - -Wupgrade-interfaces
   - --ghc-option=-Wunused-binds
   - --ghc-option=-Wunused-matches

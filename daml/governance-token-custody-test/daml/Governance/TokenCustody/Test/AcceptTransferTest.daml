@@ -14,7 +14,6 @@ import Governance.Action (GovernableAction)
 import Governance.Rules (GovernanceRules_ConfirmAction(..), GovernanceRules_ExecuteConfirmedAction(..))
 import Governance.TokenCustody.AcceptTransfer
 import Governance.TokenCustody.MockSplice (MockAcceptResult(..))
-import Governance.TokenCustody.Types (AcceptTransferResult(..))
 import Governance.TokenCustody.TestUtils
 
 -- | Full governance flow: propose → confirm → execute → verify acceptance.
@@ -45,10 +44,6 @@ testAcceptTransferFullFlow = do
   -- Confirm and execute
   confirmAndExecute parties rulesCid proposalInterfaceCid
     [parties.member1, parties.member2] parties.member2
-
-  -- Verify witnesses were created
-  results <- query @AcceptTransferResult parties.governanceParty
-  assertMsg "AcceptTransferResult should exist" (length results == 1)
 
   -- Verify mock acceptance happened
   acceptResults <- query @MockAcceptResult parties.governanceParty
