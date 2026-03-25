@@ -13,6 +13,7 @@ data-dependencies:
   - ../dars/splice-util-0.1.4.dar
   - ../dars/splice-wallet-0.1.18.dar
   - ../dars/utility-registry-app-v0-0.7.0.dar
+  - ../dars/utility-registry-v0-0.6.0.dar
 build-options:
   - --target=2.2
   - -Wupgrade-interfaces

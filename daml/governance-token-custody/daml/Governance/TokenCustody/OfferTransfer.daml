@@ -1,0 +1,58 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Governable action to create a two-step transfer offer via TransferRule.
+--
+-- Creates a pending TransferOffer that the receiver must accept separately.
+-- Use this when the receiver has NOT set up a TransferPreapproval.
+-- For receivers with a TransferPreapproval, use SendTokensProposal instead.
+module Governance.TokenCustody.OfferTransfer where
+
+import Splice.Api.Token.MetadataV1 (ExtraArgs)
+import Splice.Api.Token.TransferInstructionV1 (Transfer)
+
+import Utility.Registry.V0.Rule.Transfer (TransferRule, TransferRule_TwoStepTransfer(..))
+
+import Governance.Action
+
+-- | Proposal to create a transfer offer from the governance party.
+-- The governance party acts as the sender; authority flows through the
+-- exercise chain: GovernanceRules → GovernableAction_Execute → executeImpl
+-- → TransferRule_TwoStepTransfer (controller includes sender = governanceParty).
+--
+-- After governance execution, the receiver must separately accept the
+-- resulting TransferOffer via TransferInstruction_Accept.
+template OfferTransferProposal
+  with
+    governanceParty : Party
+      -- ^ The governance party whose authority is required.
+    proposer : Party
+      -- ^ The member proposing this transfer offer.
+    transferRuleCid : ContractId TransferRule
+      -- ^ The transfer rule to use for creating the offer.
+    expectedOperator : Party
+      -- ^ Expected operator on the transfer rule.
+    expectedProvider : Party
+      -- ^ Expected provider on the transfer rule.
+    transfer : Transfer
+      -- ^ The transfer details (sender, receiver, amount, holdings, etc.).
+    extraArgs : ExtraArgs
+      -- ^ Extra arguments for the transfer rule (context, metadata).
+  where
+    signatory proposer
+    observer governanceParty
+
+    ensure transfer.amount > 0.0
+
+    interface instance GovernableAction for OfferTransferProposal where
+      view = GovernableActionView with
+        governanceParty
+        actionLabel = "OfferTransfer"
+
+      executeImpl = do
+        exercise transferRuleCid TransferRule_TwoStepTransfer with
+          transfer
+          extraArgs
+          expectedOperator
+          expectedProvider
+        pure ()

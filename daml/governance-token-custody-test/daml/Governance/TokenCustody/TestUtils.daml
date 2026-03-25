@@ -2,20 +2,36 @@
 -- SPDX-License-Identifier: Apache-2.0
 
 -- | Test utilities for the token custody governance plugin.
--- Provides helpers to set up mock Splice infrastructure for testing.
+-- Provides helpers to set up real utility-registry infrastructure for testing.
 module Governance.TokenCustody.TestUtils where
 
 import DA.Set as Set hiding (filter)
+import DA.TextMap as TextMap
 import DA.Time (minutes)
 import Daml.Script
 
+import Splice.Amulet (FeaturedAppRight(..))
+import Splice.Api.FeaturedAppRightV1 (AppRewardBeneficiary(..))
+import Splice.Api.Token.BurnMintV1 (BurnMintFactory, BurnMintFactory_BurnMint(..), BurnMintOutput(..))
 import Splice.Api.Token.HoldingV1 (Holding, InstrumentId(..))
-import Splice.Api.Token.TransferInstructionV1 (TransferFactory, TransferInstruction)
+import Splice.Api.Token.MetadataV1 (AnyValue(..), ChoiceContext(..), ExtraArgs(..), Metadata(..), emptyChoiceContext)
+
+import Utility.Credential.V0.Credential (Claim(..), Credential(..), PartyCredentialRequirement(..))
+import Utility.Registry.App.V0.Configuration.Operator (OperatorConfiguration(..))
+import Utility.Registry.App.V0.Configuration.Provider (ProviderConfiguration)
+import Utility.Registry.App.V0.Service.AllocationFactory (AllocationFactory)
+import Utility.Registry.App.V0.Service.Provider
+import Utility.Registry.App.V0.Service.Registrar
+import Utility.Registry.Holding.V0.Holding qualified as V0Holding (Holding(..), Holding_Lock(..), Holding_Lock_Result(..))
+import Utility.Registry.Holding.V0.Types (InstrumentIdentifier(..))
+import Utility.Registry.V0.Configuration.AppReward (AppRewardConfiguration(..), AppRewardConfigurationDetails(..))
+import Utility.Registry.V0.Configuration.Instrument (InstrumentConfiguration)
+import Utility.Registry.V0.Holding.TokenApiUtils (appRewardConfigurationContextKey, featuredAppRightContextKey, instrumentConfigurationContextKey, issuerCredentialsContextKey, receiverCredentialsContextKey, senderCredentialsContextKey, transferRuleContextKey)
+import Utility.Registry.V0.Rule.Transfer (TransferRule)
 
 import Governance.Action (GovernableAction)
 import Governance.Confirmation (GovernanceConfirmation)
 import Governance.Rules
-import Governance.TokenCustody.MockSplice
 
 -- | Standard test party allocation for token custody tests.
 data TokenTestParties = TokenTestParties
@@ -25,10 +41,12 @@ data TokenTestParties = TokenTestParties
     member2 : Party
     member3 : Party
     outsider : Party
-    instrumentAdmin : Party
+    operator : Party
+    registrar : Party
+    dso : Party
   deriving (Show, Eq)
 
--- | Allocate standard test parties including an instrument admin.
+-- | Allocate standard test parties including utility-registry roles.
 allocateTokenTestParties : Script TokenTestParties
 allocateTokenTestParties = do
   governanceParty <- allocateParty "GovernanceParty"
@@ -36,7 +54,9 @@ allocateTokenTestParties = do
   member2 <- allocateParty "Member2"
   member3 <- allocateParty "Member3"
   outsider <- allocateParty "Outsider"
-  instrumentAdmin <- allocateParty "InstrumentAdmin"
+  operator <- allocateParty "Operator"
+  registrar <- allocateParty "Registrar"
+  dso <- allocateParty "DSO"
   pure TokenTestParties with ..
 
 -- | Get the standard member set.
@@ -58,38 +78,225 @@ createTestGovernance parties =
 
 -- | Standard instrument ID for tests.
 testInstrumentId : Party -> InstrumentId
-testInstrumentId admin = InstrumentId with
-  admin
+testInstrumentId registrar = InstrumentId with
+  admin = registrar
   id = "TEST-TOKEN"
 
--- | Create a mock transfer factory visible to specified users.
-createMockTransferFactory : Party -> [Party] -> Script (ContractId TransferFactory)
-createMockTransferFactory admin users = do
-  cid <- submit admin $ createCmd MockTransferFactory with admin; users
-  pure (toInterfaceContractId cid)
+-- | Complete utility onboarding result.
+data UtilityOnboardingResult = UtilityOnboardingResult
+  with
+    registrar : Party
+    provider : Party
+    operator : Party
+    dso : Party
+    providerServiceCid : ContractId ProviderService
+    providerConfigurationCid : ContractId ProviderConfiguration
+    registrarServiceCid : ContractId RegistrarService
+    allocationFactoryCid : ContractId AllocationFactory
+    transferRuleCid : ContractId TransferRule
+    instrumentConfigurationCid : ContractId InstrumentConfiguration
+    featuredAppRightCid : ContractId FeaturedAppRight
+    appRewardConfigurationCid : ContractId AppRewardConfiguration
+    credentialCids : [ContractId Credential]
+  deriving (Eq, Show)
 
--- | Create a mock holding.
-createMockHolding : Party -> Party -> Text -> Decimal -> Script (ContractId Holding)
-createMockHolding owner instrumentAdmin instrumentIdText holdingAmount = do
-  cid <- submit owner $ createCmd MockHolding with
-    owner
-    instrumentAdmin
-    instrumentIdText
-    holdingAmount
-  pure (toInterfaceContractId cid)
+-- | Credential requirement for provider onboarding.
+getProviderOnboardingRequirements : Party -> [PartyCredentialRequirement]
+getProviderOnboardingRequirements operator =
+  [ PartyCredentialRequirement with
+      issuer = operator
+      requiredClaims = [("hasRegistryRole", "Provider")]
+  ]
 
--- | Create a mock transfer instruction.
-createMockTransferInstruction : Party -> Party -> Party -> Text -> Decimal -> Time -> Time -> Script (ContractId TransferInstruction)
-createMockTransferInstruction sender receiver instrumentAdmin instrumentIdText transferAmount requestedAt executeBefore = do
-  cid <- submit sender $ createCmd MockTransferInstruction with
-    sender
-    receiver
-    instrumentAdmin
-    instrumentIdText
-    transferAmount
-    requestedAt
-    executeBefore
-  pure (toInterfaceContractId cid)
+-- | Credential requirement for registrar onboarding.
+getRegistrarOnboardingRequirements : Party -> [PartyCredentialRequirement]
+getRegistrarOnboardingRequirements provider =
+  [ PartyCredentialRequirement with
+      issuer = provider
+      requiredClaims = [("hasRegistryRole", "Registrar")]
+  ]
+
+-- | Create a credential and disclose it to the operator.
+createCredential : Party -> Party -> Text -> Text -> PartyCredentialRequirement
+  -> Script (ContractId Credential)
+createCredential operator holder id description requirement =
+  submit (actAs requirement.issuer <> actAs holder) do
+    createCmd Credential with
+      issuer = requirement.issuer
+      holder
+      id
+      description
+      validFrom = None
+      validUntil = None
+      claims = map
+        (\(property, value) -> Claim with subject = partyToText holder; property; value)
+        requirement.requiredClaims
+      observers = Set.singleton operator
+
+-- | Set up the utility app (operator configuration).
+setupUtilityApp : Party -> Script (ContractId OperatorConfiguration)
+setupUtilityApp operator = do
+  submit operator do
+    createCmd OperatorConfiguration with
+      operator
+      providerRequirements = getProviderOnboardingRequirements operator
+
+-- | Complete utility onboarding process.
+-- Sets up OperatorConfiguration, ProviderService, RegistrarService,
+-- AllocationFactory, TransferRule, InstrumentConfiguration, and AppRewardConfiguration.
+onboardToUtility : TokenTestParties -> InstrumentId -> Script UtilityOnboardingResult
+onboardToUtility parties instrument = script do
+  let operator = parties.operator
+  let registrar = parties.registrar
+  let provider = registrar
+  let dso = parties.dso
+
+  -- 1. Set up operator configuration
+  operatorConfigurationCid <- setupUtilityApp operator
+
+  -- 2. Create FeaturedAppRight (for app rewards)
+  featuredAppRightCid <- submit dso do
+    createCmd FeaturedAppRight with
+      dso
+      provider
+
+  -- 3. Set up provider service
+  submit operator do
+    createCmd ProviderService with operator; provider = operator
+
+  providerServiceRequestCid <- submit provider do
+    createCmd ProviderServiceRequest with operator; provider
+
+  credentialCids <- mapA
+    (\req -> createCredential operator provider "provider-credential" "Provider onboarding credential" req)
+    (getProviderOnboardingRequirements operator)
+
+  let appRewardConfigurationDets = AppRewardConfigurationDetails with
+        dso
+        operatorAppRewardBeneficiary = AppRewardBeneficiary with
+          beneficiary = parties.governanceParty
+          weight = 1.0
+
+  providerServiceCid <- (.providerServiceCid) <$>
+    submit operator do
+      exerciseCmd providerServiceRequestCid ProviderServiceRequest_Accept with
+        operatorConfigurationCid
+        credentialCids
+        appRewardConfigurationDetails = Some appRewardConfigurationDets
+
+  [(appRewardConfigurationCid, _)] <- query @AppRewardConfiguration provider
+
+  -- 4. Create provider configuration
+  providerConfigurationCid <- (.providerConfigurationCid) <$> submit provider do
+    exerciseCmd providerServiceCid ProviderService_CreateProviderConfiguration with
+      registrarRequirements = getRegistrarOnboardingRequirements provider
+      holderRequirements = []
+
+  -- 5. Set up registrar service
+  registrarCredentialCids <- mapA
+    (\req -> createCredential operator registrar "registrar-credential" "Registrar onboarding credential" req)
+    (getRegistrarOnboardingRequirements provider)
+
+  registrarServiceRequestCid <- submit registrar do
+    createCmd RegistrarServiceRequest with
+      operator; provider; registrar
+      createTransferRule = None
+      createAllocationFactory = None
+
+  registrarServiceCid <- (.registrarServiceCid) <$> submit provider do
+    exerciseCmd providerServiceCid ProviderService_AcceptRegistrarServiceRequest with
+      cid = registrarServiceRequestCid
+      payload = RegistrarServiceRequest_Accept with
+        providerConfigurationCid
+        credentialCids = registrarCredentialCids
+
+  -- 6. Create allocation factory, transfer rule, instrument configuration
+  allocationFactoryCid <- (.allocationFactoryCid) <$> submit registrar do
+    exerciseCmd registrarServiceCid RegistrarService_CreateAllocationFactory
+
+  transferRuleCid <- (.transferRuleCid) <$> submit registrar do
+    exerciseCmd registrarServiceCid RegistrarService_CreateTransferRule
+
+  instrumentConfigurationCid <- (.instrumentConfigurationCid) <$> submit registrar do
+    exerciseCmd registrarServiceCid RegistrarService_CreateInstrumentConfiguration with
+      instrumentId = instrument.id
+      additionalIdentifiers = [InstrumentIdentifier with source = instrument.admin, id = instrument.id, scheme = "RegistrarInternalScheme"]
+      issuerRequirements = []
+      holderRequirements = []
+
+  pure UtilityOnboardingResult with
+    registrar
+    provider
+    operator
+    dso
+    providerServiceCid
+    providerConfigurationCid
+    registrarServiceCid
+    allocationFactoryCid
+    transferRuleCid
+    instrumentConfigurationCid
+    featuredAppRightCid
+    appRewardConfigurationCid
+    credentialCids
+
+-- | Base context entries shared across all utility-registry operations.
+baseContextEntries : UtilityOnboardingResult -> [(Text, AnyValue)]
+baseContextEntries onboarding =
+  [ (instrumentConfigurationContextKey, AV_ContractId (coerceContractId onboarding.instrumentConfigurationCid))
+  , (issuerCredentialsContextKey, AV_List (map (AV_ContractId . coerceContractId) onboarding.credentialCids))
+  , (appRewardConfigurationContextKey, AV_ContractId (coerceContractId onboarding.appRewardConfigurationCid))
+  , (featuredAppRightContextKey, AV_ContractId (coerceContractId onboarding.featuredAppRightCid))
+  ]
+
+-- | Mint tokens for a party using the AllocationFactory (BurnMintFactory interface).
+mintTokens : Party -> Decimal -> UtilityOnboardingResult -> InstrumentId -> Script [ContractId Holding]
+mintTokens owner amount onboarding instrument = do
+  let mintExtraArgs = ExtraArgs with
+        context = ChoiceContext with
+          values = TextMap.fromList (baseContextEntries onboarding)
+        meta = Metadata with
+          values = TextMap.fromList [("splice.lfdecentralizedtrust.org/reason", "Test Mint")]
+
+  let factoryCid : ContractId BurnMintFactory = coerceContractId onboarding.allocationFactoryCid
+  result <- submit (actAs onboarding.registrar <> actAs owner <> readAs onboarding.operator) $
+    exerciseCmd factoryCid BurnMintFactory_BurnMint with
+      expectedAdmin = onboarding.registrar
+      instrumentId = instrument
+      inputHoldingCids = []
+      outputs = [BurnMintOutput with owner; amount; context = emptyChoiceContext]
+      extraActors = [owner]
+      extraArgs = mintExtraArgs
+
+  pure result.outputCids
+
+-- | Lock holdings for use in two-step transfers.
+-- Returns locked holding CIDs (as Holding interface).
+lockHoldings : Party -> [ContractId Holding] -> UtilityOnboardingResult -> Script [ContractId Holding]
+lockHoldings owner holdingCids onboarding =
+  mapA (\hCid -> do
+    let v0Cid : ContractId V0Holding.Holding = coerceContractId hCid
+    V0Holding.Holding_Lock_Result lockedCid <- submit (actAs owner <> actAs onboarding.registrar <> readAs onboarding.operator) $
+      exerciseCmd v0Cid V0Holding.Holding_Lock with
+        lockers = Set.fromList [onboarding.registrar]
+        observers = None
+        context = ""
+    pure (coerceContractId lockedCid)
+  ) holdingCids
+
+-- | Create a ChoiceContext for transfer operations (SendTokens, OfferTransfer, AcceptTransfer).
+-- Includes all keys needed by TransferRule and TransferPreapproval.
+createTransferContext : UtilityOnboardingResult -> ChoiceContext
+createTransferContext onboarding = ChoiceContext with
+  values = TextMap.fromList $
+    baseContextEntries onboarding <>
+    [ (transferRuleContextKey, AV_ContractId (coerceContractId onboarding.transferRuleCid))
+    , (senderCredentialsContextKey, AV_List [])
+    , (receiverCredentialsContextKey, AV_List [])
+    ]
+
+-- | Alias for createTransferContext — accept operations need the same context keys.
+createAcceptContext : UtilityOnboardingResult -> ChoiceContext
+createAcceptContext = createTransferContext
 
 -- | Collect confirmations from a list of members for an interface action.
 submitConfirmations : Party -> ContractId GovernanceRules -> ContractId GovernableAction -> [Party] -> Script [ContractId GovernanceConfirmation]
@@ -102,10 +309,17 @@ submitConfirmations governanceParty rulesCid proposalCid confirmers =
   ) confirmers
 
 -- | Confirm and execute an interface action in one go.
+-- Uses readAs on utility-registry parties and outsider to simulate Canton disclosures
+-- for utility-registry contracts and receiver's TransferPreapproval.
 confirmAndExecute : TokenTestParties -> ContractId GovernanceRules -> ContractId GovernableAction -> [Party] -> Party -> Script ()
 confirmAndExecute parties rulesCid proposalCid confirmers executor = do
   confirmationCids <- submitConfirmations parties.governanceParty rulesCid proposalCid confirmers
-  submit (memberContext executor parties.governanceParty) $
+  submit (actAs executor
+    <> actAs parties.outsider
+    <> actAs parties.registrar
+    <> readAs parties.governanceParty
+    <> readAs parties.operator
+    <> readAs parties.dso) $
     exerciseCmd rulesCid GovernanceRules_ExecuteConfirmedAction with
       executor
       actionProposalCid = proposalCid
