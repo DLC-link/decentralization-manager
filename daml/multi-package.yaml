@@ -1,3 +1,5 @@
 packages:
   - governance-core
   - governance-core-test
+  - governance-token-custody
+  - governance-token-custody-test

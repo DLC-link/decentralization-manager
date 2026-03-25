@@ -1,0 +1,139 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Tests for the SendTokensProposal governable action.
+module Governance.TokenCustody.Test.SendTokensTest where
+
+import DA.List (head)
+import DA.Time (addRelTime, hours)
+import Daml.Script
+
+import Splice.Api.Token.MetadataV1 (emptyMetadata)
+
+import Governance.Action (GovernableAction)
+import Governance.Rules (GovernanceRules_ConfirmAction(..), GovernanceRules_ExecuteConfirmedAction(..))
+import Governance.TokenCustody.MockSplice (MockTransferResult(..))
+import Governance.TokenCustody.SendTokens
+import Governance.TokenCustody.Types (SendTokensResult(..))
+import Governance.TokenCustody.TestUtils
+
+-- | Full governance flow: propose → confirm → execute → verify witnesses.
+testSendTokensFullFlow : Script ()
+testSendTokensFullFlow = do
+  parties <- allocateTokenTestParties
+  rulesCid <- createTestGovernance parties
+  factoryCid <- createMockTransferFactory parties.instrumentAdmin
+  holdingCid <- createMockHolding parties.governanceParty parties.instrumentAdmin "TEST-TOKEN" 100.0
+  now <- getTime
+
+  -- Proposer creates the proposal
+  proposalCid <- submit parties.member1 $ createCmd SendTokensProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    transferFactoryCid = factoryCid
+    expectedAdmin = parties.instrumentAdmin
+    receiver = parties.outsider
+    amount = 50.0
+    instrumentId = testInstrumentId parties.instrumentAdmin
+    requestedAt = now
+    executeBefore = now `addRelTime` hours 24
+    inputHoldingCids = [holdingCid]
+    meta = emptyMetadata
+
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+
+  -- Confirm and execute
+  confirmAndExecute parties rulesCid proposalInterfaceCid
+    [parties.member1, parties.member2] parties.member1
+
+  -- Verify witnesses were created
+  results <- query @SendTokensResult parties.governanceParty
+  assertMsg "SendTokensResult should exist" (length results == 1)
+  let (_, result) = head results
+  assertMsg "Receiver should match" (result.receiver == parties.outsider)
+  assertMsg "Amount should match" (result.amount == 50.0)
+
+  -- Verify mock transfer was executed
+  transferResults <- query @MockTransferResult parties.instrumentAdmin
+  assertMsg "MockTransferResult should exist" (length transferResults == 1)
+
+-- | Proposal with zero amount is rejected by ensure.
+testSendTokensZeroAmountRejected : Script ()
+testSendTokensZeroAmountRejected = do
+  parties <- allocateTokenTestParties
+  factoryCid <- createMockTransferFactory parties.instrumentAdmin
+  now <- getTime
+
+  submitMustFail parties.member1 $ createCmd SendTokensProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    transferFactoryCid = factoryCid
+    expectedAdmin = parties.instrumentAdmin
+    receiver = parties.outsider
+    amount = 0.0
+    instrumentId = testInstrumentId parties.instrumentAdmin
+    requestedAt = now
+    executeBefore = now `addRelTime` hours 24
+    inputHoldingCids = []
+    meta = emptyMetadata
+
+-- | Insufficient confirmations are rejected.
+testSendTokensInsufficientConfirmations : Script ()
+testSendTokensInsufficientConfirmations = do
+  parties <- allocateTokenTestParties
+  rulesCid <- createTestGovernance parties
+  factoryCid <- createMockTransferFactory parties.instrumentAdmin
+  now <- getTime
+
+  proposalCid <- submit parties.member1 $ createCmd SendTokensProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    transferFactoryCid = factoryCid
+    expectedAdmin = parties.instrumentAdmin
+    receiver = parties.outsider
+    amount = 50.0
+    instrumentId = testInstrumentId parties.instrumentAdmin
+    requestedAt = now
+    executeBefore = now `addRelTime` hours 24
+    inputHoldingCids = []
+    meta = emptyMetadata
+
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+
+  -- Only one confirmation (threshold is 2)
+  confirmationCids <- submitConfirmations parties.governanceParty rulesCid proposalInterfaceCid
+    [parties.member1]
+
+  submitMustFail (memberContext parties.member1 parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ExecuteConfirmedAction with
+      executor = parties.member1
+      actionProposalCid = proposalInterfaceCid
+      confirmations = confirmationCids
+
+-- | Non-member cannot confirm a SendTokens proposal.
+testSendTokensNonMemberCannotConfirm : Script ()
+testSendTokensNonMemberCannotConfirm = do
+  parties <- allocateTokenTestParties
+  rulesCid <- createTestGovernance parties
+  factoryCid <- createMockTransferFactory parties.instrumentAdmin
+  now <- getTime
+
+  proposalCid <- submit parties.member1 $ createCmd SendTokensProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    transferFactoryCid = factoryCid
+    expectedAdmin = parties.instrumentAdmin
+    receiver = parties.outsider
+    amount = 50.0
+    instrumentId = testInstrumentId parties.instrumentAdmin
+    requestedAt = now
+    executeBefore = now `addRelTime` hours 24
+    inputHoldingCids = []
+    meta = emptyMetadata
+
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+
+  submitMustFail (memberContext parties.outsider parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ConfirmAction with
+      confirmer = parties.outsider
+      actionProposalCid = proposalInterfaceCid

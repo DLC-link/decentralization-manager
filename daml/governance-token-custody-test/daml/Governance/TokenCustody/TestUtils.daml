@@ -1,0 +1,112 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Test utilities for the token custody governance plugin.
+-- Provides helpers to set up mock Splice infrastructure for testing.
+module Governance.TokenCustody.TestUtils where
+
+import DA.Set as Set hiding (filter)
+import DA.Time (minutes)
+import Daml.Script
+
+import Splice.Api.Token.HoldingV1 (Holding, InstrumentId(..))
+import Splice.Api.Token.TransferInstructionV1 (TransferFactory, TransferInstruction)
+
+import Governance.Action (GovernableAction)
+import Governance.Confirmation (GovernanceConfirmation)
+import Governance.Rules
+import Governance.TokenCustody.MockSplice
+
+-- | Standard test party allocation for token custody tests.
+data TokenTestParties = TokenTestParties
+  with
+    governanceParty : Party
+    member1 : Party
+    member2 : Party
+    member3 : Party
+    outsider : Party
+    instrumentAdmin : Party
+  deriving (Show, Eq)
+
+-- | Allocate standard test parties including an instrument admin.
+allocateTokenTestParties : Script TokenTestParties
+allocateTokenTestParties = do
+  governanceParty <- allocateParty "GovernanceParty"
+  member1 <- allocateParty "Member1"
+  member2 <- allocateParty "Member2"
+  member3 <- allocateParty "Member3"
+  outsider <- allocateParty "Outsider"
+  instrumentAdmin <- allocateParty "InstrumentAdmin"
+  pure TokenTestParties with ..
+
+-- | Get the standard member set.
+getMembers : TokenTestParties -> Set Party
+getMembers parties = Set.fromList [parties.member1, parties.member2, parties.member3]
+
+-- | Build submission context for a member with readAs on governance party.
+memberContext : Party -> Party -> SubmitOptions
+memberContext member gp = actAs member <> readAs gp
+
+-- | Create governance rules with standard test configuration.
+createTestGovernance : TokenTestParties -> Script (ContractId GovernanceRules)
+createTestGovernance parties =
+  submit parties.governanceParty $ createCmd GovernanceRules with
+    governanceParty = parties.governanceParty
+    members = getMembers parties
+    threshold = 2
+    actionConfirmationTimeout = minutes 30
+
+-- | Standard instrument ID for tests.
+testInstrumentId : Party -> InstrumentId
+testInstrumentId admin = InstrumentId with
+  admin
+  id = "TEST-TOKEN"
+
+-- | Create a mock transfer factory.
+createMockTransferFactory : Party -> Script (ContractId TransferFactory)
+createMockTransferFactory admin = do
+  cid <- submit admin $ createCmd MockTransferFactory with admin
+  pure (toInterfaceContractId cid)
+
+-- | Create a mock holding.
+createMockHolding : Party -> Party -> Text -> Decimal -> Script (ContractId Holding)
+createMockHolding owner instrumentAdmin instrumentIdText holdingAmount = do
+  cid <- submit owner $ createCmd MockHolding with
+    owner
+    instrumentAdmin
+    instrumentIdText
+    holdingAmount
+  pure (toInterfaceContractId cid)
+
+-- | Create a mock transfer instruction.
+createMockTransferInstruction : Party -> Party -> Party -> Text -> Decimal -> Time -> Time -> Script (ContractId TransferInstruction)
+createMockTransferInstruction sender receiver instrumentAdmin instrumentIdText transferAmount requestedAt executeBefore = do
+  cid <- submit sender $ createCmd MockTransferInstruction with
+    sender
+    receiver
+    instrumentAdmin
+    instrumentIdText
+    transferAmount
+    requestedAt
+    executeBefore
+  pure (toInterfaceContractId cid)
+
+-- | Collect confirmations from a list of members for an interface action.
+submitConfirmations : Party -> ContractId GovernanceRules -> ContractId GovernableAction -> [Party] -> Script [ContractId GovernanceConfirmation]
+submitConfirmations governanceParty rulesCid proposalCid confirmers =
+  mapA (\confirmer ->
+    submit (memberContext confirmer governanceParty) $
+      exerciseCmd rulesCid GovernanceRules_ConfirmAction with
+        confirmer
+        actionProposalCid = proposalCid
+  ) confirmers
+
+-- | Confirm and execute an interface action in one go.
+confirmAndExecute : TokenTestParties -> ContractId GovernanceRules -> ContractId GovernableAction -> [Party] -> Party -> Script ()
+confirmAndExecute parties rulesCid proposalCid confirmers executor = do
+  confirmationCids <- submitConfirmations parties.governanceParty rulesCid proposalCid confirmers
+  submit (memberContext executor parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ExecuteConfirmedAction with
+      executor
+      actionProposalCid = proposalCid
+      confirmations = confirmationCids

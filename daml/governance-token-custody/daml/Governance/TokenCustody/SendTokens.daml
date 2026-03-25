@@ -1,0 +1,82 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Governable action to send CIP-56 tokens via TransferFactory.
+--
+-- UTXO Timing Risk:
+-- The inputHoldingCids referenced in this proposal are captured at proposal
+-- creation time. If any holdings are consumed (spent, merged, split) between
+-- proposal creation and governance execution, the TransferFactory_Transfer
+-- exercise will fail. Mitigations:
+--   1. Use dedicated holdings reserved for governance proposals
+--   2. Keep governance confirmation timeouts short
+--   3. Monitor and re-propose if holdings change
+module Governance.TokenCustody.SendTokens where
+
+import Splice.Api.Token.HoldingV1 (Holding, InstrumentId)
+import Splice.Api.Token.MetadataV1 (ExtraArgs(..), Metadata, emptyChoiceContext, emptyMetadata)
+import Splice.Api.Token.TransferInstructionV1 (Transfer(..), TransferFactory, TransferFactory_Transfer(..))
+
+import Governance.Action
+import Governance.TokenCustody.Types (SendTokensResult(..))
+
+-- | Proposal to send CIP-56 tokens from the governance party.
+-- The governance party acts as the sender; authority flows through the
+-- exercise chain: GovernanceRules → GovernableAction_Execute → executeImpl
+-- → TransferFactory_Transfer (controller: transfer.sender = governanceParty).
+template SendTokensProposal
+  with
+    governanceParty : Party
+      -- ^ The governance party whose authority is required.
+    proposer : Party
+      -- ^ The member proposing this transfer.
+    transferFactoryCid : ContractId TransferFactory
+      -- ^ The transfer factory to use for executing the transfer.
+    expectedAdmin : Party
+      -- ^ The expected admin party of the transfer factory.
+    receiver : Party
+      -- ^ The party receiving the tokens.
+    amount : Decimal
+      -- ^ The amount of tokens to transfer.
+    instrumentId : InstrumentId
+      -- ^ The instrument identifier for the token.
+    requestedAt : Time
+      -- ^ Timestamp when the transfer was requested.
+    executeBefore : Time
+      -- ^ Deadline for executing the transfer.
+    inputHoldingCids : [ContractId Holding]
+      -- ^ Holdings to fund the transfer (UTXO inputs).
+    meta : Metadata
+      -- ^ Additional metadata for the transfer.
+  where
+    signatory proposer
+    observer governanceParty
+
+    ensure amount > 0.0
+
+    interface instance GovernableAction for SendTokensProposal where
+      view = GovernableActionView with
+        governanceParty
+        actionLabel = "SendTokens"
+
+      executeImpl = do
+        exercise transferFactoryCid TransferFactory_Transfer with
+          expectedAdmin
+          transfer = Transfer with
+            sender = governanceParty
+            receiver
+            amount
+            instrumentId
+            requestedAt
+            executeBefore
+            inputHoldingCids
+            meta
+          extraArgs = ExtraArgs with
+            context = emptyChoiceContext
+            meta = emptyMetadata
+        create SendTokensResult with
+          governanceParty
+          receiver
+          amount
+          instrumentId
+        pure ()
