@@ -17,10 +17,12 @@ import {
 import PersonRemoveIcon from "@mui/icons-material/PersonRemove";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import CloudUploadIcon from "@mui/icons-material/CloudUpload";
+import SettingsIcon from "@mui/icons-material/Settings";
 import { CopyableText } from "./CopyableText";
 import { KickDialog } from "./KickDialog";
 import { ContractsDialog } from "./ContractsDialog";
 import { DarsDialog } from "./DarsDialog";
+import { PartyConfigDialog } from "./PartyConfigDialog";
 import { GovernanceSection } from "./GovernanceSection";
 import { AuthSection } from "./AuthSection";
 import type { DecentralizedParty, Network, PartyAuthStatus } from "../types";
@@ -40,6 +42,7 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
   const [kickDialogOpen, setKickDialogOpen] = useState(false);
   const [contractsDialogOpen, setContractsDialogOpen] = useState(false);
   const [darsDialogOpen, setDarsDialogOpen] = useState(false);
+  const [configDialogOpen, setConfigDialogOpen] = useState(false);
   const [selectedParticipant, setSelectedParticipant] = useState<string>("");
   const [canScrollUp, setCanScrollUp] = useState(false);
   const [canScrollDown, setCanScrollDown] = useState(false);
@@ -97,6 +100,14 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
               color="primary"
             />
           )}
+          <Tooltip title="Party configuration">
+            <IconButton
+              size="small"
+              onClick={() => setConfigDialogOpen(true)}
+            >
+              <SettingsIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
           {isOwner && (
             <>
               <Button
@@ -298,6 +309,16 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
         open={darsDialogOpen}
         onClose={() => setDarsDialogOpen(false)}
         onComplete={onRefresh}
+      />
+
+      <PartyConfigDialog
+        open={configDialogOpen}
+        onClose={() => setConfigDialogOpen(false)}
+        onSave={() => {
+          onRefresh();
+          onAuthRefresh?.();
+        }}
+        partyId={party.party_id}
       />
     </Card>
   );

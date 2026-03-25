@@ -9,7 +9,6 @@ struct Assets;
 pub async fn serve_frontend(req: HttpRequest) -> HttpResponse {
     let path = req.match_info().query("path");
 
-    // Try the exact path first
     let file_path = if path.is_empty() { "index.html" } else { path };
 
     match Assets::get(file_path) {

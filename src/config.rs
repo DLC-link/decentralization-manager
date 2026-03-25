@@ -254,6 +254,14 @@ fn default_noise_port() -> u16 {
     9000
 }
 
+/// Default Keycloak configuration values for a network
+pub struct KeycloakDefaults {
+    /// Keycloak server URL
+    pub url: String,
+    /// Keycloak realm name
+    pub realm: String,
+}
+
 /// Canton Network environment
 #[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
@@ -271,6 +279,34 @@ impl Network {
             Network::Testnet => "https://docs.test.global.canton.network.sync.global/dso",
             Network::Mainnet => "https://docs.global.canton.network.sync.global/dso",
         }
+    }
+
+    /// Get default Keycloak configuration for this network
+    pub fn keycloak_defaults(&self) -> KeycloakDefaults {
+        match self {
+            Network::Devnet => KeycloakDefaults {
+                url: "https://keycloak.dev.canton.example.com".to_string(),
+                realm: "canton-devnet".to_string(),
+            },
+            Network::Testnet => KeycloakDefaults {
+                url: String::new(),
+                realm: String::new(),
+            },
+            Network::Mainnet => KeycloakDefaults {
+                url: String::new(),
+                realm: String::new(),
+            },
+        }
+    }
+}
+
+/// Default package identifiers used for new party configurations
+pub fn default_package_config() -> PackageConfig {
+    PackageConfig {
+        vault_governance: Some("#bitsafe-vault-governance-v0-rc8".to_string()),
+        vault: Some("#bitsafe-vault-v0-rc8".to_string()),
+        utility_registry: Some("#utility-registry-app-v0".to_string()),
+        utility_credential: Some("#utility-credential-app-v0".to_string()),
     }
 }
 
@@ -392,6 +428,20 @@ impl NodeConfig {
             .unwrap_or_default()
     }
 
+    /// Add or update party credentials in the config and save to disk
+    pub async fn upsert_party_credentials(&mut self, creds: PartyCredentials) -> Result {
+        if let Some(existing) = self
+            .parties
+            .iter_mut()
+            .find(|p| p.dec_party_id == creds.dec_party_id)
+        {
+            *existing = creds;
+        } else {
+            self.parties.push(creds);
+        }
+        self.save_config().await
+    }
+
     /// Get the participant ID, panicking if not resolved
     ///
     /// Call `resolve_participant_id` before using this method.
@@ -483,5 +533,114 @@ mod tests {
         assert_eq!(allowlist.len(), 2);
         assert_eq!(allowlist.get("abc123"), Some(&peer1_id));
         assert_eq!(allowlist.get("def456"), Some(&peer2_id));
+    }
+
+    #[test]
+    fn test_keycloak_defaults_devnet() {
+        let defaults = Network::Devnet.keycloak_defaults();
+        assert_eq!(defaults.url, "https://keycloak.dev.canton.example.com");
+        assert_eq!(defaults.realm, "canton-devnet");
+    }
+
+    #[test]
+    fn test_keycloak_defaults_testnet_mainnet_empty() {
+        for network in [Network::Testnet, Network::Mainnet] {
+            let defaults = network.keycloak_defaults();
+            assert!(defaults.url.is_empty());
+            assert!(defaults.realm.is_empty());
+        }
+    }
+
+    const TEST_NAMESPACE: &str =
+        "1220aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    const MINIMAL_NODE_TOML: &str = r#"
+[node]
+listen_address = "0.0.0.0"
+port = 9000
+
+[canton]
+admin_api_host = "localhost"
+admin_api_port = 5002
+ledger_api_host = "localhost"
+ledger_api_port = 5001
+network = "devnet"
+"#;
+
+    fn test_party_creds(prefix: &str) -> PartyCredentials {
+        PartyCredentials {
+            dec_party_id: CantonId::parse(&format!("{prefix}::{TEST_NAMESPACE}")).unwrap(),
+            member_party_id: CantonId::parse(&format!("member::{TEST_NAMESPACE}")).unwrap(),
+            user_id: "TestUser".to_string(),
+            keycloak: KeycloakConfig {
+                url: "https://kc.example.com".to_string(),
+                realm: "test".to_string(),
+                client_id: "client-1".to_string(),
+                client_secret: None,
+                username: None,
+                password: None,
+            },
+            packages: PackageConfig::default(),
+        }
+    }
+
+    async fn temp_node_config() -> (tempfile::TempDir, NodeConfig) {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("node.toml"), MINIMAL_NODE_TOML).unwrap();
+        let config = NodeConfig::from_dir(tmp.path()).await.unwrap();
+        (tmp, config)
+    }
+
+    #[tokio::test]
+    async fn test_upsert_party_credentials_insert() {
+        let (tmp, mut config) = temp_node_config().await;
+        assert!(config.parties.is_empty());
+
+        let creds = test_party_creds("new-party");
+        config
+            .upsert_party_credentials(creds.clone())
+            .await
+            .unwrap();
+        assert_eq!(config.parties.len(), 1);
+        assert_eq!(config.parties[0].user_id, "TestUser");
+
+        let reloaded = NodeConfig::from_dir(tmp.path()).await.unwrap();
+        assert_eq!(reloaded.parties.len(), 1);
+        assert_eq!(reloaded.parties[0].dec_party_id, creds.dec_party_id);
+    }
+
+    #[tokio::test]
+    async fn test_upsert_party_credentials_update() {
+        let (_tmp, mut config) = temp_node_config().await;
+
+        let creds = test_party_creds("my-party");
+        config.upsert_party_credentials(creds).await.unwrap();
+        assert_eq!(config.parties[0].user_id, "TestUser");
+
+        let mut updated = test_party_creds("my-party");
+        updated.user_id = "UpdatedUser".to_string();
+        config.upsert_party_credentials(updated).await.unwrap();
+        assert_eq!(config.parties.len(), 1);
+        assert_eq!(config.parties[0].user_id, "UpdatedUser");
+    }
+
+    #[test]
+    fn test_default_package_config() {
+        let packages = default_package_config();
+        assert_eq!(
+            packages.vault_governance.as_deref(),
+            Some("#bitsafe-vault-governance-v0-rc8"),
+        );
+        assert_eq!(packages.vault.as_deref(), Some("#bitsafe-vault-v0-rc8"));
+        assert_eq!(
+            packages.utility_registry.as_deref(),
+            Some("#utility-registry-app-v0"),
+        );
+        assert_eq!(
+            packages.utility_credential.as_deref(),
+            Some("#utility-credential-app-v0"),
+        );
     }
 }

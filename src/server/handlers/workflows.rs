@@ -1,9 +1,11 @@
 use std::{sync::Arc, time::Duration};
 
 use actix_web::{HttpResponse, Responder, get, post, web};
+use tokio::sync::RwLock;
 
 use crate::{
-    config::NodeConfig,
+    auth::{AuthRegistry, WorkflowAuth},
+    config::{KeycloakConfig, NodeConfig, PartyCredentials, default_package_config},
     error::Result,
     noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
     participant_id::CantonId,
@@ -161,7 +163,7 @@ pub async fn start_kick(
         let mut error = kick_state_clone.error.write().await;
 
         match result {
-            Ok(()) => {
+            Ok(_) => {
                 *status = KickStatus::Completed;
                 tracing::info!("Kick workflow completed successfully");
             }
@@ -339,6 +341,9 @@ pub async fn start_onboarding(
     let listener_notify = data.noise_listener_notify.clone();
     let party_id_prefix = body.party_id_prefix.clone();
     let peer_ids = body.peer_ids.clone();
+    let party_credentials = data.party_credentials.clone();
+    let auth_lock = data.auth.clone();
+    let is_test_mode = data.test_mode;
 
     tokio::spawn(async move {
         let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
@@ -359,10 +364,11 @@ pub async fn start_onboarding(
         tokio::time::sleep(Duration::from_secs(2)).await;
 
         let instance_name = format!("{party_id_prefix}-creation");
-        let onboarding_config = workflow::OnboardingConfig::new(party_id_prefix, instance_name);
+        let onboarding_config =
+            workflow::OnboardingConfig::new(party_id_prefix.clone(), instance_name);
 
         let result = workflow::start_coordinator(
-            config,
+            config.clone(),
             workflow::WorkflowType::Onboarding,
             Some(onboarding_config),
             None, // No kick config
@@ -378,9 +384,22 @@ pub async fn start_onboarding(
         let mut error = onboarding_state_clone.error.write().await;
 
         match result {
-            Ok(()) => {
+            Ok(coordinator_result) => {
                 *status = OnboardingStatus::Completed;
                 tracing::info!("Onboarding workflow completed successfully");
+
+                if !is_test_mode
+                    && let Some(dec_party_id) = coordinator_result.created_party_id
+                    && let Err(e) = save_default_party_config(
+                        &config,
+                        &dec_party_id,
+                        &party_credentials,
+                        &auth_lock,
+                    )
+                    .await
+                {
+                    tracing::warn!("Failed to auto-save party config: {e}");
+                }
             }
             Err(e) => {
                 *status = OnboardingStatus::Failed;
@@ -546,10 +565,11 @@ pub async fn start_contracts(
 
     // Spawn the contracts workflow in the background
     let config = data.config.clone();
-    let workflow_auth = data.auth.clone();
+    let workflow_auth = data.auth.read().await.clone();
     let contracts_state_clone = contracts_state.get_ref().clone();
     let listener_control = data.noise_listener_control.clone();
     let listener_notify = data.noise_listener_notify.clone();
+    let party_credentials = data.party_credentials.clone();
 
     tokio::spawn(async move {
         let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
@@ -586,11 +606,12 @@ pub async fn start_contracts(
         let mut error = contracts_state_clone.error.write().await;
 
         match result {
-            Ok(()) => {
+            Ok(_) => {
                 *status = WorkflowProgress::Completed;
                 tracing::info!("Contracts workflow completed successfully");
-                // Save package IDs from deployed contracts to party config
-                if let Err(e) = save_deployed_packages(&config, &contracts_config).await {
+                if let Err(e) =
+                    save_deployed_packages(&config, &contracts_config, &party_credentials).await
+                {
                     tracing::warn!("Failed to save package config: {e}");
                 }
             }
@@ -629,7 +650,11 @@ pub async fn get_contracts_status(
 }
 
 /// Save deployed package IDs to party config after successful contracts workflow
-async fn save_deployed_packages(config: &NodeConfig, contracts_config: &ContractsConfig) -> Result {
+async fn save_deployed_packages(
+    config: &NodeConfig,
+    contracts_config: &ContractsConfig,
+    party_credentials: &Arc<RwLock<Vec<PartyCredentials>>>,
+) -> Result {
     let mut fresh_config = NodeConfig::from_dir(config.root_dir()).await?;
     let creds = fresh_config
         .parties
@@ -653,7 +678,16 @@ async fn save_deployed_packages(config: &NodeConfig, contracts_config: &Contract
                 _ => {}
             }
         }
+        let updated_packages = creds.packages.clone();
+        let dec_party_id = creds.dec_party_id.clone();
         fresh_config.save_config().await?;
+
+        // Sync in-memory party credentials
+        let mut pc = party_credentials.write().await;
+        if let Some(mem_creds) = pc.iter_mut().find(|p| p.dec_party_id == dec_party_id) {
+            mem_creds.packages = updated_packages;
+        }
+
         tracing::info!("Saved package IDs to party config");
     }
     Ok(())
@@ -748,7 +782,7 @@ pub async fn start_dars(
         let mut error = dars_state_clone.error.write().await;
 
         match result {
-            Ok(()) => {
+            Ok(_) => {
                 *status = WorkflowProgress::Completed;
                 tracing::info!("DARs upload workflow completed successfully");
             }
@@ -854,6 +888,63 @@ async fn send_dars_invites(config: &NodeConfig) -> Result {
         }
     }
 
+    Ok(())
+}
+
+/// Auto-save default party config after successful onboarding
+async fn save_default_party_config(
+    config: &NodeConfig,
+    dec_party_id: &CantonId,
+    party_credentials: &Arc<RwLock<Vec<PartyCredentials>>>,
+    auth_lock: &Arc<RwLock<Option<WorkflowAuth>>>,
+) -> Result {
+    tracing::info!("Saving default config for new dec party: {dec_party_id}");
+
+    let kc_defaults = config.canton.network.keycloak_defaults();
+    let creds = PartyCredentials {
+        dec_party_id: dec_party_id.clone(),
+        // Placeholder — user must set the real member party ID via the config dialog
+        member_party_id: dec_party_id.clone(),
+        user_id: "CoordinatorUser".to_string(),
+        keycloak: KeycloakConfig {
+            url: kc_defaults.url,
+            realm: kc_defaults.realm,
+            client_id: String::new(),
+            client_secret: None,
+            username: None,
+            password: None,
+        },
+        packages: default_package_config(),
+    };
+
+    let mut fresh_config = NodeConfig::from_dir(config.root_dir()).await?;
+    fresh_config.upsert_party_credentials(creds.clone()).await?;
+
+    // Update in-memory state
+    {
+        let mut pc = party_credentials.write().await;
+        if let Some(existing) = pc.iter_mut().find(|p| p.dec_party_id == *dec_party_id) {
+            *existing = creds;
+        } else {
+            pc.push(creds);
+        }
+    }
+
+    let creds_snapshot = party_credentials.read().await.clone();
+    if !creds_snapshot.is_empty() {
+        match AuthRegistry::new(&creds_snapshot).await {
+            Ok(registry) => {
+                let mut auth = auth_lock.write().await;
+                *auth = Some(WorkflowAuth::Keycloak(Arc::new(registry)));
+                tracing::info!("Auth registry reinitialized after onboarding");
+            }
+            Err(e) => {
+                tracing::warn!("Failed to reinitialize auth registry: {e}");
+            }
+        }
+    }
+
+    tracing::info!("Default party config saved for {dec_party_id}");
     Ok(())
 }
 

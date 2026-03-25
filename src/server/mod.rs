@@ -16,7 +16,7 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use crate::{
     auth::{AuthRegistry, MockAuthRegistry, WorkflowAuth},
-    config::NodeConfig,
+    config::{NodeConfig, PartyCredentials},
     error::Result,
     noise::{Message, MessageType, NoiseKeypair, load_or_generate_keypair, parse_public_key},
     workflow,
@@ -39,7 +39,11 @@ pub struct AppState {
     /// Pending invitations awaiting user acceptance
     pub pending_invitations: Arc<RwLock<Vec<PendingInvitation>>>,
     /// Authentication registry (real Keycloak or mock for test mode)
-    pub auth: Option<WorkflowAuth>,
+    pub auth: Arc<RwLock<Option<WorkflowAuth>>>,
+    /// Party credentials (mutable, hot-reloadable)
+    pub party_credentials: Arc<RwLock<Vec<PartyCredentials>>>,
+    /// Whether the server is running in test mode
+    pub test_mode: bool,
 }
 
 /// Control mechanism for the Noise port listener
@@ -55,6 +59,13 @@ struct WorkflowTriggers {
 
 /// Start the HTTP server and a heartbeat system for peer status tracking
 pub async fn start_server(host: &str, port: u16, config: NodeConfig, test_mode: bool) -> Result {
+    if !test_mode {
+        tracing::warn!(
+            "Running without --test flag. Swagger UI is disabled. \
+             Use `serve --test` to enable mock auth and Swagger UI."
+        );
+    }
+
     // Initialize auth based on mode
     let auth = if test_mode {
         tracing::info!("Running in TEST MODE - using mock authentication");
@@ -71,6 +82,9 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig, test_mode: 
             AuthRegistry::new(&config.parties).await?,
         )))
     };
+
+    let auth = Arc::new(RwLock::new(auth));
+    let party_credentials = Arc::new(RwLock::new(config.parties.clone()));
 
     let peer_status = Arc::new(RwLock::new(HashMap::new()));
     let listener_control = Arc::new(RwLock::new(ListenerControl {
@@ -96,6 +110,8 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig, test_mode: 
         coordinator_pubkey: coordinator_pubkey.clone(),
         pending_invitations: pending_invitations.clone(),
         auth,
+        party_credentials,
+        test_mode,
     });
     let kick_state = web::Data::new(Arc::new(handlers::KickWorkflowState::new()));
     let onboarding_state = web::Data::new(Arc::new(handlers::OnboardingWorkflowState::new()));
@@ -248,6 +264,8 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig, test_mode: 
             .service(handlers::cancel_confirmation)
             .service(handlers::get_token_standard_contracts)
             .service(handlers::get_amulet_rules)
+            .service(handlers::get_party_config)
+            .service(handlers::save_party_config)
             .split_for_parts();
 
         let mut app = app.wrap(cors);

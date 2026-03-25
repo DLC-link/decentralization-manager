@@ -16,6 +16,32 @@ export interface PackageConfig {
   utility_credential?: string;
 }
 
+export interface PartyConfigRequest {
+  dec_party_id: string;
+  member_party_id: string;
+  user_id: string;
+  keycloak_url: string;
+  keycloak_realm: string;
+  keycloak_client_id: string;
+  keycloak_client_secret?: string;
+  keycloak_username?: string;
+  keycloak_password?: string;
+  packages: PackageConfig;
+}
+
+export interface PartyConfigResponse {
+  dec_party_id: string;
+  member_party_id: string;
+  user_id: string;
+  keycloak_url: string;
+  keycloak_realm: string;
+  keycloak_client_id: string;
+  has_client_secret: boolean;
+  has_username: boolean;
+  has_password: boolean;
+  packages: PackageConfig;
+}
+
 export interface PartyMetadata {
   annotations: Record<string, string>;
 }
@@ -46,6 +72,7 @@ export interface NodeConfig {
     synchronizer: string;
     network: Network;
   };
+  test_mode?: boolean;
 }
 
 export interface Peer {
