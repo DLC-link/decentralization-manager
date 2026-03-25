@@ -22,7 +22,7 @@ testSendTokensFullFlow : Script ()
 testSendTokensFullFlow = do
   parties <- allocateTokenTestParties
   rulesCid <- createTestGovernance parties
-  factoryCid <- createMockTransferFactory parties.instrumentAdmin
+  factoryCid <- createMockTransferFactory parties.instrumentAdmin [parties.governanceParty]
   holdingCid <- createMockHolding parties.governanceParty parties.instrumentAdmin "TEST-TOKEN" 100.0
   now <- getTime
 
@@ -61,7 +61,7 @@ testSendTokensFullFlow = do
 testSendTokensZeroAmountRejected : Script ()
 testSendTokensZeroAmountRejected = do
   parties <- allocateTokenTestParties
-  factoryCid <- createMockTransferFactory parties.instrumentAdmin
+  factoryCid <- createMockTransferFactory parties.instrumentAdmin [parties.governanceParty]
   now <- getTime
 
   submitMustFail parties.member1 $ createCmd SendTokensProposal with
@@ -82,7 +82,7 @@ testSendTokensInsufficientConfirmations : Script ()
 testSendTokensInsufficientConfirmations = do
   parties <- allocateTokenTestParties
   rulesCid <- createTestGovernance parties
-  factoryCid <- createMockTransferFactory parties.instrumentAdmin
+  factoryCid <- createMockTransferFactory parties.instrumentAdmin [parties.governanceParty]
   now <- getTime
 
   proposalCid <- submit parties.member1 $ createCmd SendTokensProposal with
@@ -115,7 +115,7 @@ testSendTokensNonMemberCannotConfirm : Script ()
 testSendTokensNonMemberCannotConfirm = do
   parties <- allocateTokenTestParties
   rulesCid <- createTestGovernance parties
-  factoryCid <- createMockTransferFactory parties.instrumentAdmin
+  factoryCid <- createMockTransferFactory parties.instrumentAdmin [parties.governanceParty]
   now <- getTime
 
   proposalCid <- submit parties.member1 $ createCmd SendTokensProposal with
