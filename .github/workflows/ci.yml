@@ -121,9 +121,28 @@ jobs:
       - name: Run integration tests
         run: ./run-integration-tests.sh
 
+  daml:
+    name: DAML Build & Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: daml
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dpm
+        run: curl -sSL https://get.digitalasset.com/install/install.sh | sh
+      - name: Install DAML SDK
+        run: ~/.dpm/bin/dpm install 3.4.11
+      - name: Build
+        run: ~/.dpm/bin/dpm build --all
+      - name: Test governance-core
+        run: cd governance-core-test && ~/.dpm/bin/dpm test
+      - name: Test governance-token-custody
+        run: cd governance-token-custody-test && ~/.dpm/bin/dpm test
+
   docker:
     name: Build & Push Docker Images
-    needs: test
+    needs: [test, daml]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
