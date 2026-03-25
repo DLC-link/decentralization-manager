@@ -1,8 +1,8 @@
 -- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
--- | Tests for the SetupPreapprovalProposal governable action.
-module Governance.TokenCustody.Test.SetupPreapprovalTest where
+-- | Tests for the SetupCcPreapprovalProposal governable action.
+module Governance.TokenCustody.Test.SetupCcPreapprovalTest where
 
 import DA.List (head)
 import Daml.Script
@@ -11,19 +11,18 @@ import Splice.Wallet.TransferPreapproval (TransferPreapprovalProposal(..))
 
 import Governance.Action (GovernableAction)
 import Governance.Rules (GovernanceRules_ConfirmAction(..))
-import Governance.TokenCustody.SetupPreapproval
-import Governance.TokenCustody.Types (SetupPreapprovalResult(..))
+import Governance.TokenCustody.SetupCcPreapproval
 import Governance.TokenCustody.TestUtils
 
--- | Full governance flow: propose → confirm → execute → verify preapproval proposal created.
-testSetupPreapprovalFullFlow : Script ()
-testSetupPreapprovalFullFlow = do
+-- | Full governance flow: propose -> confirm -> execute -> verify preapproval proposal created.
+testSetupCcPreapprovalFullFlow : Script ()
+testSetupCcPreapprovalFullFlow = do
   parties <- allocateTokenTestParties
   rulesCid <- createTestGovernance parties
   dso <- allocateParty "DSO"
 
   -- Proposer creates the setup preapproval proposal
-  proposalCid <- submit parties.member1 $ createCmd SetupPreapprovalProposal with
+  proposalCid <- submit parties.member1 $ createCmd SetupCcPreapprovalProposal with
     governanceParty = parties.governanceParty
     proposer = parties.member1
     provider = parties.outsider
@@ -43,19 +42,13 @@ testSetupPreapprovalFullFlow = do
   assertMsg "Provider should match" (proposal.provider == parties.outsider)
   assertMsg "ExpectedDso should match" (proposal.expectedDso == Some dso)
 
-  -- Verify witness was created
-  results <- query @SetupPreapprovalResult parties.governanceParty
-  assertMsg "SetupPreapprovalResult should exist" (length results == 1)
-  let (_, result) = head results
-  assertMsg "Provider should match in result" (result.provider == parties.outsider)
-
--- | Non-member cannot confirm a SetupPreapproval proposal.
-testSetupPreapprovalNonMemberCannotConfirm : Script ()
-testSetupPreapprovalNonMemberCannotConfirm = do
+-- | Non-member cannot confirm a SetupCcPreapproval proposal.
+testSetupCcPreapprovalNonMemberCannotConfirm : Script ()
+testSetupCcPreapprovalNonMemberCannotConfirm = do
   parties <- allocateTokenTestParties
   rulesCid <- createTestGovernance parties
 
-  proposalCid <- submit parties.member1 $ createCmd SetupPreapprovalProposal with
+  proposalCid <- submit parties.member1 $ createCmd SetupCcPreapprovalProposal with
     governanceParty = parties.governanceParty
     proposer = parties.member1
     provider = parties.outsider
@@ -68,13 +61,13 @@ testSetupPreapprovalNonMemberCannotConfirm = do
       confirmer = parties.outsider
       actionProposalCid = proposalInterfaceCid
 
--- | Setup preapproval with None expectedDso works.
-testSetupPreapprovalWithoutDso : Script ()
-testSetupPreapprovalWithoutDso = do
+-- | Setup CC preapproval with None expectedDso works.
+testSetupCcPreapprovalWithoutDso : Script ()
+testSetupCcPreapprovalWithoutDso = do
   parties <- allocateTokenTestParties
   rulesCid <- createTestGovernance parties
 
-  proposalCid <- submit parties.member1 $ createCmd SetupPreapprovalProposal with
+  proposalCid <- submit parties.member1 $ createCmd SetupCcPreapprovalProposal with
     governanceParty = parties.governanceParty
     proposer = parties.member1
     provider = parties.outsider

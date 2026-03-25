@@ -1,24 +1,23 @@
 -- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
--- | Governable action to set up a TransferPreapproval for receiving tokens.
+-- | Governable action to set up a CC (Canton Coin) TransferPreapproval for receiving tokens.
 -- Creates a TransferPreapprovalProposal where the governance party is the receiver.
 -- The provider then accepts the proposal separately (handling fee payment).
-module Governance.TokenCustody.SetupPreapproval where
+module Governance.TokenCustody.SetupCcPreapproval where
 
 import Splice.Wallet.TransferPreapproval (TransferPreapprovalProposal(..))
 
 import Governance.Action
-import Governance.TokenCustody.Types (SetupPreapprovalResult(..))
 
--- | Proposal to set up a TransferPreapproval for the governance party.
+-- | Proposal to set up a CC TransferPreapproval for the governance party.
 -- Creates a TransferPreapprovalProposal (signatory: receiver = governanceParty).
--- Authority flows: GovernanceRules → GovernableAction_Execute → executeImpl
--- → create TransferPreapprovalProposal (signatory: receiver = governanceParty).
+-- Authority flows: GovernanceRules -> GovernableAction_Execute -> executeImpl
+-- -> create TransferPreapprovalProposal (signatory: receiver = governanceParty).
 --
 -- After governance execution, the provider must separately accept the proposal
 -- via TransferPreapprovalProposal_Accept (which handles fee payment).
-template SetupPreapprovalProposal
+template SetupCcPreapprovalProposal
   with
     governanceParty : Party
       -- ^ The governance party whose authority is required.
@@ -32,17 +31,14 @@ template SetupPreapprovalProposal
     signatory proposer
     observer governanceParty
 
-    interface instance GovernableAction for SetupPreapprovalProposal where
+    interface instance GovernableAction for SetupCcPreapprovalProposal where
       view = GovernableActionView with
         governanceParty
-        actionLabel = "SetupPreapproval"
+        actionLabel = "SetupCcPreapproval"
 
       executeImpl = do
         create TransferPreapprovalProposal with
           receiver = governanceParty
           provider
           expectedDso
-        create SetupPreapprovalResult with
-          governanceParty
-          provider
         pure ()

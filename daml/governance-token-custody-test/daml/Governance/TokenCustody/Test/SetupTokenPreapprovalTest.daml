@@ -1,0 +1,87 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Tests for the SetupTokenPreapprovalProposal governable action.
+module Governance.TokenCustody.Test.SetupTokenPreapprovalTest where
+
+import DA.List (head)
+import Daml.Script
+
+import Utility.Registry.App.V0.Model.TransferPreapproval (InstrumentAllowance(..), TransferPreapproval(..))
+
+import Governance.Action (GovernableAction)
+import Governance.Rules (GovernanceRules_ConfirmAction(..))
+import Governance.TokenCustody.SetupTokenPreapproval
+import Governance.TokenCustody.TestUtils
+
+-- | Full governance flow: propose -> confirm -> execute -> verify token preapproval created.
+testSetupTokenPreapprovalFullFlow : Script ()
+testSetupTokenPreapprovalFullFlow = do
+  parties <- allocateTokenTestParties
+  rulesCid <- createTestGovernance parties
+
+  -- Proposer creates the setup token preapproval proposal
+  proposalCid <- submit parties.member1 $ createCmd SetupTokenPreapprovalProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    operator = parties.outsider
+    instrumentAdmin = parties.instrumentAdmin
+    instrumentAllowances = [InstrumentAllowance with id = "TEST-TOKEN"]
+
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+
+  -- Confirm and execute
+  confirmAndExecute parties rulesCid proposalInterfaceCid
+    [parties.member1, parties.member2] parties.member1
+
+  -- Verify the TransferPreapproval was created
+  preapprovals <- query @TransferPreapproval parties.governanceParty
+  assertMsg "TransferPreapproval should exist" (length preapprovals == 1)
+  let (_, preapproval) = head preapprovals
+  assertMsg "Receiver should be governanceParty" (preapproval.receiver == parties.governanceParty)
+  assertMsg "Operator should match" (preapproval.operator == parties.outsider)
+  assertMsg "InstrumentAdmin should match" (preapproval.instrumentAdmin == parties.instrumentAdmin)
+  assertMsg "InstrumentAllowances should match" (length preapproval.instrumentAllowances == 1)
+
+-- | Non-member cannot confirm a SetupTokenPreapproval proposal.
+testSetupTokenPreapprovalNonMemberCannotConfirm : Script ()
+testSetupTokenPreapprovalNonMemberCannotConfirm = do
+  parties <- allocateTokenTestParties
+  rulesCid <- createTestGovernance parties
+
+  proposalCid <- submit parties.member1 $ createCmd SetupTokenPreapprovalProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    operator = parties.outsider
+    instrumentAdmin = parties.instrumentAdmin
+    instrumentAllowances = []
+
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+
+  submitMustFail (memberContext parties.outsider parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ConfirmAction with
+      confirmer = parties.outsider
+      actionProposalCid = proposalInterfaceCid
+
+-- | Setup token preapproval with empty allowances (all instruments) works.
+testSetupTokenPreapprovalAllInstruments : Script ()
+testSetupTokenPreapprovalAllInstruments = do
+  parties <- allocateTokenTestParties
+  rulesCid <- createTestGovernance parties
+
+  proposalCid <- submit parties.member1 $ createCmd SetupTokenPreapprovalProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    operator = parties.outsider
+    instrumentAdmin = parties.instrumentAdmin
+    instrumentAllowances = []
+
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+
+  confirmAndExecute parties rulesCid proposalInterfaceCid
+    [parties.member2, parties.member3] parties.member3
+
+  preapprovals <- query @TransferPreapproval parties.governanceParty
+  assertMsg "TransferPreapproval should exist" (length preapprovals == 1)
+  let (_, preapproval) = head preapprovals
+  assertMsg "InstrumentAllowances should be empty" (null preapproval.instrumentAllowances)

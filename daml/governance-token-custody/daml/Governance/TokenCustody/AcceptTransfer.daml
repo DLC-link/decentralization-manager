@@ -9,7 +9,6 @@ import Splice.Api.Token.MetadataV1 (ExtraArgs(..), emptyChoiceContext, emptyMeta
 import Splice.Api.Token.TransferInstructionV1 (TransferInstruction, TransferInstruction_Accept(..))
 
 import Governance.Action
-import Governance.TokenCustody.Types (AcceptTransferResult(..))
 
 -- | Proposal to accept an incoming token transfer offer.
 -- The governance party must be the receiver on the TransferInstruction
@@ -40,6 +39,4 @@ template AcceptTransferProposal
           extraArgs = ExtraArgs with
             context = emptyChoiceContext
             meta = emptyMetadata
-        create AcceptTransferResult with
-          governanceParty
         pure ()

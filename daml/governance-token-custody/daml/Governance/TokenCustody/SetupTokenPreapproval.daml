@@ -1,0 +1,46 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Governable action to set up a utility token TransferPreapproval.
+-- Creates a TransferPreapproval from utility-registry-app where the governance
+-- party is the receiver, preapproving incoming transfers for specific instruments.
+module Governance.TokenCustody.SetupTokenPreapproval where
+
+import Utility.Registry.App.V0.Model.TransferPreapproval (InstrumentAllowance, TransferPreapproval(..))
+
+import Governance.Action
+
+-- | Proposal to set up a utility token TransferPreapproval for the governance party.
+-- Creates a TransferPreapproval directly (signatory: receiver = governanceParty).
+-- Authority flows: GovernanceRules -> GovernableAction_Execute -> executeImpl
+-- -> create TransferPreapproval (signatory: receiver = governanceParty).
+--
+-- Unlike the CC preapproval, no separate accept step is needed.
+template SetupTokenPreapprovalProposal
+  with
+    governanceParty : Party
+      -- ^ The governance party whose authority is required.
+    proposer : Party
+      -- ^ The member proposing this preapproval setup.
+    operator : Party
+      -- ^ The operator party (observer on the preapproval).
+    instrumentAdmin : Party
+      -- ^ The admin of the instruments being preapproved.
+    instrumentAllowances : [InstrumentAllowance]
+      -- ^ Specific instruments to preapprove. Empty means all instruments of the admin.
+  where
+    signatory proposer
+    observer governanceParty
+
+    interface instance GovernableAction for SetupTokenPreapprovalProposal where
+      view = GovernableActionView with
+        governanceParty
+        actionLabel = "SetupTokenPreapproval"
+
+      executeImpl = do
+        create TransferPreapproval with
+          operator
+          receiver = governanceParty
+          instrumentAdmin
+          instrumentAllowances
+        pure ()

@@ -18,7 +18,6 @@ import Splice.Api.Token.MetadataV1 (ExtraArgs(..), Metadata, emptyChoiceContext,
 import Splice.Api.Token.TransferInstructionV1 (Transfer(..), TransferFactory, TransferFactory_Transfer(..))
 
 import Governance.Action
-import Governance.TokenCustody.Types (SendTokensResult(..))
 
 -- | Proposal to send CIP-56 tokens from the governance party.
 -- The governance party acts as the sender; authority flows through the
@@ -74,9 +73,4 @@ template SendTokensProposal
           extraArgs = ExtraArgs with
             context = emptyChoiceContext
             meta = emptyMetadata
-        create SendTokensResult with
-          governanceParty
-          receiver
-          amount
-          instrumentId
         pure ()
