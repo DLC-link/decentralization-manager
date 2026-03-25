@@ -10,6 +10,7 @@ use crate::{
     },
     error::Result,
     noise::server::NoiseServer,
+    participant_id::CantonId,
     utils,
     workflow::state::WorkflowState,
 };
@@ -72,7 +73,7 @@ pub async fn start_coordinator(
     node_config: NodeConfig,
     network_config: NetworkConfig,
     onboarding_config: OnboardingConfig,
-) -> Result {
+) -> Result<CantonId> {
     tracing::info!("Initializing Noise server...");
 
     let server = NoiseServer::new(
@@ -106,7 +107,14 @@ pub async fn start_coordinator(
         .await
     });
 
-    crate::workflow::run_server_with_workflow(server, workflow_handle).await
+    crate::workflow::run_server_with_workflow(server, workflow_handle).await?;
+
+    // Read the created party ID from the workflow output
+    let party_id_path = dirs.workflow_dir.join("party_id");
+    let party_id_str = tokio::fs::read_to_string(&party_id_path)
+        .await
+        .context("Failed to read created party ID")?;
+    CantonId::parse(party_id_str.trim())
 }
 
 async fn run_workflow(
