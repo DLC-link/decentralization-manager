@@ -9,7 +9,7 @@ dependencies:
 data-dependencies:
   - ../governance-token-custody/.daml/dist/governance-token-custody-0.1.0.dar
   - ../governance-core/.daml/dist/governance-core-0.1.0.dar
-  - ../../../utility-onboarding-test-helpers/.daml/dist/utility-onboarding-test-helpers-0.1.0.dar
+  - ../dars/utility-onboarding-test-helpers-0.1.0.dar
   - ../dars/splice-amulet-0.1.17.dar
   - ../dars/splice-api-featured-app-v1-1.0.0.dar
   - ../dars/splice-api-token-burn-mint-v1-1.0.0.dar
