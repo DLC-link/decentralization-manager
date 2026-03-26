@@ -324,3 +324,46 @@ confirmAndExecute parties rulesCid proposalCid confirmers executor = do
       executor
       actionProposalCid = proposalCid
       confirmations = confirmationCids
+
+-- | Confirm and execute with explicit additional submit options.
+-- Use this when the standard confirmAndExecute doesn't provide the right party context
+-- (e.g., cross-governance tests where the counterparty isn't the standard outsider).
+confirmAndExecuteWith : SubmitOptions -> Party -> ContractId GovernanceRules -> ContractId GovernableAction -> [Party] -> Party -> Script ()
+confirmAndExecuteWith extraOpts governanceParty rulesCid proposalCid confirmers executor = do
+  confirmationCids <- submitConfirmations governanceParty rulesCid proposalCid confirmers
+  submit (actAs executor <> readAs governanceParty <> extraOpts) $
+    exerciseCmd rulesCid GovernanceRules_ExecuteConfirmedAction with
+      executor
+      actionProposalCid = proposalCid
+      confirmations = confirmationCids
+
+-- | Two governance parties with separate members sharing the same utility infrastructure.
+data CrossGovernanceParties = CrossGovernanceParties
+  with
+    govPartyA : Party
+    membersA : [Party]
+    govPartyB : Party
+    membersB : [Party]
+    operator : Party
+    registrar : Party
+    dso : Party
+  deriving (Show, Eq)
+
+-- | Allocate parties for cross-governance tests.
+allocateCrossGovernanceParties : Script CrossGovernanceParties
+allocateCrossGovernanceParties = do
+  govPartyA <- allocateParty "GovernancePartyA"
+  memberA1 <- allocateParty "MemberA1"
+  memberA2 <- allocateParty "MemberA2"
+  memberA3 <- allocateParty "MemberA3"
+  govPartyB <- allocateParty "GovernancePartyB"
+  memberB1 <- allocateParty "MemberB1"
+  memberB2 <- allocateParty "MemberB2"
+  memberB3 <- allocateParty "MemberB3"
+  operator <- allocateParty "Operator"
+  registrar <- allocateParty "Registrar"
+  dso <- allocateParty "DSO"
+  pure CrossGovernanceParties with
+    membersA = [memberA1, memberA2, memberA3]
+    membersB = [memberB1, memberB2, memberB3]
+    ..

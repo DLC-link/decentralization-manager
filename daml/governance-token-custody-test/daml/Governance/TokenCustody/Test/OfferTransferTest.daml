@@ -1,8 +1,9 @@
 -- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
--- | Tests for the OfferTransferProposal governable action.
--- OfferTransfer uses TransferRule_TwoStepTransfer to create a pending TransferOffer.
+-- | Tests for two-step transfers using TransferProposal with AllocationFactory.
+-- When the AllocationFactory is used as the TransferFactory, it creates a pending
+-- TransferOffer that the receiver must accept separately.
 module Governance.TokenCustody.Test.OfferTransferTest where
 
 import DA.Time (addRelTime, hours)
@@ -10,14 +11,14 @@ import Daml.Script
 
 import Splice.Api.Token.HoldingV1 (Holding, InstrumentId)
 import Splice.Api.Token.MetadataV1 (ExtraArgs(..), emptyMetadata)
-import Splice.Api.Token.TransferInstructionV1 (Transfer(..))
+import Splice.Api.Token.TransferInstructionV1 (Transfer(..), TransferInstruction, TransferInstruction_Accept(..))
 
+import Utility.Registry.App.V0.Model.Transfer (TransferOffer)
 import Utility.Registry.Holding.V0.Holding qualified as V0Holding
-import Utility.Registry.V0.Rule.Transfer (TransferRule_TwoStepTransfer(..))
 
 import Governance.Action (GovernableAction)
 import Governance.Rules (GovernanceRules_ConfirmAction(..), GovernanceRules_ExecuteConfirmedAction(..))
-import Governance.TokenCustody.OfferTransfer
+import Governance.TokenCustody.TransferProposal
 import Governance.TokenCustody.TestUtils
 
 -- | Build a standard Transfer from governance party to outsider.
@@ -32,51 +33,55 @@ buildTestTransfer parties instrument now amount holdingCids = Transfer with
   inputHoldingCids = holdingCids
   meta = emptyMetadata
 
--- | Build standard ExtraArgs for offer operations.
-buildOfferExtraArgs : UtilityOnboardingResult -> ExtraArgs
-buildOfferExtraArgs onboarding = ExtraArgs with
-  context = createTransferContext onboarding
-  meta = emptyMetadata
-
--- | Helper to create an OfferTransferProposal with standard test fields.
-createOfferProposal : TokenTestParties -> UtilityOnboardingResult -> Decimal -> Script (ContractId OfferTransferProposal)
-createOfferProposal parties onboarding amount = do
+-- | Helper to create a TransferProposal targeting the AllocationFactory (two-step).
+createOfferProposal : TokenTestParties -> UtilityOnboardingResult -> [ContractId Holding] -> Decimal -> Script (ContractId TransferProposal)
+createOfferProposal parties onboarding holdingCids amount = do
   let instrument = testInstrumentId parties.registrar
   now <- getTime
-  submit parties.member1 $ createCmd OfferTransferProposal with
+  submit parties.member1 $ createCmd TransferProposal with
     governanceParty = parties.governanceParty
     proposer = parties.member1
-    transferRuleCid = onboarding.transferRuleCid
-    expectedOperator = onboarding.operator
-    expectedProvider = onboarding.provider
-    transfer = buildTestTransfer parties instrument now amount []
-    extraArgs = buildOfferExtraArgs onboarding
+    transferFactoryCid = coerceContractId onboarding.allocationFactoryCid
+    expectedAdmin = parties.registrar
+    transfer = buildTestTransfer parties instrument now amount holdingCids
+    extraArgs = ExtraArgs with
+      context = createTransferContext onboarding
+      meta = emptyMetadata
 
--- | Test real TransferRule_TwoStepTransfer to create a pending offer.
--- Exercises the TransferRule directly because the choice controller
--- requires registrar/provider authorization (provided via Canton topology in production).
--- Governance confirm/execute logic is tested separately by the other tests.
-testOfferTransferFullFlow : Script ()
-testOfferTransferFullFlow = do
+-- | Full governance happy path: propose → confirm → execute → creates TransferOffer.
+-- Then receiver accepts → verify token movement.
+testOfferTransferGovernanceHappyPath : Script ()
+testOfferTransferGovernanceHappyPath = do
   parties <- allocateTokenTestParties
   let instrument = testInstrumentId parties.registrar
   onboarding <- onboardToUtility parties instrument
-  now <- getTime
+  rulesCid <- createTestGovernance parties
 
-  mintedCids <- mintTokens parties.governanceParty 100.0 onboarding instrument
-  holdingCids <- lockHoldings parties.governanceParty mintedCids onboarding
+  -- Mint tokens for governance party (unlocked — AllocationFactory locks them internally)
+  holdingCids <- mintTokens parties.governanceParty 100.0 onboarding instrument
 
-  submit (actAs parties.governanceParty <> actAs parties.outsider
+  -- Create TransferProposal with AllocationFactory as factory (two-step)
+  proposalCid <- createOfferProposal parties onboarding holdingCids 50.0
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+
+  -- Confirm and execute through governance → creates TransferOffer
+  confirmAndExecute parties rulesCid proposalInterfaceCid
+    [parties.member1, parties.member2] parties.member1
+
+  -- Receiver queries and accepts the TransferOffer
+  [(transferOfferCid, _)] <- query @TransferOffer parties.outsider
+  let transferInstructionCid : ContractId TransferInstruction = coerceContractId transferOfferCid
+
+  submit (actAs parties.outsider <> actAs parties.governanceParty
     <> readAs parties.registrar <> readAs parties.operator <> readAs parties.dso) $
-    exerciseCmd onboarding.transferRuleCid TransferRule_TwoStepTransfer with
-      transfer = buildTestTransfer parties instrument now 50.0 holdingCids
-      extraArgs = buildOfferExtraArgs onboarding
-      expectedOperator = onboarding.operator
-      expectedProvider = onboarding.provider
+    exerciseCmd transferInstructionCid TransferInstruction_Accept with
+      extraArgs = ExtraArgs with
+        context = createAcceptContext onboarding
+        meta = emptyMetadata
 
-  senderHoldings <- query @V0Holding.Holding parties.governanceParty
-  let totalRemaining = sum $ map ((.amount) . snd) senderHoldings
-  assertMsg "Sender should have 50.0 remaining" (totalRemaining == 50.0)
+  -- Verify receiver got tokens
+  outsiderHoldings <- query @V0Holding.Holding parties.outsider
+  assertMsg "Outsider should have received holdings" (not (null outsiderHoldings))
 
 -- | Proposal with zero amount is rejected by ensure.
 testOfferTransferZeroAmountRejected : Script ()
@@ -86,14 +91,15 @@ testOfferTransferZeroAmountRejected = do
   onboarding <- onboardToUtility parties instrument
   now <- getTime
 
-  submitMustFail parties.member1 $ createCmd OfferTransferProposal with
+  submitMustFail parties.member1 $ createCmd TransferProposal with
     governanceParty = parties.governanceParty
     proposer = parties.member1
-    transferRuleCid = onboarding.transferRuleCid
-    expectedOperator = onboarding.operator
-    expectedProvider = onboarding.provider
+    transferFactoryCid = coerceContractId onboarding.allocationFactoryCid
+    expectedAdmin = parties.registrar
     transfer = buildTestTransfer parties instrument now 0.0 []
-    extraArgs = buildOfferExtraArgs onboarding
+    extraArgs = ExtraArgs with
+      context = createTransferContext onboarding
+      meta = emptyMetadata
 
 -- | Insufficient confirmations are rejected.
 testOfferTransferInsufficientConfirmations : Script ()
@@ -103,7 +109,7 @@ testOfferTransferInsufficientConfirmations = do
   onboarding <- onboardToUtility parties instrument
   rulesCid <- createTestGovernance parties
 
-  proposalCid <- createOfferProposal parties onboarding 50.0
+  proposalCid <- createOfferProposal parties onboarding [] 50.0
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
 
   confirmationCids <- submitConfirmations parties.governanceParty rulesCid proposalInterfaceCid
@@ -115,7 +121,7 @@ testOfferTransferInsufficientConfirmations = do
       actionProposalCid = proposalInterfaceCid
       confirmations = confirmationCids
 
--- | Non-member cannot confirm an OfferTransfer proposal.
+-- | Non-member cannot confirm a transfer proposal.
 testOfferTransferNonMemberCannotConfirm : Script ()
 testOfferTransferNonMemberCannotConfirm = do
   parties <- allocateTokenTestParties
@@ -123,7 +129,7 @@ testOfferTransferNonMemberCannotConfirm = do
   onboarding <- onboardToUtility parties instrument
   rulesCid <- createTestGovernance parties
 
-  proposalCid <- createOfferProposal parties onboarding 50.0
+  proposalCid <- createOfferProposal parties onboarding [] 50.0
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
 
   submitMustFail (memberContext parties.outsider parties.governanceParty) $

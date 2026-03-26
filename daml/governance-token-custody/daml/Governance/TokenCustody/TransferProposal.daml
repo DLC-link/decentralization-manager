@@ -1,11 +1,19 @@
 -- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
--- | Governable action to send tokens via TransferFactory.
+-- | Governable action to transfer tokens via a TransferFactory.
 --
--- The transfer factory is typically a TransferPreapproval set up by the receiver,
--- which pre-authorizes incoming transfers. This avoids requiring the receiver's
--- active authorization during the governance execution flow.
+-- This is a unified transfer proposal that works with any TransferFactory implementation:
+--
+--   * Pass a **TransferPreapproval** for one-step transfers (completes immediately).
+--     Input holdings should be unlocked.
+--
+--   * Pass an **AllocationFactory** for two-step transfers (creates a pending
+--     TransferOffer that the receiver must accept separately).
+--     Input holdings should be unlocked (the factory locks them internally).
+--
+-- The utility-registry handles the behavioral difference based on the underlying
+-- factory implementation. The governance party acts as the sender.
 --
 -- UTXO Timing Risk:
 -- The inputHoldingCids referenced in the transfer are captured at proposal
@@ -15,25 +23,26 @@
 --   1. Use dedicated holdings reserved for governance proposals
 --   2. Keep governance confirmation timeouts short
 --   3. Monitor and re-propose if holdings change
-module Governance.TokenCustody.SendTokens where
+module Governance.TokenCustody.TransferProposal where
 
 import Splice.Api.Token.MetadataV1 (ExtraArgs)
 import Splice.Api.Token.TransferInstructionV1 (Transfer, TransferFactory, TransferFactory_Transfer(..))
 
 import Governance.Action
 
--- | Proposal to send tokens from the governance party via a TransferFactory.
+-- | Proposal to transfer tokens from the governance party via a TransferFactory.
 -- The governance party acts as the sender; authority flows through the
 -- exercise chain: GovernanceRules → GovernableAction_Execute → executeImpl
--- → TransferFactory_Transfer (controller: transfer.sender = governanceParty).
-template SendTokensProposal
+-- → TransferFactory_Transfer.
+template TransferProposal
   with
     governanceParty : Party
       -- ^ The governance party whose authority is required.
     proposer : Party
       -- ^ The member proposing this transfer.
     transferFactoryCid : ContractId TransferFactory
-      -- ^ The transfer factory to use (typically a TransferPreapproval).
+      -- ^ The transfer factory to use. Pass a TransferPreapproval for one-step
+      -- transfers, or an AllocationFactory for two-step (offer) transfers.
     expectedAdmin : Party
       -- ^ The expected admin party of the transfer factory.
     transfer : Transfer
@@ -46,10 +55,10 @@ template SendTokensProposal
 
     ensure transfer.amount > 0.0
 
-    interface instance GovernableAction for SendTokensProposal where
+    interface instance GovernableAction for TransferProposal where
       view = GovernableActionView with
         governanceParty
-        actionLabel = "SendTokens"
+        actionLabel = "Transfer"
 
       executeImpl = do
         exercise transferFactoryCid TransferFactory_Transfer with
