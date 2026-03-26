@@ -14,7 +14,7 @@ import Splice.Api.Token.MetadataV1 (ExtraArgs(..), emptyMetadata)
 import Splice.Api.Token.TransferInstructionV1 (Transfer(..), TransferInstruction, TransferInstruction_Accept(..))
 
 import Utility.Registry.App.V0.Model.Transfer (TransferOffer)
-import Utility.Registry.Holding.V0.Holding qualified as V0Holding
+import Splice.Api.Token.HoldingV1 (Holding)
 
 import Governance.Action (GovernableAction)
 import Governance.Rules (GovernanceRules_ConfirmAction(..), GovernanceRules_ExecuteConfirmedAction(..))
@@ -80,7 +80,7 @@ testOfferTransferGovernanceHappyPath = do
         meta = emptyMetadata
 
   -- Verify receiver got tokens
-  outsiderHoldings <- query @V0Holding.Holding parties.outsider
+  outsiderHoldings <- queryInterface @Holding parties.outsider
   assertMsg "Outsider should have received holdings" (not (null outsiderHoldings))
 
 -- | Proposal with zero amount is rejected by ensure.
