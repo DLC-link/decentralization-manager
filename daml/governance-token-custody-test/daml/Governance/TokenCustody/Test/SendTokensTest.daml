@@ -10,10 +10,11 @@ import Daml.Script
 
 import Splice.Api.Token.HoldingV1 (Holding, InstrumentId)
 import Splice.Api.Token.MetadataV1 (ExtraArgs(..), emptyMetadata)
-import Splice.Api.Token.TransferInstructionV1 (Transfer(..), TransferFactory, TransferFactory_Transfer(..))
+import Splice.Api.Token.TransferInstructionV1 (Transfer(..))
+
+import Splice.Api.Token.HoldingV1 (Holding)
 
 import Utility.Registry.App.V0.Model.TransferPreapproval (TransferPreapproval(..))
-import Utility.Registry.Holding.V0.Holding qualified as V0Holding
 
 import Governance.Action (GovernableAction)
 import Governance.Rules (GovernanceRules_ConfirmAction(..), GovernanceRules_ExecuteConfirmedAction(..))
@@ -56,34 +57,6 @@ createSendProposal parties onboarding amount = do
     extraArgs = ExtraArgs with
       context = createTransferContext onboarding
       meta = emptyMetadata
-
--- | Test real token transfer via TransferPreapproval acting as TransferFactory.
--- Exercises the transfer directly (not through governance chain) because
--- the underlying TransferRule requires receiver authorization via Canton topology.
--- Governance confirm/execute logic is tested separately by the other tests.
-testSendTokensFullFlow : Script ()
-testSendTokensFullFlow = do
-  parties <- allocateTokenTestParties
-  let instrument = testInstrumentId parties.registrar
-  onboarding <- onboardToUtility parties instrument
-
-  holdingCids <- mintTokens parties.governanceParty 100.0 onboarding instrument
-
-  preapprovalCid <- createReceiverPreapproval parties onboarding
-  let factoryCid : ContractId TransferFactory = coerceContractId preapprovalCid
-  now <- getTime
-
-  _ <- submit (actAs parties.governanceParty <> actAs parties.outsider
-    <> readAs parties.registrar <> readAs parties.operator <> readAs parties.dso) $
-    exerciseCmd factoryCid TransferFactory_Transfer with
-      expectedAdmin = parties.registrar
-      transfer = buildTestTransfer parties instrument now 50.0 holdingCids
-      extraArgs = ExtraArgs with
-        context = createTransferContext onboarding
-        meta = emptyMetadata
-
-  outsiderHoldings <- query @V0Holding.Holding parties.outsider
-  assertMsg "Outsider should have received a holding" (not (null outsiderHoldings))
 
 -- | Proposal with zero amount is rejected by ensure.
 testSendTokensZeroAmountRejected : Script ()
@@ -168,5 +141,5 @@ testSendTokensGovernanceHappyPath = do
   confirmAndExecute parties rulesCid proposalInterfaceCid
     [parties.member1, parties.member2] parties.member1
 
-  outsiderHoldings <- query @V0Holding.Holding parties.outsider
+  outsiderHoldings <- queryInterface @Holding parties.outsider
   assertMsg "Outsider should have received holdings" (not (null outsiderHoldings))

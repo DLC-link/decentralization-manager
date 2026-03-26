@@ -22,7 +22,6 @@ import Utility.Registry.App.V0.Configuration.Provider (ProviderConfiguration)
 import Utility.Registry.App.V0.Service.AllocationFactory (AllocationFactory)
 import Utility.Registry.App.V0.Service.Provider
 import Utility.Registry.App.V0.Service.Registrar
-import Utility.Registry.Holding.V0.Holding qualified as V0Holding (Holding(..), Holding_Lock(..), Holding_Lock_Result(..))
 import Utility.Registry.Holding.V0.Types (InstrumentIdentifier(..))
 import Utility.Registry.V0.Configuration.AppReward (AppRewardConfiguration(..), AppRewardConfigurationDetails(..))
 import Utility.Registry.V0.Configuration.Instrument (InstrumentConfiguration)
@@ -269,20 +268,6 @@ mintTokens owner amount onboarding instrument = do
 
   pure result.outputCids
 
--- | Lock holdings for use in two-step transfers.
--- Returns locked holding CIDs (as Holding interface).
-lockHoldings : Party -> [ContractId Holding] -> UtilityOnboardingResult -> Script [ContractId Holding]
-lockHoldings owner holdingCids onboarding =
-  mapA (\hCid -> do
-    let v0Cid : ContractId V0Holding.Holding = coerceContractId hCid
-    V0Holding.Holding_Lock_Result lockedCid <- submit (actAs owner <> actAs onboarding.registrar <> readAs onboarding.operator) $
-      exerciseCmd v0Cid V0Holding.Holding_Lock with
-        lockers = Set.fromList [onboarding.registrar]
-        observers = None
-        context = ""
-    pure (coerceContractId lockedCid)
-  ) holdingCids
-
 -- | Create a ChoiceContext for transfer operations (SendTokens, OfferTransfer, AcceptTransfer).
 -- Includes all keys needed by TransferRule and TransferPreapproval.
 createTransferContext : UtilityOnboardingResult -> ChoiceContext
@@ -315,9 +300,9 @@ confirmAndExecute : TokenTestParties -> ContractId GovernanceRules -> ContractId
 confirmAndExecute parties rulesCid proposalCid confirmers executor = do
   confirmationCids <- submitConfirmations parties.governanceParty rulesCid proposalCid confirmers
   submit (actAs executor
-    <> actAs parties.outsider
-    <> actAs parties.registrar
     <> readAs parties.governanceParty
+    <> readAs parties.outsider
+    <> readAs parties.registrar
     <> readAs parties.operator
     <> readAs parties.dso) $
     exerciseCmd rulesCid GovernanceRules_ExecuteConfirmedAction with
@@ -325,45 +310,3 @@ confirmAndExecute parties rulesCid proposalCid confirmers executor = do
       actionProposalCid = proposalCid
       confirmations = confirmationCids
 
--- | Confirm and execute with explicit additional submit options.
--- Use this when the standard confirmAndExecute doesn't provide the right party context
--- (e.g., cross-governance tests where the counterparty isn't the standard outsider).
-confirmAndExecuteWith : SubmitOptions -> Party -> ContractId GovernanceRules -> ContractId GovernableAction -> [Party] -> Party -> Script ()
-confirmAndExecuteWith extraOpts governanceParty rulesCid proposalCid confirmers executor = do
-  confirmationCids <- submitConfirmations governanceParty rulesCid proposalCid confirmers
-  submit (actAs executor <> readAs governanceParty <> extraOpts) $
-    exerciseCmd rulesCid GovernanceRules_ExecuteConfirmedAction with
-      executor
-      actionProposalCid = proposalCid
-      confirmations = confirmationCids
-
--- | Two governance parties with separate members sharing the same utility infrastructure.
-data CrossGovernanceParties = CrossGovernanceParties
-  with
-    govPartyA : Party
-    membersA : [Party]
-    govPartyB : Party
-    membersB : [Party]
-    operator : Party
-    registrar : Party
-    dso : Party
-  deriving (Show, Eq)
-
--- | Allocate parties for cross-governance tests.
-allocateCrossGovernanceParties : Script CrossGovernanceParties
-allocateCrossGovernanceParties = do
-  govPartyA <- allocateParty "GovernancePartyA"
-  memberA1 <- allocateParty "MemberA1"
-  memberA2 <- allocateParty "MemberA2"
-  memberA3 <- allocateParty "MemberA3"
-  govPartyB <- allocateParty "GovernancePartyB"
-  memberB1 <- allocateParty "MemberB1"
-  memberB2 <- allocateParty "MemberB2"
-  memberB3 <- allocateParty "MemberB3"
-  operator <- allocateParty "Operator"
-  registrar <- allocateParty "Registrar"
-  dso <- allocateParty "DSO"
-  pure CrossGovernanceParties with
-    membersA = [memberA1, memberA2, memberA3]
-    membersB = [memberB1, memberB2, memberB3]
-    ..
