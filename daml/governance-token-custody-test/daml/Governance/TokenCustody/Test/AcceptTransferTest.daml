@@ -69,6 +69,31 @@ testAcceptTransferFullFlow = do
   govHoldings <- query @V0Holding.Holding parties.governanceParty
   assertMsg "GovernanceParty should have received holdings" (not (null govHoldings))
 
+-- | Full governance happy path: proposal → confirm → execute → verify balance.
+-- Governance party accepts an incoming transfer from outsider via governance flow.
+testAcceptTransferGovernanceHappyPath : Script ()
+testAcceptTransferGovernanceHappyPath = do
+  parties <- allocateTokenTestParties
+  let instrument = testInstrumentId parties.registrar
+  onboarding <- onboardToUtility parties instrument
+  rulesCid <- createTestGovernance parties
+
+  transferInstructionCid <- createTransferOffer parties onboarding 75.0
+
+  proposalCid <- submit parties.member1 $ createCmd AcceptTransferProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    transferInstructionCid
+    extraArgs = buildAcceptExtraArgs onboarding
+
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+
+  confirmAndExecute parties rulesCid proposalInterfaceCid
+    [parties.member1, parties.member2] parties.member1
+
+  govHoldings <- query @V0Holding.Holding parties.governanceParty
+  assertMsg "GovernanceParty should have received holdings" (not (null govHoldings))
+
 -- | Accepting a withdrawn (archived) transfer instruction fails.
 testAcceptTransferWithdrawnOffer : Script ()
 testAcceptTransferWithdrawnOffer = do

@@ -1,7 +1,7 @@
 -- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
--- | Tests for the SendTokensProposal governable action.
+-- | Tests for the TransferProposal governable action.
 -- SendTokens uses TransferFactory_Transfer on a TransferPreapproval.
 module Governance.TokenCustody.Test.SendTokensTest where
 
@@ -17,7 +17,7 @@ import Utility.Registry.Holding.V0.Holding qualified as V0Holding
 
 import Governance.Action (GovernableAction)
 import Governance.Rules (GovernanceRules_ConfirmAction(..), GovernanceRules_ExecuteConfirmedAction(..))
-import Governance.TokenCustody.SendTokens
+import Governance.TokenCustody.TransferProposal
 import Governance.TokenCustody.TestUtils
 
 -- | Create a TransferPreapproval for the receiver, usable as a TransferFactory.
@@ -41,13 +41,13 @@ buildTestTransfer parties instrument now amount holdingCids = Transfer with
   inputHoldingCids = holdingCids
   meta = emptyMetadata
 
--- | Helper to create a SendTokensProposal with standard test fields.
-createSendProposal : TokenTestParties -> UtilityOnboardingResult -> Decimal -> Script (ContractId SendTokensProposal)
+-- | Helper to create a TransferProposal with standard test fields.
+createSendProposal : TokenTestParties -> UtilityOnboardingResult -> Decimal -> Script (ContractId TransferProposal)
 createSendProposal parties onboarding amount = do
   let instrument = testInstrumentId parties.registrar
   now <- getTime
   preapprovalCid <- createReceiverPreapproval parties onboarding
-  submit parties.member1 $ createCmd SendTokensProposal with
+  submit parties.member1 $ createCmd TransferProposal with
     governanceParty = parties.governanceParty
     proposer = parties.member1
     transferFactoryCid = coerceContractId preapprovalCid
@@ -94,7 +94,7 @@ testSendTokensZeroAmountRejected = do
   preapprovalCid <- createReceiverPreapproval parties onboarding
   now <- getTime
 
-  submitMustFail parties.member1 $ createCmd SendTokensProposal with
+  submitMustFail parties.member1 $ createCmd TransferProposal with
     governanceParty = parties.governanceParty
     proposer = parties.member1
     transferFactoryCid = coerceContractId preapprovalCid
@@ -139,3 +139,34 @@ testSendTokensNonMemberCannotConfirm = do
     exerciseCmd rulesCid GovernanceRules_ConfirmAction with
       confirmer = parties.outsider
       actionProposalCid = proposalInterfaceCid
+
+-- | Full governance happy path: proposal → confirm → execute → verify balance.
+-- Governance party sends tokens to outsider who has a TransferPreapproval.
+testSendTokensGovernanceHappyPath : Script ()
+testSendTokensGovernanceHappyPath = do
+  parties <- allocateTokenTestParties
+  let instrument = testInstrumentId parties.registrar
+  onboarding <- onboardToUtility parties instrument
+  rulesCid <- createTestGovernance parties
+  now <- getTime
+
+  holdingCids <- mintTokens parties.governanceParty 100.0 onboarding instrument
+  preapprovalCid <- createReceiverPreapproval parties onboarding
+
+  proposalCid <- submit parties.member1 $ createCmd TransferProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    transferFactoryCid = coerceContractId preapprovalCid
+    expectedAdmin = parties.registrar
+    transfer = buildTestTransfer parties instrument now 50.0 holdingCids
+    extraArgs = ExtraArgs with
+      context = createTransferContext onboarding
+      meta = emptyMetadata
+
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+
+  confirmAndExecute parties rulesCid proposalInterfaceCid
+    [parties.member1, parties.member2] parties.member1
+
+  outsiderHoldings <- query @V0Holding.Holding parties.outsider
+  assertMsg "Outsider should have received holdings" (not (null outsiderHoldings))
