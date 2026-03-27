@@ -28,10 +28,11 @@ import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import AddIcon from "@mui/icons-material/Add";
 import DeleteIcon from "@mui/icons-material/Delete";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
+import AccountBalanceIcon from "@mui/icons-material/AccountBalance";
 import GavelIcon from "@mui/icons-material/Gavel";
-// Hidden for now — uncomment when CBTC/Vault options are re-enabled
-// import AccountBalanceIcon from "@mui/icons-material/AccountBalance";
-// import StorageIcon from "@mui/icons-material/Storage";
+import HandymanIcon from "@mui/icons-material/Handyman";
+import LockIcon from "@mui/icons-material/Lock";
+import StorageIcon from "@mui/icons-material/Storage";
 import { API_BASE } from "../constants";
 import type {
   ContractsStatusResponse,
@@ -40,6 +41,7 @@ import type {
   ContractInfo,
   FieldDefinition,
   PackageConfig,
+  VettedPackageInfo,
 } from "../types";
 
 interface ContractsDialogProps {
@@ -51,6 +53,7 @@ interface ContractsDialogProps {
   defaultOperatorParty?: string;
   knownPackageIds?: string[];
   deployedContracts?: ContractInfo[];
+  vettedPackages?: VettedPackageInfo[];
 }
 
 type ContractType = "governance-core" | "cbtc" | "vault" | null;
@@ -822,114 +825,184 @@ const ContractEditor = ({
   );
 };
 
+// Plugin card with optional tooltip and enabled/disabled visual state
+const PluginCard = ({
+  icon,
+  label,
+  description,
+  onClick,
+  tooltip,
+  enabled = false,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  description: string;
+  onClick?: () => void;
+  tooltip?: string;
+  enabled?: boolean;
+}) => {
+  const card = (
+    <Card
+      sx={{
+        flex: 1,
+        border: 1,
+        borderColor: "divider",
+        opacity: enabled ? 1 : 0.5,
+        "&:hover": onClick ? { borderColor: "primary.main" } : {},
+      }}
+    >
+      <CardActionArea
+        disabled={!onClick}
+        onClick={onClick}
+        sx={{ p: 2, height: "100%" }}
+      >
+        <CardContent sx={{ textAlign: "center" }}>
+          {icon}
+          <Typography variant="h6">{label}</Typography>
+          <Typography variant="body2" color="text.secondary">
+            {description}
+          </Typography>
+        </CardContent>
+      </CardActionArea>
+    </Card>
+  );
+  return tooltip ? (
+    <Tooltip title={tooltip} arrow>
+      {card}
+    </Tooltip>
+  ) : (
+    card
+  );
+};
+
 // Contract type selection screen
 interface ContractTypeSelectionProps {
   onSelect: (type: ContractType) => void;
   isGovernanceCoreDeployed: boolean;
   isGovernanceCoreDarUploaded: boolean;
+  isTokenCustodyDarUploaded: boolean;
 }
 
 const ContractTypeSelection = ({
   onSelect,
   isGovernanceCoreDeployed,
   isGovernanceCoreDarUploaded,
+  isTokenCustodyDarUploaded,
 }: ContractTypeSelectionProps) => {
   return (
     <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
-      <Typography variant="body2" color="text.secondary">
-        Select the type of contracts you want to deploy.
-      </Typography>
-
-      <Box sx={{ display: "flex", gap: 2, mt: 1 }}>
-        {!isGovernanceCoreDeployed && (
-          <Tooltip
-            title={
-              isGovernanceCoreDarUploaded
-                ? ""
-                : "Upload the governance-core DAR first"
-            }
-            arrow
-          >
-            <Card
-              sx={{
-                flex: 1,
-                border: 1,
-                borderColor: "divider",
-                opacity: isGovernanceCoreDarUploaded ? 1 : 0.5,
-                "&:hover": isGovernanceCoreDarUploaded
-                  ? { borderColor: "primary.main" }
-                  : {},
-              }}
+      {/* Deploy Governance Core — shown only when not yet deployed */}
+      {!isGovernanceCoreDeployed && (
+        <>
+          <Typography variant="body2" color="text.secondary">
+            Deploy the core governance contract for this decentralized party.
+          </Typography>
+          <Box sx={{ display: "flex", gap: 2, mt: 1 }}>
+            <Tooltip
+              title={
+                isGovernanceCoreDarUploaded
+                  ? ""
+                  : "Upload the governance-core DAR first"
+              }
+              arrow
             >
-              <CardActionArea
-                onClick={() => onSelect("governance-core")}
-                disabled={!isGovernanceCoreDarUploaded}
-                sx={{ p: 2, height: "100%" }}
+              <Card
+                sx={{
+                  flex: 1,
+                  maxWidth: 280,
+                  border: 1,
+                  borderColor: "divider",
+                  opacity: isGovernanceCoreDarUploaded ? 1 : 0.5,
+                  "&:hover": isGovernanceCoreDarUploaded
+                    ? { borderColor: "primary.main" }
+                    : {},
+                }}
               >
-                <CardContent sx={{ textAlign: "center" }}>
-                  <GavelIcon
-                    sx={{ fontSize: 48, color: "primary.main", mb: 1 }}
-                  />
-                  <Typography variant="h6">Governance Core</Typography>
-                  <Typography variant="body2" color="text.secondary">
-                    Deploy core governance rules contract
-                  </Typography>
-                </CardContent>
-              </CardActionArea>
-            </Card>
-          </Tooltip>
-        )}
+                <CardActionArea
+                  onClick={() => onSelect("governance-core")}
+                  disabled={!isGovernanceCoreDarUploaded}
+                  sx={{ p: 2, height: "100%" }}
+                >
+                  <CardContent sx={{ textAlign: "center" }}>
+                    <GavelIcon
+                      sx={{ fontSize: 48, color: "primary.main", mb: 1 }}
+                    />
+                    <Typography variant="h6">Governance Core</Typography>
+                    <Typography variant="body2" color="text.secondary">
+                      Deploy core governance rules contract
+                    </Typography>
+                  </CardContent>
+                </CardActionArea>
+              </Card>
+            </Tooltip>
+          </Box>
+        </>
+      )}
 
-        {/* CBTC and Vault options hidden for now
-        <Card
-          sx={{
-            flex: 1,
-            border: 1,
-            borderColor: "divider",
-            "&:hover": { borderColor: "primary.main" },
-          }}
-        >
-          <CardActionArea
-            onClick={() => onSelect("cbtc")}
-            sx={{ p: 2, height: "100%" }}
+      {/* Plugins — shown only when governance core is deployed */}
+      {isGovernanceCoreDeployed && (
+        <>
+          <Typography variant="body2" color="text.secondary">
+            Governance Core is deployed. Select a plugin to deploy.
+          </Typography>
+          <Box
+            sx={{
+              display: "grid",
+              gridTemplateColumns: "repeat(2, 1fr)",
+              gap: 2,
+              mt: 1,
+            }}
           >
-            <CardContent sx={{ textAlign: "center" }}>
-              <AccountBalanceIcon
-                sx={{ fontSize: 48, color: "primary.main", mb: 1 }}
-              />
-              <Typography variant="h6">CBTC</Typography>
-              <Typography variant="body2" color="text.secondary">
-                Deploy CBTC governance and account rules contracts
-              </Typography>
-            </CardContent>
-          </CardActionArea>
-        </Card>
-
-        <Card
-          sx={{
-            flex: 1,
-            border: 1,
-            borderColor: "divider",
-            "&:hover": { borderColor: "primary.main" },
-          }}
-        >
-          <CardActionArea
-            onClick={() => onSelect("vault")}
-            sx={{ p: 2, height: "100%" }}
-          >
-            <CardContent sx={{ textAlign: "center" }}>
-              <StorageIcon
-                sx={{ fontSize: 48, color: "primary.main", mb: 1 }}
-              />
-              <Typography variant="h6">Vault</Typography>
-              <Typography variant="body2" color="text.secondary">
-                Deploy Bitsafe Vault governance contracts
-              </Typography>
-            </CardContent>
-          </CardActionArea>
-        </Card>
-        */}
-      </Box>
+            <PluginCard
+              icon={
+                <LockIcon
+                  sx={{ fontSize: 48, color: "primary.main", mb: 1 }}
+                />
+              }
+              label="Token Custody"
+              description="Deploy token custody contracts"
+              enabled={isTokenCustodyDarUploaded}
+              tooltip={
+                isTokenCustodyDarUploaded
+                  ? undefined
+                  : "Upload the governance-token-custody DAR first"
+              }
+            />
+            <PluginCard
+              icon={
+                <AccountBalanceIcon
+                  sx={{ fontSize: 48, color: "primary.main", mb: 1 }}
+                />
+              }
+              label="CBTC"
+              description="Deploy CBTC governance and account rules"
+              onClick={() => onSelect("cbtc")}
+              tooltip="Coming soon"
+            />
+            <PluginCard
+              icon={
+                <StorageIcon
+                  sx={{ fontSize: 48, color: "primary.main", mb: 1 }}
+                />
+              }
+              label="Vault"
+              description="Deploy Bitsafe Vault governance contracts"
+              onClick={() => onSelect("vault")}
+              tooltip="Coming soon"
+            />
+            <PluginCard
+              icon={
+                <HandymanIcon
+                  sx={{ fontSize: 48, color: "primary.main", mb: 1 }}
+                />
+              }
+              label="Utility"
+              description="Deploy utility registry and credential contracts"
+              tooltip="Coming soon"
+            />
+          </Box>
+        </>
+      )}
     </Box>
   );
 };
@@ -943,6 +1016,7 @@ export const ContractsDialog = ({
   defaultOperatorParty,
   knownPackageIds = [],
   deployedContracts = [],
+  vettedPackages = [],
 }: ContractsDialogProps) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -963,7 +1037,20 @@ export const ContractsDialog = ({
   const isGovernanceCoreDeployed = deployedContracts.some(
     (c) => c.template_id === "Governance.Rules:GovernanceRules",
   );
-  const isGovernanceCoreDarUploaded = !!packages.governance_core;
+  const isGovernanceCoreDarUploaded = vettedPackages.some((p) => {
+    const name = p.package_name.toLowerCase();
+    return (
+      name.includes("governance-core") ||
+      name.includes("governance.rules")
+    );
+  });
+  const isTokenCustodyDarUploaded = vettedPackages.some((p) => {
+    const name = p.package_name.toLowerCase();
+    return (
+      name.includes("governance-token-custody") ||
+      name.includes("tokencustody")
+    );
+  });
 
   // Combine package IDs from config + known contracts for dropdown
   const allPackageIds = useMemo(() => {
@@ -1168,6 +1255,7 @@ export const ContractsDialog = ({
               onSelect={setContractType}
               isGovernanceCoreDeployed={isGovernanceCoreDeployed}
               isGovernanceCoreDarUploaded={isGovernanceCoreDarUploaded}
+              isTokenCustodyDarUploaded={isTokenCustodyDarUploaded}
             />
           )}
 

@@ -13,12 +13,14 @@ import {
 import FilterListIcon from "@mui/icons-material/FilterList";
 import SearchIcon from "@mui/icons-material/Search";
 import AddIcon from "@mui/icons-material/Add";
+import CloudUploadIcon from "@mui/icons-material/CloudUpload";
 import { Header } from "./components/Header";
 import { PartyCard } from "./components/PartyCard";
 import { NodeConfigAccordion } from "./components/NodeConfigAccordion";
 import { NetworkConfigAccordion } from "./components/NetworkConfigAccordion";
 import { VettedPackagesAccordion } from "./components/VettedPackagesAccordion";
 import { LoadingSkeleton } from "./components/LoadingSkeleton";
+import { DarsDialog } from "./components/DarsDialog";
 import { OnboardingDialog } from "./components/OnboardingDialog";
 import { InvitationModal } from "./components/InvitationModal";
 import { useSnackbar } from "./contexts";
@@ -50,6 +52,7 @@ const App = () => {
   const [keyStatus, setKeyStatus] = useState<KeyStatusResponse | null>(null);
   const [authStatuses, setAuthStatuses] = useState<PartyAuthStatus[]>([]);
   const [onboardingDialogOpen, setOnboardingDialogOpen] = useState(false);
+  const [darsDialogOpen, setDarsDialogOpen] = useState(false);
   const [_pendingInvitations, setPendingInvitations] = useState<
     PendingInvitation[]
   >([]);
@@ -307,14 +310,25 @@ const App = () => {
                     {parties.length} parties
                   </Typography>
                 </Box>
-                <Button
-                  variant="contained"
-                  startIcon={<AddIcon />}
-                  onClick={() => setOnboardingDialogOpen(true)}
-                  disabled={!ADMIN_ACCESS}
-                >
-                  Create Party
-                </Button>
+                <Box sx={{ display: "flex", gap: 1 }}>
+                  <Button
+                    variant="contained"
+                    color="secondary"
+                    startIcon={<CloudUploadIcon />}
+                    onClick={() => setDarsDialogOpen(true)}
+                    disabled={!ADMIN_ACCESS}
+                  >
+                    Upload DARs
+                  </Button>
+                  <Button
+                    variant="contained"
+                    startIcon={<AddIcon />}
+                    onClick={() => setOnboardingDialogOpen(true)}
+                    disabled={!ADMIN_ACCESS}
+                  >
+                    Create Party
+                  </Button>
+                </Box>
               </Box>
               <Box sx={{ display: "flex", alignItems: "flex-start", gap: 1 }}>
                 <TextField
@@ -361,8 +375,15 @@ const App = () => {
                 onAuthRefresh={refreshAuthStatus}
                 operatorParty={operatorParty}
                 network={nodeConfig?.canton.network}
+                vettedPackages={vettedPackages}
               />
             ))}
+
+            <DarsDialog
+              open={darsDialogOpen}
+              onClose={() => setDarsDialogOpen(false)}
+              onComplete={refreshParties}
+            />
 
             <OnboardingDialog
               open={onboardingDialogOpen}

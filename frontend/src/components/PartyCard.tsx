@@ -17,18 +17,16 @@ import {
 } from "@mui/material";
 import PersonRemoveIcon from "@mui/icons-material/PersonRemove";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
-import CloudUploadIcon from "@mui/icons-material/CloudUpload";
 import ExpandLessIcon from "@mui/icons-material/ExpandLess";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import SettingsIcon from "@mui/icons-material/Settings";
 import { CopyableText } from "./CopyableText";
 import { KickDialog } from "./KickDialog";
 import { ContractsDialog } from "./ContractsDialog";
-import { DarsDialog } from "./DarsDialog";
 import { PartyConfigDialog } from "./PartyConfigDialog";
 import { GovernanceSection } from "./GovernanceSection";
 import { AuthSection } from "./AuthSection";
-import type { DecentralizedParty, Network, PartyAuthStatus } from "../types";
+import type { DecentralizedParty, Network, PartyAuthStatus, VettedPackageInfo } from "../types";
 import { ADMIN_ACCESS } from "../constants";
 
 interface PartyCardProps {
@@ -39,12 +37,12 @@ interface PartyCardProps {
   onAuthRefresh?: () => void;
   operatorParty?: string;
   network?: Network;
+  vettedPackages?: VettedPackageInfo[];
 }
 
-export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onAuthRefresh, operatorParty, network }: PartyCardProps) => {
+export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onAuthRefresh, operatorParty, network, vettedPackages = [] }: PartyCardProps) => {
   const [kickDialogOpen, setKickDialogOpen] = useState(false);
   const [contractsDialogOpen, setContractsDialogOpen] = useState(false);
-  const [darsDialogOpen, setDarsDialogOpen] = useState(false);
   const [configDialogOpen, setConfigDialogOpen] = useState(false);
   const [selectedParticipant, setSelectedParticipant] = useState<string>("");
   const [contractsExpanded, setContractsExpanded] = useState(true);
@@ -113,26 +111,15 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
             </IconButton>
           </Tooltip>
           {isOwner && (
-            <>
-              <Button
-                variant="outlined"
-                size="small"
-                startIcon={<CloudUploadIcon />}
-                onClick={() => setDarsDialogOpen(true)}
-                disabled={!ADMIN_ACCESS}
-              >
-                Upload DARs
-              </Button>
-              <Button
-                variant="outlined"
-                size="small"
-                startIcon={<UploadFileIcon />}
-                onClick={() => setContractsDialogOpen(true)}
-                disabled={!ADMIN_ACCESS}
-              >
-                Deploy Contracts
-              </Button>
-            </>
+            <Button
+              variant="outlined"
+              size="small"
+              startIcon={<UploadFileIcon />}
+              onClick={() => setContractsDialogOpen(true)}
+              disabled={!ADMIN_ACCESS}
+            >
+              Deploy Contracts
+            </Button>
           )}
         </Box>
 
@@ -329,13 +316,9 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
         defaultOperatorParty={operatorParty}
         knownPackageIds={[...new Set(party.contracts?.map((c) => c.package_id) ?? [])]}
         deployedContracts={party.contracts ?? []}
+        vettedPackages={vettedPackages}
       />
 
-      <DarsDialog
-        open={darsDialogOpen}
-        onClose={() => setDarsDialogOpen(false)}
-        onComplete={onRefresh}
-      />
 
       <PartyConfigDialog
         open={configDialogOpen}
