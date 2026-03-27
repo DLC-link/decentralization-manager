@@ -17,9 +17,9 @@ use crate::{
 use super::{
     action_serializer,
     types::{
-        ActionType, ContractInfo, ContractWithBlob, GovernanceAction, GovernanceConfirmation,
-        GovernanceState, PartyMetadata, ProviderServiceInfo, RegistrarServiceInfo, UserServiceInfo,
-        VaultInfo,
+        ActionType, ContractInfo, ContractWithBlob, DomainGovernanceAction, GovernanceAction,
+        GovernanceConfirmation, GovernanceState, PartyMetadata, ProviderServiceInfo,
+        RegistrarServiceInfo, UserServiceInfo, VaultInfo,
     },
 };
 
@@ -96,16 +96,39 @@ fn governance_templates(packages: &PackageConfig) -> Vec<TemplateId> {
         module_name: "CBTC.Governance",
         entity_name: "Confirmation",
     });
+    if let Some(ref pkg) = packages.governance_core {
+        templates.push(TemplateId {
+            package_id: pkg.clone(),
+            module_name: "Governance.Rules",
+            entity_name: "GovernanceSelfConfirmation",
+        });
+        templates.push(TemplateId {
+            package_id: pkg.clone(),
+            module_name: "Governance.Confirmation",
+            entity_name: "GovernanceConfirmation",
+        });
+    }
     templates
 }
 
-/// Governance state template identifier
-fn governance_state_template(packages: &PackageConfig) -> Option<TemplateId> {
-    packages.vault_governance.as_ref().map(|pkg| TemplateId {
-        package_id: pkg.clone(),
-        module_name: "BitsafeVault.VaultGovernance",
-        entity_name: "VaultGovernanceRules",
-    })
+/// Governance state template identifiers (tries both vault and core)
+fn governance_state_templates(packages: &PackageConfig) -> Vec<TemplateId> {
+    let mut templates = Vec::new();
+    if let Some(ref pkg) = packages.vault_governance {
+        templates.push(TemplateId {
+            package_id: pkg.clone(),
+            module_name: "BitsafeVault.VaultGovernance",
+            entity_name: "VaultGovernanceRules",
+        });
+    }
+    if let Some(ref pkg) = packages.governance_core {
+        templates.push(TemplateId {
+            package_id: pkg.clone(),
+            module_name: "Governance.Rules",
+            entity_name: "GovernanceRules",
+        });
+    }
+    templates
 }
 
 /// Vault template identifier
@@ -169,6 +192,8 @@ const GOVERNANCE_TEMPLATE_NAMES: &[(&str, &str)] = &[
         "VaultGovernanceConfirmation",
     ),
     ("CBTC.Governance", "Confirmation"),
+    ("Governance.Rules", "GovernanceSelfConfirmation"),
+    ("Governance.Confirmation", "GovernanceConfirmation"),
 ];
 
 /// Get active contracts for a party
@@ -417,14 +442,24 @@ pub async fn get_governance_confirmations(
     token: Option<String>,
     test_mode: bool,
     packages: &PackageConfig,
-) -> Result<Vec<GovernanceAction>> {
-    // Collect confirmations grouped by action hash
+) -> Result<(Vec<GovernanceAction>, Vec<DomainGovernanceAction>)> {
+    // Collect confirmations grouped by action hash (vault + core self-management)
     let mut confirmations_by_hash: HashMap<String, (ActionType, Vec<GovernanceConfirmation>)> =
+        HashMap::new();
+    // Collect domain confirmations grouped by proposal CID (core domain actions)
+    let mut domain_confirmations: HashMap<String, (String, Vec<GovernanceConfirmation>)> =
         HashMap::new();
 
     if test_mode {
         tracing::debug!("Using WildcardFilter for governance query (test mode)");
-        fetch_governance_with_wildcard(config, party_id, token, &mut confirmations_by_hash).await?;
+        fetch_governance_with_wildcard(
+            config,
+            party_id,
+            token,
+            &mut confirmations_by_hash,
+            &mut domain_confirmations,
+        )
+        .await?;
     } else {
         tracing::debug!("Using TemplateFilter for governance query (per-template)");
         for t in &governance_templates(packages) {
@@ -434,6 +469,7 @@ pub async fn get_governance_confirmations(
                 token.clone(),
                 t,
                 &mut confirmations_by_hash,
+                &mut domain_confirmations,
             )
             .await
             {
@@ -483,7 +519,27 @@ pub async fn get_governance_confirmations(
         })
         .collect();
 
-    Ok(actions)
+    // Build domain actions from domain confirmations
+    let domain_actions: Vec<DomainGovernanceAction> = domain_confirmations
+        .into_iter()
+        .map(|(proposal_cid, (action_label, confirmations))| {
+            let mut seen_parties = std::collections::HashSet::new();
+            let unique_confirmations: Vec<GovernanceConfirmation> = confirmations
+                .into_iter()
+                .filter(|c| seen_parties.insert(c.confirming_party.clone()))
+                .collect();
+            let confirmation_count = unique_confirmations.len();
+            DomainGovernanceAction {
+                proposal_cid,
+                action_label,
+                confirmations: unique_confirmations,
+                confirmation_count,
+                can_execute: confirmation_count >= threshold,
+            }
+        })
+        .collect();
+
+    Ok((actions, domain_actions))
 }
 
 /// Fetch governance confirmations using WildcardFilter (for test mode)
@@ -492,6 +548,7 @@ async fn fetch_governance_with_wildcard(
     party_id: &str,
     token: Option<String>,
     confirmations_by_hash: &mut HashMap<String, (ActionType, Vec<GovernanceConfirmation>)>,
+    domain_confirmations: &mut HashMap<String, (String, Vec<GovernanceConfirmation>)>,
 ) -> Result {
     let mut state_client = utils::create_state_client(config, token).await?;
 
@@ -532,11 +589,14 @@ async fn fetch_governance_with_wildcard(
     while let Some(response) = stream.message().await? {
         if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
             && let Some(created) = active.created_event
+            && let Some(ref template_id) = created.template_id
+            && is_governance_template(&template_id.module_name, &template_id.entity_name)
         {
-            // Check if this is a governance template
-            if let Some(ref template_id) = created.template_id
-                && is_governance_template(&template_id.module_name, &template_id.entity_name)
+            if template_id.module_name == "Governance.Confirmation"
+                && template_id.entity_name == "GovernanceConfirmation"
             {
+                extract_and_add_domain_confirmation(&created, domain_confirmations);
+            } else {
                 extract_and_add_confirmation(&created, confirmations_by_hash);
             }
         }
@@ -552,6 +612,7 @@ async fn fetch_governance_for_template(
     token: Option<String>,
     template: &TemplateId,
     confirmations_by_hash: &mut HashMap<String, (ActionType, Vec<GovernanceConfirmation>)>,
+    domain_confirmations: &mut HashMap<String, (String, Vec<GovernanceConfirmation>)>,
 ) -> Result {
     let mut state_client = utils::create_state_client(config, token).await?;
 
@@ -598,7 +659,14 @@ async fn fetch_governance_for_template(
         if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
             && let Some(created) = active.created_event
         {
-            extract_and_add_confirmation(&created, confirmations_by_hash);
+            if created.template_id.as_ref().is_some_and(|t| {
+                t.module_name == "Governance.Confirmation"
+                    && t.entity_name == "GovernanceConfirmation"
+            }) {
+                extract_and_add_domain_confirmation(&created, domain_confirmations);
+            } else {
+                extract_and_add_confirmation(&created, confirmations_by_hash);
+            }
         }
     }
 
@@ -621,13 +689,16 @@ fn extract_and_add_confirmation(
         return;
     };
 
-    // Try to parse the action
+    // Try to parse the action (vault ActionRequiringConfirmation or core GovernanceSelfAction)
     let action = match action_serializer::deserialize_action(action_field) {
         Ok(a) => a,
-        Err(e) => {
-            tracing::warn!("Failed to deserialize action: {e}");
-            return;
-        }
+        Err(_) => match action_serializer::deserialize_self_action(action_field) {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::warn!("Failed to deserialize action: {e}");
+                return;
+            }
+        },
     };
 
     // Extract confirming party
@@ -654,6 +725,67 @@ fn extract_and_add_confirmation(
     confirmations_by_hash
         .entry(action_hash)
         .or_insert_with(|| (action, Vec::new()))
+        .1
+        .push(confirmation);
+}
+
+/// Extract a domain confirmation (GovernanceConfirmation from governance-core)
+/// and add it to the domain confirmations map, grouped by actionProposalCid
+fn extract_and_add_domain_confirmation(
+    created: &CreatedEvent,
+    domain_confirmations: &mut HashMap<String, (String, Vec<GovernanceConfirmation>)>,
+) {
+    let Some(record) = &created.create_arguments else {
+        return;
+    };
+
+    // Extract actionProposalCid (ContractId)
+    let proposal_cid = record
+        .fields
+        .iter()
+        .find(|f| f.label == "actionProposalCid")
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::ContractId(cid)) => Some(cid.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+
+    // Extract actionLabel (Text)
+    let action_label = record
+        .fields
+        .iter()
+        .find(|f| f.label == "actionLabel")
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Text(t)) => Some(t.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+
+    // Extract confirmer (Party)
+    let confirming_party = record
+        .fields
+        .iter()
+        .find(|f| f.label == "confirmer")
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Party(p)) => Some(p.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+
+    // Use a dummy ActionType for the GovernanceConfirmation struct (domain confirmations
+    // don't have inline actions — they reference a proposal CID instead)
+    let confirmation = GovernanceConfirmation {
+        contract_id: created.contract_id.clone(),
+        action: ActionType::GovernanceSetThreshold { new_threshold: 0 }, // placeholder
+        confirming_party,
+    };
+
+    domain_confirmations
+        .entry(proposal_cid)
+        .or_insert_with(|| (action_label, Vec::new()))
         .1
         .push(confirmation);
 }
@@ -686,12 +818,27 @@ pub async fn get_governance_state(
     if test_mode {
         fetch_governance_state_with_wildcard(config, party_id, token).await
     } else {
-        match governance_state_template(packages) {
-            Some(template) => {
-                fetch_governance_state_for_template(config, party_id, token, &template).await
+        // Try each governance template (vault, core) until we find a match
+        for template in governance_state_templates(packages) {
+            match fetch_governance_state_for_template(config, party_id, token.clone(), &template)
+                .await
+            {
+                Ok(Some(state)) => return Ok(Some(state)),
+                Ok(None) => continue,
+                Err(e) => {
+                    let err_str = e.to_string();
+                    if err_str.contains("PACKAGE_NAMES_NOT_FOUND") {
+                        continue;
+                    }
+                    tracing::warn!(
+                        "Failed to query governance state for {}:{}: {e}",
+                        template.module_name,
+                        template.entity_name
+                    );
+                }
             }
-            None => Ok(None),
         }
+        Ok(None)
     }
 }
 
@@ -741,10 +888,12 @@ async fn fetch_governance_state_with_wildcard(
         if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
             && let Some(created) = active.created_event
         {
-            // Check if this is the VaultGovernanceRules template
+            // Check if this is a governance rules template (vault or core)
             if let Some(ref template_id) = created.template_id
-                && template_id.module_name == "BitsafeVault.VaultGovernance"
-                && template_id.entity_name == "VaultGovernanceRules"
+                && ((template_id.module_name == "BitsafeVault.VaultGovernance"
+                    && template_id.entity_name == "VaultGovernanceRules")
+                    || (template_id.module_name == "Governance.Rules"
+                        && template_id.entity_name == "GovernanceRules"))
             {
                 return Ok(extract_governance_state(&created));
             }
@@ -813,15 +962,15 @@ async fn fetch_governance_state_for_template(
     Ok(None)
 }
 
-/// Extract governance state from a VaultGovernanceRules created event
+/// Extract governance state from a VaultGovernanceRules or GovernanceRules created event
 fn extract_governance_state(created: &CreatedEvent) -> Option<GovernanceState> {
     let record = created.create_arguments.as_ref()?;
 
-    // Extract vaultManager (Party)
+    // Extract governance party (vaultManager for vault, governanceParty for core)
     let vault_manager: CantonId = record
         .fields
         .iter()
-        .find(|f| f.label == "vaultManager")
+        .find(|f| f.label == "vaultManager" || f.label == "governanceParty")
         .and_then(|f| f.value.as_ref())
         .and_then(|v| match &v.sum {
             Some(value::Sum::Party(p)) => p.parse().ok(),
@@ -852,13 +1001,14 @@ fn extract_governance_state(created: &CreatedEvent) -> Option<GovernanceState> {
         })
         .unwrap_or(0);
 
-    // Extract actionConfirmationTimeout (Optional RelTime - RelTime is a Record with Int64)
+    // Extract actionConfirmationTimeout
+    // VaultGovernanceRules: Optional RelTime; GovernanceRules: RelTime (non-optional)
     let timeout = record
         .fields
         .iter()
         .find(|f| f.label == "actionConfirmationTimeout")
         .and_then(|f| f.value.as_ref())
-        .and_then(extract_optional_reltime);
+        .and_then(|v| extract_optional_reltime(v).or_else(|| extract_reltime(v)));
 
     Some(GovernanceState {
         contract_id: created.contract_id.clone(),

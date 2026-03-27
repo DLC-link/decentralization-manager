@@ -13,7 +13,7 @@ pub use governance::{
     cancel_confirmation, confirm_action, execute_action, expire_confirmation, get_amulet_rules,
     get_governance, get_governance_state, get_packages, get_provider_services_handler,
     get_registrar_services_handler, get_token_standard_contracts, get_user_services_handler,
-    get_vaults_handler, query_contracts_handler,
+    get_vaults_handler, propose_action, query_contracts_handler,
 };
 pub use invitations::{accept_invitation, decline_invitation, get_invitations};
 pub use keys::get_key_status;

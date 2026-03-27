@@ -11,6 +11,7 @@ export interface ContractInfo {
 
 export interface PackageConfig {
   governance_core?: string;
+  governance_token_custody?: string;
   utility_credential?: string;
   utility_registry?: string;
   vault?: string;
@@ -252,10 +253,55 @@ export interface GovernanceAction {
   can_execute: boolean;
 }
 
+export interface DomainGovernanceAction {
+  proposal_cid: string;
+  action_label: string;
+  confirmations: GovernanceConfirmation[];
+  confirmation_count: number;
+  can_execute: boolean;
+}
+
 export interface GovernanceResponse {
   actions: GovernanceAction[];
+  domain_actions?: DomainGovernanceAction[];
   threshold: number;
   member_party_id?: string;
+}
+
+export interface InstrumentAllowance {
+  id: string;
+}
+
+export type ProposalType =
+  | {
+      type: "setup_cc_preapproval";
+      provider: string;
+      expected_dso?: string;
+    }
+  | {
+      type: "setup_token_preapproval";
+      operator: string;
+      instrument_admin: string;
+      instrument_allowances: InstrumentAllowance[];
+    }
+  | {
+      type: "transfer";
+      transfer_factory_cid: string;
+      expected_admin: string;
+      receiver: string;
+      amount: string;
+      instrument_id: { admin: string; id: string };
+      input_holding_cids: string[];
+    }
+  | {
+      type: "accept_transfer";
+      transfer_instruction_cid: string;
+    };
+
+export interface ProposeActionRequest {
+  party_id: string;
+  rules_contract_id: string;
+  proposal: ProposalType;
 }
 
 // ============================================================================
@@ -423,10 +469,13 @@ export interface DisclosedContract {
 export type DisclosedContractInput = DisclosedContract;
 
 // Request types
+export type GovernanceType = "vault" | "core_self" | "core_domain";
+
 export interface ConfirmActionRequest {
   party_id: string;
   rules_contract_id: string;
   action: ActionType;
+  governance_type?: GovernanceType;
 }
 
 export interface ExecuteActionRequest {
@@ -435,17 +484,20 @@ export interface ExecuteActionRequest {
   action: ActionType;
   confirmation_cids: string[];
   disclosed_contracts: DisclosedContractInput[];
+  governance_type?: GovernanceType;
 }
 
 export interface ExpireConfirmationRequest {
   party_id: string;
   rules_contract_id: string;
   confirmation_cid: string;
+  governance_type?: GovernanceType;
 }
 
 export interface CancelConfirmationRequest {
   party_id: string;
   confirmation_cid: string;
+  governance_type?: GovernanceType;
 }
 
 // Vault types

@@ -1037,20 +1037,14 @@ export const ContractsDialog = ({
   const isGovernanceCoreDeployed = deployedContracts.some(
     (c) => c.template_id === "Governance.Rules:GovernanceRules",
   );
-  const isGovernanceCoreDarUploaded = vettedPackages.some((p) => {
-    const name = p.package_name.toLowerCase();
-    return (
-      name.includes("governance-core") ||
-      name.includes("governance.rules")
-    );
-  });
-  const isTokenCustodyDarUploaded = vettedPackages.some((p) => {
-    const name = p.package_name.toLowerCase();
-    return (
-      name.includes("governance-token-custody") ||
-      name.includes("tokencustody")
-    );
-  });
+  const isDarUploaded = (patterns: string[]) =>
+    vettedPackages.some((p) => {
+      const name = p.package_name.toLowerCase();
+      return patterns.some((pat) => name.includes(pat));
+    });
+
+  const isGovernanceCoreDarUploaded = isDarUploaded(["governance-core", "governance.rules"]);
+  const isTokenCustodyDarUploaded = isDarUploaded(["governance-token-custody", "tokencustody"]);
 
   // Combine package IDs from config + known contracts for dropdown
   const allPackageIds = useMemo(() => {

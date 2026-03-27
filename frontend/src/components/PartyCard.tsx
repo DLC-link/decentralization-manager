@@ -50,11 +50,16 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
   const [canScrollDown, setCanScrollDown] = useState(false);
   const contractsScrollRef = useRef<HTMLDivElement>(null);
 
-  // Find VaultGovernanceRules contracts from party's contracts
+  // Find governance rules contracts from party's contracts (vault or core)
   const governanceContracts = party.contracts?.filter(
-    (c) => c.template_id.includes("VaultGovernanceRules") || c.template_id.includes("VaultGovernance")
+    (c) => c.template_id.includes("VaultGovernanceRules")
+        || c.template_id.includes("VaultGovernance")
+        || c.template_id === "Governance.Rules:GovernanceRules"
   ) ?? [];
-  const vaultGovernanceRulesContract = governanceContracts[0];
+  const rulesContract = governanceContracts[0];
+  const governanceType = rulesContract?.template_id === "Governance.Rules:GovernanceRules"
+    ? "core_self" as const
+    : "vault" as const;
 
   const updateScrollShadows = useCallback(() => {
     const el = contractsScrollRef.current;
@@ -288,11 +293,12 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
         {authStatus?.rights?.dec_party_act_as && (
           <GovernanceSection
             partyId={party.party_id}
-            rulesContractId={vaultGovernanceRulesContract?.contract_id}
+            rulesContractId={rulesContract?.contract_id}
             governanceContractIds={governanceContracts.map((c) => c.contract_id)}
             memberPartyId={authStatus?.member_party_id}
             defaultOperatorParty={operatorParty}
             network={network}
+            governanceType={governanceType}
           />
         )}
       </CardContent>

@@ -3,8 +3,9 @@ use anyhow::Context;
 use base64::Engine;
 use canton_proto_rs::com::{
     daml::ledger::api::v2::{
-        Command, Commands, DisclosedContract, ExerciseCommand, Identifier, Record, RecordField,
-        SubmitAndWaitRequest, Value, command, command_service_client::CommandServiceClient, value,
+        Command, Commands, CreateCommand, DisclosedContract, ExerciseCommand, Identifier, Record,
+        RecordField, SubmitAndWaitRequest, Value, command,
+        command_service_client::CommandServiceClient, value,
     },
     digitalasset::canton::topology::admin::v30::{
         BaseQuery, ListDecentralizedNamespaceDefinitionRequest, StoreId, Synchronizer, base_query,
@@ -29,8 +30,9 @@ use crate::{
         types::{
             CancelConfirmationRequest, ConfirmActionRequest, ContractQueryResponse,
             ContractWithBlob, ErrorResponse, ExecuteActionRequest, ExpireConfirmationRequest,
-            GovernanceResponse, GovernanceStateResponse, MessageResponse, ProviderServicesResponse,
-            RegistrarServicesResponse, UserServicesResponse, VaultsResponse,
+            GovernanceResponse, GovernanceStateResponse, GovernanceType, MessageResponse,
+            ProposeActionRequest, ProviderServicesResponse, RegistrarServicesResponse,
+            UserServicesResponse, VaultsResponse,
         },
     },
     utils,
@@ -97,8 +99,9 @@ pub async fn get_governance(
     )
     .await
     {
-        Ok(actions) => HttpResponse::Ok().json(GovernanceResponse {
+        Ok((actions, domain_actions)) => HttpResponse::Ok().json(GovernanceResponse {
             actions,
+            domain_actions,
             threshold,
             member_party_id,
         }),
@@ -320,6 +323,115 @@ pub async fn query_contracts_handler(
 // ============================================================================
 // Action Endpoints
 // ============================================================================
+
+/// Propose a domain governance action (creates a GovernableAction proposal contract)
+#[utoipa::path(
+    tag = "Governance",
+    request_body = ProposeActionRequest,
+    responses(
+        (status = 200, description = "Proposal created", body = MessageResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+#[post("/governance/propose")]
+pub async fn propose_action(
+    data: web::Data<AppState>,
+    body: web::Json<ProposeActionRequest>,
+) -> impl Responder {
+    let party_id = &body.party_id;
+    let (token, member_party_id) = match get_party_credentials(&data, party_id).await {
+        Some(creds) => creds,
+        None => {
+            return HttpResponse::Unauthorized().json(ErrorResponse {
+                error: "No credentials configured for party".to_string(),
+            });
+        }
+    };
+
+    let packages = get_packages_for_party(&data, &party_id.to_string()).await;
+    let governance_token_custody_pkg = match packages.governance_token_custody.as_deref() {
+        Some(pkg) => pkg,
+        None => {
+            return HttpResponse::BadRequest().json(ErrorResponse {
+                error: "governance_token_custody package not configured".to_string(),
+            });
+        }
+    };
+
+    let (module_name, entity_name, create_args) = action_serializer::build_proposal_create_args(
+        &party_id.to_string(),
+        &member_party_id,
+        &body.proposal,
+    );
+
+    let template_id = Identifier {
+        package_id: governance_token_custody_pkg.to_string(),
+        module_name: module_name.to_string(),
+        entity_name: entity_name.to_string(),
+    };
+
+    let cmd = Command {
+        command: Some(command::Command::Create(CreateCommand {
+            template_id: Some(template_id),
+            create_arguments: Some(create_args),
+        })),
+    };
+
+    let commands = Commands {
+        workflow_id: String::new(),
+        user_id: String::new(),
+        command_id: uuid::Uuid::new_v4().to_string(),
+        commands: vec![cmd],
+        deduplication_period: None,
+        min_ledger_time_abs: None,
+        min_ledger_time_rel: None,
+        act_as: vec![member_party_id.clone()],
+        read_as: vec![party_id.to_string()],
+        submission_id: String::new(),
+        disclosed_contracts: vec![],
+        synchronizer_id: String::new(),
+        package_id_selection_preference: vec![],
+        prefetch_contract_keys: vec![],
+    };
+
+    let channel = match tonic::transport::Channel::from_shared(data.config.ledger_api_url()) {
+        Ok(endpoint) => match endpoint.connect().await {
+            Ok(ch) => ch,
+            Err(e) => {
+                return HttpResponse::InternalServerError().json(ErrorResponse {
+                    error: format!("Failed to connect to ledger API: {e}"),
+                });
+            }
+        },
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Invalid ledger API URL: {e}"),
+            });
+        }
+    };
+
+    let mut client =
+        CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
+
+    let mut req = tonic::Request::new(SubmitAndWaitRequest {
+        commands: Some(commands),
+    });
+    req.metadata_mut()
+        .insert("authorization", format!("Bearer {token}").parse().unwrap());
+
+    match client.submit_and_wait(req).await {
+        Ok(_) => HttpResponse::Ok().json(MessageResponse {
+            message: "Proposal created successfully".to_string(),
+        }),
+        Err(e) => {
+            tracing::error!("Failed to create proposal: {e}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to create proposal: {e}"),
+            })
+        }
+    }
+}
 
 /// Submit a confirmation for a governance action using structured ActionType
 #[utoipa::path(
@@ -714,10 +826,60 @@ async fn execute_confirm_action(
     member_party_id: &str,
     packages: &PackageConfig,
 ) -> Result {
-    let vault_governance_pkg = packages
-        .vault_governance
-        .as_deref()
-        .context("vault_governance package not configured")?;
+    let (template_id, choice, choice_argument) = match request.governance_type {
+        GovernanceType::Vault => {
+            let pkg = packages
+                .vault_governance
+                .as_deref()
+                .context("vault_governance package not configured")?;
+            (
+                Identifier {
+                    package_id: pkg.to_string(),
+                    module_name: "BitsafeVault.VaultGovernance".to_string(),
+                    entity_name: "VaultGovernanceRules".to_string(),
+                },
+                "VaultGovernanceRules_ConfirmAction".to_string(),
+                action_serializer::build_confirm_action_argument(member_party_id, &request.action),
+            )
+        }
+        GovernanceType::CoreSelf => {
+            let pkg = packages
+                .governance_core
+                .as_deref()
+                .context("governance_core package not configured")?;
+            (
+                Identifier {
+                    package_id: pkg.to_string(),
+                    module_name: "Governance.Rules".to_string(),
+                    entity_name: "GovernanceRules".to_string(),
+                },
+                "GovernanceRules_ConfirmGovernanceAction".to_string(),
+                action_serializer::build_confirm_governance_action_arg(
+                    member_party_id,
+                    &request.action,
+                ),
+            )
+        }
+        GovernanceType::CoreDomain => {
+            let pkg = packages
+                .governance_core
+                .as_deref()
+                .context("governance_core package not configured")?;
+            let proposal_cid = request
+                .proposal_cid
+                .as_deref()
+                .context("proposal_cid required for core_domain confirm")?;
+            (
+                Identifier {
+                    package_id: pkg.to_string(),
+                    module_name: "Governance.Rules".to_string(),
+                    entity_name: "GovernanceRules".to_string(),
+                },
+                "GovernanceRules_ConfirmAction".to_string(),
+                action_serializer::build_confirm_domain_action_arg(member_party_id, proposal_cid),
+            )
+        }
+    };
 
     let channel = tonic::transport::Channel::from_shared(config.ledger_api_url())?
         .connect()
@@ -726,21 +888,11 @@ async fn execute_confirm_action(
     let mut client =
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
 
-    let template_id = Identifier {
-        package_id: vault_governance_pkg.to_string(),
-        module_name: "BitsafeVault.VaultGovernance".to_string(),
-        entity_name: "VaultGovernanceRules".to_string(),
-    };
-
-    // Build choice argument using action_serializer
-    let choice_argument =
-        action_serializer::build_confirm_action_argument(member_party_id, &request.action);
-
     let cmd = Command {
         command: Some(command::Command::Exercise(ExerciseCommand {
             template_id: Some(template_id),
             contract_id: request.rules_contract_id.clone(),
-            choice: "VaultGovernanceRules_ConfirmAction".to_string(),
+            choice,
             choice_argument: Some(choice_argument),
         })),
     };
@@ -773,7 +925,7 @@ async fn execute_confirm_action(
     Ok(())
 }
 
-/// Execute ExecuteConfirmedAction choice on VaultGovernanceRules contract with structured action
+/// Execute ExecuteConfirmedAction choice on governance rules contract
 async fn execute_confirmed_action(
     config: &NodeConfig,
     request: &ExecuteActionRequest,
@@ -781,10 +933,70 @@ async fn execute_confirmed_action(
     member_party_id: &str,
     packages: &PackageConfig,
 ) -> Result {
-    let vault_governance_pkg = packages
-        .vault_governance
-        .as_deref()
-        .context("vault_governance package not configured")?;
+    let (template_id, choice, choice_argument) = match request.governance_type {
+        GovernanceType::Vault => {
+            let pkg = packages
+                .vault_governance
+                .as_deref()
+                .context("vault_governance package not configured")?;
+            (
+                Identifier {
+                    package_id: pkg.to_string(),
+                    module_name: "BitsafeVault.VaultGovernance".to_string(),
+                    entity_name: "VaultGovernanceRules".to_string(),
+                },
+                "VaultGovernanceRules_ExecuteConfirmedAction".to_string(),
+                action_serializer::build_execute_action_argument(
+                    member_party_id,
+                    &request.action,
+                    &request.confirmation_cids,
+                    None,
+                ),
+            )
+        }
+        GovernanceType::CoreSelf => {
+            let pkg = packages
+                .governance_core
+                .as_deref()
+                .context("governance_core package not configured")?;
+            (
+                Identifier {
+                    package_id: pkg.to_string(),
+                    module_name: "Governance.Rules".to_string(),
+                    entity_name: "GovernanceRules".to_string(),
+                },
+                "GovernanceRules_ExecuteGovernanceAction".to_string(),
+                action_serializer::build_execute_governance_action_arg(
+                    member_party_id,
+                    &request.action,
+                    &request.confirmation_cids,
+                ),
+            )
+        }
+        GovernanceType::CoreDomain => {
+            let pkg = packages
+                .governance_core
+                .as_deref()
+                .context("governance_core package not configured")?;
+            let proposal_cid = request
+                .proposal_cid
+                .as_deref()
+                .context("proposal_cid required for core_domain execute")?;
+            (
+                Identifier {
+                    package_id: pkg.to_string(),
+                    module_name: "Governance.Rules".to_string(),
+                    entity_name: "GovernanceRules".to_string(),
+                },
+                "GovernanceRules_ExecuteConfirmedAction".to_string(),
+                action_serializer::build_execute_domain_action_arg(
+                    member_party_id,
+                    proposal_cid,
+                    &request.confirmation_cids,
+                ),
+            )
+        }
+    };
 
     let channel = tonic::transport::Channel::from_shared(config.ledger_api_url())?
         .connect()
@@ -793,25 +1005,11 @@ async fn execute_confirmed_action(
     let mut client =
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
 
-    let template_id = Identifier {
-        package_id: vault_governance_pkg.to_string(),
-        module_name: "BitsafeVault.VaultGovernance".to_string(),
-        entity_name: "VaultGovernanceRules".to_string(),
-    };
-
-    // Build choice argument using action_serializer
-    let choice_argument = action_serializer::build_execute_action_argument(
-        member_party_id,
-        &request.action,
-        &request.confirmation_cids,
-        None, // contractCid is optional, typically None for execute
-    );
-
     let cmd = Command {
         command: Some(command::Command::Exercise(ExerciseCommand {
             template_id: Some(template_id),
             contract_id: request.rules_contract_id.clone(),
-            choice: "VaultGovernanceRules_ExecuteConfirmedAction".to_string(),
+            choice,
             choice_argument: Some(choice_argument),
         })),
     };
@@ -857,7 +1055,7 @@ async fn execute_confirmed_action(
     Ok(())
 }
 
-/// Execute ExpireConfirmation choice on VaultGovernanceRules contract
+/// Execute ExpireConfirmation choice on governance rules contract
 async fn execute_expire_confirmation(
     config: &NodeConfig,
     request: &ExpireConfirmationRequest,
@@ -865,25 +1063,7 @@ async fn execute_expire_confirmation(
     member_party_id: &str,
     packages: &PackageConfig,
 ) -> Result {
-    let vault_governance_pkg = packages
-        .vault_governance
-        .as_deref()
-        .context("vault_governance package not configured")?;
-
-    let channel = tonic::transport::Channel::from_shared(config.ledger_api_url())?
-        .connect()
-        .await?;
-
-    let mut client =
-        CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
-
-    let template_id = Identifier {
-        package_id: vault_governance_pkg.to_string(),
-        module_name: "BitsafeVault.VaultGovernance".to_string(),
-        entity_name: "VaultGovernanceRules".to_string(),
-    };
-
-    // Build choice argument: ExpireConfirmation { member : Party, confirmationCid : ContractId VaultGovernanceConfirmation }
+    // Both vault and core use the same argument shape: { member, staleConfirmationCid }
     let choice_argument = Value {
         sum: Some(value::Sum::Record(Record {
             record_id: None,
@@ -904,11 +1084,52 @@ async fn execute_expire_confirmation(
         })),
     };
 
+    let (template_id, choice) = match request.governance_type {
+        GovernanceType::Vault => {
+            let pkg = packages
+                .vault_governance
+                .as_deref()
+                .context("vault_governance package not configured")?;
+            (
+                Identifier {
+                    package_id: pkg.to_string(),
+                    module_name: "BitsafeVault.VaultGovernance".to_string(),
+                    entity_name: "VaultGovernanceRules".to_string(),
+                },
+                "VaultGovernanceRules_ExpireConfirmation".to_string(),
+            )
+        }
+        GovernanceType::CoreSelf => {
+            let pkg = packages
+                .governance_core
+                .as_deref()
+                .context("governance_core package not configured")?;
+            (
+                Identifier {
+                    package_id: pkg.to_string(),
+                    module_name: "Governance.Rules".to_string(),
+                    entity_name: "GovernanceRules".to_string(),
+                },
+                "GovernanceRules_ExpireGovernanceConfirmation".to_string(),
+            )
+        }
+        GovernanceType::CoreDomain => {
+            anyhow::bail!("Core domain actions not yet supported for expire")
+        }
+    };
+
+    let channel = tonic::transport::Channel::from_shared(config.ledger_api_url())?
+        .connect()
+        .await?;
+
+    let mut client =
+        CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
+
     let cmd = Command {
         command: Some(command::Command::Exercise(ExerciseCommand {
             template_id: Some(template_id),
             contract_id: request.rules_contract_id.clone(),
-            choice: "VaultGovernanceRules_ExpireConfirmation".to_string(),
+            choice,
             choice_argument: Some(choice_argument),
         })),
     };
@@ -941,7 +1162,7 @@ async fn execute_expire_confirmation(
     Ok(())
 }
 
-/// Execute Cancel choice directly on VaultGovernanceConfirmation contract
+/// Execute Cancel choice directly on a confirmation contract
 async fn execute_cancel_confirmation(
     config: &NodeConfig,
     request: &CancelConfirmationRequest,
@@ -949,10 +1170,39 @@ async fn execute_cancel_confirmation(
     member_party_id: &str,
     packages: &PackageConfig,
 ) -> Result {
-    let vault_governance_pkg = packages
-        .vault_governance
-        .as_deref()
-        .context("vault_governance package not configured")?;
+    let (template_id, choice) = match request.governance_type {
+        GovernanceType::Vault => {
+            let pkg = packages
+                .vault_governance
+                .as_deref()
+                .context("vault_governance package not configured")?;
+            (
+                Identifier {
+                    package_id: pkg.to_string(),
+                    module_name: "BitsafeVault.VaultGovernance".to_string(),
+                    entity_name: "VaultGovernanceConfirmation".to_string(),
+                },
+                "VaultGovernanceConfirmation_Cancel".to_string(),
+            )
+        }
+        GovernanceType::CoreSelf => {
+            let pkg = packages
+                .governance_core
+                .as_deref()
+                .context("governance_core package not configured")?;
+            (
+                Identifier {
+                    package_id: pkg.to_string(),
+                    module_name: "Governance.Rules".to_string(),
+                    entity_name: "GovernanceSelfConfirmation".to_string(),
+                },
+                "GovernanceSelfConfirmation_Cancel".to_string(),
+            )
+        }
+        GovernanceType::CoreDomain => {
+            anyhow::bail!("Core domain actions not yet supported for cancel")
+        }
+    };
 
     let channel = tonic::transport::Channel::from_shared(config.ledger_api_url())?
         .connect()
@@ -960,12 +1210,6 @@ async fn execute_cancel_confirmation(
 
     let mut client =
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
-
-    let template_id = Identifier {
-        package_id: vault_governance_pkg.to_string(),
-        module_name: "BitsafeVault.VaultGovernance".to_string(),
-        entity_name: "VaultGovernanceConfirmation".to_string(),
-    };
 
     // Cancel takes no arguments
     let choice_argument = Value {
@@ -979,7 +1223,7 @@ async fn execute_cancel_confirmation(
         command: Some(command::Command::Exercise(ExerciseCommand {
             template_id: Some(template_id),
             contract_id: request.confirmation_cid.clone(),
-            choice: "VaultGovernanceConfirmation_Cancel".to_string(),
+            choice,
             choice_argument: Some(choice_argument),
         })),
     };

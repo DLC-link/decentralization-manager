@@ -144,6 +144,7 @@ pub struct KeycloakConfig {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct PackageConfig {
     pub governance_core: Option<String>,
+    pub governance_token_custody: Option<String>,
     pub utility_credential: Option<String>,
     pub utility_registry: Option<String>,
     pub vault: Option<String>,
@@ -305,6 +306,7 @@ impl Network {
 pub fn default_package_config() -> PackageConfig {
     PackageConfig {
         governance_core: Some("#governance-core-v0".to_string()),
+        governance_token_custody: Some("#governance-token-custody-v0-rc1".to_string()),
         utility_credential: Some("#utility-credential-app-v0".to_string()),
         utility_registry: Some("#utility-registry-app-v0".to_string()),
         vault: Some("#bitsafe-vault-v0-rc8".to_string()),
@@ -634,6 +636,10 @@ network = "devnet"
         assert_eq!(
             packages.governance_core.as_deref(),
             Some("#governance-core-v0"),
+        );
+        assert_eq!(
+            packages.governance_token_custody.as_deref(),
+            Some("#governance-token-custody-v0-rc1"),
         );
         assert_eq!(
             packages.utility_credential.as_deref(),

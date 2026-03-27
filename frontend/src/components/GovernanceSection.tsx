@@ -70,7 +70,10 @@ import type {
   UserServicesResponse,
   ContractWithBlob,
   ContractQueryResponse,
+  DomainGovernanceAction,
   Network,
+  ProposeActionRequest,
+  ProposalType,
 } from "../types";
 
 // Action types — ordered per GOVERNANCE_CLIENT_MIGRATION.md vault launch sequence
@@ -171,6 +174,7 @@ interface GovernanceSectionProps {
   memberPartyId?: string;
   defaultOperatorParty?: string;
   network?: Network;
+  governanceType?: "vault" | "core_self" | "core_domain";
 }
 
 // Default values for action form
@@ -199,6 +203,7 @@ export const GovernanceSection = ({
   memberPartyId,
   defaultOperatorParty,
   network,
+  governanceType = "vault",
 }: GovernanceSectionProps) => {
   const [expanded, setExpanded] = useState(true);
   const [loading, setLoading] = useState(true);
@@ -208,6 +213,22 @@ export const GovernanceSection = ({
   const [executeDialogAction, setExecuteDialogAction] =
     useState<GovernanceAction | null>(null);
   const [executeError, setExecuteError] = useState<string | null>(null);
+  // Domain proposal state
+  const [showProposalForm, setShowProposalForm] = useState(false);
+  const [proposalType, setProposalType] = useState<ProposalType["type"]>("setup_cc_preapproval");
+  const [proposalProvider, setProposalProvider] = useState("");
+  const [proposalExpectedDso, setProposalExpectedDso] = useState("");
+  const [proposalOperator, setProposalOperator] = useState("");
+  const [proposalInstrumentAdmin, setProposalInstrumentAdmin] = useState("");
+  const [proposalTransferFactoryCid, setProposalTransferFactoryCid] = useState("");
+  const [proposalExpectedAdmin, setProposalExpectedAdmin] = useState("");
+  const [proposalReceiver, setProposalReceiver] = useState("");
+  const [proposalAmount, setProposalAmount] = useState("");
+  const [proposalInstrumentIdAdmin, setProposalInstrumentIdAdmin] = useState("");
+  const [proposalInstrumentIdId, setProposalInstrumentIdId] = useState("");
+  const [proposalInputHoldingCids, setProposalInputHoldingCids] = useState("");
+  const [proposalTransferInstructionCid, setProposalTransferInstructionCid] = useState("");
+  const [proposalLoading, setProposalLoading] = useState(false);
   const [rulesContractId, setRulesContractId] = useState(
     initialRulesContractId || "",
   );
@@ -562,6 +583,7 @@ export const GovernanceSection = ({
         party_id: partyId,
         rules_contract_id: rulesContractId,
         action: action.action,
+        governance_type: governanceType,
       };
 
       const res = await fetch(`${API_BASE}/governance/confirm`, {
@@ -605,6 +627,7 @@ export const GovernanceSection = ({
         action: action.action,
         confirmation_cids: action.confirmations.map((c) => c.contract_id),
         disclosed_contracts: disclosedContracts,
+        governance_type: governanceType,
       };
 
       const res = await fetch(`${API_BASE}/governance/execute`, {
@@ -641,6 +664,7 @@ export const GovernanceSection = ({
       const request: CancelConfirmationRequest = {
         party_id: partyId,
         confirmation_cid: confirmationCid,
+        governance_type: governanceType,
       };
 
       const res = await fetch(`${API_BASE}/governance/cancel`, {
@@ -682,6 +706,7 @@ export const GovernanceSection = ({
         party_id: partyId,
         rules_contract_id: rulesContractId,
         confirmation_cid: confirmationCid,
+        governance_type: governanceType,
       };
 
       const res = await fetch(`${API_BASE}/governance/expire`, {
@@ -908,6 +933,7 @@ export const GovernanceSection = ({
         party_id: partyId,
         rules_contract_id: rulesContractId,
         action,
+        governance_type: governanceType,
       };
 
       const res = await fetch(`${API_BASE}/governance/confirm`, {
@@ -930,6 +956,138 @@ export const GovernanceSection = ({
       );
     } finally {
       setFormLoading(false);
+    }
+  };
+
+  const handleSubmitProposal = async () => {
+    if (!rulesContractId) return;
+    setProposalLoading(true);
+    setError(null);
+
+    try {
+      let proposal: ProposalType;
+      switch (proposalType) {
+        case "setup_cc_preapproval":
+          proposal = {
+            type: "setup_cc_preapproval",
+            provider: proposalProvider,
+            expected_dso: proposalExpectedDso || undefined,
+          };
+          break;
+        case "setup_token_preapproval":
+          proposal = {
+            type: "setup_token_preapproval",
+            operator: proposalOperator,
+            instrument_admin: proposalInstrumentAdmin,
+            instrument_allowances: [],
+          };
+          break;
+        case "transfer":
+          proposal = {
+            type: "transfer",
+            transfer_factory_cid: proposalTransferFactoryCid,
+            expected_admin: proposalExpectedAdmin,
+            receiver: proposalReceiver,
+            amount: proposalAmount,
+            instrument_id: { admin: proposalInstrumentIdAdmin, id: proposalInstrumentIdId },
+            input_holding_cids: proposalInputHoldingCids ? proposalInputHoldingCids.split(",").map((s) => s.trim()).filter(Boolean) : [],
+          };
+          break;
+        case "accept_transfer":
+          proposal = {
+            type: "accept_transfer",
+            transfer_instruction_cid: proposalTransferInstructionCid,
+          };
+          break;
+      }
+
+      const request: ProposeActionRequest = {
+        party_id: partyId,
+        rules_contract_id: rulesContractId,
+        proposal,
+      };
+
+      const res = await fetch(`${API_BASE}/governance/propose`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(request),
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || "Failed to create proposal");
+      }
+
+      setShowProposalForm(false);
+      await fetchGovernance();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to create proposal");
+    } finally {
+      setProposalLoading(false);
+    }
+  };
+
+  const handleConfirmDomain = async (domainAction: DomainGovernanceAction) => {
+    if (!rulesContractId) return;
+    setActionLoading(domainAction.proposal_cid);
+    setError(null);
+
+    try {
+      const res = await fetch(`${API_BASE}/governance/confirm`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          party_id: partyId,
+          rules_contract_id: rulesContractId,
+          action: { type: "governance_set_threshold", new_threshold: 0 }, // placeholder
+          governance_type: "core_domain",
+          proposal_cid: domainAction.proposal_cid,
+        }),
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || "Failed to confirm proposal");
+      }
+
+      await fetchGovernance();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to confirm proposal");
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleExecuteDomain = async (domainAction: DomainGovernanceAction) => {
+    if (!rulesContractId) return;
+    setActionLoading(domainAction.proposal_cid);
+    setError(null);
+
+    try {
+      const res = await fetch(`${API_BASE}/governance/execute`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          party_id: partyId,
+          rules_contract_id: rulesContractId,
+          action: { type: "governance_set_threshold", new_threshold: 0 }, // placeholder
+          governance_type: "core_domain",
+          proposal_cid: domainAction.proposal_cid,
+          confirmation_cids: domainAction.confirmations.map((c) => c.contract_id),
+          disclosed_contracts: [],
+        }),
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || "Failed to execute proposal");
+      }
+
+      await fetchGovernance();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to execute proposal");
+    } finally {
+      setActionLoading(null);
     }
   };
 
@@ -2247,7 +2405,7 @@ export const GovernanceSection = ({
             renderInput={(params) => (
               <TextField
                 {...params}
-                label="VaultGovernanceRules Contract ID"
+                label={governanceType === "core_self" ? "GovernanceRules Contract ID" : "VaultGovernanceRules Contract ID"}
                 placeholder="Enter or select contract ID"
               />
             )}
@@ -2290,7 +2448,15 @@ export const GovernanceSection = ({
                   }
                   MenuProps={{ disableScrollLock: true }}
                 >
-                  {getActionTypeOptions(network).filter((opt) => !opt.hidden).map(
+                  {getActionTypeOptions(network).filter((opt) => {
+                    if (opt.hidden && governanceType !== "core_self") return false;
+                    if (governanceType === "core_self") {
+                      // For governance-core, only show self-management actions
+                      const selfActions = ["governance_add_member", "governance_remove_member", "governance_set_threshold", "governance_set_timeout"];
+                      return selfActions.includes(opt.value);
+                    }
+                    return !opt.hidden;
+                  }).map(
                     (opt) => (
                       <MenuItem key={opt.value} value={opt.value}>
                         {opt.label}
@@ -2491,6 +2657,132 @@ export const GovernanceSection = ({
           </Typography>
         )}
       </Collapse>
+
+      {/* Domain Proposals — only for governance-core */}
+      {governanceType === "core_self" && data && (
+        <Box sx={{ mt: 2 }}>
+          <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 1 }}>
+            <Typography variant="subtitle2">
+              Domain Proposals
+              {(data.domain_actions?.length ?? 0) > 0 && (
+                <Chip label={data.domain_actions!.length} size="small" sx={{ ml: 1 }} color="secondary" />
+              )}
+            </Typography>
+            <Button
+              size="small"
+              variant="outlined"
+              onClick={() => setShowProposalForm(!showProposalForm)}
+            >
+              {showProposalForm ? "Cancel" : "New Proposal"}
+            </Button>
+          </Box>
+
+          <Collapse in={showProposalForm}>
+            <Box sx={{ display: "flex", flexDirection: "column", gap: 1.5, mb: 2, p: 2, border: 1, borderColor: "divider", borderRadius: 2 }}>
+              <FormControl size="small" fullWidth>
+                <Select
+                  value={proposalType}
+                  onChange={(e) => setProposalType(e.target.value as ProposalType["type"])}
+                >
+                  <MenuItem value="setup_cc_preapproval">Setup CC Preapproval</MenuItem>
+                  <MenuItem value="setup_token_preapproval">Setup Token Preapproval</MenuItem>
+                  <MenuItem value="transfer">Transfer</MenuItem>
+                  <MenuItem value="accept_transfer">Accept Transfer</MenuItem>
+                </Select>
+              </FormControl>
+
+              {proposalType === "setup_cc_preapproval" && (
+                <>
+                  <TextField size="small" label="Provider Party" value={proposalProvider} onChange={(e) => setProposalProvider(e.target.value)} fullWidth required />
+                  <TextField size="small" label="Expected DSO (optional)" value={proposalExpectedDso} onChange={(e) => setProposalExpectedDso(e.target.value)} fullWidth />
+                </>
+              )}
+
+              {proposalType === "setup_token_preapproval" && (
+                <>
+                  <TextField size="small" label="Operator Party" value={proposalOperator} onChange={(e) => setProposalOperator(e.target.value)} fullWidth required />
+                  <TextField size="small" label="Instrument Admin" value={proposalInstrumentAdmin} onChange={(e) => setProposalInstrumentAdmin(e.target.value)} fullWidth required />
+                </>
+              )}
+
+              {proposalType === "transfer" && (
+                <>
+                  <TextField size="small" label="TransferFactory Contract ID" value={proposalTransferFactoryCid} onChange={(e) => setProposalTransferFactoryCid(e.target.value)} fullWidth required />
+                  <TextField size="small" label="Expected Admin Party" value={proposalExpectedAdmin} onChange={(e) => setProposalExpectedAdmin(e.target.value)} fullWidth required />
+                  <TextField size="small" label="Receiver Party" value={proposalReceiver} onChange={(e) => setProposalReceiver(e.target.value)} fullWidth required />
+                  <TextField size="small" label="Amount" value={proposalAmount} onChange={(e) => setProposalAmount(e.target.value)} fullWidth required />
+                  <TextField size="small" label="Instrument Admin" value={proposalInstrumentIdAdmin} onChange={(e) => setProposalInstrumentIdAdmin(e.target.value)} fullWidth required />
+                  <TextField size="small" label="Instrument ID" value={proposalInstrumentIdId} onChange={(e) => setProposalInstrumentIdId(e.target.value)} fullWidth required />
+                  <TextField size="small" label="Input Holding CIDs (comma-separated)" value={proposalInputHoldingCids} onChange={(e) => setProposalInputHoldingCids(e.target.value)} fullWidth helperText="Leave empty for auto-selection" />
+                </>
+              )}
+
+              {proposalType === "accept_transfer" && (
+                <TextField size="small" label="TransferInstruction Contract ID" value={proposalTransferInstructionCid} onChange={(e) => setProposalTransferInstructionCid(e.target.value)} fullWidth required />
+              )}
+
+              <Button variant="contained" size="small" onClick={handleSubmitProposal} disabled={proposalLoading}>
+                {proposalLoading ? <CircularProgress size={16} /> : "Submit Proposal"}
+              </Button>
+            </Box>
+          </Collapse>
+
+          {(data.domain_actions?.length ?? 0) > 0 ? (
+            <Table size="small">
+              <TableHead>
+                <TableRow>
+                  <TableCell>Proposal</TableCell>
+                  <TableCell>Confirmations</TableCell>
+                  <TableCell align="right">Actions</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {data.domain_actions!.map((da) => (
+                  <TableRow key={da.proposal_cid}>
+                    <TableCell>
+                      <Typography variant="body2">{da.action_label}</Typography>
+                      <Typography variant="caption" color="text.secondary" sx={{ fontFamily: "monospace" }}>
+                        {da.proposal_cid.slice(0, 16)}...
+                      </Typography>
+                    </TableCell>
+                    <TableCell>
+                      {da.confirmation_count} / {data.threshold}
+                    </TableCell>
+                    <TableCell align="right">
+                      <Box sx={{ display: "flex", gap: 0.5, justifyContent: "flex-end" }}>
+                        <Button
+                          size="small"
+                          variant="outlined"
+                          onClick={() => handleConfirmDomain(da)}
+                          disabled={actionLoading === da.proposal_cid}
+                        >
+                          Confirm
+                        </Button>
+                        {da.can_execute && (
+                          <Button
+                            size="small"
+                            variant="contained"
+                            onClick={() => handleExecuteDomain(da)}
+                            disabled={actionLoading === da.proposal_cid}
+                          >
+                            Execute
+                          </Button>
+                        )}
+                      </Box>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          ) : (
+            !showProposalForm && (
+              <Typography variant="body2" color="text.secondary">
+                No domain proposals pending.
+              </Typography>
+            )
+          )}
+        </Box>
+      )}
 
       <ExecuteDialog
         open={executeDialogAction !== null}
