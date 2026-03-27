@@ -61,6 +61,14 @@ fn contract_templates(packages: &PackageConfig) -> Vec<TemplateId> {
             entity_name: "CBTCWithdrawAccount",
         },
     ];
+    // Governance Core contracts (configurable package ID)
+    if let Some(ref pkg) = packages.governance_core {
+        templates.push(TemplateId {
+            package_id: pkg.clone(),
+            module_name: "Governance.Rules",
+            entity_name: "GovernanceRules",
+        });
+    }
     // Vault contracts (configurable package ID)
     if let Some(ref pkg) = packages.vault_governance {
         templates.push(TemplateId {
@@ -138,12 +146,13 @@ fn registrar_service_template(packages: &PackageConfig) -> Option<TemplateId> {
 
 /// Module/entity names for contract templates (used for wildcard filtering)
 const CONTRACT_TEMPLATE_NAMES: &[(&str, &str)] = &[
-    ("CBTC.Governance", "CBTCGovernanceRules"),
-    ("CBTC.DepositAccount", "CBTCDepositAccountRules"),
-    ("CBTC.DepositAccount", "CBTCDepositAccount"),
-    ("CBTC.WithdrawAccount", "CBTCWithdrawAccountRules"),
-    ("CBTC.WithdrawAccount", "CBTCWithdrawAccount"),
     ("BitsafeVault.VaultGovernance", "VaultGovernanceRules"),
+    ("CBTC.DepositAccount", "CBTCDepositAccount"),
+    ("CBTC.DepositAccount", "CBTCDepositAccountRules"),
+    ("CBTC.Governance", "CBTCGovernanceRules"),
+    ("CBTC.WithdrawAccount", "CBTCWithdrawAccount"),
+    ("CBTC.WithdrawAccount", "CBTCWithdrawAccountRules"),
+    ("Governance.Rules", "GovernanceRules"),
 ];
 
 /// Check if a template matches any contract template we want to display

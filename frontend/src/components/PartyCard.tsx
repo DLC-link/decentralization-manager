@@ -303,6 +303,7 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
         participantIds={party.participants.map((p) => p.participant_uid)}
         defaultOperatorParty={operatorParty}
         knownPackageIds={[...new Set(party.contracts?.map((c) => c.package_id) ?? [])]}
+        deployedContracts={party.contracts ?? []}
       />
 
       <DarsDialog

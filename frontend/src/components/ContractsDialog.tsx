@@ -22,18 +22,22 @@ import {
   Card,
   CardActionArea,
   CardContent,
+  Tooltip,
 } from "@mui/material";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import AddIcon from "@mui/icons-material/Add";
 import DeleteIcon from "@mui/icons-material/Delete";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
-import AccountBalanceIcon from "@mui/icons-material/AccountBalance";
-import StorageIcon from "@mui/icons-material/Storage";
+import GavelIcon from "@mui/icons-material/Gavel";
+// Hidden for now — uncomment when CBTC/Vault options are re-enabled
+// import AccountBalanceIcon from "@mui/icons-material/AccountBalance";
+// import StorageIcon from "@mui/icons-material/Storage";
 import { API_BASE } from "../constants";
 import type {
   ContractsStatusResponse,
   ContractsRequest,
   ContractDefinition,
+  ContractInfo,
   FieldDefinition,
   PackageConfig,
 } from "../types";
@@ -46,9 +50,10 @@ interface ContractsDialogProps {
   participantIds: string[];
   defaultOperatorParty?: string;
   knownPackageIds?: string[];
+  deployedContracts?: ContractInfo[];
 }
 
-type ContractType = "cbtc" | "vault" | null;
+type ContractType = "governance-core" | "cbtc" | "vault" | null;
 
 const FIELD_TYPES = [
   { value: "decentralized_party", label: "Dec. Party" },
@@ -114,6 +119,29 @@ const createEmptyContract = (): ContractDefinition => ({
   entity_name: "",
   fields: [],
 });
+
+// Governance Core contract definitions
+const getGovernanceCoreContracts = (
+  participantCount: number = 3,
+  governanceCorePkg: string = "",
+): ContractDefinition[] => {
+  const defaultThreshold = Math.max(2, Math.ceil((participantCount * 2) / 3));
+  return [
+    {
+      id: "create-governance-rules",
+      name: "GovernanceRules",
+      package_id: governanceCorePkg,
+      module_name: "Governance.Rules",
+      entity_name: "GovernanceRules",
+      fields: [
+        { type: "decentralized_party" }, // governanceParty : Party
+        { type: "party_set", parties: [] }, // members : Set Party
+        { type: "governance_threshold", value: defaultThreshold }, // threshold : Int
+        { type: "rel_time", microseconds: 86400000000 }, // actionConfirmationTimeout : RelTime (24 hours)
+      ],
+    },
+  ];
+};
 
 // CBTC contract definitions
 const getCbtcContracts = (): ContractDefinition[] => [
@@ -189,6 +217,11 @@ const getContractsForType = (
   packages?: PackageConfig,
 ): ContractDefinition[] => {
   switch (type) {
+    case "governance-core":
+      return getGovernanceCoreContracts(
+        participantCount,
+        packages?.governance_core ?? "",
+      );
     case "cbtc":
       return getCbtcContracts();
     case "vault":
@@ -792,9 +825,15 @@ const ContractEditor = ({
 // Contract type selection screen
 interface ContractTypeSelectionProps {
   onSelect: (type: ContractType) => void;
+  isGovernanceCoreDeployed: boolean;
+  isGovernanceCoreDarUploaded: boolean;
 }
 
-const ContractTypeSelection = ({ onSelect }: ContractTypeSelectionProps) => {
+const ContractTypeSelection = ({
+  onSelect,
+  isGovernanceCoreDeployed,
+  isGovernanceCoreDarUploaded,
+}: ContractTypeSelectionProps) => {
   return (
     <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
       <Typography variant="body2" color="text.secondary">
@@ -802,6 +841,46 @@ const ContractTypeSelection = ({ onSelect }: ContractTypeSelectionProps) => {
       </Typography>
 
       <Box sx={{ display: "flex", gap: 2, mt: 1 }}>
+        {!isGovernanceCoreDeployed && (
+          <Tooltip
+            title={
+              isGovernanceCoreDarUploaded
+                ? ""
+                : "Upload the governance-core DAR first"
+            }
+            arrow
+          >
+            <Card
+              sx={{
+                flex: 1,
+                border: 1,
+                borderColor: "divider",
+                opacity: isGovernanceCoreDarUploaded ? 1 : 0.5,
+                "&:hover": isGovernanceCoreDarUploaded
+                  ? { borderColor: "primary.main" }
+                  : {},
+              }}
+            >
+              <CardActionArea
+                onClick={() => onSelect("governance-core")}
+                disabled={!isGovernanceCoreDarUploaded}
+                sx={{ p: 2, height: "100%" }}
+              >
+                <CardContent sx={{ textAlign: "center" }}>
+                  <GavelIcon
+                    sx={{ fontSize: 48, color: "primary.main", mb: 1 }}
+                  />
+                  <Typography variant="h6">Governance Core</Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    Deploy core governance rules contract
+                  </Typography>
+                </CardContent>
+              </CardActionArea>
+            </Card>
+          </Tooltip>
+        )}
+
+        {/* CBTC and Vault options hidden for now
         <Card
           sx={{
             flex: 1,
@@ -840,7 +919,7 @@ const ContractTypeSelection = ({ onSelect }: ContractTypeSelectionProps) => {
           >
             <CardContent sx={{ textAlign: "center" }}>
               <StorageIcon
-                sx={{ fontSize: 48, color: "secondary.main", mb: 1 }}
+                sx={{ fontSize: 48, color: "primary.main", mb: 1 }}
               />
               <Typography variant="h6">Vault</Typography>
               <Typography variant="body2" color="text.secondary">
@@ -849,6 +928,7 @@ const ContractTypeSelection = ({ onSelect }: ContractTypeSelectionProps) => {
             </CardContent>
           </CardActionArea>
         </Card>
+        */}
       </Box>
     </Box>
   );
@@ -862,6 +942,7 @@ export const ContractsDialog = ({
   participantIds,
   defaultOperatorParty,
   knownPackageIds = [],
+  deployedContracts = [],
 }: ContractsDialogProps) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -878,9 +959,16 @@ export const ContractsDialog = ({
   const [participantParties, setParticipantParties] = useState<string[]>([]);
   const [contracts, setContracts] = useState<ContractDefinition[]>([]);
 
+  // Governance Core deployment state
+  const isGovernanceCoreDeployed = deployedContracts.some(
+    (c) => c.template_id === "Governance.Rules:GovernanceRules",
+  );
+  const isGovernanceCoreDarUploaded = !!packages.governance_core;
+
   // Combine package IDs from config + known contracts for dropdown
   const allPackageIds = useMemo(() => {
     const ids = new Set(knownPackageIds);
+    if (packages.governance_core) ids.add(packages.governance_core);
     if (packages.vault_governance) ids.add(packages.vault_governance);
     if (packages.vault) ids.add(packages.vault);
     if (packages.utility_registry) ids.add(packages.utility_registry);
@@ -974,7 +1062,7 @@ export const ContractsDialog = ({
     setError(null);
 
     // Validate required fields
-    if (contractType !== "vault" && !operatorParty) {
+    if (contractType !== "vault" && contractType !== "governance-core" && !operatorParty) {
       setError("Operator party ID is required");
       setLoading(false);
       return;
@@ -982,6 +1070,7 @@ export const ContractsDialog = ({
 
     if (
       contractType !== "vault" &&
+      contractType !== "governance-core" &&
       participantParties.length !== participantIds.length
     ) {
       setError(
@@ -1035,6 +1124,7 @@ export const ContractsDialog = ({
 
   const getDialogTitle = () => {
     if (!contractType) return "Deploy Contracts";
+    if (contractType === "governance-core") return "Deploy Governance Core";
     if (contractType === "cbtc") return "Deploy CBTC Contracts";
     return "Deploy Vault Contracts";
   };
@@ -1074,7 +1164,11 @@ export const ContractsDialog = ({
           )}
 
           {!isInProgress && !isCompleted && !contractType && (
-            <ContractTypeSelection onSelect={setContractType} />
+            <ContractTypeSelection
+              onSelect={setContractType}
+              isGovernanceCoreDeployed={isGovernanceCoreDeployed}
+              isGovernanceCoreDarUploaded={isGovernanceCoreDarUploaded}
+            />
           )}
 
           {!isInProgress && !isCompleted && contractType && (
@@ -1085,7 +1179,7 @@ export const ContractsDialog = ({
                 submissions. Make sure DARs have been uploaded first.
               </Typography>
 
-              {contractType !== "vault" && (
+              {contractType !== "vault" && contractType !== "governance-core" && (
                 <>
                   <Divider />
                   <Typography variant="subtitle1">
@@ -1094,7 +1188,7 @@ export const ContractsDialog = ({
                 </>
               )}
 
-              {contractType !== "vault" && (
+              {contractType !== "vault" && contractType !== "governance-core" && (
                 <TextField
                   size="small"
                   label="Operator Party ID"

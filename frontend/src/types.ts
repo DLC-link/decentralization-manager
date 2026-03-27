@@ -10,10 +10,11 @@ export interface ContractInfo {
 }
 
 export interface PackageConfig {
-  vault_governance?: string;
-  vault?: string;
-  utility_registry?: string;
+  governance_core?: string;
   utility_credential?: string;
+  utility_registry?: string;
+  vault?: string;
+  vault_governance?: string;
 }
 
 export interface PartyConfigRequest {
