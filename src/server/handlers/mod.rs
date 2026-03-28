@@ -17,7 +17,7 @@ pub use governance::{
 };
 pub use invitations::{accept_invitation, decline_invitation, get_invitations};
 pub use keys::get_key_status;
-pub use parties::{get_decentralized_parties, get_participants_status};
+pub use parties::{compare_peer_packages, get_decentralized_parties, get_participants_status};
 pub use party_config::{get_party_config, save_party_config};
 pub use workflows::{
     ContractsWorkflowState, DarsWorkflowState, KickWorkflowState, OnboardingWorkflowState,

@@ -26,8 +26,8 @@ use crate::{
         queries::{get_contracts, get_party_metadata},
         types::{
             ConnectionStatus, DecentralizedPartiesResponse, DecentralizedParty, ErrorResponse,
-            ParticipantInfo, ParticipantStatus, ParticipantsStatusResponse, Permission,
-            VettedPackageInfo,
+            PackageInfo, ParticipantInfo, ParticipantStatus, ParticipantsStatusResponse,
+            PeerPackageComparison, PeerPackageResult, Permission, VettedPackageInfo,
         },
     },
     utils,
@@ -454,4 +454,123 @@ async fn check_participants_status(config: &NodeConfig) -> Result<ParticipantsSt
     let statuses: Vec<ParticipantStatus> = results.into_iter().filter_map(|r| r.ok()).collect();
 
     Ok(ParticipantsStatusResponse { statuses })
+}
+
+/// Compare locally uploaded packages with peer nodes via Noise protocol
+#[utoipa::path(
+    tag = "Packages",
+    responses(
+        (status = 200, description = "Peer package comparison", body = PeerPackageComparison),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+#[get("/packages/compare-peers")]
+pub async fn compare_peer_packages(data: web::Data<AppState>) -> impl Responder {
+    match fetch_peer_packages(&data.config).await {
+        Ok(comparison) => HttpResponse::Ok().json(comparison),
+        Err(e) => {
+            tracing::error!("Failed to compare peer packages: {e}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to compare peer packages: {e}"),
+            })
+        }
+    }
+}
+
+async fn fetch_peer_packages(config: &NodeConfig) -> Result<PeerPackageComparison> {
+    // Get local packages
+    let mut client = PackageServiceClient::connect(config.admin_api_url()).await?;
+    let local_response = client
+        .list_packages(tonic::Request::new(ListPackagesRequest {
+            limit: 0,
+            filter_name: String::new(),
+        }))
+        .await?
+        .into_inner();
+
+    let local_packages: Vec<PackageInfo> = local_response
+        .package_descriptions
+        .into_iter()
+        .map(|p| PackageInfo {
+            package_id: p.package_id,
+            name: p.name,
+            version: p.version,
+        })
+        .collect();
+
+    // Load network config and keypair for Noise communication
+    let network_config = config.load_network_config().await?;
+    let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
+    let current_participant_id = config.participant_id();
+
+    let invite_message = Message::new_empty(MessageType::ListPackages);
+
+    // Query each peer in parallel
+    let peer_futures: Vec<_> = network_config
+        .peers
+        .iter()
+        .filter(|p| p.participant_id != *current_participant_id && !p.public_key.is_empty())
+        .map(|peer| {
+            let keypair = keypair.clone();
+            let peer = peer.clone();
+            let msg = invite_message.clone();
+            async move {
+                let peer_pub_key = match parse_public_key(&peer.public_key) {
+                    Ok(pk) => pk,
+                    Err(_) => {
+                        return PeerPackageResult {
+                            participant_id: peer.participant_id.to_string(),
+                            name: peer.name.clone(),
+                            reachable: false,
+                            packages: vec![],
+                        };
+                    }
+                };
+
+                let psk = keypair.derive_psk(&peer_pub_key);
+                let identity = current_participant_id.to_string();
+
+                match tokio::time::timeout(
+                    Duration::from_secs(5),
+                    send_noise_message(&peer.address, peer.port, &psk, identity.as_bytes(), &msg),
+                )
+                .await
+                {
+                    Ok(Ok(response)) => {
+                        if let Ok(response_msg) = Message::from_bytes(&response)
+                            && response_msg.msg_type == MessageType::Data
+                            && let Ok(packages) =
+                                serde_json::from_slice::<Vec<PackageInfo>>(&response_msg.payload)
+                        {
+                            return PeerPackageResult {
+                                participant_id: peer.participant_id.to_string(),
+                                name: peer.name.clone(),
+                                reachable: true,
+                                packages,
+                            };
+                        }
+                        PeerPackageResult {
+                            participant_id: peer.participant_id.to_string(),
+                            name: peer.name.clone(),
+                            reachable: true,
+                            packages: vec![],
+                        }
+                    }
+                    _ => PeerPackageResult {
+                        participant_id: peer.participant_id.to_string(),
+                        name: peer.name.clone(),
+                        reachable: false,
+                        packages: vec![],
+                    },
+                }
+            }
+        })
+        .collect();
+
+    let peers = futures::future::join_all(peer_futures).await;
+
+    Ok(PeerPackageComparison {
+        local_packages,
+        peers,
+    })
 }

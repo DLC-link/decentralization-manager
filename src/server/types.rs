@@ -117,6 +117,31 @@ pub struct VettedPackageInfo {
     pub package_version: String,
 }
 
+/// Package info for peer comparison
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
+pub struct PackageInfo {
+    pub package_id: String,
+    pub name: String,
+    pub version: String,
+}
+
+/// Result of querying packages from a single peer
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct PeerPackageResult {
+    pub participant_id: String,
+    pub name: String,
+    pub reachable: bool,
+    #[serde(default)]
+    pub packages: Vec<PackageInfo>,
+}
+
+/// Response from the peer DAR comparison endpoint
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct PeerPackageComparison {
+    pub local_packages: Vec<PackageInfo>,
+    pub peers: Vec<PeerPackageResult>,
+}
+
 /// Party metadata from Ledger API
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct PartyMetadata {

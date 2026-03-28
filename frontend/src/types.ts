@@ -50,6 +50,24 @@ export interface VettedPackageInfo {
   package_version: string;
 }
 
+export interface PackageInfo {
+  package_id: string;
+  name: string;
+  version: string;
+}
+
+export interface PeerPackageResult {
+  participant_id: string;
+  name: string;
+  reachable: boolean;
+  packages: PackageInfo[];
+}
+
+export interface PeerPackageComparison {
+  local_packages: PackageInfo[];
+  peers: PeerPackageResult[];
+}
+
 export interface PartyMetadata {
   annotations: Record<string, string>;
 }
