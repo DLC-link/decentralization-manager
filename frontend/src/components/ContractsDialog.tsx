@@ -1151,7 +1151,6 @@ export const ContractsDialog = ({
 
     if (
       contractType !== "vault" &&
-      contractType !== "governance-core" &&
       participantParties.length !== participantIds.length
     ) {
       setError(
