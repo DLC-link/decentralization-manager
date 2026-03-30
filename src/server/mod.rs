@@ -267,7 +267,7 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig, test_mode: 
             .service(handlers::expire_confirmation)
             .service(handlers::cancel_confirmation)
             .service(handlers::get_token_standard_contracts)
-            .service(handlers::get_amulet_rules)
+            .service(handlers::get_network_info)
             .service(handlers::get_party_config)
             .service(handlers::save_party_config)
             .split_for_parts();

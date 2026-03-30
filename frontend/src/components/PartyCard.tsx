@@ -28,6 +28,7 @@ import { GovernanceSection } from "./GovernanceSection";
 import { AuthSection } from "./AuthSection";
 import type { DecentralizedParty, Network, PartyAuthStatus, VettedPackageInfo } from "../types";
 import { ADMIN_ACCESS } from "../constants";
+import { zebraRow } from "../styles";
 
 interface PartyCardProps {
   party: DecentralizedParty;
@@ -86,7 +87,7 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
   const isOwner = Boolean(party.my_owner_key);
   return (
     <Card sx={{ mb: 3, borderRadius: 2 }}>
-      <CardContent sx={{ p: 3, "&:last-child": { pb: 3 } }}>
+      <CardContent sx={{ p: 3, pb: 0, "&:last-child": { pb: 0 } }}>
         <CopyableText
           text={party.party_id}
           truncate={{ start: party.party_id.indexOf("::") + 18, end: 16 }}
@@ -123,7 +124,7 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
               onClick={() => setContractsDialogOpen(true)}
               disabled={!ADMIN_ACCESS}
             >
-              Deploy Contracts
+              {governanceType === "core_self" ? "Manage Plugins" : "Deploy Contracts"}
             </Button>
           )}
         </Box>
@@ -155,8 +156,8 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
             </TableRow>
           </TableHead>
           <TableBody>
-            {party.participants.map((p) => (
-              <TableRow key={p.participant_uid}>
+            {party.participants.map((p, idx) => (
+              <TableRow key={p.participant_uid} sx={zebraRow(idx)}>
                 <TableCell sx={{ py: 1 }}>
                   <CopyableText
                     text={p.participant_uid}
@@ -253,8 +254,8 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
                     </TableRow>
                   </TableHead>
                   <TableBody>
-                    {party.contracts.map((c) => (
-                      <TableRow key={c.contract_id}>
+                    {party.contracts.map((c, idx) => (
+                      <TableRow key={c.contract_id} sx={zebraRow(idx)}>
                         <TableCell sx={{ py: 1 }}>{c.template_id}</TableCell>
                         <TableCell sx={{ py: 1 }}>
                           <CopyableText
@@ -288,20 +289,22 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
         </>
       )}
 
-      <CardContent sx={{ pt: 0 }}>
-        <AuthSection partyId={party.party_id} authStatus={authStatus} onRefresh={onAuthRefresh} />
-        {authStatus?.rights?.dec_party_act_as && (
-          <GovernanceSection
-            partyId={party.party_id}
-            rulesContractId={rulesContract?.contract_id}
-            governanceContractIds={governanceContracts.map((c) => c.contract_id)}
-            memberPartyId={authStatus?.member_party_id}
-            defaultOperatorParty={operatorParty}
-            network={network}
-            governanceType={governanceType}
-          />
-        )}
-      </CardContent>
+      {authStatus && (
+        <CardContent sx={{ pt: 1, pb: 0, "&:last-child": { pb: 0 } }}>
+          <AuthSection partyId={party.party_id} authStatus={authStatus} onRefresh={onAuthRefresh} />
+          {authStatus.rights?.dec_party_act_as && (
+            <GovernanceSection
+              partyId={party.party_id}
+              rulesContractId={rulesContract?.contract_id}
+              governanceContractIds={governanceContracts.map((c) => c.contract_id)}
+              memberPartyId={authStatus.member_party_id}
+              defaultOperatorParty={operatorParty}
+              network={network}
+              governanceType={governanceType}
+            />
+          )}
+        </CardContent>
+      )}
 
       <KickDialog
         open={kickDialogOpen}

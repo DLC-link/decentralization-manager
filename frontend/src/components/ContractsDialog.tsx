@@ -943,7 +943,7 @@ const ContractTypeSelection = ({
       {isGovernanceCoreDeployed && (
         <>
           <Typography variant="body2" color="text.secondary">
-            Governance Core is deployed. Select a plugin to deploy.
+            Governance Core is deployed. Available plugins:
           </Typography>
           <Box
             sx={{
@@ -960,7 +960,7 @@ const ContractTypeSelection = ({
                 />
               }
               label="Token Custody"
-              description="Deploy token custody contracts"
+              description="Receive, transfer, and manage tokens via governance"
               enabled={isTokenCustodyDarUploaded}
               tooltip={
                 isTokenCustodyDarUploaded
@@ -975,7 +975,7 @@ const ContractTypeSelection = ({
                 />
               }
               label="CBTC"
-              description="Deploy CBTC governance and account rules"
+              description="Bitcoin-backed deposit and withdrawal management"
               onClick={() => onSelect("cbtc")}
               tooltip="Coming soon"
             />
@@ -986,7 +986,7 @@ const ContractTypeSelection = ({
                 />
               }
               label="Vault"
-              description="Deploy Bitsafe Vault governance contracts"
+              description="Pooled custody with yield and share accounting"
               onClick={() => onSelect("vault")}
               tooltip="Coming soon"
             />
@@ -997,8 +997,18 @@ const ContractTypeSelection = ({
                 />
               }
               label="Utility"
-              description="Deploy utility registry and credential contracts"
+              description="Registry services and verifiable credentials"
               tooltip="Coming soon"
+            />
+            <PluginCard
+              icon={
+                <AddIcon
+                  sx={{ fontSize: 48, color: "primary.main", mb: 1 }}
+                />
+              }
+              label="Add Plugin"
+              description="Upload a custom plugin DAR from the Packages tab"
+              tooltip="Go to the Packages tab to upload DARs"
             />
           </Box>
         </>
@@ -1203,7 +1213,7 @@ export const ContractsDialog = ({
   const isFailed = status?.status === "failed";
 
   const getDialogTitle = () => {
-    if (!contractType) return "Deploy Contracts";
+    if (!contractType) return isGovernanceCoreDeployed ? "Plugin Manager" : "Deploy Contracts";
     if (contractType === "governance-core") return "Deploy Governance Core";
     if (contractType === "cbtc") return "Deploy CBTC Contracts";
     return "Deploy Vault Contracts";

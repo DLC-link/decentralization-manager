@@ -4,7 +4,7 @@ use base64::Engine;
 use canton_proto_rs::com::{
     daml::ledger::api::v2::{
         Command, Commands, CreateCommand, DisclosedContract, ExerciseCommand, Identifier, Record,
-        RecordField, SubmitAndWaitRequest, Value, command,
+        RecordField, SubmitAndWaitForTransactionRequest, SubmitAndWaitRequest, Value, command,
         command_service_client::CommandServiceClient, value,
     },
     digitalasset::canton::topology::admin::v30::{
@@ -28,9 +28,9 @@ use crate::{
             get_registrar_services, get_user_services, get_vaults, query_contracts_by_template,
         },
         types::{
-            CancelConfirmationRequest, ConfirmActionRequest, ContractQueryResponse,
-            ContractWithBlob, ErrorResponse, ExecuteActionRequest, ExpireConfirmationRequest,
-            GovernanceResponse, GovernanceStateResponse, GovernanceType, MessageResponse,
+            CancelConfirmationRequest, ConfirmActionRequest, ContractQueryResponse, ErrorResponse,
+            ExecuteActionRequest, ExpireConfirmationRequest, GovernanceResponse,
+            GovernanceStateResponse, GovernanceType, MessageResponse, NetworkInfo,
             ProposeActionRequest, ProviderServicesResponse, RegistrarServicesResponse,
             UserServicesResponse, VaultsResponse,
         },
@@ -414,20 +414,111 @@ pub async fn propose_action(
     let mut client =
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
 
-    let mut req = tonic::Request::new(SubmitAndWaitRequest {
+    // Step 1: Create the proposal and get the contract ID back
+    let mut create_req = tonic::Request::new(SubmitAndWaitForTransactionRequest {
         commands: Some(commands),
+        transaction_format: None,
     });
-    req.metadata_mut()
+    create_req
+        .metadata_mut()
         .insert("authorization", format!("Bearer {token}").parse().unwrap());
 
-    match client.submit_and_wait(req).await {
-        Ok(_) => HttpResponse::Ok().json(MessageResponse {
-            message: "Proposal created successfully".to_string(),
-        }),
+    let proposal_cid = match client.submit_and_wait_for_transaction(create_req).await {
+        Ok(response) => {
+            // Extract created contract ID from the transaction events
+            match response.into_inner().transaction.and_then(|tx| {
+                tx.events.iter().find_map(|event| {
+                    event.event.as_ref().and_then(|e| match e {
+                        canton_proto_rs::com::daml::ledger::api::v2::event::Event::Created(
+                            created,
+                        ) => Some(created.contract_id.clone()),
+                        _ => None,
+                    })
+                })
+            }) {
+                Some(cid) => cid,
+                None => {
+                    return HttpResponse::InternalServerError().json(ErrorResponse {
+                        error: "Proposal created but could not extract contract ID".to_string(),
+                    });
+                }
+            }
+        }
         Err(e) => {
             tracing::error!("Failed to create proposal: {e}");
-            HttpResponse::InternalServerError().json(ErrorResponse {
+            return HttpResponse::InternalServerError().json(ErrorResponse {
                 error: format!("Failed to create proposal: {e}"),
+            });
+        }
+    };
+
+    tracing::info!("Proposal created with CID: {proposal_cid}");
+
+    // Step 2: Immediately confirm the proposal as the proposer
+    let governance_core_pkg = match packages.governance_core.as_deref() {
+        Some(pkg) => pkg,
+        None => {
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: "governance_core package not configured".to_string(),
+            });
+        }
+    };
+
+    let confirm_template = Identifier {
+        package_id: governance_core_pkg.to_string(),
+        module_name: "Governance.Rules".to_string(),
+        entity_name: "GovernanceRules".to_string(),
+    };
+
+    let confirm_arg =
+        action_serializer::build_confirm_domain_action_arg(&member_party_id, &proposal_cid);
+
+    let confirm_cmd = Command {
+        command: Some(command::Command::Exercise(ExerciseCommand {
+            template_id: Some(confirm_template),
+            contract_id: body.rules_contract_id.clone(),
+            choice: "GovernanceRules_ConfirmAction".to_string(),
+            choice_argument: Some(confirm_arg),
+        })),
+    };
+
+    let confirm_commands = Commands {
+        workflow_id: String::new(),
+        user_id: String::new(),
+        command_id: uuid::Uuid::new_v4().to_string(),
+        commands: vec![confirm_cmd],
+        deduplication_period: None,
+        min_ledger_time_abs: None,
+        min_ledger_time_rel: None,
+        act_as: vec![member_party_id.clone()],
+        read_as: vec![party_id.to_string()],
+        submission_id: String::new(),
+        disclosed_contracts: vec![],
+        synchronizer_id: String::new(),
+        package_id_selection_preference: vec![],
+        prefetch_contract_keys: vec![],
+    };
+
+    let mut confirm_req = tonic::Request::new(SubmitAndWaitRequest {
+        commands: Some(confirm_commands),
+    });
+    confirm_req
+        .metadata_mut()
+        .insert("authorization", format!("Bearer {token}").parse().unwrap());
+
+    match client.submit_and_wait(confirm_req).await {
+        Ok(_) => {
+            tracing::info!("Proposal {proposal_cid} confirmed by proposer");
+            HttpResponse::Ok().json(MessageResponse {
+                message: "Proposal created and confirmed".to_string(),
+            })
+        }
+        Err(e) => {
+            tracing::error!("Proposal created but confirmation failed: {e}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!(
+                    "Proposal created (CID: {proposal_cid}) but confirmation failed: {e}"
+                ),
             })
         }
     }
@@ -635,22 +726,23 @@ pub async fn get_packages(
     HttpResponse::Ok().json(packages)
 }
 
-/// Fetch AmuletRules contract from the DSO API
+/// Get DSO network info (DSO party ID + amulet rules contract)
 #[utoipa::path(
     tag = "Proxy",
     responses(
-        (status = 200, description = "AmuletRules contract", body = ContractWithBlob),
-        (status = 502, description = "Bad gateway", body = ErrorResponse)
+        (status = 200, description = "Network info", body = NetworkInfo),
+        (status = 502, description = "DSO API error", body = ErrorResponse)
     )
 )]
-#[get("/amulet-rules")]
-pub async fn get_amulet_rules(data: web::Data<AppState>) -> impl Responder {
+#[get("/network-info")]
+pub async fn get_network_info(data: web::Data<AppState>) -> impl Responder {
     let url = data.config.canton.network.dso_url();
     let client = reqwest::Client::new();
 
     match client.get(url).send().await {
         Ok(res) if res.status().is_success() => match res.json::<serde_json::Value>().await {
             Ok(json) => {
+                let dso_party = json.pointer("/dso_party_id").and_then(|v| v.as_str());
                 let contract_id = json
                     .pointer("/amulet_rules/contract/contract_id")
                     .and_then(|v| v.as_str());
@@ -658,13 +750,19 @@ pub async fn get_amulet_rules(data: web::Data<AppState>) -> impl Responder {
                     .pointer("/amulet_rules/contract/created_event_blob")
                     .and_then(|v| v.as_str());
 
-                match (contract_id, blob) {
-                    (Some(cid), Some(blob)) => HttpResponse::Ok().json(ContractWithBlob {
-                        contract_id: cid.to_string(),
-                        blob: blob.to_string(),
-                    }),
+                match (dso_party, contract_id, blob) {
+                    (Some(dso), Some(cid), Some(blob)) => match dso.parse::<CantonId>() {
+                        Ok(dso_id) => HttpResponse::Ok().json(NetworkInfo {
+                            dso_party_id: dso_id,
+                            amulet_rules_cid: cid.to_string(),
+                            amulet_rules_blob: blob.to_string(),
+                        }),
+                        Err(e) => HttpResponse::BadGateway().json(ErrorResponse {
+                            error: format!("Invalid DSO party ID: {e}"),
+                        }),
+                    },
                     _ => {
-                        tracing::warn!("Unexpected amulet-rules response format: {json}");
+                        tracing::warn!("Unexpected DSO API response format");
                         HttpResponse::BadGateway().json(ErrorResponse {
                             error: "Unexpected response format from DSO API".to_string(),
                         })
@@ -672,7 +770,7 @@ pub async fn get_amulet_rules(data: web::Data<AppState>) -> impl Responder {
                 }
             }
             Err(e) => HttpResponse::BadGateway().json(ErrorResponse {
-                error: format!("Failed to parse amulet-rules response: {e}"),
+                error: format!("Failed to parse DSO response: {e}"),
             }),
         },
         Ok(res) => {

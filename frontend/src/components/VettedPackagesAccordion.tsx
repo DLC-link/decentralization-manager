@@ -1,8 +1,5 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import {
-  Accordion,
-  AccordionSummary,
-  AccordionDetails,
   Typography,
   Box,
   Table,
@@ -10,42 +7,32 @@ import {
   TableBody,
   TableRow,
   TableCell,
-  Chip,
   Button,
   CircularProgress,
   Tooltip,
 } from "@mui/material";
-import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
+import CloudUploadIcon from "@mui/icons-material/CloudUpload";
 import CompareArrowsIcon from "@mui/icons-material/CompareArrows";
 import SignalWifiOffIcon from "@mui/icons-material/SignalWifiOff";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import ErrorIcon from "@mui/icons-material/Error";
 import { CopyableText } from "./CopyableText";
 import { API_BASE } from "../constants";
+import { zebraRow } from "../styles";
 import type {
   VettedPackageInfo,
   PeerPackageComparison,
   PeerPackageResult,
 } from "../types";
 
-const accordionSx = {
-  borderRadius: 2,
-  mb: 2,
-  "&:first-of-type": { borderRadius: 2 },
-  "&:last-of-type": { borderRadius: 2 },
-  overflow: "hidden",
-};
-
-const zebraRow = (index: number) => ({
-  bgcolor: index % 2 === 0 ? "transparent" : "action.hover",
-});
-
 interface VettedPackagesAccordionProps {
   packages: VettedPackageInfo[];
+  onUploadDars?: () => void;
 }
 
 export const VettedPackagesAccordion = ({
   packages,
+  onUploadDars,
 }: VettedPackagesAccordionProps) => {
   const [canScrollUp, setCanScrollUp] = useState(false);
   const [canScrollDown, setCanScrollDown] = useState(false);
@@ -124,39 +111,31 @@ export const VettedPackagesAccordion = ({
 
   const statusColor = (
     status: "match" | "mismatch" | "unreachable",
+    rowIndex: number,
   ): string => {
     switch (status) {
       case "match":
-        return "success.light";
+        return rowIndex % 2 === 0
+          ? "rgba(76, 175, 80, 0.08)"
+          : "rgba(76, 175, 80, 0.15)";
       case "mismatch":
-        return "error.light";
+        return rowIndex % 2 === 0
+          ? "rgba(244, 67, 54, 0.08)"
+          : "rgba(244, 67, 54, 0.15)";
       case "unreachable":
-        return "action.disabledBackground";
+        return rowIndex % 2 === 0 ? "transparent" : "action.hover";
     }
   };
 
   return (
-    <Accordion sx={accordionSx}>
-      <AccordionSummary
-        expandIcon={<ExpandMoreIcon />}
-        sx={{ borderRadius: "8px 8px 0 0" }}
-      >
-        <Typography variant="h6">
-          Vetted Packages
-          <Chip
-            label={packages.length}
-            size="small"
-            sx={{ ml: 1 }}
-            color="primary"
-          />
-        </Typography>
-      </AccordionSummary>
-      <AccordionDetails sx={{ p: 0 }}>
-        <Box sx={{ px: 2, pt: 1, pb: 1.5 }}>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-            Packages vetted on this participant. Use "Check Peer DARs" to
-            compare with other nodes in the network.
+    <Box sx={{ display: "flex", flexDirection: "column", height: "calc(100vh - 200px)" }}>
+      <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 2, flexShrink: 0 }}>
+        <Box>
+          <Typography variant="body2" color="text.secondary">
+            {packages.length} packages vetted on this participant
           </Typography>
+        </Box>
+        <Box sx={{ display: "flex", gap: 1 }}>
           <Button
             variant="outlined"
             size="small"
@@ -172,9 +151,21 @@ export const VettedPackagesAccordion = ({
           >
             {comparing ? "Checking..." : "Check Peer DARs"}
           </Button>
+          {onUploadDars && (
+            <Button
+              variant="contained"
+              size="small"
+              color="secondary"
+              startIcon={<CloudUploadIcon />}
+              onClick={onUploadDars}
+            >
+              Upload DARs
+            </Button>
+          )}
         </Box>
+      </Box>
 
-        <Box sx={{ position: "relative" }}>
+        <Box sx={{ position: "relative", flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
           <Box
             sx={{
               position: "absolute",
@@ -193,7 +184,8 @@ export const VettedPackagesAccordion = ({
           <Box
             ref={scrollRef}
             sx={{
-              maxHeight: 400,
+              flex: 1,
+              minHeight: 0,
               overflowY: "auto",
               overflowX: "auto",
             }}
@@ -227,7 +219,7 @@ export const VettedPackagesAccordion = ({
                             gap: 0.5,
                           }}
                         >
-                          {peer.name || peer.participant_id.split("::")[0]}
+                          {peer.name || peer.participant_id}
                           {!peer.reachable && (
                             <Tooltip title="Unreachable" arrow>
                               <SignalWifiOffIcon
@@ -265,7 +257,7 @@ export const VettedPackagesAccordion = ({
                               sx={{
                                 py: 0.75,
                                 textAlign: "center",
-                                bgcolor: statusColor(status),
+                                bgcolor: statusColor(status, idx),
                               }}
                             >
                               {status === "match" && (
@@ -343,7 +335,6 @@ export const VettedPackagesAccordion = ({
             }}
           />
         </Box>
-      </AccordionDetails>
-    </Accordion>
+    </Box>
   );
 };

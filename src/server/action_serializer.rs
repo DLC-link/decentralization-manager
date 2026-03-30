@@ -670,14 +670,6 @@ pub fn build_execute_governance_action_arg(
 // Governance-Core Domain Action Proposal Serialization
 // ============================================================================
 
-fn make_optional_party(party: &Option<CantonId>) -> Value {
-    Value {
-        sum: Some(value::Sum::Optional(Box::new(Optional {
-            value: party.as_ref().map(|p| Box::new(make_party(p))),
-        }))),
-    }
-}
-
 fn serialize_instrument_allowances(allowances: &[InstrumentAllowance]) -> Value {
     make_list(
         allowances
@@ -708,7 +700,14 @@ pub fn build_proposal_create_args(
                     field("governanceParty", make_party(governance_party)),
                     field("proposer", make_party(proposer)),
                     field("provider", make_party(provider)),
-                    field("expectedDso", make_optional_party(expected_dso)),
+                    field(
+                        "expectedDso",
+                        Value {
+                            sum: Some(value::Sum::Optional(Box::new(Optional {
+                                value: Some(Box::new(make_party(expected_dso))),
+                            }))),
+                        },
+                    ),
                 ],
             },
         ),

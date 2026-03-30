@@ -590,7 +590,7 @@ pub enum ProposalType {
     /// Set up Canton Coin TransferPreapproval
     SetupCcPreapproval {
         provider: CantonId,
-        expected_dso: Option<CantonId>,
+        expected_dso: CantonId,
     },
     /// Set up utility token TransferPreapproval
     SetupTokenPreapproval {
@@ -807,6 +807,14 @@ pub struct RegistrarServicesResponse {
 pub struct ContractWithBlob {
     pub contract_id: String,
     pub blob: String,
+}
+
+/// DSO network info (amulet rules + DSO party)
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct NetworkInfo {
+    pub dso_party_id: CantonId,
+    pub amulet_rules_cid: String,
+    pub amulet_rules_blob: String,
 }
 
 /// Response for the generic contract query endpoint

@@ -294,7 +294,7 @@ export type ProposalType =
   | {
       type: "setup_cc_preapproval";
       provider: string;
-      expected_dso?: string;
+      expected_dso: string;
     }
   | {
       type: "setup_token_preapproval";
@@ -569,6 +569,12 @@ export interface ContractWithBlob {
 
 export interface ContractQueryResponse {
   contracts: ContractWithBlob[];
+}
+
+export interface NetworkInfo {
+  dso_party_id: string;
+  amulet_rules_cid: string;
+  amulet_rules_blob: string;
 }
 
 export type Network = "devnet" | "testnet" | "mainnet";

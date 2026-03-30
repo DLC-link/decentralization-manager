@@ -48,6 +48,7 @@ import {
   INTERFACE_FEATURED_APP_RIGHT,
   TEMPLATE_REGISTRAR_SERVICE,
 } from "../constants";
+import { zebraRow } from "../styles";
 import type {
   GovernanceResponse,
   GovernanceAction,
@@ -72,6 +73,7 @@ import type {
   ContractQueryResponse,
   DomainGovernanceAction,
   Network,
+  NetworkInfo,
   ProposeActionRequest,
   ProposalType,
 } from "../types";
@@ -269,6 +271,7 @@ export const GovernanceSection = ({
   const [providerServiceCid, setProviderServiceCid] = useState("");
   const [userServiceCid, setUserServiceCid] = useState("");
   const [amuletRulesCid, setAmuletRulesCid] = useState("");
+  const [dsoPartyId, setDsoPartyId] = useState("");
   const [allocationFactoryCid, setAllocationFactoryCid] = useState("");
   const [initialSupportedVaults, setInitialSupportedVaults] = useState<
     string[]
@@ -515,18 +518,23 @@ export const GovernanceSection = ({
     }
   }, []);
 
-  // Fetch amulet rules from DSO API
-  const fetchAmuletRules = useCallback(async () => {
+  // Fetch network info (DSO party + amulet rules) from DSO API
+  const fetchNetworkInfo = useCallback(async () => {
     setAmuletRulesLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/amulet-rules`);
+      const res = await fetch(`${API_BASE}/network-info`);
       if (res.ok) {
-        const data: ContractWithBlob = await res.json();
-        setAmuletRulesContract(data);
-        setAmuletRulesCid(data.contract_id);
+        const data: NetworkInfo = await res.json();
+        setAmuletRulesContract({
+          contract_id: data.amulet_rules_cid,
+          blob: data.amulet_rules_blob,
+        });
+        setAmuletRulesCid(data.amulet_rules_cid);
+        setDsoPartyId(data.dso_party_id);
+        setProposalExpectedDso(data.dso_party_id);
       }
     } catch (e) {
-      console.error("Failed to fetch amulet rules:", e);
+      console.error("Failed to fetch network info:", e);
     } finally {
       setAmuletRulesLoading(false);
     }
@@ -545,9 +553,9 @@ export const GovernanceSection = ({
       fetchBurnMintFactory();
     }
     if (selectedActionType === "dev_net_feature_app") {
-      fetchAmuletRules();
+      fetchNetworkInfo();
     }
-  }, [selectedActionType, fetchDeployContracts, fetchBurnMintFactory, fetchAmuletRules]);
+  }, [selectedActionType, fetchDeployContracts, fetchBurnMintFactory, fetchNetworkInfo]);
 
   // Build dynamic blob map from queried contracts (for ExecuteDialog)
   const contractBlobMap = useMemo(() => {
@@ -971,7 +979,7 @@ export const GovernanceSection = ({
           proposal = {
             type: "setup_cc_preapproval",
             provider: proposalProvider,
-            expected_dso: proposalExpectedDso || undefined,
+            expected_dso: proposalExpectedDso,
           };
           break;
         case "setup_token_preapproval":
@@ -2339,7 +2347,7 @@ export const GovernanceSection = ({
             />
             <IconButton
               size="small"
-              onClick={fetchAmuletRules}
+              onClick={fetchNetworkInfo}
               disabled={amuletRulesLoading}
             >
               {amuletRulesLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
@@ -2497,7 +2505,7 @@ export const GovernanceSection = ({
         </Box>
 
         {data && data.actions.length > 0 ? (
-          <Box sx={{ overflowX: "auto" }}>
+          <Box sx={{ overflowX: "auto", mx: -2 }}>
             <Table size="small">
               <TableHead>
                 <TableRow>
@@ -2509,8 +2517,8 @@ export const GovernanceSection = ({
                 </TableRow>
               </TableHead>
               <TableBody>
-                {data.actions.map((action) => (
-                  <TableRow key={action.action_hash}>
+                {data.actions.map((action, idx) => (
+                  <TableRow key={action.action_hash} sx={zebraRow(idx)}>
                     <TableCell sx={{ py: 1 }}>
                       <Typography variant="body2" sx={{ fontWeight: 500 }}>
                         {formatActionType(action.action)}
@@ -2652,7 +2660,7 @@ export const GovernanceSection = ({
             </Table>
           </Box>
         ) : (
-          <Typography variant="body2" color="text.secondary" sx={{ py: 2 }}>
+          <Typography variant="body2" color="text.secondary" sx={{ pt: 2, pb: 2 }}>
             No governance actions found for this party.
           </Typography>
         )}
@@ -2660,8 +2668,8 @@ export const GovernanceSection = ({
 
       {/* Domain Proposals — only for governance-core */}
       {governanceType === "core_self" && data && (
-        <Box sx={{ mt: 2 }}>
-          <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 1 }}>
+        <Box sx={{ mt: 2, mx: -2 }}>
+          <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 1, px: 2 }}>
             <Typography variant="subtitle2">
               Domain Proposals
               {(data.domain_actions?.length ?? 0) > 0 && (
@@ -2671,14 +2679,17 @@ export const GovernanceSection = ({
             <Button
               size="small"
               variant="outlined"
-              onClick={() => setShowProposalForm(!showProposalForm)}
+              onClick={() => {
+                if (!showProposalForm && !dsoPartyId) fetchNetworkInfo();
+                setShowProposalForm(!showProposalForm);
+              }}
             >
               {showProposalForm ? "Cancel" : "New Proposal"}
             </Button>
           </Box>
 
           <Collapse in={showProposalForm}>
-            <Box sx={{ display: "flex", flexDirection: "column", gap: 1.5, mb: 2, p: 2, border: 1, borderColor: "divider", borderRadius: 2 }}>
+            <Box sx={{ display: "flex", flexDirection: "column", gap: 1.5, mb: 2, p: 2, mx: 2, border: 1, borderColor: "divider", borderRadius: 2 }}>
               <FormControl size="small" fullWidth>
                 <Select
                   value={proposalType}
@@ -2694,7 +2705,7 @@ export const GovernanceSection = ({
               {proposalType === "setup_cc_preapproval" && (
                 <>
                   <TextField size="small" label="Provider Party" value={proposalProvider} onChange={(e) => setProposalProvider(e.target.value)} fullWidth required />
-                  <TextField size="small" label="Expected DSO (optional)" value={proposalExpectedDso} onChange={(e) => setProposalExpectedDso(e.target.value)} fullWidth />
+                  <TextField size="small" label="Expected DSO Party" value={proposalExpectedDso} onChange={(e) => setProposalExpectedDso(e.target.value)} fullWidth required />
                 </>
               )}
 
@@ -2737,8 +2748,8 @@ export const GovernanceSection = ({
                 </TableRow>
               </TableHead>
               <TableBody>
-                {data.domain_actions!.map((da) => (
-                  <TableRow key={da.proposal_cid}>
+                {data.domain_actions!.map((da, idx) => (
+                  <TableRow key={da.proposal_cid} sx={zebraRow(idx)}>
                     <TableCell>
                       <Typography variant="body2">{da.action_label}</Typography>
                       <Typography variant="caption" color="text.secondary" sx={{ fontFamily: "monospace" }}>
@@ -2750,14 +2761,16 @@ export const GovernanceSection = ({
                     </TableCell>
                     <TableCell align="right">
                       <Box sx={{ display: "flex", gap: 0.5, justifyContent: "flex-end" }}>
-                        <Button
-                          size="small"
-                          variant="outlined"
-                          onClick={() => handleConfirmDomain(da)}
-                          disabled={actionLoading === da.proposal_cid}
-                        >
-                          Confirm
-                        </Button>
+                        {!da.confirmations.some((c) => c.confirming_party === (data.member_party_id || memberPartyId)) && (
+                          <Button
+                            size="small"
+                            variant="outlined"
+                            onClick={() => handleConfirmDomain(da)}
+                            disabled={actionLoading === da.proposal_cid}
+                          >
+                            Confirm
+                          </Button>
+                        )}
                         {da.can_execute && (
                           <Button
                             size="small"
@@ -2776,7 +2789,7 @@ export const GovernanceSection = ({
             </Table>
           ) : (
             !showProposalForm && (
-              <Typography variant="body2" color="text.secondary">
+              <Typography variant="body2" color="text.secondary" sx={{ px: 2, pb: 2 }}>
                 No domain proposals pending.
               </Typography>
             )
