@@ -877,6 +877,19 @@ pub struct PartyConfigResponse {
     pub packages: PackageConfig,
 }
 
+/// Frontend authentication configuration response
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct AuthConfigResponse {
+    /// Whether Keycloak auth is required (false in test mode)
+    pub auth_required: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keycloak_host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keycloak_realm: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keycloak_client_id: Option<String>,
+}
+
 /// Generic error response
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct ErrorResponse {

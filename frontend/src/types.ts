@@ -1,3 +1,10 @@
+export interface AuthConfig {
+  auth_required: boolean;
+  keycloak_host?: string;
+  keycloak_realm?: string;
+  keycloak_client_id?: string;
+}
+
 export interface ParticipantInfo {
   participant_uid: string;
   permission: string;
