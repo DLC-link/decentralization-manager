@@ -1,14 +1,14 @@
-# Node configuration for Participant 3
+parties = []
 
 [node]
-participant_id = "sv::12204091b9d435c5e332bd84f966edec44c2f84d1512b7a71e24032a6cd486d2b08e"
+participant_id = "sv::122083bdf96a399d9361b604a0b445c212047b6d71368f7ede921165e61150939319"
 listen_address = "0.0.0.0"
 port = 9003
 
 [canton]
-admin_api_host = "54.84.166.135"
+admin_api_host = "127.0.0.1"
 admin_api_port = 4902
-ledger_api_host = "54.84.166.135"
+ledger_api_host = "127.0.0.1"
 ledger_api_port = 4901
 synchronizer = "global"
 network = "devnet"
@@ -18,20 +18,3 @@ handshake_timeout_secs = 30
 message_timeout_secs = 120
 connection_retry_attempts = 3
 connection_retry_delay_secs = 5
-
-[[parties]]
-dec_party_id = "cbtc-network::12202a83c6f4082217c175e29bc53da5f2703ba2675778ab99217a5a881a949203ff"
-member_party_id = "attestor-3::1220d544125d3619e9c4d7340466a78a85f738e75a740837fa6283a1051494f5df23"
-user_id = "attestorUser3"
-
-[parties.keycloak]
-url = "https://keycloak.dev.canton.ibtc.network"
-realm = "ibtc-catalyst-devnet"
-client_id = "attestor-3"
-client_secret = "1AY5fFw9iCiDYWiJhsMkJ9VgIJBQSoEN"
-
-[parties.packages]
-vault_governance = "#bitsafe-vault-governance-v0-rc8"
-vault = "#bitsafe-vault-v0-rc8"
-utility_registry = "#utility-registry-app-v0"
-utility_credential = "#utility-credential-app-v0"

@@ -2,9 +2,9 @@ target/
 
 # Generated keys and configuration
 
-/development/local/participant-*/config/peers.csv
-/development/local/participant-*/data/
+/development/local
 /development/remote
 /configs
+.localnet/
 .DS_Store
 .idea

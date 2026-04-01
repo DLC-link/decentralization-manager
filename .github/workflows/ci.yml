@@ -93,24 +93,27 @@ jobs:
     name: Integration Tests
     needs: test
     runs-on: ubuntu-latest
-    container: rust:slim-bookworm
     steps:
       - uses: actions/checkout@v4
-      - name: Install dependencies
-        run: apt-get update && apt-get install -y pkg-config libssl-dev protobuf-compiler git openssh-client nodejs npm jq curl
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev protobuf-compiler git openssh-client nodejs npm jq curl
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
       - name: Setup SSH
         run: |
-          mkdir -p /root/.ssh
-          ssh-keyscan github.com >> /root/.ssh/known_hosts
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > /root/.ssh/id_ed25519
-          chmod 600 /root/.ssh/id_ed25519
-          git config --global core.sshCommand "ssh -i /root/.ssh/id_ed25519 -o StrictHostKeyChecking=no"
+          mkdir -p ~/.ssh
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          git config --global core.sshCommand "ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no"
       - name: Cache cargo
         uses: actions/cache@v4
         with:
           path: |
-            /usr/local/cargo/registry
-            /usr/local/cargo/git
+            ~/.cargo/registry
+            ~/.cargo/git
             target
           key: cargo-${{ hashFiles('Cargo.lock') }}
       - name: Cache npm
@@ -118,8 +121,13 @@ jobs:
         with:
           path: frontend/node_modules
           key: npm-${{ hashFiles('frontend/package-lock.json') }}
+      - name: Cache localnet bundle
+        uses: actions/cache@v4
+        with:
+          path: .localnet/
+          key: localnet-0.5.17
       - name: Run integration tests
-        run: ./run-integration-tests.sh
+        run: ./integration-tests/run.sh
 
   docker:
     name: Build & Push Docker Images
