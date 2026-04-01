@@ -1,15 +1,15 @@
-# Node configuration for Participant 2
+parties = []
 
 [node]
-participant_id = "participant::12207ad94e6b7dfb8ccd976205729a9b7d23c24063966b7c2cf965a7455367d65415"
+participant_id = "participant::122077db7f8ff7fe22b918a97019c2bf48bf2c90524c6c08dff38d46c65a45b4c505"
 listen_address = "0.0.0.0"
 port = 9002
 
 [canton]
-admin_api_host = "0.0.0.0"
-admin_api_port = 3902
-ledger_api_host = "0.0.0.0"
-ledger_api_port = 3901
+admin_api_host = "127.0.0.1"
+admin_api_port = 2902
+ledger_api_host = "127.0.0.1"
+ledger_api_port = 2901
 synchronizer = "global"
 network = "devnet"
 
@@ -18,20 +18,3 @@ handshake_timeout_secs = 30
 message_timeout_secs = 120
 connection_retry_attempts = 3
 connection_retry_delay_secs = 5
-
-[[parties]]
-dec_party_id = "cbtc-network::12202a83c6f4082217c175e29bc53da5f2703ba2675778ab99217a5a881a949203ff"
-member_party_id = "attestor-2::122099953934d9fe163fed07dd371fa13982b2b30749d6df56ecdba385f8c78a867a"
-user_id = "attestorUser2"
-
-[parties.keycloak]
-url = "https://keycloak.dev.canton.example.com"
-realm = "canton-devnet"
-client_id = "attestor-2"
-client_secret = "***REDACTED-CLIENT-SECRET***"
-
-[parties.packages]
-vault_governance = "#bitsafe-vault-governance-v0-rc8"
-vault = "#bitsafe-vault-v0-rc8"
-utility_registry = "#utility-registry-app-v0"
-utility_credential = "#utility-credential-app-v0"
