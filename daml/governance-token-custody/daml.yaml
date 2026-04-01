@@ -1,12 +1,12 @@
 sdk-version: 3.4.11
-name: governance-token-custody
+name: governance-token-custody-v0-rc1
 version: 0.1.0
 source: daml
 dependencies:
   - daml-prim
   - daml-stdlib
 data-dependencies:
-  - ../governance-core/.daml/dist/governance-core-0.1.0.dar
+  - ../governance-core/.daml/dist/governance-core-v0-rc1-0.1.0.dar
   - ../dars/splice-api-token-holding-v1-1.0.0.dar
   - ../dars/splice-api-token-metadata-v1-1.0.0.dar
   - ../dars/splice-api-token-transfer-instruction-v1-1.0.0.dar
