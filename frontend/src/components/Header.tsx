@@ -1,14 +1,17 @@
 import { useRef, useState } from "react";
-import { Box, Container, Typography, useTheme } from "@mui/material";
+import { Box, Container, IconButton, Tooltip, Typography, useTheme } from "@mui/material";
+import LogoutIcon from "@mui/icons-material/Logout";
 
 import BitSafeLogoDark from "../assets/bitsafe-logo-dark.svg";
 import BitSafeLogoLight from "../assets/bitsafe-logo-light.svg";
+import { useAuth } from "../contexts";
 import { ThemeSwitcher } from "./ThemeSwitcher";
 
 declare const __BUILD_DATE__: string;
 
 export const Header = () => {
   const theme = useTheme();
+  const { token, logout } = useAuth();
   const logo =
     theme.palette.mode === "light" ? BitSafeLogoDark : BitSafeLogoLight;
   const [showBuildDate, setShowBuildDate] = useState(false);
@@ -70,7 +73,16 @@ export const Header = () => {
               : "Monitor and manage your decentralized parties"}
           </Typography>
         </Box>
-        <ThemeSwitcher />
+        <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+          <ThemeSwitcher />
+          {token && (
+            <Tooltip title="Log out" arrow>
+              <IconButton size="small" onClick={logout} color="inherit">
+                <LogoutIcon fontSize="small" />
+              </IconButton>
+            </Tooltip>
+          )}
+        </Box>
       </Container>
     </Box>
   );
