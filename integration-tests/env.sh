@@ -40,7 +40,7 @@ P3_NOISE=9003
 
 # Paths
 DEV_DIR="$SCRIPT_DIR/development/local"
-DARS_DIR="$SCRIPT_DIR/development/dars"
+DARS_DIR="$SCRIPT_DIR/releases/v0/rc1"
 BINARY="$SCRIPT_DIR/target/release/dec-party-manager"
 
 # Process tracking

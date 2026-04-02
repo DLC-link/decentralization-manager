@@ -1,0 +1,84 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Tests for the SetupCcPreapprovalProposal governable action.
+module Governance.TokenCustody.Test.SetupCcPreapprovalTest where
+
+import DA.List (head)
+import Daml.Script
+
+import Splice.Wallet.TransferPreapproval (TransferPreapprovalProposal(..))
+
+import Governance.Action (GovernableAction)
+import Governance.Rules (GovernanceRules_ConfirmAction(..))
+import Governance.TokenCustody.SetupCcPreapproval
+import Governance.TokenCustody.TestUtils
+
+-- | Full governance flow: propose -> confirm -> execute -> verify preapproval proposal created.
+testSetupCcPreapprovalFullFlow : Script ()
+testSetupCcPreapprovalFullFlow = do
+  parties <- allocateTokenTestParties
+  rulesCid <- createTestGovernance parties
+  dso <- allocateParty "DSO"
+
+  -- Proposer creates the setup preapproval proposal
+  proposalCid <- submit parties.member1 $ createCmd SetupCcPreapprovalProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    provider = parties.outsider
+    expectedDso = Some dso
+
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+
+  -- Confirm and execute
+  confirmAndExecute parties rulesCid proposalInterfaceCid
+    [parties.member1, parties.member2] parties.member1
+
+  -- Verify the TransferPreapprovalProposal was created
+  preapprovalProposals <- query @TransferPreapprovalProposal parties.governanceParty
+  assertMsg "TransferPreapprovalProposal should exist" (length preapprovalProposals == 1)
+  let (_, proposal) = head preapprovalProposals
+  assertMsg "Receiver should be governanceParty" (proposal.receiver == parties.governanceParty)
+  assertMsg "Provider should match" (proposal.provider == parties.outsider)
+  assertMsg "ExpectedDso should match" (proposal.expectedDso == Some dso)
+
+-- | Non-member cannot confirm a SetupCcPreapproval proposal.
+testSetupCcPreapprovalNonMemberCannotConfirm : Script ()
+testSetupCcPreapprovalNonMemberCannotConfirm = do
+  parties <- allocateTokenTestParties
+  rulesCid <- createTestGovernance parties
+
+  proposalCid <- submit parties.member1 $ createCmd SetupCcPreapprovalProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    provider = parties.outsider
+    expectedDso = None
+
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+
+  submitMustFail (memberContext parties.outsider parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ConfirmAction with
+      confirmer = parties.outsider
+      actionProposalCid = proposalInterfaceCid
+
+-- | Setup CC preapproval with None expectedDso works.
+testSetupCcPreapprovalWithoutDso : Script ()
+testSetupCcPreapprovalWithoutDso = do
+  parties <- allocateTokenTestParties
+  rulesCid <- createTestGovernance parties
+
+  proposalCid <- submit parties.member1 $ createCmd SetupCcPreapprovalProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    provider = parties.outsider
+    expectedDso = None
+
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+
+  confirmAndExecute parties rulesCid proposalInterfaceCid
+    [parties.member2, parties.member3] parties.member3
+
+  preapprovalProposals <- query @TransferPreapprovalProposal parties.governanceParty
+  assertMsg "TransferPreapprovalProposal should exist" (length preapprovalProposals == 1)
+  let (_, proposal) = head preapprovalProposals
+  assertMsg "ExpectedDso should be None" (proposal.expectedDso == None)

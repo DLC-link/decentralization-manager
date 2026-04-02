@@ -1,0 +1,44 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Governable action to set up a CC (Canton Coin) TransferPreapproval for receiving tokens.
+-- Creates a TransferPreapprovalProposal where the governance party is the receiver.
+-- The provider then accepts the proposal separately (handling fee payment).
+module Governance.TokenCustody.SetupCcPreapproval where
+
+import Splice.Wallet.TransferPreapproval (TransferPreapprovalProposal(..))
+
+import Governance.Action
+
+-- | Proposal to set up a CC TransferPreapproval for the governance party.
+-- Creates a TransferPreapprovalProposal (signatory: receiver = governanceParty).
+-- Authority flows: GovernanceRules -> GovernableAction_Execute -> executeImpl
+-- -> create TransferPreapprovalProposal (signatory: receiver = governanceParty).
+--
+-- After governance execution, the provider must separately accept the proposal
+-- via TransferPreapprovalProposal_Accept (which handles fee payment).
+template SetupCcPreapprovalProposal
+  with
+    governanceParty : Party
+      -- ^ The governance party whose authority is required.
+    proposer : Party
+      -- ^ The member proposing this preapproval setup.
+    provider : Party
+      -- ^ The party that will provide and pay fees for the preapproval.
+    expectedDso : Optional Party
+      -- ^ The DSO party expected on the transfer preapproval.
+  where
+    signatory proposer
+    observer governanceParty
+
+    interface instance GovernableAction for SetupCcPreapprovalProposal where
+      view = GovernableActionView with
+        governanceParty
+        actionLabel = "SetupCcPreapproval"
+
+      executeImpl = do
+        create TransferPreapprovalProposal with
+          receiver = governanceParty
+          provider
+          expectedDso
+        pure ()

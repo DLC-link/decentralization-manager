@@ -1,0 +1,45 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Confirmation contracts for governance actions.
+-- Each confirmation represents a single member's approval of a specific action proposal.
+module Governance.Confirmation where
+
+import Governance.Action (GovernableAction)
+
+-- | A confirmation that a governance member has approved an action proposal.
+-- Confirmations are matched to proposals by ContractId (globally unique).
+-- The actionLabel is stored for human readability and UI display only.
+template GovernanceConfirmation
+  with
+    governanceParty : Party
+      -- ^ The governance party this confirmation belongs to.
+    confirmer : Party
+      -- ^ The governance member who created this confirmation.
+    actionProposalCid : ContractId GovernableAction
+      -- ^ The action proposal being confirmed (primary matching key).
+    actionLabel : Text
+      -- ^ Human-readable label from the proposal (for UI/audit, not matching).
+    expiresAt : Time
+      -- ^ When this confirmation becomes invalid.
+  where
+    signatory confirmer
+    observer governanceParty
+
+    -- | Consume this confirmation during action execution.
+    -- Returns the confirmation data for validation.
+    choice GovernanceConfirmation_Consume : GovernanceConfirmation
+      controller governanceParty
+      do pure this
+
+    -- | Expire a stale confirmation that has passed its expiry time.
+    choice GovernanceConfirmation_Expire : ()
+      controller governanceParty
+      do
+        now <- getTime
+        assertMsg "Confirmation has not expired yet" (now > expiresAt)
+
+    -- | Allow the confirmer to cancel their own confirmation.
+    choice GovernanceConfirmation_Cancel : ()
+      controller confirmer
+      do pure ()
