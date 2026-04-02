@@ -1,0 +1,142 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Tests for the AcceptTransferProposal governable action.
+module Governance.TokenCustody.Test.AcceptTransferTest where
+
+import DA.Time (addRelTime, hours)
+import Daml.Script
+
+import Splice.Api.Token.HoldingV1 (Holding)
+import Splice.Api.Token.MetadataV1 (ExtraArgs(..), emptyChoiceContext, emptyMetadata)
+import Splice.Api.Token.TransferInstructionV1 (Transfer(..), TransferFactory(..), TransferFactory_Transfer(..), TransferInstruction, TransferInstruction_Withdraw(..))
+
+import Utility.Registry.App.V0.Model.Transfer (TransferOffer)
+
+import Governance.Action (GovernableAction)
+import Governance.Rules (GovernanceRules_ConfirmAction(..), GovernanceRules_ExecuteConfirmedAction(..))
+import Governance.TokenCustody.AcceptTransfer
+import Governance.TokenCustody.TestUtils
+
+-- | Build ExtraArgs for accept operations.
+buildAcceptExtraArgs : UtilityOnboardingResult -> ExtraArgs
+buildAcceptExtraArgs onboarding = ExtraArgs with
+  context = createAcceptContext onboarding
+  meta = emptyMetadata
+
+-- | Create a pending TransferOffer from outsider to governance party.
+-- Uses the AllocationFactory (TransferFactory interface) which creates a TransferOffer
+-- when the sender != receiver (two-step transfer).
+createTransferOffer : TokenTestParties -> UtilityOnboardingResult -> Decimal -> Script (ContractId TransferInstruction)
+createTransferOffer parties onboarding amount = do
+  now <- getTime
+  let instrument = testInstrumentId parties.registrar
+
+  -- Mint tokens for the outsider (sender)
+  holdingCids <- mintTokens parties.outsider amount onboarding instrument
+
+  -- Use AllocationFactory as TransferFactory to create a pending TransferOffer
+  let factoryCid : ContractId TransferFactory = coerceContractId onboarding.allocationFactoryCid
+  result <- submit (actAs parties.outsider <> actAs parties.registrar
+    <> readAs parties.operator <> readAs parties.dso) $
+    exerciseCmd factoryCid TransferFactory_Transfer with
+      expectedAdmin = parties.registrar
+      transfer = Transfer with
+        sender = parties.outsider
+        receiver = parties.governanceParty
+        instrumentId = instrument
+        amount
+        requestedAt = now
+        executeBefore = now `addRelTime` hours 24
+        inputHoldingCids = holdingCids
+        meta = emptyMetadata
+      extraArgs = ExtraArgs with
+        context = createTransferContext onboarding
+        meta = emptyMetadata
+
+  -- The result contains a pending TransferInstruction (TransferOffer)
+  -- Query it from the receiver's perspective
+  [(offerCid, _)] <- query @TransferOffer parties.governanceParty
+  pure (coerceContractId offerCid)
+
+-- | Full governance happy path: proposal → confirm → execute → verify balance.
+-- Outsider creates a TransferOffer, governance party accepts it via governance flow.
+testAcceptTransferGovernanceHappyPath : Script ()
+testAcceptTransferGovernanceHappyPath = do
+  parties <- allocateTokenTestParties
+  let instrument = testInstrumentId parties.registrar
+  onboarding <- onboardToUtility parties instrument
+  rulesCid <- createTestGovernance parties
+
+  transferInstructionCid <- createTransferOffer parties onboarding 75.0
+
+  proposalCid <- submit parties.member1 $ createCmd AcceptTransferProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    transferInstructionCid
+    extraArgs = buildAcceptExtraArgs onboarding
+
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+
+  confirmAndExecute parties rulesCid proposalInterfaceCid
+    [parties.member1, parties.member2] parties.member1
+
+  govHoldings <- queryInterface @Holding parties.governanceParty
+  assertMsg "GovernanceParty should have received holdings" (not (null govHoldings))
+
+-- | Accepting a withdrawn (archived) transfer instruction fails.
+testAcceptTransferWithdrawnOffer : Script ()
+testAcceptTransferWithdrawnOffer = do
+  parties <- allocateTokenTestParties
+  let instrument = testInstrumentId parties.registrar
+  onboarding <- onboardToUtility parties instrument
+  rulesCid <- createTestGovernance parties
+
+  transferInstructionCid <- createTransferOffer parties onboarding 75.0
+
+  proposalCid <- submit parties.member1 $ createCmd AcceptTransferProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    transferInstructionCid
+    extraArgs = buildAcceptExtraArgs onboarding
+
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+
+  -- Sender withdraws the transfer instruction before governance approves
+  submit (actAs parties.outsider <> readAs parties.registrar <> readAs onboarding.operator) $
+    exerciseCmd transferInstructionCid TransferInstruction_Withdraw with
+      extraArgs = ExtraArgs with
+        context = emptyChoiceContext
+        meta = emptyMetadata
+
+  confirmationCids <- submitConfirmations parties.governanceParty rulesCid proposalInterfaceCid
+    [parties.member1, parties.member2]
+
+  submitMustFail (memberContext parties.member1 parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ExecuteConfirmedAction with
+      executor = parties.member1
+      actionProposalCid = proposalInterfaceCid
+      confirmations = confirmationCids
+
+-- | Non-member cannot confirm an AcceptTransfer proposal.
+testAcceptTransferNonMemberCannotConfirm : Script ()
+testAcceptTransferNonMemberCannotConfirm = do
+  parties <- allocateTokenTestParties
+  let instrument = testInstrumentId parties.registrar
+  onboarding <- onboardToUtility parties instrument
+  rulesCid <- createTestGovernance parties
+
+  transferInstructionCid <- createTransferOffer parties onboarding 75.0
+
+  proposalCid <- submit parties.member1 $ createCmd AcceptTransferProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    transferInstructionCid
+    extraArgs = buildAcceptExtraArgs onboarding
+
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+
+  submitMustFail (memberContext parties.outsider parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ConfirmAction with
+      confirmer = parties.outsider
+      actionProposalCid = proposalInterfaceCid

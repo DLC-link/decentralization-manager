@@ -1,0 +1,5 @@
+packages:
+  - daml/governance-core
+  - daml/governance-core-test
+  - daml/governance-token-custody
+  - daml/governance-token-custody-test

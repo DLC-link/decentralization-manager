@@ -1,0 +1,17 @@
+sdk-version: 3.4.11
+name: governance-core-test
+version: 0.1.0
+source: daml
+dependencies:
+  - daml-prim
+  - daml-stdlib
+  - daml-script
+data-dependencies:
+  - ../governance-core/.daml/dist/governance-core-v0-rc1-0.1.0.dar
+  - ../dars/splice-util-0.1.4.dar
+build-options:
+  - --target=2.2
+  - -Wno-upgrade-interfaces
+  - -Wno-template-interface-depends-on-daml-script
+  - --ghc-option=-Wunused-binds
+  - --ghc-option=-Wunused-matches
