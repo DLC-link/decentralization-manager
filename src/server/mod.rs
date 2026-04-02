@@ -55,6 +55,7 @@ pub struct ListenerControl {
 #[derive(Clone)]
 struct WorkflowTriggers {
     pending_invitations: Arc<RwLock<Vec<PendingInvitation>>>,
+    admin_api_url: String,
 }
 
 /// Start the HTTP server and a heartbeat system for peer status tracking
@@ -125,6 +126,7 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig, test_mode: 
     let heartbeat_notify = listener_notify.clone();
     let heartbeat_triggers = WorkflowTriggers {
         pending_invitations: pending_invitations.clone(),
+        admin_api_url: config.admin_api_url(),
     };
     tokio::spawn(async move {
         run_heartbeat(
@@ -236,6 +238,7 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig, test_mode: 
             .service(handlers::get_node_config)
             .service(handlers::get_decentralized_parties)
             .service(handlers::get_participants_status)
+            .service(handlers::compare_peer_packages)
             .service(handlers::start_kick)
             .service(handlers::get_kick_status)
             .service(handlers::start_onboarding)
@@ -258,12 +261,13 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig, test_mode: 
             .service(handlers::get_registrar_services_handler)
             .service(handlers::query_contracts_handler)
             .service(handlers::get_packages)
+            .service(handlers::propose_action)
             .service(handlers::confirm_action)
             .service(handlers::execute_action)
             .service(handlers::expire_confirmation)
             .service(handlers::cancel_confirmation)
             .service(handlers::get_token_standard_contracts)
-            .service(handlers::get_amulet_rules)
+            .service(handlers::get_network_info)
             .service(handlers::get_party_config)
             .service(handlers::save_party_config)
             .split_for_parts();
@@ -462,6 +466,22 @@ async fn handle_incoming_connection(
                             return Ok(Response::builder()
                                 .status(StatusCode::OK)
                                 .body(Body::from(pong.to_bytes()))
+                                .unwrap());
+                        }
+                        MessageType::ListPackages => {
+                            tracing::debug!("Received ListPackages request");
+                            let admin_url = triggers.admin_api_url.clone();
+                            let payload = match list_local_packages(&admin_url).await {
+                                Ok(data) => data,
+                                Err(e) => {
+                                    tracing::error!("Failed to list packages: {e}");
+                                    b"[]".to_vec()
+                                }
+                            };
+                            let response_msg = Message::new(MessageType::Data, payload);
+                            return Ok(Response::builder()
+                                .status(StatusCode::OK)
+                                .body(Body::from(response_msg.to_bytes()))
                                 .unwrap());
                         }
                         MessageType::InviteOnboarding => {
@@ -1001,4 +1021,34 @@ async fn run_dars_attestor_listener(
             }
         }
     }
+}
+
+/// List locally uploaded packages via Canton admin API (called by Noise ListPackages handler)
+async fn list_local_packages(admin_api_url: &str) -> Result<Vec<u8>> {
+    use canton_proto_rs::com::digitalasset::canton::admin::participant::v30::{
+        ListPackagesRequest, package_service_client::PackageServiceClient,
+    };
+
+    let mut client = PackageServiceClient::connect(admin_api_url.to_string()).await?;
+    let response = client
+        .list_packages(tonic::Request::new(ListPackagesRequest {
+            limit: 0,
+            filter_name: String::new(),
+        }))
+        .await?
+        .into_inner();
+
+    let packages: Vec<serde_json::Value> = response
+        .package_descriptions
+        .into_iter()
+        .map(|p| {
+            serde_json::json!({
+                "package_id": p.package_id,
+                "name": p.name,
+                "version": p.version,
+            })
+        })
+        .collect();
+
+    Ok(serde_json::to_vec(&packages)?)
 }

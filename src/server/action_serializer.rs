@@ -10,7 +10,10 @@ use canton_proto_rs::com::daml::ledger::api::v2::{
 
 use crate::{error::Result, participant_id::CantonId};
 
-use super::types::{ActionType, AppRewardBeneficiary, Claim, FarConfig, InstrumentId, VaultLimits};
+use super::types::{
+    ActionType, AppRewardBeneficiary, Claim, FarConfig, InstrumentAllowance, InstrumentId,
+    ProposalType, VaultLimits,
+};
 
 // ============================================================================
 // Helper Functions
@@ -76,6 +79,28 @@ fn make_list(values: Vec<Value>) -> Value {
     Value {
         sum: Some(value::Sum::List(List { elements: values })),
     }
+}
+
+fn make_empty_gen_map() -> Value {
+    Value {
+        sum: Some(value::Sum::GenMap(
+            canton_proto_rs::com::daml::ledger::api::v2::GenMap { entries: vec![] },
+        )),
+    }
+}
+
+fn make_empty_metadata() -> Value {
+    make_record(vec![field("values", make_empty_gen_map())])
+}
+
+fn make_empty_extra_args() -> Value {
+    make_record(vec![
+        field(
+            "context",
+            make_record(vec![field("values", make_empty_gen_map())]),
+        ),
+        field("meta", make_empty_metadata()),
+    ])
 }
 
 // ============================================================================
@@ -512,6 +537,309 @@ pub fn build_execute_action_argument(
         field("action", serialize_action(action)),
         field("confirmations", confirmations),
         field("contractCid", contract_cid_value),
+    ])
+}
+
+// ============================================================================
+// Governance-Core Self-Management Serialization
+// ============================================================================
+
+/// Serialize an ActionType to a GovernanceSelfAction DAML variant
+///
+/// Maps the same ActionType variants used for vault governance to the
+/// governance-core GovernanceSelfAction enum (different field names).
+fn serialize_self_action(action: &ActionType) -> Value {
+    match action {
+        ActionType::GovernanceAddMember {
+            member,
+            new_threshold,
+        } => make_variant(
+            "SelfAction_AddMemberAndSetThreshold",
+            make_record(vec![
+                field("newMember", make_party(member)),
+                field("newThresholdAfterAdd", make_int64(*new_threshold)),
+            ]),
+        ),
+        ActionType::GovernanceRemoveMember {
+            member,
+            new_threshold,
+        } => make_variant(
+            "SelfAction_RemoveMemberAndSetThreshold",
+            make_record(vec![
+                field("removedMember", make_party(member)),
+                field("newThresholdAfterRemove", make_int64(*new_threshold)),
+            ]),
+        ),
+        ActionType::GovernanceSetThreshold { new_threshold } => make_variant(
+            "SelfAction_SetThreshold",
+            make_record(vec![field("updatedThreshold", make_int64(*new_threshold))]),
+        ),
+        ActionType::GovernanceSetTimeout {
+            new_timeout_microseconds,
+        } => make_variant(
+            "SelfAction_SetTimeout",
+            make_record(vec![field(
+                "updatedTimeout",
+                serialize_reltime(*new_timeout_microseconds),
+            )]),
+        ),
+        _ => panic!("ActionType {action:?} is not a governance self-management action"),
+    }
+}
+
+/// Deserialize a GovernanceSelfAction DAML variant to ActionType
+pub fn deserialize_self_action(value: &Value) -> Result<ActionType> {
+    let variant = match &value.sum {
+        Some(value::Sum::Variant(v)) => v,
+        _ => anyhow::bail!("Expected Variant value for GovernanceSelfAction"),
+    };
+
+    let inner = variant
+        .value
+        .as_ref()
+        .context("GovernanceSelfAction variant has no inner value")?;
+
+    let record = extract_record(inner).context("Expected GovernanceSelfAction record")?;
+    let constructor = &variant.constructor;
+
+    match constructor.as_str() {
+        "SelfAction_AddMemberAndSetThreshold" => {
+            let member = extract_party_id(get_field(record, "newMember")?)?;
+            let new_threshold = extract_int64(get_field(record, "newThresholdAfterAdd")?)?;
+            Ok(ActionType::GovernanceAddMember {
+                member,
+                new_threshold,
+            })
+        }
+        "SelfAction_RemoveMemberAndSetThreshold" => {
+            let member = extract_party_id(get_field(record, "removedMember")?)?;
+            let new_threshold = extract_int64(get_field(record, "newThresholdAfterRemove")?)?;
+            Ok(ActionType::GovernanceRemoveMember {
+                member,
+                new_threshold,
+            })
+        }
+        "SelfAction_SetThreshold" => {
+            let new_threshold = extract_int64(get_field(record, "updatedThreshold")?)?;
+            Ok(ActionType::GovernanceSetThreshold { new_threshold })
+        }
+        "SelfAction_SetTimeout" => {
+            let reltime = get_field(record, "updatedTimeout")?;
+            let microseconds = deserialize_reltime(reltime)?;
+            Ok(ActionType::GovernanceSetTimeout {
+                new_timeout_microseconds: microseconds,
+            })
+        }
+        other => anyhow::bail!("Unknown GovernanceSelfAction constructor: {other}"),
+    }
+}
+
+/// Build the GovernanceRules_ConfirmGovernanceAction choice argument
+///
+/// DAML structure: { confirmer: Party, action: GovernanceSelfAction }
+pub fn build_confirm_governance_action_arg(confirmer: &str, action: &ActionType) -> Value {
+    make_record(vec![
+        field("confirmer", make_party(confirmer)),
+        field("action", serialize_self_action(action)),
+    ])
+}
+
+/// Build the GovernanceRules_ExecuteGovernanceAction choice argument
+///
+/// DAML structure: { executor: Party, action: GovernanceSelfAction, confirmations: [ContractId GovernanceSelfConfirmation] }
+pub fn build_execute_governance_action_arg(
+    executor: &str,
+    action: &ActionType,
+    confirmation_cids: &[String],
+) -> Value {
+    let confirmations = make_list(
+        confirmation_cids
+            .iter()
+            .map(|cid| make_contract_id(cid))
+            .collect(),
+    );
+
+    make_record(vec![
+        field("executor", make_party(executor)),
+        field("action", serialize_self_action(action)),
+        field("confirmations", confirmations),
+    ])
+}
+
+// ============================================================================
+// Governance-Core Domain Action Proposal Serialization
+// ============================================================================
+
+fn serialize_instrument_allowances(allowances: &[InstrumentAllowance]) -> Value {
+    make_list(
+        allowances
+            .iter()
+            .map(|a| make_record(vec![field("id", make_text(&a.id))]))
+            .collect(),
+    )
+}
+
+/// Build the create-command record fields for a governance domain action proposal.
+///
+/// Returns (module_name, entity_name, record_fields) for the CreateCommand.
+pub fn build_proposal_create_args(
+    governance_party: &str,
+    proposer: &str,
+    proposal: &ProposalType,
+) -> (&'static str, &'static str, Record) {
+    match proposal {
+        ProposalType::SetupCcPreapproval {
+            provider,
+            expected_dso,
+        } => (
+            "Governance.TokenCustody.SetupCcPreapproval",
+            "SetupCcPreapprovalProposal",
+            Record {
+                record_id: None,
+                fields: vec![
+                    field("governanceParty", make_party(governance_party)),
+                    field("proposer", make_party(proposer)),
+                    field("provider", make_party(provider)),
+                    field(
+                        "expectedDso",
+                        Value {
+                            sum: Some(value::Sum::Optional(Box::new(Optional {
+                                value: Some(Box::new(make_party(expected_dso))),
+                            }))),
+                        },
+                    ),
+                ],
+            },
+        ),
+        ProposalType::SetupTokenPreapproval {
+            operator,
+            instrument_admin,
+            instrument_allowances,
+        } => (
+            "Governance.TokenCustody.SetupTokenPreapproval",
+            "SetupTokenPreapprovalProposal",
+            Record {
+                record_id: None,
+                fields: vec![
+                    field("governanceParty", make_party(governance_party)),
+                    field("proposer", make_party(proposer)),
+                    field("operator", make_party(operator)),
+                    field("instrumentAdmin", make_party(instrument_admin)),
+                    field(
+                        "instrumentAllowances",
+                        serialize_instrument_allowances(instrument_allowances),
+                    ),
+                ],
+            },
+        ),
+        ProposalType::Transfer {
+            transfer_factory_cid,
+            expected_admin,
+            receiver,
+            amount,
+            instrument_id,
+            input_holding_cids,
+        } => {
+            let transfer_record = make_record(vec![
+                field("sender", make_party(governance_party)),
+                field("receiver", make_party(receiver)),
+                field("amount", make_numeric(amount)),
+                field(
+                    "instrumentId",
+                    make_record(vec![
+                        field("admin", make_party(&instrument_id.admin)),
+                        field("id", make_text(&instrument_id.id)),
+                    ]),
+                ),
+                field(
+                    "requestedAt",
+                    Value {
+                        sum: Some(value::Sum::Timestamp(0)),
+                    },
+                ),
+                field(
+                    "executeBefore",
+                    Value {
+                        sum: Some(value::Sum::Timestamp(i64::MAX / 1000)),
+                    },
+                ),
+                field(
+                    "inputHoldingCids",
+                    make_list(
+                        input_holding_cids
+                            .iter()
+                            .map(|cid| make_contract_id(cid))
+                            .collect(),
+                    ),
+                ),
+                field("meta", make_empty_metadata()),
+            ]);
+            (
+                "Governance.TokenCustody.TransferProposal",
+                "TransferProposal",
+                Record {
+                    record_id: None,
+                    fields: vec![
+                        field("governanceParty", make_party(governance_party)),
+                        field("proposer", make_party(proposer)),
+                        field("transferFactoryCid", make_contract_id(transfer_factory_cid)),
+                        field("expectedAdmin", make_party(expected_admin)),
+                        field("transfer", transfer_record),
+                        field("extraArgs", make_empty_extra_args()),
+                    ],
+                },
+            )
+        }
+        ProposalType::AcceptTransfer {
+            transfer_instruction_cid,
+        } => (
+            "Governance.TokenCustody.AcceptTransfer",
+            "AcceptTransferProposal",
+            Record {
+                record_id: None,
+                fields: vec![
+                    field("governanceParty", make_party(governance_party)),
+                    field("proposer", make_party(proposer)),
+                    field(
+                        "transferInstructionCid",
+                        make_contract_id(transfer_instruction_cid),
+                    ),
+                    field("extraArgs", make_empty_extra_args()),
+                ],
+            },
+        ),
+    }
+}
+
+/// Build the GovernanceRules_ConfirmAction choice argument for domain actions
+///
+/// DAML structure: { confirmer: Party, actionProposalCid: ContractId GovernableAction }
+pub fn build_confirm_domain_action_arg(confirmer: &str, proposal_cid: &str) -> Value {
+    make_record(vec![
+        field("confirmer", make_party(confirmer)),
+        field("actionProposalCid", make_contract_id(proposal_cid)),
+    ])
+}
+
+/// Build the GovernanceRules_ExecuteConfirmedAction choice argument for domain actions
+///
+/// DAML structure: { executor: Party, actionProposalCid: ContractId GovernableAction, confirmations: [ContractId GovernanceConfirmation] }
+pub fn build_execute_domain_action_arg(
+    executor: &str,
+    proposal_cid: &str,
+    confirmation_cids: &[String],
+) -> Value {
+    let confirmations = make_list(
+        confirmation_cids
+            .iter()
+            .map(|cid| make_contract_id(cid))
+            .collect(),
+    );
+
+    make_record(vec![
+        field("executor", make_party(executor)),
+        field("actionProposalCid", make_contract_id(proposal_cid)),
+        field("confirmations", confirmations),
     ])
 }
 

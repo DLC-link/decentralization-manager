@@ -32,6 +32,7 @@ pub enum MessageType {
     GetNextCommand = 0x0008,
     SignKick = 0x0009,
     Ping = 0x000A,
+    ListPackages = 0x000B,
 
     // Invites (0x0010 - 0x001F)
     InviteOnboarding = 0x0010,
@@ -84,6 +85,7 @@ impl TryFrom<u16> for MessageType {
             0x0008 => Ok(Self::GetNextCommand),
             0x0009 => Ok(Self::SignKick),
             0x000A => Ok(Self::Ping),
+            0x000B => Ok(Self::ListPackages),
             0x0010 => Ok(Self::InviteOnboarding),
             0x0011 => Ok(Self::InviteKick),
             0x0012 => Ok(Self::InviteContracts),

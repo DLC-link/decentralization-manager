@@ -3,6 +3,11 @@ import type { DisclosedContract, Network } from "./types";
 export const API_BASE = "";
 export const ADMIN_ACCESS = import.meta.env.VITE_ADMIN_ACCESS === "true";
 
+/** Zebra stripe sx for table rows — subtle alternating background like Apple lists */
+export const zebraRow = (index: number) => ({
+  bgcolor: index % 2 === 0 ? "transparent" : "action.hover",
+});
+
 export const OPERATOR_API_URLS: Record<Network, string> = {
   mainnet: "https://api.utilities.digitalasset.com/api/utilities/v0/operator",
   testnet:
