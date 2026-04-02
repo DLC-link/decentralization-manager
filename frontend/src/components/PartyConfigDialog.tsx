@@ -328,6 +328,34 @@ export const PartyConfigDialog = ({
               <Typography variant="subtitle2">Packages</Typography>
 
               <TextField
+                label="Governance Core"
+                value={packages.governance_core ?? ""}
+                onChange={(e) =>
+                  setPackages({
+                    ...packages,
+                    governance_core: e.target.value,
+                  })
+                }
+                fullWidth
+                size="small"
+                disabled={saving}
+              />
+
+              <TextField
+                label="Governance Token Custody"
+                value={packages.governance_token_custody ?? ""}
+                onChange={(e) =>
+                  setPackages({
+                    ...packages,
+                    governance_token_custody: e.target.value,
+                  })
+                }
+                fullWidth
+                size="small"
+                disabled={saving}
+              />
+
+              <TextField
                 label="Vault Governance"
                 value={packages.vault_governance ?? ""}
                 onChange={(e) =>

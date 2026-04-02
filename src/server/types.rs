@@ -109,6 +109,39 @@ pub struct ContractInfo {
     pub package_id: String,
 }
 
+/// Vetted package information
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct VettedPackageInfo {
+    pub package_id: String,
+    pub package_name: String,
+    pub package_version: String,
+}
+
+/// Package info for peer comparison
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
+pub struct PackageInfo {
+    pub package_id: String,
+    pub name: String,
+    pub version: String,
+}
+
+/// Result of querying packages from a single peer
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct PeerPackageResult {
+    pub participant_id: String,
+    pub name: String,
+    pub reachable: bool,
+    #[serde(default)]
+    pub packages: Vec<PackageInfo>,
+}
+
+/// Response from the peer DAR comparison endpoint
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct PeerPackageComparison {
+    pub local_packages: Vec<PackageInfo>,
+    pub peers: Vec<PeerPackageResult>,
+}
+
 /// Party metadata from Ledger API
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct PartyMetadata {
@@ -134,6 +167,8 @@ pub struct DecentralizedParty {
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct DecentralizedPartiesResponse {
     pub parties: Vec<DecentralizedParty>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub vetted_packages: Vec<VettedPackageInfo>,
 }
 
 /// Connection status for a participant
@@ -529,12 +564,89 @@ pub struct Claim {
     pub value: String,
 }
 
+/// Which governance system a request targets
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GovernanceType {
+    /// VaultGovernanceRules (closed-enum inline actions)
+    #[default]
+    Vault,
+    /// GovernanceRules self-management (GovernanceSelfAction)
+    CoreSelf,
+    /// GovernanceRules domain actions (GovernableAction proposals)
+    CoreDomain,
+}
+
+/// Instrument allowance for token preapproval
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
+pub struct InstrumentAllowance {
+    pub id: String,
+}
+
+/// Types of governance domain action proposals
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ProposalType {
+    /// Set up Canton Coin TransferPreapproval
+    SetupCcPreapproval {
+        provider: CantonId,
+        expected_dso: CantonId,
+    },
+    /// Set up utility token TransferPreapproval
+    SetupTokenPreapproval {
+        operator: CantonId,
+        instrument_admin: CantonId,
+        #[serde(default)]
+        instrument_allowances: Vec<InstrumentAllowance>,
+    },
+    /// Transfer tokens via a TransferFactory
+    Transfer {
+        transfer_factory_cid: String,
+        expected_admin: CantonId,
+        receiver: CantonId,
+        amount: String,
+        instrument_id: InstrumentId,
+        #[serde(default)]
+        input_holding_cids: Vec<String>,
+    },
+    /// Accept an incoming token transfer
+    AcceptTransfer { transfer_instruction_cid: String },
+}
+
+/// Request to propose a governance domain action (creates proposal contract)
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct ProposeActionRequest {
+    pub party_id: CantonId,
+    pub rules_contract_id: String,
+    pub proposal: ProposalType,
+}
+
+/// A pending domain action proposal with its confirmations
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct DomainGovernanceAction {
+    /// Contract ID of the proposal
+    pub proposal_cid: String,
+    /// Human-readable label (e.g., "SetupCcPreapproval")
+    pub action_label: String,
+    /// Confirmations for this proposal
+    pub confirmations: Vec<GovernanceConfirmation>,
+    /// Number of unique confirmers
+    pub confirmation_count: usize,
+    /// Whether threshold is met for execution
+    pub can_execute: bool,
+}
+
 /// Request to submit a confirmation for an action with structured type
 #[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
 pub struct ConfirmActionRequest {
     pub party_id: CantonId,
     pub rules_contract_id: String,
     pub action: ActionType,
+    #[serde(default)]
+    pub governance_type: GovernanceType,
+    /// For CoreDomain: ContractId of the GovernableAction proposal
+    #[serde(default)]
+    pub proposal_cid: Option<String>,
 }
 
 /// A disclosed contract to include in the ledger submission
@@ -553,6 +665,11 @@ pub struct ExecuteActionRequest {
     pub confirmation_cids: Vec<String>,
     #[serde(default)]
     pub disclosed_contracts: Vec<DisclosedContractInput>,
+    #[serde(default)]
+    pub governance_type: GovernanceType,
+    /// For CoreDomain: ContractId of the GovernableAction proposal
+    #[serde(default)]
+    pub proposal_cid: Option<String>,
 }
 
 /// A single governance confirmation with parsed action
@@ -582,6 +699,9 @@ pub struct GovernanceAction {
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct GovernanceResponse {
     pub actions: Vec<GovernanceAction>,
+    /// Pending domain action proposals (governance-core GovernableAction)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub domain_actions: Vec<DomainGovernanceAction>,
     pub threshold: usize,
     /// The member party ID for the requesting party (used to identify own confirmations)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -594,6 +714,8 @@ pub struct ExpireConfirmationRequest {
     pub party_id: CantonId,
     pub rules_contract_id: String,
     pub confirmation_cid: String,
+    #[serde(default)]
+    pub governance_type: GovernanceType,
 }
 
 /// Request to cancel (revoke) own confirmation
@@ -601,6 +723,8 @@ pub struct ExpireConfirmationRequest {
 pub struct CancelConfirmationRequest {
     pub party_id: CantonId,
     pub confirmation_cid: String,
+    #[serde(default)]
+    pub governance_type: GovernanceType,
 }
 
 /// State of a VaultGovernanceRules contract
@@ -683,6 +807,14 @@ pub struct RegistrarServicesResponse {
 pub struct ContractWithBlob {
     pub contract_id: String,
     pub blob: String,
+}
+
+/// DSO network info (amulet rules + DSO party)
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct NetworkInfo {
+    pub dso_party_id: CantonId,
+    pub amulet_rules_cid: String,
+    pub amulet_rules_blob: String,
 }
 
 /// Response for the generic contract query endpoint

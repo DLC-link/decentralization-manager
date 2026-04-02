@@ -663,6 +663,9 @@ async fn save_deployed_packages(
     if let Some(creds) = creds {
         for contract in &contracts_config.contracts {
             match (contract.module_name.as_str(), contract.entity_name.as_str()) {
+                ("Governance.Rules", "GovernanceRules") => {
+                    creds.packages.governance_core = Some(contract.package_id.clone());
+                }
                 ("BitsafeVault.VaultGovernance", "VaultGovernanceRules") => {
                     creds.packages.vault_governance = Some(contract.package_id.clone());
                 }

@@ -9,6 +9,10 @@ import {
   InputAdornment,
   LinearProgress,
   IconButton,
+  Tabs,
+  Tab,
+  Card,
+  Divider,
 } from "@mui/material";
 import FilterListIcon from "@mui/icons-material/FilterList";
 import SearchIcon from "@mui/icons-material/Search";
@@ -17,13 +21,17 @@ import { Header } from "./components/Header";
 import { PartyCard } from "./components/PartyCard";
 import { NodeConfigAccordion } from "./components/NodeConfigAccordion";
 import { NetworkConfigAccordion } from "./components/NetworkConfigAccordion";
-import { LoadingSkeleton } from "./components/LoadingSkeleton";
+import { VettedPackagesAccordion } from "./components/VettedPackagesAccordion";
+import { LoadingSkeleton, ConfigTabSkeleton } from "./components/LoadingSkeleton";
+import { DarsDialog } from "./components/DarsDialog";
 import { OnboardingDialog } from "./components/OnboardingDialog";
 import { InvitationModal } from "./components/InvitationModal";
 import { useSnackbar } from "./contexts";
 import { API_BASE, ADMIN_ACCESS, OPERATOR_API_URLS } from "./constants";
 import type {
   DecentralizedParty,
+  DecentralizedPartiesResponse,
+  VettedPackageInfo,
   NodeConfig,
   NetworkConfig,
   ParticipantStatus,
@@ -35,7 +43,9 @@ import type {
 } from "./types";
 
 const App = () => {
+  const [activeTab, setActiveTab] = useState(0);
   const [parties, setParties] = useState<DecentralizedParty[]>([]);
+  const [vettedPackages, setVettedPackages] = useState<VettedPackageInfo[]>([]);
   const [nodeConfig, setNodeConfig] = useState<NodeConfig | null>(null);
   const [networkConfig, setNetworkConfig] = useState<NetworkConfig | null>(
     null,
@@ -46,6 +56,7 @@ const App = () => {
   const [keyStatus, setKeyStatus] = useState<KeyStatusResponse | null>(null);
   const [authStatuses, setAuthStatuses] = useState<PartyAuthStatus[]>([]);
   const [onboardingDialogOpen, setOnboardingDialogOpen] = useState(false);
+  const [darsDialogOpen, setDarsDialogOpen] = useState(false);
   const [_pendingInvitations, setPendingInvitations] = useState<
     PendingInvitation[]
   >([]);
@@ -83,8 +94,9 @@ const App = () => {
         : "";
       const res = await fetch(`${API_BASE}/decentralized-parties${params}`);
       if (res.ok) {
-        const data = await res.json();
+        const data: DecentralizedPartiesResponse = await res.json();
         setParties(data.parties);
+        setVettedPackages(data.vetted_packages ?? []);
       } else {
         showSnackbar("Failed to refresh parties");
       }
@@ -152,28 +164,20 @@ const App = () => {
         const partiesParams = partyFilter
           ? `?prefix=${encodeURIComponent(partyFilter)}`
           : "";
-        const [partiesRes, networkRes, keyStatusRes, authStatusRes] =
-          await Promise.all([
-            fetch(`${API_BASE}/decentralized-parties${partiesParams}`),
-            fetch(`${API_BASE}/network-config`),
-            fetch(`${API_BASE}/keys/status`),
-            fetch(`${API_BASE}/auth/status`),
-          ]);
+        const [partiesRes, authStatusRes] = await Promise.all([
+          fetch(`${API_BASE}/decentralized-parties${partiesParams}`),
+          fetch(`${API_BASE}/auth/status`),
+        ]);
 
-        if (!partiesRes.ok || !networkRes.ok) {
+        if (!partiesRes.ok) {
           throw new Error("Failed to fetch data");
         }
 
-        const partiesData = await partiesRes.json();
-        const networkData = await networkRes.json();
+        const partiesData: DecentralizedPartiesResponse =
+          await partiesRes.json();
 
         setParties(partiesData.parties);
-        setNetworkConfig(networkData);
-
-        if (keyStatusRes.ok) {
-          const keyStatusData = await keyStatusRes.json();
-          setKeyStatus(keyStatusData);
-        }
+        setVettedPackages(partiesData.vetted_packages ?? []);
 
         if (authStatusRes.ok) {
           const authStatusData: AuthStatusResponse = await authStatusRes.json();
@@ -189,6 +193,25 @@ const App = () => {
     fetchData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Lazy-load config tab data when first opened
+  useEffect(() => {
+    if (activeTab !== 2) return;
+    if (networkConfig && keyStatus) return; // already loaded
+    const fetchConfigData = async () => {
+      try {
+        const [networkRes, keyStatusRes] = await Promise.all([
+          fetch(`${API_BASE}/network-config`),
+          fetch(`${API_BASE}/keys/status`),
+        ]);
+        if (networkRes.ok) setNetworkConfig(await networkRes.json());
+        if (keyStatusRes.ok) setKeyStatus(await keyStatusRes.json());
+      } catch {
+        // Ignore — will show empty state
+      }
+    };
+    fetchConfigData();
+  }, [activeTab, networkConfig, keyStatus]);
 
   // Poll participant statuses every 2 seconds
   useEffect(() => {
@@ -255,7 +278,7 @@ const App = () => {
     >
       <Header />
 
-      <Container maxWidth="md" sx={{ pt: 16, pb: 6 }}>
+      <Container maxWidth="md" sx={{ pt: 16, pb: 0 }}>
         {window.location.pathname.startsWith("/swagger-ui") &&
         nodeConfig &&
         !nodeConfig.test_mode ? (
@@ -270,90 +293,137 @@ const App = () => {
           <Alert severity="error">{error}</Alert>
         ) : (
           <>
-            {nodeConfig && <NodeConfigAccordion config={nodeConfig} />}
-            {networkConfig && (
-              <NetworkConfigAccordion
-                config={networkConfig}
-                nodeConfig={nodeConfig ?? undefined}
-                keyStatus={keyStatus ?? undefined}
-                participantStatuses={participantStatuses}
-                onSave={savePeers}
+            <Tabs
+              value={activeTab}
+              onChange={(_e, v) => setActiveTab(v)}
+              sx={{ mb: 3, borderBottom: 1, borderColor: "divider" }}
+            >
+              <Tab label={`Parties (${parties.length})`} />
+              <Tab label="Packages" />
+              <Tab label="Configuration" />
+            </Tabs>
+
+            {/* Tab 0: Decentralized Parties */}
+            {activeTab === 0 && (
+              <>
+                <Box sx={{ mb: 3 }}>
+                  <Box
+                    sx={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "flex-start",
+                      mb: 2,
+                    }}
+                  >
+                    <Box>
+                      <Typography variant="body2" color="text.secondary">
+                        {parties.length} decentralized parties
+                      </Typography>
+                    </Box>
+                    <Button
+                      variant="contained"
+                      startIcon={<AddIcon />}
+                      onClick={() => setOnboardingDialogOpen(true)}
+                      disabled={!ADMIN_ACCESS}
+                    >
+                      Create Party
+                    </Button>
+                  </Box>
+                  <Box sx={{ display: "flex", alignItems: "flex-start", gap: 1 }}>
+                    <TextField
+                      size="small"
+                      label="Filter by prefix"
+                      value={partyFilter}
+                      onChange={(e) => setPartyFilter(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          refreshParties();
+                        }
+                      }}
+                      disabled={refreshingParties}
+                      InputProps={{
+                        startAdornment: (
+                          <InputAdornment position="start">
+                            <FilterListIcon fontSize="small" color="action" />
+                          </InputAdornment>
+                        ),
+                      }}
+                      sx={{ width: 300 }}
+                    />
+                    <IconButton
+                      onClick={refreshParties}
+                      disabled={refreshingParties}
+                      color="primary"
+                      sx={{ mt: "1px" }}
+                    >
+                      <SearchIcon />
+                    </IconButton>
+                  </Box>
+                  {refreshingParties && (
+                    <LinearProgress sx={{ mt: 1, borderRadius: 1 }} />
+                  )}
+                </Box>
+
+                {parties.map((party) => (
+                  <PartyCard
+                    key={party.party_id}
+                    party={party}
+                    onRefresh={refreshParties}
+                    selfParticipantId={nodeConfig?.node.participant_id}
+                    authStatus={authStatuses.find((a) => a.dec_party_id === party.party_id)}
+                    onAuthRefresh={refreshAuthStatus}
+                    operatorParty={operatorParty}
+                    network={nodeConfig?.canton.network}
+                    vettedPackages={vettedPackages}
+                  />
+                ))}
+              </>
+            )}
+
+            {/* Tab 1: Package Management */}
+            {activeTab === 1 && (
+              <VettedPackagesAccordion
+                packages={vettedPackages}
+                onUploadDars={() => setDarsDialogOpen(true)}
               />
             )}
 
-            <Box sx={{ mt: 5, mb: 3 }}>
-              <Box
-                sx={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "flex-start",
-                  mb: 2,
-                }}
-              >
-                <Box>
-                  <Typography variant="h6" sx={{ mb: 0.5 }}>
-                    Decentralized Parties
-                  </Typography>
-                  <Typography variant="body2" color="text.secondary">
-                    {parties.length} parties
-                  </Typography>
-                </Box>
-                <Button
-                  variant="contained"
-                  startIcon={<AddIcon />}
-                  onClick={() => setOnboardingDialogOpen(true)}
-                  disabled={!ADMIN_ACCESS}
-                >
-                  Create Party
-                </Button>
-              </Box>
-              <Box sx={{ display: "flex", alignItems: "flex-start", gap: 1 }}>
-                <TextField
-                  size="small"
-                  label="Filter by prefix"
-                  value={partyFilter}
-                  onChange={(e) => setPartyFilter(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      refreshParties();
-                    }
-                  }}
-                  disabled={refreshingParties}
-                  InputProps={{
-                    startAdornment: (
-                      <InputAdornment position="start">
-                        <FilterListIcon fontSize="small" color="action" />
-                      </InputAdornment>
-                    ),
-                  }}
-                  sx={{ width: 300 }}
-                />
-                <IconButton
-                  onClick={refreshParties}
-                  disabled={refreshingParties}
-                  color="primary"
-                  sx={{ mt: "1px" }}
-                >
-                  <SearchIcon />
-                </IconButton>
-              </Box>
-              {refreshingParties && (
-                <LinearProgress sx={{ mt: 1, borderRadius: 1 }} />
-              )}
-            </Box>
+            {/* Tab 2: Configuration */}
+            {activeTab === 2 && (
+              <Card sx={{ borderRadius: 2, overflow: "hidden" }}>
+                {nodeConfig ? (
+                  <>
+                    <Box sx={{ p: 3, pb: 2 }}>
+                      <NodeConfigAccordion config={nodeConfig} />
+                    </Box>
+                    <Divider />
+                    {networkConfig ? (
+                      <NetworkConfigAccordion
+                        config={networkConfig}
+                        nodeConfig={nodeConfig ?? undefined}
+                        keyStatus={keyStatus ?? undefined}
+                        participantStatuses={participantStatuses}
+                        onSave={savePeers}
+                      />
+                    ) : (
+                      <Box sx={{ p: 3 }}>
+                        <ConfigTabSkeleton />
+                      </Box>
+                    )}
+                  </>
+                ) : (
+                  <Box sx={{ p: 3 }}>
+                    <ConfigTabSkeleton />
+                  </Box>
+                )}
+              </Card>
+            )}
 
-            {parties.map((party) => (
-              <PartyCard
-                key={party.party_id}
-                party={party}
-                onRefresh={refreshParties}
-                selfParticipantId={nodeConfig?.node.participant_id}
-                authStatus={authStatuses.find((a) => a.dec_party_id === party.party_id)}
-                onAuthRefresh={refreshAuthStatus}
-                operatorParty={operatorParty}
-                network={nodeConfig?.canton.network}
-              />
-            ))}
+            <DarsDialog
+              open={darsDialogOpen}
+              onClose={() => setDarsDialogOpen(false)}
+              onComplete={refreshParties}
+            />
 
             <OnboardingDialog
               open={onboardingDialogOpen}

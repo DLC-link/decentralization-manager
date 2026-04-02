@@ -40,10 +40,11 @@ data:
     client_secret = "***REDACTED-CLIENT-SECRET***"
 
     [parties.packages]
-    vault_governance = "#bitsafe-vault-governance-v0-rc8"
-    vault = "#bitsafe-vault-v0-rc8"
-    utility_registry = "#utility-registry-app-v0"
+    governance_core = "#governance-core-v0-rc1"
     utility_credential = "#utility-credential-app-v0"
+    utility_registry = "#utility-registry-app-v0"
+    vault = "#bitsafe-vault-v0-rc8"
+    vault_governance = "#bitsafe-vault-governance-v0-rc8"
 
     [[parties]]
     dec_party_id = "vault-test-3::1220a840c4b8c9433447f7c86e90908a8cfc6145ce2abfc7e104d5afc60b8ebb3a83"
@@ -57,10 +58,29 @@ data:
     client_secret = "***REDACTED-CLIENT-SECRET***"
 
     [parties.packages]
-    vault_governance = "#bitsafe-vault-governance-v0-rc8"
-    vault = "#bitsafe-vault-v0-rc8"
-    utility_registry = "#utility-registry-app-v0"
+    governance_core = "#governance-core-v0-rc1"
     utility_credential = "#utility-credential-app-v0"
+    utility_registry = "#utility-registry-app-v0"
+    vault = "#bitsafe-vault-v0-rc8"
+    vault_governance = "#bitsafe-vault-governance-v0-rc8"
+
+    [[parties]]
+    dec_party_id = "gov-core-test::1220a9afd0196a3d0cd913239ee35b82931da22f5680c35acb00b080360ac4cc6003"
+    member_party_id = "attestor-2::122099953934d9fe163fed07dd371fa13982b2b30749d6df56ecdba385f8c78a867a"
+    user_id = "CoordinatorUser"
+
+    [parties.keycloak]
+    url = "https://keycloak.dev.canton.example.com"
+    realm = "canton-devnet"
+    client_id = "attestor-2"
+    client_secret = "***REDACTED-CLIENT-SECRET***"
+
+    [parties.packages]
+    governance_core = "#governance-core-v0-rc1"
+    utility_credential = "#utility-credential-app-v0"
+    utility_registry = "#utility-registry-app-v0"
+    vault = "#bitsafe-vault-v0-rc8"
+    vault_governance = "#bitsafe-vault-governance-v0-rc8"
 
 ---
 apiVersion: v1

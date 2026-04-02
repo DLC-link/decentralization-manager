@@ -10,10 +10,12 @@ export interface ContractInfo {
 }
 
 export interface PackageConfig {
-  vault_governance?: string;
-  vault?: string;
-  utility_registry?: string;
+  governance_core?: string;
+  governance_token_custody?: string;
   utility_credential?: string;
+  utility_registry?: string;
+  vault?: string;
+  vault_governance?: string;
 }
 
 export interface PartyConfigRequest {
@@ -42,6 +44,30 @@ export interface PartyConfigResponse {
   packages: PackageConfig;
 }
 
+export interface VettedPackageInfo {
+  package_id: string;
+  package_name: string;
+  package_version: string;
+}
+
+export interface PackageInfo {
+  package_id: string;
+  name: string;
+  version: string;
+}
+
+export interface PeerPackageResult {
+  participant_id: string;
+  name: string;
+  reachable: boolean;
+  packages: PackageInfo[];
+}
+
+export interface PeerPackageComparison {
+  local_packages: PackageInfo[];
+  peers: PeerPackageResult[];
+}
+
 export interface PartyMetadata {
   annotations: Record<string, string>;
 }
@@ -54,6 +80,11 @@ export interface DecentralizedParty {
   participants: ParticipantInfo[];
   contracts?: ContractInfo[];
   local_metadata?: PartyMetadata;
+}
+
+export interface DecentralizedPartiesResponse {
+  parties: DecentralizedParty[];
+  vetted_packages?: VettedPackageInfo[];
 }
 
 export interface NodeConfig {
@@ -240,10 +271,55 @@ export interface GovernanceAction {
   can_execute: boolean;
 }
 
+export interface DomainGovernanceAction {
+  proposal_cid: string;
+  action_label: string;
+  confirmations: GovernanceConfirmation[];
+  confirmation_count: number;
+  can_execute: boolean;
+}
+
 export interface GovernanceResponse {
   actions: GovernanceAction[];
+  domain_actions?: DomainGovernanceAction[];
   threshold: number;
   member_party_id?: string;
+}
+
+export interface InstrumentAllowance {
+  id: string;
+}
+
+export type ProposalType =
+  | {
+      type: "setup_cc_preapproval";
+      provider: string;
+      expected_dso: string;
+    }
+  | {
+      type: "setup_token_preapproval";
+      operator: string;
+      instrument_admin: string;
+      instrument_allowances: InstrumentAllowance[];
+    }
+  | {
+      type: "transfer";
+      transfer_factory_cid: string;
+      expected_admin: string;
+      receiver: string;
+      amount: string;
+      instrument_id: { admin: string; id: string };
+      input_holding_cids: string[];
+    }
+  | {
+      type: "accept_transfer";
+      transfer_instruction_cid: string;
+    };
+
+export interface ProposeActionRequest {
+  party_id: string;
+  rules_contract_id: string;
+  proposal: ProposalType;
 }
 
 // ============================================================================
@@ -411,10 +487,13 @@ export interface DisclosedContract {
 export type DisclosedContractInput = DisclosedContract;
 
 // Request types
+export type GovernanceType = "vault" | "core_self" | "core_domain";
+
 export interface ConfirmActionRequest {
   party_id: string;
   rules_contract_id: string;
   action: ActionType;
+  governance_type?: GovernanceType;
 }
 
 export interface ExecuteActionRequest {
@@ -423,17 +502,20 @@ export interface ExecuteActionRequest {
   action: ActionType;
   confirmation_cids: string[];
   disclosed_contracts: DisclosedContractInput[];
+  governance_type?: GovernanceType;
 }
 
 export interface ExpireConfirmationRequest {
   party_id: string;
   rules_contract_id: string;
   confirmation_cid: string;
+  governance_type?: GovernanceType;
 }
 
 export interface CancelConfirmationRequest {
   party_id: string;
   confirmation_cid: string;
+  governance_type?: GovernanceType;
 }
 
 // Vault types
@@ -487,6 +569,12 @@ export interface ContractWithBlob {
 
 export interface ContractQueryResponse {
   contracts: ContractWithBlob[];
+}
+
+export interface NetworkInfo {
+  dso_party_id: string;
+  amulet_rules_cid: string;
+  amulet_rules_blob: string;
 }
 
 export type Network = "devnet" | "testnet" | "mainnet";

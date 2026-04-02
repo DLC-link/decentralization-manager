@@ -192,7 +192,7 @@ export const DarsDialog = ({ open, onClose, onComplete }: DarsDialogProps) => {
                 <Typography variant="body2" color="text.secondary">
                   {darFiles.length === 0
                     ? "No files selected"
-                    : `${darFiles.length} file(s) selected`}
+                    : `${darFiles.length} file${darFiles.length === 1 ? "" : "s"} selected`}
                 </Typography>
               </Box>
               {darFiles.length > 0 && (

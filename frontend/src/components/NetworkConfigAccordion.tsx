@@ -1,8 +1,5 @@
 import { useState } from "react";
 import {
-  Accordion,
-  AccordionSummary,
-  AccordionDetails,
   Typography,
   Box,
   Table,
@@ -18,7 +15,6 @@ import {
   useMediaQuery,
   useTheme,
 } from "@mui/material";
-import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import CircleIcon from "@mui/icons-material/Circle";
 import EditIcon from "@mui/icons-material/Edit";
 import DeleteIcon from "@mui/icons-material/Delete";
@@ -29,7 +25,8 @@ import PersonIcon from "@mui/icons-material/Person";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import ContentPasteIcon from "@mui/icons-material/ContentPaste";
 import { useSnackbar } from "../contexts";
-import { CopyableText, copyToClipboard } from "./CopyableText";
+import { zebraRow } from "../styles";
+import { copyToClipboard } from "./CopyableText";
 import type {
   NetworkConfig,
   Peer,
@@ -38,14 +35,6 @@ import type {
   KeyStatusResponse,
   ConnectionStatus,
 } from "../types";
-
-const accordionSx = {
-  borderRadius: 2,
-  mb: 2,
-  "&:first-of-type": { borderRadius: 2 },
-  "&:last-of-type": { borderRadius: 2 },
-  overflow: "hidden",
-};
 
 interface NetworkConfigAccordionProps {
   config: NetworkConfig;
@@ -84,8 +73,8 @@ export const NetworkConfigAccordion = ({
 
   const truncateKey = (key: string): string => {
     if (!key) return "-";
-    const len = isSmall ? 8 : isMedium ? 12 : 16;
-    return `${key.slice(0, len)}...`;
+    const len = isSmall ? 6 : isMedium ? 8 : 12;
+    return `${key.slice(0, len)}...${key.slice(-4)}`;
   };
 
   // Truncate participant ID: prefix::1220...last4
@@ -206,14 +195,10 @@ export const NetworkConfigAccordion = ({
 
   if (editing) {
     return (
-      <Accordion sx={accordionSx} defaultExpanded>
-        <AccordionSummary
-          expandIcon={<ExpandMoreIcon />}
-          sx={{ borderRadius: "8px 8px 0 0" }}
-        >
-          <Typography variant="h6">Edit Peers</Typography>
-        </AccordionSummary>
-        <AccordionDetails sx={{ p: 3 }}>
+      <Box sx={{ p: 2 }}>
+        <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 2 }}>
+          Edit Peers
+        </Typography>
           <Stack spacing={2}>
             {editedPeers.map((peer, index) => (
               <Box
@@ -312,22 +297,13 @@ export const NetworkConfigAccordion = ({
               </Box>
             </Box>
           </Stack>
-        </AccordionDetails>
-      </Accordion>
+      </Box>
     );
   }
 
   return (
-    <Accordion sx={accordionSx}>
-      <AccordionSummary
-        expandIcon={<ExpandMoreIcon />}
-        sx={{ borderRadius: "8px 8px 0 0" }}
-      >
-        <Typography variant="h6">Network Configuration</Typography>
-      </AccordionSummary>
-      <AccordionDetails sx={{ p: 0 }}>
-        <Box>
-          <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", px: 2, py: 1 }}>
+    <Box>
+      <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", px: 3, py: 2 }}>
             <Typography variant="subtitle1">Peers:</Typography>
             <Box sx={{ display: "flex", gap: 1 }}>
               {selfEntry && (
@@ -357,7 +333,6 @@ export const NetworkConfigAccordion = ({
               <TableHead>
                 <TableRow>
                   <TableCell sx={{ py: 1, width: 50 }}>Status</TableCell>
-                  <TableCell sx={{ py: 1 }}>ID</TableCell>
                   <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>Name</TableCell>
                   <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>Address</TableCell>
                   <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>Public Key</TableCell>
@@ -369,16 +344,9 @@ export const NetworkConfigAccordion = ({
                   <TableCell sx={{ py: 1 }}>
                     <PersonIcon sx={{ fontSize: 14, color: "primary.main" }} />
                   </TableCell>
-                  <TableCell sx={{ py: 1 }}>
-                    <CopyableText
-                      text={selfEntry.participant_id}
-                      truncate={{ start: 16, end: 8 }}
-                      variant="body2"
-                    />
-                  </TableCell>
                   <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>
                     <Typography variant="body2" color="text.secondary">
-                      You
+                      {selfPeer?.name || truncateParticipantId(selfEntry.participant_id)} (You)
                     </Typography>
                   </TableCell>
                   <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>
@@ -391,10 +359,10 @@ export const NetworkConfigAccordion = ({
                   </TableCell>
                 </TableRow>
               )}
-              {otherPeers.map((p) => {
+              {otherPeers.map((p, idx) => {
                 const status = getStatus(p.participant_id);
                 return (
-                  <TableRow key={p.participant_id}>
+                  <TableRow key={p.participant_id} sx={zebraRow(idx)}>
                     <TableCell sx={{ py: 1 }}>
                       <Tooltip title={getStatusTooltip(status)} arrow>
                         <CircleIcon
@@ -406,14 +374,9 @@ export const NetworkConfigAccordion = ({
                         />
                       </Tooltip>
                     </TableCell>
-                    <TableCell sx={{ py: 1 }}>
-                      <CopyableText
-                        text={p.participant_id}
-                        truncate={{ start: 16, end: 8 }}
-                        variant="body2"
-                      />
+                    <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>
+                      {p.name || truncateParticipantId(p.participant_id)}
                     </TableCell>
-                    <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>{p.name}</TableCell>
                     <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>
                       {p.address}:{p.port}
                     </TableCell>
@@ -427,9 +390,7 @@ export const NetworkConfigAccordion = ({
               })}
             </TableBody>
           </Table>
-          </Box>
         </Box>
-      </AccordionDetails>
-    </Accordion>
+    </Box>
   );
 };
