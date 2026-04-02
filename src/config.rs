@@ -211,6 +211,9 @@ pub struct NodeConfig {
     pub canton: CantonConfig,
     #[serde(default)]
     pub timeouts: Timeouts,
+    /// Top-level Keycloak config for frontend website gating
+    #[serde(default)]
+    pub keycloak: Option<KeycloakConfig>,
     /// Per-party credentials with Keycloak auth (multiple parties supported)
     #[serde(default)]
     pub parties: Vec<PartyCredentials>,

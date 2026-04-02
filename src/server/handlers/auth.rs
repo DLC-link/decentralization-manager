@@ -12,12 +12,37 @@ use crate::{
     server::{
         AppState,
         types::{
-            AuthStatus, AuthStatusResponse, AuthTestResponse, AuthTestResult, PartyAuthStatus,
-            RightsStatus,
+            AuthConfigResponse, AuthStatus, AuthStatusResponse, AuthTestResponse, AuthTestResult,
+            PartyAuthStatus, RightsStatus,
         },
     },
     utils,
 };
+
+/// Get frontend auth configuration (keycloak details + whether auth is required)
+#[utoipa::path(
+    tag = "Authentication",
+    responses(
+        (status = 200, description = "Auth configuration", body = AuthConfigResponse)
+    )
+)]
+#[get("/auth-config")]
+pub async fn get_auth_config(data: web::Data<AppState>) -> impl Responder {
+    match &data.config.keycloak {
+        Some(config) if !data.test_mode => HttpResponse::Ok().json(AuthConfigResponse {
+            auth_required: true,
+            keycloak_host: Some(config.url.clone()),
+            keycloak_realm: Some(config.realm.clone()),
+            keycloak_client_id: Some(config.client_id.clone()),
+        }),
+        _ => HttpResponse::Ok().json(AuthConfigResponse {
+            auth_required: false,
+            keycloak_host: None,
+            keycloak_realm: None,
+            keycloak_client_id: None,
+        }),
+    }
+}
 
 /// Check authentication status for all configured parties
 #[utoipa::path(

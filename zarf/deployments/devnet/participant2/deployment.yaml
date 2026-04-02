@@ -22,6 +22,11 @@ data:
     synchronizer = "global"
     network = "devnet"
 
+    [keycloak]
+    url = "https://keycloak.dev.canton.example.com/auth"
+    realm = "canton-devnet"
+    client_id = "devnet-dec-party-mgr-1"
+
     [timeouts]
     handshake_timeout_secs = 30
     message_timeout_secs = 120
