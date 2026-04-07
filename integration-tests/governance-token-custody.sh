@@ -186,7 +186,8 @@ REMAINING_ACTIONS=$(echo "$GOVERNANCE_RESPONSE" | jq '.domain_actions | length')
 echo "  Remaining domain actions: $REMAINING_ACTIONS"
 
 if [ "$REMAINING_ACTIONS" != "0" ]; then
-    echo "WARNING: Expected 0 domain actions after execution, got $REMAINING_ACTIONS"
+    echo "ERROR: Expected 0 domain actions after execution, got $REMAINING_ACTIONS"
+    exit 1
 fi
 
 echo ""

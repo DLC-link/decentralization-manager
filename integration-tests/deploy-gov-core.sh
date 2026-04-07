@@ -53,7 +53,8 @@ grant_user_rights() {
     local name=$3
 
     echo "Granting actAs+readAs on '$party_id' to ledger-api-user on $name..."
-    curl -s -X POST "http://localhost:$json_api_port/v2/users/ledger-api-user/rights" \
+    local response http_code
+    response=$(curl -s -w "\n%{http_code}" -X POST "http://localhost:$json_api_port/v2/users/ledger-api-user/rights" \
         -H "Content-Type: application/json" \
         -H "Authorization: Bearer $MOCK_TOKEN" \
         -d "{
@@ -63,7 +64,15 @@ grant_user_rights() {
                 {\"kind\": {\"CanReadAs\": {\"value\": {\"party\": \"$party_id\"}}}}
             ],
             \"identityProviderId\": \"\"
-        }" > /dev/null
+        }")
+    http_code=$(echo "$response" | tail -1)
+    local body
+    body=$(echo "$response" | sed '$d')
+
+    if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+        echo "ERROR: Failed to grant rights on $name (HTTP $http_code): $body"
+        exit 1
+    fi
 }
 
 # Extract participant UIDs from the party JSON
@@ -107,7 +116,8 @@ update_party_config() {
     local name=$3
 
     echo "Updating party config on $name..."
-    curl -s -X PUT "http://localhost:$port/party-config" \
+    local response http_code
+    response=$(curl -s -w "\n%{http_code}" -X PUT "http://localhost:$port/party-config" \
         -H "Content-Type: application/json" \
         -d "{
             \"dec_party_id\": \"$PARTY_ID\",
@@ -120,7 +130,14 @@ update_party_config() {
                 \"governance_core\": \"#governance-core-v0-rc1\",
                 \"governance_token_custody\": \"#governance-token-custody-v0-rc1\"
             }
-        }" > /dev/null
+        }")
+    http_code=$(echo "$response" | tail -1)
+    if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+        local body
+        body=$(echo "$response" | sed '$d')
+        echo "ERROR: Failed to update party config on $name (HTTP $http_code): $body"
+        exit 1
+    fi
 }
 
 update_party_config $P1_HTTP "$P1_MEMBER_PARTY" "participant-1"
