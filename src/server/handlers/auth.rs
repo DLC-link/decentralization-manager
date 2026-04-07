@@ -59,7 +59,7 @@ pub async fn get_auth_status(data: web::Data<AppState>) -> impl Responder {
 
     // Handle test mode - return mock status
     if let Some(WorkflowAuth::Mock(ref mock_registry)) = *auth {
-        let manager = mock_registry.get_by_str("");
+        let manager = mock_registry.get_by_str("").await;
         party_statuses.push(PartyAuthStatus {
             dec_party_id: "(test mode)".to_string(),
             member_party_id: "(test mode)".to_string(),

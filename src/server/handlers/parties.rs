@@ -207,7 +207,7 @@ async fn fetch_decentralized_parties(
                         }
                     }
                     Some(WorkflowAuth::Mock(mock_registry)) => {
-                        Some(mock_registry.get_by_str(&party_id_str).get_token())
+                        Some(mock_registry.get_by_str(&party_id_str).await.get_token())
                     }
                     None => None,
                 };

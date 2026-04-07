@@ -1,7 +1,5 @@
-parties = []
-
 [node]
-participant_id = "participant::122077db7f8ff7fe22b918a97019c2bf48bf2c90524c6c08dff38d46c65a45b4c505"
+participant_id = "participant::1220b74dfd162500eea09349d5ddfecb43d2e80e33b4822a9ae7eb53db0065987ada"
 listen_address = "0.0.0.0"
 port = 9002
 
@@ -18,3 +16,17 @@ handshake_timeout_secs = 30
 message_timeout_secs = 120
 connection_retry_attempts = 3
 connection_retry_delay_secs = 5
+
+[[parties]]
+dec_party_id = "test-network-1::12208be0f48b80ccbb82c45b1e9a078ae79d27d515daed0db2af7221e64744f801bf"
+member_party_id = "party-1218353c-d7ed-411f-a1ed-5a1ddfcc1f0b::1220b74dfd162500eea09349d5ddfecb43d2e80e33b4822a9ae7eb53db0065987ada"
+user_id = "ledger-api-user"
+
+[parties.keycloak]
+url = ""
+realm = ""
+client_id = ""
+
+[parties.packages]
+governance_core = "#governance-core-v0-rc1"
+governance_token_custody = "#governance-token-custody-v0-rc1"
