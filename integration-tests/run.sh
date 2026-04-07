@@ -46,6 +46,9 @@ source "$SCRIPT_DIR/integration-tests/distribute-dars.sh"
 log_phase "Deploying governance core contract"
 source "$SCRIPT_DIR/integration-tests/deploy-gov-core.sh"
 
+log_phase "Testing governance token custody flow"
+source "$SCRIPT_DIR/integration-tests/governance-token-custody.sh"
+
 log_phase "Kicking participant-3"
 source "$SCRIPT_DIR/integration-tests/kick.sh"
 

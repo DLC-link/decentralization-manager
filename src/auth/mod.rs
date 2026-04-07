@@ -285,7 +285,7 @@ impl WorkflowAuth {
                 })
             }
             WorkflowAuth::Mock(registry) => {
-                let mm = registry.get(dec_party_id);
+                let mm = registry.get(dec_party_id).await;
                 Ok(PartyAuthCredentials {
                     token: mm.get_token(),
                     user_id: mm.user_id().to_string(),
