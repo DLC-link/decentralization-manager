@@ -67,10 +67,14 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig, test_mode: 
         );
     }
 
+    let party_credentials = Arc::new(RwLock::new(config.parties.clone()));
+
     // Initialize auth based on mode
     let auth = if test_mode {
         tracing::info!("Running in TEST MODE - using mock authentication");
-        Some(WorkflowAuth::Mock(Arc::new(MockAuthRegistry::new())))
+        Some(WorkflowAuth::Mock(Arc::new(MockAuthRegistry::new(
+            party_credentials.clone(),
+        ))))
     } else if config.parties.is_empty() {
         tracing::info!("No party credentials configured, auth disabled");
         None
@@ -85,7 +89,6 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig, test_mode: 
     };
 
     let auth = Arc::new(RwLock::new(auth));
-    let party_credentials = Arc::new(RwLock::new(config.parties.clone()));
 
     let peer_status = Arc::new(RwLock::new(HashMap::new()));
     let listener_control = Arc::new(RwLock::new(ListenerControl {

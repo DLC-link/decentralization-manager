@@ -823,7 +823,9 @@ async fn get_party_token(data: &web::Data<AppState>, party_id: &CantonId) -> Opt
     let auth = data.auth.read().await;
     match &*auth {
         Some(WorkflowAuth::Keycloak(registry)) => registry.get(party_id)?.get_token().await.ok(),
-        Some(WorkflowAuth::Mock(mock_registry)) => Some(mock_registry.get(party_id).get_token()),
+        Some(WorkflowAuth::Mock(mock_registry)) => {
+            Some(mock_registry.get(party_id).await.get_token())
+        }
         None => None,
     }
 }
@@ -895,7 +897,7 @@ async fn get_party_credentials(
             Some((token, tm.member_party_id().to_string()))
         }
         Some(WorkflowAuth::Mock(mock_registry)) => {
-            let mm = mock_registry.get(party_id);
+            let mm = mock_registry.get(party_id).await;
             Some((mm.get_token(), mm.member_party_id().to_string()))
         }
         None => None,
