@@ -3,7 +3,7 @@ mod cli;
 use tracing_subscriber::{filter::EnvFilter, prelude::*};
 
 use cli::{Cli, Commands, Parser};
-use dec_party_manager::{config::NodeConfig, error::Result, utils};
+use dec_party_manager::{config::NodeConfig, db, error::Result, utils};
 
 #[tokio::main]
 async fn main() -> Result {
@@ -28,13 +28,21 @@ async fn main() -> Result {
 
     tracing::info!("Running as participant: {}", config.participant_id());
 
+    // Initialize database
+    let db_path = config.db_path();
+    tracing::info!("Connecting to database at {}", db_path.display());
+    let pool = db::connect(&db_path).await?;
+
+    tracing::info!("Running database migrations");
+    db::MIGRATOR.run(&pool).await?;
+
     match args.command {
         Commands::Serve {
             ref host,
             port,
             test,
         } => {
-            dec_party_manager::server::start_server(host, port, config, test).await?;
+            dec_party_manager::server::start_server(host, port, config, test, pool).await?;
         }
     }
 

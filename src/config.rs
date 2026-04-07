@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     consts::{
-        CONFIG_DIR, DARS_DIR, DATA_DIR, NODE_CONFIG_FILENAME, NOISE_KEY_FILENAME, WORKFLOW_DATA_DIR,
+        CONFIG_DIR, DARS_DIR, DATA_DIR, DB_FILENAME, NODE_CONFIG_FILENAME, NOISE_KEY_FILENAME,
+        WORKFLOW_DATA_DIR,
     },
     error::Result,
     participant_id::CantonId,
@@ -412,6 +413,11 @@ impl NodeConfig {
     /// Get the dars directory
     pub fn dars_dir(&self) -> PathBuf {
         self.data_dir().join(DARS_DIR)
+    }
+
+    /// Get the path to the SQLite database file
+    pub fn db_path(&self) -> PathBuf {
+        self.data_dir().join(DB_FILENAME)
     }
 
     /// Get the root directory

@@ -9,6 +9,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use actix_cors::Cors;
 use actix_web::{App, HttpServer, web};
 use hyper::{Body, Response, StatusCode};
+use sqlx::SqlitePool;
 use tokio::sync::{Notify, RwLock};
 use tokio_noise::handshakes::nn_psk2::Responder;
 use utoipa_actix_web::AppExt;
@@ -26,6 +27,7 @@ pub use types::*;
 
 /// Application state shared across all handlers
 pub struct AppState {
+    pub db: SqlitePool,
     pub config: NodeConfig,
     pub peer_status: Arc<RwLock<HashMap<String, bool>>>,
     pub noise_listener_control: Arc<RwLock<ListenerControl>>,
@@ -59,7 +61,13 @@ struct WorkflowTriggers {
 }
 
 /// Start the HTTP server and a heartbeat system for peer status tracking
-pub async fn start_server(host: &str, port: u16, config: NodeConfig, test_mode: bool) -> Result {
+pub async fn start_server(
+    host: &str,
+    port: u16,
+    config: NodeConfig,
+    test_mode: bool,
+    db: SqlitePool,
+) -> Result {
     if !test_mode {
         tracing::warn!(
             "Running without --test flag. Swagger UI is disabled. \
@@ -103,6 +111,7 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig, test_mode: 
     let pending_invitations = Arc::new(RwLock::new(Vec::new()));
 
     let app_state = web::Data::new(AppState {
+        db,
         config: config.clone(),
         peer_status: peer_status.clone(),
         noise_listener_control: listener_control.clone(),

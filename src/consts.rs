@@ -83,6 +83,9 @@ pub const DATA_DIR: &str = "data";
 /// Noise private key filename (inside data/)
 pub const NOISE_KEY_FILENAME: &str = "noise.key";
 
+/// SQLite database filename (inside data/)
+pub const DB_FILENAME: &str = "dpm.db";
+
 /// Workflow data directory name (inside data/)
 pub const WORKFLOW_DATA_DIR: &str = "workflow-data";
 
