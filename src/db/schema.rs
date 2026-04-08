@@ -22,6 +22,9 @@ pub trait SchemaRead {
     /// Get all party credentials
     async fn get_all_party_credentials(&self) -> Result<Vec<PartyCredentials>>;
 
+    /// Get a peer by its Noise public key
+    async fn get_peer_by_public_key(&self, public_key: &str) -> Result<Option<Peer>>;
+
     /// Get party credentials by decentralized party ID
     async fn get_party_credentials(&self, dec_party_id: &str) -> Result<Option<PartyCredentials>>;
 }
@@ -82,6 +85,15 @@ impl SchemaRead for SqlitePool {
             .await?;
 
         Ok(count.0)
+    }
+
+    async fn get_peer_by_public_key(&self, public_key: &str) -> Result<Option<Peer>> {
+        let row = sqlx::query_as::<_, PeerRow>("SELECT * FROM peers WHERE public_key = ?")
+            .bind(public_key)
+            .fetch_optional(self)
+            .await?;
+
+        row.map(|r| r.into_domain()).transpose()
     }
 
     async fn get_all_party_credentials(&self) -> Result<Vec<PartyCredentials>> {

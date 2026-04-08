@@ -41,6 +41,11 @@ pub struct Peer {
 }
 
 impl NetworkConfig {
+    /// Construct a NetworkConfig from a list of peers (e.g., loaded from DB)
+    pub fn from_peers(peers: Vec<Peer>) -> Self {
+        Self { peers }
+    }
+
     /// Load network configuration from a CSV file
     ///
     /// CSV format: participant_id,name,address,port,public_key,party
@@ -223,6 +228,19 @@ pub struct NodeConfig {
     root_dir: PathBuf,
 }
 
+impl Default for NodeConfig {
+    fn default() -> Self {
+        Self {
+            node: NodeInfo::default(),
+            canton: CantonConfig::default(),
+            timeouts: Timeouts::default(),
+            keycloak: None,
+            parties: Vec::new(),
+            root_dir: PathBuf::new(),
+        }
+    }
+}
+
 /// Node-specific information
 #[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct NodeInfo {
@@ -260,6 +278,17 @@ fn default_noise_port() -> u16 {
     9000
 }
 
+impl Default for NodeInfo {
+    fn default() -> Self {
+        Self {
+            participant_id: None,
+            listen_address: default_listen_address(),
+            port: default_noise_port(),
+            public_address: None,
+        }
+    }
+}
+
 /// Default Keycloak configuration values for a network
 pub struct KeycloakDefaults {
     /// Keycloak server URL
@@ -269,7 +298,7 @@ pub struct KeycloakDefaults {
 }
 
 /// Canton Network environment
-#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum Network {
     Devnet,
@@ -335,6 +364,19 @@ fn default_synchronizer() -> String {
     "global".to_string()
 }
 
+impl Default for CantonConfig {
+    fn default() -> Self {
+        Self {
+            admin_api_host: "127.0.0.1".to_string(),
+            admin_api_port: 5002,
+            ledger_api_host: "127.0.0.1".to_string(),
+            ledger_api_port: 5001,
+            synchronizer: default_synchronizer(),
+            network: Network::Devnet,
+        }
+    }
+}
+
 impl NodeConfig {
     /// Load node configuration from a root directory
     ///
@@ -348,11 +390,19 @@ impl NodeConfig {
         let root_dir = root_dir.as_ref();
         let config_path = root_dir.join(CONFIG_DIR).join(NODE_CONFIG_FILENAME);
 
-        let content = tokio::fs::read_to_string(&config_path)
-            .await
-            .with_context(|| format!("Failed to read node config '{}'", config_path.display()))?;
-        let mut config: NodeConfig = toml::from_str(&content)
-            .with_context(|| format!("Failed to parse node config '{}'", config_path.display()))?;
+        let mut config = if config_path.exists() {
+            let content = tokio::fs::read_to_string(&config_path)
+                .await
+                .with_context(|| {
+                    format!("Failed to read node config '{}'", config_path.display())
+                })?;
+            toml::from_str::<NodeConfig>(&content).with_context(|| {
+                format!("Failed to parse node config '{}'", config_path.display())
+            })?
+        } else {
+            tracing::info!("No node.toml found, using defaults");
+            NodeConfig::default()
+        };
         config.root_dir = root_dir.to_path_buf();
         Ok(config)
     }
@@ -383,10 +433,14 @@ impl NodeConfig {
         &self.canton.synchronizer
     }
 
+    /// Get the path to the peers.csv file
+    pub fn peers_csv_path(&self) -> PathBuf {
+        self.config_dir().join("peers.csv")
+    }
+
     /// Load the peers configuration from peers.csv in the config directory
     pub async fn load_network_config(&self) -> Result<NetworkConfig> {
-        let peers_config_path = self.config_dir().join("peers.csv");
-        NetworkConfig::from_file(&peers_config_path).await
+        NetworkConfig::from_file(&self.peers_csv_path()).await
     }
 
     /// Save the peers configuration to peers.csv in the config directory

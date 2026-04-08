@@ -39,7 +39,7 @@ P3_HTTP=8083
 P3_NOISE=9003
 
 # Paths
-DEV_DIR="$SCRIPT_DIR/development/local"
+DEV_DIR=$(mktemp -d "${TMPDIR:-/tmp}/dpm-it-XXXXXX")
 DARS_DIR="$SCRIPT_DIR/releases/v0/rc1"
 BINARY="$SCRIPT_DIR/target/release/dec-party-manager"
 
@@ -109,6 +109,11 @@ cleanup() {
     for f in "${TEMP_FILES[@]}"; do
         rm -f "$f" 2>/dev/null || true
     done
+
+    # Remove temp directory
+    if [ -n "$DEV_DIR" ] && [ -d "$DEV_DIR" ]; then
+        rm -rf "$DEV_DIR"
+    fi
 
     wait 2>/dev/null || true
     echo "Cleanup complete"
@@ -193,40 +198,14 @@ wait_for_localnet() {
 }
 
 # ============================================================================
-# Config generation
+# Directory setup
 # ============================================================================
 
-generate_configs() {
-    echo "Generating integration test configs..."
-
-    # Wipe and recreate development/local
-    rm -rf "$DEV_DIR"
-
-    local canton_ledger_ports=($P1_CANTON_LEDGER $P2_CANTON_LEDGER $P3_CANTON_LEDGER)
-    local canton_admin_ports=($P1_CANTON_ADMIN $P2_CANTON_ADMIN $P3_CANTON_ADMIN)
-    local noise_ports=($P1_NOISE $P2_NOISE $P3_NOISE)
-
+setup_directories() {
+    echo "Setting up test directories in $DEV_DIR..."
     for i in 1 2 3; do
-        local idx=$((i - 1))
-        local config_dir="$DEV_DIR/participant-$i/config"
-        mkdir -p "$config_dir"
-
-        cat > "$config_dir/node.toml" <<EOF
-# Auto-generated for integration tests
-[node]
-listen_address = "0.0.0.0"
-port = ${noise_ports[$idx]}
-
-[canton]
-admin_api_host = "127.0.0.1"
-admin_api_port = ${canton_admin_ports[$idx]}
-ledger_api_host = "127.0.0.1"
-ledger_api_port = ${canton_ledger_ports[$idx]}
-network = "devnet"
-EOF
+        mkdir -p "$DEV_DIR/participant-$i"
     done
-
-    echo "Configs generated in $DEV_DIR"
 }
 
 # ============================================================================
@@ -235,10 +214,19 @@ EOF
 
 start_nodes() {
     local http_ports=($P1_HTTP $P2_HTTP $P3_HTTP)
+    local canton_ledger_ports=($P1_CANTON_LEDGER $P2_CANTON_LEDGER $P3_CANTON_LEDGER)
+    local canton_admin_ports=($P1_CANTON_ADMIN $P2_CANTON_ADMIN $P3_CANTON_ADMIN)
+    local noise_ports=($P1_NOISE $P2_NOISE $P3_NOISE)
 
     for i in 1 2 3; do
         local idx=$((i - 1))
         echo "Starting participant-$i..."
+        DECPM_CANTON_ADMIN_HOST=127.0.0.1 \
+        DECPM_CANTON_ADMIN_PORT="${canton_admin_ports[$idx]}" \
+        DECPM_CANTON_LEDGER_HOST=127.0.0.1 \
+        DECPM_CANTON_LEDGER_PORT="${canton_ledger_ports[$idx]}" \
+        DECPM_CANTON_NETWORK=devnet \
+        DECPM_NOISE_PORT="${noise_ports[$idx]}" \
         "$BINARY" -d "$DEV_DIR/participant-$i" serve \
             --host 0.0.0.0 --port "${http_ports[$idx]}" --test &
         PIDS+=($!)

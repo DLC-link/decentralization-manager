@@ -360,12 +360,7 @@ pub async fn resolve_participant_id(config: &mut NodeConfig) -> Result {
     let participant_id = get_participant_id(config).await?;
     tracing::info!("Got participant ID from Canton: {participant_id}");
 
-    config
-        .set_and_save_participant_id(participant_id)
-        .await
-        .context("Failed to save participant ID to config")?;
-
-    tracing::info!("Saved participant ID to config file");
+    config.node.participant_id = Some(participant_id);
     Ok(())
 }
 

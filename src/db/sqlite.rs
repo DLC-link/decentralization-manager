@@ -15,6 +15,11 @@ pub static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 ///
 /// Returns an error if the database file cannot be created or opened
 pub async fn connect(db_path: &Path) -> Result<SqlitePool> {
+    // Ensure parent directory exists
+    if let Some(parent) = db_path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+
     let db_url = format!("sqlite:{}", db_path.display());
 
     let options = SqliteConnectOptions::from_str(&db_url)?

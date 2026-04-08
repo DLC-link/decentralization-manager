@@ -8,10 +8,13 @@ use std::sync::Arc;
 
 use anyhow::Context;
 
+use sqlx::SqlitePool;
+
 use crate::{
     auth::WorkflowAuth,
-    config::{NodeConfig, Peer},
+    config::{NetworkConfig, NodeConfig, Peer},
     consts::{LEDGER_SUBMISSIONS_DIR, PREPARED_DIR},
+    db::schema::SchemaRead,
     error::Result,
     noise::{MessageType, client::NoiseClient, server::NoiseServer},
     participant_id::CantonId,
@@ -40,8 +43,10 @@ pub struct CoordinatorResult {
 }
 
 /// Start a coordinator workflow (called when this node initiates the workflow from UI)
+#[allow(clippy::too_many_arguments)]
 pub async fn start_coordinator(
     node_config: NodeConfig,
+    db: SqlitePool,
     workflow_type: WorkflowType,
     onboarding_config: Option<OnboardingConfig>,
     kick_config: Option<KickConfig>,
@@ -49,8 +54,8 @@ pub async fn start_coordinator(
     dars_config: Option<DarsConfig>,
     workflow_auth: Option<WorkflowAuth>,
 ) -> Result<CoordinatorResult> {
-    tracing::info!("Loading network config...");
-    let network_config = node_config.load_network_config().await?;
+    tracing::info!("Loading peers from database...");
+    let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
 
     tracing::info!("Starting {workflow_type:?} workflow as COORDINATOR");
 

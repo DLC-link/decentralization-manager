@@ -3,9 +3,12 @@ use std::{sync::Arc, time::Duration};
 use actix_web::{HttpResponse, Responder, get, post, web};
 use tokio::sync::RwLock;
 
+use sqlx::SqlitePool;
+
 use crate::{
     auth::{AuthRegistry, WorkflowAuth},
-    config::{KeycloakConfig, NodeConfig, PartyCredentials, default_package_config},
+    config::{KeycloakConfig, NetworkConfig, NodeConfig, PartyCredentials, default_package_config},
+    db::schema::{Commitable, SchemaRead, SchemaWrite},
     error::Result,
     noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
     participant_id::CantonId,
@@ -109,6 +112,7 @@ pub async fn start_kick(
 
     // Spawn the kick workflow in the background
     let config = data.config.clone();
+    let db = data.db.clone();
     let kick_state_clone = kick_state.get_ref().clone();
     let namespace_fingerprint = body.namespace_fingerprint.clone();
     let new_threshold = body.new_threshold;
@@ -119,7 +123,7 @@ pub async fn start_kick(
         let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
 
         // Send kick invites to all peers before starting coordinator workflow
-        let invite_result = send_kick_invites(&config, &participant_id).await;
+        let invite_result = send_kick_invites(&config, &db, &participant_id).await;
         if let Err(e) = invite_result {
             tracing::error!("Failed to send kick invites: {e}");
             guard.resume().await;
@@ -148,6 +152,7 @@ pub async fn start_kick(
 
         let result = workflow::start_coordinator(
             config,
+            db,
             workflow::WorkflowType::Kick,
             None, // No onboarding config
             Some(kick_config),
@@ -200,8 +205,12 @@ pub async fn get_kick_status(kick_state: web::Data<Arc<KickWorkflowState>>) -> i
 }
 
 /// Send kick invites to all peers using Noise protocol (excluding the peer being kicked)
-async fn send_kick_invites(config: &NodeConfig, kicked_participant: &CantonId) -> Result {
-    let network_config = config.load_network_config().await?;
+async fn send_kick_invites(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    kicked_participant: &CantonId,
+) -> Result {
+    let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
 
     let current_participant_id = config.participant_id();
@@ -336,6 +345,7 @@ pub async fn start_onboarding(
 
     // Spawn the onboarding workflow in the background
     let config = data.config.clone();
+    let db = data.db.clone();
     let onboarding_state_clone = onboarding_state.get_ref().clone();
     let listener_control = data.noise_listener_control.clone();
     let listener_notify = data.noise_listener_notify.clone();
@@ -349,7 +359,7 @@ pub async fn start_onboarding(
         let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
 
         // Send invites to selected peers before starting coordinator workflow
-        let invite_result = send_onboarding_invites(&config, &peer_ids).await;
+        let invite_result = send_onboarding_invites(&config, &db, &peer_ids).await;
         if let Err(e) = invite_result {
             tracing::error!("Failed to send onboarding invites: {e}");
             guard.resume().await;
@@ -369,6 +379,7 @@ pub async fn start_onboarding(
 
         let result = workflow::start_coordinator(
             config.clone(),
+            db.clone(),
             workflow::WorkflowType::Onboarding,
             Some(onboarding_config),
             None, // No kick config
@@ -392,6 +403,7 @@ pub async fn start_onboarding(
                     && let Some(dec_party_id) = coordinator_result.created_party_id
                     && let Err(e) = save_default_party_config(
                         &config,
+                        &db,
                         &dec_party_id,
                         &party_credentials,
                         &auth_lock,
@@ -436,8 +448,12 @@ pub async fn get_onboarding_status(
 }
 
 /// Send onboarding invites to selected peers using Noise protocol
-async fn send_onboarding_invites(config: &NodeConfig, peer_ids: &[String]) -> Result {
-    let network_config = config.load_network_config().await?;
+async fn send_onboarding_invites(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    peer_ids: &[String],
+) -> Result {
+    let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
 
     let invite_message = Message::new_empty(MessageType::InviteOnboarding);
@@ -565,6 +581,7 @@ pub async fn start_contracts(
 
     // Spawn the contracts workflow in the background
     let config = data.config.clone();
+    let db = data.db.clone();
     let workflow_auth = data.auth.read().await.clone();
     let contracts_state_clone = contracts_state.get_ref().clone();
     let listener_control = data.noise_listener_control.clone();
@@ -575,7 +592,7 @@ pub async fn start_contracts(
         let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
 
         // Send invites to all peers before starting coordinator workflow
-        let invite_result = send_contracts_invites(&config).await;
+        let invite_result = send_contracts_invites(&config, &db).await;
         if let Err(e) = invite_result {
             tracing::error!("Failed to send contracts invites: {e}");
             guard.resume().await;
@@ -591,6 +608,7 @@ pub async fn start_contracts(
 
         let result = workflow::start_coordinator(
             config.clone(),
+            db.clone(),
             workflow::WorkflowType::Contracts,
             None, // No onboarding config
             None, // No kick config
@@ -610,7 +628,7 @@ pub async fn start_contracts(
                 *status = WorkflowProgress::Completed;
                 tracing::info!("Contracts workflow completed successfully");
                 if let Err(e) =
-                    save_deployed_packages(&config, &contracts_config, &party_credentials).await
+                    save_deployed_packages(&db, &contracts_config, &party_credentials).await
                 {
                     tracing::warn!("Failed to save package config: {e}");
                 }
@@ -651,48 +669,56 @@ pub async fn get_contracts_status(
 
 /// Save deployed package IDs to party config after successful contracts workflow
 async fn save_deployed_packages(
-    config: &NodeConfig,
+    db: &SqlitePool,
     contracts_config: &ContractsConfig,
     party_credentials: &Arc<RwLock<Vec<PartyCredentials>>>,
 ) -> Result {
-    let mut fresh_config = NodeConfig::from_dir(config.root_dir()).await?;
-    let creds = fresh_config
-        .parties
-        .iter_mut()
-        .find(|p| p.dec_party_id == contracts_config.decentralized_party_id);
-    if let Some(creds) = creds {
-        for contract in &contracts_config.contracts {
-            match (contract.module_name.as_str(), contract.entity_name.as_str()) {
-                ("Governance.Rules", "GovernanceRules") => {
-                    creds.packages.governance_core = Some(contract.package_id.clone());
-                }
-                ("BitsafeVault.VaultGovernance", "VaultGovernanceRules") => {
-                    creds.packages.vault_governance = Some(contract.package_id.clone());
-                }
-                ("BitsafeVault.Vault", "Vault") => {
-                    creds.packages.vault = Some(contract.package_id.clone());
-                }
-                (m, _) if m.starts_with("Utility.Registry.App") => {
-                    creds.packages.utility_registry = Some(contract.package_id.clone());
-                }
-                (m, _) if m.starts_with("Utility.Credential.App") => {
-                    creds.packages.utility_credential = Some(contract.package_id.clone());
-                }
-                _ => {}
+    // Start from existing packages, then update with deployed contract IDs
+    let mut packages = {
+        let pc = party_credentials.read().await;
+        pc.iter()
+            .find(|p| p.dec_party_id == contracts_config.decentralized_party_id)
+            .map(|c| c.packages.clone())
+            .unwrap_or_default()
+    };
+    for contract in &contracts_config.contracts {
+        match (contract.module_name.as_str(), contract.entity_name.as_str()) {
+            ("Governance.Rules", "GovernanceRules") => {
+                packages.governance_core = Some(contract.package_id.clone());
             }
+            ("BitsafeVault.VaultGovernance", "VaultGovernanceRules") => {
+                packages.vault_governance = Some(contract.package_id.clone());
+            }
+            ("BitsafeVault.Vault", "Vault") => {
+                packages.vault = Some(contract.package_id.clone());
+            }
+            (m, _) if m.starts_with("Utility.Registry.App") => {
+                packages.utility_registry = Some(contract.package_id.clone());
+            }
+            (m, _) if m.starts_with("Utility.Credential.App") => {
+                packages.utility_credential = Some(contract.package_id.clone());
+            }
+            _ => {}
         }
-        let updated_packages = creds.packages.clone();
-        let dec_party_id = creds.dec_party_id.clone();
-        fresh_config.save_config().await?;
-
-        // Sync in-memory party credentials
-        let mut pc = party_credentials.write().await;
-        if let Some(mem_creds) = pc.iter_mut().find(|p| p.dec_party_id == dec_party_id) {
-            mem_creds.packages = updated_packages;
-        }
-
-        tracing::info!("Saved package IDs to party config");
     }
+
+    let dec_party_id = contracts_config.decentralized_party_id.to_string();
+
+    // Primary write: update packages in database
+    let mut tx = db.begin_transaction().await?;
+    tx.update_party_packages(&dec_party_id, &packages).await?;
+    Commitable::commit(tx).await?;
+
+    // Sync in-memory party credentials
+    let mut pc = party_credentials.write().await;
+    if let Some(mem_creds) = pc
+        .iter_mut()
+        .find(|p| p.dec_party_id == contracts_config.decentralized_party_id)
+    {
+        mem_creds.packages = packages;
+    }
+
+    tracing::info!("Saved package IDs to party config");
     Ok(())
 }
 
@@ -746,6 +772,7 @@ pub async fn start_dars(
 
     // Spawn the DARs workflow in the background
     let config = data.config.clone();
+    let db = data.db.clone();
     let dars_state_clone = dars_state.get_ref().clone();
     let listener_control = data.noise_listener_control.clone();
     let listener_notify = data.noise_listener_notify.clone();
@@ -754,7 +781,7 @@ pub async fn start_dars(
         let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
 
         // Send invites to all peers before starting coordinator workflow
-        let invite_result = send_dars_invites(&config).await;
+        let invite_result = send_dars_invites(&config, &db).await;
         if let Err(e) = invite_result {
             tracing::error!("Failed to send DARs invites: {e}");
             guard.resume().await;
@@ -770,6 +797,7 @@ pub async fn start_dars(
 
         let result = workflow::start_coordinator(
             config,
+            db,
             workflow::WorkflowType::Dars,
             None, // No onboarding config
             None, // No kick config
@@ -822,8 +850,8 @@ pub async fn get_dars_status(dars_state: web::Data<Arc<DarsWorkflowState>>) -> i
 }
 
 /// Send DARs invites to all peers using Noise protocol
-async fn send_dars_invites(config: &NodeConfig) -> Result {
-    let network_config = config.load_network_config().await?;
+async fn send_dars_invites(config: &NodeConfig, db: &SqlitePool) -> Result {
+    let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
 
     let current_participant_id = config.participant_id();
@@ -897,6 +925,7 @@ async fn send_dars_invites(config: &NodeConfig) -> Result {
 /// Auto-save default party config after successful onboarding
 async fn save_default_party_config(
     config: &NodeConfig,
+    db: &SqlitePool,
     dec_party_id: &CantonId,
     party_credentials: &Arc<RwLock<Vec<PartyCredentials>>>,
     auth_lock: &Arc<RwLock<Option<WorkflowAuth>>>,
@@ -920,8 +949,10 @@ async fn save_default_party_config(
         packages: default_package_config(),
     };
 
-    let mut fresh_config = NodeConfig::from_dir(config.root_dir()).await?;
-    fresh_config.upsert_party_credentials(creds.clone()).await?;
+    // Primary write: save to database
+    let mut tx = db.begin_transaction().await?;
+    tx.upsert_party_credentials(&creds).await?;
+    Commitable::commit(tx).await?;
 
     // Update in-memory state
     {
@@ -952,8 +983,8 @@ async fn save_default_party_config(
 }
 
 /// Send contracts invites to all peers using Noise protocol
-async fn send_contracts_invites(config: &NodeConfig) -> Result {
-    let network_config = config.load_network_config().await?;
+async fn send_contracts_invites(config: &NodeConfig, db: &SqlitePool) -> Result {
+    let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
 
     let current_participant_id = config.participant_id();

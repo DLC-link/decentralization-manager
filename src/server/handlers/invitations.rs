@@ -1,5 +1,6 @@
 use actix_web::{HttpResponse, Responder, get, post, web};
 
+use crate::db::schema::SchemaRead;
 use crate::server::{
     AppState,
     types::{
@@ -19,23 +20,21 @@ use crate::server::{
 pub async fn get_invitations(data: web::Data<AppState>) -> impl Responder {
     let invitations = data.pending_invitations.read().await;
 
-    // Try to resolve coordinator names from network config
-    let network_config = data.config.load_network_config().await.ok();
-    let invitations_with_names: Vec<PendingInvitation> = invitations
-        .iter()
-        .map(|inv| {
-            let coordinator_name = network_config.as_ref().and_then(|nc| {
-                nc.peers
-                    .iter()
-                    .find(|p| p.public_key == inv.coordinator_pubkey)
-                    .map(|p| p.name.clone())
-            });
-            PendingInvitation {
-                coordinator_name,
-                ..inv.clone()
-            }
-        })
-        .collect();
+    // Try to resolve coordinator names from database
+    let mut invitations_with_names = Vec::with_capacity(invitations.len());
+    for inv in invitations.iter() {
+        let coordinator_name = data
+            .db
+            .get_peer_by_public_key(&inv.coordinator_pubkey)
+            .await
+            .ok()
+            .flatten()
+            .map(|p| p.name);
+        invitations_with_names.push(PendingInvitation {
+            coordinator_name,
+            ..inv.clone()
+        });
+    }
 
     HttpResponse::Ok().json(PendingInvitationsResponse {
         invitations: invitations_with_names,
