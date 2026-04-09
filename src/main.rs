@@ -17,8 +17,17 @@ use cli::{Cli, Commands, Parser};
 fn find_dir_arg() -> PathBuf {
     let args: Vec<String> = std::env::args().collect();
     for i in 0..args.len() {
-        if (args[i] == "-d" || args[i] == "--dir") && i + 1 < args.len() {
+        let arg = &args[i];
+        if (arg == "-d" || arg == "--dir") && i + 1 < args.len() {
             return PathBuf::from(&args[i + 1]);
+        }
+        if let Some(dir) = arg.strip_prefix("--dir=") {
+            return PathBuf::from(dir);
+        }
+        if let Some(dir) = arg.strip_prefix("-d")
+            && !dir.is_empty()
+        {
+            return PathBuf::from(dir);
         }
     }
     PathBuf::from(".")
