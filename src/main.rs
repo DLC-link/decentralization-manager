@@ -2,12 +2,7 @@ mod cli;
 
 use std::path::PathBuf;
 
-use dec_party_manager::{
-    config::{KeycloakConfig, NodeConfig},
-    db,
-    error::Result,
-    utils,
-};
+use dec_party_manager::{config::{KeycloakConfig, NodeConfig}, db, error::Result, utils};
 use tracing_subscriber::{filter::EnvFilter, prelude::*};
 
 use cli::{Cli, Commands, Parser};
@@ -44,13 +39,9 @@ async fn main() -> Result {
 
     let args = Cli::parse();
 
-    tracing::info!(
-        "Loading configuration from: {path}",
-        path = args.dir.display()
-    );
-    let mut config = NodeConfig::from_dir(&args.dir).await?;
+    // Build config from defaults + CLI/env var overrides
+    let mut config = NodeConfig::default().with_root_dir(&args.dir);
 
-    // Apply CLI/env var overrides
     match &args.command {
         Commands::Serve {
             participant_id,
@@ -150,8 +141,6 @@ async fn main() -> Result {
 
     tracing::info!("Running database migrations");
     db::MIGRATOR.run(&pool).await?;
-
-    db::seed::seed_from_config(&pool, &config).await?;
 
     match args.command {
         Commands::Serve {

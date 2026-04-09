@@ -77,8 +77,8 @@ pub async fn start_server(
     }
 
     let db_party_creds = db.get_all_party_credentials().await.unwrap_or_else(|e| {
-        tracing::warn!("Failed to load party credentials from DB, falling back to config: {e}");
-        config.parties.clone()
+        tracing::warn!("Failed to load party credentials from DB: {e}");
+        Vec::new()
     });
     let party_credentials = Arc::new(RwLock::new(db_party_creds.clone()));
 

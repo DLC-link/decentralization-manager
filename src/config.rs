@@ -3,15 +3,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    consts::{
-        CONFIG_DIR, DARS_DIR, DATA_DIR, DB_FILENAME, NODE_CONFIG_FILENAME, NOISE_KEY_FILENAME,
-        WORKFLOW_DATA_DIR,
-    },
-    error::Result,
+    consts::{DARS_DIR, DATA_DIR, DB_FILENAME, NOISE_KEY_FILENAME, WORKFLOW_DATA_DIR},
     participant_id::CantonId,
 };
 
@@ -44,60 +39,6 @@ impl NetworkConfig {
     /// Construct a NetworkConfig from a list of peers (e.g., loaded from DB)
     pub fn from_peers(peers: Vec<Peer>) -> Self {
         Self { peers }
-    }
-
-    /// Load network configuration from a CSV file
-    ///
-    /// CSV format: participant_id,name,address,port,public_key,party
-    /// Creates an empty file with header if it doesn't exist
-    pub async fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let path = path.as_ref();
-
-        // Create file with header if it doesn't exist
-        if !path.exists() {
-            tracing::info!("Creating empty peers.csv at '{}'", path.display());
-            tokio::fs::write(path, "participant_id,name,address,port,public_key,party\n")
-                .await
-                .with_context(|| format!("Failed to create peers config '{}'", path.display()))?;
-        }
-
-        let content = tokio::fs::read_to_string(path)
-            .await
-            .with_context(|| format!("Failed to read peers config '{}'", path.display()))?;
-
-        let mut reader = csv::Reader::from_reader(content.as_bytes());
-        let mut peers = Vec::new();
-
-        for result in reader.deserialize() {
-            let peer: Peer = result.with_context(|| {
-                format!("Failed to parse peer in '{path}'", path = path.display())
-            })?;
-            peers.push(peer);
-        }
-
-        Ok(NetworkConfig { peers })
-    }
-
-    /// Save network configuration to a CSV file
-    pub async fn save_to_file<P: AsRef<Path>>(&self, path: P) -> Result {
-        let path = path.as_ref();
-        let mut writer = csv::Writer::from_writer(Vec::new());
-
-        for peer in &self.peers {
-            writer
-                .serialize(peer)
-                .with_context(|| "Failed to serialize peer")?;
-        }
-
-        let data = writer
-            .into_inner()
-            .with_context(|| "Failed to finalize CSV")?;
-
-        tokio::fs::write(path, data)
-            .await
-            .with_context(|| format!("Failed to write peers config '{}'", path.display()))?;
-
-        Ok(())
     }
 
     /// Get the governance threshold for multi-sig operations
@@ -174,56 +115,34 @@ pub struct PartyCredentials {
 }
 
 /// Timeout configuration
-#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct Timeouts {
-    #[serde(default = "default_handshake_timeout")]
     pub handshake_timeout_secs: u64,
-    #[serde(default = "default_message_timeout")]
     pub message_timeout_secs: u64,
-    #[serde(default = "default_connection_retry_attempts")]
     pub connection_retry_attempts: u32,
-    #[serde(default = "default_connection_retry_delay")]
     pub connection_retry_delay_secs: u64,
-}
-
-fn default_handshake_timeout() -> u64 {
-    30
-}
-fn default_message_timeout() -> u64 {
-    120
-}
-fn default_connection_retry_attempts() -> u32 {
-    3
-}
-fn default_connection_retry_delay() -> u64 {
-    5
 }
 
 impl Default for Timeouts {
     fn default() -> Self {
         Self {
-            handshake_timeout_secs: default_handshake_timeout(),
-            message_timeout_secs: default_message_timeout(),
-            connection_retry_attempts: default_connection_retry_attempts(),
-            connection_retry_delay_secs: default_connection_retry_delay(),
+            handshake_timeout_secs: 30,
+            message_timeout_secs: 120,
+            connection_retry_attempts: 3,
+            connection_retry_delay_secs: 5,
         }
     }
 }
 
 /// Individual node configuration
-#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct NodeConfig {
     pub node: NodeInfo,
     pub canton: CantonConfig,
-    #[serde(default)]
     pub timeouts: Timeouts,
     /// Top-level Keycloak config for frontend website gating
-    #[serde(default)]
     pub keycloak: Option<KeycloakConfig>,
-    /// Per-party credentials with Keycloak auth (multiple parties supported)
-    #[serde(default)]
-    pub parties: Vec<PartyCredentials>,
-    /// Root directory containing config/ and data/ subdirectories
+    /// Root directory containing data/ subdirectory
     #[serde(skip)]
     root_dir: PathBuf,
 }
@@ -235,33 +154,22 @@ impl Default for NodeConfig {
             canton: CantonConfig::default(),
             timeouts: Timeouts::default(),
             keycloak: None,
-            parties: Vec::new(),
             root_dir: PathBuf::new(),
         }
     }
 }
 
 /// Node-specific information
-#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct NodeInfo {
     /// Canton participant ID for this node (e.g., "participant1::1220...")
-    /// If not specified, it will be queried from Canton and saved to the config.
-    #[serde(default)]
     pub participant_id: Option<CantonId>,
-    /// Address to listen on for Noise protocol connections (use 0.0.0.0 to listen on all interfaces)
-    #[serde(default = "default_listen_address")]
+    /// Address to listen on for Noise protocol connections
     pub listen_address: String,
     /// Port to listen on for Noise protocol connections
-    #[serde(default = "default_noise_port")]
     pub port: u16,
-    /// Public address that other peers should use to connect to this node.
-    /// This is the address shared when exporting peer info.
-    #[serde(default)]
+    /// Public address that other peers should use to connect to this node
     pub public_address: Option<String>,
-}
-
-fn default_listen_address() -> String {
-    "0.0.0.0".to_string()
 }
 
 impl NodeInfo {
@@ -274,16 +182,12 @@ impl NodeInfo {
     }
 }
 
-fn default_noise_port() -> u16 {
-    9000
-}
-
 impl Default for NodeInfo {
     fn default() -> Self {
         Self {
             participant_id: None,
-            listen_address: default_listen_address(),
-            port: default_noise_port(),
+            listen_address: "0.0.0.0".to_string(),
+            port: 9000,
             public_address: None,
         }
     }
@@ -348,20 +252,15 @@ pub fn default_package_config() -> PackageConfig {
 }
 
 /// Canton participant configuration
-#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct CantonConfig {
     pub admin_api_host: String,
     pub admin_api_port: u16,
     pub ledger_api_host: String,
     pub ledger_api_port: u16,
-    #[serde(default = "default_synchronizer")]
     pub synchronizer: String,
     /// Canton Network environment (devnet, testnet, mainnet)
     pub network: Network,
-}
-
-fn default_synchronizer() -> String {
-    "global".to_string()
 }
 
 impl Default for CantonConfig {
@@ -371,45 +270,17 @@ impl Default for CantonConfig {
             admin_api_port: 5002,
             ledger_api_host: "127.0.0.1".to_string(),
             ledger_api_port: 5001,
-            synchronizer: default_synchronizer(),
+            synchronizer: "global".to_string(),
             network: Network::Devnet,
         }
     }
 }
 
 impl NodeConfig {
-    /// Load node configuration from a root directory
-    ///
-    /// The directory should contain:
-    /// - config/node.toml - Node configuration
-    /// - config/peers.csv - Peers list (id,name,address,port,public_key,party)
-    /// - data/noise.key - Noise keypair (auto-generated if missing)
-    /// - data/workflow-data/ - Workflow state
-    /// - data/dars/ - DAR files
-    pub async fn from_dir<P: AsRef<Path>>(root_dir: P) -> Result<Self> {
-        let root_dir = root_dir.as_ref();
-        let config_path = root_dir.join(CONFIG_DIR).join(NODE_CONFIG_FILENAME);
-
-        let mut config = if config_path.exists() {
-            let content = tokio::fs::read_to_string(&config_path)
-                .await
-                .with_context(|| {
-                    format!("Failed to read node config '{}'", config_path.display())
-                })?;
-            toml::from_str::<NodeConfig>(&content).with_context(|| {
-                format!("Failed to parse node config '{}'", config_path.display())
-            })?
-        } else {
-            tracing::info!("No node.toml found, using defaults");
-            NodeConfig::default()
-        };
-        config.root_dir = root_dir.to_path_buf();
-        Ok(config)
-    }
-
-    /// Get the config directory
-    pub fn config_dir(&self) -> PathBuf {
-        self.root_dir.join(CONFIG_DIR)
+    /// Create a NodeConfig with the given root directory
+    pub fn with_root_dir<P: AsRef<Path>>(mut self, root_dir: P) -> Self {
+        self.root_dir = root_dir.as_ref().to_path_buf();
+        self
     }
 
     /// Get the full Admin API URL
@@ -431,22 +302,6 @@ impl NodeConfig {
     /// Get the synchronizer name
     pub fn synchronizer(&self) -> &str {
         &self.canton.synchronizer
-    }
-
-    /// Get the path to the peers.csv file
-    pub fn peers_csv_path(&self) -> PathBuf {
-        self.config_dir().join("peers.csv")
-    }
-
-    /// Load the peers configuration from peers.csv in the config directory
-    pub async fn load_network_config(&self) -> Result<NetworkConfig> {
-        NetworkConfig::from_file(&self.peers_csv_path()).await
-    }
-
-    /// Save the peers configuration to peers.csv in the config directory
-    pub async fn save_network_config(&self, config: &NetworkConfig) -> Result {
-        let peers_config_path = self.config_dir().join("peers.csv");
-        config.save_to_file(&peers_config_path).await
     }
 
     /// Get the data directory
@@ -479,36 +334,6 @@ impl NodeConfig {
         &self.root_dir
     }
 
-    /// Get party credentials by decentralized party ID
-    pub fn get_party_credentials(&self, dec_party_id: &CantonId) -> Option<&PartyCredentials> {
-        self.parties
-            .iter()
-            .find(|p| &p.dec_party_id == dec_party_id)
-    }
-
-    /// Get package config for a decentralized party
-    pub fn get_packages(&self, dec_party_id: &str) -> PackageConfig {
-        CantonId::parse(dec_party_id)
-            .ok()
-            .and_then(|id| self.get_party_credentials(&id))
-            .map(|c| c.packages.clone())
-            .unwrap_or_default()
-    }
-
-    /// Add or update party credentials in the config and save to disk
-    pub async fn upsert_party_credentials(&mut self, creds: PartyCredentials) -> Result {
-        if let Some(existing) = self
-            .parties
-            .iter_mut()
-            .find(|p| p.dec_party_id == creds.dec_party_id)
-        {
-            *existing = creds;
-        } else {
-            self.parties.push(creds);
-        }
-        self.save_config().await
-    }
-
     /// Get the participant ID, panicking if not resolved
     ///
     /// Call `resolve_participant_id` before using this method.
@@ -523,27 +348,6 @@ impl NodeConfig {
     pub fn has_participant_id(&self) -> bool {
         self.node.participant_id.is_some()
     }
-
-    /// Set the participant_id and save the config to disk
-    pub async fn set_and_save_participant_id(&mut self, participant_id: CantonId) -> Result {
-        self.node.participant_id = Some(participant_id);
-        self.save_config().await
-    }
-
-    /// Save the current config to disk
-    pub async fn save_config(&self) -> Result {
-        let config_path = self.root_dir.join(CONFIG_DIR).join(NODE_CONFIG_FILENAME);
-
-        // Create a serializable version without the root_dir field
-        let toml_content =
-            toml::to_string_pretty(self).with_context(|| "Failed to serialize config to TOML")?;
-
-        tokio::fs::write(&config_path, toml_content)
-            .await
-            .with_context(|| format!("Failed to write config to '{}'", config_path.display()))?;
-
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -551,7 +355,6 @@ mod tests {
     use super::*;
 
     fn test_peer(index: u8, pub_key: &str) -> Peer {
-        // Create a valid hex namespace (68 hex chars = 34 bytes)
         let namespace = format!("1220{:0>64}", format!("{index:02x}"));
         Peer {
             participant_id: CantonId::parse(&format!("node{index}::{namespace}")).unwrap(),
@@ -616,81 +419,6 @@ mod tests {
             assert!(defaults.url.is_empty());
             assert!(defaults.realm.is_empty());
         }
-    }
-
-    const TEST_NAMESPACE: &str =
-        "1220aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-
-    const MINIMAL_NODE_TOML: &str = r#"
-[node]
-listen_address = "0.0.0.0"
-port = 9000
-
-[canton]
-admin_api_host = "localhost"
-admin_api_port = 5002
-ledger_api_host = "localhost"
-ledger_api_port = 5001
-network = "devnet"
-"#;
-
-    fn test_party_creds(prefix: &str) -> PartyCredentials {
-        PartyCredentials {
-            dec_party_id: CantonId::parse(&format!("{prefix}::{TEST_NAMESPACE}")).unwrap(),
-            member_party_id: CantonId::parse(&format!("member::{TEST_NAMESPACE}")).unwrap(),
-            user_id: "TestUser".to_string(),
-            keycloak: KeycloakConfig {
-                url: "https://kc.example.com".to_string(),
-                realm: "test".to_string(),
-                client_id: "client-1".to_string(),
-                client_secret: None,
-                username: None,
-                password: None,
-            },
-            packages: PackageConfig::default(),
-        }
-    }
-
-    async fn temp_node_config() -> (tempfile::TempDir, NodeConfig) {
-        let tmp = tempfile::tempdir().unwrap();
-        let config_dir = tmp.path().join("config");
-        std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::write(config_dir.join("node.toml"), MINIMAL_NODE_TOML).unwrap();
-        let config = NodeConfig::from_dir(tmp.path()).await.unwrap();
-        (tmp, config)
-    }
-
-    #[tokio::test]
-    async fn test_upsert_party_credentials_insert() {
-        let (tmp, mut config) = temp_node_config().await;
-        assert!(config.parties.is_empty());
-
-        let creds = test_party_creds("new-party");
-        config
-            .upsert_party_credentials(creds.clone())
-            .await
-            .unwrap();
-        assert_eq!(config.parties.len(), 1);
-        assert_eq!(config.parties[0].user_id, "TestUser");
-
-        let reloaded = NodeConfig::from_dir(tmp.path()).await.unwrap();
-        assert_eq!(reloaded.parties.len(), 1);
-        assert_eq!(reloaded.parties[0].dec_party_id, creds.dec_party_id);
-    }
-
-    #[tokio::test]
-    async fn test_upsert_party_credentials_update() {
-        let (_tmp, mut config) = temp_node_config().await;
-
-        let creds = test_party_creds("my-party");
-        config.upsert_party_credentials(creds).await.unwrap();
-        assert_eq!(config.parties[0].user_id, "TestUser");
-
-        let mut updated = test_party_creds("my-party");
-        updated.user_id = "UpdatedUser".to_string();
-        config.upsert_party_credentials(updated).await.unwrap();
-        assert_eq!(config.parties.len(), 1);
-        assert_eq!(config.parties[0].user_id, "UpdatedUser");
     }
 
     #[test]

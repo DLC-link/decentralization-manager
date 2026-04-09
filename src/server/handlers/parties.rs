@@ -19,7 +19,7 @@ use sqlx::SqlitePool;
 
 use crate::{
     auth::WorkflowAuth,
-    config::{NetworkConfig, NodeConfig},
+    config::{NetworkConfig, NodeConfig, PartyCredentials},
     db::schema::SchemaRead,
     error::Result,
     noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
@@ -59,7 +59,10 @@ pub async fn get_decentralized_parties(
     query: web::Query<PartiesQuery>,
 ) -> impl Responder {
     let auth = data.auth.read().await.clone();
-    match fetch_decentralized_parties(&data.config, query.prefix.as_deref(), auth).await {
+    let party_creds = data.party_credentials.read().await.clone();
+    match fetch_decentralized_parties(&data.config, query.prefix.as_deref(), auth, &party_creds)
+        .await
+    {
         Ok(response) => HttpResponse::Ok().json(response),
         Err(e) => {
             tracing::error!("Failed to fetch decentralized parties: {e}");
@@ -74,6 +77,7 @@ async fn fetch_decentralized_parties(
     config: &NodeConfig,
     prefix_filter: Option<&str>,
     auth: Option<WorkflowAuth>,
+    party_credentials: &[PartyCredentials],
 ) -> Result<DecentralizedPartiesResponse> {
     let channel = tonic::transport::Channel::from_shared(config.admin_api_url())?
         .connect()
@@ -215,7 +219,11 @@ async fn fetch_decentralized_parties(
                     None => None,
                 };
 
-                let packages = config.get_packages(&party_id_str);
+                let packages = CantonId::parse(&party_id_str)
+                    .ok()
+                    .and_then(|id| party_credentials.iter().find(|p| p.dec_party_id == id))
+                    .map(|c| c.packages.clone())
+                    .unwrap_or_default();
                 let token_clone = token.clone();
                 let (contracts, local_metadata) = tokio::join!(
                     async {
