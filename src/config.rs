@@ -1,7 +1,4 @@
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -45,21 +42,6 @@ impl NetworkConfig {
     /// Returns majority threshold: (n/2 + 1)
     pub fn governance_threshold(&self) -> u32 {
         ((self.peers.len() / 2) + 1) as u32
-    }
-
-    /// Get peer by participant ID string
-    pub fn get_peer(&self, id: &str) -> Option<&Peer> {
-        self.peers
-            .iter()
-            .find(|p| p.participant_id.to_string() == id)
-    }
-
-    /// Create a map of public keys to peer IDs for verification
-    pub fn get_public_key_allowlist(&self) -> HashMap<String, String> {
-        self.peers
-            .iter()
-            .map(|p| (p.public_key.clone(), p.participant_id.to_string()))
-            .collect()
     }
 }
 
@@ -377,32 +359,6 @@ mod tests {
         };
 
         assert_eq!(network.governance_threshold(), 2);
-    }
-
-    #[test]
-    fn test_get_peer() {
-        let peer1 = test_peer(1, "abc123");
-        let peer1_id = peer1.participant_id.to_string();
-        let network = NetworkConfig { peers: vec![peer1] };
-
-        assert!(network.get_peer(&peer1_id).is_some());
-        assert!(network.get_peer("nonexistent").is_none());
-    }
-
-    #[test]
-    fn test_public_key_allowlist() {
-        let peer1 = test_peer(1, "abc123");
-        let peer2 = test_peer(2, "def456");
-        let peer1_id = peer1.participant_id.to_string();
-        let peer2_id = peer2.participant_id.to_string();
-        let network = NetworkConfig {
-            peers: vec![peer1, peer2],
-        };
-
-        let allowlist = network.get_public_key_allowlist();
-        assert_eq!(allowlist.len(), 2);
-        assert_eq!(allowlist.get("abc123"), Some(&peer1_id));
-        assert_eq!(allowlist.get("def456"), Some(&peer2_id));
     }
 
     #[test]
