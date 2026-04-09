@@ -55,39 +55,59 @@ docker run -d \
   --name dec-party-manager \
   -p 8080:8080 \
   -p 9000:9000 \
-  -v $(pwd)/config:/config \
-  -v $(pwd)/data:/data \
+  -v $(pwd)/data:/app/data \
+  -e DECPM_CANTON_ADMIN_HOST=canton-participant \
+  -e DECPM_CANTON_ADMIN_PORT=5002 \
+  -e DECPM_CANTON_LEDGER_HOST=canton-participant \
+  -e DECPM_CANTON_LEDGER_PORT=5001 \
+  -e DECPM_CANTON_SYNCHRONIZER=global \
+  -e DECPM_CANTON_NETWORK=devnet \
+  -e DECPM_LISTEN_ADDRESS=0.0.0.0 \
+  -e DECPM_NOISE_PORT=9000 \
+  -e DECPM_PUBLIC_ADDRESS=your-external-address \
   public.ecr.aws/dlc-link/canton-decparty-manager:latest
 ```
 
 The container expects:
-- `/config/node.toml` -- Node configuration
-- `/config/peers.csv` -- Peer list (auto-created if missing)
-- `/data/` -- Persistent storage for keys, workflow data, and DAR files
+- `/app/data/` -- Persistent storage for the SQLite database (`decpm.db`), Noise keys, workflow data, and DAR files
+- `DECPM_*` environment variables -- All node configuration (Canton endpoints, networking, timeouts)
+
+Alternatively, place a `.env` file in the root directory (`/app/.env`) containing the `DECPM_*` variables and mount it as a volume:
+
+```bash
+docker run -d \
+  --name dec-party-manager \
+  -p 8080:8080 \
+  -p 9000:9000 \
+  -v $(pwd)/data:/app/data \
+  -v $(pwd)/.env:/app/.env:ro \
+  public.ecr.aws/dlc-link/canton-decparty-manager:latest
+```
 
 ### Kubernetes
 
-Full manifest with ConfigMap, PVC, Deployment, and Service:
+Full manifest with Secret, PVC, Deployment, and Service:
 
 ```yaml
 apiVersion: v1
-kind: ConfigMap
+kind: Secret
 metadata:
-  name: dec-party-manager-config
-data:
-  node.toml: |
-    [node]
-    listen_address = "0.0.0.0"
-    public_address = "your-external-address"
-    port = 9000
-
-    [canton]
-    admin_api_host = "canton-participant.default.svc.cluster.local"
-    admin_api_port = 5002
-    ledger_api_host = "canton-participant.default.svc.cluster.local"
-    ledger_api_port = 5001
-    synchronizer = "global"
-    network = "devnet"
+  name: dec-party-manager-secrets
+type: Opaque
+stringData:
+  DECPM_CANTON_ADMIN_HOST: "canton-participant.default.svc.cluster.local"
+  DECPM_CANTON_ADMIN_PORT: "5002"
+  DECPM_CANTON_LEDGER_HOST: "canton-participant.default.svc.cluster.local"
+  DECPM_CANTON_LEDGER_PORT: "5001"
+  DECPM_CANTON_SYNCHRONIZER: "global"
+  DECPM_CANTON_NETWORK: "devnet"
+  DECPM_LISTEN_ADDRESS: "0.0.0.0"
+  DECPM_NOISE_PORT: "9000"
+  DECPM_PUBLIC_ADDRESS: "your-external-address"
+  # Optional: Keycloak for frontend auth gating
+  # DECPM_KEYCLOAK_URL: "https://keycloak.example.com"
+  # DECPM_KEYCLOAK_REALM: "canton"
+  # DECPM_KEYCLOAK_CLIENT_ID: "dpm-ui"
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -115,17 +135,10 @@ spec:
         app: dec-party-manager
     spec:
       initContainers:
-        - name: copy-config
+        - name: init-data
           image: busybox:latest
-          command:
-            - sh
-            - -c
-            - |
-              mkdir -p /app/config /app/data
-              cp /config-readonly/* /app/config/
+          command: ["sh", "-c", "mkdir -p /app/data"]
           volumeMounts:
-            - name: config
-              mountPath: /config-readonly
             - name: data
               mountPath: /app
       containers:
@@ -149,10 +162,10 @@ spec:
             limits:
               memory: "512Mi"
               cpu: "500m"
+          envFrom:
+            - secretRef:
+                name: dec-party-manager-secrets
       volumes:
-        - name: config
-          configMap:
-            name: dec-party-manager-config
         - name: data
           persistentVolumeClaim:
             claimName: dec-party-manager-data
@@ -180,20 +193,75 @@ spec:
 # Build from source
 cargo build --release
 
-# Run
+# Option 1: Using environment variables
+export DECPM_CANTON_ADMIN_HOST=localhost
+export DECPM_CANTON_ADMIN_PORT=5002
+export DECPM_CANTON_LEDGER_HOST=localhost
+export DECPM_CANTON_LEDGER_PORT=5001
+export DECPM_CANTON_SYNCHRONIZER=global
+export DECPM_CANTON_NETWORK=devnet
+
 ./target/release/dec-party-manager -d /path/to/root-dir serve \
   --host 0.0.0.0 \
   --port 8080
+
+# Option 2: Using a .env file in the root directory
+cat > /path/to/root-dir/.env <<EOF
+DECPM_CANTON_ADMIN_HOST=localhost
+DECPM_CANTON_ADMIN_PORT=5002
+DECPM_CANTON_LEDGER_HOST=localhost
+DECPM_CANTON_LEDGER_PORT=5001
+DECPM_CANTON_SYNCHRONIZER=global
+DECPM_CANTON_NETWORK=devnet
+EOF
+
+./target/release/dec-party-manager -d /path/to/root-dir serve \
+  --host 0.0.0.0 \
+  --port 8080
+
+# Option 3: Using CLI flags directly
+./target/release/dec-party-manager -d /path/to/root-dir serve \
+  --host 0.0.0.0 \
+  --port 8080 \
+  --canton-admin-host localhost \
+  --canton-admin-port 5002 \
+  --canton-ledger-host localhost \
+  --canton-ledger-port 5001 \
+  --canton-synchronizer global \
+  --canton-network devnet
 ```
 
 CLI options:
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `-d`, `--dir` | `.` | Root directory containing `config/` and `data/` |
-| `--host` | `0.0.0.0` | HTTP server bind address |
-| `--port` | `8080` | HTTP server port |
-| `--test` | `false` | Enable test mode with mock authentication |
+| Flag | Env Var | Default | Description |
+|------|---------|---------|-------------|
+| `-d`, `--dir` | -- | `.` | Root directory for persistent data; loads `.env` from this dir if present |
+| `--host` | -- | `0.0.0.0` | HTTP server bind address |
+| `--port` | -- | `8080` | HTTP server port |
+| `--test` | -- | `false` | Enable test mode with mock authentication |
+| `--db` | -- | `{dir}/data/decpm.db` | Path to SQLite database file |
+| `--listen-address` | `DECPM_LISTEN_ADDRESS` | `0.0.0.0` | Noise server bind address |
+| `--noise-port` | `DECPM_NOISE_PORT` | `9000` | Noise server port |
+| `--public-address` | `DECPM_PUBLIC_ADDRESS` | (none) | External address for peers |
+| `--canton-admin-host` | `DECPM_CANTON_ADMIN_HOST` | `127.0.0.1` | Canton Admin API host |
+| `--canton-admin-port` | `DECPM_CANTON_ADMIN_PORT` | `5002` | Canton Admin API port |
+| `--canton-ledger-host` | `DECPM_CANTON_LEDGER_HOST` | `127.0.0.1` | Canton Ledger API host |
+| `--canton-ledger-port` | `DECPM_CANTON_LEDGER_PORT` | `5001` | Canton Ledger API port |
+| `--canton-synchronizer` | `DECPM_CANTON_SYNCHRONIZER` | `global` | Synchronizer name |
+| `--canton-network` | `DECPM_CANTON_NETWORK` | `devnet` | Canton network (`devnet`, `testnet`, `mainnet`) |
+| `--keycloak-url` | `DECPM_KEYCLOAK_URL` | (none) | Keycloak server URL (frontend auth gating) |
+| `--keycloak-realm` | `DECPM_KEYCLOAK_REALM` | (none) | Keycloak realm name (frontend auth gating) |
+| `--keycloak-client-id` | `DECPM_KEYCLOAK_CLIENT_ID` | (none) | OAuth2 client ID (frontend auth gating) |
+| `--timeout-handshake` | `DECPM_TIMEOUT_HANDSHAKE` | `30` | Noise handshake timeout (seconds) |
+| `--timeout-message` | `DECPM_TIMEOUT_MESSAGE` | `120` | Noise message timeout (seconds) |
+| `--timeout-retry-attempts` | `DECPM_TIMEOUT_RETRY_ATTEMPTS` | `3` | Connection retry count |
+| `--timeout-retry-delay` | `DECPM_TIMEOUT_RETRY_DELAY` | `5` | Retry delay (seconds) |
+
+**Configuration precedence** (highest to lowest):
+1. CLI flags (`--canton-admin-host`)
+2. Environment variables (`DECPM_CANTON_ADMIN_HOST`)
+3. `.env` file in the `--dir` directory
+4. Built-in defaults
 
 ## Configuration Reference
 
@@ -201,144 +269,169 @@ CLI options:
 
 ```
 root-dir/
-├── config/
-│   ├── node.toml          # Node configuration
-│   └── peers.csv          # Network peer list (auto-created)
+├── .env                   # Environment variables (optional, auto-loaded)
 └── data/
+    ├── decpm.db           # SQLite database (peers, party credentials)
     ├── noise.key          # Noise keypair (auto-generated)
     ├── dars/              # DAR files for contract deployment
     └── workflow-data/     # Per-workflow state directories
 ```
 
-### Node Configuration (`config/node.toml`)
+### Environment Variables
 
-```toml
-[node]
-# Canton participant UID. If omitted, auto-resolved from Canton Admin API on startup.
-# participant_id = "participant1::1220abc..."
-listen_address = "0.0.0.0"          # Noise listen address
-port = 9000                          # Noise listen port (default: 9000)
-# Public address peers use to reach this node. Falls back to listen_address if unset.
-# public_address = "dpm.example.com"
+All node configuration is provided through environment variables (or their equivalent CLI flags). The `DECPM_*` prefix is used for all variables.
 
-[canton]
-admin_api_host = "localhost"         # Canton Admin API host
-admin_api_port = 5002                # Canton Admin API port
-ledger_api_host = "localhost"        # Canton Ledger API host
-ledger_api_port = 5001               # Canton Ledger API port
-synchronizer = "global"              # Synchronizer name (default: "global")
-network = "devnet"                   # Canton network environment (devnet, testnet, mainnet)
+| Variable | CLI Flag | Type | Default | Description |
+|----------|----------|------|---------|-------------|
+| `DECPM_LISTEN_ADDRESS` | `--listen-address` | string | `0.0.0.0` | Noise server bind address |
+| `DECPM_NOISE_PORT` | `--noise-port` | u16 | `9000` | Noise server port |
+| `DECPM_PUBLIC_ADDRESS` | `--public-address` | string | (none) | External address peers use to reach this node. Falls back to listen address if unset |
+| `DECPM_CANTON_ADMIN_HOST` | `--canton-admin-host` | string | `127.0.0.1` | Canton Admin API host |
+| `DECPM_CANTON_ADMIN_PORT` | `--canton-admin-port` | u16 | `5002` | Canton Admin API port |
+| `DECPM_CANTON_LEDGER_HOST` | `--canton-ledger-host` | string | `127.0.0.1` | Canton Ledger API host |
+| `DECPM_CANTON_LEDGER_PORT` | `--canton-ledger-port` | u16 | `5001` | Canton Ledger API port |
+| `DECPM_CANTON_SYNCHRONIZER` | `--canton-synchronizer` | string | `global` | Synchronizer name |
+| `DECPM_CANTON_NETWORK` | `--canton-network` | string | `devnet` | Canton network environment (`devnet`, `testnet`, `mainnet`). Determines DSO API URL for AmuletRules queries |
+| `DECPM_KEYCLOAK_URL` | `--keycloak-url` | string | (none) | Keycloak server URL for frontend auth gating |
+| `DECPM_KEYCLOAK_REALM` | `--keycloak-realm` | string | (none) | Keycloak realm name for frontend auth gating |
+| `DECPM_KEYCLOAK_CLIENT_ID` | `--keycloak-client-id` | string | (none) | OAuth2 client ID for frontend auth gating |
+| `DECPM_TIMEOUT_HANDSHAKE` | `--timeout-handshake` | u64 | `30` | Noise handshake timeout in seconds |
+| `DECPM_TIMEOUT_MESSAGE` | `--timeout-message` | u64 | `120` | Noise message timeout in seconds |
+| `DECPM_TIMEOUT_RETRY_ATTEMPTS` | `--timeout-retry-attempts` | u32 | `3` | Max connection retries |
+| `DECPM_TIMEOUT_RETRY_DELAY` | `--timeout-retry-delay` | u64 | `5` | Retry delay in seconds |
 
-[timeouts]
-handshake_timeout_secs = 30          # Noise handshake timeout (default: 30)
-message_timeout_secs = 120           # Noise message timeout (default: 120)
-connection_retry_attempts = 3        # Connection retry count (default: 3)
-connection_retry_delay_secs = 5      # Delay between retries (default: 5)
+### `.env` File
 
-# Per-party authentication credentials (one [[parties]] block per decentralized party)
-[[parties]]
-dec_party_id = "vault-network::1220abc..."      # Decentralized party ID
-member_party_id = "member1::1220def..."          # Local member party ID
-user_id = "user-123"                             # Ledger API user (must match JWT 'sub')
+A `.env` file placed in the `--dir` directory is automatically loaded before CLI/env parsing. This allows you to set all `DECPM_*` variables in a single file:
 
-[parties.keycloak]
-url = "https://keycloak.example.com"
-realm = "canton"
-client_id = "dpm-client"
-# M2M flow: set client_secret
-client_secret = "your-secret"
-# OR password flow: set username + password
-# username = "admin"
-# password = "admin-password"
+```env
+DECPM_CANTON_ADMIN_HOST=canton-participant.default.svc.cluster.local
+DECPM_CANTON_ADMIN_PORT=5002
+DECPM_CANTON_LEDGER_HOST=canton-participant.default.svc.cluster.local
+DECPM_CANTON_LEDGER_PORT=5001
+DECPM_CANTON_SYNCHRONIZER=global
+DECPM_CANTON_NETWORK=devnet
+DECPM_LISTEN_ADDRESS=0.0.0.0
+DECPM_NOISE_PORT=9000
+DECPM_PUBLIC_ADDRESS=dpm.example.com
 ```
 
-**Field reference:**
+### SQLite Database (`decpm.db`)
 
-| Section | Field | Type | Default | Description |
-|---------|-------|------|---------|-------------|
-| `[node]` | `participant_id` | string | (auto) | Canton participant UID |
-| `[node]` | `listen_address` | string | `0.0.0.0` | Noise server bind address |
-| `[node]` | `port` | u16 | `9000` | Noise server port |
-| `[node]` | `public_address` | string | (none) | External address for peers |
-| `[canton]` | `admin_api_host` | string | required | Canton Admin API host |
-| `[canton]` | `admin_api_port` | u16 | required | Canton Admin API port |
-| `[canton]` | `ledger_api_host` | string | required | Canton Ledger API host |
-| `[canton]` | `ledger_api_port` | u16 | required | Canton Ledger API port |
-| `[canton]` | `synchronizer` | string | `global` | Synchronizer name |
-| `[canton]` | `network` | string | required | Canton network environment (`devnet`, `testnet`, `mainnet`). Determines DSO API URL for AmuletRules queries |
-| `[timeouts]` | `handshake_timeout_secs` | u64 | `30` | Noise handshake timeout |
-| `[timeouts]` | `message_timeout_secs` | u64 | `120` | Noise message timeout |
-| `[timeouts]` | `connection_retry_attempts` | u32 | `3` | Max connection retries |
-| `[timeouts]` | `connection_retry_delay_secs` | u64 | `5` | Retry delay in seconds |
-| `[[parties]]` | `dec_party_id` | CantonId | required | Decentralized party ID |
-| `[[parties]]` | `member_party_id` | CantonId | required | Local member party ID |
-| `[[parties]]` | `user_id` | string | required | Ledger API user ID |
-| `[parties.keycloak]` | `url` | string | required | Keycloak server URL |
-| `[parties.keycloak]` | `realm` | string | required | Keycloak realm name |
-| `[parties.keycloak]` | `client_id` | string | required | OAuth2 client ID |
-| `[parties.keycloak]` | `client_secret` | string | (none) | Client secret (M2M flow) |
-| `[parties.keycloak]` | `username` | string | (none) | Username (password flow) |
-| `[parties.keycloak]` | `password` | string | (none) | Password (password flow) |
+The SQLite database stores:
+- **Peers** -- Network peer list (participant ID, name, address, port, public key)
+- **Party credentials** -- Per-party authentication credentials (dec party ID, member party ID, user ID, Keycloak config, package IDs)
 
-### Peers Configuration (`config/peers.csv`)
-
-CSV format with header row:
-
-```csv
-participant_id,name,address,port,public_key,party
-node1::1220abc...,Node 1,10.0.0.1,9000,03ab12cd...,
-node2::1220def...,Node 2,10.0.0.2,9000,02ef34ab...,
-node3::1220ghi...,Node 3,10.0.0.3,9000,03cd56ef...,
-```
-
-| Column | Description |
-|--------|-------------|
-| `participant_id` | Canton participant UID (e.g., `node1::1220...`) |
-| `name` | Human-readable display name |
-| `address` | Hostname or IP for Noise connections |
-| `port` | Noise protocol port |
-| `public_key` | Hex-encoded secp256k1 compressed public key (33 bytes) |
-| `party` | Canton party ID (populated after onboarding, can be left empty) |
+The database is automatically created and migrated on startup. Its default location is `{dir}/data/decpm.db`, overridable with the `--db` flag.
 
 ## Authentication Setup
 
+Party credentials (Keycloak authentication for each decentralized party) are configured at runtime via the `/party-config` API endpoint. They are stored in the SQLite database.
+
+### Configuring Party Credentials via API
+
+Use `PUT /party-config` to save or update credentials for a decentralized party:
+
+```bash
+curl -X PUT http://localhost:8080/party-config \
+  -H "Content-Type: application/json" \
+  -d '{
+    "dec_party_id": "vault-network::1220abc...",
+    "member_party_id": "member1::1220def...",
+    "user_id": "service-user",
+    "keycloak_url": "https://keycloak.example.com",
+    "keycloak_realm": "canton",
+    "keycloak_client_id": "dpm-service",
+    "keycloak_client_secret": "your-client-secret",
+    "packages": {}
+  }'
+```
+
+Response:
+```json
+{ "success": true }
+```
+
 ### M2M Flow (Client Credentials)
 
-Best for automated/service deployments where no interactive user login is needed.
+Best for automated/service deployments where no interactive user login is needed. Set `keycloak_client_secret` in the request body:
 
-In `node.toml`:
-```toml
-[[parties]]
-dec_party_id = "vault-network::1220..."
-member_party_id = "member1::1220..."
-user_id = "service-user"
-
-[parties.keycloak]
-url = "https://keycloak.example.com"
-realm = "canton"
-client_id = "dpm-service"
-client_secret = "your-client-secret"
+```bash
+curl -X PUT http://localhost:8080/party-config \
+  -H "Content-Type: application/json" \
+  -d '{
+    "dec_party_id": "vault-network::1220abc...",
+    "member_party_id": "member1::1220def...",
+    "user_id": "service-user",
+    "keycloak_url": "https://keycloak.example.com",
+    "keycloak_realm": "canton",
+    "keycloak_client_id": "dpm-service",
+    "keycloak_client_secret": "your-client-secret",
+    "packages": {}
+  }'
 ```
 
 The application will automatically obtain and refresh tokens using the `client_credentials` grant type.
 
 ### Password Flow
 
-For deployments where a specific user identity is needed.
+For deployments where a specific user identity is needed. Set `keycloak_username` and `keycloak_password` in the request body:
 
-```toml
-[[parties]]
-dec_party_id = "vault-network::1220..."
-member_party_id = "member1::1220..."
-user_id = "alice"
-
-[parties.keycloak]
-url = "https://keycloak.example.com"
-realm = "canton"
-client_id = "dpm-ui"
-username = "alice"
-password = "alice-password"
+```bash
+curl -X PUT http://localhost:8080/party-config \
+  -H "Content-Type: application/json" \
+  -d '{
+    "dec_party_id": "vault-network::1220abc...",
+    "member_party_id": "member1::1220def...",
+    "user_id": "alice",
+    "keycloak_url": "https://keycloak.example.com",
+    "keycloak_realm": "canton",
+    "keycloak_client_id": "dpm-ui",
+    "keycloak_username": "alice",
+    "keycloak_password": "alice-password",
+    "packages": {}
+  }'
 ```
+
+### Retrieving Party Configuration
+
+Use `GET /party-config/{dec_party_id}` to retrieve the current configuration (secrets are masked):
+
+```bash
+curl http://localhost:8080/party-config/vault-network::1220abc...
+```
+
+Response:
+```json
+{
+  "dec_party_id": "vault-network::1220abc...",
+  "member_party_id": "member1::1220def...",
+  "user_id": "service-user",
+  "keycloak_url": "https://keycloak.example.com",
+  "keycloak_realm": "canton",
+  "keycloak_client_id": "dpm-service",
+  "has_client_secret": true,
+  "has_username": false,
+  "has_password": false,
+  "packages": {
+    "governance_core": "#governance-core-v0-rc1",
+    "governance_token_custody": "#governance-token-custody-v0-rc1",
+    "utility_credential": "#utility-credential-app-v0",
+    "utility_registry": "#utility-registry-app-v0",
+    "vault": "#bitsafe-vault-v0-rc8",
+    "vault_governance": "#bitsafe-vault-governance-v0-rc8"
+  }
+}
+```
+
+### Credential Update Semantics
+
+When updating party credentials, secret fields (`keycloak_client_secret`, `keycloak_username`, `keycloak_password`) follow merge semantics:
+- **Omitted** (`null` / not present) -- keep the existing value
+- **Empty string** (`""`) -- clear the value
+- **Non-empty string** -- set to the new value
+
+This allows partial updates without re-submitting secrets.
 
 ### Test Mode
 
@@ -394,6 +487,8 @@ The Ledger API user must match the JWT `sub` claim. The user needs:
 
 ## Peer Network Setup
 
+Peers are configured at runtime via the `/network-config` API endpoint and stored in the SQLite database.
+
 ### 1. Get Your Node's Public Key
 
 After starting the server, retrieve your Noise public key:
@@ -423,29 +518,53 @@ Each participant needs to share:
 
 ### 3. Add Peers
 
-Via the UI (Network Config page) or via API:
+Via the UI (Network Config page) or via the API. Use `POST /network-config` with an array of peer objects:
 
 ```bash
 curl -X POST http://localhost:8080/network-config \
   -H "Content-Type: application/json" \
-  -d '{
-    "peers": [
-      {
-        "participant_id": "node1::1220abc...",
-        "name": "Node 1",
-        "address": "10.0.0.1",
-        "port": 9000,
-        "public_key": "03ab12cd..."
-      },
-      {
-        "participant_id": "node2::1220def...",
-        "name": "Node 2",
-        "address": "10.0.0.2",
-        "port": 9000,
-        "public_key": "02ef34ab..."
-      }
-    ]
-  }'
+  -d '[
+    {
+      "participant_id": "node1::1220abc...",
+      "name": "Node 1",
+      "address": "10.0.0.1",
+      "port": 9000,
+      "public_key": "03ab12cd..."
+    },
+    {
+      "participant_id": "node2::1220def...",
+      "name": "Node 2",
+      "address": "10.0.0.2",
+      "port": 9000,
+      "public_key": "02ef34ab..."
+    }
+  ]'
+```
+
+Response:
+```json
+{ "success": true }
+```
+
+Retrieve the current peer list:
+```bash
+curl http://localhost:8080/network-config
+```
+
+Response:
+```json
+{
+  "peers": [
+    {
+      "participant_id": "node1::1220abc...",
+      "name": "Node 1",
+      "address": "10.0.0.1",
+      "port": 9000,
+      "public_key": "03ab12cd...",
+      "party": null
+    }
+  ]
+}
 ```
 
 ### 4. Verify Connectivity
@@ -475,7 +594,7 @@ Status values:
 
 ### Prerequisites
 
-- All participants running and configured with each other in `peers.csv`
+- All participants running and configured with peers via `POST /network-config`
 - All peers showing `Connected` status
 - At least 2 participants
 
@@ -697,8 +816,10 @@ Each participant's Ledger API user needs:
 | Method | Endpoint | Description | Request Body | Response |
 |--------|----------|-------------|--------------|----------|
 | GET | `/node-config` | Get node configuration | -- | Node config JSON |
-| GET | `/network-config` | Get peer list | -- | `{ "peers": [...] }` |
-| POST | `/network-config` | Update peer list | `{ "peers": [...] }` | `{ "peers": [...] }` |
+| GET | `/network-config` | Get peer list from database | -- | `{ "peers": [...] }` |
+| POST | `/network-config` | Save peer list to database | `[{ "participant_id": "...", "name": "...", "address": "...", "port": 9000, "public_key": "..." }]` | `{ "success": true }` |
+| GET | `/party-config/{dec_party_id}` | Get party config (secrets masked) | -- | Party config JSON |
+| PUT | `/party-config` | Save/update party credentials | Party config JSON | `{ "success": true }` |
 
 ### Keys
 

@@ -4,7 +4,7 @@ use clap::Subcommand;
 
 pub use clap::Parser;
 
-use dec_party_manager::{config::Network, participant_id::CantonId};
+use dec_party_manager::config::Network;
 
 #[derive(Parser)]
 #[command(name = "dec-party-manager")]
@@ -39,10 +39,6 @@ pub enum Commands {
         db: Option<PathBuf>,
 
         // Node settings
-        /// Canton participant ID (e.g., "participant1::1220...")
-        #[arg(long, env = "DECPM_PARTICIPANT_ID")]
-        participant_id: Option<CantonId>,
-
         /// Address to listen on for Noise protocol connections
         #[arg(long, env = "DECPM_LISTEN_ADDRESS")]
         listen_address: Option<String>,

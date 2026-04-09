@@ -71,7 +71,7 @@ The complete end-to-end deployment of a vault system follows these steps. Each g
 | # | Step | Actor | Description |
 |---|------|-------|-------------|
 | 1 | Create decentralized party | DPM (onboarding workflow) | Create the shared party identity |
-| 2 | Configure party credentials | External (deployment config) | Add `[[parties]]` section to each node's `node.toml` with Keycloak credentials |
+| 2 | Configure party credentials | DPM (`PUT /party-config` API) | Configure Keycloak credentials and package IDs for each party |
 | 3 | Grant Ledger API rights | External (Canton admin) | Grant `actAs`/`readAs` rights for member parties on the decentralized party |
 | 4 | Upload DARs | DPM (DARs workflow) | Upload DAR packages to all participant nodes |
 | 5 | Deploy VaultGovernance | DPM (contracts workflow) | Deploy `VaultGovernanceRules` contract with package `#bitsafe-vault-governance-v0-rc8` |

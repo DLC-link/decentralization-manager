@@ -248,7 +248,7 @@ Chunk size: 1024 bytes. Chunking is required for payloads exceeding `MAX_PAYLOAD
 ### Security
 
 - **PSK derivation**: Each peer pair derives a unique PSK via secp256k1 ECDH. The coordinator's secret key and the attestor's public key (or vice versa) produce a shared secret used as the Noise PSK.
-- **Peer allowlist**: Only peers listed in `config/peers.csv` can establish connections. Unknown public keys are rejected.
+- **Peer allowlist**: Only peers registered in the database can establish connections. Unknown public keys are rejected.
 - **Transport encryption**: All data is encrypted by the Noise protocol after handshake completion.
 
 ## Workflows

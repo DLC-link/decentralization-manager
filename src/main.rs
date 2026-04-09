@@ -2,7 +2,12 @@ mod cli;
 
 use std::path::PathBuf;
 
-use dec_party_manager::{config::{KeycloakConfig, NodeConfig}, db, error::Result, utils};
+use dec_party_manager::{
+    config::{KeycloakConfig, NodeConfig},
+    db,
+    error::Result,
+    utils,
+};
 use tracing_subscriber::{filter::EnvFilter, prelude::*};
 
 use cli::{Cli, Commands, Parser};
@@ -44,7 +49,6 @@ async fn main() -> Result {
 
     match &args.command {
         Commands::Serve {
-            participant_id,
             listen_address,
             noise_port,
             public_address,
@@ -63,9 +67,6 @@ async fn main() -> Result {
             timeout_retry_delay,
             ..
         } => {
-            if let Some(id) = participant_id {
-                config.node.participant_id = Some(id.clone());
-            }
             if let Some(addr) = listen_address {
                 config.node.listen_address = addr.clone();
             }
