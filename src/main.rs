@@ -2,7 +2,12 @@ mod cli;
 
 use std::path::PathBuf;
 
-use dec_party_manager::{config::{KeycloakConfig, NodeConfig}, db, error::Result, utils};
+use dec_party_manager::{
+    config::{KeycloakConfig, NodeConfig},
+    db,
+    error::Result,
+    utils,
+};
 use tracing_subscriber::{filter::EnvFilter, prelude::*};
 
 use cli::{Cli, Commands, Parser};
