@@ -5,7 +5,9 @@ use crate::{
     error::Result,
 };
 
-use super::rows::{PartyCredentialsRow, PeerRow};
+use super::rows::{
+    DecPartyContractRow, DecPartyParticipantRow, DecPartyRow, PartyCredentialsRow, PeerRow,
+};
 
 /// Read operations on the database
 #[allow(async_fn_in_trait)]
@@ -27,6 +29,21 @@ pub trait SchemaRead {
 
     /// Get party credentials by decentralized party ID
     async fn get_party_credentials(&self, dec_party_id: &str) -> Result<Option<PartyCredentials>>;
+
+    /// Get cached decentralized parties by prefix
+    async fn get_dec_parties_by_prefix(&self, prefix: &str) -> Result<Vec<DecPartyRow>>;
+
+    /// Get owner keys for a decentralized party
+    async fn get_dec_party_owners(&self, party_id: &str) -> Result<Vec<String>>;
+
+    /// Get participants for a decentralized party
+    async fn get_dec_party_participants(
+        &self,
+        party_id: &str,
+    ) -> Result<Vec<DecPartyParticipantRow>>;
+
+    /// Get contracts for a decentralized party
+    async fn get_dec_party_contracts(&self, party_id: &str) -> Result<Vec<DecPartyContractRow>>;
 }
 
 /// Write operations on the database
@@ -52,6 +69,29 @@ pub trait Commitable {
 
     /// Insert or replace party credentials
     async fn upsert_party_credentials(&mut self, creds: &PartyCredentials) -> Result;
+
+    /// Upsert a decentralized party
+    async fn upsert_dec_party(&mut self, row: &DecPartyRow) -> Result;
+
+    /// Replace all owners for a decentralized party
+    async fn replace_dec_party_owners(&mut self, party_id: &str, owners: &[String]) -> Result;
+
+    /// Replace all participants for a decentralized party
+    async fn replace_dec_party_participants(
+        &mut self,
+        party_id: &str,
+        participants: &[DecPartyParticipantRow],
+    ) -> Result;
+
+    /// Replace all contracts for a decentralized party
+    async fn replace_dec_party_contracts(
+        &mut self,
+        party_id: &str,
+        contracts: &[DecPartyContractRow],
+    ) -> Result;
+
+    /// Delete decentralized parties by prefix (cascades to owners, participants, contracts)
+    async fn delete_dec_parties_by_prefix(&mut self, prefix: &str) -> Result;
 }
 
 impl SchemaRead for SqlitePool {
@@ -106,6 +146,57 @@ impl SchemaRead for SqlitePool {
         .await?;
 
         row.map(|r| r.into_domain()).transpose()
+    }
+
+    async fn get_dec_parties_by_prefix(&self, prefix: &str) -> Result<Vec<DecPartyRow>> {
+        let rows = if prefix.is_empty() {
+            sqlx::query_as::<_, DecPartyRow>("SELECT * FROM dec_party")
+                .fetch_all(self)
+                .await?
+        } else {
+            sqlx::query_as::<_, DecPartyRow>("SELECT * FROM dec_party WHERE prefix = ?")
+                .bind(prefix)
+                .fetch_all(self)
+                .await?
+        };
+
+        Ok(rows)
+    }
+
+    async fn get_dec_party_owners(&self, party_id: &str) -> Result<Vec<String>> {
+        let rows = sqlx::query_as::<_, (String,)>(
+            "SELECT owner_key FROM dec_party_owner WHERE dec_party_id = ?",
+        )
+        .bind(party_id)
+        .fetch_all(self)
+        .await?;
+
+        Ok(rows.into_iter().map(|(k,)| k).collect())
+    }
+
+    async fn get_dec_party_participants(
+        &self,
+        party_id: &str,
+    ) -> Result<Vec<DecPartyParticipantRow>> {
+        let rows = sqlx::query_as::<_, DecPartyParticipantRow>(
+            "SELECT * FROM dec_party_participant WHERE dec_party_id = ?",
+        )
+        .bind(party_id)
+        .fetch_all(self)
+        .await?;
+
+        Ok(rows)
+    }
+
+    async fn get_dec_party_contracts(&self, party_id: &str) -> Result<Vec<DecPartyContractRow>> {
+        let rows = sqlx::query_as::<_, DecPartyContractRow>(
+            "SELECT * FROM dec_party_contract WHERE dec_party_id = ?",
+        )
+        .bind(party_id)
+        .fetch_all(self)
+        .await?;
+
+        Ok(rows)
     }
 }
 
@@ -186,6 +277,127 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         .bind(&row.keycloak_password)
         .execute(&mut **self)
         .await?;
+
+        Ok(())
+    }
+
+    async fn upsert_dec_party(&mut self, row: &DecPartyRow) -> Result {
+        sqlx::query(
+            r"
+            INSERT OR REPLACE INTO dec_party (
+                party_id,
+                prefix,
+                threshold,
+                updated_at
+            ) VALUES (?, ?, ?, ?)
+            ",
+        )
+        .bind(&row.party_id)
+        .bind(&row.prefix)
+        .bind(row.threshold)
+        .bind(row.updated_at)
+        .execute(&mut **self)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn replace_dec_party_owners(&mut self, party_id: &str, owners: &[String]) -> Result {
+        sqlx::query("DELETE FROM dec_party_owner WHERE dec_party_id = ?")
+            .bind(party_id)
+            .execute(&mut **self)
+            .await?;
+
+        for owner in owners {
+            sqlx::query(
+                r"
+                INSERT INTO dec_party_owner (dec_party_id, owner_key)
+                VALUES (?, ?)
+                ",
+            )
+            .bind(party_id)
+            .bind(owner)
+            .execute(&mut **self)
+            .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn replace_dec_party_participants(
+        &mut self,
+        party_id: &str,
+        participants: &[DecPartyParticipantRow],
+    ) -> Result {
+        sqlx::query("DELETE FROM dec_party_participant WHERE dec_party_id = ?")
+            .bind(party_id)
+            .execute(&mut **self)
+            .await?;
+
+        for p in participants {
+            sqlx::query(
+                r"
+                INSERT INTO dec_party_participant (
+                    dec_party_id,
+                    participant_uid,
+                    permission
+                ) VALUES (?, ?, ?)
+                ",
+            )
+            .bind(party_id)
+            .bind(&p.participant_uid)
+            .bind(&p.permission)
+            .execute(&mut **self)
+            .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn replace_dec_party_contracts(
+        &mut self,
+        party_id: &str,
+        contracts: &[DecPartyContractRow],
+    ) -> Result {
+        sqlx::query("DELETE FROM dec_party_contract WHERE dec_party_id = ?")
+            .bind(party_id)
+            .execute(&mut **self)
+            .await?;
+
+        for c in contracts {
+            sqlx::query(
+                r"
+                INSERT INTO dec_party_contract (
+                    dec_party_id,
+                    contract_id,
+                    template_id,
+                    package_id
+                ) VALUES (?, ?, ?, ?)
+                ",
+            )
+            .bind(party_id)
+            .bind(&c.contract_id)
+            .bind(&c.template_id)
+            .bind(&c.package_id)
+            .execute(&mut **self)
+            .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn delete_dec_parties_by_prefix(&mut self, prefix: &str) -> Result {
+        // CASCADE deletes owners, participants, and contracts
+        if prefix.is_empty() {
+            sqlx::query("DELETE FROM dec_party")
+                .execute(&mut **self)
+                .await?;
+        } else {
+            sqlx::query("DELETE FROM dec_party WHERE prefix = ?")
+                .bind(prefix)
+                .execute(&mut **self)
+                .await?;
+        }
 
         Ok(())
     }

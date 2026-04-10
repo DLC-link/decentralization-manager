@@ -89,9 +89,13 @@ export interface DecentralizedParty {
   local_metadata?: PartyMetadata;
 }
 
+export type ResponseSource = "live" | "cache";
+
 export interface DecentralizedPartiesResponse {
   parties: DecentralizedParty[];
   vetted_packages?: VettedPackageInfo[];
+  source?: ResponseSource;
+  refreshing?: boolean;
 }
 
 export interface NodeConfig {

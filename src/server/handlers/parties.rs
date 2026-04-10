@@ -28,9 +28,10 @@ use crate::{
         AppState,
         queries::{get_contracts, get_party_metadata},
         types::{
-            ConnectionStatus, DecentralizedPartiesResponse, DecentralizedParty, ErrorResponse,
-            PackageInfo, ParticipantInfo, ParticipantStatus, ParticipantsStatusResponse,
-            PeerPackageComparison, PeerPackageResult, Permission, VettedPackageInfo,
+            ConnectionStatus, ContractInfo, DecentralizedPartiesResponse, DecentralizedParty,
+            ErrorResponse, PackageInfo, ParticipantInfo, ParticipantStatus,
+            ParticipantsStatusResponse, PeerPackageComparison, PeerPackageResult, Permission,
+            ResponseSource, VettedPackageInfo,
         },
     },
     utils,
@@ -58,12 +59,58 @@ pub async fn get_decentralized_parties(
     data: web::Data<AppState>,
     query: web::Query<PartiesQuery>,
 ) -> impl Responder {
+    let prefix = query.prefix.clone().unwrap_or_default();
+
+    // Try to load from DB cache first
+    let cached = load_cached_parties(&data.db, &prefix).await;
+    if let Ok(Some(mut response)) = cached {
+        response.source = ResponseSource::Cache;
+
+        // Spawn background refresh if not already in-flight
+        let is_refreshing = {
+            let refreshing = data.refreshing_prefixes.read().await;
+            refreshing.contains(&prefix)
+        };
+        if !is_refreshing {
+            data.refreshing_prefixes
+                .write()
+                .await
+                .insert(prefix.clone());
+            let data = data.clone();
+            let prefix = prefix.clone();
+            tokio::spawn(async move {
+                refresh_and_cache_parties(&data, &prefix).await;
+                data.refreshing_prefixes.write().await.remove(&prefix);
+            });
+        }
+        response.refreshing = true; // Background refresh is now in-flight (or was just spawned)
+
+        return HttpResponse::Ok().json(response);
+    }
+
+    // No cache — do the full Canton query (first request is slow)
     let auth = data.auth.read().await.clone();
     let party_creds = data.party_credentials.read().await.clone();
-    match fetch_decentralized_parties(&data.config, query.prefix.as_deref(), auth, &party_creds)
-        .await
+    match fetch_decentralized_parties(
+        &data.config,
+        Some(prefix.as_str()).filter(|s| !s.is_empty()),
+        auth,
+        &party_creds,
+    )
+    .await
     {
-        Ok(response) => HttpResponse::Ok().json(response),
+        Ok(response) => {
+            // Cache in background
+            let db = data.db.clone();
+            let parties = response.parties.clone();
+            let prefix = prefix.clone();
+            tokio::spawn(async move {
+                if let Err(e) = store_parties_to_db(&db, &prefix, &parties).await {
+                    tracing::warn!("Failed to cache parties: {e}");
+                }
+            });
+            HttpResponse::Ok().json(response)
+        }
         Err(e) => {
             tracing::error!("Failed to fetch decentralized parties: {e}");
             HttpResponse::InternalServerError().json(ErrorResponse {
@@ -73,7 +120,156 @@ pub async fn get_decentralized_parties(
     }
 }
 
-async fn fetch_decentralized_parties(
+/// Background task: fetch from Canton and store to DB
+async fn refresh_and_cache_parties(data: &web::Data<AppState>, prefix: &str) {
+    let auth = data.auth.read().await.clone();
+    let party_creds = data.party_credentials.read().await.clone();
+    match fetch_decentralized_parties(
+        &data.config,
+        Some(prefix).filter(|s| !s.is_empty()),
+        auth,
+        &party_creds,
+    )
+    .await
+    {
+        Ok(response) => {
+            if let Err(e) = store_parties_to_db(&data.db, prefix, &response.parties).await {
+                tracing::warn!("Failed to cache parties: {e}");
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Background refresh failed for prefix '{prefix}': {e}");
+        }
+    }
+}
+
+/// Load cached parties from the dec_party tables
+async fn load_cached_parties(
+    db: &SqlitePool,
+    prefix: &str,
+) -> Result<Option<DecentralizedPartiesResponse>> {
+    use crate::db::schema::SchemaRead;
+
+    let rows = db.get_dec_parties_by_prefix(prefix).await?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+
+    let mut parties = Vec::with_capacity(rows.len());
+    for row in rows {
+        let owners = db.get_dec_party_owners(&row.party_id).await?;
+        let participant_rows = db.get_dec_party_participants(&row.party_id).await?;
+        let participants = participant_rows
+            .into_iter()
+            .map(|p| ParticipantInfo {
+                participant_uid: CantonId::parse(&p.participant_uid)
+                    .unwrap_or_else(|_| CantonId::parse("unknown::1220000000000000000000000000000000000000000000000000000000000000000000").unwrap()),
+                permission: match p.permission.as_str() {
+                    "submission" => Permission::Submission,
+                    "confirmation" => Permission::Confirmation,
+                    "observation" => Permission::Observation,
+                    _ => Permission::Unknown,
+                },
+            })
+            .collect();
+
+        let contract_rows = db.get_dec_party_contracts(&row.party_id).await?;
+        let contracts = contract_rows
+            .into_iter()
+            .map(|c| ContractInfo {
+                contract_id: c.contract_id,
+                template_id: c.template_id,
+                package_id: c.package_id,
+            })
+            .collect();
+
+        parties.push(DecentralizedParty {
+            party_id: CantonId::parse(&row.party_id)?,
+            threshold: row.threshold as i32,
+            owners,
+            my_owner_key: None,
+            participants,
+            contracts,
+            local_metadata: None,
+        });
+    }
+
+    Ok(Some(DecentralizedPartiesResponse {
+        parties,
+        vetted_packages: Vec::new(),
+        source: ResponseSource::Cache,
+        refreshing: false,
+    }))
+}
+
+/// Store parties into the dec_party tables
+pub async fn store_parties_to_db(
+    db: &SqlitePool,
+    prefix: &str,
+    parties: &[DecentralizedParty],
+) -> Result {
+    use crate::db::{
+        rows::{DecPartyContractRow, DecPartyParticipantRow, DecPartyRow},
+        schema::{Commitable, SchemaWrite},
+    };
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+
+    let mut tx = db.begin_transaction().await?;
+    tx.delete_dec_parties_by_prefix(prefix).await?;
+
+    for party in parties {
+        // Extract the real prefix from party_id (everything before "::")
+        let party_id_str = party.party_id.to_string();
+        let real_prefix = party_id_str
+            .split_once("::")
+            .map(|(p, _)| p)
+            .unwrap_or(&party_id_str);
+
+        let row = DecPartyRow {
+            party_id: party_id_str.clone(),
+            prefix: real_prefix.to_string(),
+            threshold: party.threshold as i64,
+            updated_at: now,
+        };
+        tx.upsert_dec_party(&row).await?;
+
+        tx.replace_dec_party_owners(&row.party_id, &party.owners)
+            .await?;
+
+        let participants: Vec<DecPartyParticipantRow> = party
+            .participants
+            .iter()
+            .map(|p| DecPartyParticipantRow {
+                dec_party_id: row.party_id.clone(),
+                participant_uid: p.participant_uid.to_string(),
+                permission: format!("{:?}", p.permission).to_lowercase(),
+            })
+            .collect();
+        tx.replace_dec_party_participants(&row.party_id, &participants)
+            .await?;
+
+        let contracts: Vec<DecPartyContractRow> = party
+            .contracts
+            .iter()
+            .map(|c| DecPartyContractRow {
+                dec_party_id: row.party_id.clone(),
+                contract_id: c.contract_id.clone(),
+                template_id: c.template_id.clone(),
+                package_id: c.package_id.clone(),
+            })
+            .collect();
+        tx.replace_dec_party_contracts(&row.party_id, &contracts)
+            .await?;
+    }
+
+    Commitable::commit(tx).await
+}
+
+pub async fn fetch_decentralized_parties(
     config: &NodeConfig,
     prefix_filter: Option<&str>,
     auth: Option<WorkflowAuth>,
@@ -274,6 +470,8 @@ async fn fetch_decentralized_parties(
     Ok(DecentralizedPartiesResponse {
         parties,
         vetted_packages,
+        source: ResponseSource::Live,
+        refreshing: false,
     })
 }
 

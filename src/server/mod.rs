@@ -4,7 +4,11 @@ mod handlers;
 mod queries;
 mod types;
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use actix_cors::Cors;
 use actix_web::{App, HttpServer, web};
@@ -47,6 +51,8 @@ pub struct AppState {
     pub party_credentials: Arc<RwLock<Vec<PartyCredentials>>>,
     /// Whether the server is running in test mode
     pub test_mode: bool,
+    /// Prefixes currently being refreshed from Canton (deduplication)
+    pub refreshing_prefixes: Arc<RwLock<HashSet<String>>>,
 }
 
 /// Control mechanism for the Noise port listener
@@ -130,6 +136,7 @@ pub async fn start_server(
         auth,
         party_credentials,
         test_mode,
+        refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
     });
     let kick_state = web::Data::new(Arc::new(handlers::KickWorkflowState::new()));
     let onboarding_state = web::Data::new(Arc::new(handlers::OnboardingWorkflowState::new()));
@@ -236,6 +243,44 @@ pub async fn start_server(
             dars_coordinator_pubkey,
         )
         .await;
+    });
+
+    // Background task: sync decentralized parties from Canton on startup
+    let sync_config = config.clone();
+    let sync_db = db.clone();
+    let sync_auth = app_state.auth.clone();
+    let sync_party_creds = app_state.party_credentials.clone();
+    tokio::spawn(async move {
+        // Delay to let Canton stabilize after startup
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        tracing::info!("Starting background sync of decentralized parties from Canton...");
+
+        let auth_snapshot = sync_auth.read().await.clone();
+        let creds_snapshot = sync_party_creds.read().await.clone();
+
+        match handlers::fetch_decentralized_parties(
+            &sync_config,
+            None,
+            auth_snapshot,
+            &creds_snapshot,
+        )
+        .await
+        {
+            Ok(response) => {
+                if let Err(e) = handlers::store_parties_to_db(&sync_db, "", &response.parties).await
+                {
+                    tracing::warn!("Failed to cache parties on startup: {e}");
+                } else {
+                    tracing::info!(
+                        "Cached {} decentralized parties from Canton",
+                        response.parties.len()
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Background Canton sync failed on startup: {e}");
+            }
+        }
     });
 
     tracing::info!("Starting HTTP server on {host}:{port}");

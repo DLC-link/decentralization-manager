@@ -74,7 +74,7 @@ impl ListenerPauseGuard {
 }
 
 /// Participant permission level
-#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Permission {
     Submission,
@@ -95,14 +95,14 @@ impl From<i32> for Permission {
 }
 
 /// Participant in a decentralized party
-#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct ParticipantInfo {
     pub participant_uid: CantonId,
     pub permission: Permission,
 }
 
 /// Contract information
-#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct ContractInfo {
     pub contract_id: String,
     pub template_id: String,
@@ -110,7 +110,7 @@ pub struct ContractInfo {
 }
 
 /// Vetted package information
-#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct VettedPackageInfo {
     pub package_id: String,
     pub package_name: String,
@@ -143,32 +143,48 @@ pub struct PeerPackageComparison {
 }
 
 /// Party metadata from Ledger API
-#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct PartyMetadata {
     pub annotations: HashMap<String, String>,
 }
 
 /// Decentralized party information
-#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct DecentralizedParty {
     pub party_id: CantonId,
     pub threshold: i32,
     pub owners: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub my_owner_key: Option<String>,
     pub participants: Vec<ParticipantInfo>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub contracts: Vec<ContractInfo>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_metadata: Option<PartyMetadata>,
 }
 
+/// Where the response data came from
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ResponseSource {
+    /// Fresh data from Canton gRPC
+    #[default]
+    Live,
+    /// Cached data from local database
+    Cache,
+}
+
 /// Response for the decentralized parties endpoint
-#[derive(Serialize, utoipa::ToSchema)]
+#[derive(Deserialize, Serialize, utoipa::ToSchema)]
 pub struct DecentralizedPartiesResponse {
     pub parties: Vec<DecentralizedParty>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub vetted_packages: Vec<VettedPackageInfo>,
+    #[serde(default)]
+    pub source: ResponseSource,
+    /// Whether a background refresh from Canton is currently in progress
+    #[serde(default)]
+    pub refreshing: bool,
 }
 
 /// Connection status for a participant
