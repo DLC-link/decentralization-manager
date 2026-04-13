@@ -74,8 +74,8 @@ given_governance_with_token_setup = do
 -- When
 -- ============================================================================
 
-when_zero_amount_proposal_created : SendFixture -> Script ()
-when_zero_amount_proposal_created f = do
+when_zero_amount_proposal_creation_fails : SendFixture -> Script ()
+when_zero_amount_proposal_creation_fails f = do
   preapprovalCid <- createReceiverPreapproval f.parties f.result
   now <- getTime
   submitMustFail f.parties.member1 $ createCmd TransferProposal with
@@ -88,8 +88,8 @@ when_zero_amount_proposal_created f = do
       context = createTransferContext f.result
       meta = emptyMetadata
 
-when_insufficient_confirmations : SendFixture -> Script ()
-when_insufficient_confirmations f = do
+when_insufficient_confirmations_fails : SendFixture -> Script ()
+when_insufficient_confirmations_fails f = do
   preapprovalCid <- createReceiverPreapproval f.parties f.result
   now <- getTime
   proposalCid <- submit f.parties.member1 $ createCmd TransferProposal with
@@ -110,8 +110,8 @@ when_insufficient_confirmations f = do
       actionProposalCid = proposalInterfaceCid
       confirmations = confirmationCids
 
-when_non_member_confirms : SendFixture -> Script ()
-when_non_member_confirms f = do
+when_non_member_confirmation_fails : SendFixture -> Script ()
+when_non_member_confirmation_fails f = do
   preapprovalCid <- createReceiverPreapproval f.parties f.result
   now <- getTime
   proposalCid <- submit f.parties.member1 $ createCmd TransferProposal with
@@ -154,8 +154,8 @@ when_tokens_sent_via_governance f = do
 -- Then
 -- ============================================================================
 
-then_submit_failed : SendFixture -> () -> Script Failures
-then_submit_failed _ _ = pure []
+then_nothing_to_verify : SendFixture -> () -> Script Failures
+then_nothing_to_verify _ _ = pure []
 
 then_outsider_received_holdings : SendFixture -> [ContractId Holding] -> Script Failures
 then_outsider_received_holdings _ holdings =
@@ -168,20 +168,20 @@ then_outsider_received_holdings _ holdings =
 testSendTokensZeroAmountRejected = script do
   run Test with
     given = given_governance_with_token_setup
-    when = when_zero_amount_proposal_created
-    then_ = then_submit_failed
+    when = when_zero_amount_proposal_creation_fails
+    then_ = then_nothing_to_verify
 
 testSendTokensInsufficientConfirmations = script do
   run Test with
     given = given_governance_with_token_setup
-    when = when_insufficient_confirmations
-    then_ = then_submit_failed
+    when = when_insufficient_confirmations_fails
+    then_ = then_nothing_to_verify
 
 testSendTokensNonMemberCannotConfirm = script do
   run Test with
     given = given_governance_with_token_setup
-    when = when_non_member_confirms
-    then_ = then_submit_failed
+    when = when_non_member_confirmation_fails
+    then_ = then_nothing_to_verify
 
 testSendTokensGovernanceHappyPath = script do
   run Test with

@@ -73,8 +73,8 @@ when_full_flow_executed f = do
   confirmAndExecute f.parties f.rulesCid proposalInterfaceCid
     [f.parties.member1, f.parties.member2] f.parties.member1
 
-when_non_member_confirms : PreapprovalFixture -> Script ()
-when_non_member_confirms f = do
+when_non_member_confirmation_fails : PreapprovalFixture -> Script ()
+when_non_member_confirmation_fails f = do
   proposalCid <- submit f.parties.member1 $ createCmd SetupTokenPreapprovalProposal with
     governanceParty = f.parties.governanceParty
     proposer = f.parties.member1
@@ -149,8 +149,8 @@ then_preapproval_created f _ = do
     shouldBe "InstrumentAdmin" f.parties.registrar preapproval.instrumentAdmin <>
     shouldBe "InstrumentAllowances count" 1 (length preapproval.instrumentAllowances)
 
-then_submit_failed : PreapprovalFixture -> () -> Script Failures
-then_submit_failed _ _ = pure []
+then_nothing_to_verify : PreapprovalFixture -> () -> Script Failures
+then_nothing_to_verify _ _ = pure []
 
 then_all_instruments_preapproval_created : PreapprovalFixture -> () -> Script Failures
 then_all_instruments_preapproval_created f _ = do
@@ -177,8 +177,8 @@ testSetupTokenPreapprovalFullFlow = script do
 testSetupTokenPreapprovalNonMemberCannotConfirm = script do
   run Test with
     given = given_governance
-    when = when_non_member_confirms
-    then_ = then_submit_failed
+    when = when_non_member_confirmation_fails
+    then_ = then_nothing_to_verify
 
 testSetupTokenPreapprovalAllInstruments = script do
   run Test with

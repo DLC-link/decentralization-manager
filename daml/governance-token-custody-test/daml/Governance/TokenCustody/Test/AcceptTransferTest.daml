@@ -130,8 +130,8 @@ when_withdrawn_offer_fails f = do
       actionProposalCid = proposalInterfaceCid
       confirmations = confirmationCids
 
-when_non_member_confirms : AcceptFixture -> Script ()
-when_non_member_confirms f = do
+when_non_member_confirmation_fails : AcceptFixture -> Script ()
+when_non_member_confirmation_fails f = do
   transferInstructionCid <- createTransferOffer f.parties f.result 75.0
   proposalCid <- submit f.parties.member1 $ createCmd AcceptTransferProposal with
     governanceParty = f.parties.governanceParty
@@ -148,8 +148,8 @@ when_non_member_confirms f = do
 -- Then
 -- ============================================================================
 
-then_submit_failed : AcceptFixture -> () -> Script Failures
-then_submit_failed _ _ = pure []
+then_nothing_to_verify : AcceptFixture -> () -> Script Failures
+then_nothing_to_verify _ _ = pure []
 
 then_governance_party_received_holdings : AcceptFixture -> [ContractId Holding] -> Script Failures
 then_governance_party_received_holdings _ holdings =
@@ -169,10 +169,10 @@ testAcceptTransferWithdrawnOffer = script do
   run Test with
     given = given_governance_with_token_setup
     when = when_withdrawn_offer_fails
-    then_ = then_submit_failed
+    then_ = then_nothing_to_verify
 
 testAcceptTransferNonMemberCannotConfirm = script do
   run Test with
     given = given_governance_with_token_setup
-    when = when_non_member_confirms
-    then_ = then_submit_failed
+    when = when_non_member_confirmation_fails
+    then_ = then_nothing_to_verify

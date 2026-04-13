@@ -57,8 +57,8 @@ when_full_flow_with_dso f = do
   results <- query @TransferPreapprovalProposal f.parties.governanceParty
   pure (map snd results)
 
-when_non_member_tries_to_confirm : SetupCcFixture -> Script ()
-when_non_member_tries_to_confirm f = do
+when_non_member_confirmation_fails : SetupCcFixture -> Script ()
+when_non_member_confirmation_fails f = do
   proposalCid <- submit f.parties.member1 $ createCmd SetupCcPreapprovalProposal with
     governanceParty = f.parties.governanceParty
     proposer = f.parties.member1
@@ -92,8 +92,8 @@ when_full_flow_without_dso f = do
 -- Then
 -- ============================================================================
 
-then_submit_failed : SetupCcFixture -> () -> Script Failures
-then_submit_failed _ _ = pure []
+then_nothing_to_verify : SetupCcFixture -> () -> Script Failures
+then_nothing_to_verify _ _ = pure []
 
 then_preapproval_proposal_created_with_dso : SetupCcFixture -> [TransferPreapprovalProposal] -> Script Failures
 then_preapproval_proposal_created_with_dso f proposals = do
@@ -128,8 +128,8 @@ testSetupCcPreapprovalFullFlow = script do
 testSetupCcPreapprovalNonMemberCannotConfirm = script do
   run Test with
     given = given_governance_with_dso
-    when = when_non_member_tries_to_confirm
-    then_ = then_submit_failed
+    when = when_non_member_confirmation_fails
+    then_ = then_nothing_to_verify
 
 testSetupCcPreapprovalWithoutDso = script do
   run Test with
