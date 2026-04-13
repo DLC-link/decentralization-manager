@@ -119,19 +119,19 @@ then_preapproval_proposal_created_without_dso _ proposals = do
 -- Tests
 -- ============================================================================
 
-testSetupCcPreapprovalFullFlow = script do
+test_when_cc_preapproval_proposed_then_proposal_created = script do
   run Test with
     given = given_governance_with_dso
     when = when_full_flow_with_dso
     then_ = then_preapproval_proposal_created_with_dso
 
-testSetupCcPreapprovalNonMemberCannotConfirm = script do
+test_when_non_member_confirms_then_confirmation_rejected = script do
   run Test with
     given = given_governance_with_dso
     when = when_non_member_confirmation_fails
     then_ = then_nothing_to_verify
 
-testSetupCcPreapprovalWithoutDso = script do
+test_when_no_dso_then_preapproval_created = script do
   run Test with
     given = given_governance_with_dso
     when = when_full_flow_without_dso

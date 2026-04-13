@@ -159,19 +159,19 @@ then_governance_party_received_holdings _ holdings =
 -- Tests
 -- ============================================================================
 
-testAcceptTransferGovernanceHappyPath = script do
+test_when_transfer_accepted_then_governance_receives_holdings = script do
   run Test with
     given = given_governance_with_token_setup
     when = when_transfer_accepted_via_governance
     then_ = then_governance_party_received_holdings
 
-testAcceptTransferWithdrawnOffer = script do
+test_when_withdrawn_offer_accepted_then_execution_fails = script do
   run Test with
     given = given_governance_with_token_setup
     when = when_withdrawn_offer_fails
     then_ = then_nothing_to_verify
 
-testAcceptTransferNonMemberCannotConfirm = script do
+test_when_non_member_confirms_then_confirmation_rejected = script do
   run Test with
     given = given_governance_with_token_setup
     when = when_non_member_confirmation_fails

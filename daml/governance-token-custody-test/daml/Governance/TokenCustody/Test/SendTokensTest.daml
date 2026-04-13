@@ -165,25 +165,25 @@ then_outsider_received_holdings _ holdings =
 -- Tests
 -- ============================================================================
 
-testSendTokensZeroAmountRejected = script do
+test_when_zero_amount_then_proposal_rejected = script do
   run Test with
     given = given_governance_with_token_setup
     when = when_zero_amount_proposal_creation_fails
     then_ = then_nothing_to_verify
 
-testSendTokensInsufficientConfirmations = script do
+test_when_insufficient_confirmations_then_execution_rejected = script do
   run Test with
     given = given_governance_with_token_setup
     when = when_insufficient_confirmations_fails
     then_ = then_nothing_to_verify
 
-testSendTokensNonMemberCannotConfirm = script do
+test_when_non_member_confirms_then_confirmation_rejected = script do
   run Test with
     given = given_governance_with_token_setup
     when = when_non_member_confirmation_fails
     then_ = then_nothing_to_verify
 
-testSendTokensGovernanceHappyPath = script do
+test_when_tokens_sent_then_outsider_receives_holdings = script do
   run Test with
     given = given_governance_with_token_setup
     when = when_tokens_sent_via_governance
