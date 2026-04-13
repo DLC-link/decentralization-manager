@@ -14,13 +14,15 @@ use canton_proto_rs::com::digitalasset::canton::{
     },
 };
 use serde::Deserialize;
-
 use sqlx::SqlitePool;
 
 use crate::{
     auth::WorkflowAuth,
     config::{NetworkConfig, NodeConfig, PartyCredentials},
-    db::schema::SchemaRead,
+    db::{
+        rows::{DecPartyContractRow, DecPartyParticipantRow, DecPartyRow},
+        schema::{Commitable, SchemaRead, SchemaWrite},
+    },
     error::Result,
     noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
     participant_id::CantonId,
@@ -120,7 +122,7 @@ pub async fn get_decentralized_parties(
     }
 }
 
-/// Background task: fetch from Canton and store to DB
+/// Background task: fetch from Canton, store to DB, then resolve owner keys from peers
 async fn refresh_and_cache_parties(data: &web::Data<AppState>, prefix: &str) {
     let auth = data.auth.read().await.clone();
     let party_creds = data.party_credentials.read().await.clone();
@@ -135,10 +137,125 @@ async fn refresh_and_cache_parties(data: &web::Data<AppState>, prefix: &str) {
         Ok(response) => {
             if let Err(e) = store_parties_to_db(&data.db, prefix, &response.parties).await {
                 tracing::warn!("Failed to cache parties: {e}");
+                return;
             }
+            resolve_owner_keys_from_peers(&data.config, &data.db, &response.parties).await;
         }
         Err(e) => {
             tracing::warn!("Background refresh failed for prefix '{prefix}': {e}");
+        }
+    }
+}
+
+/// Query each peer via Noise for their owner keys, then update the DB
+pub async fn resolve_owner_keys_from_peers(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    parties: &[DecentralizedParty],
+) {
+    tracing::debug!("Resolving owner keys from peers...");
+
+    let peers = match db.get_all_peers().await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("Failed to load peers for owner key resolution: {e}");
+            return;
+        }
+    };
+
+    let keypair = match NoiseKeypair::from_file(&config.key_file_path()).await {
+        Ok(kp) => kp,
+        Err(e) => {
+            tracing::warn!("Failed to load keypair for owner key resolution: {e}");
+            return;
+        }
+    };
+
+    let current_participant_id = config.participant_id().to_string();
+
+    for peer in &peers {
+        let peer_uid = peer.participant_id.to_string();
+        if peer_uid == current_participant_id || peer.public_key.is_empty() {
+            continue;
+        }
+
+        let peer_pub_key = match parse_public_key(&peer.public_key) {
+            Ok(pk) => pk,
+            Err(e) => {
+                tracing::warn!("Failed to parse public key for {peer_uid}: {e}");
+                continue;
+            }
+        };
+
+        let psk = keypair.derive_psk(&peer_pub_key);
+        let identity = keypair.public_key.serialize();
+        let msg = Message::new_empty(MessageType::RequestOwnerKeys);
+
+        tracing::debug!("Requesting owner keys from {peer_uid}");
+        let response = match tokio::time::timeout(
+            Duration::from_secs(10),
+            send_noise_message(&peer.address, peer.port, &psk, &identity, &msg),
+        )
+        .await
+        {
+            Ok(Ok(bytes)) => bytes,
+            Ok(Err(e)) => {
+                tracing::warn!("Noise request to {peer_uid} failed: {e}");
+                continue;
+            }
+            Err(_) => {
+                tracing::warn!("Noise request to {peer_uid} timed out");
+                continue;
+            }
+        };
+
+        let response_msg = match Message::from_bytes(&response) {
+            Ok(m) if m.msg_type == MessageType::OwnerKeys => m,
+            Ok(m) => {
+                tracing::warn!("Unexpected response type from {peer_uid}: {:?}", m.msg_type);
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!("Failed to parse response from {peer_uid}: {e}");
+                continue;
+            }
+        };
+
+        let entries: Vec<serde_json::Value> = match serde_json::from_slice(&response_msg.payload) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!("Failed to deserialize owner keys from {peer_uid}: {e}");
+                continue;
+            }
+        };
+
+        tracing::debug!(
+            "Received {} owner key entries from {peer_uid}",
+            entries.len()
+        );
+
+        // Update DB with the owner keys
+        let peer_uid = peer.participant_id.to_string();
+        if let Ok(mut tx) = db.begin_transaction().await {
+            for entry in &entries {
+                let Some(party_id) = entry["party_id"].as_str() else {
+                    continue;
+                };
+                let Some(owner_key) = entry["owner_key"].as_str() else {
+                    continue;
+                };
+
+                if parties.iter().any(|p| p.party_id.to_string() == party_id)
+                    && let Err(e) = tx
+                        .update_participant_owner_key(party_id, &peer_uid, owner_key)
+                        .await
+                {
+                    tracing::debug!("Failed to update owner key for {peer_uid}: {e}");
+                }
+            }
+            if let Err(e) = Commitable::commit(tx).await {
+                tracing::debug!("Failed to commit owner key updates: {e}");
+            }
         }
     }
 }
@@ -148,8 +265,6 @@ async fn load_cached_parties(
     db: &SqlitePool,
     prefix: &str,
 ) -> Result<Option<DecentralizedPartiesResponse>> {
-    use crate::db::schema::SchemaRead;
-
     let rows = db.get_dec_parties_by_prefix(prefix).await?;
     if rows.is_empty() {
         return Ok(None);
@@ -161,15 +276,18 @@ async fn load_cached_parties(
         let participant_rows = db.get_dec_party_participants(&row.party_id).await?;
         let participants = participant_rows
             .into_iter()
-            .map(|p| ParticipantInfo {
-                participant_uid: CantonId::parse(&p.participant_uid)
-                    .unwrap_or_else(|_| CantonId::parse("unknown::1220000000000000000000000000000000000000000000000000000000000000000000").unwrap()),
-                permission: match p.permission.as_str() {
-                    "submission" => Permission::Submission,
-                    "confirmation" => Permission::Confirmation,
-                    "observation" => Permission::Observation,
-                    _ => Permission::Unknown,
-                },
+            .filter_map(|p| {
+                let participant_uid = CantonId::parse(&p.participant_uid).ok()?;
+                Some(ParticipantInfo {
+                    participant_uid,
+                    permission: match p.permission.as_str() {
+                        "submission" => Permission::Submission,
+                        "confirmation" => Permission::Confirmation,
+                        "observation" => Permission::Observation,
+                        _ => Permission::Unknown,
+                    },
+                    owner_key: p.owner_key,
+                })
             })
             .collect();
 
@@ -208,11 +326,6 @@ pub async fn store_parties_to_db(
     prefix: &str,
     parties: &[DecentralizedParty],
 ) -> Result {
-    use crate::db::{
-        rows::{DecPartyContractRow, DecPartyParticipantRow, DecPartyRow},
-        schema::{Commitable, SchemaWrite},
-    };
-
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -246,7 +359,14 @@ pub async fn store_parties_to_db(
             .map(|p| DecPartyParticipantRow {
                 dec_party_id: row.party_id.clone(),
                 participant_uid: p.participant_uid.to_string(),
-                permission: format!("{:?}", p.permission).to_lowercase(),
+                permission: match p.permission {
+                    Permission::Submission => "submission",
+                    Permission::Confirmation => "confirmation",
+                    Permission::Observation => "observation",
+                    Permission::Unknown => "unknown",
+                }
+                .to_string(),
+                owner_key: p.owner_key.clone(),
             })
             .collect();
         tx.replace_dec_party_participants(&row.party_id, &participants)
@@ -269,6 +389,7 @@ pub async fn store_parties_to_db(
     Commitable::commit(tx).await
 }
 
+/// Fetch decentralized parties from Canton topology and ledger APIs
 pub async fn fetch_decentralized_parties(
     config: &NodeConfig,
     prefix_filter: Option<&str>,
@@ -447,6 +568,7 @@ pub async fn fetch_decentralized_parties(
                         Some(ParticipantInfo {
                             participant_uid,
                             permission: Permission::from(p.permission),
+                            owner_key: None, // Populated during onboarding
                         })
                     })
                     .collect();

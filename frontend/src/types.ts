@@ -8,6 +8,7 @@ export interface AuthConfig {
 export interface ParticipantInfo {
   participant_uid: string;
   permission: string;
+  owner_key?: string;
 }
 
 export interface ContractInfo {

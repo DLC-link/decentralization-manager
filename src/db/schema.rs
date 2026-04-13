@@ -92,6 +92,14 @@ pub trait Commitable {
 
     /// Delete decentralized parties by prefix (cascades to owners, participants, contracts)
     async fn delete_dec_parties_by_prefix(&mut self, prefix: &str) -> Result;
+
+    /// Update the owner key for a specific participant in a decentralized party
+    async fn update_participant_owner_key(
+        &mut self,
+        party_id: &str,
+        participant_uid: &str,
+        owner_key: &str,
+    ) -> Result;
 }
 
 impl SchemaRead for SqlitePool {
@@ -340,13 +348,15 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                 INSERT INTO dec_party_participant (
                     dec_party_id,
                     participant_uid,
-                    permission
-                ) VALUES (?, ?, ?)
+                    permission,
+                    owner_key
+                ) VALUES (?, ?, ?, ?)
                 ",
             )
             .bind(party_id)
             .bind(&p.participant_uid)
             .bind(&p.permission)
+            .bind(&p.owner_key)
             .execute(&mut **self)
             .await?;
         }
@@ -398,6 +408,28 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                 .execute(&mut **self)
                 .await?;
         }
+
+        Ok(())
+    }
+
+    async fn update_participant_owner_key(
+        &mut self,
+        party_id: &str,
+        participant_uid: &str,
+        owner_key: &str,
+    ) -> Result {
+        sqlx::query(
+            r"
+            UPDATE dec_party_participant
+            SET owner_key = ?
+            WHERE dec_party_id = ? AND participant_uid = ?
+            ",
+        )
+        .bind(owner_key)
+        .bind(party_id)
+        .bind(participant_uid)
+        .execute(&mut **self)
+        .await?;
 
         Ok(())
     }

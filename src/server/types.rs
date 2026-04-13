@@ -99,6 +99,9 @@ impl From<i32> for Permission {
 pub struct ParticipantInfo {
     pub participant_uid: CantonId,
     pub permission: Permission,
+    /// Namespace key fingerprint for this participant (if they are an owner)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_key: Option<String>,
 }
 
 /// Contract information

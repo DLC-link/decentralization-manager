@@ -104,6 +104,7 @@ pub struct DecPartyParticipantRow {
     pub dec_party_id: String,
     pub participant_uid: String,
     pub permission: String,
+    pub owner_key: Option<String>,
 }
 
 #[derive(Debug, sqlx::FromRow)]

@@ -12,6 +12,18 @@ use std::{
 
 use actix_cors::Cors;
 use actix_web::{App, HttpServer, web};
+use canton_proto_rs::com::digitalasset::canton::{
+    admin::participant::v30::{ListPackagesRequest, package_service_client::PackageServiceClient},
+    crypto::{
+        admin::v30::{ListMyKeysRequest, vault_service_client::VaultServiceClient},
+        v30::public_key,
+    },
+    topology::admin::v30::{
+        BaseQuery, ListDecentralizedNamespaceDefinitionRequest, ListPartyToParticipantRequest,
+        StoreId, Synchronizer, base_query, store_id, synchronizer,
+        topology_manager_read_service_client::TopologyManagerReadServiceClient,
+    },
+};
 use hyper::{Body, Response, StatusCode};
 use sqlx::SqlitePool;
 use tokio::sync::{Notify, RwLock};
@@ -65,6 +77,7 @@ pub struct ListenerControl {
 struct WorkflowTriggers {
     pending_invitations: Arc<RwLock<Vec<PendingInvitation>>>,
     admin_api_url: String,
+    synchronizer: String,
 }
 
 /// Start the HTTP server and a heartbeat system for peer status tracking
@@ -152,6 +165,7 @@ pub async fn start_server(
     let heartbeat_triggers = WorkflowTriggers {
         pending_invitations: pending_invitations.clone(),
         admin_api_url: config.admin_api_url(),
+        synchronizer: config.synchronizer().to_string(),
     };
     tokio::spawn(async move {
         run_heartbeat(
@@ -275,6 +289,12 @@ pub async fn start_server(
                         "Cached {} decentralized parties from Canton",
                         response.parties.len()
                     );
+                    handlers::resolve_owner_keys_from_peers(
+                        &sync_config,
+                        &sync_db,
+                        &response.parties,
+                    )
+                    .await;
                 }
             }
             Err(e) => {
@@ -553,6 +573,24 @@ async fn handle_incoming_connection(
                                 }
                             };
                             let response_msg = Message::new(MessageType::Data, payload);
+                            return Ok(Response::builder()
+                                .status(StatusCode::OK)
+                                .body(Body::from(response_msg.to_bytes()))
+                                .unwrap());
+                        }
+                        MessageType::RequestOwnerKeys => {
+                            tracing::debug!("Received RequestOwnerKeys request");
+                            let admin_url = triggers.admin_api_url.clone();
+                            let synchronizer = triggers.synchronizer.clone();
+                            let payload = match list_my_owner_keys(&admin_url, &synchronizer).await
+                            {
+                                Ok(data) => data,
+                                Err(e) => {
+                                    tracing::error!("Failed to list owner keys: {e}");
+                                    b"[]".to_vec()
+                                }
+                            };
+                            let response_msg = Message::new(MessageType::OwnerKeys, payload);
                             return Ok(Response::builder()
                                 .status(StatusCode::OK)
                                 .body(Body::from(response_msg.to_bytes()))
@@ -1089,11 +1127,102 @@ async fn run_dars_attestor_listener(
 }
 
 /// List locally uploaded packages via Canton admin API (called by Noise ListPackages handler)
-async fn list_local_packages(admin_api_url: &str) -> Result<Vec<u8>> {
-    use canton_proto_rs::com::digitalasset::canton::admin::participant::v30::{
-        ListPackagesRequest, package_service_client::PackageServiceClient,
+/// Query Canton for this node's owner keys across all decentralized parties.
+/// Returns JSON: `[{"party_id": "prefix::namespace", "owner_key": "fingerprint"}, ...]`
+async fn list_my_owner_keys(admin_api_url: &str, synchronizer_alias: &str) -> Result<Vec<u8>> {
+    let channel = tonic::transport::Channel::from_shared(admin_api_url.to_string())?
+        .connect()
+        .await?;
+
+    let mut vault_client = VaultServiceClient::new(channel.clone());
+    let mut topology_client = TopologyManagerReadServiceClient::new(channel);
+
+    // Get this node's namespace key fingerprints
+    let keys_response = vault_client
+        .list_my_keys(tonic::Request::new(ListMyKeysRequest { filters: None }))
+        .await?
+        .into_inner();
+
+    let mut my_fingerprints = Vec::new();
+    for key_meta in keys_response.private_keys_metadata {
+        if let Some(pub_key_with_name) = &key_meta.public_key_with_name
+            && let Some(pub_key) = &pub_key_with_name.public_key
+            && let Some(public_key::Key::SigningPublicKey(signing_key)) = &pub_key.key
+            && signing_key.usage.contains(&1)
+        {
+            my_fingerprints.push(crate::utils::compute_fingerprint(signing_key));
+        }
+    }
+
+    let synchronizer_id =
+        crate::utils::get_synchronizer_id_from_url(admin_api_url, synchronizer_alias).await?;
+
+    let base_query = BaseQuery {
+        store: Some(StoreId {
+            store: Some(store_id::Store::Synchronizer(Synchronizer {
+                kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id)),
+            })),
+        }),
+        proposals: false,
+        operation: 0,
+        time_query: Some(base_query::TimeQuery::HeadState(())),
+        filter_signed_key: String::new(),
+        protocol_version: None,
     };
 
+    // Get all decentralized namespace definitions
+    let dns_response = topology_client
+        .list_decentralized_namespace_definition(tonic::Request::new(
+            ListDecentralizedNamespaceDefinitionRequest {
+                base_query: Some(base_query.clone()),
+                filter_namespace: String::new(),
+            },
+        ))
+        .await?
+        .into_inner();
+
+    // Get P2P mappings to resolve full party_id (prefix::namespace)
+    let p2p_response = topology_client
+        .list_party_to_participant(tonic::Request::new(ListPartyToParticipantRequest {
+            base_query: Some(base_query),
+            filter_party: String::new(),
+            filter_participant: String::new(),
+        }))
+        .await?
+        .into_inner();
+
+    // Build namespace → full party_id map from P2P data
+    let namespace_to_party: HashMap<String, String> = p2p_response
+        .results
+        .into_iter()
+        .filter_map(|r| {
+            let p = r.item?;
+            let ns = p.party.rsplit_once("::")?.1.to_string();
+            Some((ns, p.party))
+        })
+        .collect();
+
+    // Match this node's fingerprints against each party's owners list
+    let mut entries = Vec::new();
+    for result in dns_response.results {
+        let Some(item) = result.item else { continue };
+        let Some(full_party_id) = namespace_to_party.get(&item.decentralized_namespace) else {
+            continue;
+        };
+        for owner in &item.owners {
+            if my_fingerprints.contains(owner) {
+                entries.push(serde_json::json!({
+                    "party_id": full_party_id,
+                    "owner_key": owner,
+                }));
+            }
+        }
+    }
+
+    Ok(serde_json::to_vec(&entries)?)
+}
+
+async fn list_local_packages(admin_api_url: &str) -> Result<Vec<u8>> {
     let mut client = PackageServiceClient::connect(admin_api_url.to_string()).await?;
     let response = client
         .list_packages(tonic::Request::new(ListPackagesRequest {

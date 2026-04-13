@@ -275,21 +275,26 @@ pub fn compute_fingerprint(key: &SigningPublicKey) -> String {
 /// Queries the participant's synchronizer connectivity service to get the physical
 /// synchronizer ID for the configured synchronizer alias.
 pub async fn get_synchronizer_id(config: &NodeConfig) -> Result<String> {
+    get_synchronizer_id_from_url(&config.admin_api_url(), config.synchronizer()).await
+}
+
+/// Get the physical synchronizer ID from a Canton Admin API URL and alias
+pub async fn get_synchronizer_id_from_url(
+    admin_api_url: &str,
+    synchronizer_alias: &str,
+) -> Result<String> {
     let mut conn_client =
-        SynchronizerConnectivityServiceClient::connect(config.admin_api_url()).await?;
+        SynchronizerConnectivityServiceClient::connect(admin_api_url.to_string()).await?;
 
     let response = conn_client
         .get_synchronizer_id(tonic::Request::new(GetSynchronizerIdRequest {
-            synchronizer_alias: config.synchronizer().to_string(),
+            synchronizer_alias: synchronizer_alias.to_string(),
         }))
         .await?
         .into_inner();
 
     if response.physical_synchronizer_id.is_empty() {
-        anyhow::bail!(
-            "No synchronizer ID returned for synchronizer alias '{id}'",
-            id = config.synchronizer()
-        );
+        anyhow::bail!("No synchronizer ID returned for synchronizer alias '{synchronizer_alias}'");
     }
 
     Ok(response.physical_synchronizer_id)

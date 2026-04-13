@@ -431,6 +431,13 @@ pub async fn start_onboarding(
                                 super::parties::store_parties_to_db(&bg_db, "", &resp.parties).await
                             {
                                 tracing::warn!("Failed to cache parties after onboarding: {e}");
+                            } else {
+                                super::parties::resolve_owner_keys_from_peers(
+                                    &bg_config,
+                                    &bg_db,
+                                    &resp.parties,
+                                )
+                                .await;
                             }
                         }
                         Err(e) => tracing::warn!("Failed to refresh parties after onboarding: {e}"),
@@ -676,6 +683,13 @@ pub async fn start_contracts(
                                 tracing::warn!(
                                     "Failed to cache parties after contract deployment: {e}"
                                 );
+                            } else {
+                                super::parties::resolve_owner_keys_from_peers(
+                                    &bg_config,
+                                    &bg_db,
+                                    &resp.parties,
+                                )
+                                .await;
                             }
                         }
                         Err(e) => {

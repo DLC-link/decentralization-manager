@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS dec_party_participant (
     dec_party_id    TEXT NOT NULL REFERENCES dec_party(party_id) ON DELETE CASCADE,
     participant_uid TEXT NOT NULL,
     permission      TEXT NOT NULL,
+    owner_key       TEXT,
     PRIMARY KEY (dec_party_id, participant_uid)
 );
 
