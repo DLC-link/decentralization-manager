@@ -93,8 +93,8 @@ given_governance_with_token_setup = do
 -- When
 -- ============================================================================
 
-when_happy_path_executed : AcceptFixture -> Script [ContractId Holding]
-when_happy_path_executed f = do
+when_transfer_accepted_via_governance : AcceptFixture -> Script [ContractId Holding]
+when_transfer_accepted_via_governance f = do
   transferInstructionCid <- createTransferOffer f.parties f.result 75.0
   proposalCid <- submit f.parties.member1 $ createCmd AcceptTransferProposal with
     governanceParty = f.parties.governanceParty
@@ -162,7 +162,7 @@ then_governance_party_received_holdings _ holdings =
 testAcceptTransferGovernanceHappyPath = script do
   run Test with
     given = given_governance_with_token_setup
-    when = when_happy_path_executed
+    when = when_transfer_accepted_via_governance
     then_ = then_governance_party_received_holdings
 
 testAcceptTransferWithdrawnOffer = script do

@@ -115,8 +115,8 @@ when_non_member_confirms f = do
       confirmer = f.parties.outsider
       actionProposalCid = proposalInterfaceCid
 
-when_happy_path_executed : OfferFixture -> Script [ContractId Holding]
-when_happy_path_executed f = do
+when_transfer_offered_via_governance : OfferFixture -> Script [ContractId Holding]
+when_transfer_offered_via_governance f = do
   holdingCids <- mintTokens f.parties.governanceParty 100.0 f.result (Some "Test Mint")
   proposalCid <- createOfferProposal f.parties f.result holdingCids 50.0
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
@@ -169,5 +169,5 @@ testOfferTransferNonMemberCannotConfirm = script do
 testOfferTransferGovernanceHappyPath = script do
   run Test with
     given = given_governance_with_token_setup
-    when = when_happy_path_executed
+    when = when_transfer_offered_via_governance
     then_ = then_outsider_received_holdings

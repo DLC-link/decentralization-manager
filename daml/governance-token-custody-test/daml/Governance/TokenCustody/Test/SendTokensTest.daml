@@ -129,8 +129,8 @@ when_non_member_confirms f = do
       confirmer = f.parties.outsider
       actionProposalCid = proposalInterfaceCid
 
-when_happy_path_executed : SendFixture -> Script [ContractId Holding]
-when_happy_path_executed f = do
+when_tokens_sent_via_governance : SendFixture -> Script [ContractId Holding]
+when_tokens_sent_via_governance f = do
   let instrument = testInstrumentId f.parties.registrar
   holdingCids <- mintTokens f.parties.governanceParty 100.0 f.result (Some "Test Mint")
   preapprovalCid <- createReceiverPreapproval f.parties f.result
@@ -186,5 +186,5 @@ testSendTokensNonMemberCannotConfirm = script do
 testSendTokensGovernanceHappyPath = script do
   run Test with
     given = given_governance_with_token_setup
-    when = when_happy_path_executed
+    when = when_tokens_sent_via_governance
     then_ = then_outsider_received_holdings
