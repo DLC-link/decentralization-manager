@@ -1,7 +1,7 @@
 -- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
--- | Tests for the TransferProposal governable action.
+-- | Tests for the TransferProposal governable action (SendTokens).
 -- SendTokens uses TransferFactory_Transfer on a TransferPreapproval.
 module Governance.TokenCustody.Test.SendTokensTest where
 
@@ -12,20 +12,37 @@ import Splice.Api.Token.HoldingV1 (Holding, InstrumentId)
 import Splice.Api.Token.MetadataV1 (ExtraArgs(..), emptyMetadata)
 import Splice.Api.Token.TransferInstructionV1 (Transfer(..))
 
-import Splice.Api.Token.HoldingV1 (Holding)
-
 import Utility.Registry.App.V0.Model.TransferPreapproval (TransferPreapproval(..))
 
 import Governance.Action (GovernableAction)
-import Governance.Rules (GovernanceRules_ConfirmAction(..), GovernanceRules_ExecuteConfirmedAction(..))
+import Governance.Rules (GovernanceRules(..), GovernanceRules_ConfirmAction(..), GovernanceRules_ExecuteConfirmedAction(..))
 import Governance.TokenCustody.TransferProposal
 import Governance.TokenCustody.TestUtils
 
--- | Create a TransferPreapproval for the receiver, usable as a TransferFactory.
-createReceiverPreapproval : TokenTestParties -> UtilityOnboardingResult -> Script (ContractId TransferPreapproval)
-createReceiverPreapproval parties onboarding =
+import TestHarness
+import TestLib.Token (SetupTokenResult(..))
+import TestLib.TokenOps (mintTokens, createTransferContext)
+
+-- ============================================================================
+-- Fixtures
+-- ============================================================================
+
+data SendFixture = SendFixture
+  with
+    parties : TokenTestParties
+    result : SetupTokenResult
+    rulesCid : ContractId GovernanceRules
+  deriving (Eq, Show)
+
+-- ============================================================================
+-- Helpers
+-- ============================================================================
+
+-- | Create a TransferPreapproval for the receiver.
+createReceiverPreapproval : TokenTestParties -> SetupTokenResult -> Script (ContractId TransferPreapproval)
+createReceiverPreapproval parties result =
   submit parties.outsider $ createCmd TransferPreapproval with
-    operator = onboarding.operator
+    operator = result.operator
     receiver = parties.outsider
     instrumentAdmin = parties.registrar
     instrumentAllowances = []
@@ -42,104 +59,132 @@ buildTestTransfer parties instrument now amount holdingCids = Transfer with
   inputHoldingCids = holdingCids
   meta = emptyMetadata
 
--- | Helper to create a TransferProposal with standard test fields.
-createSendProposal : TokenTestParties -> UtilityOnboardingResult -> Decimal -> Script (ContractId TransferProposal)
-createSendProposal parties onboarding amount = do
-  let instrument = testInstrumentId parties.registrar
-  now <- getTime
-  preapprovalCid <- createReceiverPreapproval parties onboarding
-  submit parties.member1 $ createCmd TransferProposal with
-    governanceParty = parties.governanceParty
-    proposer = parties.member1
-    transferFactoryCid = coerceContractId preapprovalCid
-    expectedAdmin = parties.registrar
-    transfer = buildTestTransfer parties instrument now amount []
-    extraArgs = ExtraArgs with
-      context = createTransferContext onboarding
-      meta = emptyMetadata
+-- ============================================================================
+-- Given
+-- ============================================================================
 
--- | Proposal with zero amount is rejected by ensure.
-testSendTokensZeroAmountRejected : Script ()
-testSendTokensZeroAmountRejected = do
+given_governance_with_token_setup : Script SendFixture
+given_governance_with_token_setup = do
   parties <- allocateTokenTestParties
-  let instrument = testInstrumentId parties.registrar
-  onboarding <- onboardToUtility parties instrument
-  preapprovalCid <- createReceiverPreapproval parties onboarding
-  now <- getTime
-
-  submitMustFail parties.member1 $ createCmd TransferProposal with
-    governanceParty = parties.governanceParty
-    proposer = parties.member1
-    transferFactoryCid = coerceContractId preapprovalCid
-    expectedAdmin = parties.registrar
-    transfer = buildTestTransfer parties instrument now 0.0 []
-    extraArgs = ExtraArgs with
-      context = createTransferContext onboarding
-      meta = emptyMetadata
-
--- | Insufficient confirmations are rejected.
-testSendTokensInsufficientConfirmations : Script ()
-testSendTokensInsufficientConfirmations = do
-  parties <- allocateTokenTestParties
-  let instrument = testInstrumentId parties.registrar
-  onboarding <- onboardToUtility parties instrument
+  result <- setupTestToken parties
   rulesCid <- createTestGovernance parties
+  pure SendFixture with ..
 
-  proposalCid <- createSendProposal parties onboarding 50.0
+-- ============================================================================
+-- When
+-- ============================================================================
+
+when_zero_amount_proposal_created : SendFixture -> Script ()
+when_zero_amount_proposal_created f = do
+  preapprovalCid <- createReceiverPreapproval f.parties f.result
+  now <- getTime
+  submitMustFail f.parties.member1 $ createCmd TransferProposal with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+    transferFactoryCid = coerceContractId preapprovalCid
+    expectedAdmin = f.parties.registrar
+    transfer = buildTestTransfer f.parties (testInstrumentId f.parties.registrar) now 0.0 []
+    extraArgs = ExtraArgs with
+      context = createTransferContext f.result
+      meta = emptyMetadata
+
+when_insufficient_confirmations : SendFixture -> Script ()
+when_insufficient_confirmations f = do
+  preapprovalCid <- createReceiverPreapproval f.parties f.result
+  now <- getTime
+  proposalCid <- submit f.parties.member1 $ createCmd TransferProposal with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+    transferFactoryCid = coerceContractId preapprovalCid
+    expectedAdmin = f.parties.registrar
+    transfer = buildTestTransfer f.parties (testInstrumentId f.parties.registrar) now 50.0 []
+    extraArgs = ExtraArgs with
+      context = createTransferContext f.result
+      meta = emptyMetadata
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
-
-  confirmationCids <- submitConfirmations parties.governanceParty rulesCid proposalInterfaceCid
-    [parties.member1]
-
-  submitMustFail (memberContext parties.member1 parties.governanceParty) $
-    exerciseCmd rulesCid GovernanceRules_ExecuteConfirmedAction with
-      executor = parties.member1
+  confirmationCids <- submitConfirmations f.parties.governanceParty f.rulesCid proposalInterfaceCid
+    [f.parties.member1]
+  submitMustFail (memberContext f.parties.member1 f.parties.governanceParty) $
+    exerciseCmd f.rulesCid GovernanceRules_ExecuteConfirmedAction with
+      executor = f.parties.member1
       actionProposalCid = proposalInterfaceCid
       confirmations = confirmationCids
 
--- | Non-member cannot confirm a SendTokens proposal.
-testSendTokensNonMemberCannotConfirm : Script ()
-testSendTokensNonMemberCannotConfirm = do
-  parties <- allocateTokenTestParties
-  let instrument = testInstrumentId parties.registrar
-  onboarding <- onboardToUtility parties instrument
-  rulesCid <- createTestGovernance parties
-
-  proposalCid <- createSendProposal parties onboarding 50.0
+when_non_member_confirms : SendFixture -> Script ()
+when_non_member_confirms f = do
+  preapprovalCid <- createReceiverPreapproval f.parties f.result
+  now <- getTime
+  proposalCid <- submit f.parties.member1 $ createCmd TransferProposal with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+    transferFactoryCid = coerceContractId preapprovalCid
+    expectedAdmin = f.parties.registrar
+    transfer = buildTestTransfer f.parties (testInstrumentId f.parties.registrar) now 50.0 []
+    extraArgs = ExtraArgs with
+      context = createTransferContext f.result
+      meta = emptyMetadata
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
-
-  submitMustFail (memberContext parties.outsider parties.governanceParty) $
-    exerciseCmd rulesCid GovernanceRules_ConfirmAction with
-      confirmer = parties.outsider
+  submitMustFail (memberContext f.parties.outsider f.parties.governanceParty) $
+    exerciseCmd f.rulesCid GovernanceRules_ConfirmAction with
+      confirmer = f.parties.outsider
       actionProposalCid = proposalInterfaceCid
 
--- | Full governance happy path: proposal → confirm → execute → verify balance.
--- Governance party sends tokens to outsider who has a TransferPreapproval.
-testSendTokensGovernanceHappyPath : Script ()
-testSendTokensGovernanceHappyPath = do
-  parties <- allocateTokenTestParties
-  let instrument = testInstrumentId parties.registrar
-  onboarding <- onboardToUtility parties instrument
-  rulesCid <- createTestGovernance parties
+when_happy_path_executed : SendFixture -> Script [ContractId Holding]
+when_happy_path_executed f = do
+  let instrument = testInstrumentId f.parties.registrar
+  holdingCids <- mintTokens f.parties.governanceParty 100.0 f.result (Some "Test Mint")
+  preapprovalCid <- createReceiverPreapproval f.parties f.result
   now <- getTime
-
-  holdingCids <- mintTokens parties.governanceParty 100.0 onboarding instrument
-  preapprovalCid <- createReceiverPreapproval parties onboarding
-
-  proposalCid <- submit parties.member1 $ createCmd TransferProposal with
-    governanceParty = parties.governanceParty
-    proposer = parties.member1
+  proposalCid <- submit f.parties.member1 $ createCmd TransferProposal with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
     transferFactoryCid = coerceContractId preapprovalCid
-    expectedAdmin = parties.registrar
-    transfer = buildTestTransfer parties instrument now 50.0 holdingCids
+    expectedAdmin = f.parties.registrar
+    transfer = buildTestTransfer f.parties instrument now 50.0 holdingCids
     extraArgs = ExtraArgs with
-      context = createTransferContext onboarding
+      context = createTransferContext f.result
       meta = emptyMetadata
-
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  confirmAndExecute f.parties f.rulesCid proposalInterfaceCid
+    [f.parties.member1, f.parties.member2] f.parties.member1
+  results <- queryInterface @Holding f.parties.outsider
+  pure (map fst results)
 
-  confirmAndExecute parties rulesCid proposalInterfaceCid
-    [parties.member1, parties.member2] parties.member1
+-- ============================================================================
+-- Then
+-- ============================================================================
 
-  outsiderHoldings <- queryInterface @Holding parties.outsider
-  assertMsg "Outsider should have received holdings" (not (null outsiderHoldings))
+then_submit_failed : SendFixture -> () -> Script Failures
+then_submit_failed _ _ = pure []
+
+then_outsider_received_holdings : SendFixture -> [ContractId Holding] -> Script Failures
+then_outsider_received_holdings _ holdings =
+  pure $ shouldNotBeEmpty "outsider holdings" holdings
+
+-- ============================================================================
+-- Tests
+-- ============================================================================
+
+testSendTokensZeroAmountRejected = script do
+  run Test with
+    given = given_governance_with_token_setup
+    when = when_zero_amount_proposal_created
+    then_ = then_submit_failed
+
+testSendTokensInsufficientConfirmations = script do
+  run Test with
+    given = given_governance_with_token_setup
+    when = when_insufficient_confirmations
+    then_ = then_submit_failed
+
+testSendTokensNonMemberCannotConfirm = script do
+  run Test with
+    given = given_governance_with_token_setup
+    when = when_non_member_confirms
+    then_ = then_submit_failed
+
+testSendTokensGovernanceHappyPath = script do
+  run Test with
+    given = given_governance_with_token_setup
+    when = when_happy_path_executed
+    then_ = then_outsider_received_holdings
