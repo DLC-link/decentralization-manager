@@ -141,13 +141,13 @@ when_e2e_tokens_received f = do
 then_preapproval_created : PreapprovalFixture -> () -> Script Failures
 then_preapproval_created f _ = do
   preapprovals <- query @TransferPreapproval f.parties.governanceParty
-  let (_, preapproval) = head preapprovals
-  pure $
-    shouldBe "TransferPreapproval count" 1 (length preapprovals) <>
-    shouldBe "Receiver" f.parties.governanceParty preapproval.receiver <>
-    shouldBe "Operator" f.parties.outsider preapproval.operator <>
-    shouldBe "InstrumentAdmin" f.parties.registrar preapproval.instrumentAdmin <>
-    shouldBe "InstrumentAllowances count" 1 (length preapproval.instrumentAllowances)
+  case preapprovals of
+    [(_, preapproval)] -> pure $
+      shouldBe "Receiver" f.parties.governanceParty preapproval.receiver <>
+      shouldBe "Operator" f.parties.outsider preapproval.operator <>
+      shouldBe "InstrumentAdmin" f.parties.registrar preapproval.instrumentAdmin <>
+      shouldBe "InstrumentAllowances count" 1 (length preapproval.instrumentAllowances)
+    _ -> pure $ shouldBe "TransferPreapproval count" 1 (length preapprovals)
 
 then_nothing_to_verify : PreapprovalFixture -> () -> Script Failures
 then_nothing_to_verify _ _ = pure []
@@ -155,10 +155,10 @@ then_nothing_to_verify _ _ = pure []
 then_all_instruments_preapproval_created : PreapprovalFixture -> () -> Script Failures
 then_all_instruments_preapproval_created f _ = do
   preapprovals <- query @TransferPreapproval f.parties.governanceParty
-  let (_, preapproval) = head preapprovals
-  pure $
-    shouldBe "TransferPreapproval count" 1 (length preapprovals) <>
-    shouldBe "InstrumentAllowances" [] preapproval.instrumentAllowances
+  case preapprovals of
+    [(_, preapproval)] -> pure $
+      shouldBe "InstrumentAllowances" [] preapproval.instrumentAllowances
+    _ -> pure $ shouldBe "TransferPreapproval count" 1 (length preapprovals)
 
 then_gov_party_received_holdings : PreapprovalWithTokenFixture -> [ContractId Holding] -> Script Failures
 then_gov_party_received_holdings _ holdings =
