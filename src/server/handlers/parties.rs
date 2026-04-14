@@ -12,7 +12,7 @@ use canton_proto_rs::com::digitalasset::canton::{
     },
     topology::admin::v30::{
         BaseQuery, ListDecentralizedNamespaceDefinitionRequest, ListPartyToParticipantRequest,
-        ListVettedPackagesRequest, StoreId, Synchronizer, base_query, store_id, synchronizer,
+        StoreId, Synchronizer, base_query, store_id, synchronizer,
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
     },
 };
@@ -342,7 +342,6 @@ async fn load_cached_parties(
     Ok(Some((
         DecentralizedPartiesResponse {
             parties,
-            vetted_packages: Vec::new(),
             source: ResponseSource::Cache,
             refreshing: false,
         },
@@ -432,10 +431,8 @@ pub async fn fetch_decentralized_parties(
 
     let mut topology_client = TopologyManagerReadServiceClient::new(channel.clone())
         .max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
-    let mut vault_client = VaultServiceClient::new(channel.clone())
-        .max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
-    let mut package_client =
-        PackageServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
+    let mut vault_client =
+        VaultServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
 
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
 
@@ -500,19 +497,6 @@ pub async fn fetch_decentralized_parties(
         }))
         .await?
         .into_inner();
-
-    // Fetch vetted packages for this participant (participant-level, not per-party)
-    let vetted_packages = fetch_vetted_packages(
-        &mut topology_client,
-        &mut package_client,
-        &synchronizer_id,
-        &namespace_key_fingerprints,
-    )
-    .await
-    .unwrap_or_else(|e| {
-        tracing::warn!("Failed to fetch vetted packages: {e:#}");
-        Vec::new()
-    });
 
     // Build a map of namespace -> P2P item for quick lookup
     let p2p_by_namespace: HashMap<String, _> = p2p_response
@@ -621,93 +605,56 @@ pub async fn fetch_decentralized_parties(
 
     Ok(DecentralizedPartiesResponse {
         parties,
-        vetted_packages,
         source: ResponseSource::Live,
         refreshing: false,
     })
 }
 
-async fn fetch_vetted_packages(
-    topology_client: &mut TopologyManagerReadServiceClient<tonic::transport::Channel>,
-    package_client: &mut PackageServiceClient<tonic::transport::Channel>,
-    synchronizer_id: &str,
-    namespace_key_fingerprints: &HashMap<String, bool>,
-) -> Result<Vec<VettedPackageInfo>> {
-    // Get all vetted packages on this synchronizer
-    let vetted_response = topology_client
-        .list_vetted_packages(tonic::Request::new(ListVettedPackagesRequest {
-            base_query: Some(BaseQuery {
-                store: Some(StoreId {
-                    store: Some(store_id::Store::Synchronizer(Synchronizer {
-                        kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.to_string())),
-                    })),
-                }),
-                proposals: false,
-                operation: 0,
-                time_query: Some(base_query::TimeQuery::HeadState(())),
-                filter_signed_key: String::new(),
-                protocol_version: None,
-            }),
-            filter_participant: String::new(),
-        }))
-        .await?
-        .into_inner();
-
-    // Collect vetted package IDs only for this participant (match by namespace fingerprint)
-    let mut vetted_ids: Vec<String> = Vec::new();
-    for result in &vetted_response.results {
-        let is_ours = result
-            .item
-            .as_ref()
-            .and_then(|item| item.participant_uid.rsplit_once("::"))
-            .is_some_and(|(_, ns)| namespace_key_fingerprints.contains_key(ns));
-
-        if !is_ours {
-            continue;
+/// Get vetted packages for this participant
+#[utoipa::path(
+    tag = "Packages",
+    responses(
+        (status = 200, description = "Vetted packages", body = Vec<VettedPackageInfo>),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+#[get("/packages/vetted")]
+pub async fn get_vetted_packages(data: web::Data<AppState>) -> impl Responder {
+    let mut client = match PackageServiceClient::connect(data.config.admin_api_url()).await {
+        Ok(c) => c,
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to connect to Canton: {e}"),
+            });
         }
+    };
 
-        if let Some(item) = &result.item {
-            #[allow(deprecated)]
-            for id in &item.package_ids {
-                vetted_ids.push(id.clone());
-            }
-            for pkg in &item.packages {
-                vetted_ids.push(pkg.package_id.clone());
-            }
-        }
-    }
-
-    // Get all uploaded package descriptions
-    let packages_response = package_client
+    let response = match client
         .list_packages(tonic::Request::new(ListPackagesRequest {
             limit: 0,
             filter_name: String::new(),
         }))
-        .await?
-        .into_inner();
+        .await
+    {
+        Ok(r) => r.into_inner(),
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to list packages: {e}"),
+            });
+        }
+    };
 
-    // Build lookup map: package_id -> (name, version)
-    let package_info: HashMap<String, (String, String)> = packages_response
+    let packages: Vec<VettedPackageInfo> = response
         .package_descriptions
         .into_iter()
-        .map(|p| (p.package_id, (p.name, p.version)))
-        .collect();
-
-    // Cross-reference vetted IDs with package metadata
-    let vetted_packages = vetted_ids
-        .into_iter()
-        .map(|package_id| {
-            let (package_name, package_version) =
-                package_info.get(&package_id).cloned().unwrap_or_default();
-            VettedPackageInfo {
-                package_id,
-                package_name,
-                package_version,
-            }
+        .map(|p| VettedPackageInfo {
+            package_id: p.package_id,
+            package_name: p.name,
+            package_version: p.version,
         })
         .collect();
 
-    Ok(vetted_packages)
+    HttpResponse::Ok().json(packages)
 }
 
 /// Check connectivity status of all participants

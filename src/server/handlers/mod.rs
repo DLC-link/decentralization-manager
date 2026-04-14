@@ -19,7 +19,8 @@ pub use invitations::{accept_invitation, decline_invitation, get_invitations};
 pub use keys::get_key_status;
 pub use parties::{
     compare_peer_packages, fetch_decentralized_parties, get_decentralized_parties,
-    get_participants_status, resolve_owner_keys_from_peers, store_parties_to_db,
+    get_participants_status, get_vetted_packages, resolve_owner_keys_from_peers,
+    store_parties_to_db,
 };
 pub use party_config::{get_party_config, save_party_config};
 pub use workflows::{

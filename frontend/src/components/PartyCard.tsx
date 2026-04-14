@@ -26,7 +26,7 @@ import { ContractsDialog } from "./ContractsDialog";
 import { PartyConfigDialog } from "./PartyConfigDialog";
 import { GovernanceSection } from "./GovernanceSection";
 import { AuthSection } from "./AuthSection";
-import type { DecentralizedParty, Network, PartyAuthStatus, VettedPackageInfo } from "../types";
+import type { DecentralizedParty, Network, PartyAuthStatus } from "../types";
 import { ADMIN_ACCESS } from "../constants";
 import { zebraRow } from "../styles";
 
@@ -38,10 +38,9 @@ interface PartyCardProps {
   onAuthRefresh?: () => void;
   operatorParty?: string;
   network?: Network;
-  vettedPackages?: VettedPackageInfo[];
 }
 
-export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onAuthRefresh, operatorParty, network, vettedPackages = [] }: PartyCardProps) => {
+export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onAuthRefresh, operatorParty, network }: PartyCardProps) => {
   const [kickDialogOpen, setKickDialogOpen] = useState(false);
   const [contractsDialogOpen, setContractsDialogOpen] = useState(false);
   const [configDialogOpen, setConfigDialogOpen] = useState(false);
@@ -330,7 +329,6 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
         defaultOperatorParty={operatorParty}
         knownPackageIds={[...new Set(party.contracts?.map((c) => c.package_id) ?? [])]}
         deployedContracts={party.contracts ?? []}
-        vettedPackages={vettedPackages}
       />
 
 

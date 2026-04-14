@@ -31,7 +31,6 @@ import { API_BASE, ADMIN_ACCESS, OPERATOR_API_URLS } from "./constants";
 import type {
   DecentralizedParty,
   DecentralizedPartiesResponse,
-  VettedPackageInfo,
   NodeConfig,
   NetworkConfig,
   ParticipantStatus,
@@ -45,7 +44,6 @@ import type {
 const App = () => {
   const [activeTab, setActiveTab] = useState(0);
   const [parties, setParties] = useState<DecentralizedParty[]>([]);
-  const [vettedPackages, setVettedPackages] = useState<VettedPackageInfo[]>([]);
   const [nodeConfig, setNodeConfig] = useState<NodeConfig | null>(null);
   const [networkConfig, setNetworkConfig] = useState<NetworkConfig | null>(
     null,
@@ -100,7 +98,6 @@ const App = () => {
       if (res.ok) {
         const data: DecentralizedPartiesResponse = await res.json();
         setParties(data.parties);
-        setVettedPackages(data.vetted_packages ?? []);
         setPartiesSource(data.source ?? "live");
       } else {
         showSnackbar("Failed to refresh parties");
@@ -182,7 +179,6 @@ const App = () => {
           await partiesRes.json();
 
         setParties(partiesData.parties);
-        setVettedPackages(partiesData.vetted_packages ?? []);
         setPartiesSource(partiesData.source ?? "live");
 
         if (authStatusRes.ok) {
@@ -390,7 +386,6 @@ const App = () => {
                     onAuthRefresh={refreshAuthStatus}
                     operatorParty={operatorParty}
                     network={nodeConfig?.canton.network}
-                    vettedPackages={vettedPackages}
                   />
                 ))}
               </>
@@ -399,7 +394,6 @@ const App = () => {
             {/* Tab 1: Package Management */}
             {activeTab === 1 && (
               <PackagesPanel
-                packages={vettedPackages}
                 onUploadDars={() => setUploadDarsDialogOpen(true)}
                 onDistributeDars={() => setDarsDialogOpen(true)}
               />

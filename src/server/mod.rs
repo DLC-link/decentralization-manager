@@ -332,6 +332,7 @@ pub async fn start_server(
             .service(handlers::get_decentralized_parties)
             .service(handlers::get_participants_status)
             .service(handlers::compare_peer_packages)
+            .service(handlers::get_vetted_packages)
             .service(handlers::start_kick)
             .service(handlers::get_kick_status)
             .service(handlers::start_onboarding)

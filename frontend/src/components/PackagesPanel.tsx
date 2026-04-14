@@ -26,16 +26,25 @@ import type {
 } from "../types";
 
 interface PackagesPanelProps {
-  packages: VettedPackageInfo[];
   onUploadDars?: () => void;
   onDistributeDars?: () => void;
 }
 
 export const PackagesPanel = ({
-  packages,
   onUploadDars,
   onDistributeDars,
 }: PackagesPanelProps) => {
+  const [packages, setPackages] = useState<VettedPackageInfo[]>([]);
+  const [loadingPackages, setLoadingPackages] = useState(true);
+
+  useEffect(() => {
+    setLoadingPackages(true);
+    fetch(`${API_BASE}/packages/vetted`)
+      .then((res) => (res.ok ? res.json() : []))
+      .then((data: VettedPackageInfo[]) => setPackages(data))
+      .catch(() => {})
+      .finally(() => setLoadingPackages(false));
+  }, []);
   const [canScrollUp, setCanScrollUp] = useState(false);
   const [canScrollDown, setCanScrollDown] = useState(false);
   const [comparison, setComparison] = useState<PeerPackageComparison | null>(
@@ -134,7 +143,9 @@ export const PackagesPanel = ({
       <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 2, flexShrink: 0 }}>
         <Box>
           <Typography variant="body2" color="text.secondary">
-            {packages.length} packages vetted on this participant
+            {loadingPackages
+              ? "Loading vetted packages..."
+              : `${packages.length} packages vetted on this participant`}
           </Typography>
         </Box>
         <Box sx={{ display: "flex", gap: 1 }}>
