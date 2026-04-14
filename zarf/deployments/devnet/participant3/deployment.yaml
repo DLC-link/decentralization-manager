@@ -1,94 +1,4 @@
 apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: dec-party-manager-3-config
-  namespace: catalyst-canton
-  labels:
-    app.kubernetes.io/name: dec-party-manager
-    app.kubernetes.io/instance: participant-3
-data:
-  node.toml: |
-    [node]
-    participant_id = "iBTC-validator-3::1220d544125d3619e9c4d7340466a78a85f738e75a740837fa6283a1051494f5df23"
-    listen_address = "0.0.0.0"
-    public_address = "dec-party-manager-3.catalyst-canton.svc.cluster.local"
-    port = 9000
-
-    [canton]
-    admin_api_host = "participant-devnet-3.catalyst-canton.svc.cluster.local"
-    admin_api_port = 5002
-    ledger_api_host = "participant-devnet-3.catalyst-canton.svc.cluster.local"
-    ledger_api_port = 5001
-    synchronizer = "global"
-    network = "devnet"
-
-    [keycloak]
-    url = "https://keycloak.dev.canton.example.com/auth"
-    realm = "canton-devnet"
-    client_id = "devnet-dec-party-mgr-1"
-
-    [timeouts]
-    handshake_timeout_secs = 30
-    message_timeout_secs = 120
-    connection_retry_attempts = 3
-    connection_retry_delay_secs = 5
-
-    [[parties]]
-    dec_party_id = "cbtc-network::12202a83c6f4082217c175e29bc53da5f2703ba2675778ab99217a5a881a949203ff"
-    member_party_id = "attestor-3::1220d544125d3619e9c4d7340466a78a85f738e75a740837fa6283a1051494f5df23"
-    user_id = "attestorUser3"
-
-    [parties.keycloak]
-    url = "https://keycloak.dev.canton.example.com"
-    realm = "canton-devnet"
-    client_id = "attestor-3"
-    client_secret = "***REDACTED-CLIENT-SECRET***"
-
-    [parties.packages]
-    governance_core = "#governance-core-v0-rc1"
-    utility_credential = "#utility-credential-app-v0"
-    utility_registry = "#utility-registry-app-v0"
-    vault = "#bitsafe-vault-v0-rc8"
-    vault_governance = "#bitsafe-vault-governance-v0-rc8"
-
-    [[parties]]
-    dec_party_id = "vault-test-3::1220a840c4b8c9433447f7c86e90908a8cfc6145ce2abfc7e104d5afc60b8ebb3a83"
-    member_party_id = "attestor-3::1220d544125d3619e9c4d7340466a78a85f738e75a740837fa6283a1051494f5df23"
-    user_id = "attestorUser3"
-
-    [parties.keycloak]
-    url = "https://keycloak.dev.canton.example.com"
-    realm = "canton-devnet"
-    client_id = "attestor-3"
-    client_secret = "***REDACTED-CLIENT-SECRET***"
-
-    [parties.packages]
-    governance_core = "#governance-core-v0-rc1"
-    utility_credential = "#utility-credential-app-v0"
-    utility_registry = "#utility-registry-app-v0"
-    vault = "#bitsafe-vault-v0-rc8"
-    vault_governance = "#bitsafe-vault-governance-v0-rc8"
-
-    [[parties]]
-    dec_party_id = "gov-core-test::1220a9afd0196a3d0cd913239ee35b82931da22f5680c35acb00b080360ac4cc6003"
-    member_party_id = "attestor-3::1220d544125d3619e9c4d7340466a78a85f738e75a740837fa6283a1051494f5df23"
-    user_id = "CoordinatorUser"
-
-    [parties.keycloak]
-    url = "https://keycloak.dev.canton.example.com"
-    realm = "canton-devnet"
-    client_id = "attestor-3"
-    client_secret = "***REDACTED-CLIENT-SECRET***"
-
-    [parties.packages]
-    governance_core = "#governance-core-v0-rc1"
-    utility_credential = "#utility-credential-app-v0"
-    utility_registry = "#utility-registry-app-v0"
-    vault = "#bitsafe-vault-v0-rc8"
-    vault_governance = "#bitsafe-vault-governance-v0-rc8"
-
----
-apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: dec-party-manager-3-data
@@ -126,23 +36,12 @@ spec:
         app.kubernetes.io/component: attestor
     spec:
       initContainers:
-        - name: copy-config
+        - name: init-data
           image: busybox:latest
-          command:
-            - sh
-            - -c
-            - |
-              mkdir -p /app/config /app/data
-              cp /config-readonly/* /app/config/
-              echo "Config copied to persistent storage"
+          command: ["sh", "-c", "mkdir -p /app/data"]
           volumeMounts:
-            - name: config
-              mountPath: /config-readonly
             - name: data
               mountPath: /app
-          env:
-            - name: RUST_LOG
-              value: dec_party_manager=debug,tokio_noise=error,hyper_noise=error
       containers:
         - name: dec-party-manager
           image: public.ecr.aws/dlc-link/canton-decparty-manager:0.0.28
@@ -175,10 +74,13 @@ spec:
             limits:
               memory: "512Mi"
               cpu: "500m"
+          env:
+            - name: RUST_LOG
+              value: dec_party_manager=debug,tokio_noise=error,hyper_noise=error
+          envFrom:
+            - secretRef:
+                name: dec-party-manager-3-secrets
       volumes:
-        - name: config
-          configMap:
-            name: dec-party-manager-3-config
         - name: data
           persistentVolumeClaim:
             claimName: dec-party-manager-3-data

@@ -15,9 +15,12 @@ use canton_proto_rs::com::digitalasset::canton::{
 };
 use serde::Deserialize;
 
+use sqlx::SqlitePool;
+
 use crate::{
     auth::WorkflowAuth,
-    config::NodeConfig,
+    config::{NetworkConfig, NodeConfig, PartyCredentials},
+    db::schema::SchemaRead,
     error::Result,
     noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
     participant_id::CantonId,
@@ -56,7 +59,10 @@ pub async fn get_decentralized_parties(
     query: web::Query<PartiesQuery>,
 ) -> impl Responder {
     let auth = data.auth.read().await.clone();
-    match fetch_decentralized_parties(&data.config, query.prefix.as_deref(), auth).await {
+    let party_creds = data.party_credentials.read().await.clone();
+    match fetch_decentralized_parties(&data.config, query.prefix.as_deref(), auth, &party_creds)
+        .await
+    {
         Ok(response) => HttpResponse::Ok().json(response),
         Err(e) => {
             tracing::error!("Failed to fetch decentralized parties: {e}");
@@ -71,6 +77,7 @@ async fn fetch_decentralized_parties(
     config: &NodeConfig,
     prefix_filter: Option<&str>,
     auth: Option<WorkflowAuth>,
+    party_credentials: &[PartyCredentials],
 ) -> Result<DecentralizedPartiesResponse> {
     let channel = tonic::transport::Channel::from_shared(config.admin_api_url())?
         .connect()
@@ -212,7 +219,11 @@ async fn fetch_decentralized_parties(
                     None => None,
                 };
 
-                let packages = config.get_packages(&party_id_str);
+                let packages = CantonId::parse(&party_id_str)
+                    .ok()
+                    .and_then(|id| party_credentials.iter().find(|p| p.dec_party_id == id))
+                    .map(|c| c.packages.clone())
+                    .unwrap_or_default();
                 let token_clone = token.clone();
                 let (contracts, local_metadata) = tokio::join!(
                     async {
@@ -359,7 +370,7 @@ async fn fetch_vetted_packages(
 )]
 #[get("/participants-status")]
 pub async fn get_participants_status(data: web::Data<AppState>) -> impl Responder {
-    match check_participants_status(&data.config).await {
+    match check_participants_status(&data.config, &data.db).await {
         Ok(response) => HttpResponse::Ok().json(response),
         Err(e) => {
             tracing::error!("Failed to check participants status: {e}");
@@ -370,8 +381,11 @@ pub async fn get_participants_status(data: web::Data<AppState>) -> impl Responde
     }
 }
 
-async fn check_participants_status(config: &NodeConfig) -> Result<ParticipantsStatusResponse> {
-    let network_config = config.load_network_config().await?;
+async fn check_participants_status(
+    config: &NodeConfig,
+    db: &SqlitePool,
+) -> Result<ParticipantsStatusResponse> {
+    let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
     let current_participant_id = config.participant_id();
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
 
@@ -466,7 +480,7 @@ async fn check_participants_status(config: &NodeConfig) -> Result<ParticipantsSt
 )]
 #[get("/packages/compare-peers")]
 pub async fn compare_peer_packages(data: web::Data<AppState>) -> impl Responder {
-    match fetch_peer_packages(&data.config).await {
+    match fetch_peer_packages(&data.config, &data.db).await {
         Ok(comparison) => HttpResponse::Ok().json(comparison),
         Err(e) => {
             tracing::error!("Failed to compare peer packages: {e}");
@@ -477,7 +491,10 @@ pub async fn compare_peer_packages(data: web::Data<AppState>) -> impl Responder 
     }
 }
 
-async fn fetch_peer_packages(config: &NodeConfig) -> Result<PeerPackageComparison> {
+async fn fetch_peer_packages(
+    config: &NodeConfig,
+    db: &SqlitePool,
+) -> Result<PeerPackageComparison> {
     // Get local packages
     let mut client = PackageServiceClient::connect(config.admin_api_url()).await?;
     let local_response = client
@@ -499,7 +516,7 @@ async fn fetch_peer_packages(config: &NodeConfig) -> Result<PeerPackageCompariso
         .collect();
 
     // Load network config and keypair for Noise communication
-    let network_config = config.load_network_config().await?;
+    let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
     let current_participant_id = config.participant_id();
 

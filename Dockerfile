@@ -13,6 +13,7 @@ COPY frontend/package.json frontend/package-lock.json ./frontend/
 RUN cd frontend && npm ci
 
 COPY Cargo.toml Cargo.lock build.rs ./
+COPY migrations ./migrations
 COPY src ./src
 COPY frontend/src ./frontend/src
 COPY frontend/index.html frontend/vite.config.ts frontend/tsconfig*.json frontend/eslint.config.js frontend/.env ./frontend/

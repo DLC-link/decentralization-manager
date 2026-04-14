@@ -341,12 +341,11 @@ pub async fn get_participant_id(config: &NodeConfig) -> Result<CantonId> {
     CantonId::parse(&response.unique_identifier)
 }
 
-/// Resolve the participant ID from Canton if not already set in the config
+/// Resolve the participant ID from Canton if not already set in the config.
 ///
-/// If the participant_id is not set in the config, this function queries Canton
-/// to get the participant ID and saves it to the config file.
-///
-/// Returns the participant ID (either from config or freshly queried).
+/// If the participant_id is not set, queries Canton Admin API and stores
+/// the result in memory. The ID is not persisted — it will be re-queried
+/// on every startup.
 pub async fn resolve_participant_id(config: &mut NodeConfig) -> Result {
     if config.has_participant_id() {
         tracing::debug!(
@@ -360,12 +359,7 @@ pub async fn resolve_participant_id(config: &mut NodeConfig) -> Result {
     let participant_id = get_participant_id(config).await?;
     tracing::info!("Got participant ID from Canton: {participant_id}");
 
-    config
-        .set_and_save_participant_id(participant_id)
-        .await
-        .context("Failed to save participant ID to config")?;
-
-    tracing::info!("Saved participant ID to config file");
+    config.node.participant_id = Some(participant_id);
     Ok(())
 }
 

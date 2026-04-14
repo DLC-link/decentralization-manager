@@ -30,7 +30,7 @@ wait_for_localnet
 
 # dec-party-manager instances
 log_phase "Starting dec-party-manager instances"
-generate_configs
+setup_directories
 start_nodes
 
 log_phase "Configuring peers"

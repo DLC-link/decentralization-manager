@@ -57,7 +57,15 @@ The application runs as an HTTP server with an embedded React frontend. Multiple
 ### Running Locally
 
 ```bash
-# Build and run
+# Build and run with env vars
+DECPM_CANTON_ADMIN_HOST=localhost \
+DECPM_CANTON_ADMIN_PORT=5002 \
+DECPM_CANTON_LEDGER_HOST=localhost \
+DECPM_CANTON_LEDGER_PORT=5001 \
+DECPM_NOISE_PORT=9001 \
+cargo run -- -d ./development/participant-1 serve --port 8081
+
+# Or with a .env file in the data directory
 cargo run -- -d ./development/participant-1 serve --port 8081
 
 # Or with release build
@@ -74,7 +82,15 @@ Open http://localhost:8081 in your browser.
 docker build -t dec-party-manager .
 
 # Run a single instance
-docker run -p 8080:8080 -v ./config:/config -v ./data:/data dec-party-manager
+docker run -p 8080:8080 -v ./data:/data \
+  -e DECPM_CANTON_ADMIN_HOST=canton-node \
+  -e DECPM_CANTON_ADMIN_PORT=5002 \
+  -e DECPM_CANTON_LEDGER_HOST=canton-node \
+  -e DECPM_CANTON_LEDGER_PORT=5001 \
+  -e DECPM_NOISE_PORT=9001 \
+  -e DECPM_CANTON_SYNCHRONIZER=global \
+  -e DECPM_CANTON_NETWORK=devnet \
+  dec-party-manager
 ```
 
 ### Running Multiple Participants (Development)
@@ -88,50 +104,87 @@ This starts three participant instances on ports 8081, 8082, and 8083.
 
 ## Configuration
 
-The application expects a directory structure with `config/` and `data/` subdirectories:
+All node configuration is done via environment variables (prefixed `DECPM_*`) or CLI arguments. The `--dir` (`-d`) flag points to a directory for persistent data. If a `.env` file exists in that directory, it is loaded automatically before parsing CLI arguments.
+
+### Directory Structure
 
 ```
 participant-dir/
-├── config/
-│   ├── node.toml      # Node configuration
-│   └── peers.csv      # Network peer list
+├── .env               # Optional environment file (loaded automatically)
 └── data/
     ├── noise.key      # Auto-generated Noise keypair
+    ├── decpm.db       # SQLite database (peers, party credentials)
     ├── dars/          # DAR files for contract deployment
     └── workflow-data/ # Workflow data (proposals, signatures, etc.)
 ```
 
-### Node Configuration (`config/node.toml`)
+The database file path can be overridden with the `--db` CLI flag.
 
-```toml
-[node]
-participant_id = "participant::1220..."  # Canton participant UID (auto-resolved from Canton if omitted)
-listen_address = "0.0.0.0"
-public_address = "your-public-ip-or-hostname"  # Address other peers use to connect (optional)
-port = 9001
+### Environment Variables
 
-[canton]
-admin_api_host = "localhost"
-admin_api_port = 5002
-ledger_api_host = "localhost"
-ledger_api_port = 5001
-synchronizer = "global"
-network = "devnet"
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `DECPM_LISTEN_ADDRESS` | Address to listen on for Noise protocol connections | `0.0.0.0` |
+| `DECPM_NOISE_PORT` | Port for Noise protocol connections | `9000` |
+| `DECPM_PUBLIC_ADDRESS` | Public address that peers use to connect to this node | _(falls back to listen address)_ |
+| `DECPM_CANTON_ADMIN_HOST` | Canton Admin API host | `127.0.0.1` |
+| `DECPM_CANTON_ADMIN_PORT` | Canton Admin API port | `5002` |
+| `DECPM_CANTON_LEDGER_HOST` | Canton Ledger API host | `127.0.0.1` |
+| `DECPM_CANTON_LEDGER_PORT` | Canton Ledger API port | `5001` |
+| `DECPM_CANTON_SYNCHRONIZER` | Canton synchronizer name | `global` |
+| `DECPM_CANTON_NETWORK` | Canton network environment (`devnet`, `testnet`, `mainnet`) | `devnet` |
+| `DECPM_KEYCLOAK_URL` | Keycloak server URL for frontend auth | _(none)_ |
+| `DECPM_KEYCLOAK_REALM` | Keycloak realm name for frontend auth | _(none)_ |
+| `DECPM_KEYCLOAK_CLIENT_ID` | Keycloak client ID for frontend auth | _(none)_ |
+| `DECPM_TIMEOUT_HANDSHAKE` | Noise handshake timeout in seconds | `30` |
+| `DECPM_TIMEOUT_MESSAGE` | Noise message timeout in seconds | `120` |
+| `DECPM_TIMEOUT_RETRY_ATTEMPTS` | Connection retry attempts | `3` |
+| `DECPM_TIMEOUT_RETRY_DELAY` | Connection retry delay in seconds | `5` |
 
-[timeouts]
-handshake_timeout_secs = 30
-message_timeout_secs = 120
-connection_retry_attempts = 3
-connection_retry_delay_secs = 5
+All environment variables can also be passed as CLI arguments (e.g., `--canton-admin-host`).
+
+### Example `.env` File
+
+```env
+DECPM_NOISE_PORT=9001
+DECPM_PUBLIC_ADDRESS=10.0.0.1
+DECPM_CANTON_ADMIN_HOST=localhost
+DECPM_CANTON_ADMIN_PORT=5002
+DECPM_CANTON_LEDGER_HOST=localhost
+DECPM_CANTON_LEDGER_PORT=5001
+DECPM_CANTON_SYNCHRONIZER=global
+DECPM_CANTON_NETWORK=devnet
 ```
 
-### Network Peers (`config/peers.csv`)
+### Network Peers
 
-```csv
-participant_id,name,address,port,public_key,party
-participant::1220abc...,Participant 1,10.0.0.1,9001,03ab12cd...,
-participant::1220def...,Participant 2,10.0.0.2,9002,02ef34ab...,
-sv::1220ghi...,Participant 3,10.0.0.3,9003,03cd56ef...,
+Peers are stored in the SQLite database and managed via the `/network-config` API endpoint:
+
+```bash
+# Configure peers
+curl -X POST http://localhost:8081/network-config \
+  -H "Content-Type: application/json" \
+  -d '[
+    {
+      "participant_id": "participant1::1220abc...",
+      "name": "Participant 1",
+      "address": "10.0.0.1",
+      "port": 9001,
+      "public_key": "03ab12cd...",
+      "party": null
+    },
+    {
+      "participant_id": "participant2::1220def...",
+      "name": "Participant 2",
+      "address": "10.0.0.2",
+      "port": 9002,
+      "public_key": "02ef34ab...",
+      "party": null
+    }
+  ]'
+
+# Retrieve current peers
+curl http://localhost:8081/network-config
 ```
 
 - `participant_id`: Canton participant UID (e.g., `participant::1220...`)
@@ -141,11 +194,33 @@ sv::1220ghi...,Participant 3,10.0.0.3,9003,03cd56ef...,
 - `public_key`: Hex-encoded secp256k1 public key (auto-populated from `/keys/status` endpoint)
 - `party`: Canton party ID (populated after onboarding)
 
+### Party Credentials
+
+Party credentials (Keycloak auth, package IDs) are stored in the SQLite database and managed via the `/party-config` API endpoint:
+
+```bash
+# Configure party credentials
+curl -X PUT http://localhost:8081/party-config \
+  -H "Content-Type: application/json" \
+  -d '{
+    "dec_party_id": "decparty::1220abc...",
+    "member_party_id": "participant1::1220abc...",
+    "user_id": "CoordinatorUser",
+    "keycloak_url": "https://keycloak.example.com",
+    "keycloak_realm": "my-realm",
+    "keycloak_client_id": "my-client",
+    "keycloak_client_secret": "secret-value"
+  }'
+
+# Retrieve party config (secrets masked)
+curl http://localhost:8081/party-config/decparty::1220abc...
+```
+
 ## Workflows
 
 ### Creating a Decentralized Party (Onboarding)
 
-1. Configure all participant nodes with each other's connection details in `peers.csv`
+1. Configure all participant nodes with each other's connection details via the `/network-config` API
 2. Start all participant servers
 3. On the coordinator's UI, click **Create Party** and enter a party ID prefix
 4. The coordinator invites attestors and orchestrates:
@@ -181,8 +256,10 @@ sv::1220ghi...,Participant 3,10.0.0.3,9003,03cd56ef...,
 |----------|--------|-------------|
 | `/` | GET | Serves the React frontend |
 | `/node-config` | GET | Returns node configuration |
-| `/network-config` | GET | Returns network peer list |
-| `/network-config` | POST | Updates network peer list |
+| `/network-config` | GET | Returns network peer list (from SQLite) |
+| `/network-config` | POST | Updates network peer list (saved to SQLite) |
+| `/party-config/{dec_party_id}` | GET | Returns party credentials (secrets masked) |
+| `/party-config` | PUT | Saves or updates party credentials (to SQLite) |
 | `/decentralized-parties` | GET | Lists decentralized parties (filtered by `prefix` query param) |
 | `/participants-status` | GET | Returns peer connectivity status |
 | `/keys/status` | GET | Returns Noise keypair status |

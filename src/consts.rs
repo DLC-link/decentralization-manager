@@ -74,23 +74,20 @@ pub const NEW_THRESHOLD_FILENAME: &str = "new-threshold";
 pub const PREPARED_SUBMISSION_PREFIX: &str = "prepared-submission";
 
 // Base directory names (relative to root directory)
-/// Config directory name
-pub const CONFIG_DIR: &str = "config";
-
 /// Data directory name (contains keys, workflow-data, and dars)
 pub const DATA_DIR: &str = "data";
 
 /// Noise private key filename (inside data/)
 pub const NOISE_KEY_FILENAME: &str = "noise.key";
 
+/// SQLite database filename (inside data/)
+pub const DB_FILENAME: &str = "decpm.db";
+
 /// Workflow data directory name (inside data/)
 pub const WORKFLOW_DATA_DIR: &str = "workflow-data";
 
 /// DARs directory name (inside data/)
 pub const DARS_DIR: &str = "dars";
-
-/// Default node config filename
-pub const NODE_CONFIG_FILENAME: &str = "node.toml";
 
 // Workflow subdirectory names
 /// Participant keys subdirectory name

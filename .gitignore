@@ -2,9 +2,11 @@ target/
 
 # Generated keys and configuration
 
-/development/local
 /development/remote
 /configs
 .localnet/
 .DS_Store
 .idea
+
+# Kubernetes secrets (contain credentials)
+**/secrets.yaml
