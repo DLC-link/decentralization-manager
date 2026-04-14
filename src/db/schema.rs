@@ -165,7 +165,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
     }
 
     async fn upsert_party_credentials(&mut self, creds: &PartyCredentials) -> Result {
-        let row = PartyCredentialsRow::from_domain(creds);
+        let row = PartyCredentialsRow::from_domain(creds)?;
 
         sqlx::query(
             r"

@@ -38,6 +38,10 @@ pub enum Commands {
         #[arg(long)]
         db: Option<PathBuf>,
 
+        /// Encryption key for secrets stored in the database
+        #[arg(long, env = "DECPM_DB_ENCRYPTION_KEY")]
+        db_encryption_key: Option<String>,
+
         // Node settings
         /// Address to listen on for Noise protocol connections
         #[arg(long, env = "DECPM_LISTEN_ADDRESS")]

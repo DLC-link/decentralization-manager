@@ -13,6 +13,7 @@ panic = "unwind"
 [dependencies]
 actix-cors = { version = "0.7" }
 actix-web = { version = "4" }
+aes-gcm = { version = "0.10" }
 anyhow = { version = "1.0.98" }
 base64 = { version = "0.22" }
 bytes = { version = "1.9.0" }

@@ -74,8 +74,13 @@ async fn main() -> Result {
             timeout_message,
             timeout_retry_attempts,
             timeout_retry_delay,
+            db_encryption_key,
             ..
         } => {
+            if let Some(key) = db_encryption_key {
+                dec_party_manager::db::crypto::init_key(key);
+                tracing::info!("Database encryption enabled");
+            }
             if let Some(addr) = listen_address {
                 config.node.listen_address = addr.clone();
             }

@@ -1,5 +1,6 @@
 use crate::{
     config::{KeycloakConfig, PackageConfig, PartyCredentials, Peer},
+    db::crypto,
     error::Result,
     participant_id::CantonId,
 };
@@ -58,24 +59,24 @@ pub struct PartyCredentialsRow {
 }
 
 impl PartyCredentialsRow {
-    pub fn from_domain(creds: &PartyCredentials) -> Self {
-        Self {
+    pub fn from_domain(creds: &PartyCredentials) -> Result<Self> {
+        Ok(Self {
             dec_party_id: creds.dec_party_id.to_string(),
             member_party_id: creds.member_party_id.to_string(),
             user_id: creds.user_id.clone(),
             keycloak_url: creds.keycloak.url.clone(),
             keycloak_realm: creds.keycloak.realm.clone(),
-            keycloak_client_id: creds.keycloak.client_id.clone(),
-            keycloak_client_secret: creds.keycloak.client_secret.clone(),
-            keycloak_username: creds.keycloak.username.clone(),
-            keycloak_password: creds.keycloak.password.clone(),
+            keycloak_client_id: crypto::encrypt(&creds.keycloak.client_id)?,
+            keycloak_client_secret: crypto::encrypt_opt(&creds.keycloak.client_secret)?,
+            keycloak_username: crypto::encrypt_opt(&creds.keycloak.username)?,
+            keycloak_password: crypto::encrypt_opt(&creds.keycloak.password)?,
             governance_core: creds.packages.governance_core.clone(),
             governance_token_custody: creds.packages.governance_token_custody.clone(),
             utility_credential: creds.packages.utility_credential.clone(),
             utility_registry: creds.packages.utility_registry.clone(),
             vault: creds.packages.vault.clone(),
             vault_governance: creds.packages.vault_governance.clone(),
-        }
+        })
     }
 
     pub fn into_domain(self) -> Result<PartyCredentials> {
@@ -86,10 +87,10 @@ impl PartyCredentialsRow {
             keycloak: KeycloakConfig {
                 url: self.keycloak_url,
                 realm: self.keycloak_realm,
-                client_id: self.keycloak_client_id,
-                client_secret: self.keycloak_client_secret,
-                username: self.keycloak_username,
-                password: self.keycloak_password,
+                client_id: crypto::decrypt(&self.keycloak_client_id)?,
+                client_secret: crypto::decrypt_opt(self.keycloak_client_secret)?,
+                username: crypto::decrypt_opt(self.keycloak_username)?,
+                password: crypto::decrypt_opt(self.keycloak_password)?,
             },
             packages: PackageConfig {
                 governance_core: self.governance_core,
