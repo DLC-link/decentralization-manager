@@ -1,4 +1,7 @@
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use actix_web::{HttpResponse, Responder, get, web};
 use canton_proto_rs::com::digitalasset::canton::{
@@ -65,27 +68,34 @@ pub async fn get_decentralized_parties(
 
     // Try to load from DB cache first
     let cached = load_cached_parties(&data.db, &prefix).await;
-    if let Ok(Some(mut response)) = cached {
+    if let Ok(Some((mut response, updated_at))) = cached {
         response.source = ResponseSource::Cache;
 
-        // Spawn background refresh if not already in-flight
-        let is_refreshing = {
-            let refreshing = data.refreshing_prefixes.read().await;
-            refreshing.contains(&prefix)
-        };
-        if !is_refreshing {
-            data.refreshing_prefixes
+        // Only refresh if cache is stale (older than 60 seconds)
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let is_stale = (now - updated_at) > 60;
+
+        if is_stale {
+            // Atomic check+insert to avoid duplicate spawns
+            let spawned = data
+                .refreshing_prefixes
                 .write()
                 .await
                 .insert(prefix.clone());
-            let data = data.clone();
-            let prefix = prefix.clone();
-            tokio::spawn(async move {
-                refresh_and_cache_parties(&data, &prefix).await;
-                data.refreshing_prefixes.write().await.remove(&prefix);
-            });
+            if spawned {
+                let data = data.clone();
+                let prefix = prefix.clone();
+                tokio::spawn(async move {
+                    refresh_and_cache_parties(&data, &prefix).await;
+                    data.refreshing_prefixes.write().await.remove(&prefix);
+                });
+            }
         }
-        response.refreshing = true; // Background refresh is now in-flight (or was just spawned)
+
+        response.refreshing = is_stale && data.refreshing_prefixes.read().await.contains(&prefix);
 
         return HttpResponse::Ok().json(response);
     }
@@ -172,6 +182,7 @@ pub async fn resolve_owner_keys_from_peers(
     };
 
     let current_participant_id = config.participant_id().to_string();
+    let known_party_ids: HashSet<String> = parties.iter().map(|p| p.party_id.to_string()).collect();
 
     for peer in &peers {
         let peer_uid = peer.participant_id.to_string();
@@ -245,7 +256,7 @@ pub async fn resolve_owner_keys_from_peers(
                     continue;
                 };
 
-                if parties.iter().any(|p| p.party_id.to_string() == party_id)
+                if known_party_ids.contains(party_id)
                     && let Err(e) = tx
                         .update_participant_owner_key(party_id, &peer_uid, owner_key)
                         .await
@@ -260,26 +271,36 @@ pub async fn resolve_owner_keys_from_peers(
     }
 }
 
-/// Load cached parties from the dec_party tables
+/// Load cached parties from the dec_party tables.
+/// Returns the response and the newest `updated_at` timestamp (unix seconds).
 async fn load_cached_parties(
     db: &SqlitePool,
     prefix: &str,
-) -> Result<Option<DecentralizedPartiesResponse>> {
+) -> Result<Option<(DecentralizedPartiesResponse, i64)>> {
     let rows = db.get_dec_parties_by_prefix(prefix).await?;
     if rows.is_empty() {
         return Ok(None);
     }
 
-    let mut parties = Vec::with_capacity(rows.len());
-    for row in rows {
-        let owners = db.get_dec_party_owners(&row.party_id).await?;
-        let participant_rows = db.get_dec_party_participants(&row.party_id).await?;
-        let participants = participant_rows
-            .into_iter()
-            .filter_map(|p| {
-                let participant_uid = CantonId::parse(&p.participant_uid).ok()?;
-                Some(ParticipantInfo {
-                    participant_uid,
+    // Bulk-fetch all related data in 3 queries instead of 3*N
+    let all_owners = db.get_all_dec_party_owners(prefix).await?;
+    let all_participants = db.get_all_dec_party_participants(prefix).await?;
+    let all_contracts = db.get_all_dec_party_contracts(prefix).await?;
+
+    // Group by party_id
+    let mut owners_map: HashMap<String, Vec<String>> = HashMap::new();
+    for (party_id, owner_key) in all_owners {
+        owners_map.entry(party_id).or_default().push(owner_key);
+    }
+
+    let mut participants_map: HashMap<String, Vec<ParticipantInfo>> = HashMap::new();
+    for p in all_participants {
+        if let Ok(uid) = CantonId::parse(&p.participant_uid) {
+            participants_map
+                .entry(p.dec_party_id.clone())
+                .or_default()
+                .push(ParticipantInfo {
+                    participant_uid: uid,
                     permission: match p.permission.as_str() {
                         "submission" => Permission::Submission,
                         "confirmation" => Permission::Confirmation,
@@ -287,37 +308,46 @@ async fn load_cached_parties(
                         _ => Permission::Unknown,
                     },
                     owner_key: p.owner_key,
-                })
-            })
-            .collect();
+                });
+        }
+    }
 
-        let contract_rows = db.get_dec_party_contracts(&row.party_id).await?;
-        let contracts = contract_rows
-            .into_iter()
-            .map(|c| ContractInfo {
+    let mut contracts_map: HashMap<String, Vec<ContractInfo>> = HashMap::new();
+    for c in all_contracts {
+        contracts_map
+            .entry(c.dec_party_id.clone())
+            .or_default()
+            .push(ContractInfo {
                 contract_id: c.contract_id,
                 template_id: c.template_id,
                 package_id: c.package_id,
-            })
-            .collect();
+            });
+    }
 
+    let max_updated_at = rows.iter().map(|r| r.updated_at).max().unwrap_or(0);
+
+    let mut parties = Vec::with_capacity(rows.len());
+    for row in rows {
         parties.push(DecentralizedParty {
             party_id: CantonId::parse(&row.party_id)?,
             threshold: row.threshold as i32,
-            owners,
+            owners: owners_map.remove(&row.party_id).unwrap_or_default(),
             my_owner_key: None,
-            participants,
-            contracts,
+            participants: participants_map.remove(&row.party_id).unwrap_or_default(),
+            contracts: contracts_map.remove(&row.party_id).unwrap_or_default(),
             local_metadata: None,
         });
     }
 
-    Ok(Some(DecentralizedPartiesResponse {
-        parties,
-        vetted_packages: Vec::new(),
-        source: ResponseSource::Cache,
-        refreshing: false,
-    }))
+    Ok(Some((
+        DecentralizedPartiesResponse {
+            parties,
+            vetted_packages: Vec::new(),
+            source: ResponseSource::Cache,
+            refreshing: false,
+        },
+        max_updated_at,
+    )))
 }
 
 /// Store parties into the dec_party tables
@@ -326,8 +356,8 @@ pub async fn store_parties_to_db(
     prefix: &str,
     parties: &[DecentralizedParty],
 ) -> Result {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
 

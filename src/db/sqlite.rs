@@ -6,16 +6,15 @@ use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
 };
 
-use crate::{
-    config::{PartyCredentials, Peer},
-    error::Result,
-};
-
 use super::{
     rows::{
         DecPartyContractRow, DecPartyParticipantRow, DecPartyRow, PartyCredentialsRow, PeerRow,
     },
     schema::{Commitable, SchemaRead, SchemaWrite},
+};
+use crate::{
+    config::{PartyCredentials, Peer},
+    error::Result,
 };
 
 pub static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
@@ -48,7 +47,7 @@ pub async fn connect(db_path: &Path) -> Result<SqlitePool> {
 
 impl SchemaRead for SqlitePool {
     async fn get_all_peers(&self) -> Result<Vec<Peer>> {
-        let rows = sqlx::query_as::<_, PeerRow>("SELECT * FROM peers")
+        let rows = sqlx::query_as::<_, PeerRow>("SELECT * FROM peers ORDER BY name")
             .fetch_all(self)
             .await?;
 
@@ -147,6 +146,93 @@ impl SchemaRead for SqlitePool {
         .bind(party_id)
         .fetch_all(self)
         .await?;
+
+        Ok(rows)
+    }
+
+    async fn get_all_dec_party_owners(&self, prefix: &str) -> Result<Vec<(String, String)>> {
+        let rows = if prefix.is_empty() {
+            sqlx::query_as::<_, (String, String)>(
+                r"
+                SELECT o.dec_party_id, o.owner_key
+                FROM dec_party_owner o
+                INNER JOIN dec_party p ON p.party_id = o.dec_party_id
+                ",
+            )
+            .fetch_all(self)
+            .await?
+        } else {
+            sqlx::query_as::<_, (String, String)>(
+                r"
+                SELECT o.dec_party_id, o.owner_key
+                FROM dec_party_owner o
+                INNER JOIN dec_party p ON p.party_id = o.dec_party_id
+                WHERE p.prefix = ?
+                ",
+            )
+            .bind(prefix)
+            .fetch_all(self)
+            .await?
+        };
+
+        Ok(rows)
+    }
+
+    async fn get_all_dec_party_participants(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<DecPartyParticipantRow>> {
+        let rows = if prefix.is_empty() {
+            sqlx::query_as::<_, DecPartyParticipantRow>(
+                r"
+                SELECT dp.*
+                FROM dec_party_participant dp
+                INNER JOIN dec_party p ON p.party_id = dp.dec_party_id
+                ",
+            )
+            .fetch_all(self)
+            .await?
+        } else {
+            sqlx::query_as::<_, DecPartyParticipantRow>(
+                r"
+                SELECT dp.*
+                FROM dec_party_participant dp
+                INNER JOIN dec_party p ON p.party_id = dp.dec_party_id
+                WHERE p.prefix = ?
+                ",
+            )
+            .bind(prefix)
+            .fetch_all(self)
+            .await?
+        };
+
+        Ok(rows)
+    }
+
+    async fn get_all_dec_party_contracts(&self, prefix: &str) -> Result<Vec<DecPartyContractRow>> {
+        let rows = if prefix.is_empty() {
+            sqlx::query_as::<_, DecPartyContractRow>(
+                r"
+                SELECT dc.*
+                FROM dec_party_contract dc
+                INNER JOIN dec_party p ON p.party_id = dc.dec_party_id
+                ",
+            )
+            .fetch_all(self)
+            .await?
+        } else {
+            sqlx::query_as::<_, DecPartyContractRow>(
+                r"
+                SELECT dc.*
+                FROM dec_party_contract dc
+                INNER JOIN dec_party p ON p.party_id = dc.dec_party_id
+                WHERE p.prefix = ?
+                ",
+            )
+            .bind(prefix)
+            .fetch_all(self)
+            .await?
+        };
 
         Ok(rows)
     }

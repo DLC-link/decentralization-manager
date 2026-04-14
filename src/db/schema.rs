@@ -1,9 +1,8 @@
+use super::rows::{DecPartyContractRow, DecPartyParticipantRow, DecPartyRow};
 use crate::{
     config::{PartyCredentials, Peer},
     error::Result,
 };
-
-use super::rows::{DecPartyContractRow, DecPartyParticipantRow, DecPartyRow};
 
 /// Read operations on the database
 #[allow(async_fn_in_trait)]
@@ -40,6 +39,18 @@ pub trait SchemaRead {
 
     /// Get contracts for a decentralized party
     async fn get_dec_party_contracts(&self, party_id: &str) -> Result<Vec<DecPartyContractRow>>;
+
+    /// Get all owners for parties matching a prefix (bulk query)
+    async fn get_all_dec_party_owners(&self, prefix: &str) -> Result<Vec<(String, String)>>;
+
+    /// Get all participants for parties matching a prefix (bulk query)
+    async fn get_all_dec_party_participants(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<DecPartyParticipantRow>>;
+
+    /// Get all contracts for parties matching a prefix (bulk query)
+    async fn get_all_dec_party_contracts(&self, prefix: &str) -> Result<Vec<DecPartyContractRow>>;
 }
 
 /// Write operations on the database

@@ -22,8 +22,9 @@ while [ -z "$OWNER_KEY_3" ]; do
     PARTY_JSON=$(echo "$PARTIES_RESPONSE" | jq --arg prefix "$PARTY_PREFIX" \
         '.parties[] | select(.party_id | startswith($prefix))')
 
-    PARTICIPANT_3_UID=$(echo "$PARTY_JSON" | jq -r '.participants[2].participant_uid // empty')
-    OWNER_KEY_3=$(echo "$PARTY_JSON" | jq -r '.participants[2].owner_key // empty')
+    PARTICIPANT_3_UID="$P3_PARTICIPANT_ID"
+    OWNER_KEY_3=$(echo "$PARTY_JSON" | jq -r --arg uid "$P3_PARTICIPANT_ID" \
+        '.participants[] | select(.participant_uid == $uid) | .owner_key // empty')
 
     if [ -z "$OWNER_KEY_3" ]; then
         sleep 2

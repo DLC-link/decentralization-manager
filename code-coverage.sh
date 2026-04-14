@@ -27,6 +27,6 @@ COVERAGE=$(jq '.coveragePercent' coverage.json)
 echo "Code coverage: $COVERAGE%"
 
 if (( $(echo "$COVERAGE < 6" | bc -l) )); then
-    echo "Coverage $COVERAGE% is below threshold of 5%"
+    echo "Coverage $COVERAGE% is below threshold of 6%"
     exit 1
 fi

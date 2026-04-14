@@ -37,6 +37,7 @@ use crate::{
     db::schema::SchemaRead,
     error::Result,
     noise::{Message, MessageType, NoiseKeypair, load_or_generate_keypair, parse_public_key},
+    utils::{compute_fingerprint, get_synchronizer_id_from_url},
     workflow,
 };
 
@@ -1126,7 +1127,6 @@ async fn run_dars_attestor_listener(
     }
 }
 
-/// List locally uploaded packages via Canton admin API (called by Noise ListPackages handler)
 /// Query Canton for this node's owner keys across all decentralized parties.
 /// Returns JSON: `[{"party_id": "prefix::namespace", "owner_key": "fingerprint"}, ...]`
 async fn list_my_owner_keys(admin_api_url: &str, synchronizer_alias: &str) -> Result<Vec<u8>> {
@@ -1150,12 +1150,11 @@ async fn list_my_owner_keys(admin_api_url: &str, synchronizer_alias: &str) -> Re
             && let Some(public_key::Key::SigningPublicKey(signing_key)) = &pub_key.key
             && signing_key.usage.contains(&1)
         {
-            my_fingerprints.push(crate::utils::compute_fingerprint(signing_key));
+            my_fingerprints.push(compute_fingerprint(signing_key));
         }
     }
 
-    let synchronizer_id =
-        crate::utils::get_synchronizer_id_from_url(admin_api_url, synchronizer_alias).await?;
+    let synchronizer_id = get_synchronizer_id_from_url(admin_api_url, synchronizer_alias).await?;
 
     let base_query = BaseQuery {
         store: Some(StoreId {

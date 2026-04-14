@@ -5,6 +5,9 @@ use tokio::sync::RwLock;
 
 use sqlx::SqlitePool;
 
+use super::parties::{
+    fetch_decentralized_parties, resolve_owner_keys_from_peers, store_parties_to_db,
+};
 use crate::{
     auth::{AuthRegistry, WorkflowAuth},
     config::{KeycloakConfig, NetworkConfig, NodeConfig, PartyCredentials, default_package_config},
@@ -421,23 +424,13 @@ pub async fn start_onboarding(
                 tokio::spawn(async move {
                     let auth = bg_auth.read().await.clone();
                     let creds = bg_creds.read().await.clone();
-                    match super::parties::fetch_decentralized_parties(
-                        &bg_config, None, auth, &creds,
-                    )
-                    .await
-                    {
+                    match fetch_decentralized_parties(&bg_config, None, auth, &creds).await {
                         Ok(resp) => {
-                            if let Err(e) =
-                                super::parties::store_parties_to_db(&bg_db, "", &resp.parties).await
-                            {
+                            if let Err(e) = store_parties_to_db(&bg_db, "", &resp.parties).await {
                                 tracing::warn!("Failed to cache parties after onboarding: {e}");
                             } else {
-                                super::parties::resolve_owner_keys_from_peers(
-                                    &bg_config,
-                                    &bg_db,
-                                    &resp.parties,
-                                )
-                                .await;
+                                resolve_owner_keys_from_peers(&bg_config, &bg_db, &resp.parties)
+                                    .await;
                             }
                         }
                         Err(e) => tracing::warn!("Failed to refresh parties after onboarding: {e}"),
@@ -668,25 +661,15 @@ pub async fn start_contracts(
                 tokio::spawn(async move {
                     let auth = bg_auth.read().await.clone();
                     let creds = bg_creds.read().await.clone();
-                    match super::parties::fetch_decentralized_parties(
-                        &bg_config, None, auth, &creds,
-                    )
-                    .await
-                    {
+                    match fetch_decentralized_parties(&bg_config, None, auth, &creds).await {
                         Ok(resp) => {
-                            if let Err(e) =
-                                super::parties::store_parties_to_db(&bg_db, "", &resp.parties).await
-                            {
+                            if let Err(e) = store_parties_to_db(&bg_db, "", &resp.parties).await {
                                 tracing::warn!(
                                     "Failed to cache parties after contract deployment: {e}"
                                 );
                             } else {
-                                super::parties::resolve_owner_keys_from_peers(
-                                    &bg_config,
-                                    &bg_db,
-                                    &resp.parties,
-                                )
-                                .await;
+                                resolve_owner_keys_from_peers(&bg_config, &bg_db, &resp.parties)
+                                    .await;
                             }
                         }
                         Err(e) => {
