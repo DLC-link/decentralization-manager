@@ -21,6 +21,11 @@ kubectl delete deployment dec-party-manager-1 -n catalyst-canton --ignore-not-fo
 kubectl delete deployment dec-party-manager-2 -n catalyst-canton --ignore-not-found
 kubectl delete deployment dec-party-manager-3 -n catalyst-canton --ignore-not-found
 
+echo "Applying secrets..."
+kubectl apply -f "$DEPLOY_DIR/participant1/secrets.yaml"
+kubectl apply -f "$DEPLOY_DIR/participant2/secrets.yaml"
+kubectl apply -f "$DEPLOY_DIR/participant3/secrets.yaml"
+
 echo "Applying deployments..."
 kubectl apply -f "$DEPLOY_DIR/participant1/deployment.yaml"
 kubectl apply -f "$DEPLOY_DIR/participant2/deployment.yaml"

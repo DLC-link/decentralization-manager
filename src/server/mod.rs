@@ -9,6 +9,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use actix_cors::Cors;
 use actix_web::{App, HttpServer, web};
 use hyper::{Body, Response, StatusCode};
+use sqlx::SqlitePool;
 use tokio::sync::{Notify, RwLock};
 use tokio_noise::handshakes::nn_psk2::Responder;
 use utoipa_actix_web::AppExt;
@@ -17,6 +18,7 @@ use utoipa_swagger_ui::SwaggerUi;
 use crate::{
     auth::{AuthRegistry, MockAuthRegistry, WorkflowAuth},
     config::{NodeConfig, PartyCredentials},
+    db::schema::SchemaRead,
     error::Result,
     noise::{Message, MessageType, NoiseKeypair, load_or_generate_keypair, parse_public_key},
     workflow,
@@ -26,6 +28,7 @@ pub use types::*;
 
 /// Application state shared across all handlers
 pub struct AppState {
+    pub db: SqlitePool,
     pub config: NodeConfig,
     pub peer_status: Arc<RwLock<HashMap<String, bool>>>,
     pub noise_listener_control: Arc<RwLock<ListenerControl>>,
@@ -59,7 +62,13 @@ struct WorkflowTriggers {
 }
 
 /// Start the HTTP server and a heartbeat system for peer status tracking
-pub async fn start_server(host: &str, port: u16, config: NodeConfig, test_mode: bool) -> Result {
+pub async fn start_server(
+    host: &str,
+    port: u16,
+    config: NodeConfig,
+    test_mode: bool,
+    db: SqlitePool,
+) -> Result {
     if !test_mode {
         tracing::warn!(
             "Running without --test flag. Swagger UI is disabled. \
@@ -67,7 +76,11 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig, test_mode: 
         );
     }
 
-    let party_credentials = Arc::new(RwLock::new(config.parties.clone()));
+    let db_party_creds = db.get_all_party_credentials().await.unwrap_or_else(|e| {
+        tracing::warn!("Failed to load party credentials from DB: {e}");
+        Vec::new()
+    });
+    let party_credentials = Arc::new(RwLock::new(db_party_creds.clone()));
 
     // Initialize auth based on mode
     let auth = if test_mode {
@@ -75,16 +88,16 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig, test_mode: 
         Some(WorkflowAuth::Mock(Arc::new(MockAuthRegistry::new(
             party_credentials.clone(),
         ))))
-    } else if config.parties.is_empty() {
+    } else if db_party_creds.is_empty() {
         tracing::info!("No party credentials configured, auth disabled");
         None
     } else {
         tracing::info!(
             "Initializing auth registry for {} parties",
-            config.parties.len()
+            db_party_creds.len()
         );
         Some(WorkflowAuth::Keycloak(Arc::new(
-            AuthRegistry::new(&config.parties).await?,
+            AuthRegistry::new(&db_party_creds).await?,
         )))
     };
 
@@ -103,6 +116,7 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig, test_mode: 
     let pending_invitations = Arc::new(RwLock::new(Vec::new()));
 
     let app_state = web::Data::new(AppState {
+        db: db.clone(),
         config: config.clone(),
         peer_status: peer_status.clone(),
         noise_listener_control: listener_control.clone(),
@@ -124,6 +138,7 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig, test_mode: 
 
     // Start heartbeat background task (pings peers and listens for invites)
     let heartbeat_config = config.clone();
+    let heartbeat_db = db.clone();
     let heartbeat_status = peer_status.clone();
     let heartbeat_control = listener_control.clone();
     let heartbeat_notify = listener_notify.clone();
@@ -134,6 +149,7 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig, test_mode: 
     tokio::spawn(async move {
         run_heartbeat(
             heartbeat_config,
+            heartbeat_db,
             heartbeat_status,
             heartbeat_control,
             heartbeat_notify,
@@ -144,6 +160,7 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig, test_mode: 
 
     // Start attestor trigger listener for onboarding (starts attestor workflow when invite received)
     let onboarding_attestor_config = config.clone();
+    let onboarding_attestor_db = db.clone();
     let onboarding_attestor_control = listener_control.clone();
     let onboarding_attestor_notify = listener_notify.clone();
     let onboarding_attestor_state = onboarding_state.clone();
@@ -151,6 +168,7 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig, test_mode: 
     tokio::spawn(async move {
         run_onboarding_attestor_listener(
             onboarding_attestor_config,
+            onboarding_attestor_db,
             onboarding_attestor_control,
             onboarding_attestor_notify,
             onboarding_attestor_state,
@@ -162,6 +180,7 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig, test_mode: 
 
     // Start attestor trigger listener for kick (starts attestor workflow when kick invite received)
     let kick_attestor_config = config.clone();
+    let kick_attestor_db = db.clone();
     let kick_attestor_control = listener_control.clone();
     let kick_attestor_notify = listener_notify.clone();
     let kick_attestor_state = kick_state.clone();
@@ -169,6 +188,7 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig, test_mode: 
     tokio::spawn(async move {
         run_kick_attestor_listener(
             kick_attestor_config,
+            kick_attestor_db,
             kick_attestor_control,
             kick_attestor_notify,
             kick_attestor_state,
@@ -180,6 +200,7 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig, test_mode: 
 
     // Start attestor trigger listener for contracts (starts attestor workflow when contracts invite received)
     let contracts_attestor_config = config.clone();
+    let contracts_attestor_db = db.clone();
     let contracts_attestor_control = listener_control.clone();
     let contracts_attestor_notify = listener_notify.clone();
     let contracts_attestor_state = contracts_state.clone();
@@ -187,6 +208,7 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig, test_mode: 
     tokio::spawn(async move {
         run_contracts_attestor_listener(
             contracts_attestor_config,
+            contracts_attestor_db,
             contracts_attestor_control,
             contracts_attestor_notify,
             contracts_attestor_state,
@@ -198,6 +220,7 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig, test_mode: 
 
     // Start attestor trigger listener for DARs (starts attestor workflow when DARs invite received)
     let dars_attestor_config = config.clone();
+    let dars_attestor_db = db.clone();
     let dars_attestor_control = listener_control.clone();
     let dars_attestor_notify = listener_notify.clone();
     let dars_attestor_state = dars_state.clone();
@@ -205,6 +228,7 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig, test_mode: 
     tokio::spawn(async move {
         run_dars_attestor_listener(
             dars_attestor_config,
+            dars_attestor_db,
             dars_attestor_control,
             dars_attestor_notify,
             dars_attestor_state,
@@ -293,6 +317,7 @@ pub async fn start_server(host: &str, port: u16, config: NodeConfig, test_mode: 
 /// Background task that runs a Noise server for handling pings and invites
 async fn run_heartbeat(
     config: NodeConfig,
+    db: SqlitePool,
     peer_status: Arc<RwLock<HashMap<String, bool>>>,
     listener_control: Arc<RwLock<ListenerControl>>,
     listener_notify: Arc<Notify>,
@@ -315,18 +340,18 @@ async fn run_heartbeat(
         }
     };
 
-    // Load network config for peer key authentication
-    let network_config = match config.load_network_config().await {
-        Ok(nc) => nc,
+    // Load peers from database for peer key authentication
+    let peers = match db.get_all_peers().await {
+        Ok(p) => p,
         Err(e) => {
-            tracing::error!("Failed to load network config for peer keys: {e}");
+            tracing::error!("Failed to load peers from database: {e}");
             return;
         }
     };
 
     // Build peer key map for Noise authentication
     let mut peer_keys = HashMap::new();
-    for peer in &network_config.peers {
+    for peer in &peers {
         if peer.participant_id == *config.participant_id() || peer.public_key.is_empty() {
             continue;
         }
@@ -402,7 +427,7 @@ async fn run_heartbeat(
     });
 
     // Ping peers every 5 seconds
-    run_peer_ping_loop(config, peer_status).await;
+    run_peer_ping_loop(config, db, peer_status).await;
 }
 
 /// Handle an incoming Noise connection (either ping or invite)
@@ -613,24 +638,27 @@ async fn handle_incoming_connection(
 }
 
 /// Ping peers every 5 seconds
-async fn run_peer_ping_loop(config: NodeConfig, peer_status: Arc<RwLock<HashMap<String, bool>>>) {
+async fn run_peer_ping_loop(
+    config: NodeConfig,
+    db: SqlitePool,
+    peer_status: Arc<RwLock<HashMap<String, bool>>>,
+) {
     let mut interval = tokio::time::interval(Duration::from_secs(5));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         interval.tick().await;
 
-        let network_config = match config.load_network_config().await {
-            Ok(nc) => nc,
+        let peers = match db.get_all_peers().await {
+            Ok(p) => p,
             Err(e) => {
-                tracing::debug!("Failed to load network config for heartbeat: {e}");
+                tracing::debug!("Failed to load peers from database for heartbeat: {e}");
                 continue;
             }
         };
 
         let current_participant_id = config.participant_id();
-        let futures: Vec<_> = network_config
-            .peers
+        let futures: Vec<_> = peers
             .iter()
             .filter(|p| p.participant_id != *current_participant_id)
             .map(|peer| {
@@ -665,6 +693,7 @@ async fn run_peer_ping_loop(config: NodeConfig, peer_status: Arc<RwLock<HashMap<
 /// Background task that starts onboarding attestor workflow when triggered by an invite
 async fn run_onboarding_attestor_listener(
     config: NodeConfig,
+    db: SqlitePool,
     listener_control: Arc<RwLock<ListenerControl>>,
     listener_notify: Arc<Notify>,
     onboarding_state: web::Data<Arc<handlers::OnboardingWorkflowState>>,
@@ -698,19 +727,15 @@ async fn run_onboarding_attestor_listener(
             };
             drop(pubkey_guard);
 
-            // Look up coordinator in network config by public key
-            match config.load_network_config().await {
-                Ok(nc) => match nc.peers.iter().find(|p| p.public_key == pubkey) {
-                    Some(peer) => peer.clone(),
-                    None => {
-                        tracing::error!(
-                            "Coordinator with pubkey {pubkey} not found in network config"
-                        );
-                        continue;
-                    }
-                },
+            // Look up coordinator in database by public key
+            match db.get_peer_by_public_key(&pubkey).await {
+                Ok(Some(peer)) => peer,
+                Ok(None) => {
+                    tracing::error!("Coordinator with pubkey {pubkey} not found in database");
+                    continue;
+                }
                 Err(e) => {
-                    tracing::error!("Failed to load network config: {e}");
+                    tracing::error!("Failed to look up coordinator peer: {e}");
                     continue;
                 }
             }
@@ -757,6 +782,7 @@ async fn run_onboarding_attestor_listener(
 /// Background task that starts kick attestor workflow when triggered by an invite
 async fn run_kick_attestor_listener(
     config: NodeConfig,
+    db: SqlitePool,
     listener_control: Arc<RwLock<ListenerControl>>,
     listener_notify: Arc<Notify>,
     kick_state: web::Data<Arc<handlers::KickWorkflowState>>,
@@ -790,18 +816,14 @@ async fn run_kick_attestor_listener(
             };
             drop(pubkey_guard);
 
-            match config.load_network_config().await {
-                Ok(nc) => match nc.peers.iter().find(|p| p.public_key == pubkey) {
-                    Some(peer) => peer.clone(),
-                    None => {
-                        tracing::error!(
-                            "Coordinator with pubkey {pubkey} not found in network config"
-                        );
-                        continue;
-                    }
-                },
+            match db.get_peer_by_public_key(&pubkey).await {
+                Ok(Some(peer)) => peer,
+                Ok(None) => {
+                    tracing::error!("Coordinator with pubkey {pubkey} not found in database");
+                    continue;
+                }
                 Err(e) => {
-                    tracing::error!("Failed to load network config: {e}");
+                    tracing::error!("Failed to look up coordinator peer: {e}");
                     continue;
                 }
             }
@@ -848,6 +870,7 @@ async fn run_kick_attestor_listener(
 /// Background task that starts contracts attestor workflow when triggered by an invite
 async fn run_contracts_attestor_listener(
     config: NodeConfig,
+    db: SqlitePool,
     listener_control: Arc<RwLock<ListenerControl>>,
     listener_notify: Arc<Notify>,
     contracts_state: web::Data<Arc<handlers::ContractsWorkflowState>>,
@@ -881,18 +904,14 @@ async fn run_contracts_attestor_listener(
             };
             drop(pubkey_guard);
 
-            match config.load_network_config().await {
-                Ok(nc) => match nc.peers.iter().find(|p| p.public_key == pubkey) {
-                    Some(peer) => peer.clone(),
-                    None => {
-                        tracing::error!(
-                            "Coordinator with pubkey {pubkey} not found in network config"
-                        );
-                        continue;
-                    }
-                },
+            match db.get_peer_by_public_key(&pubkey).await {
+                Ok(Some(peer)) => peer,
+                Ok(None) => {
+                    tracing::error!("Coordinator with pubkey {pubkey} not found in database");
+                    continue;
+                }
                 Err(e) => {
-                    tracing::error!("Failed to load network config: {e}");
+                    tracing::error!("Failed to look up coordinator peer: {e}");
                     continue;
                 }
             }
@@ -939,6 +958,7 @@ async fn run_contracts_attestor_listener(
 /// Background task that starts DARs attestor workflow when triggered by an invite
 async fn run_dars_attestor_listener(
     config: NodeConfig,
+    db: SqlitePool,
     listener_control: Arc<RwLock<ListenerControl>>,
     listener_notify: Arc<Notify>,
     dars_state: web::Data<Arc<handlers::DarsWorkflowState>>,
@@ -972,18 +992,14 @@ async fn run_dars_attestor_listener(
             };
             drop(pubkey_guard);
 
-            match config.load_network_config().await {
-                Ok(nc) => match nc.peers.iter().find(|p| p.public_key == pubkey) {
-                    Some(peer) => peer.clone(),
-                    None => {
-                        tracing::error!(
-                            "Coordinator with pubkey {pubkey} not found in network config"
-                        );
-                        continue;
-                    }
-                },
+            match db.get_peer_by_public_key(&pubkey).await {
+                Ok(Some(peer)) => peer,
+                Ok(None) => {
+                    tracing::error!("Coordinator with pubkey {pubkey} not found in database");
+                    continue;
+                }
                 Err(e) => {
-                    tracing::error!("Failed to load network config: {e}");
+                    tracing::error!("Failed to look up coordinator peer: {e}");
                     continue;
                 }
             }

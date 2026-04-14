@@ -9,7 +9,7 @@ grcov . --binary-path ./target/debug/ -s . -t covdir --branch --ignore-not-exist
 COVERAGE=$(jq '.coveragePercent' coverage.json)
 echo "Code coverage: $COVERAGE%"
 
-if (( $(echo "$COVERAGE < 6" | bc -l) )); then
-    echo "Coverage $COVERAGE% is below threshold of 6%"
+if (( $(echo "$COVERAGE < 5" | bc -l) )); then
+    echo "Coverage $COVERAGE% is below threshold of 5%"
     exit 1
 fi

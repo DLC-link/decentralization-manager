@@ -5,7 +5,8 @@ use tokio::sync::RwLock;
 
 use crate::{
     auth::{AuthRegistry, WorkflowAuth},
-    config::{KeycloakConfig, NodeConfig, PartyCredentials, default_package_config},
+    config::{KeycloakConfig, PartyCredentials, default_package_config},
+    db::schema::{Commitable, SchemaWrite},
     error::Result,
     participant_id::CantonId,
     server::{
@@ -128,19 +129,26 @@ pub async fn save_party_config(
         packages: req.packages,
     };
 
-    let mut fresh_config = match NodeConfig::from_dir(data.config.root_dir()).await {
-        Ok(c) => c,
-        Err(e) => {
+    // Primary write: save to database
+    {
+        let mut tx = match data.db.begin_transaction().await {
+            Ok(tx) => tx,
+            Err(e) => {
+                return HttpResponse::InternalServerError().json(ErrorResponse {
+                    error: format!("Failed to begin transaction: {e}"),
+                });
+            }
+        };
+        if let Err(e) = tx.upsert_party_credentials(&creds).await {
             return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to read config: {e}"),
+                error: format!("Failed to save party credentials: {e}"),
             });
         }
-    };
-
-    if let Err(e) = fresh_config.upsert_party_credentials(creds.clone()).await {
-        return HttpResponse::InternalServerError().json(ErrorResponse {
-            error: format!("Failed to save config: {e}"),
-        });
+        if let Err(e) = Commitable::commit(tx).await {
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to commit transaction: {e}"),
+            });
+        }
     }
 
     {

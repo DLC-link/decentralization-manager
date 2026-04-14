@@ -1,8 +1,12 @@
 use actix_web::{HttpResponse, Responder, get, post, web};
 use serde::Serialize;
 
+use sqlx::SqlitePool;
+
 use crate::{
     config::{NetworkConfig, NodeConfig, Peer},
+    db::schema::{Commitable, SchemaRead, SchemaWrite},
+    error::Result,
     server::{
         AppState,
         types::{ErrorResponse, SuccessResponse},
@@ -19,10 +23,10 @@ use crate::{
 )]
 #[get("/network-config")]
 pub async fn get_network_config(data: web::Data<AppState>) -> impl Responder {
-    match data.config.load_network_config().await {
-        Ok(network_config) => HttpResponse::Ok().json(network_config),
+    match data.db.get_all_peers().await {
+        Ok(peers) => HttpResponse::Ok().json(NetworkConfig::from_peers(peers)),
         Err(e) => {
-            tracing::error!("Failed to load network config: {e}");
+            tracing::error!("Failed to load peers from database: {e}");
             HttpResponse::InternalServerError().json(ErrorResponse {
                 error: format!("Failed to load network config: {e}"),
             })
@@ -44,25 +48,18 @@ pub async fn save_network_config(
     data: web::Data<AppState>,
     body: web::Json<Vec<Peer>>,
 ) -> impl Responder {
-    let network_config = NetworkConfig {
-        peers: body.into_inner(),
-    };
+    let peers = body.into_inner();
 
-    match data.config.save_network_config(&network_config).await {
-        Ok(()) => {
-            tracing::info!(
-                "Saved network config with {} peers",
-                network_config.peers.len()
-            );
-            HttpResponse::Ok().json(SuccessResponse { success: true })
-        }
-        Err(e) => {
-            tracing::error!("Failed to save network config: {e}");
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to save network config: {e}"),
-            })
-        }
+    // Primary write: save to database
+    if let Err(e) = save_peers_to_db(&data.db, &peers).await {
+        tracing::error!("Failed to save peers to database: {e}");
+        return HttpResponse::InternalServerError().json(ErrorResponse {
+            error: format!("Failed to save network config: {e}"),
+        });
     }
+
+    tracing::info!("Saved network config with {} peers", peers.len());
+    HttpResponse::Ok().json(SuccessResponse { success: true })
 }
 
 /// Node configuration response (includes runtime flags)
@@ -86,4 +83,13 @@ pub async fn get_node_config(data: web::Data<AppState>) -> impl Responder {
         config: &data.config,
         test_mode: data.test_mode,
     })
+}
+
+async fn save_peers_to_db(db: &SqlitePool, peers: &[Peer]) -> Result {
+    let mut tx = db.begin_transaction().await?;
+    tx.delete_all_peers().await?;
+    for peer in peers {
+        tx.insert_peer(peer).await?;
+    }
+    Commitable::commit(tx).await
 }

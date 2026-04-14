@@ -4,39 +4,42 @@ services:
       context: ..
       dockerfile: Dockerfile
     volumes:
-      - ./participant-1/config:/config
-      - ./participant-1/data:/data
+      - ./remote/participant-1/data:/app/data
     network_mode: host
     ports:
       - "8081:8081"
       - "9001:9001"
+    env_file:
+      - ./remote/participant-1/.env
     entrypoint:
-      ["dec-party-manager", "-d", "/", "serve", "--host", "0.0.0.0", "--port", "8081"]
+      ["dec-party-manager", "-d", "/app", "serve", "--host", "0.0.0.0", "--port", "8081"]
 
   participant-2:
     build:
       context: ..
       dockerfile: Dockerfile
     volumes:
-      - ./participant-2/config:/config
-      - ./participant-2/data:/data
+      - ./remote/participant-2/data:/app/data
     network_mode: host
     ports:
       - "8082:8082"
       - "9002:9002"
+    env_file:
+      - ./remote/participant-2/.env
     entrypoint:
-      ["dec-party-manager", "-d", "/", "serve", "--host", "0.0.0.0", "--port", "8082"]
+      ["dec-party-manager", "-d", "/app", "serve", "--host", "0.0.0.0", "--port", "8082"]
 
   participant-3:
     build:
       context: ..
       dockerfile: Dockerfile
     volumes:
-      - ./participant-3/config:/config
-      - ./participant-3/data:/data
+      - ./remote/participant-3/data:/app/data
     network_mode: host
     ports:
       - "8083:8083"
       - "9003:9003"
+    env_file:
+      - ./remote/participant-3/.env
     entrypoint:
-      ["dec-party-manager", "-d", "/", "serve", "--host", "0.0.0.0", "--port", "8083"]
+      ["dec-party-manager", "-d", "/app", "serve", "--host", "0.0.0.0", "--port", "8083"]
