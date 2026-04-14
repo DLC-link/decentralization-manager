@@ -618,6 +618,7 @@ pub async fn start_contracts(
     let contracts_state_clone = contracts_state.get_ref().clone();
     let listener_control = data.noise_listener_control.clone();
     let listener_notify = data.noise_listener_notify.clone();
+    let party_credentials = data.party_credentials.clone();
 
     tokio::spawn(async move {
         let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
@@ -673,12 +674,8 @@ pub async fn start_contracts(
                     .await
                     {
                         Ok(resp) => {
-                            if let Err(e) = super::parties::store_parties_to_db(
-                                &bg_db,
-                                "",
-                                &resp.parties,
-                            )
-                            .await
+                            if let Err(e) =
+                                super::parties::store_parties_to_db(&bg_db, "", &resp.parties).await
                             {
                                 tracing::warn!(
                                     "Failed to cache parties after contract deployment: {e}"
