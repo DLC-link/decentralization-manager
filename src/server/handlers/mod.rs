@@ -25,5 +25,5 @@ pub use party_config::{get_party_config, save_party_config};
 pub use workflows::{
     ContractsWorkflowState, DarsWorkflowState, KickWorkflowState, OnboardingWorkflowState,
     get_contracts_status, get_dars_status, get_kick_status, get_onboarding_status, start_contracts,
-    start_dars, start_kick, start_onboarding,
+    start_dars, start_kick, start_onboarding, upload_dars_local,
 };

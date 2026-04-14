@@ -21,8 +21,14 @@ cat > "$DARS_REQUEST_FILE" <<EOF
 }
 EOF
 
-echo "Starting DARs upload on participant-1..."
-curl -s -X POST "http://localhost:$P1_HTTP/dars" \
+echo "Uploading DARs to participant-1 (local)..."
+UPLOAD_RESPONSE=$(curl -s -X POST "http://localhost:$P1_HTTP/dars/upload" \
+    -H "Content-Type: application/json" \
+    -d @"$DARS_REQUEST_FILE")
+echo "  Response: $UPLOAD_RESPONSE"
+
+echo "Distributing DARs to all participants..."
+curl -s -X POST "http://localhost:$P1_HTTP/dars/distribute" \
     -H "Content-Type: application/json" \
     -d @"$DARS_REQUEST_FILE"
 echo ""
@@ -34,4 +40,4 @@ accept_invitation $P3_HTTP "participant-3" "Dars" &
 PID_ACCEPT2=$!
 wait $PID_ACCEPT1 $PID_ACCEPT2
 
-poll_status $P1_HTTP "dars/status"
+poll_status $P1_HTTP "dars/distribute/status"

@@ -338,6 +338,7 @@ pub async fn start_server(
             .service(handlers::get_onboarding_status)
             .service(handlers::start_contracts)
             .service(handlers::get_contracts_status)
+            .service(handlers::upload_dars_local)
             .service(handlers::start_dars)
             .service(handlers::get_dars_status)
             .service(handlers::get_key_status)

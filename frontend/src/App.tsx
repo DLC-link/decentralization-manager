@@ -21,7 +21,7 @@ import { Header } from "./components/Header";
 import { PartyCard } from "./components/PartyCard";
 import { NodeConfigAccordion } from "./components/NodeConfigAccordion";
 import { NetworkConfigAccordion } from "./components/NetworkConfigAccordion";
-import { VettedPackagesAccordion } from "./components/VettedPackagesAccordion";
+import { PackagesPanel } from "./components/PackagesPanel";
 import { LoadingSkeleton, ConfigTabSkeleton } from "./components/LoadingSkeleton";
 import { DarsDialog } from "./components/DarsDialog";
 import { OnboardingDialog } from "./components/OnboardingDialog";
@@ -57,6 +57,7 @@ const App = () => {
   const [authStatuses, setAuthStatuses] = useState<PartyAuthStatus[]>([]);
   const [onboardingDialogOpen, setOnboardingDialogOpen] = useState(false);
   const [darsDialogOpen, setDarsDialogOpen] = useState(false);
+  const [uploadDarsDialogOpen, setUploadDarsDialogOpen] = useState(false);
   const [_pendingInvitations, setPendingInvitations] = useState<
     PendingInvitation[]
   >([]);
@@ -397,9 +398,10 @@ const App = () => {
 
             {/* Tab 1: Package Management */}
             {activeTab === 1 && (
-              <VettedPackagesAccordion
+              <PackagesPanel
                 packages={vettedPackages}
-                onUploadDars={() => setDarsDialogOpen(true)}
+                onUploadDars={() => setUploadDarsDialogOpen(true)}
+                onDistributeDars={() => setDarsDialogOpen(true)}
               />
             )}
 
@@ -438,6 +440,14 @@ const App = () => {
               open={darsDialogOpen}
               onClose={() => setDarsDialogOpen(false)}
               onComplete={refreshParties}
+              mode="distribute"
+            />
+
+            <DarsDialog
+              open={uploadDarsDialogOpen}
+              onClose={() => setUploadDarsDialogOpen(false)}
+              onComplete={refreshParties}
+              mode="upload"
             />
 
             <OnboardingDialog

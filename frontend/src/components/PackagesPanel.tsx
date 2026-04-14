@@ -25,15 +25,17 @@ import type {
   PeerPackageResult,
 } from "../types";
 
-interface VettedPackagesAccordionProps {
+interface PackagesPanelProps {
   packages: VettedPackageInfo[];
   onUploadDars?: () => void;
+  onDistributeDars?: () => void;
 }
 
-export const VettedPackagesAccordion = ({
+export const PackagesPanel = ({
   packages,
   onUploadDars,
-}: VettedPackagesAccordionProps) => {
+  onDistributeDars,
+}: PackagesPanelProps) => {
   const [canScrollUp, setCanScrollUp] = useState(false);
   const [canScrollDown, setCanScrollDown] = useState(false);
   const [comparison, setComparison] = useState<PeerPackageComparison | null>(
@@ -160,6 +162,17 @@ export const VettedPackagesAccordion = ({
               onClick={onUploadDars}
             >
               Upload DARs
+            </Button>
+          )}
+          {onDistributeDars && (
+            <Button
+              variant="contained"
+              size="small"
+              color="secondary"
+              startIcon={<CloudUploadIcon />}
+              onClick={onDistributeDars}
+            >
+              Distribute DARs
             </Button>
           )}
         </Box>
