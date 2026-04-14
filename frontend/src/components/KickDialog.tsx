@@ -20,6 +20,7 @@ interface KickDialogProps {
   onKickComplete: () => void;
   partyId: string;
   participantUid: string;
+  participantOwnerKey?: string;
   currentThreshold: number;
   currentOwnerCount: number;
 }
@@ -30,6 +31,7 @@ export const KickDialog = ({
   onKickComplete,
   partyId,
   participantUid,
+  participantOwnerKey,
   currentThreshold,
   currentOwnerCount,
 }: KickDialogProps) => {
@@ -49,13 +51,15 @@ export const KickDialog = ({
   }, [currentThreshold, remainingOwners, suggestedThreshold]);
 
   useEffect(() => {
-    if (!open) {
+    if (open) {
+      setNamespaceFingerprint(participantOwnerKey ?? "");
+    } else {
       setError(null);
       setStatus(null);
       setLoading(false);
       setNamespaceFingerprint("");
     }
-  }, [open]);
+  }, [open, participantOwnerKey]);
 
   const pollStatus = useCallback(async () => {
     try {
