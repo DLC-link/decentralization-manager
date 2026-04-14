@@ -16,11 +16,5 @@ CREATE TABLE IF NOT EXISTS party_credentials (
     keycloak_client_id       TEXT NOT NULL DEFAULT '',
     keycloak_client_secret   TEXT,
     keycloak_username        TEXT,
-    keycloak_password        TEXT,
-    governance_core          TEXT,
-    governance_token_custody TEXT,
-    utility_credential       TEXT,
-    utility_registry         TEXT,
-    vault                    TEXT,
-    vault_governance         TEXT
+    keycloak_password        TEXT
 );

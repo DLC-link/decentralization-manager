@@ -50,12 +50,6 @@ pub struct PartyCredentialsRow {
     pub keycloak_client_secret: Option<String>,
     pub keycloak_username: Option<String>,
     pub keycloak_password: Option<String>,
-    pub governance_core: Option<String>,
-    pub governance_token_custody: Option<String>,
-    pub utility_credential: Option<String>,
-    pub utility_registry: Option<String>,
-    pub vault: Option<String>,
-    pub vault_governance: Option<String>,
 }
 
 impl PartyCredentialsRow {
@@ -70,12 +64,6 @@ impl PartyCredentialsRow {
             keycloak_client_secret: crypto::encrypt_opt(&creds.keycloak.client_secret)?,
             keycloak_username: crypto::encrypt_opt(&creds.keycloak.username)?,
             keycloak_password: crypto::encrypt_opt(&creds.keycloak.password)?,
-            governance_core: creds.packages.governance_core.clone(),
-            governance_token_custody: creds.packages.governance_token_custody.clone(),
-            utility_credential: creds.packages.utility_credential.clone(),
-            utility_registry: creds.packages.utility_registry.clone(),
-            vault: creds.packages.vault.clone(),
-            vault_governance: creds.packages.vault_governance.clone(),
         })
     }
 
@@ -92,14 +80,7 @@ impl PartyCredentialsRow {
                 username: crypto::decrypt_opt(self.keycloak_username)?,
                 password: crypto::decrypt_opt(self.keycloak_password)?,
             },
-            packages: PackageConfig {
-                governance_core: self.governance_core,
-                governance_token_custody: self.governance_token_custody,
-                utility_credential: self.utility_credential,
-                utility_registry: self.utility_registry,
-                vault: self.vault,
-                vault_governance: self.vault_governance,
-            },
+            packages: PackageConfig::default(),
         })
     }
 }

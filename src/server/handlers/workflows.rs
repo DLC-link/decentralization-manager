@@ -20,7 +20,7 @@ use crate::{
             OnboardingStatus, WorkflowProgress, WorkflowResponse, WorkflowStatusResponse,
         },
     },
-    workflow::{self, ContractsConfig},
+    workflow,
 };
 
 // ============================================================================
@@ -586,7 +586,6 @@ pub async fn start_contracts(
     let contracts_state_clone = contracts_state.get_ref().clone();
     let listener_control = data.noise_listener_control.clone();
     let listener_notify = data.noise_listener_notify.clone();
-    let party_credentials = data.party_credentials.clone();
 
     tokio::spawn(async move {
         let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
@@ -627,11 +626,6 @@ pub async fn start_contracts(
             Ok(_) => {
                 *status = WorkflowProgress::Completed;
                 tracing::info!("Contracts workflow completed successfully");
-                if let Err(e) =
-                    save_deployed_packages(&db, &contracts_config, &party_credentials).await
-                {
-                    tracing::warn!("Failed to save package config: {e}");
-                }
             }
             Err(e) => {
                 *status = WorkflowProgress::Failed;
@@ -665,61 +659,6 @@ pub async fn get_contracts_status(
         status: *status,
         error: error.clone(),
     })
-}
-
-/// Save deployed package IDs to party config after successful contracts workflow
-async fn save_deployed_packages(
-    db: &SqlitePool,
-    contracts_config: &ContractsConfig,
-    party_credentials: &Arc<RwLock<Vec<PartyCredentials>>>,
-) -> Result {
-    // Start from existing packages, then update with deployed contract IDs
-    let mut packages = {
-        let pc = party_credentials.read().await;
-        pc.iter()
-            .find(|p| p.dec_party_id == contracts_config.decentralized_party_id)
-            .map(|c| c.packages.clone())
-            .unwrap_or_default()
-    };
-    for contract in &contracts_config.contracts {
-        match (contract.module_name.as_str(), contract.entity_name.as_str()) {
-            ("Governance.Rules", "GovernanceRules") => {
-                packages.governance_core = Some(contract.package_id.clone());
-            }
-            ("BitsafeVault.VaultGovernance", "VaultGovernanceRules") => {
-                packages.vault_governance = Some(contract.package_id.clone());
-            }
-            ("BitsafeVault.Vault", "Vault") => {
-                packages.vault = Some(contract.package_id.clone());
-            }
-            (m, _) if m.starts_with("Utility.Registry.App") => {
-                packages.utility_registry = Some(contract.package_id.clone());
-            }
-            (m, _) if m.starts_with("Utility.Credential.App") => {
-                packages.utility_credential = Some(contract.package_id.clone());
-            }
-            _ => {}
-        }
-    }
-
-    let dec_party_id = contracts_config.decentralized_party_id.to_string();
-
-    // Primary write: update packages in database
-    let mut tx = db.begin_transaction().await?;
-    tx.update_party_packages(&dec_party_id, &packages).await?;
-    Commitable::commit(tx).await?;
-
-    // Sync in-memory party credentials
-    let mut pc = party_credentials.write().await;
-    if let Some(mem_creds) = pc
-        .iter_mut()
-        .find(|p| p.dec_party_id == contracts_config.decentralized_party_id)
-    {
-        mem_creds.packages = packages;
-    }
-
-    tracing::info!("Saved package IDs to party config");
-    Ok(())
 }
 
 // ============================================================================

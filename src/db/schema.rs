@@ -1,7 +1,7 @@
 use sqlx::SqlitePool;
 
 use crate::{
-    config::{PackageConfig, PartyCredentials, Peer},
+    config::{PartyCredentials, Peer},
     error::Result,
 };
 
@@ -52,13 +52,6 @@ pub trait Commitable {
 
     /// Insert or replace party credentials
     async fn upsert_party_credentials(&mut self, creds: &PartyCredentials) -> Result;
-
-    /// Update only the package fields for a party
-    async fn update_party_packages(
-        &mut self,
-        dec_party_id: &str,
-        packages: &PackageConfig,
-    ) -> Result;
 }
 
 impl SchemaRead for SqlitePool {
@@ -178,14 +171,8 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                 keycloak_client_id,
                 keycloak_client_secret,
                 keycloak_username,
-                keycloak_password,
-                governance_core,
-                governance_token_custody,
-                utility_credential,
-                utility_registry,
-                vault,
-                vault_governance
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                keycloak_password
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ",
         )
         .bind(&row.dec_party_id)
@@ -197,42 +184,6 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         .bind(&row.keycloak_client_secret)
         .bind(&row.keycloak_username)
         .bind(&row.keycloak_password)
-        .bind(&row.governance_core)
-        .bind(&row.governance_token_custody)
-        .bind(&row.utility_credential)
-        .bind(&row.utility_registry)
-        .bind(&row.vault)
-        .bind(&row.vault_governance)
-        .execute(&mut **self)
-        .await?;
-
-        Ok(())
-    }
-
-    async fn update_party_packages(
-        &mut self,
-        dec_party_id: &str,
-        packages: &PackageConfig,
-    ) -> Result {
-        sqlx::query(
-            r"
-            UPDATE party_credentials
-            SET governance_core = ?,
-                governance_token_custody = ?,
-                utility_credential = ?,
-                utility_registry = ?,
-                vault = ?,
-                vault_governance = ?
-            WHERE dec_party_id = ?
-            ",
-        )
-        .bind(&packages.governance_core)
-        .bind(&packages.governance_token_custody)
-        .bind(&packages.utility_credential)
-        .bind(&packages.utility_registry)
-        .bind(&packages.vault)
-        .bind(&packages.vault_governance)
-        .bind(dec_party_id)
         .execute(&mut **self)
         .await?;
 
