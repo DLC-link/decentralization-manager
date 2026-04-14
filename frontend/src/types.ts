@@ -8,6 +8,7 @@ export interface AuthConfig {
 export interface ParticipantInfo {
   participant_uid: string;
   permission: string;
+  owner_key?: string;
 }
 
 export interface ContractInfo {
@@ -89,9 +90,13 @@ export interface DecentralizedParty {
   local_metadata?: PartyMetadata;
 }
 
+export type ResponseSource = "live" | "cache";
+
 export interface DecentralizedPartiesResponse {
   parties: DecentralizedParty[];
   vetted_packages?: VettedPackageInfo[];
+  source?: ResponseSource;
+  refreshing?: boolean;
 }
 
 export interface NodeConfig {

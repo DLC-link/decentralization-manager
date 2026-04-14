@@ -312,6 +312,11 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
         onKickComplete={onRefresh}
         partyId={party.party_id}
         participantUid={selectedParticipant}
+        participantOwnerKey={
+          party.participants.find(
+            (p) => p.participant_uid === selectedParticipant,
+          )?.owner_key
+        }
         currentThreshold={party.threshold}
         currentOwnerCount={party.owners.length}
       />

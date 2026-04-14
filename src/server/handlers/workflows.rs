@@ -5,6 +5,9 @@ use tokio::sync::RwLock;
 
 use sqlx::SqlitePool;
 
+use super::parties::{
+    fetch_decentralized_parties, resolve_owner_keys_from_peers, store_parties_to_db,
+};
 use crate::{
     auth::{AuthRegistry, WorkflowAuth},
     config::{KeycloakConfig, NetworkConfig, NodeConfig, PartyCredentials, default_package_config},
@@ -412,6 +415,27 @@ pub async fn start_onboarding(
                 {
                     tracing::warn!("Failed to auto-save party config: {e}");
                 }
+
+                // Refresh dec_party cache in background
+                let bg_config = config.clone();
+                let bg_db = db.clone();
+                let bg_auth = auth_lock.clone();
+                let bg_creds = party_credentials.clone();
+                tokio::spawn(async move {
+                    let auth = bg_auth.read().await.clone();
+                    let creds = bg_creds.read().await.clone();
+                    match fetch_decentralized_parties(&bg_config, None, auth, &creds).await {
+                        Ok(resp) => {
+                            if let Err(e) = store_parties_to_db(&bg_db, "", &resp.parties).await {
+                                tracing::warn!("Failed to cache parties after onboarding: {e}");
+                            } else {
+                                resolve_owner_keys_from_peers(&bg_config, &bg_db, &resp.parties)
+                                    .await;
+                            }
+                        }
+                        Err(e) => tracing::warn!("Failed to refresh parties after onboarding: {e}"),
+                    }
+                });
             }
             Err(e) => {
                 *status = OnboardingStatus::Failed;
@@ -583,9 +607,11 @@ pub async fn start_contracts(
     let config = data.config.clone();
     let db = data.db.clone();
     let workflow_auth = data.auth.read().await.clone();
+    let auth_lock = data.auth.clone();
     let contracts_state_clone = contracts_state.get_ref().clone();
     let listener_control = data.noise_listener_control.clone();
     let listener_notify = data.noise_listener_notify.clone();
+    let party_credentials = data.party_credentials.clone();
 
     tokio::spawn(async move {
         let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
@@ -626,6 +652,33 @@ pub async fn start_contracts(
             Ok(_) => {
                 *status = WorkflowProgress::Completed;
                 tracing::info!("Contracts workflow completed successfully");
+
+                // Refresh dec_party cache to pick up new contracts
+                let bg_config = config.clone();
+                let bg_db = db.clone();
+                let bg_auth = auth_lock.clone();
+                let bg_creds = party_credentials.clone();
+                tokio::spawn(async move {
+                    let auth = bg_auth.read().await.clone();
+                    let creds = bg_creds.read().await.clone();
+                    match fetch_decentralized_parties(&bg_config, None, auth, &creds).await {
+                        Ok(resp) => {
+                            if let Err(e) = store_parties_to_db(&bg_db, "", &resp.parties).await {
+                                tracing::warn!(
+                                    "Failed to cache parties after contract deployment: {e}"
+                                );
+                            } else {
+                                resolve_owner_keys_from_peers(&bg_config, &bg_db, &resp.parties)
+                                    .await;
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to refresh parties after contract deployment: {e}"
+                            );
+                        }
+                    }
+                });
             }
             Err(e) => {
                 *status = WorkflowProgress::Failed;

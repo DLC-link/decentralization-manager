@@ -64,8 +64,11 @@ const App = () => {
     useState<PendingInvitation | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [partyFilter, setPartyFilter] = useState("cbtc-network");
+  const [partyFilter, setPartyFilter] = useState("");
   const [refreshingParties, setRefreshingParties] = useState(false);
+  const [partiesSource, setPartiesSource] = useState<"live" | "cache" | null>(
+    null,
+  );
   const [operatorParty, setOperatorParty] = useState("");
   const { showSnackbar } = useSnackbar();
 
@@ -97,6 +100,7 @@ const App = () => {
         const data: DecentralizedPartiesResponse = await res.json();
         setParties(data.parties);
         setVettedPackages(data.vetted_packages ?? []);
+        setPartiesSource(data.source ?? "live");
       } else {
         showSnackbar("Failed to refresh parties");
       }
@@ -178,6 +182,7 @@ const App = () => {
 
         setParties(partiesData.parties);
         setVettedPackages(partiesData.vetted_packages ?? []);
+        setPartiesSource(partiesData.source ?? "live");
 
         if (authStatusRes.ok) {
           const authStatusData: AuthStatusResponse = await authStatusRes.json();
@@ -318,6 +323,15 @@ const App = () => {
                     <Box>
                       <Typography variant="body2" color="text.secondary">
                         {parties.length} decentralized parties
+                        {partiesSource === "cache" && refreshingParties && (
+                          <Typography
+                            component="span"
+                            variant="body2"
+                            sx={{ ml: 1, fontStyle: "italic", color: "warning.main" }}
+                          >
+                            (cached — refreshing from network...)
+                          </Typography>
+                        )}
                       </Typography>
                     </Box>
                     <Button
@@ -332,7 +346,8 @@ const App = () => {
                   <Box sx={{ display: "flex", alignItems: "flex-start", gap: 1 }}>
                     <TextField
                       size="small"
-                      label="Filter by prefix"
+                      label="Filter by full prefix (e.g. cbtc-network)"
+                      placeholder="Enter full party prefix"
                       value={partyFilter}
                       onChange={(e) => setPartyFilter(e.target.value)}
                       onKeyDown={(e) => {

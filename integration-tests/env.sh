@@ -221,6 +221,7 @@ start_nodes() {
     for i in 1 2 3; do
         local idx=$((i - 1))
         echo "Starting participant-$i..."
+        RUST_LOG="${RUST_LOG:-dec_party_manager=info,tokio_noise=error,hyper_noise=error}" \
         DECPM_CANTON_ADMIN_HOST=127.0.0.1 \
         DECPM_CANTON_ADMIN_PORT="${canton_admin_ports[$idx]}" \
         DECPM_CANTON_LEDGER_HOST=127.0.0.1 \

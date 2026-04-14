@@ -84,3 +84,33 @@ impl PartyCredentialsRow {
         })
     }
 }
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct DecPartyRow {
+    pub party_id: String,
+    pub prefix: String,
+    pub threshold: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct DecPartyOwnerRow {
+    pub dec_party_id: String,
+    pub owner_key: String,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct DecPartyParticipantRow {
+    pub dec_party_id: String,
+    pub participant_uid: String,
+    pub permission: String,
+    pub owner_key: Option<String>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct DecPartyContractRow {
+    pub dec_party_id: String,
+    pub contract_id: String,
+    pub template_id: String,
+    pub package_id: String,
+}

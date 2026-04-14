@@ -4,13 +4,33 @@
 # Sourced by run.sh — expects env.sh variables and PARTY_ID/PARTY_JSON
 # from create-dec-party.sh to be available.
 
-# Refetch party details
-PARTIES_RESPONSE=$(curl -s "http://localhost:$P1_HTTP/decentralized-parties")
-PARTY_JSON=$(echo "$PARTIES_RESPONSE" | jq --arg prefix "$PARTY_PREFIX" \
-    '.parties[] | select(.party_id | startswith($prefix))')
+# Refetch party details and wait for owner keys to be resolved
+echo "Waiting for owner keys to be resolved via Noise..."
+MAX_ATTEMPTS=30
+ATTEMPT=0
+OWNER_KEY_3=""
 
-PARTICIPANT_3_UID=$(echo "$PARTY_JSON" | jq -r '.participants[2].participant_uid // empty')
-OWNER_KEY_3=$(echo "$PARTY_JSON" | jq -r '.owners[2] // empty')
+while [ -z "$OWNER_KEY_3" ]; do
+    ATTEMPT=$((ATTEMPT + 1))
+    if [ $ATTEMPT -ge $MAX_ATTEMPTS ]; then
+        echo "ERROR: Owner key not resolved for participant 3 after $MAX_ATTEMPTS attempts"
+        exit 1
+    fi
+
+    # Trigger a refresh by querying the endpoint
+    PARTIES_RESPONSE=$(curl -s "http://localhost:$P1_HTTP/decentralized-parties?prefix=$PARTY_PREFIX")
+    PARTY_JSON=$(echo "$PARTIES_RESPONSE" | jq --arg prefix "$PARTY_PREFIX" \
+        '.parties[] | select(.party_id | startswith($prefix))')
+
+    PARTICIPANT_3_UID="$P3_PARTICIPANT_ID"
+    OWNER_KEY_3=$(echo "$PARTY_JSON" | jq -r --arg uid "$P3_PARTICIPANT_ID" \
+        '.participants[] | select(.participant_uid == $uid) | .owner_key // empty')
+
+    if [ -z "$OWNER_KEY_3" ]; then
+        sleep 2
+    fi
+done
+
 CURRENT_THRESHOLD=$(echo "$PARTY_JSON" | jq -r '.threshold // 2')
 
 if [ -z "$PARTICIPANT_3_UID" ]; then

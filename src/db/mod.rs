@@ -1,4 +1,4 @@
-mod rows;
+pub mod rows;
 mod sqlite;
 
 pub mod crypto;
