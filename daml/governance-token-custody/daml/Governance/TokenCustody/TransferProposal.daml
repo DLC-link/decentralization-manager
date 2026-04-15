@@ -59,6 +59,7 @@ template TransferProposal
       view = GovernableActionView with
         governanceParty
         actionLabel = "Transfer"
+        description = "Transfer tokens from governance party"
 
       executeImpl = do
         exercise transferFactoryCid TransferFactory_Transfer with

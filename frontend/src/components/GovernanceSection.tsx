@@ -230,6 +230,7 @@ export const GovernanceSection = ({
   const [proposalInstrumentIdId, setProposalInstrumentIdId] = useState("");
   const [proposalInputHoldingCids, setProposalInputHoldingCids] = useState("");
   const [proposalTransferInstructionCid, setProposalTransferInstructionCid] = useState("");
+  const [proposalDescription, setProposalDescription] = useState("");
   const [proposalLoading, setProposalLoading] = useState(false);
   const [rulesContractId, setRulesContractId] = useState(
     initialRulesContractId || "",
@@ -1005,6 +1006,12 @@ export const GovernanceSection = ({
           proposal = {
             type: "accept_transfer",
             transfer_instruction_cid: proposalTransferInstructionCid,
+          };
+          break;
+        case "generic_vote":
+          proposal = {
+            type: "generic_vote",
+            description: proposalDescription,
           };
           break;
       }
@@ -2695,12 +2702,17 @@ export const GovernanceSection = ({
                   value={proposalType}
                   onChange={(e) => setProposalType(e.target.value as ProposalType["type"])}
                 >
+                  <MenuItem value="generic_vote">Generic Vote</MenuItem>
                   <MenuItem value="setup_cc_preapproval">Setup CC Preapproval</MenuItem>
                   <MenuItem value="setup_token_preapproval">Setup Token Preapproval</MenuItem>
                   <MenuItem value="transfer">Transfer</MenuItem>
                   <MenuItem value="accept_transfer">Accept Transfer</MenuItem>
                 </Select>
               </FormControl>
+
+              {proposalType === "generic_vote" && (
+                <TextField size="small" label="Vote Description" value={proposalDescription} onChange={(e) => setProposalDescription(e.target.value)} fullWidth required multiline minRows={2} maxRows={6} helperText="Describe what the governance members are voting on" />
+              )}
 
               {proposalType === "setup_cc_preapproval" && (
                 <>

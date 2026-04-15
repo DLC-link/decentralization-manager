@@ -628,6 +628,8 @@ pub enum ProposalType {
     },
     /// Accept an incoming token transfer
     AcceptTransfer { transfer_instruction_cid: String },
+    /// Generic text-based vote (no on-chain effect beyond recording the result)
+    GenericVote { description: String },
 }
 
 /// Request to propose a governance domain action (creates proposal contract)

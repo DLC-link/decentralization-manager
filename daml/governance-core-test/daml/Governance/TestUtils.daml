@@ -10,9 +10,10 @@ import DA.Set as Set hiding (filter)
 import DA.Time (minutes)
 import Daml.Script
 
-import Governance.Rules
-import Governance.Confirmation
 import Governance.Action (GovernableAction)
+import Governance.Confirmation
+import Governance.ExecutionResult
+import Governance.Rules
 
 -- | Standard test party allocation.
 data TestParties = TestParties
@@ -73,7 +74,7 @@ submitSelfConfirmations governanceParty rulesCid action confirmers =
   ) confirmers
 
 -- | Confirm and execute an interface action in one go.
-confirmAndExecute : TestParties -> ContractId GovernanceRules -> ContractId GovernableAction -> [Party] -> Party -> Script ()
+confirmAndExecute : TestParties -> ContractId GovernanceRules -> ContractId GovernableAction -> [Party] -> Party -> Script (ContractId GovernanceExecutionResult)
 confirmAndExecute parties rulesCid proposalCid confirmers executor = do
   confirmationCids <- submitConfirmations parties.governanceParty rulesCid proposalCid confirmers
   submit (memberContext executor parties.governanceParty) $

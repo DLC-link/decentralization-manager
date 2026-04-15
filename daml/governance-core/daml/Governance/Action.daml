@@ -13,6 +13,8 @@ data GovernableActionView = GovernableActionView
       -- ^ The governance party whose authority is required to execute this action.
     actionLabel : Text
       -- ^ Human-readable label for display and audit (e.g., "VaultPause", "DepositComplete").
+    description : Text
+      -- ^ Human-readable description of the action. Recorded in the execution result contract.
   deriving (Show, Eq)
 
 -- | Interface that all governable action proposals must implement.

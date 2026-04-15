@@ -325,6 +325,10 @@ export type ProposalType =
   | {
       type: "accept_transfer";
       transfer_instruction_cid: string;
+    }
+  | {
+      type: "generic_vote";
+      description: string;
     };
 
 export interface ProposeActionRequest {
