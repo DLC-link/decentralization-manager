@@ -182,7 +182,7 @@ sleep 2
 
 GOVERNANCE_RESPONSE=$(curl -s "http://localhost:$P1_HTTP/governance/confirmations?party_id=$PARTY_ID")
 REMAINING_VOTE_ACTIONS=$(echo "$GOVERNANCE_RESPONSE" | jq \
-    '[.domain_actions[] | select(.action_label == "GenericVote")] | length')
+    '[(.domain_actions // [])[] | select(.action_label == "GenericVote")] | length')
 
 echo "  Remaining GenericVote actions: $REMAINING_VOTE_ACTIONS"
 
