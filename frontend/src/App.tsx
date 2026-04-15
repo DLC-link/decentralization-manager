@@ -21,7 +21,7 @@ import { Header } from "./components/Header";
 import { PartyCard } from "./components/PartyCard";
 import { NodeConfigAccordion } from "./components/NodeConfigAccordion";
 import { NetworkConfigAccordion } from "./components/NetworkConfigAccordion";
-import { VettedPackagesAccordion } from "./components/VettedPackagesAccordion";
+import { PackagesPanel } from "./components/PackagesPanel";
 import { LoadingSkeleton, ConfigTabSkeleton } from "./components/LoadingSkeleton";
 import { DarsDialog } from "./components/DarsDialog";
 import { OnboardingDialog } from "./components/OnboardingDialog";
@@ -31,7 +31,6 @@ import { API_BASE, ADMIN_ACCESS, OPERATOR_API_URLS } from "./constants";
 import type {
   DecentralizedParty,
   DecentralizedPartiesResponse,
-  VettedPackageInfo,
   NodeConfig,
   NetworkConfig,
   ParticipantStatus,
@@ -45,7 +44,6 @@ import type {
 const App = () => {
   const [activeTab, setActiveTab] = useState(0);
   const [parties, setParties] = useState<DecentralizedParty[]>([]);
-  const [vettedPackages, setVettedPackages] = useState<VettedPackageInfo[]>([]);
   const [nodeConfig, setNodeConfig] = useState<NodeConfig | null>(null);
   const [networkConfig, setNetworkConfig] = useState<NetworkConfig | null>(
     null,
@@ -57,6 +55,7 @@ const App = () => {
   const [authStatuses, setAuthStatuses] = useState<PartyAuthStatus[]>([]);
   const [onboardingDialogOpen, setOnboardingDialogOpen] = useState(false);
   const [darsDialogOpen, setDarsDialogOpen] = useState(false);
+  const [uploadDarsDialogOpen, setUploadDarsDialogOpen] = useState(false);
   const [_pendingInvitations, setPendingInvitations] = useState<
     PendingInvitation[]
   >([]);
@@ -99,7 +98,6 @@ const App = () => {
       if (res.ok) {
         const data: DecentralizedPartiesResponse = await res.json();
         setParties(data.parties);
-        setVettedPackages(data.vetted_packages ?? []);
         setPartiesSource(data.source ?? "live");
       } else {
         showSnackbar("Failed to refresh parties");
@@ -181,7 +179,6 @@ const App = () => {
           await partiesRes.json();
 
         setParties(partiesData.parties);
-        setVettedPackages(partiesData.vetted_packages ?? []);
         setPartiesSource(partiesData.source ?? "live");
 
         if (authStatusRes.ok) {
@@ -389,7 +386,6 @@ const App = () => {
                     onAuthRefresh={refreshAuthStatus}
                     operatorParty={operatorParty}
                     network={nodeConfig?.canton.network}
-                    vettedPackages={vettedPackages}
                   />
                 ))}
               </>
@@ -397,9 +393,9 @@ const App = () => {
 
             {/* Tab 1: Package Management */}
             {activeTab === 1 && (
-              <VettedPackagesAccordion
-                packages={vettedPackages}
-                onUploadDars={() => setDarsDialogOpen(true)}
+              <PackagesPanel
+                onUploadDars={() => setUploadDarsDialogOpen(true)}
+                onDistributeDars={() => setDarsDialogOpen(true)}
               />
             )}
 
@@ -438,6 +434,14 @@ const App = () => {
               open={darsDialogOpen}
               onClose={() => setDarsDialogOpen(false)}
               onComplete={refreshParties}
+              mode="distribute"
+            />
+
+            <DarsDialog
+              open={uploadDarsDialogOpen}
+              onClose={() => setUploadDarsDialogOpen(false)}
+              onComplete={refreshParties}
+              mode="upload"
             />
 
             <OnboardingDialog

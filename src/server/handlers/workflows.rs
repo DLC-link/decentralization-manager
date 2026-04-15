@@ -20,7 +20,8 @@ use crate::{
         types::{
             ContractsRequest, DarsRequest, ErrorResponse, HttpWorkflowState, KickRequest,
             KickResponse, KickStatus, ListenerPauseGuard, OnboardingRequest, OnboardingResponse,
-            OnboardingStatus, WorkflowProgress, WorkflowResponse, WorkflowStatusResponse,
+            OnboardingStatus, SuccessResponse, WorkflowProgress, WorkflowResponse,
+            WorkflowStatusResponse,
         },
     },
     workflow,
@@ -39,7 +40,7 @@ pub type OnboardingWorkflowState = HttpWorkflowState<OnboardingStatus>;
 /// State for tracking contracts workflow
 pub type ContractsWorkflowState = HttpWorkflowState<WorkflowProgress>;
 
-/// State for tracking DARs upload workflow
+/// State for tracking DARs distribution workflow
 pub type DarsWorkflowState = HttpWorkflowState<WorkflowProgress>;
 
 // ============================================================================
@@ -715,19 +716,54 @@ pub async fn get_contracts_status(
 }
 
 // ============================================================================
-// DARs Upload Workflow
+// DARs Upload (Local)
 // ============================================================================
 
-/// Start a DARs upload workflow to distribute DARs across all participants
+/// Upload DAR files to the current node only (no distribution to peers)
 #[utoipa::path(
     tag = "Workflows",
     request_body = DarsRequest,
     responses(
-        (status = 202, description = "DARs upload workflow started", body = WorkflowResponse),
+        (status = 200, description = "DARs uploaded to local node", body = SuccessResponse),
+        (status = 500, description = "Upload failed", body = ErrorResponse)
+    )
+)]
+#[post("/dars/upload")]
+pub async fn upload_dars_local(
+    data: web::Data<AppState>,
+    body: web::Json<DarsRequest>,
+) -> impl Responder {
+    match workflow::contracts::upload_dars(&data.config, &body.dar_files).await {
+        Ok(()) => {
+            tracing::info!(
+                "Uploaded {} DAR file(s) to local node",
+                body.dar_files.len()
+            );
+            HttpResponse::Ok().json(SuccessResponse { success: true })
+        }
+        Err(e) => {
+            tracing::error!("Failed to upload DARs to local node: {e}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to upload DARs: {e}"),
+            })
+        }
+    }
+}
+
+// ============================================================================
+// DARs Distribution Workflow
+// ============================================================================
+
+/// Distribute DARs across all participants via Noise protocol
+#[utoipa::path(
+    tag = "Workflows",
+    request_body = DarsRequest,
+    responses(
+        (status = 202, description = "DARs distribution workflow started", body = WorkflowResponse),
         (status = 409, description = "Workflow already in progress", body = ErrorResponse)
     )
 )]
-#[post("/dars")]
+#[post("/dars/distribute")]
 pub async fn start_dars(
     data: web::Data<AppState>,
     dars_state: web::Data<Arc<DarsWorkflowState>>,
@@ -738,7 +774,7 @@ pub async fn start_dars(
         let status = dars_state.status.read().await;
         if *status == WorkflowProgress::InProgress {
             return HttpResponse::Conflict().json(ErrorResponse {
-                error: "A DARs upload workflow is already in progress".to_string(),
+                error: "A DARs distribution workflow is already in progress".to_string(),
             });
         }
     }
@@ -756,7 +792,7 @@ pub async fn start_dars(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let instance_name = format!("dars-upload-{timestamp}");
+    let instance_name = format!("dars-distribute-{timestamp}");
     let dars_config = workflow::DarsConfig {
         dar_files: body.dar_files.clone(),
         instance_name,
@@ -807,30 +843,30 @@ pub async fn start_dars(
         match result {
             Ok(_) => {
                 *status = WorkflowProgress::Completed;
-                tracing::info!("DARs upload workflow completed successfully");
+                tracing::info!("DARs distribution workflow completed successfully");
             }
             Err(e) => {
                 *status = WorkflowProgress::Failed;
                 *error = Some(format!("{e}"));
-                tracing::error!("DARs upload workflow failed: {e}");
+                tracing::error!("DARs distribution workflow failed: {e}");
             }
         }
     });
 
     HttpResponse::Accepted().json(WorkflowResponse {
         status: WorkflowProgress::InProgress,
-        message: "DARs upload workflow started".to_string(),
+        message: "DARs distribution workflow started".to_string(),
     })
 }
 
-/// Get the current status of the DARs upload workflow
+/// Get the current status of the DARs distribution workflow
 #[utoipa::path(
     tag = "Workflows",
     responses(
-        (status = 200, description = "DARs upload workflow status", body = WorkflowStatusResponse)
+        (status = 200, description = "DARs distribution workflow status", body = WorkflowStatusResponse)
     )
 )]
-#[get("/dars/status")]
+#[get("/dars/distribute/status")]
 pub async fn get_dars_status(dars_state: web::Data<Arc<DarsWorkflowState>>) -> impl Responder {
     let status = dars_state.status.read().await;
     let error = dars_state.error.read().await;

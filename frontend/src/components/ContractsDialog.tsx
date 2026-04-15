@@ -1026,8 +1026,20 @@ export const ContractsDialog = ({
   defaultOperatorParty,
   knownPackageIds = [],
   deployedContracts = [],
-  vettedPackages = [],
+  vettedPackages: initialVettedPackages = [],
 }: ContractsDialogProps) => {
+  const [vettedPackages, setVettedPackages] = useState(initialVettedPackages);
+
+  // Fetch fresh vetted packages when dialog opens
+  useEffect(() => {
+    if (open) {
+      fetch(`${API_BASE}/packages/vetted`)
+        .then((res) => (res.ok ? res.json() : []))
+        .then((data: VettedPackageInfo[]) => setVettedPackages(data))
+        .catch(() => {});
+    }
+  }, [open]);
+
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<ContractsStatusResponse | null>(null);
