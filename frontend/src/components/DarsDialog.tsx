@@ -20,9 +20,16 @@ interface DarsDialogProps {
   open: boolean;
   onClose: () => void;
   onComplete: () => void;
+  /** "upload" = local node only, "distribute" = all peers (default) */
+  mode?: "upload" | "distribute";
 }
 
-export const DarsDialog = ({ open, onClose, onComplete }: DarsDialogProps) => {
+export const DarsDialog = ({
+  open,
+  onClose,
+  onComplete,
+  mode = "distribute",
+}: DarsDialogProps) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<DarsStatusResponse | null>(null);
@@ -40,7 +47,7 @@ export const DarsDialog = ({ open, onClose, onComplete }: DarsDialogProps) => {
 
   const pollStatus = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/dars/status`);
+      const res = await fetch(`${API_BASE}/dars/distribute/status`);
       if (res.ok) {
         const data: DarsStatusResponse = await res.json();
         setStatus(data);
@@ -113,7 +120,11 @@ export const DarsDialog = ({ open, onClose, onComplete }: DarsDialogProps) => {
     }
 
     try {
-      const res = await fetch(`${API_BASE}/dars`, {
+      const endpoint =
+        mode === "upload"
+          ? `${API_BASE}/dars/upload`
+          : `${API_BASE}/dars/distribute`;
+      const res = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ dar_files: darFiles }),
@@ -121,10 +132,17 @@ export const DarsDialog = ({ open, onClose, onComplete }: DarsDialogProps) => {
 
       if (!res.ok) {
         const data = await res.json();
-        throw new Error(data.error || "Failed to start DARs upload workflow");
+        throw new Error(data.error || "Failed to upload DARs");
       }
 
-      setStatus({ status: "inprogress" });
+      if (mode === "upload") {
+        // Local upload is synchronous — done immediately
+        setStatus({ status: "completed" });
+        setLoading(false);
+        onComplete();
+      } else {
+        setStatus({ status: "inprogress" });
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error");
       setLoading(false);
@@ -143,35 +161,42 @@ export const DarsDialog = ({ open, onClose, onComplete }: DarsDialogProps) => {
 
   return (
     <Dialog open={open} onClose={handleClose} maxWidth="sm" fullWidth>
-      <DialogTitle>Upload DARs</DialogTitle>
+      <DialogTitle>
+        {mode === "upload" ? "Upload DARs" : "Distribute DARs"}
+      </DialogTitle>
       <DialogContent>
         <Box sx={{ display: "flex", flexDirection: "column", gap: 2, mt: 1 }}>
           {error && <Alert severity="error">{error}</Alert>}
 
           {isInProgress && (
             <Alert severity="info" icon={<CircularProgress size={20} />}>
-              DARs upload in progress... Distributing to all participants.
+              {mode === "upload"
+                ? "Uploading DARs to this node..."
+                : "Distributing DARs to all participants..."}
             </Alert>
           )}
 
           {isCompleted && (
             <Alert severity="success">
-              DARs have been successfully uploaded to all participants!
+              {mode === "upload"
+                ? "DARs uploaded to this node successfully!"
+                : "DARs distributed to all participants successfully!"}
             </Alert>
           )}
 
           {isFailed && (
             <Alert severity="error">
-              DARs upload failed: {status.error || "Unknown error"}
+              {mode === "upload" ? "Upload" : "Distribution"} failed:{" "}
+              {status.error || "Unknown error"}
             </Alert>
           )}
 
           {!isInProgress && !isCompleted && (
             <>
               <Typography variant="body2" color="text.secondary">
-                Upload Daml Archive (DAR) files to distribute across all
-                participants. This will coordinate with other nodes to ensure
-                all participants have the same packages installed.
+                {mode === "upload"
+                  ? "Upload Daml Archive (DAR) files to this node only."
+                  : "Distribute Daml Archive (DAR) files to all participants. This will coordinate with other nodes via Noise protocol."}
               </Typography>
 
               <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
@@ -246,7 +271,13 @@ export const DarsDialog = ({ open, onClose, onComplete }: DarsDialogProps) => {
             color="primary"
             disabled={loading || darFiles.length === 0}
           >
-            {loading ? <CircularProgress size={20} /> : "Upload DARs"}
+            {loading ? (
+              <CircularProgress size={20} />
+            ) : mode === "upload" ? (
+              "Upload DARs"
+            ) : (
+              "Distribute DARs"
+            )}
           </Button>
         ) : null}
       </DialogActions>

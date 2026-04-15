@@ -844,8 +844,10 @@ Each participant's Ledger API user needs:
 | GET | `/kick/status` | Get kick progress | -- |
 | POST | `/contracts` | Start contracts workflow | `{ "decentralized_party_id": "...", "participant_ids": [...], ... }` |
 | GET | `/contracts/status` | Get contracts progress | -- |
-| POST | `/dars` | Start DARs upload workflow | `{ "dar_files": [{ "filename": "...", "data": "<base64>" }] }` |
-| GET | `/dars/status` | Get DARs workflow progress | -- |
+| POST | `/dars/upload` | Upload DARs to current node only | `{ "dar_files": [{ "filename": "...", "data": "<base64>" }] }` |
+| POST | `/dars/distribute` | Distribute DARs to all participants | `{ "dar_files": [{ "filename": "...", "data": "<base64>" }] }` |
+| GET | `/dars/distribute/status` | Get DARs distribution progress | -- |
+| GET | `/packages/vetted` | Get packages uploaded on this node | -- |
 
 ### Invitations
 

@@ -94,7 +94,6 @@ export type ResponseSource = "live" | "cache";
 
 export interface DecentralizedPartiesResponse {
   parties: DecentralizedParty[];
-  vetted_packages?: VettedPackageInfo[];
   source?: ResponseSource;
   refreshing?: boolean;
 }

@@ -25,15 +25,26 @@ import type {
   PeerPackageResult,
 } from "../types";
 
-interface VettedPackagesAccordionProps {
-  packages: VettedPackageInfo[];
+interface PackagesPanelProps {
   onUploadDars?: () => void;
+  onDistributeDars?: () => void;
 }
 
-export const VettedPackagesAccordion = ({
-  packages,
+export const PackagesPanel = ({
   onUploadDars,
-}: VettedPackagesAccordionProps) => {
+  onDistributeDars,
+}: PackagesPanelProps) => {
+  const [packages, setPackages] = useState<VettedPackageInfo[]>([]);
+  const [loadingPackages, setLoadingPackages] = useState(true);
+
+  useEffect(() => {
+    setLoadingPackages(true);
+    fetch(`${API_BASE}/packages/vetted`)
+      .then((res) => (res.ok ? res.json() : []))
+      .then((data: VettedPackageInfo[]) => setPackages(data))
+      .catch(() => {})
+      .finally(() => setLoadingPackages(false));
+  }, []);
   const [canScrollUp, setCanScrollUp] = useState(false);
   const [canScrollDown, setCanScrollDown] = useState(false);
   const [comparison, setComparison] = useState<PeerPackageComparison | null>(
@@ -132,7 +143,9 @@ export const VettedPackagesAccordion = ({
       <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 2, flexShrink: 0 }}>
         <Box>
           <Typography variant="body2" color="text.secondary">
-            {packages.length} packages vetted on this participant
+            {loadingPackages
+              ? "Loading vetted packages..."
+              : `${packages.length} packages vetted on this participant`}
           </Typography>
         </Box>
         <Box sx={{ display: "flex", gap: 1 }}>
@@ -160,6 +173,17 @@ export const VettedPackagesAccordion = ({
               onClick={onUploadDars}
             >
               Upload DARs
+            </Button>
+          )}
+          {onDistributeDars && (
+            <Button
+              variant="contained"
+              size="small"
+              color="secondary"
+              startIcon={<CloudUploadIcon />}
+              onClick={onDistributeDars}
+            >
+              Distribute DARs
             </Button>
           )}
         </Box>

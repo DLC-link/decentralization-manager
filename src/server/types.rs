@@ -181,8 +181,6 @@ pub enum ResponseSource {
 #[derive(Deserialize, Serialize, utoipa::ToSchema)]
 pub struct DecentralizedPartiesResponse {
     pub parties: Vec<DecentralizedParty>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub vetted_packages: Vec<VettedPackageInfo>,
     #[serde(default)]
     pub source: ResponseSource,
     /// Whether a background refresh from Canton is currently in progress
