@@ -2764,6 +2764,11 @@ export const GovernanceSection = ({
                   <TableRow key={da.proposal_cid} sx={zebraRow(idx)}>
                     <TableCell>
                       <Typography variant="body2">{da.action_label}</Typography>
+                      {da.description && (
+                        <Typography variant="caption" color="text.primary" sx={{ display: "block" }}>
+                          {da.description}
+                        </Typography>
+                      )}
                       <Typography variant="caption" color="text.secondary" sx={{ fontFamily: "monospace" }}>
                         {da.proposal_cid.slice(0, 16)}...
                       </Typography>

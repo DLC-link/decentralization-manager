@@ -285,6 +285,7 @@ export interface GovernanceAction {
 export interface DomainGovernanceAction {
   proposal_cid: string;
   action_label: string;
+  description?: string;
   confirmations: GovernanceConfirmation[];
   confirmation_count: number;
   can_execute: boolean;
