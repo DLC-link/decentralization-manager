@@ -40,7 +40,7 @@ pub type OnboardingWorkflowState = HttpWorkflowState<OnboardingStatus>;
 /// State for tracking contracts workflow
 pub type ContractsWorkflowState = HttpWorkflowState<WorkflowProgress>;
 
-/// State for tracking DARs upload workflow
+/// State for tracking DARs distribution workflow
 pub type DarsWorkflowState = HttpWorkflowState<WorkflowProgress>;
 
 // ============================================================================
@@ -774,7 +774,7 @@ pub async fn start_dars(
         let status = dars_state.status.read().await;
         if *status == WorkflowProgress::InProgress {
             return HttpResponse::Conflict().json(ErrorResponse {
-                error: "A DARs upload workflow is already in progress".to_string(),
+                error: "A DARs distribution workflow is already in progress".to_string(),
             });
         }
     }
@@ -792,7 +792,7 @@ pub async fn start_dars(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let instance_name = format!("dars-upload-{timestamp}");
+    let instance_name = format!("dars-distribute-{timestamp}");
     let dars_config = workflow::DarsConfig {
         dar_files: body.dar_files.clone(),
         instance_name,
@@ -843,23 +843,23 @@ pub async fn start_dars(
         match result {
             Ok(_) => {
                 *status = WorkflowProgress::Completed;
-                tracing::info!("DARs upload workflow completed successfully");
+                tracing::info!("DARs distribution workflow completed successfully");
             }
             Err(e) => {
                 *status = WorkflowProgress::Failed;
                 *error = Some(format!("{e}"));
-                tracing::error!("DARs upload workflow failed: {e}");
+                tracing::error!("DARs distribution workflow failed: {e}");
             }
         }
     });
 
     HttpResponse::Accepted().json(WorkflowResponse {
         status: WorkflowProgress::InProgress,
-        message: "DARs upload workflow started".to_string(),
+        message: "DARs distribution workflow started".to_string(),
     })
 }
 
-/// Get the current status of the DARs upload workflow
+/// Get the current status of the DARs distribution workflow
 #[utoipa::path(
     tag = "Workflows",
     responses(

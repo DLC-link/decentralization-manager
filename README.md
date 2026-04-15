@@ -288,8 +288,10 @@ curl http://localhost:8081/party-config/decparty::1220abc...
 | `/packages` | GET | Returns configured package IDs for a party |
 | `/amulet-rules` | GET | Returns AmuletRules contract |
 | `/token-standard-contracts` | POST | Queries token standard contracts |
-| `/dars` | POST | Starts DARs upload workflow |
-| `/dars/status` | GET | Returns DARs workflow progress |
+| `/dars/upload` | POST | Uploads DARs to the current node only |
+| `/dars/distribute` | POST | Distributes DARs across all participants |
+| `/dars/distribute/status` | GET | Returns DARs distribution workflow progress |
+| `/packages/vetted` | GET | Returns packages uploaded on this node |
 
 ## Development
 

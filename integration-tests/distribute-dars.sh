@@ -22,13 +22,13 @@ cat > "$DARS_REQUEST_FILE" <<EOF
 EOF
 
 echo "Uploading DARs to participant-1 (local)..."
-UPLOAD_RESPONSE=$(curl -s -X POST "http://localhost:$P1_HTTP/dars/upload" \
+UPLOAD_RESPONSE=$(curl -sf -X POST "http://localhost:$P1_HTTP/dars/upload" \
     -H "Content-Type: application/json" \
     -d @"$DARS_REQUEST_FILE")
 echo "  Response: $UPLOAD_RESPONSE"
 
 echo "Distributing DARs to all participants..."
-curl -s -X POST "http://localhost:$P1_HTTP/dars/distribute" \
+curl -sf -X POST "http://localhost:$P1_HTTP/dars/distribute" \
     -H "Content-Type: application/json" \
     -d @"$DARS_REQUEST_FILE"
 echo ""
