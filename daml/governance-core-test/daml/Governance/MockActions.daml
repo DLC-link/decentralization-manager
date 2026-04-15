@@ -34,6 +34,7 @@ template MockProposal
       view = GovernableActionView with
         governanceParty
         actionLabel = label
+        description = payload
 
       executeImpl = do
         create MockActionResult with
@@ -56,6 +57,7 @@ template MockFailingProposal
       view = GovernableActionView with
         governanceParty
         actionLabel = "MockFailing"
+        description = "Mock action that always fails"
 
       executeImpl = do
         abort "Mock action intentionally failed"
@@ -91,6 +93,7 @@ template MockAuthorityProposal
       view = GovernableActionView with
         governanceParty
         actionLabel = "MockAuthorityTest"
+        description = "Mock authority flow test"
 
       executeImpl = do
         exercise resourceCid MockProtectedResource_Update with newValue

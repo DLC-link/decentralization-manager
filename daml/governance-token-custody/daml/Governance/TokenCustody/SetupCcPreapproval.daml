@@ -35,6 +35,7 @@ template SetupCcPreapprovalProposal
       view = GovernableActionView with
         governanceParty
         actionLabel = "SetupCcPreapproval"
+        description = "Set up Canton Coin transfer preapproval"
 
       executeImpl = do
         create TransferPreapprovalProposal with

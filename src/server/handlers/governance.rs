@@ -350,23 +350,39 @@ pub async fn propose_action(
     };
 
     let packages = get_packages_for_party(&data, &party_id.to_string()).await;
-    let governance_token_custody_pkg = match packages.governance_token_custody.as_deref() {
-        Some(pkg) => pkg,
-        None => {
-            return HttpResponse::BadRequest().json(ErrorResponse {
-                error: "governance_token_custody package not configured".to_string(),
-            });
+
+    let (package_source, module_name, entity_name, create_args) =
+        action_serializer::build_proposal_create_args(
+            &party_id.to_string(),
+            &member_party_id,
+            &body.proposal,
+        );
+
+    let package_id = match package_source {
+        action_serializer::ProposalPackage::GovernanceCore => {
+            match packages.governance_core.as_deref() {
+                Some(pkg) => pkg,
+                None => {
+                    return HttpResponse::BadRequest().json(ErrorResponse {
+                        error: "governance_core package not configured".to_string(),
+                    });
+                }
+            }
+        }
+        action_serializer::ProposalPackage::GovernanceTokenCustody => {
+            match packages.governance_token_custody.as_deref() {
+                Some(pkg) => pkg,
+                None => {
+                    return HttpResponse::BadRequest().json(ErrorResponse {
+                        error: "governance_token_custody package not configured".to_string(),
+                    });
+                }
+            }
         }
     };
 
-    let (module_name, entity_name, create_args) = action_serializer::build_proposal_create_args(
-        &party_id.to_string(),
-        &member_party_id,
-        &body.proposal,
-    );
-
     let template_id = Identifier {
-        package_id: governance_token_custody_pkg.to_string(),
+        package_id: package_id.to_string(),
         module_name: module_name.to_string(),
         entity_name: entity_name.to_string(),
     };

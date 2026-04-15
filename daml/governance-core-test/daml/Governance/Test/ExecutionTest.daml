@@ -9,8 +9,8 @@ import DA.Time (minutes)
 import Daml.Script
 
 import Governance.Action (GovernableAction)
-import Governance.Rules
 import Governance.MockActions
+import Governance.Rules
 import Governance.TestUtils
 
 -- | Full flow: create proposal → confirm → execute → verify result.
@@ -26,12 +26,19 @@ testFullExecutionFlow = script do
 
   let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
 
-  confirmAndExecute parties rulesCid proposalIfaceCid
+  resultCid <- confirmAndExecute parties rulesCid proposalIfaceCid
     [parties.member1, parties.member2] parties.member3
 
-  [(_, result)] <- query @MockActionResult parties.governanceParty
-  result.label === "TestAction"
-  result.payload === "hello governance"
+  -- Verify MockActionResult (created by executeImpl)
+  [(_, mockResult)] <- query @MockActionResult parties.governanceParty
+  mockResult.label === "TestAction"
+  mockResult.payload === "hello governance"
+
+  -- Verify GovernanceExecutionResult (created by GovernanceRules)
+  Some executionResult <- queryContractId parties.governanceParty resultCid
+  executionResult.actionLabel === "TestAction"
+  executionResult.description === "hello governance"
+  executionResult.executor === parties.member3
 
   proposals <- query @MockProposal parties.governanceParty
   proposals === []

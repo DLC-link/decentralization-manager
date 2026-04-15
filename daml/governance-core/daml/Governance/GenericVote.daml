@@ -1,0 +1,34 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Generic text-based voting proposal.
+-- Allows governance members to propose a free-text description for a vote.
+-- The execute step has no on-chain side-effect — the vote outcome is recorded
+-- solely via the GovernanceExecutionResult contract created by GovernanceRules.
+module Governance.GenericVote where
+
+import Governance.Action
+
+-- | A proposal for a generic text-based governance vote.
+-- Members confirm (vote) on the description text. When threshold is met
+-- and the action is executed, a GovernanceExecutionResult is created
+-- containing the description as a permanent on-chain record.
+template GenericVoteProposal
+  with
+    governanceParty : Party
+      -- ^ The governance party this vote belongs to.
+    proposer : Party
+      -- ^ The member who proposed this vote.
+    description : Text
+      -- ^ The text content of the vote (e.g., "We should switch to dark theme").
+  where
+    signatory proposer
+    observer governanceParty
+
+    interface instance GovernableAction for GenericVoteProposal where
+      view = GovernableActionView with
+        governanceParty
+        actionLabel = "GenericVote"
+        description
+
+      executeImpl = pure ()

@@ -1,0 +1,85 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Tests for the GenericVoteProposal template.
+module Governance.Test.GenericVoteTest where
+
+import DA.Assert
+import Daml.Script
+
+import Governance.Action (GovernableAction)
+import Governance.GenericVote
+import Governance.TestUtils
+
+-- | Full flow: propose a generic vote → confirm → execute → verify result.
+testGenericVoteFullFlow = script do
+  parties <- allocateTestParties
+  rulesCid <- createTestGovernance parties
+
+  proposalCid <- submit parties.member1 $ createCmd GenericVoteProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    description = "We should switch to dark theme for our website"
+
+  let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
+
+  resultCid <- confirmAndExecute parties rulesCid proposalIfaceCid
+    [parties.member1, parties.member2] parties.member3
+
+  -- Verify result contract records the vote description
+  Some result <- queryContractId parties.governanceParty resultCid
+  result.actionLabel === "GenericVote"
+  result.description === "We should switch to dark theme for our website"
+  result.executor === parties.member3
+
+  -- Verify proposal is consumed after execution
+  proposals <- query @GenericVoteProposal parties.governanceParty
+  proposals === []
+
+-- | Generic vote with all members confirming.
+testGenericVoteAllConfirm = script do
+  parties <- allocateTestParties
+  rulesCid <- createTestGovernance parties
+
+  proposalCid <- submit parties.member2 $ createCmd GenericVoteProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member2
+    description = "Allocate budget for new infrastructure"
+
+  let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
+
+  resultCid <- confirmAndExecute parties rulesCid proposalIfaceCid
+    [parties.member1, parties.member2, parties.member3] parties.member1
+
+  Some result <- queryContractId parties.governanceParty resultCid
+  result.description === "Allocate budget for new infrastructure"
+
+-- | Multiple generic votes can coexist independently.
+testMultipleGenericVotes = script do
+  parties <- allocateTestParties
+  rulesCid <- createTestGovernance parties
+
+  proposalA <- submit parties.member1 $ createCmd GenericVoteProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    description = "Proposal A: expand to new market"
+
+  proposalB <- submit parties.member2 $ createCmd GenericVoteProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member2
+    description = "Proposal B: hire more developers"
+
+  let proposalACid = toInterfaceContractId @GovernableAction proposalA
+  let proposalBCid = toInterfaceContractId @GovernableAction proposalB
+
+  resultACid <- confirmAndExecute parties rulesCid proposalACid
+    [parties.member1, parties.member2] parties.member1
+
+  resultBCid <- confirmAndExecute parties rulesCid proposalBCid
+    [parties.member2, parties.member3] parties.member3
+
+  Some resultA <- queryContractId parties.governanceParty resultACid
+  resultA.description === "Proposal A: expand to new market"
+
+  Some resultB <- queryContractId parties.governanceParty resultBCid
+  resultB.description === "Proposal B: hire more developers"

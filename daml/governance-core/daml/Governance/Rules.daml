@@ -14,6 +14,7 @@ import Splice.Util (require)
 
 import Governance.Action
 import Governance.Confirmation
+import Governance.ExecutionResult
 
 
 -- ============================================================================
@@ -299,7 +300,9 @@ template GovernanceRules
           expiresAt = now `addRelTime` actionConfirmationTimeout
 
     -- | Execute a confirmed action proposal after threshold confirmations are collected.
-    nonconsuming choice GovernanceRules_ExecuteConfirmedAction : ()
+    -- Creates a GovernanceExecutionResult contract as an on-chain audit trail.
+    nonconsuming choice GovernanceRules_ExecuteConfirmedAction
+        : ContractId GovernanceExecutionResult
       with
         executor : Party
         actionProposalCid : ContractId GovernableAction
@@ -321,8 +324,20 @@ template GovernanceRules
         require "Enough confirmations to execute action"
           (length valid >= threshold)
 
+        -- Capture proposal metadata before execution consumes the contract
+        actionView <- view <$> fetch actionProposalCid
+
         -- Execute: governanceParty's authority flows via exercise chain
         exercise actionProposalCid GovernableAction_Execute
+
+        -- Create audit trail
+        create GovernanceExecutionResult with
+          governanceParty
+          actionLabel = actionView.actionLabel
+          description = actionView.description
+          executor
+          confirmers = map (.confirmer) valid
+          executedAt = now
 
     -- Note: Proposal cancellation is NOT a governance choice. Proposers cancel
     -- their own proposals directly via template-specific choices. Governance-level

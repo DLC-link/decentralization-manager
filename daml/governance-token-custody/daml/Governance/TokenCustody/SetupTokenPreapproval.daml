@@ -36,6 +36,7 @@ template SetupTokenPreapprovalProposal
       view = GovernableActionView with
         governanceParty
         actionLabel = "SetupTokenPreapproval"
+        description = "Set up utility token transfer preapproval"
 
       executeImpl = do
         create TransferPreapproval with

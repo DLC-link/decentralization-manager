@@ -35,6 +35,7 @@ template AcceptTransferProposal
       view = GovernableActionView with
         governanceParty
         actionLabel = "AcceptTransfer"
+        description = "Accept incoming token transfer"
 
       executeImpl = do
         exercise transferInstructionCid TransferInstruction_Accept with
