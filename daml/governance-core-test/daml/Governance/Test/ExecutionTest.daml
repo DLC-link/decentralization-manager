@@ -9,39 +9,69 @@ import DA.Time (minutes)
 import Daml.Script
 
 import Governance.Action (GovernableAction)
+import Governance.ExecutionResult
 import Governance.MockActions
 import Governance.Rules
 import Governance.TestUtils
 
--- | Full flow: create proposal → confirm → execute → verify result.
-testFullExecutionFlow = script do
+import TestHarness
+
+-- ============================================================================
+-- Fixtures & Results for GWT tests
+-- ============================================================================
+
+data ExecutionFixture = ExecutionFixture
+  with
+    parties : TestParties
+    rulesCid : ContractId GovernanceRules
+  deriving (Eq, Show)
+
+data FullFlowResult = FullFlowResult
+  with
+    mockResult : MockActionResult
+    executionResult : GovernanceExecutionResult
+    remainingProposals : [(ContractId MockProposal, MockProposal)]
+  deriving (Eq, Show)
+
+given_governance_setup : Script ExecutionFixture
+given_governance_setup = do
   parties <- allocateTestParties
   rulesCid <- createTestGovernance parties
+  pure ExecutionFixture with ..
 
-  proposalCid <- submit parties.member1 $ createCmd MockProposal with
-    governanceParty = parties.governanceParty
-    proposer = parties.member1
+when_proposal_confirmed_and_executed : ExecutionFixture -> Script FullFlowResult
+when_proposal_confirmed_and_executed f = do
+  proposalCid <- submit f.parties.member1 $ createCmd MockProposal with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
     label = "TestAction"
     payload = "hello governance"
 
   let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
 
-  resultCid <- confirmAndExecute parties rulesCid proposalIfaceCid
-    [parties.member1, parties.member2] parties.member3
+  resultCid <- confirmAndExecute f.parties f.rulesCid proposalIfaceCid
+    [f.parties.member1, f.parties.member2] f.parties.member3
 
-  -- Verify MockActionResult (created by executeImpl)
-  [(_, mockResult)] <- query @MockActionResult parties.governanceParty
-  mockResult.label === "TestAction"
-  mockResult.payload === "hello governance"
+  [(_, mockResult)] <- query @MockActionResult f.parties.governanceParty
+  Some executionResult <- queryContractId f.parties.governanceParty resultCid
+  remainingProposals <- query @MockProposal f.parties.governanceParty
+  pure FullFlowResult with ..
 
-  -- Verify GovernanceExecutionResult (created by GovernanceRules)
-  Some executionResult <- queryContractId parties.governanceParty resultCid
-  executionResult.actionLabel === "TestAction"
-  executionResult.description === "hello governance"
-  executionResult.executor === parties.member3
+then_action_and_result_created : ExecutionFixture -> FullFlowResult -> Script Failures
+then_action_and_result_created f r = pure $
+  shouldBe "mock label" "TestAction" r.mockResult.label <>
+  shouldBe "mock payload" "hello governance" r.mockResult.payload <>
+  shouldBe "result actionLabel" "TestAction" r.executionResult.actionLabel <>
+  shouldBe "result description" "hello governance" r.executionResult.description <>
+  shouldBe "result executor" f.parties.member3 r.executionResult.executor <>
+  shouldBe "proposal consumed" 0 (length r.remainingProposals)
 
-  proposals <- query @MockProposal parties.governanceParty
-  proposals === []
+-- | Full flow: create proposal → confirm → execute → verify result.
+test_when_proposal_executed_then_action_and_result_created = script do
+  run Test with
+    given = given_governance_setup
+    when = when_proposal_confirmed_and_executed
+    then_ = then_action_and_result_created
 
 -- | Execution with all 3 members confirming (more than threshold).
 testExecutionWithExtraConfirmations = script do

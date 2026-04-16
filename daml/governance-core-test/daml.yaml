@@ -9,6 +9,7 @@ dependencies:
 data-dependencies:
   - ../governance-core/.daml/dist/governance-core-v0-rc2-0.1.0.dar
   - ../dars/splice-util-0.1.4.dar
+  - ../dars/testlib-0.1.0.dar
 build-options:
   - --target=2.2
   - -Wno-upgrade-interfaces
