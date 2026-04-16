@@ -4,82 +4,148 @@
 -- | Tests for the GenericVoteProposal template.
 module Governance.Test.GenericVoteTest where
 
-import DA.Assert
 import Daml.Script
 
 import Governance.Action (GovernableAction)
+import Governance.ExecutionResult
 import Governance.GenericVote
+import Governance.Rules (GovernanceRules)
 import Governance.TestUtils
 
--- | Full flow: propose a generic vote → confirm → execute → verify result.
-testGenericVoteFullFlow = script do
+import TestHarness
+
+-- ============================================================================
+-- Fixtures
+-- ============================================================================
+
+data GenericVoteFixture = GenericVoteFixture
+  with
+    parties : TestParties
+    rulesCid : ContractId GovernanceRules
+  deriving (Eq, Show)
+
+data VoteResult = VoteResult
+  with
+    executionResult : GovernanceExecutionResult
+    remainingProposals : [(ContractId GenericVoteProposal, GenericVoteProposal)]
+  deriving (Eq, Show)
+
+data MultiVoteResult = MultiVoteResult
+  with
+    resultA : GovernanceExecutionResult
+    resultB : GovernanceExecutionResult
+  deriving (Eq, Show)
+
+-- ============================================================================
+-- Given
+-- ============================================================================
+
+given_governance_setup : Script GenericVoteFixture
+given_governance_setup = do
   parties <- allocateTestParties
   rulesCid <- createTestGovernance parties
+  pure GenericVoteFixture with ..
 
-  proposalCid <- submit parties.member1 $ createCmd GenericVoteProposal with
-    governanceParty = parties.governanceParty
-    proposer = parties.member1
+-- ============================================================================
+-- When
+-- ============================================================================
+
+when_vote_proposed_confirmed_executed : GenericVoteFixture -> Script VoteResult
+when_vote_proposed_confirmed_executed f = do
+  proposalCid <- submit f.parties.member1 $ createCmd GenericVoteProposal with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
     description = "We should switch to dark theme for our website"
 
   let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
 
-  resultCid <- confirmAndExecute parties rulesCid proposalIfaceCid
-    [parties.member1, parties.member2] parties.member3
+  resultCid <- confirmAndExecute f.parties f.rulesCid proposalIfaceCid
+    [f.parties.member1, f.parties.member2] f.parties.member3
 
-  -- Verify result contract records the vote description
-  Some result <- queryContractId parties.governanceParty resultCid
-  result.actionLabel === "GenericVote"
-  result.description === "We should switch to dark theme for our website"
-  result.executor === parties.member3
+  Some executionResult <- queryContractId f.parties.governanceParty resultCid
+  remainingProposals <- query @GenericVoteProposal f.parties.governanceParty
+  pure VoteResult with ..
 
-  -- Verify proposal is consumed after execution
-  proposals <- query @GenericVoteProposal parties.governanceParty
-  proposals === []
-
--- | Generic vote with all members confirming.
-testGenericVoteAllConfirm = script do
-  parties <- allocateTestParties
-  rulesCid <- createTestGovernance parties
-
-  proposalCid <- submit parties.member2 $ createCmd GenericVoteProposal with
-    governanceParty = parties.governanceParty
-    proposer = parties.member2
+when_all_members_confirm_and_execute : GenericVoteFixture -> Script VoteResult
+when_all_members_confirm_and_execute f = do
+  proposalCid <- submit f.parties.member2 $ createCmd GenericVoteProposal with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member2
     description = "Allocate budget for new infrastructure"
 
   let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
 
-  resultCid <- confirmAndExecute parties rulesCid proposalIfaceCid
-    [parties.member1, parties.member2, parties.member3] parties.member1
+  resultCid <- confirmAndExecute f.parties f.rulesCid proposalIfaceCid
+    [f.parties.member1, f.parties.member2, f.parties.member3] f.parties.member1
 
-  Some result <- queryContractId parties.governanceParty resultCid
-  result.description === "Allocate budget for new infrastructure"
+  Some executionResult <- queryContractId f.parties.governanceParty resultCid
+  remainingProposals <- query @GenericVoteProposal f.parties.governanceParty
+  pure VoteResult with ..
 
--- | Multiple generic votes can coexist independently.
-testMultipleGenericVotes = script do
-  parties <- allocateTestParties
-  rulesCid <- createTestGovernance parties
-
-  proposalA <- submit parties.member1 $ createCmd GenericVoteProposal with
-    governanceParty = parties.governanceParty
-    proposer = parties.member1
+when_two_votes_proposed_and_executed : GenericVoteFixture -> Script MultiVoteResult
+when_two_votes_proposed_and_executed f = do
+  proposalA <- submit f.parties.member1 $ createCmd GenericVoteProposal with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
     description = "Proposal A: expand to new market"
 
-  proposalB <- submit parties.member2 $ createCmd GenericVoteProposal with
-    governanceParty = parties.governanceParty
-    proposer = parties.member2
+  proposalB <- submit f.parties.member2 $ createCmd GenericVoteProposal with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member2
     description = "Proposal B: hire more developers"
 
   let proposalACid = toInterfaceContractId @GovernableAction proposalA
   let proposalBCid = toInterfaceContractId @GovernableAction proposalB
 
-  resultACid <- confirmAndExecute parties rulesCid proposalACid
-    [parties.member1, parties.member2] parties.member1
+  resultACid <- confirmAndExecute f.parties f.rulesCid proposalACid
+    [f.parties.member1, f.parties.member2] f.parties.member1
 
-  resultBCid <- confirmAndExecute parties rulesCid proposalBCid
-    [parties.member2, parties.member3] parties.member3
+  resultBCid <- confirmAndExecute f.parties f.rulesCid proposalBCid
+    [f.parties.member2, f.parties.member3] f.parties.member3
 
-  Some resultA <- queryContractId parties.governanceParty resultACid
-  resultA.description === "Proposal A: expand to new market"
+  Some resultA <- queryContractId f.parties.governanceParty resultACid
+  Some resultB <- queryContractId f.parties.governanceParty resultBCid
+  pure MultiVoteResult with ..
 
-  Some resultB <- queryContractId parties.governanceParty resultBCid
-  resultB.description === "Proposal B: hire more developers"
+-- ============================================================================
+-- Then
+-- ============================================================================
+
+then_result_records_vote : GenericVoteFixture -> VoteResult -> Script Failures
+then_result_records_vote f r = pure $
+  shouldBe "actionLabel" "GenericVote" r.executionResult.actionLabel <>
+  shouldBe "description" "We should switch to dark theme for our website" r.executionResult.description <>
+  shouldBe "executor" f.parties.member3 r.executionResult.executor <>
+  shouldBe "proposal consumed" 0 (length r.remainingProposals)
+
+then_result_records_all_confirm_vote : GenericVoteFixture -> VoteResult -> Script Failures
+then_result_records_all_confirm_vote _ r = pure $
+  shouldBe "description" "Allocate budget for new infrastructure" r.executionResult.description <>
+  shouldBe "proposal consumed" 0 (length r.remainingProposals)
+
+then_both_votes_recorded_independently : GenericVoteFixture -> MultiVoteResult -> Script Failures
+then_both_votes_recorded_independently _ r = pure $
+  shouldBe "result A description" "Proposal A: expand to new market" r.resultA.description <>
+  shouldBe "result B description" "Proposal B: hire more developers" r.resultB.description
+
+-- ============================================================================
+-- Tests
+-- ============================================================================
+
+test_when_vote_executed_then_result_records_description = script do
+  run Test with
+    given = given_governance_setup
+    when = when_vote_proposed_confirmed_executed
+    then_ = then_result_records_vote
+
+test_when_all_members_confirm_then_vote_passes = script do
+  run Test with
+    given = given_governance_setup
+    when = when_all_members_confirm_and_execute
+    then_ = then_result_records_all_confirm_vote
+
+test_when_multiple_votes_then_results_are_independent = script do
+  run Test with
+    given = given_governance_setup
+    when = when_two_votes_proposed_and_executed
+    then_ = then_both_votes_recorded_independently

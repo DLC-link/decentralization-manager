@@ -70,8 +70,9 @@ when_full_flow_executed f = do
     instrumentAdmin = f.parties.registrar
     instrumentAllowances = [InstrumentAllowance with id = "TEST-TOKEN"]
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
-  confirmAndExecute f.parties f.rulesCid proposalInterfaceCid
+  _ <- confirmAndExecute f.parties f.rulesCid proposalInterfaceCid
     [f.parties.member1, f.parties.member2] f.parties.member1
+  pure ()
 
 when_non_member_confirmation_fails : PreapprovalFixture -> Script ()
 when_non_member_confirmation_fails f = do
@@ -96,8 +97,9 @@ when_all_instruments_flow_executed f = do
     instrumentAdmin = f.parties.registrar
     instrumentAllowances = []
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
-  confirmAndExecute f.parties f.rulesCid proposalInterfaceCid
+  _ <- confirmAndExecute f.parties f.rulesCid proposalInterfaceCid
     [f.parties.member2, f.parties.member3] f.parties.member3
+  pure ()
 
 when_e2e_tokens_received : PreapprovalWithTokenFixture -> Script [ContractId Holding]
 when_e2e_tokens_received f = do
