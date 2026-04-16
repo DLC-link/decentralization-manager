@@ -15,118 +15,113 @@ import Splice.Api.Token.TransferInstructionV1 (Transfer(..), TransferFactory, Tr
 import Utility.Registry.App.V0.Model.TransferPreapproval (InstrumentAllowance(..), TransferPreapproval(..))
 
 import Governance.Action (GovernableAction)
-import Governance.Rules (GovernanceRules_ConfirmAction(..))
+import Governance.Rules (GovernanceRules(..), GovernanceRules_ConfirmAction(..))
 import Governance.TokenCustody.SetupTokenPreapproval
 import Governance.TokenCustody.TestUtils
 
--- | Full governance flow: propose -> confirm -> execute -> verify token preapproval created.
-testSetupTokenPreapprovalFullFlow : Script ()
-testSetupTokenPreapprovalFullFlow = do
+import TestHarness
+import TestLib.Token (SetupTokenResult(..))
+import TestLib.TokenOps (mintTokens, createTransferContext)
+
+-- ============================================================================
+-- Fixtures
+-- ============================================================================
+
+data PreapprovalFixture = PreapprovalFixture
+  with
+    parties : TokenTestParties
+    rulesCid : ContractId GovernanceRules
+  deriving (Eq, Show)
+
+data PreapprovalWithTokenFixture = PreapprovalWithTokenFixture
+  with
+    parties : TokenTestParties
+    result : SetupTokenResult
+    rulesCid : ContractId GovernanceRules
+  deriving (Eq, Show)
+
+-- ============================================================================
+-- Given
+-- ============================================================================
+
+given_governance : Script PreapprovalFixture
+given_governance = do
   parties <- allocateTokenTestParties
   rulesCid <- createTestGovernance parties
+  pure PreapprovalFixture with ..
 
-  -- Proposer creates the setup token preapproval proposal
-  proposalCid <- submit parties.member1 $ createCmd SetupTokenPreapprovalProposal with
-    governanceParty = parties.governanceParty
-    proposer = parties.member1
-    operator = parties.outsider
-    instrumentAdmin = parties.registrar
+given_governance_with_token_setup : Script PreapprovalWithTokenFixture
+given_governance_with_token_setup = do
+  parties <- allocateTokenTestParties
+  result <- setupTestToken parties
+  rulesCid <- createTestGovernance parties
+  pure PreapprovalWithTokenFixture with ..
+
+-- ============================================================================
+-- When
+-- ============================================================================
+
+when_full_flow_executed : PreapprovalFixture -> Script ()
+when_full_flow_executed f = do
+  proposalCid <- submit f.parties.member1 $ createCmd SetupTokenPreapprovalProposal with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+    operator = f.parties.outsider
+    instrumentAdmin = f.parties.registrar
     instrumentAllowances = [InstrumentAllowance with id = "TEST-TOKEN"]
-
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  confirmAndExecute f.parties f.rulesCid proposalInterfaceCid
+    [f.parties.member1, f.parties.member2] f.parties.member1
 
-  -- Confirm and execute
-  confirmAndExecute parties rulesCid proposalInterfaceCid
-    [parties.member1, parties.member2] parties.member1
-
-  -- Verify the TransferPreapproval was created
-  preapprovals <- query @TransferPreapproval parties.governanceParty
-  assertMsg "TransferPreapproval should exist" (length preapprovals == 1)
-  let (_, preapproval) = head preapprovals
-  assertMsg "Receiver should be governanceParty" (preapproval.receiver == parties.governanceParty)
-  assertMsg "Operator should match" (preapproval.operator == parties.outsider)
-  assertMsg "InstrumentAdmin should match" (preapproval.instrumentAdmin == parties.registrar)
-  assertMsg "InstrumentAllowances should match" (length preapproval.instrumentAllowances == 1)
-
--- | Non-member cannot confirm a SetupTokenPreapproval proposal.
-testSetupTokenPreapprovalNonMemberCannotConfirm : Script ()
-testSetupTokenPreapprovalNonMemberCannotConfirm = do
-  parties <- allocateTokenTestParties
-  rulesCid <- createTestGovernance parties
-
-  proposalCid <- submit parties.member1 $ createCmd SetupTokenPreapprovalProposal with
-    governanceParty = parties.governanceParty
-    proposer = parties.member1
-    operator = parties.outsider
-    instrumentAdmin = parties.registrar
+when_non_member_confirmation_fails : PreapprovalFixture -> Script ()
+when_non_member_confirmation_fails f = do
+  proposalCid <- submit f.parties.member1 $ createCmd SetupTokenPreapprovalProposal with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+    operator = f.parties.outsider
+    instrumentAdmin = f.parties.registrar
     instrumentAllowances = []
-
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
-
-  submitMustFail (memberContext parties.outsider parties.governanceParty) $
-    exerciseCmd rulesCid GovernanceRules_ConfirmAction with
-      confirmer = parties.outsider
+  submitMustFail (memberContext f.parties.outsider f.parties.governanceParty) $
+    exerciseCmd f.rulesCid GovernanceRules_ConfirmAction with
+      confirmer = f.parties.outsider
       actionProposalCid = proposalInterfaceCid
 
--- | Setup token preapproval with empty allowances (all instruments) works.
-testSetupTokenPreapprovalAllInstruments : Script ()
-testSetupTokenPreapprovalAllInstruments = do
-  parties <- allocateTokenTestParties
-  rulesCid <- createTestGovernance parties
-
-  proposalCid <- submit parties.member1 $ createCmd SetupTokenPreapprovalProposal with
-    governanceParty = parties.governanceParty
-    proposer = parties.member1
-    operator = parties.outsider
-    instrumentAdmin = parties.registrar
+when_all_instruments_flow_executed : PreapprovalFixture -> Script ()
+when_all_instruments_flow_executed f = do
+  proposalCid <- submit f.parties.member1 $ createCmd SetupTokenPreapprovalProposal with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+    operator = f.parties.outsider
+    instrumentAdmin = f.parties.registrar
     instrumentAllowances = []
-
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  confirmAndExecute f.parties f.rulesCid proposalInterfaceCid
+    [f.parties.member2, f.parties.member3] f.parties.member3
 
-  confirmAndExecute parties rulesCid proposalInterfaceCid
-    [parties.member2, parties.member3] parties.member3
-
-  preapprovals <- query @TransferPreapproval parties.governanceParty
-  assertMsg "TransferPreapproval should exist" (length preapprovals == 1)
-  let (_, preapproval) = head preapprovals
-  assertMsg "InstrumentAllowances should be empty" (null preapproval.instrumentAllowances)
-
--- | End-to-end: governance sets up token preapproval, outsider sends tokens through it.
-testSetupTokenPreapprovalAndReceiveTokens : Script ()
-testSetupTokenPreapprovalAndReceiveTokens = do
-  parties <- allocateTokenTestParties
-  let instrument = testInstrumentId parties.registrar
-  onboarding <- onboardToUtility parties instrument
-  rulesCid <- createTestGovernance parties
-
-  -- 1. Governance sets up TransferPreapproval with correct utility parties
-  proposalCid <- submit parties.member1 $ createCmd SetupTokenPreapprovalProposal with
-    governanceParty = parties.governanceParty
-    proposer = parties.member1
-    operator = onboarding.operator
-    instrumentAdmin = parties.registrar
+when_e2e_tokens_received : PreapprovalWithTokenFixture -> Script [ContractId Holding]
+when_e2e_tokens_received f = do
+  let instrument = testInstrumentId f.parties.registrar
+  proposalCid <- submit f.parties.member1 $ createCmd SetupTokenPreapprovalProposal with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+    operator = f.result.operator
+    instrumentAdmin = f.parties.registrar
     instrumentAllowances = []
-
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
-  confirmAndExecute parties rulesCid proposalInterfaceCid
-    [parties.member1, parties.member2] parties.member1
-
-  -- 2. Get the created TransferPreapproval
-  [(preapprovalCid, _)] <- query @TransferPreapproval parties.governanceParty
+  confirmAndExecute f.parties f.rulesCid proposalInterfaceCid
+    [f.parties.member1, f.parties.member2] f.parties.member1
+  [(preapprovalCid, _)] <- query @TransferPreapproval f.parties.governanceParty
   let factoryCid : ContractId TransferFactory = coerceContractId preapprovalCid
-
-  -- 3. Mint tokens for the outsider (sender)
-  holdingCids <- mintTokens parties.outsider 100.0 onboarding instrument
+  holdingCids <- mintTokens f.parties.outsider 100.0 f.result (Some "Test Mint")
   now <- getTime
-
-  -- 4. Outsider sends tokens to governance party via the preapproval
-  submit (actAs parties.outsider
-    <> readAs parties.registrar <> readAs parties.operator <> readAs parties.dso) $
+  submit (actAs f.parties.outsider
+    <> readAs f.parties.registrar <> readAs f.parties.operator <> readAs f.parties.dso) $
     exerciseCmd factoryCid TransferFactory_Transfer with
-      expectedAdmin = parties.registrar
+      expectedAdmin = f.parties.registrar
       transfer = Transfer with
-        sender = parties.outsider
-        receiver = parties.governanceParty
+        sender = f.parties.outsider
+        receiver = f.parties.governanceParty
         amount = 50.0
         instrumentId = instrument
         requestedAt = now
@@ -134,9 +129,65 @@ testSetupTokenPreapprovalAndReceiveTokens = do
         inputHoldingCids = holdingCids
         meta = emptyMetadata
       extraArgs = ExtraArgs with
-        context = createTransferContext onboarding
+        context = createTransferContext f.result
         meta = emptyMetadata
+  results <- queryInterface @Holding f.parties.governanceParty
+  pure (map fst results)
 
-  -- 5. Verify governance party received tokens
-  govHoldings <- queryInterface @Holding parties.governanceParty
-  assertMsg "GovernanceParty should have received holdings" (not (null govHoldings))
+-- ============================================================================
+-- Then
+-- ============================================================================
+
+then_preapproval_created : PreapprovalFixture -> () -> Script Failures
+then_preapproval_created f _ = do
+  preapprovals <- query @TransferPreapproval f.parties.governanceParty
+  case preapprovals of
+    [(_, preapproval)] -> pure $
+      shouldBe "Receiver" f.parties.governanceParty preapproval.receiver <>
+      shouldBe "Operator" f.parties.outsider preapproval.operator <>
+      shouldBe "InstrumentAdmin" f.parties.registrar preapproval.instrumentAdmin <>
+      shouldBe "InstrumentAllowances count" 1 (length preapproval.instrumentAllowances)
+    _ -> pure $ shouldBe "TransferPreapproval count" 1 (length preapprovals)
+
+then_nothing_to_verify : PreapprovalFixture -> () -> Script Failures
+then_nothing_to_verify _ _ = pure []
+
+then_all_instruments_preapproval_created : PreapprovalFixture -> () -> Script Failures
+then_all_instruments_preapproval_created f _ = do
+  preapprovals <- query @TransferPreapproval f.parties.governanceParty
+  case preapprovals of
+    [(_, preapproval)] -> pure $
+      shouldBe "InstrumentAllowances" [] preapproval.instrumentAllowances
+    _ -> pure $ shouldBe "TransferPreapproval count" 1 (length preapprovals)
+
+then_gov_party_received_holdings : PreapprovalWithTokenFixture -> [ContractId Holding] -> Script Failures
+then_gov_party_received_holdings _ holdings =
+  pure $ shouldNotBeEmpty "governanceParty holdings" holdings
+
+-- ============================================================================
+-- Tests
+-- ============================================================================
+
+test_when_token_preapproval_proposed_then_preapproval_created = script do
+  run Test with
+    given = given_governance
+    when = when_full_flow_executed
+    then_ = then_preapproval_created
+
+test_when_non_member_confirms_then_confirmation_rejected = script do
+  run Test with
+    given = given_governance
+    when = when_non_member_confirmation_fails
+    then_ = then_nothing_to_verify
+
+test_when_empty_allowances_then_preapproval_created = script do
+  run Test with
+    given = given_governance
+    when = when_all_instruments_flow_executed
+    then_ = then_all_instruments_preapproval_created
+
+test_when_preapproval_setup_then_tokens_receivable = script do
+  run Test with
+    given = given_governance_with_token_setup
+    when = when_e2e_tokens_received
+    then_ = then_gov_party_received_holdings

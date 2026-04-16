@@ -4,81 +4,133 @@
 -- | Tests for the SetupCcPreapprovalProposal governable action.
 module Governance.TokenCustody.Test.SetupCcPreapprovalTest where
 
-import DA.List (head)
 import Daml.Script
 
 import Splice.Wallet.TransferPreapproval (TransferPreapprovalProposal(..))
 
 import Governance.Action (GovernableAction)
-import Governance.Rules (GovernanceRules_ConfirmAction(..))
+import Governance.Rules (GovernanceRules(..), GovernanceRules_ConfirmAction(..))
 import Governance.TokenCustody.SetupCcPreapproval
 import Governance.TokenCustody.TestUtils
 
--- | Full governance flow: propose -> confirm -> execute -> verify preapproval proposal created.
-testSetupCcPreapprovalFullFlow : Script ()
-testSetupCcPreapprovalFullFlow = do
+import TestHarness
+
+-- ============================================================================
+-- Fixtures
+-- ============================================================================
+
+data SetupCcFixture = SetupCcFixture
+  with
+    parties : TokenTestParties
+    rulesCid : ContractId GovernanceRules
+  deriving (Eq, Show)
+
+-- ============================================================================
+-- Given
+-- ============================================================================
+
+given_governance_setup : Script SetupCcFixture
+given_governance_setup = do
   parties <- allocateTokenTestParties
   rulesCid <- createTestGovernance parties
-  dso <- allocateParty "DSO"
+  pure SetupCcFixture with ..
 
-  -- Proposer creates the setup preapproval proposal
-  proposalCid <- submit parties.member1 $ createCmd SetupCcPreapprovalProposal with
-    governanceParty = parties.governanceParty
-    proposer = parties.member1
-    provider = parties.outsider
-    expectedDso = Some dso
+-- ============================================================================
+-- When
+-- ============================================================================
+
+when_full_flow_with_dso : SetupCcFixture -> Script [TransferPreapprovalProposal]
+when_full_flow_with_dso f = do
+  proposalCid <- submit f.parties.member1 $ createCmd SetupCcPreapprovalProposal with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+    provider = f.parties.outsider
+    expectedDso = Some f.parties.dso
 
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
 
-  -- Confirm and execute
-  confirmAndExecute parties rulesCid proposalInterfaceCid
-    [parties.member1, parties.member2] parties.member1
+  confirmAndExecute f.parties f.rulesCid proposalInterfaceCid
+    [f.parties.member1, f.parties.member2] f.parties.member1
 
-  -- Verify the TransferPreapprovalProposal was created
-  preapprovalProposals <- query @TransferPreapprovalProposal parties.governanceParty
-  assertMsg "TransferPreapprovalProposal should exist" (length preapprovalProposals == 1)
-  let (_, proposal) = head preapprovalProposals
-  assertMsg "Receiver should be governanceParty" (proposal.receiver == parties.governanceParty)
-  assertMsg "Provider should match" (proposal.provider == parties.outsider)
-  assertMsg "ExpectedDso should match" (proposal.expectedDso == Some dso)
+  results <- query @TransferPreapprovalProposal f.parties.governanceParty
+  pure (map snd results)
 
--- | Non-member cannot confirm a SetupCcPreapproval proposal.
-testSetupCcPreapprovalNonMemberCannotConfirm : Script ()
-testSetupCcPreapprovalNonMemberCannotConfirm = do
-  parties <- allocateTokenTestParties
-  rulesCid <- createTestGovernance parties
-
-  proposalCid <- submit parties.member1 $ createCmd SetupCcPreapprovalProposal with
-    governanceParty = parties.governanceParty
-    proposer = parties.member1
-    provider = parties.outsider
+when_non_member_confirmation_fails : SetupCcFixture -> Script ()
+when_non_member_confirmation_fails f = do
+  proposalCid <- submit f.parties.member1 $ createCmd SetupCcPreapprovalProposal with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+    provider = f.parties.outsider
     expectedDso = None
 
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
 
-  submitMustFail (memberContext parties.outsider parties.governanceParty) $
-    exerciseCmd rulesCid GovernanceRules_ConfirmAction with
-      confirmer = parties.outsider
+  submitMustFail (memberContext f.parties.outsider f.parties.governanceParty) $
+    exerciseCmd f.rulesCid GovernanceRules_ConfirmAction with
+      confirmer = f.parties.outsider
       actionProposalCid = proposalInterfaceCid
 
--- | Setup CC preapproval with None expectedDso works.
-testSetupCcPreapprovalWithoutDso : Script ()
-testSetupCcPreapprovalWithoutDso = do
-  parties <- allocateTokenTestParties
-  rulesCid <- createTestGovernance parties
-
-  proposalCid <- submit parties.member1 $ createCmd SetupCcPreapprovalProposal with
-    governanceParty = parties.governanceParty
-    proposer = parties.member1
-    provider = parties.outsider
+when_full_flow_without_dso : SetupCcFixture -> Script [TransferPreapprovalProposal]
+when_full_flow_without_dso f = do
+  proposalCid <- submit f.parties.member1 $ createCmd SetupCcPreapprovalProposal with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+    provider = f.parties.outsider
     expectedDso = None
 
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
 
-  confirmAndExecute parties rulesCid proposalInterfaceCid
-    [parties.member2, parties.member3] parties.member3
+  confirmAndExecute f.parties f.rulesCid proposalInterfaceCid
+    [f.parties.member2, f.parties.member3] f.parties.member3
 
-  preapprovalProposals <- query @TransferPreapprovalProposal parties.governanceParty
-  assertMsg "TransferPreapprovalProposal should exist" (length preapprovalProposals == 1)
-  let (_, proposal) = head preapprovalProposals
-  assertMsg "ExpectedDso should be None" (proposal.expectedDso == None)
+  results <- query @TransferPreapprovalProposal f.parties.governanceParty
+  pure (map snd results)
+
+-- ============================================================================
+-- Then
+-- ============================================================================
+
+then_nothing_to_verify : SetupCcFixture -> () -> Script Failures
+then_nothing_to_verify _ _ = pure []
+
+then_preapproval_proposal_created_with_dso : SetupCcFixture -> [TransferPreapprovalProposal] -> Script Failures
+then_preapproval_proposal_created_with_dso f proposals = do
+  let countCheck = shouldBe "number of TransferPreapprovalProposals" 1 (length proposals)
+  case proposals of
+    [] -> pure countCheck
+    (proposal :: _) -> pure $
+      countCheck <>
+      shouldBe "receiver" f.parties.governanceParty proposal.receiver <>
+      shouldBe "provider" f.parties.outsider proposal.provider <>
+      shouldBe "expectedDso" (Some f.parties.dso) proposal.expectedDso
+
+then_preapproval_proposal_created_without_dso : SetupCcFixture -> [TransferPreapprovalProposal] -> Script Failures
+then_preapproval_proposal_created_without_dso _ proposals = do
+  let countCheck = shouldBe "number of TransferPreapprovalProposals" 1 (length proposals)
+  case proposals of
+    [] -> pure countCheck
+    (proposal :: _) -> pure $
+      countCheck <>
+      shouldBe "expectedDso" (None : Optional Party) proposal.expectedDso
+
+-- ============================================================================
+-- Tests
+-- ============================================================================
+
+test_when_cc_preapproval_proposed_then_proposal_created = script do
+  run Test with
+    given = given_governance_setup
+    when = when_full_flow_with_dso
+    then_ = then_preapproval_proposal_created_with_dso
+
+test_when_non_member_confirms_then_confirmation_rejected = script do
+  run Test with
+    given = given_governance_setup
+    when = when_non_member_confirmation_fails
+    then_ = then_nothing_to_verify
+
+test_when_no_dso_then_preapproval_created = script do
+  run Test with
+    given = given_governance_setup
+    when = when_full_flow_without_dso
+    then_ = then_preapproval_proposal_created_without_dso
