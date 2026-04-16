@@ -14,30 +14,49 @@ import Splice.Api.Token.TransferInstructionV1 (Transfer(..), TransferFactory(..)
 import Utility.Registry.App.V0.Model.Transfer (TransferOffer)
 
 import Governance.Action (GovernableAction)
-import Governance.Rules (GovernanceRules_ConfirmAction(..), GovernanceRules_ExecuteConfirmedAction(..))
+import Governance.Rules (GovernanceRules(..), GovernanceRules_ConfirmAction(..), GovernanceRules_ExecuteConfirmedAction(..))
 import Governance.TokenCustody.AcceptTransfer
 import Governance.TokenCustody.TestUtils
 
+import TestHarness
+import TestLib.Token (SetupTokenResult(..))
+import TestLib.TokenOps (mintTokens, createTransferContext)
+
+-- ============================================================================
+-- Fixtures
+-- ============================================================================
+
+data AcceptFixture = AcceptFixture
+  with
+    parties : TokenTestParties
+    result : SetupTokenResult
+    rulesCid : ContractId GovernanceRules
+  deriving (Eq, Show)
+
+-- ============================================================================
+-- Helpers
+-- ============================================================================
+
 -- | Build ExtraArgs for accept operations.
-buildAcceptExtraArgs : UtilityOnboardingResult -> ExtraArgs
-buildAcceptExtraArgs onboarding = ExtraArgs with
-  context = createAcceptContext onboarding
+buildAcceptExtraArgs : SetupTokenResult -> ExtraArgs
+buildAcceptExtraArgs result = ExtraArgs with
+  context = createTransferContext result
   meta = emptyMetadata
 
 -- | Create a pending TransferOffer from outsider to governance party.
 -- Uses the AllocationFactory (TransferFactory interface) which creates a TransferOffer
 -- when the sender != receiver (two-step transfer).
-createTransferOffer : TokenTestParties -> UtilityOnboardingResult -> Decimal -> Script (ContractId TransferInstruction)
-createTransferOffer parties onboarding amount = do
+createTransferOffer : TokenTestParties -> SetupTokenResult -> Decimal -> Script (ContractId TransferInstruction)
+createTransferOffer parties result amount = do
   now <- getTime
   let instrument = testInstrumentId parties.registrar
 
   -- Mint tokens for the outsider (sender)
-  holdingCids <- mintTokens parties.outsider amount onboarding instrument
+  holdingCids <- mintTokens parties.outsider amount result (Some "Test Mint")
 
   -- Use AllocationFactory as TransferFactory to create a pending TransferOffer
-  let factoryCid : ContractId TransferFactory = coerceContractId onboarding.allocationFactoryCid
-  result <- submit (actAs parties.outsider <> actAs parties.registrar
+  let factoryCid : ContractId TransferFactory = coerceContractId result.allocationFactoryCid
+  submit (actAs parties.outsider <> actAs parties.registrar
     <> readAs parties.operator <> readAs parties.dso) $
     exerciseCmd factoryCid TransferFactory_Transfer with
       expectedAdmin = parties.registrar
@@ -51,7 +70,7 @@ createTransferOffer parties onboarding amount = do
         inputHoldingCids = holdingCids
         meta = emptyMetadata
       extraArgs = ExtraArgs with
-        context = createTransferContext onboarding
+        context = createTransferContext result
         meta = emptyMetadata
 
   -- The result contains a pending TransferInstruction (TransferOffer)
@@ -59,84 +78,101 @@ createTransferOffer parties onboarding amount = do
   [(offerCid, _)] <- query @TransferOffer parties.governanceParty
   pure (coerceContractId offerCid)
 
--- | Full governance happy path: proposal → confirm → execute → verify balance.
--- Outsider creates a TransferOffer, governance party accepts it via governance flow.
-testAcceptTransferGovernanceHappyPath : Script ()
-testAcceptTransferGovernanceHappyPath = do
+-- ============================================================================
+-- Given
+-- ============================================================================
+
+given_governance_with_token_setup : Script AcceptFixture
+given_governance_with_token_setup = do
   parties <- allocateTokenTestParties
-  let instrument = testInstrumentId parties.registrar
-  onboarding <- onboardToUtility parties instrument
+  result <- setupTestToken parties
   rulesCid <- createTestGovernance parties
+  pure AcceptFixture with ..
 
-  transferInstructionCid <- createTransferOffer parties onboarding 75.0
+-- ============================================================================
+-- When
+-- ============================================================================
 
-  proposalCid <- submit parties.member1 $ createCmd AcceptTransferProposal with
-    governanceParty = parties.governanceParty
-    proposer = parties.member1
+when_transfer_accepted_via_governance : AcceptFixture -> Script [ContractId Holding]
+when_transfer_accepted_via_governance f = do
+  transferInstructionCid <- createTransferOffer f.parties f.result 75.0
+  proposalCid <- submit f.parties.member1 $ createCmd AcceptTransferProposal with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
     transferInstructionCid
-    extraArgs = buildAcceptExtraArgs onboarding
-
+    extraArgs = buildAcceptExtraArgs f.result
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  confirmAndExecute f.parties f.rulesCid proposalInterfaceCid
+    [f.parties.member1, f.parties.member2] f.parties.member1
+  results <- queryInterface @Holding f.parties.governanceParty
+  pure (map fst results)
 
-  confirmAndExecute parties rulesCid proposalInterfaceCid
-    [parties.member1, parties.member2] parties.member1
-
-  govHoldings <- queryInterface @Holding parties.governanceParty
-  assertMsg "GovernanceParty should have received holdings" (not (null govHoldings))
-
--- | Accepting a withdrawn (archived) transfer instruction fails.
-testAcceptTransferWithdrawnOffer : Script ()
-testAcceptTransferWithdrawnOffer = do
-  parties <- allocateTokenTestParties
-  let instrument = testInstrumentId parties.registrar
-  onboarding <- onboardToUtility parties instrument
-  rulesCid <- createTestGovernance parties
-
-  transferInstructionCid <- createTransferOffer parties onboarding 75.0
-
-  proposalCid <- submit parties.member1 $ createCmd AcceptTransferProposal with
-    governanceParty = parties.governanceParty
-    proposer = parties.member1
+when_withdrawn_offer_fails : AcceptFixture -> Script ()
+when_withdrawn_offer_fails f = do
+  transferInstructionCid <- createTransferOffer f.parties f.result 75.0
+  proposalCid <- submit f.parties.member1 $ createCmd AcceptTransferProposal with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
     transferInstructionCid
-    extraArgs = buildAcceptExtraArgs onboarding
-
+    extraArgs = buildAcceptExtraArgs f.result
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
-
   -- Sender withdraws the transfer instruction before governance approves
-  submit (actAs parties.outsider <> readAs parties.registrar <> readAs onboarding.operator) $
+  submit (actAs f.parties.outsider <> readAs f.parties.registrar <> readAs f.result.operator) $
     exerciseCmd transferInstructionCid TransferInstruction_Withdraw with
       extraArgs = ExtraArgs with
         context = emptyChoiceContext
         meta = emptyMetadata
-
-  confirmationCids <- submitConfirmations parties.governanceParty rulesCid proposalInterfaceCid
-    [parties.member1, parties.member2]
-
-  submitMustFail (memberContext parties.member1 parties.governanceParty) $
-    exerciseCmd rulesCid GovernanceRules_ExecuteConfirmedAction with
-      executor = parties.member1
+  confirmationCids <- submitConfirmations f.parties.governanceParty f.rulesCid proposalInterfaceCid
+    [f.parties.member1, f.parties.member2]
+  submitMustFail (memberContext f.parties.member1 f.parties.governanceParty) $
+    exerciseCmd f.rulesCid GovernanceRules_ExecuteConfirmedAction with
+      executor = f.parties.member1
       actionProposalCid = proposalInterfaceCid
       confirmations = confirmationCids
 
--- | Non-member cannot confirm an AcceptTransfer proposal.
-testAcceptTransferNonMemberCannotConfirm : Script ()
-testAcceptTransferNonMemberCannotConfirm = do
-  parties <- allocateTokenTestParties
-  let instrument = testInstrumentId parties.registrar
-  onboarding <- onboardToUtility parties instrument
-  rulesCid <- createTestGovernance parties
-
-  transferInstructionCid <- createTransferOffer parties onboarding 75.0
-
-  proposalCid <- submit parties.member1 $ createCmd AcceptTransferProposal with
-    governanceParty = parties.governanceParty
-    proposer = parties.member1
+when_non_member_confirmation_fails : AcceptFixture -> Script ()
+when_non_member_confirmation_fails f = do
+  transferInstructionCid <- createTransferOffer f.parties f.result 75.0
+  proposalCid <- submit f.parties.member1 $ createCmd AcceptTransferProposal with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
     transferInstructionCid
-    extraArgs = buildAcceptExtraArgs onboarding
-
+    extraArgs = buildAcceptExtraArgs f.result
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
-
-  submitMustFail (memberContext parties.outsider parties.governanceParty) $
-    exerciseCmd rulesCid GovernanceRules_ConfirmAction with
-      confirmer = parties.outsider
+  submitMustFail (memberContext f.parties.outsider f.parties.governanceParty) $
+    exerciseCmd f.rulesCid GovernanceRules_ConfirmAction with
+      confirmer = f.parties.outsider
       actionProposalCid = proposalInterfaceCid
+
+-- ============================================================================
+-- Then
+-- ============================================================================
+
+then_nothing_to_verify : AcceptFixture -> () -> Script Failures
+then_nothing_to_verify _ _ = pure []
+
+then_governance_party_received_holdings : AcceptFixture -> [ContractId Holding] -> Script Failures
+then_governance_party_received_holdings _ holdings =
+  pure $ shouldNotBeEmpty "governanceParty holdings" holdings
+
+-- ============================================================================
+-- Tests
+-- ============================================================================
+
+test_when_transfer_accepted_then_governance_receives_holdings = script do
+  run Test with
+    given = given_governance_with_token_setup
+    when = when_transfer_accepted_via_governance
+    then_ = then_governance_party_received_holdings
+
+test_when_withdrawn_offer_accepted_then_execution_fails = script do
+  run Test with
+    given = given_governance_with_token_setup
+    when = when_withdrawn_offer_fails
+    then_ = then_nothing_to_verify
+
+test_when_non_member_confirms_then_confirmation_rejected = script do
+  run Test with
+    given = given_governance_with_token_setup
+    when = when_non_member_confirmation_fails
+    then_ = then_nothing_to_verify
