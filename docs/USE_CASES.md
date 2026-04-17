@@ -64,9 +64,11 @@ curl -X POST http://custodian-a:8080/contracts \
 
 This deploys a `VaultGovernanceRules` contract with all 3 members, threshold 2, and a 24-hour confirmation timeout.
 
+> **Note:** New deployments should use `GovernanceRules` (from `#governance-core-v0-rc2`) instead. See the [Integration Guide](INTEGRATION_GUIDE.md#deploying-governance-contracts) for the recommended contract deployment payload.
+
 ### Full Deployment Flow
 
-The complete end-to-end deployment of a vault system follows these steps. Each governance action (steps 5-14) requires threshold confirmations before execution.
+The complete end-to-end deployment of a vault system follows these steps. Each governance action (steps 6-15) requires threshold confirmations before execution. Steps 5a/5b show the two governance contract options.
 
 | # | Step | Actor | Description |
 |---|------|-------|-------------|
@@ -74,7 +76,8 @@ The complete end-to-end deployment of a vault system follows these steps. Each g
 | 2 | Configure party credentials | DPM (`PUT /party-config` API) | Configure Keycloak credentials and package IDs for each party |
 | 3 | Grant Ledger API rights | External (Canton admin) | Grant `actAs`/`readAs` rights for member parties on the decentralized party |
 | 4 | Upload DARs | DPM (DARs workflow) | Upload DAR packages to all participant nodes |
-| 5 | Deploy VaultGovernance | DPM (contracts workflow) | Deploy `VaultGovernanceRules` contract with package `#bitsafe-vault-governance-v0-rc8` |
+| 5a | Deploy GovernanceRules | DPM (contracts workflow) | Deploy `GovernanceRules` contract with package `#governance-core-v0-rc2` (recommended) |
+| 5b | Deploy VaultGovernance | DPM (contracts workflow) | Deploy `VaultGovernanceRules` contract with package `#bitsafe-vault-governance-v0-rc8` (legacy) |
 | 6 | Create ProviderService | Governance action | `utility_create_provider_request` |
 | 7 | Create UserService | Governance action | `utility_create_user_request` |
 | 8 | Setup Utility | Governance action | `utility_setup` -- links provider and user services |
@@ -599,3 +602,260 @@ Issue and accept credentials through governance:
 ```
 
 All credential operations go through the same governance confirmation flow, requiring threshold approval from the decentralized party members.
+
+## Generic Voting
+
+The `GovernanceRules` contract supports free-text governance votes through the `GenericVoteProposal` template. Unlike vault or token actions, a generic vote has no on-chain side effect -- the outcome is recorded solely as a `GovernanceExecutionResult` contract on the ledger.
+
+This is useful for off-chain decisions (e.g., policy changes, operational approvals) where you want an auditable on-chain record of the vote without triggering any contract state change.
+
+### Scenario
+
+Three custodians want to formally vote on a policy change. The vote itself doesn't modify any contracts, but the decision should be permanently recorded on the Canton ledger.
+
+### Step 1: Propose a Vote (Custodian A)
+
+```bash
+curl -X POST http://custodian-a:8080/governance/propose \
+  -H "Content-Type: application/json" \
+  -d '{
+    "party_id": "joint-vault::1220...",
+    "rules_contract_id": "<governance-rules-cid>",
+    "proposal": {
+      "type": "generic_vote",
+      "description": "Approve migration to new custody infrastructure by Q3 2026"
+    }
+  }'
+```
+
+The proposer (Custodian A) automatically receives one confirmation.
+
+### Step 2: Check Pending Proposals
+
+```bash
+curl "http://custodian-a:8080/governance/confirmations?party_id=joint-vault::1220..."
+```
+
+```json
+{
+  "actions": [],
+  "domain_actions": [
+    {
+      "proposal_cid": "00abc123...",
+      "action_label": "GenericVote",
+      "description": "Approve migration to new custody infrastructure by Q3 2026",
+      "confirmations": [
+        {
+          "contract_id": "confirm-cid-1",
+          "action": { "type": "governance_set_threshold", "new_threshold": 0 },
+          "confirming_party": "member-a::1220..."
+        }
+      ],
+      "confirmation_count": 1,
+      "can_execute": false
+    }
+  ],
+  "threshold": 2
+}
+```
+
+### Step 3: Confirm the Vote (Custodian B)
+
+```bash
+curl -X POST http://custodian-b:8080/governance/confirm \
+  -H "Content-Type: application/json" \
+  -d '{
+    "party_id": "joint-vault::1220...",
+    "rules_contract_id": "<governance-rules-cid>",
+    "action": { "type": "governance_set_threshold", "new_threshold": 0 },
+    "governance_type": "core_domain",
+    "proposal_cid": "00abc123..."
+  }'
+```
+
+After Custodian B's confirmation, threshold (2) is met and `can_execute` becomes `true`.
+
+### Step 4: Execute the Vote
+
+```bash
+curl -X POST http://custodian-a:8080/governance/execute \
+  -H "Content-Type: application/json" \
+  -d '{
+    "party_id": "joint-vault::1220...",
+    "rules_contract_id": "<governance-rules-cid>",
+    "action": { "type": "governance_set_threshold", "new_threshold": 0 },
+    "confirmation_cids": ["confirm-cid-1", "confirm-cid-2"],
+    "disclosed_contracts": [],
+    "governance_type": "core_domain",
+    "proposal_cid": "00abc123..."
+  }'
+```
+
+After execution:
+- The `GenericVoteProposal` contract is archived
+- All `GovernanceConfirmation` contracts are consumed
+- A `GovernanceExecutionResult` is created with the vote description, confirmers, and timestamp as a permanent on-chain record
+
+## Token Custody
+
+The `governance-token-custody` package enables governance-controlled token operations. All token actions follow the same propose -> confirm -> execute flow as generic votes, but trigger real on-chain state changes when executed.
+
+### Prerequisites
+
+- `GovernanceRules` contract deployed (from `#governance-core-v0-rc2`)
+- `governance-token-custody` DAR uploaded to all participants (from `#governance-token-custody-v0-rc2`)
+- Token infrastructure deployed (transfer factories, instruments, etc.)
+
+### Set Up Canton Coin Preapproval
+
+Allows the governance party to receive Canton Coin transfers without per-transfer approval. This creates a `TransferPreapprovalProposal` that a provider must separately accept.
+
+```bash
+curl -X POST http://custodian-a:8080/governance/propose \
+  -H "Content-Type: application/json" \
+  -d '{
+    "party_id": "joint-vault::1220...",
+    "rules_contract_id": "<governance-rules-cid>",
+    "proposal": {
+      "type": "setup_cc_preapproval",
+      "provider": "provider-party::1220...",
+      "expected_dso": "dso-party::1220..."
+    }
+  }'
+```
+
+### Set Up Utility Token Preapproval
+
+Allows the governance party to receive utility token transfers. This creates a `TransferPreapproval` directly (no separate accept step).
+
+```bash
+curl -X POST http://custodian-a:8080/governance/propose \
+  -H "Content-Type: application/json" \
+  -d '{
+    "party_id": "joint-vault::1220...",
+    "rules_contract_id": "<governance-rules-cid>",
+    "proposal": {
+      "type": "setup_token_preapproval",
+      "operator": "operator::1220...",
+      "instrument_admin": "registrar::1220...",
+      "instrument_allowances": [{ "id": "TEST-TOKEN" }]
+    }
+  }'
+```
+
+Omit `instrument_allowances` or pass an empty array to preapprove all instruments from the admin.
+
+### Transfer Tokens
+
+Transfers tokens from the governance party to a receiver via a `TransferFactory`.
+
+```bash
+curl -X POST http://custodian-a:8080/governance/propose \
+  -H "Content-Type: application/json" \
+  -d '{
+    "party_id": "joint-vault::1220...",
+    "rules_contract_id": "<governance-rules-cid>",
+    "proposal": {
+      "type": "transfer",
+      "transfer_factory_cid": "<transfer-factory-cid>",
+      "expected_admin": "registrar::1220...",
+      "receiver": "recipient::1220...",
+      "amount": "100.00",
+      "instrument_id": { "admin": "registrar::1220...", "id": "TEST-TOKEN" },
+      "input_holding_cids": ["<holding-cid-1>"]
+    }
+  }'
+```
+
+> **UTXO timing risk**: The holdings referenced by `input_holding_cids` are captured at proposal creation time. If those holdings are spent before the proposal is executed, the transfer will fail. Mitigations: use dedicated holdings, keep confirmation timeouts short, and re-propose if holdings change.
+
+### Accept Incoming Transfer
+
+Accepts a pending `TransferInstruction` directed at the governance party.
+
+```bash
+curl -X POST http://custodian-a:8080/governance/propose \
+  -H "Content-Type: application/json" \
+  -d '{
+    "party_id": "joint-vault::1220...",
+    "rules_contract_id": "<governance-rules-cid>",
+    "proposal": {
+      "type": "accept_transfer",
+      "transfer_instruction_cid": "<transfer-instruction-cid>"
+    }
+  }'
+```
+
+> **Timing risk**: The sender can withdraw the transfer instruction before governance approval completes, which would cause execution to fail with a contract-not-found error.
+
+### Governance Self-Management
+
+The `GovernanceRules` contract supports self-management actions (add/remove members, change threshold, change timeout) through the `core_self` governance type. These do not require proposals -- they use value-based matching like `VaultGovernanceRules`.
+
+**Add a new member:**
+
+```bash
+curl -X POST http://custodian-a:8080/governance/confirm \
+  -H "Content-Type: application/json" \
+  -d '{
+    "party_id": "joint-vault::1220...",
+    "rules_contract_id": "<governance-rules-cid>",
+    "action": {
+      "type": "governance_add_member",
+      "member": "new-member-d::1220...",
+      "new_threshold": 3
+    },
+    "governance_type": "core_self"
+  }'
+```
+
+**Change the threshold:**
+
+```bash
+curl -X POST http://custodian-a:8080/governance/confirm \
+  -H "Content-Type: application/json" \
+  -d '{
+    "party_id": "joint-vault::1220...",
+    "rules_contract_id": "<governance-rules-cid>",
+    "action": {
+      "type": "governance_set_threshold",
+      "new_threshold": 3
+    },
+    "governance_type": "core_self"
+  }'
+```
+
+**Change the confirmation timeout:**
+
+```bash
+curl -X POST http://custodian-a:8080/governance/confirm \
+  -H "Content-Type: application/json" \
+  -d '{
+    "party_id": "joint-vault::1220...",
+    "rules_contract_id": "<governance-rules-cid>",
+    "action": {
+      "type": "governance_set_timeout",
+      "new_timeout_microseconds": 172800000000
+    },
+    "governance_type": "core_self"
+  }'
+```
+
+After threshold confirmations are collected, execute with:
+
+```bash
+curl -X POST http://custodian-a:8080/governance/execute \
+  -H "Content-Type: application/json" \
+  -d '{
+    "party_id": "joint-vault::1220...",
+    "rules_contract_id": "<governance-rules-cid>",
+    "action": {
+      "type": "governance_set_threshold",
+      "new_threshold": 3
+    },
+    "confirmation_cids": ["<confirmation-cid-1>", "<confirmation-cid-2>"],
+    "governance_type": "core_self"
+  }'
+```
+
+Self-management execution returns a new `GovernanceRules` contract with the updated state.
