@@ -1,6 +1,6 @@
 # Token Issuance Plugin — Design
 
-**Status:** draft design. Most items are decided; two architectural proposals require team consensus before being locked in.
+**Status:** draft design. Most items are proposed defaults (open to team review); two architectural proposals are flagged as explicitly requiring team consensus before being locked in.
 
 **Terminology note.** Strictly, "issuance" means the creation of new tokens (minting) — burning is its opposite, and "supply management" is the umbrella term covering both. This document uses "issuance" colloquially, following the name of the plugin, to refer to the full mint + burn lifecycle that the plugin governs. Wherever the distinction matters, the specific operation ("mint" or "burn") is named explicitly.
 
@@ -42,13 +42,15 @@ The following two choices keep the plugin self-contained and simple, but they ha
 
 ---
 
-## Team coordination item (out of plugin scope)
+## Out-of-scope prerequisite: attestation protocol
 
-**Attestation pipeline.** How committee members learn about the external event they're voting on — a bridge oracle, a signed attestation chain, a manual evidence process — is out of scope for the plugin itself. But the structure of that evidence determines whether the free-form `description` field (the current v1 default) is enough or whether we need typed fields on `MintProposal` / `BurnProposal`. Worth a parallel team agreement on the attestation protocol before any structured schema is fixed.
+How committee members learn about the external event they're voting on — a bridge oracle, a signed attestation chain, a manual evidence process — is out of scope for the plugin itself, but the plugin assumes *some* such protocol exists. The structure of the evidence it delivers determines whether the free-form `description` field (the current v1 default) is enough or whether we need typed fields on `MintProposal` / `BurnProposal`. Choosing that protocol is a parallel decision that should happen alongside this plugin design, before any structured proposal schema is fixed.
 
 ---
 
-## Decisions so far
+## Proposed decisions
+
+Items the proposer has made an initial call on. They are working defaults for the plugin's design and are open to team review — this is not the "requires explicit consensus" tier above, but any of them can be reopened on request.
 
 ### Product-level decisions
 
