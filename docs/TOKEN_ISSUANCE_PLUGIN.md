@@ -271,3 +271,16 @@ This is exactly why the treasury-first / treasury-only pair is so clean architec
 | (factory's `admin`) | The instrument admin, always required | Stored on the factory | Daml's authorization rules |
 
 In short: `extraActors` is how the factory interface lets *anyone else's consent* into the mint/burn operation without baking a specific "who" into the interface. Implementations make it concrete.
+
+---
+
+## Appendix: utility-registry async mint / burn workflows
+
+The `AllocationFactory` template (in `utility-registry-app-v0`) exports a set of `Request*` / `Offer*` choices that provide two-step (async) mint and burn workflows as a core utility-registry feature — no custom `MintPreapproval` contract needed:
+
+- `AllocationFactory_OfferMint` → produces a `MintOffer` contract the recipient accepts on their own time.
+- `AllocationFactory_RequestMint` → produces a `MintRequest` contract the admin approves.
+- `AllocationFactory_OfferBurn` → analogous for burn (holder-facing offer).
+- `AllocationFactory_RequestBurn` → analogous (holder requests their own holdings be burnt).
+
+The async property comes from the two steps being authorized separately: whichever party initiates needs only their own authority to create the offer / request contract; the other party's authority enters later at accept time. The treasury-first mint alternative ("Proposals requiring team consensus") names the mint side of this pattern explicitly. The burn side (`OfferBurn` / `RequestBurn`) is available on the same factory and would similarly support a user-initiated redemption flow if treasury-only burn is rejected.
