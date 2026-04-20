@@ -56,9 +56,11 @@ Items the proposer has made an initial call on. They are working defaults for th
 
 Scope, policy, and feature choices. These define what the plugin does and doesn't do, and each could be reopened without changing the plugin's internal wiring.
 
-#### Setup is governance-driven (not operator-driven)
+#### Setup runs through the governance committee, not as an out-of-band script
 
-The Utility-Registry onboarding that produces the `AllocationFactory` and registers the instrument is performed under committee control, via a governance-gated proposal, rather than by operators running an out-of-band script. This keeps the full plugin lifecycle (setup → mint / burn → pause / rotate) within the same governance committee that signs the governance party.
+The Utility-Registry onboarding that produces the `AllocationFactory` and registers the instrument is performed under committee control, via a governance-gated proposal, rather than by a sysadmin running a one-off deployment script with the right keys. This keeps the full plugin lifecycle (setup → mint / burn → pause / rotate) within the same governance committee that signs the governance party.
+
+(Unrelated: the Splice utility-registry has its own concept of an "operator" *Party* — a Daml party that represents the registry app itself and appears as a co-signatory on `ProviderService`, `UserService`, `RegistrarService`, etc. That operator party shows up as a field on `SetupIssuanceProposal` in the technical section below. The "operator-driven" we were ruling out here is the sysadmin sense, not the Splice operator-party sense.)
 
 #### Single-instrument plugin deployment
 
@@ -118,7 +120,7 @@ Given the product-level decision that setup is governance-driven, the implementa
 
 **Prerequisites.** `SetupIssuanceProposal.executeImpl` consumes an existing `ProviderService` and `UserService` — it does not create them. These utility-registry contracts must be provisioned for the governance party before setup can run, e.g. via the existing `governance-token-custody` plugin's `UtilityCreateProviderRequest` / `UtilityCreateUserRequest`, or an equivalent path.
 
-**Input fields on `SetupIssuanceProposal`.** `providerServiceCid : ContractId ProviderService`, `userServiceCid : ContractId UserService`, `operator : Party`, `instrumentIdText : Text` (the `Text` half of the eventual `InstrumentId`; the `admin` half is the governance party), the token-UX metadata (display name, symbol, decimals), and any issuer/holder requirements lists the registry needs. The specific schema is finalised in the implementation plan.
+**Input fields on `SetupIssuanceProposal`.** `providerServiceCid : ContractId ProviderService`, `userServiceCid : ContractId UserService`, `operator : Party` (the Splice utility-registry operator party — the party representing the registry app; not a human role), `instrumentIdText : Text` (the `Text` half of the eventual `InstrumentId`; the `admin` half is the governance party), the token-UX metadata (display name, symbol, decimals), and any issuer/holder requirements lists the registry needs. The specific schema is finalised in the implementation plan.
 
 #### `IssuanceConfig` schema
 
