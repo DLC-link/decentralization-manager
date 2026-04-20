@@ -1,6 +1,6 @@
 # Token Issuance Plugin — Design
 
-**Status:** draft design. All items are proposer-made defaults, open to team review; any can be reopened on request.
+**Status:** design agreed with the team. Ready to proceed to the implementation plan.
 
 **Terminology note.** Strictly, "issuance" means the creation of new tokens (minting) — burning is its opposite, and "supply management" is the umbrella term covering both. This document uses "issuance" colloquially, following the name of the plugin, to refer to the full mint + burn lifecycle that the plugin governs. Wherever the distinction matters, the specific operation ("mint" or "burn") is named explicitly.
 
@@ -20,9 +20,9 @@ How committee members learn about the external event they're voting on — a bri
 
 ---
 
-## Proposed decisions
+## Decisions
 
-Items the proposer has made an initial call on. They are working defaults for the plugin's design and are open to team review; any of them can be reopened on request.
+Items agreed with the team.
 
 ### Product-level decisions
 
