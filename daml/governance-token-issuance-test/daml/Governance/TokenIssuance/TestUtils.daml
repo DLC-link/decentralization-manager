@@ -1,0 +1,80 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Test utilities for the token issuance governance plugin.
+module Governance.TokenIssuance.TestUtils where
+
+import DA.Set as Set hiding (filter)
+import DA.Time (minutes)
+import Daml.Script
+
+import Governance.Action (GovernableAction)
+import Governance.Confirmation (GovernanceConfirmation)
+import Governance.ExecutionResult
+import Governance.Rules
+
+-- | Standard test party allocation for token issuance tests.
+-- NB: no separate `registrar` field — the governance party itself is the registrar.
+data IssuanceTestParties = IssuanceTestParties
+  with
+    governanceParty : Party
+    member1 : Party
+    member2 : Party
+    member3 : Party
+    outsider : Party
+    operator : Party
+    dso : Party
+  deriving (Show, Eq)
+
+-- | Allocate standard test parties.
+allocateIssuanceTestParties : Script IssuanceTestParties
+allocateIssuanceTestParties = do
+  governanceParty <- allocateParty "GovernanceParty"
+  member1 <- allocateParty "Member1"
+  member2 <- allocateParty "Member2"
+  member3 <- allocateParty "Member3"
+  outsider <- allocateParty "Outsider"
+  operator <- allocateParty "Operator"
+  dso <- allocateParty "DSO"
+  pure IssuanceTestParties with ..
+
+-- | Standard member set.
+getMembers : IssuanceTestParties -> Set Party
+getMembers parties = Set.fromList [parties.member1, parties.member2, parties.member3]
+
+-- | Build submission context for a member with readAs on governance party.
+memberContext : Party -> Party -> SubmitOptions
+memberContext member gp = actAs member <> readAs gp
+
+-- | Create governance rules with standard test configuration (threshold 2 of 3).
+createTestGovernance : IssuanceTestParties -> Script (ContractId GovernanceRules)
+createTestGovernance parties =
+  submit parties.governanceParty $ createCmd GovernanceRules with
+    governanceParty = parties.governanceParty
+    members = getMembers parties
+    threshold = 2
+    actionConfirmationTimeout = minutes 30
+
+-- | Collect confirmations from a list of members for an interface action.
+submitConfirmations : Party -> ContractId GovernanceRules -> ContractId GovernableAction -> [Party] -> Script [ContractId GovernanceConfirmation]
+submitConfirmations governanceParty rulesCid proposalCid confirmers =
+  mapA (\confirmer ->
+    submit (memberContext confirmer governanceParty) $
+      exerciseCmd rulesCid GovernanceRules_ConfirmAction with
+        confirmer
+        actionProposalCid = proposalCid
+  ) confirmers
+
+-- | Confirm and execute an interface action in one go.
+confirmAndExecute : IssuanceTestParties -> ContractId GovernanceRules -> ContractId GovernableAction -> [Party] -> Party -> Script (ContractId GovernanceExecutionResult)
+confirmAndExecute parties rulesCid proposalCid confirmers executor = do
+  confirmationCids <- submitConfirmations parties.governanceParty rulesCid proposalCid confirmers
+  submit (actAs executor
+    <> readAs parties.governanceParty
+    <> readAs parties.outsider
+    <> readAs parties.operator
+    <> readAs parties.dso) $
+    exerciseCmd rulesCid GovernanceRules_ExecuteConfirmedAction with
+      executor
+      actionProposalCid = proposalCid
+      confirmations = confirmationCids
