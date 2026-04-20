@@ -24,6 +24,32 @@ How committee members learn about the external event they're voting on — a bri
 
 Items agreed with the team.
 
+**Product-level:**
+- [Mint via `AllocationFactory_OfferMint`](#mint-via-allocationfactory_offermint)
+- [Burn via `AllocationFactory_OfferBurn`](#burn-via-allocationfactory_offerburn)
+- [Setup runs through the governance committee, not as an out-of-band script](#setup-runs-through-the-governance-committee-not-as-an-out-of-band-script)
+- [Single-instrument plugin deployment](#single-instrument-plugin-deployment)
+- [Token UX is decided at setup](#token-ux-is-decided-at-setup)
+- [Amount source: trusted plaintext](#amount-source-trusted-plaintext)
+- [Replay protection: committee diligence only](#replay-protection-committee-diligence-only)
+- [No on-chain supply accounting](#no-on-chain-supply-accounting)
+- [No plugin-specific audit record](#no-plugin-specific-audit-record)
+- [Pause / resume — considered, not included](#pause--resume--considered-not-included)
+- [Factory rotation](#factory-rotation)
+
+**Technical implementation:**
+- [Two plugin templates: `MintProposal` and `BurnProposal`](#two-plugin-templates-mintproposal-and-burnproposal)
+- [Setup runs the whole onboarding chain in one `SetupIssuanceProposal`](#setup-runs-the-whole-onboarding-chain-in-one-setupissuanceproposal)
+- [`IssuanceConfig` schema](#issuanceconfig-schema)
+- [`MintProposal` and `BurnProposal` carry no instrument selector](#mintproposal-and-burnproposal-carry-no-instrument-selector)
+- [One Mint per `MintProposal`, one Burn per `BurnProposal`](#one-mint-per-mintproposal-one-burn-per-burnproposal)
+- [Burn target holdings are supplied by the proposer](#burn-target-holdings-are-supplied-by-the-proposer)
+- [External-event metadata in the `description` field](#external-event-metadata-in-the-description-field)
+- [Proposer: committee members only](#proposer-committee-members-only)
+- [`SetupIssuanceProposal` is one-shot (enforced by committee diligence)](#setupissuanceproposal-is-one-shot-enforced-by-committee-diligence)
+- [`IssuanceConfig` owns its own update choice](#issuanceconfig-owns-its-own-update-choice)
+- [`actionLabel` values](#actionlabel-values)
+
 ### Product-level decisions
 
 Scope, policy, and feature choices. These define what the plugin does and doesn't do.
