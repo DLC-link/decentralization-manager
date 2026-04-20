@@ -633,7 +633,7 @@ pub enum ProposalType {
 }
 
 /// Request to propose a governance domain action (creates proposal contract)
-#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct ProposeActionRequest {
     pub party_id: CantonId,
     pub rules_contract_id: String,
@@ -659,7 +659,7 @@ pub struct DomainGovernanceAction {
 }
 
 /// Request to submit a confirmation for an action with structured type
-#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct ConfirmActionRequest {
     pub party_id: CantonId,
     pub rules_contract_id: String,
@@ -672,14 +672,14 @@ pub struct ConfirmActionRequest {
 }
 
 /// A disclosed contract to include in the ledger submission
-#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct DisclosedContractInput {
     pub contract_id: String,
     pub blob: String, // base64-encoded created_event_blob
 }
 
 /// Request to execute a confirmed action with structured type
-#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct ExecuteActionRequest {
     pub party_id: CantonId,
     pub rules_contract_id: String,
@@ -731,7 +731,7 @@ pub struct GovernanceResponse {
 }
 
 /// Request to expire a stale confirmation
-#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct ExpireConfirmationRequest {
     pub party_id: CantonId,
     pub rules_contract_id: String,
@@ -741,7 +741,7 @@ pub struct ExpireConfirmationRequest {
 }
 
 /// Request to cancel (revoke) own confirmation
-#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct CancelConfirmationRequest {
     pub party_id: CantonId,
     pub confirmation_cid: String,
@@ -935,4 +935,49 @@ pub struct SuccessResponse {
 pub struct WorkflowStatusResponse {
     pub status: WorkflowProgress,
     pub error: Option<String>,
+}
+
+// ============================================================================
+// Audit Trail Types
+// ============================================================================
+
+/// Query parameters for the governance audit endpoint
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct AuditLogQuery {
+    /// Decentralized party ID to filter audit entries
+    pub party_id: CantonId,
+    /// Maximum number of entries to return (default 50)
+    #[serde(default = "default_audit_limit")]
+    pub limit: i64,
+    /// Offset for pagination (default 0)
+    #[serde(default)]
+    pub offset: i64,
+}
+
+fn default_audit_limit() -> i64 {
+    50
+}
+
+/// A single governance audit log entry
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct AuditLogEntry {
+    pub id: i64,
+    pub timestamp: i64,
+    pub event_type: String,
+    pub party_id: String,
+    pub member_party_id: String,
+    pub governance_type: String,
+    pub action_summary: String,
+    pub details: serde_json::Value,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+    pub created_at: i64,
+}
+
+/// Response for the governance audit endpoint
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct AuditLogResponse {
+    pub entries: Vec<AuditLogEntry>,
+    pub total_returned: usize,
 }

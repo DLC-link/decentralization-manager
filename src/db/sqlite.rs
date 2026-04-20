@@ -8,13 +8,15 @@ use sqlx::{
 
 use super::{
     rows::{
-        DecPartyContractRow, DecPartyParticipantRow, DecPartyRow, PartyCredentialsRow, PeerRow,
+        DecPartyContractRow, DecPartyParticipantRow, DecPartyRow, GovernanceAuditRow,
+        PartyCredentialsRow, PeerRow,
     },
     schema::{Commitable, SchemaRead, SchemaWrite},
 };
 use crate::{
     config::{PartyCredentials, Peer},
     error::Result,
+    participant_id::CantonId,
 };
 
 pub static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
@@ -233,6 +235,29 @@ impl SchemaRead for SqlitePool {
             .fetch_all(self)
             .await?
         };
+
+        Ok(rows)
+    }
+
+    async fn get_governance_audit(
+        &self,
+        party_id: &CantonId,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<GovernanceAuditRow>> {
+        let rows = sqlx::query_as::<_, GovernanceAuditRow>(
+            r"
+            SELECT * FROM governance_audit
+            WHERE party_id = ?
+            ORDER BY created_at DESC
+            LIMIT ? OFFSET ?
+            ",
+        )
+        .bind(party_id.to_string())
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(self)
+        .await?;
 
         Ok(rows)
     }
@@ -826,6 +851,114 @@ mod tests {
         Commitable::commit(tx).await?;
 
         assert!(pool.get_dec_parties_by_prefix("").await?.is_empty());
+
+        Ok(())
+    }
+
+    // ====================================================================
+    // Governance Audit
+    // ====================================================================
+
+    async fn insert_audit_entry(
+        pool: &SqlitePool,
+        party_id: &str,
+        event_type: &str,
+        status: &str,
+        created_at: i64,
+    ) -> Result {
+        sqlx::query(
+            r"
+            INSERT INTO governance_audit (
+                timestamp, event_type, party_id, member_party_id,
+                governance_type, action_summary, details, status,
+                error_message, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ",
+        )
+        .bind(created_at)
+        .bind(event_type)
+        .bind(party_id)
+        .bind("member::1220aa")
+        .bind("vault")
+        .bind("governance_add_member")
+        .bind(r#"{"type":"governance_add_member"}"#)
+        .bind(status)
+        .bind(None::<String>)
+        .bind(created_at)
+        .execute(pool)
+        .await?;
+
+        Ok(())
+    }
+
+    fn test_party_id(prefix: &str) -> CantonId {
+        CantonId::parse(&format!("{prefix}::{TEST_NS}")).unwrap()
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_governance_audit_insert_and_query(pool: SqlitePool) -> Result {
+        let party_id = test_party_id("party-a");
+        let party_id_str = party_id.to_string();
+
+        // Empty initially
+        let entries = pool.get_governance_audit(&party_id, 50, 0).await?;
+        assert!(entries.is_empty());
+
+        // Insert entries
+        insert_audit_entry(&pool, &party_id_str, "propose", "success", 1000).await?;
+        insert_audit_entry(&pool, &party_id_str, "confirm", "success", 2000).await?;
+        insert_audit_entry(&pool, &party_id_str, "execute", "failed", 3000).await?;
+
+        // Query all
+        let entries = pool.get_governance_audit(&party_id, 50, 0).await?;
+        assert_eq!(entries.len(), 3);
+        // Newest first
+        assert_eq!(entries[0].event_type, "execute");
+        assert_eq!(entries[1].event_type, "confirm");
+        assert_eq!(entries[2].event_type, "propose");
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_governance_audit_pagination(pool: SqlitePool) -> Result {
+        let party_id = test_party_id("party-a");
+        let party_id_str = party_id.to_string();
+
+        for i in 0..5 {
+            insert_audit_entry(&pool, &party_id_str, "confirm", "success", 1000 + i).await?;
+        }
+
+        // Limit
+        let entries = pool.get_governance_audit(&party_id, 2, 0).await?;
+        assert_eq!(entries.len(), 2);
+
+        // Offset
+        let entries = pool.get_governance_audit(&party_id, 2, 3).await?;
+        assert_eq!(entries.len(), 2);
+
+        // Beyond end
+        let entries = pool.get_governance_audit(&party_id, 50, 5).await?;
+        assert!(entries.is_empty());
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_governance_audit_filters_by_party(pool: SqlitePool) -> Result {
+        let party_a = test_party_id("party-a");
+        let party_b = test_party_id("party-b");
+
+        insert_audit_entry(&pool, &party_a.to_string(), "propose", "success", 1000).await?;
+        insert_audit_entry(&pool, &party_b.to_string(), "confirm", "success", 2000).await?;
+
+        let entries = pool.get_governance_audit(&party_a, 50, 0).await?;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].event_type, "propose");
+
+        let entries = pool.get_governance_audit(&party_b, 50, 0).await?;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].event_type, "confirm");
 
         Ok(())
     }

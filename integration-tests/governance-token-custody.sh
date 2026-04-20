@@ -190,6 +190,83 @@ if [ "$REMAINING_ACTIONS" != "0" ]; then
     exit 1
 fi
 
+# ============================================================================
+# Step 7: Verify the governance audit trail
+# ============================================================================
+
+echo ""
+echo "Step 7: Verifying governance audit trail..."
+sleep 2
+
+# P1 proposed (propose auto-confirms, so one "propose" entry)
+P1_AUDIT=$(curl -s "http://localhost:$P1_HTTP/governance/audit?party_id=$PARTY_ID")
+P1_AUDIT_COUNT=$(echo "$P1_AUDIT" | jq '.total_returned')
+echo "  P1 audit entries: $P1_AUDIT_COUNT"
+
+if [ "$P1_AUDIT_COUNT" -lt 1 ]; then
+    echo "ERROR: Expected at least 1 audit entry for P1 (propose), got $P1_AUDIT_COUNT"
+    echo "  Full response: $P1_AUDIT"
+    exit 1
+fi
+
+P1_PROPOSE_EVENT=$(echo "$P1_AUDIT" | jq -r '[.entries[] | select(.event_type == "propose")][0].event_type // empty')
+if [ "$P1_PROPOSE_EVENT" != "propose" ]; then
+    echo "ERROR: Expected propose event in P1 audit trail"
+    echo "  Entries: $(echo "$P1_AUDIT" | jq '[.entries[].event_type]')"
+    exit 1
+fi
+
+P1_PROPOSE_STATUS=$(echo "$P1_AUDIT" | jq -r '[.entries[] | select(.event_type == "propose")][0].status // empty')
+if [ "$P1_PROPOSE_STATUS" != "success" ]; then
+    echo "ERROR: Expected propose status=success, got $P1_PROPOSE_STATUS"
+    exit 1
+fi
+
+# P2 confirmed
+P2_AUDIT=$(curl -s "http://localhost:$P2_HTTP/governance/audit?party_id=$PARTY_ID")
+P2_AUDIT_COUNT=$(echo "$P2_AUDIT" | jq '.total_returned')
+echo "  P2 audit entries: $P2_AUDIT_COUNT"
+
+if [ "$P2_AUDIT_COUNT" -lt 1 ]; then
+    echo "ERROR: Expected at least 1 audit entry for P2 (confirm), got $P2_AUDIT_COUNT"
+    echo "  Full response: $P2_AUDIT"
+    exit 1
+fi
+
+P2_CONFIRM_EVENT=$(echo "$P2_AUDIT" | jq -r '[.entries[] | select(.event_type == "confirm")][0].event_type // empty')
+if [ "$P2_CONFIRM_EVENT" != "confirm" ]; then
+    echo "ERROR: Expected confirm event in P2 audit trail"
+    echo "  Entries: $(echo "$P2_AUDIT" | jq '[.entries[].event_type]')"
+    exit 1
+fi
+
+# P3 executed
+P3_AUDIT=$(curl -s "http://localhost:$P3_HTTP/governance/audit?party_id=$PARTY_ID")
+P3_AUDIT_COUNT=$(echo "$P3_AUDIT" | jq '.total_returned')
+echo "  P3 audit entries: $P3_AUDIT_COUNT"
+
+if [ "$P3_AUDIT_COUNT" -lt 1 ]; then
+    echo "ERROR: Expected at least 1 audit entry for P3 (execute), got $P3_AUDIT_COUNT"
+    echo "  Full response: $P3_AUDIT"
+    exit 1
+fi
+
+P3_EXECUTE_EVENT=$(echo "$P3_AUDIT" | jq -r '[.entries[] | select(.event_type == "execute")][0].event_type // empty')
+if [ "$P3_EXECUTE_EVENT" != "execute" ]; then
+    echo "ERROR: Expected execute event in P3 audit trail"
+    echo "  Entries: $(echo "$P3_AUDIT" | jq '[.entries[].event_type]')"
+    exit 1
+fi
+
+# Verify audit entry details are valid JSON
+P1_DETAILS=$(echo "$P1_AUDIT" | jq -r '.entries[0].details // empty')
+if [ -z "$P1_DETAILS" ] || [ "$P1_DETAILS" = "null" ]; then
+    echo "ERROR: Audit entry details should contain request JSON"
+    exit 1
+fi
+
+echo "  All audit entries verified!"
+
 echo ""
 echo "Governance token custody flow completed successfully!"
 echo "  Proposer:  participant-1 ($P1_MEMBER_PARTY)"

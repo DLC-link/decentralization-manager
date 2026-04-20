@@ -114,3 +114,18 @@ pub struct DecPartyContractRow {
     pub template_id: String,
     pub package_id: String,
 }
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct GovernanceAuditRow {
+    pub id: i64,
+    pub timestamp: i64,
+    pub event_type: String,
+    pub party_id: String,
+    pub member_party_id: String,
+    pub governance_type: String,
+    pub action_summary: String,
+    pub details: String,
+    pub status: String,
+    pub error_message: Option<String>,
+    pub created_at: i64,
+}
