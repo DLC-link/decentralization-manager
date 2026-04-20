@@ -361,32 +361,27 @@ git commit -m "feat(token-issuance): added IssuanceConfig_RotateFactory choice"
 
 - [ ] **Step 1: Add `initUtilityPrereqs` helper to TestUtils.**
 
-`SetupIssuanceProposal` consumes existing `ProviderService` and `UserService` contracts for the governance party. Tests need to provision these before running the proposal. Append to `daml/governance-token-issuance-test/daml/Governance/TokenIssuance/TestUtils.daml`:
+`SetupIssuanceProposal` consumes an existing `ProviderService` contract for the governance party. Tests need to provision it before running the proposal. Append to `daml/governance-token-issuance-test/daml/Governance/TokenIssuance/TestUtils.daml`:
 
 ```daml
-import Utility.Registry.App.V0.Service.ProviderService
+import Utility.Registry.App.V0.Service.Provider
   (ProviderService(..))
-import Utility.Registry.App.V0.Service.UserService
-  (UserService(..))
 
--- | Provision a ProviderService and UserService for the governance party.
+-- | Provision a ProviderService for the governance party.
 -- Uses multi-party submit to stand in for the full Utility-Registry onboarding.
--- Production paths reach these via governance-token-custody proposals
--- (UtilityCreateProviderRequest / UtilityCreateUserRequest).
-initUtilityPrereqs : IssuanceTestParties -> Script (ContractId ProviderService, ContractId UserService)
-initUtilityPrereqs parties = do
-  providerCid <- submitMulti [parties.governanceParty, parties.operator] [] $
+-- A production path would reach this via a `UtilityCreateProviderRequest` flow
+-- added to the existing governance-token-custody plugin, or equivalent.
+initUtilityPrereqs : IssuanceTestParties -> Script (ContractId ProviderService)
+initUtilityPrereqs parties =
+  submitMulti [parties.governanceParty, parties.operator] [] $
     createCmd ProviderService with
       operator = parties.operator
       provider = parties.governanceParty
-  userCid <- submitMulti [parties.governanceParty, parties.operator] [] $
-    createCmd UserService with
-      operator = parties.operator
-      user = parties.governanceParty
-  pure (providerCid, userCid)
 ```
 
-> **If the `ProviderService` / `UserService` field shapes in `utility-registry-app-v0-0.7.0` differ from the above (extra fields, different signatories), adjust. Confirm by reading those two `.daml` files from the locally extracted DAR bundle.**
+> **If the `ProviderService` field shape in `utility-registry-app-v0-0.7.0` differs from the above (extra fields, different signatories), adjust. Confirm by reading `Utility/Registry/App/V0/Service/Provider.daml` from the locally extracted DAR bundle.**
+>
+> **Why no `UserService`.** V1 uses `registrarRequirements = []`, so `RegistrarServiceRequest_Accept` takes `credentialCids = []` and no credential / `UserService` path is needed. `UserService` itself lives in `utility-credential-app`, not `utility-registry-app`. If a later version tightens registrar requirements, follow canton-vault's `VaultGovernanceRules_SetupUtility` (`VaultGovernance.daml:469-514`): add `utility-credential-app-v0-*.dar` as a data-dependency, import `Utility.Credential.App.V0.Service.User (UserService)`, take a `userServiceCid` on the proposal, and wire the credential-offer / credential-accept choices before `AcceptRegistrarServiceRequest`.
 
 - [ ] **Step 2: Write the failing test for `SetupIssuanceProposal`.**
 
@@ -425,12 +420,11 @@ given_governance = do
 
 when_setup_executed : Fixture -> Script ()
 when_setup_executed f = do
-  (providerCid, userCid) <- initUtilityPrereqs f.parties
+  providerCid <- initUtilityPrereqs f.parties
   proposalCid <- submit f.parties.member1 $ createCmd SetupIssuanceProposal with
     governanceParty = f.parties.governanceParty
     proposer = f.parties.member1
     providerServiceCid = providerCid
-    userServiceCid = userCid
     operator = f.parties.operator
     instrumentIdText = "TEST-TOKEN"
     displayName = "Test Token"
@@ -486,31 +480,29 @@ module Governance.TokenIssuance.SetupIssuance where
 
 import Splice.Api.Token.HoldingV1 (InstrumentId(..))
 
-import Utility.Registry.App.V0.Service.ProviderService
+import Utility.Registry.App.V0.Service.Provider
   (ProviderService, ProviderService_CreateProviderConfiguration(..),
    ProviderService_AcceptRegistrarServiceRequest(..))
-import Utility.Registry.App.V0.Service.RegistrarService
-  (RegistrarService,
-   RegistrarService_CreateAllocationFactory(..),
+import Utility.Registry.App.V0.Service.Registrar
+  (RegistrarService_CreateAllocationFactory(..),
    RegistrarService_CreateInstrumentConfiguration(..),
    RegistrarServiceRequest(..),
    RegistrarServiceRequest_Accept(..))
-import Utility.Registry.App.V0.Service.UserService (UserService)
 
 import Governance.Action
 
 import Governance.TokenIssuance.IssuanceConfig
 
 -- | The initial plugin-setup proposal.
--- Consumes an existing ProviderService / UserService for the governance party
--- (provisioned beforehand via governance-token-custody or equivalent), runs the
--- four Utility-Registry onboarding steps, and creates IssuanceConfig.
+-- Consumes an existing ProviderService for the governance party (provisioned
+-- beforehand via governance-token-custody or equivalent), runs the four
+-- Utility-Registry onboarding steps, and creates IssuanceConfig. V1 uses
+-- empty registrar/holder requirements, so no UserService / credential path.
 template SetupIssuanceProposal
   with
     governanceParty : Party
     proposer : Party
     providerServiceCid : ContractId ProviderService
-    userServiceCid : ContractId UserService
     operator : Party
     instrumentIdText : Text
     displayName : Text
@@ -682,12 +674,11 @@ test_when_mint_proposed_then_mint_offer_created = script do
 >
 > setupIssuanceForTest : IssuanceTestParties -> ContractId GovernanceRules -> Script (ContractId IssuanceConfig)
 > setupIssuanceForTest parties rulesCid = do
->   (providerCid, userCid) <- initUtilityPrereqs parties
+>   providerCid <- initUtilityPrereqs parties
 >   proposalCid <- submit parties.member1 $ createCmd SetupIssuanceProposal with
 >     governanceParty = parties.governanceParty
 >     proposer = parties.member1
 >     providerServiceCid = providerCid
->     userServiceCid = userCid
 >     operator = parties.operator
 >     instrumentIdText = "TEST-TOKEN"
 >     displayName = "Test Token"
@@ -1212,12 +1203,11 @@ Append:
 -- The rules contract rejects `GovernanceRules_ConfirmAction` from non-members.
 when_non_member_confirms : Fixture -> Script ()
 when_non_member_confirms f = do
-  (providerCid, userCid) <- initUtilityPrereqs f.parties
+  providerCid <- initUtilityPrereqs f.parties
   proposalCid <- submit f.parties.member1 $ createCmd SetupIssuanceProposal with
     governanceParty = f.parties.governanceParty
     proposer = f.parties.member1
     providerServiceCid = providerCid
-    userServiceCid = userCid
     operator = f.parties.operator
     instrumentIdText = "TEST-TOKEN"
     displayName = "Test Token"
@@ -1483,7 +1473,7 @@ git commit -m "docs(token-issuance): added implementation plan"
 
 ## Notes for the engineer
 
-- **Utility-registry detail drift.** The exact shape of `ProviderService`, `UserService`, `RegistrarService`, `Mint`, `Burn`, and the various context keys required by `AllocationFactory`'s choice bodies is defined in `utility-registry-app-v0-0.7.0`. Locally the source lives under `canton-network-utility-dars-0.12.0/utility-registry-app-v0-0.7.0/utility-registry-app-v0-0.7.0-<hash>/Utility/…`. When a test fails because a record constructor is wrong or a context key is missing, read the relevant source file and adjust. The design doc (`docs/TOKEN_ISSUANCE_PLUGIN.md`) cites specific lines for where `OfferMint` / `OfferBurn` are defined (`AllocationFactory.daml:479-494` and nearby).
+- **Utility-registry detail drift.** The exact shape of `ProviderService`, `RegistrarService`, `Mint`, `Burn`, and the various context keys required by `AllocationFactory`'s choice bodies is defined in `utility-registry-app-v0-0.7.0`. Module paths follow the file layout: `Utility.Registry.App.V0.Service.Provider` (file `Service/Provider.daml`), `Utility.Registry.App.V0.Service.Registrar` (file `Service/Registrar.daml`), `Utility.Registry.App.V0.Service.AllocationFactory`, `Utility.Registry.App.V0.Model.Mint`, `Utility.Registry.App.V0.Model.Burn`. Locally the source lives under `canton-network-utility-dars-0.12.0/utility-registry-app-v0-0.7.0/utility-registry-app-v0-0.7.0-<hash>/Utility/…`. When a test fails because a record constructor is wrong or a context key is missing, read the relevant source file and adjust. The design doc (`docs/TOKEN_ISSUANCE_PLUGIN.md`) cites specific lines for where `OfferMint` / `OfferBurn` are defined (`AllocationFactory.daml:479-494` and nearby).
 - **`require` import.** Several templates call `require "message" condition`. Import via `import Splice.Util (require)`.
 - **Test harness library.** All tests use the given / when / then_ pattern from `DLC-link/daml-test-harness`, shipped as `daml/dars/testlib-0.1.0.dar`. Key exports (`import TestHarness`): the `Test` record (`{ given, when, then_ }`), `run` to thread a fixture through the three phases, `Failures` (a monoid over failure messages — `<>` combines, `[]` is pass), and `shouldBe "label" expected actual` which yields `[]` on match or a non-empty `Failures` on mismatch. After a local `daml build`, the harness source is readable at `daml/<package>-test/.daml/dependencies/2.2/…/testlib-0.1.0-…/TestHarness.daml` if the engineer needs to check exact types. Copy the overall file shape from `governance-token-custody-test`'s tests for anything ambiguous.
 - **Multi-party submit in tests.** `confirmAndExecute` uses `actAs executor <> readAs governanceParty <> readAs outsider <> readAs operator <> readAs dso`. This is a test-mode shortcut to simulate Canton's contract disclosure; it's not how the production authorization chain works. Keep it as-is for v1.
