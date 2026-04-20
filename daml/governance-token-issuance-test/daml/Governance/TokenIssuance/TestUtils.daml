@@ -69,6 +69,7 @@ submitConfirmations governanceParty rulesCid proposalCid confirmers =
 confirmAndExecute : IssuanceTestParties -> ContractId GovernanceRules -> ContractId GovernableAction -> [Party] -> Party -> Script (ContractId GovernanceExecutionResult)
 confirmAndExecute parties rulesCid proposalCid confirmers executor = do
   confirmationCids <- submitConfirmations parties.governanceParty rulesCid proposalCid confirmers
+  debug "WARNING: Multi-party submit (actAs executor <> readAs governance/outsider/operator/dso) is a test shortcut. Verify authorization pattern matches your production implementation."
   submit (actAs executor
     <> readAs parties.governanceParty
     <> readAs parties.outsider
