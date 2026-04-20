@@ -1,0 +1,29 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | State contract for the token-issuance plugin.
+-- Holds the AllocationFactory cid and instrument metadata.
+-- See docs/TOKEN_ISSUANCE_PLUGIN.md for the design.
+module Governance.TokenIssuance.IssuanceConfig where
+
+import Splice.Api.Token.BurnMintV1 (BurnMintFactory)
+import Splice.Api.Token.HoldingV1 (InstrumentId)
+
+import Utility.Registry.App.V0.Service.AllocationFactory (AllocationFactory)
+
+-- | One-per-plugin-deployment state contract.
+-- Created by SetupIssuanceProposal. Updated in place by IssuanceConfig_RotateFactory.
+template IssuanceConfig
+  with
+    governanceParty : Party
+      -- ^ Signatory; the committee's on-chain identity.
+    instrumentId : InstrumentId
+      -- ^ The token instrument this plugin deployment issues.
+    allocationFactoryCid : ContractId AllocationFactory
+      -- ^ The AllocationFactory used for mint/burn. Cast to BurnMintFactory /
+      -- TransferFactory interfaces as needed inside executeImpl bodies.
+    displayName : Text
+    symbol : Text
+    decimals : Int
+  where
+    signatory governanceParty
