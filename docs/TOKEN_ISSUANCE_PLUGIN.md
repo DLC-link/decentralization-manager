@@ -1,6 +1,6 @@
 # Token Issuance Plugin — Design
 
-**Status:** design in progress. Decisions so far and open questions below.
+**Status:** draft design. Most items are decided; two architectural proposals require team consensus before being locked in.
 
 ## Overview
 
@@ -52,6 +52,24 @@ Display name, symbol, decimals, and any other `InstrumentConfiguration` fields a
 
 `"SetupIssuance"`, `"Mint"`, `"Burn"`, `"SetPause"`, `"RotateFactory"`. Short and human-readable; they surface on `GovernanceExecutionResult` records and in any UI.
 
+### Mint / burn proposal shape — minimalist defaults
+
+**One output per `MintProposal`.** Each `MintProposal` has exactly one `BurnMintOutput`. Under the treasury-first proposal (see "Proposals requiring team consensus" below) the single recipient is always the governance party, so batching has no effect anyway; even absent treasury-first, one-per-proposal keeps committee review focused on one mint at a time.
+
+**Amount source: plaintext `Decimal` field.** Proposer writes the amount on the proposal; the committee verifies against off-chain evidence before confirming. No oracle contract or on-chain amount computation in v1.
+
+**External-event metadata: `description : Text` field of `GovernableActionView`.** Evidence of the off-ledger event that justifies the mint or burn (bridge tx hash, oracle quote id, bank wire ref, etc.) goes into the free-form `description`, which is surfaced on the `GovernanceExecutionResult` audit record. No typed event-id field on the proposal template in v1. Structured metadata can be added later if a real need emerges.
+
+**Proposer: committee members only.** With treasury-first mint and treasury-only burn proposed (pending team consensus), all proposals are committee-initiated; the plugin does not need to accommodate non-member proposers. (Contingent on those two proposals — if user-initiated redemption is wanted later, this would need to relax.)
+
+### Operational policy — minimalist defaults
+
+**Replay protection: committee diligence only.** No `ProcessedEventLog` contract or audit-log scanning in v1. Committee members are responsible for refusing duplicate proposals for the same external event. If double-execution becomes a real problem in practice, a log can be added later.
+
+**No on-chain supply accounting.** Ground-truth supply is the sum of live `Holding`s for the share instrument. The per-execution `GovernanceExecutionResult` records produced by `governance-core` are the natural supply event log. No running supply contract analogous to canton-vault's `YieldEpoch`.
+
+**No plugin-specific audit record.** The `GovernanceExecutionResult` that `governance-core` already emits per execution (`actionLabel`, `description`, `confirmers`, `executedAt`) is the plugin's audit trail. No additional structured fields (event id, recipient, amount) captured in a plugin template.
+
 ### Advanced features included — beyond strict minimalism
 
 The next two decisions go beyond what a strictly minimal design would require. We recommend including them because the cost is small and the operational value is real. A team prioritising absolute minimalism could defer either to a later version; our default is to ship both in v1.
@@ -66,83 +84,38 @@ The next two decisions go beyond what a strictly minimal design would require. W
 
 ---
 
-## Open design questions
+## Proposals requiring team consensus
 
-### Q1. `extraActors` on the mint — the recipient-authority question
+The following two choices keep the plugin self-contained and simple, but they have real operational implications and foreclose certain use cases. They are proposed as the default but should be confirmed by the team before being locked in.
 
-This is the biggest architectural decision. The Splice `AllocationFactory` implementation requires the owner of a newly-minted holding to appear in `BurnMintFactory_BurnMint.extraActors`. In canton-vault the owner is the depositing user, already a signatory on `DepositRequest` — their authority is naturally present. For a governance-initiated mint to an arbitrary recipient, the recipient's authority is not normally in scope inside `executeImpl`. Options:
+### Treasury-first mint
 
-- **(a) Recipient co-signs the `MintProposal`.** `signatory proposer, recipient`. The recipient must explicitly accept before the committee can execute. Flow: proposer drafts → recipient countersigns → committee confirms → execute. Good for consent-based issuance; heavy for bridge-style flows where the recipient may not be online or may not exist at propose time.
-- **(b) Mint-preapproval contract.** A separate `MintPreapproval` contract signed by the recipient permits the governance party to mint to them (possibly up to a limit). `executeImpl` fetches the preapproval and uses it for authority. Lets the committee mint autonomously once the recipient has opted in.
-- **(c) Use a different factory implementation.** One that does not demand owner authority. Requires an alternative to `AllocationFactory`; may not be available off the shelf.
-- **(d) Treasury-first.** Mint to the governance party itself (`extraActors = []`, since the governance party is admin and owner). A separate subsequent step — a `TransferProposal` from the existing `governance-token-custody` plugin — delivers tokens to the final recipient. Splits issuance and distribution; requires the custody plugin in place and a treasury model.
+**Proposal.** Every `MintProposal` mints to the governance party itself. `BurnMintOutput.owner = governanceParty`, `extraActors = []`. Delivery to the final recipient is a *separate* governance action, via the custody plugin's `TransferProposal`.
 
-The answer shapes `MintProposal`, the flow, and the plugin's dependencies.
+**Why this simplifies the plugin.** The Splice `AllocationFactory` implementation requires the owner of a newly-minted holding to appear in `BurnMintFactory_BurnMint.extraActors`. A mint directly to an arbitrary third party would therefore need that party's authority in scope inside `executeImpl` — which forces either a recipient countersignature on every `MintProposal`, a pre-existing `MintPreapproval` contract, or a non-`AllocationFactory` implementation. Treasury-first sidesteps all three, because the governance party is both the admin and the owner of the new holding.
 
-### Q2. One recipient per proposal, or batched?
+**Trade-off.** "Mint and deliver to Alice" becomes two governance votes (one `MintProposal`, then one `TransferProposal` out of the custody plugin). This is fine for lower-frequency governance-controlled issuance, and potentially expensive for high-throughput bridge-style flows where every external event produces a mint.
 
-`BurnMintFactory_BurnMint.outputs : [BurnMintOutput]` supports multiple recipients in one call.
+**Alternatives if rejected.** (a) recipient co-signs `MintProposal` — consent-based, requires recipient online at propose time; (b) `MintPreapproval` contract — recipient opts in once, committee mints autonomously thereafter; (c) different factory implementation — requires an alternative to `AllocationFactory` we'd have to source separately.
 
-- **One per proposal.** Committee reviews one mint at a time. Many proposals for a batch.
-- **Batched.** One committee vote releases N mints. Cheaper; committee must review the full list. If the batch spans recipients, each must still be authorised per Q1.
+### Treasury-only burn
 
-### Q3. Amount source — trusted plaintext or computed?
+**Proposal.** Every `BurnProposal` burns holdings owned by the governance party. `extraActors = []`. The governance party's authority is already present via signatory inheritance through the `BurnProposal` contract; no third-party signatures required.
 
-Where does the mint amount come from?
+**Why this simplifies the plugin.** No redemption flow to model, no holder authority to collect, no proposer-outside-the-committee case to handle. Symmetric with treasury-first mint.
 
-- **Trusted plaintext.** Proposer writes a `Decimal` amount; committee verifies against off-chain evidence.
-- **Computed on-chain.** An oracle contract or similar produces the amount; `executeImpl` reads it at execution time. More complex; depends on oracle infrastructure.
+**Trade-off.** User-initiated redemption — where a holder hands back shares in exchange for something — is not supported. Burns reflect off-chain unwinds decided by the committee, not user surrender.
 
-A first version probably uses plaintext; team should flag if the use case needs otherwise.
+**Alternative if rejected.** Add a `RedemptionBurnProposal` template whose signatories include the holder, with `extraActors = [holder]` in the burn call. This also means the proposer may be a user rather than a committee member, which is worth explicit validation against the governance-core flow.
 
-### Q4. External-event metadata
+---
 
-Each mint (and burn, where relevant) should reference the off-ledger event that justifies it — bridge tx hash, oracle quote id, bank wire reference, etc. Where does this evidence live?
+## Team coordination item (out of plugin scope)
 
-- As typed fields on the proposal template (e.g. `eventRef : Text`, plus structured supplementary data if needed).
-- In the `description : Text` field of `GovernableActionView` (free-form; appears on the `GovernanceExecutionResult` audit record).
-- Inside `extraArgs.meta : Metadata` (the Splice `BurnMintFactory_BurnMint` context) — Splice suggests a `splice.lfdecentralizedtrust.org/reason` key.
-
-Open: what typed fields does the team want on the proposal, and is there a schema to standardise?
-
-### Q5. Burn target — whose holdings get burnt?
-
-`BurnProposal` must identify the holdings to burn (`inputHoldingCids`). Without a swap, three shapes are possible:
-
-- **(a) Treasury-only burn.** Governance party owns a pool of shares (from a treasury mint, or received transfers); burns reduce the pool. `extraActors = []`. Typical for de-issuance reflecting off-chain unwind.
-- **(b) Third-party burn / redemption.** A holder surrenders their shares. The holder's authority is required in `extraActors`; the natural proposer is the holder themselves.
-- **(c) Both, via two variants.** `TreasuryBurnProposal` and `RedemptionBurnProposal`, or one template with variant fields.
-
-### Q6. Proposer identity
-
-For committee-initiated proposals (bridge-event mint, treasury burn) the proposer is a committee member. For user-initiated redemption (Q5b) the proposer is the holder — not a committee member.
-
-The governance-core plugin pattern (`signatory proposer, observer governanceParty`) does not on its face restrict the proposer to members. Worth explicit validation during design: does the confirm-then-execute flow work cleanly when the proposer is external to the committee?
-
-### Q7. Replay / idempotency — preventing double-execution of the same event
-
-If two proposals reference the same external event (same bridge tx, same oracle reading), both executing is a double-mint. Because each plugin deployment covers a single instrument, the replay-protection scope is naturally per-deployment — there's no "which instrument" key to carry. Options:
-
-- **(a) Committee diligence only.** Members responsible for refusing duplicates. Simplest; no on-chain protection.
-- **(b) `ProcessedEventLog` contract.** A stateful contract keyed by external event id; `executeImpl` checks the log and either refuses (if present) or appends (on success). Robust; adds a new contract to the plugin model.
-- **(c) Scan past `GovernanceExecutionResult`s.** Reuse the existing audit log, structured so event ids can be read from prior executions. No new contract; requires discipline in how evidence is recorded.
-
-### Q8. Supply accounting — any on-chain bookkeeping needed?
-
-Canton-vault maintains `YieldEpoch` because share value depends on total supply. This plugin is issuance-only; ground-truth supply is the sum of live `Holding`s, and the `GovernanceExecutionResult` audit record per mint/burn is the natural supply event log.
-
-Confirm this is sufficient, or call out specific reasons a live supply contract is needed (external systems polling, on-chain cap enforcement, etc.).
-
-### Q9. Audit expectations beyond `GovernanceExecutionResult`
-
-`governance-core` already creates a `GovernanceExecutionResult` per execution with `actionLabel`, `description`, `confirmers`, `executedAt`. Does the team need additional structured fields (event id, recipient, amount, instrument) captured in a plugin-specific audit record?
-
-### Q10. Off-chain attestation pipeline (out of plugin scope, but shapes Q4)
-
-How committee members learn about the external event they're voting on — a bridge oracle, a signed attestation chain, a manual evidence process — is out of scope for the plugin itself. But the structure of that evidence determines the proposal fields (Q4). Worth a parallel team agreement on the attestation protocol before fixing the proposal schema.
+**Attestation pipeline.** How committee members learn about the external event they're voting on — a bridge oracle, a signed attestation chain, a manual evidence process — is out of scope for the plugin itself. But the structure of that evidence determines whether the free-form `description` field (the current v1 default) is enough or whether we need typed fields on `MintProposal` / `BurnProposal`. Worth a parallel team agreement on the attestation protocol before any structured schema is fixed.
 
 ---
 
 ## Next step
 
-After the open questions are answered, the next artefact is an implementation plan: concrete template fields and choices for `IssuanceConfig`, `SetupIssuanceProposal`, `MintProposal`, `BurnProposal`, `SetPauseProposal`, and (conditionally) `RotateFactoryProposal`; `executeImpl` bodies; and a test plan.
+Once the two proposals above are confirmed (or replaced), the next artefact is an implementation plan: concrete template fields and choices for `IssuanceConfig`, `SetupIssuanceProposal`, `MintProposal`, `BurnProposal`, `SetPauseProposal`, and (conditionally) `RotateFactoryProposal`; `executeImpl` bodies; and a test plan.
