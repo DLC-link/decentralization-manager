@@ -10,6 +10,7 @@ import Splice.Api.Token.BurnMintV1 (BurnMintFactory)
 import Splice.Api.Token.HoldingV1 (InstrumentId)
 
 import Utility.Registry.App.V0.Service.AllocationFactory (AllocationFactory)
+import Utility.Registry.V0.Configuration.Instrument (InstrumentConfiguration)
 
 -- | One-per-plugin-deployment state contract.
 -- Created by SetupIssuanceProposal. Updated in place by IssuanceConfig_RotateFactory.
@@ -22,6 +23,10 @@ template IssuanceConfig
     allocationFactoryCid : ContractId AllocationFactory
       -- ^ The AllocationFactory used for mint/burn. Cast to BurnMintFactory /
       -- TransferFactory interfaces as needed inside executeImpl bodies.
+    instrumentConfigurationCid : ContractId InstrumentConfiguration
+      -- ^ The InstrumentConfiguration for `instrumentId`. Mint/Burn executeImpl
+      -- passes this as `extraArgs.context[instrumentConfigurationContextKey]`
+      -- to AllocationFactory_OfferMint / OfferBurn.
     displayName : Text
     symbol : Text
     decimals : Int
