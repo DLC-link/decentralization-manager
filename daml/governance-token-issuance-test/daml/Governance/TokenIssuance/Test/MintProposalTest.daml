@@ -1,0 +1,60 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+module Governance.TokenIssuance.Test.MintProposalTest where
+
+import DA.Time (addRelTime, hours)
+import Daml.Script
+
+import Utility.Registry.App.V0.Model.Mint (MintOffer)
+
+import Governance.Action (GovernableAction)
+import Governance.Rules (GovernanceRules)
+
+import Governance.TokenIssuance.IssuanceConfig (IssuanceConfig)
+import Governance.TokenIssuance.MintProposal
+import Governance.TokenIssuance.TestUtils
+
+import TestHarness
+
+data Fixture = Fixture
+  with
+    parties : IssuanceTestParties
+    rulesCid : ContractId GovernanceRules
+    configCid : ContractId IssuanceConfig
+  deriving (Eq, Show)
+
+given_setup_done : Script Fixture
+given_setup_done = do
+  parties <- allocateIssuanceTestParties
+  rulesCid <- createTestGovernance parties
+  configCid <- setupIssuanceForTest parties rulesCid
+  pure Fixture with ..
+
+when_mint_offered : Fixture -> Script ()
+when_mint_offered f = do
+  now <- getTime
+  proposalCid <- submit f.parties.member1 $ createCmd MintProposal with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+    issuanceConfigCid = f.configCid
+    recipient = f.parties.outsider
+    amount = 100.0
+    description = "Bridge tx abcd1234"
+    requestedAt = now
+    executeBefore = now `addRelTime` hours 24
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  _ <- confirmAndExecute f.parties f.rulesCid proposalInterfaceCid
+    [f.parties.member1, f.parties.member2] f.parties.member1
+  pure ()
+
+then_mint_offer_exists : Fixture -> () -> Script Failures
+then_mint_offer_exists f _ = do
+  offers <- query @MintOffer f.parties.governanceParty
+  pure $ shouldBe "MintOffer count" 1 (length offers)
+
+test_when_mint_proposed_then_mint_offer_created = script do
+  run Test with
+    given = given_setup_done
+    when = when_mint_offered
+    then_ = then_mint_offer_exists
