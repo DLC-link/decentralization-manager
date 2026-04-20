@@ -1,6 +1,6 @@
 # Token Issuance Plugin — Design
 
-**Status:** draft design. Most items are proposed defaults (open to team review); two architectural proposals are flagged as explicitly requiring team consensus before being locked in.
+**Status:** draft design. All items are proposer-made defaults, open to team review; any can be reopened on request.
 
 **Terminology note.** Strictly, "issuance" means the creation of new tokens (minting) — burning is its opposite, and "supply management" is the umbrella term covering both. This document uses "issuance" colloquially, following the name of the plugin, to refer to the full mint + burn lifecycle that the plugin governs. Wherever the distinction matters, the specific operation ("mint" or "burn") is named explicitly.
 
@@ -14,32 +14,6 @@ A Daml package that plugs into `governance-core`. Each plugin template implement
 
 ---
 
-## Proposals requiring team consensus
-
-The following two choices keep the plugin self-contained and simple, but they have real operational implications and foreclose certain use cases. They are proposed as the default but should be confirmed by the team before being locked in.
-
-### Two-step mint via `AllocationFactory_OfferMint`
-
-**Proposal.** `MintProposal.executeImpl` calls `AllocationFactory_OfferMint` (controller: `registrar`, i.e. the governance party; defined in `utility-registry-app-v0-0.7.0`, module `Utility.Registry.App.V0.Service.AllocationFactory`, lines 479–494) to create a `MintOffer` contract addressed to the intended recipient. The recipient later exercises the accept choice on `MintOffer` to materialise the new holding. `AllocationFactory_RequestMint` (controller: `mint.holder`) is the reverse direction — the recipient requests a mint and the committee approves off the resulting `MintRequest`. The plugin's v1 shape is **OfferMint-first**, i.e. committee-initiated offers; `RequestMint` approval can be added later as its own proposal template if needed.
-
-**Why.** Both are standard utility-registry templates, so we do not need a custom `MintPreapproval` or any treasury indirection. The recipient's authority enters at accept time, not at propose or execute time — solving the recipient-authority problem that `BurnMintFactory_BurnMint` alone imposes (see the appendix ["What `extraActors` means"](#appendix-what-extraactors-means) for the underlying mechanism).
-
-**Trade-off.** Minting is a two-step flow: committee offers, recipient accepts. Not atomic. If the recipient never accepts (lost keys, abandonment), the `MintOffer` sits on the ledger until it expires or is withdrawn — standard CIP-56 flow. The plugin does not model the accept step; that happens on the recipient side with no further governance involvement.
-
-**Alternative if rejected.** Treasury-first mint — `MintProposal` mints into a treasury pool owned by the governance party itself (`BurnMintOutput.owner = governanceParty`, `extraActors = []`), with delivery to the final recipient as a separate governance action via the custody plugin's `TransferProposal`. Keeps mint atomic-with-governance (no recipient accept dependency) but adds a second governance vote per delivery and depends on the custody plugin being deployed alongside. The two plugins would need to share the same `AllocationFactory` cid rather than each running their own onboarding.
-
-### Two-step burn via `AllocationFactory_OfferBurn`
-
-**Proposal.** Symmetric with mint. `BurnProposal.executeImpl` calls `AllocationFactory_OfferBurn` (controller: `registrar`, i.e. the governance party; same source module as above) to create a `BurnOffer` contract addressed to a specific holder. The holder later accepts, at which point their holdings are burnt. `AllocationFactory_RequestBurn` (controller: `burn.holder`) is the reverse direction — a holder requests their own holdings be burnt and the committee approves off the resulting `BurnRequest`. v1 shape is **OfferBurn-first**; `RequestBurn` approval can be added later.
-
-**Why.** Standard utility-registry templates; no custom contract; holder authority lands at accept time, same pattern as mint.
-
-**Trade-off.** Burn requires the holder's cooperation — the committee cannot unilaterally destroy holdings without the holder accepting the offer. This is a feature for token-as-bearer-asset models (the governance party cannot arbitrarily seize someone's balance), but it means burns for uncooperative holders are not possible through this path. For retirement of governance-party-owned tokens (holder == admin == governanceParty), both OfferBurn and its accept step need the governance party's authority — doable as two separate governance actions, but unwieldy compared to a direct `BurnMintFactory_BurnMint`.
-
-**Alternative if rejected.** Treasury-only burn — `BurnProposal.executeImpl` calls `BurnMintFactory_BurnMint` directly on holdings owned by the governance party, `extraActors = []`. No holder cooperation needed; works only for governance-owned tokens. Simpler for pure de-issuance of a treasury pool, but no user-redemption path.
-
----
-
 ## Out-of-scope prerequisite: attestation protocol
 
 How committee members learn about the external event they're voting on — a bridge oracle, a signed attestation chain, a manual evidence process — is out of scope for the plugin itself, but the plugin assumes *some* such protocol exists. The structure of the evidence it delivers determines whether the free-form `description` field (the current v1 default) is enough or whether we need typed fields on `MintProposal` / `BurnProposal`. Choosing that protocol is a parallel decision that should happen alongside this plugin design, before any structured proposal schema is fixed.
@@ -48,11 +22,31 @@ How committee members learn about the external event they're voting on — a bri
 
 ## Proposed decisions
 
-Items the proposer has made an initial call on. They are working defaults for the plugin's design and are open to team review — this is not the "requires explicit consensus" tier above, but any of them can be reopened on request.
+Items the proposer has made an initial call on. They are working defaults for the plugin's design and are open to team review; any of them can be reopened on request.
 
 ### Product-level decisions
 
-Scope, policy, and feature choices. These define what the plugin does and doesn't do, and each could be reopened without changing the plugin's internal wiring.
+Scope, policy, and feature choices. These define what the plugin does and doesn't do.
+
+#### Mint via `AllocationFactory_OfferMint`
+
+**Decision.** `MintProposal.executeImpl` calls `AllocationFactory_OfferMint` (controller: `registrar`, i.e. the governance party; defined in `utility-registry-app-v0-0.7.0`, module `Utility.Registry.App.V0.Service.AllocationFactory`, lines 479–494) to create a `MintOffer` contract addressed to the intended recipient. The recipient later exercises the accept choice on `MintOffer` to materialise the new holding. `AllocationFactory_RequestMint` (controller: `mint.holder`) is the reverse direction — the recipient requests a mint and the committee approves off the resulting `MintRequest`. The plugin's v1 shape is **OfferMint-first**, i.e. committee-initiated offers; `RequestMint` approval can be added later as its own proposal template if needed.
+
+**Why.** Both are standard utility-registry templates, so we do not need a custom `MintPreapproval` or any treasury indirection. The recipient's authority enters at accept time, not at propose or execute time — solving the recipient-authority problem that `BurnMintFactory_BurnMint` alone imposes (see the appendix ["What `extraActors` means"](#appendix-what-extraactors-means) for the underlying mechanism).
+
+**Trade-off.** Minting is a two-step flow: committee offers, recipient accepts. Not atomic. If the recipient never accepts (lost keys, abandonment), the `MintOffer` sits on the ledger until it expires or is withdrawn — standard CIP-56 flow. The plugin does not model the accept step; that happens on the recipient side with no further governance involvement.
+
+**Alternative considered.** Treasury-first mint — `MintProposal` mints into a treasury pool owned by the governance party itself (`BurnMintOutput.owner = governanceParty`, `extraActors = []`), with delivery to the final recipient as a separate governance action via the custody plugin's `TransferProposal`. Keeps mint atomic-with-governance (no recipient accept dependency) but adds a second governance vote per delivery and depends on the custody plugin being deployed alongside. The two plugins would need to share the same `AllocationFactory` cid rather than each running their own onboarding.
+
+#### Burn via `AllocationFactory_OfferBurn`
+
+**Decision.** Symmetric with mint. `BurnProposal.executeImpl` calls `AllocationFactory_OfferBurn` (controller: `registrar`, i.e. the governance party; same source module as above) to create a `BurnOffer` contract addressed to a specific holder. The holder later accepts, at which point their holdings are burnt. `AllocationFactory_RequestBurn` (controller: `burn.holder`) is the reverse direction — a holder requests their own holdings be burnt and the committee approves off the resulting `BurnRequest`. v1 shape is **OfferBurn-first**; `RequestBurn` approval can be added later.
+
+**Why.** Standard utility-registry templates; no custom contract; holder authority lands at accept time, same pattern as mint.
+
+**Trade-off.** Burn requires the holder's cooperation — the committee cannot unilaterally destroy holdings without the holder accepting the offer. This is a feature for token-as-bearer-asset models (the governance party cannot arbitrarily seize someone's balance), but it means burns for uncooperative holders are not possible through this path. For retirement of governance-party-owned tokens (holder == admin == governanceParty), both OfferBurn and its accept step need the governance party's authority — doable as two separate governance actions, but unwieldy compared to a direct `BurnMintFactory_BurnMint`.
+
+**Alternative considered.** Treasury-only burn — `BurnProposal.executeImpl` calls `BurnMintFactory_BurnMint` directly on holdings owned by the governance party, `extraActors = []`. No holder cooperation needed; works only for governance-owned tokens. Simpler for pure de-issuance of a treasury pool, but no user-redemption path.
 
 #### Setup runs through the governance committee, not as an out-of-band script
 
@@ -177,7 +171,7 @@ The recreated `IssuanceConfig` has a new ContractId; holders re-acquire it via t
 
 ## Next step
 
-Once the two proposals above are confirmed (or replaced), the next artefact is an implementation plan: concrete template fields and choices for `IssuanceConfig`, `SetupIssuanceProposal`, `MintProposal`, `BurnProposal`, and (conditionally) `RotateFactoryProposal`; `executeImpl` bodies; and a test plan.
+The next artefact is an implementation plan: concrete template fields and choices for `IssuanceConfig`, `SetupIssuanceProposal`, `MintProposal`, `BurnProposal`, and (conditionally) `RotateFactoryProposal`; `executeImpl` bodies; and a test plan.
 
 ---
 
