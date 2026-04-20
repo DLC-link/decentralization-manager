@@ -27,3 +27,17 @@ template IssuanceConfig
     decimals : Int
   where
     signatory governanceParty
+
+    -- | Replace the AllocationFactory cid, preserving all other fields.
+    -- Controller is the governance party, exercised from
+    -- RotateFactoryProposal.executeImpl via the governance exercise chain.
+    -- NB: we do NOT validate the new factory's admin here; the calling
+    -- proposal is responsible for that via BurnMintFactory_PublicFetch.
+    -- Keeping the choice body minimal makes it easy to audit.
+    choice IssuanceConfig_RotateFactory : ContractId IssuanceConfig
+      with
+        newFactoryCid : ContractId AllocationFactory
+      controller governanceParty
+      do
+        create this with
+          allocationFactoryCid = newFactoryCid
