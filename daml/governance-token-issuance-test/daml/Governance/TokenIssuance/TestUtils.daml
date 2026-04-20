@@ -13,6 +13,8 @@ import Governance.Confirmation (GovernanceConfirmation)
 import Governance.ExecutionResult
 import Governance.Rules
 
+import Utility.Registry.App.V0.Service.Provider (ProviderService(..))
+
 -- | Standard test party allocation for token issuance tests.
 -- NB: no separate `registrar` field — the governance party itself is the registrar.
 data IssuanceTestParties = IssuanceTestParties
@@ -79,3 +81,14 @@ confirmAndExecute parties rulesCid proposalCid confirmers executor = do
       executor
       actionProposalCid = proposalCid
       confirmations = confirmationCids
+
+-- | Provision a ProviderService for the governance party.
+-- Uses multi-party submit to stand in for the full Utility-Registry onboarding.
+-- A production path would reach this via a `UtilityCreateProviderRequest` flow
+-- added to the existing governance-token-custody plugin, or equivalent.
+initUtilityPrereqs : IssuanceTestParties -> Script (ContractId ProviderService)
+initUtilityPrereqs parties =
+  submit (actAs parties.governanceParty <> actAs parties.operator) $
+    createCmd ProviderService with
+      operator = parties.operator
+      provider = parties.governanceParty
