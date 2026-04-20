@@ -594,3 +594,23 @@ export interface NetworkInfo {
 }
 
 export type Network = "devnet" | "testnet" | "mainnet";
+
+// Governance audit trail types
+export interface AuditLogEntry {
+  id: number;
+  timestamp: number;
+  event_type: string;
+  party_id: string;
+  member_party_id: string;
+  governance_type: string;
+  action_summary: string;
+  details: Record<string, unknown>;
+  status: string;
+  error_message?: string;
+  created_at: number;
+}
+
+export interface AuditLogResponse {
+  entries: AuditLogEntry[];
+  total_returned: number;
+}
