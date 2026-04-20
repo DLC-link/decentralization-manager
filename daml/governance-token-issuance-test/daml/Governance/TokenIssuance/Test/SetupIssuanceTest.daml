@@ -8,7 +8,7 @@ import Daml.Script
 import Governance.Action (GovernableAction)
 import Governance.Rules (GovernanceRules)
 
-import Governance.TokenIssuance.IssuanceConfig (IssuanceConfig(..))
+import Governance.TokenIssuance.IssuanceConfig (IssuanceConfig)
 import Governance.TokenIssuance.SetupIssuance
 import Governance.TokenIssuance.TestUtils
 
