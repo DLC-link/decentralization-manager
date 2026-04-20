@@ -256,7 +256,7 @@ module Governance.TokenIssuance.IssuanceConfig where
 import Splice.Api.Token.BurnMintV1 (BurnMintFactory)
 import Splice.Api.Token.HoldingV1 (InstrumentId)
 
-import Utility.Registry.App.V0.Configuration.Registrar (InstrumentConfiguration)
+import Utility.Registry.V0.Configuration.Instrument (InstrumentConfiguration)
 import Utility.Registry.App.V0.Service.AllocationFactory (AllocationFactory)
 
 -- | One-per-plugin-deployment state contract.
