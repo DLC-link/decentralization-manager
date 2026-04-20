@@ -13,16 +13,6 @@ Both packages are registered in `daml/multi-package.yaml`. The plugin data-depen
 
 **Tech Stack:** Daml 3.4.11, LF 2.2, Splice Token APIs, `utility-registry-app-v0-0.7.0`, `testlib-0.1.0`, `governance-core-v0-rc2`.
 
-**Reference patterns:** The plan assumes the engineer will mimic the *shape* of existing plugin packages. Files worth skimming before starting:
-
-- [`daml/governance-token-custody/daml.yaml`](../../../daml/governance-token-custody/daml.yaml) — plugin `daml.yaml` shape and data-deps convention.
-- [`daml/governance-token-custody/daml/Governance/TokenCustody/SetupTokenPreapproval.daml`](../../../daml/governance-token-custody/daml/Governance/TokenCustody/SetupTokenPreapproval.daml) — a single-operation plugin template implementing `GovernableAction` (good reference for `MintProposal` / `BurnProposal`).
-- [`daml/governance-token-custody-test/daml/Governance/TokenCustody/TestUtils.daml`](../../../daml/governance-token-custody-test/daml/Governance/TokenCustody/TestUtils.daml) — party allocation, `GovernanceRules` setup, `confirmAndExecute` helper.
-- [`daml/governance-token-custody-test/daml/Governance/TokenCustody/Test/SetupTokenPreapprovalTest.daml`](../../../daml/governance-token-custody-test/daml/Governance/TokenCustody/Test/SetupTokenPreapprovalTest.daml) — the `given / when / then_ / test_` harness in full.
-- Splice source (locally extracted): `utility-registry-app-v0-0.7.0/utility-registry-app-v0-0.7.0-<hash>/Utility/Registry/App/V0/Service/AllocationFactory.daml` — reference for the `AllocationFactory_OfferMint` / `_OfferBurn` / `_RequestMint` / `_RequestBurn` choice signatures and their `Mint` / `Burn` record types.
-
----
-
 ## Task 1: Scaffold the `governance-token-issuance` package
 
 **Files:**
@@ -502,7 +492,9 @@ import Utility.Registry.App.V0.Service.ProviderService
 import Utility.Registry.App.V0.Service.RegistrarService
   (RegistrarService,
    RegistrarService_CreateAllocationFactory(..),
-   RegistrarService_CreateInstrumentConfiguration(..))
+   RegistrarService_CreateInstrumentConfiguration(..),
+   RegistrarServiceRequest(..),
+   RegistrarServiceRequest_Accept(..))
 import Utility.Registry.App.V0.Service.UserService (UserService)
 
 import Governance.Action
@@ -733,6 +725,7 @@ module Governance.TokenIssuance.MintProposal where
 import DA.TextMap as TextMap
 
 import Splice.Api.Token.MetadataV1 (ExtraArgs(..), Metadata(..), emptyChoiceContext)
+import Splice.Util (require)
 
 import Utility.Registry.App.V0.Model.Mint (Mint(..))
 import Utility.Registry.App.V0.Service.AllocationFactory
@@ -787,9 +780,7 @@ template MintProposal
         pure ()
 ```
 
-> **`Mint` record fields.** The exact field shape of the `Mint` data type lives in `utility-registry-app-v0-0.7.0/…/Utility/Registry/App/V0/Model/Mint.daml`. Verify the fields above (`instrumentId`, `holder`, `amount`, `requestedAt`, `executeBefore`) match; adjust if the record has additional fields (e.g., `context` or operator-related fields). Similarly, verify `ExtraArgs.context` is what `emptyChoiceContext` produces, or use whatever the registry expects (see [`AllocationFactory.daml:489-508`](../../../canton-network-utility-dars-0.12.0/utility-registry-app-v0-0.7.0/utility-registry-app-v0-0.7.0-...) for the list of required context keys).
-
-> **`require` import.** The `require` helper (from `splice-util`) was referenced; import as `import Splice.Util (require)` if not already.
+> **`Mint` record fields.** The exact field shape of the `Mint` data type lives in `utility-registry-app-v0-0.7.0/…/Utility/Registry/App/V0/Model/Mint.daml`. Verify the fields above (`instrumentId`, `holder`, `amount`, `requestedAt`, `executeBefore`) match; adjust if the record has additional fields (e.g., `context` or operator-related fields). Similarly, verify `ExtraArgs.context` is what `emptyChoiceContext` produces, or use whatever the registry expects (see `AllocationFactory.daml:489-508` for the list of required context keys).
 
 - [ ] **Step 4: Run the test.**
 
@@ -1331,7 +1322,126 @@ git commit -m "test(token-issuance): added negative tests for non-member confirm
 
 ---
 
-## Task 10: Run the full test suite and verify nothing regressed
+## Task 10: Sandbox-populating script + justfile recipe
+
+**Files:**
+- Create: `daml/governance-token-issuance-test/daml/Governance/TokenIssuance/Scripts/PopulateSandbox.daml`
+- Create: `daml/justfile`
+
+A one-shot Daml script for local development: starts from an empty sandbox, runs the plugin through the full setup → mint → recipient-accept flow, and leaves the sandbox with a visible `Holding` for an outsider party so you can poke at it with the navigator or the ledger API. The `just populate-sandbox` recipe wraps the command so it's discoverable alongside build / test commands.
+
+> **Why this lives in the test package.** It reuses the TestUtils helpers (`allocateIssuanceTestParties`, `createTestGovernance`, `initUtilityPrereqs`, `confirmAndExecute`, `setupIssuanceForTest`, `mintForTest`). Writing a standalone deployment-scripts package would duplicate all that plumbing. The script is a daml-script function, so it runs the same way as tests — against a live sandbox rather than an in-memory simulated ledger.
+
+- [ ] **Step 1: Write the populate-sandbox script.**
+
+Write `daml/governance-token-issuance-test/daml/Governance/TokenIssuance/Scripts/PopulateSandbox.daml`:
+
+```daml
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Populates a local sandbox with a freshly-issued test token.
+-- Run via: `just populate-sandbox` (see daml/justfile).
+--
+-- After this script runs, the sandbox contains:
+--   - IssuanceTestParties (governanceParty, three members, outsider, operator, DSO)
+--   - A GovernanceRules with threshold 2 of 3 members
+--   - An IssuanceConfig for a "TEST-TOKEN" instrument
+--   - A Holding for `outsider` of 100.0 TEST-TOKEN (minted via MintProposal +
+--     recipient accept)
+module Governance.TokenIssuance.Scripts.PopulateSandbox where
+
+import Daml.Script
+
+import Governance.TokenIssuance.TestUtils
+
+populate : Script ()
+populate = do
+  parties <- allocateIssuanceTestParties
+  rulesCid <- createTestGovernance parties
+  configCid <- setupIssuanceForTest parties rulesCid
+  holdingCids <- mintForTest parties rulesCid configCid parties.outsider 100.0
+  debug $ "Populated sandbox: "
+    <> show (length holdingCids) <> " Holding(s) created for outsider"
+  pure ()
+```
+
+- [ ] **Step 2: Rebuild the test package so the script lands in the DAR.**
+
+```sh
+cd daml/governance-token-issuance-test && daml build
+```
+
+Expected: build succeeds; the new script module compiles against the TestUtils helpers.
+
+- [ ] **Step 3: Write `daml/justfile` with recipes for build / test / populate-sandbox.**
+
+Write `daml/justfile`:
+
+```make
+# justfile for the dec-party-manager Daml packages
+
+# Default recipe: list available recipes.
+default:
+    @just --list
+
+# Build all Daml packages.
+build:
+    daml build --all
+
+# Build only the token-issuance plugin and its test package.
+build-issuance:
+    cd governance-token-issuance && daml build
+    cd governance-token-issuance-test && daml build
+
+# Run the token-issuance test suite.
+test-issuance:
+    cd governance-token-issuance-test && daml test
+
+# Start a local sandbox on port 6865 (run in a separate terminal).
+sandbox:
+    daml sandbox --port 6865
+
+# Populate a running sandbox with a freshly-issued test token.
+# Assumes `just sandbox` (or equivalent) is running on localhost:6865.
+populate-sandbox: build-issuance
+    daml script \
+      --dar governance-token-issuance-test/.daml/dist/governance-token-issuance-test-0.1.0.dar \
+      --script-name Governance.TokenIssuance.Scripts.PopulateSandbox:populate \
+      --ledger-host localhost \
+      --ledger-port 6865 \
+      --wall-clock-time
+
+# Clean Daml build artefacts for token-issuance packages.
+clean-issuance:
+    rm -rf governance-token-issuance/.daml governance-token-issuance-test/.daml
+```
+
+- [ ] **Step 4: Smoke-test the recipe end-to-end.**
+
+In one terminal:
+```sh
+cd daml && just sandbox
+```
+
+In a second terminal:
+```sh
+cd daml && just populate-sandbox
+```
+
+Expected: the script runs through without errors and prints the debug line `"Populated sandbox: 1 Holding(s) created for outsider"` (or similar). The sandbox now has the described contracts; they can be inspected via `daml navigator` or the ledger API.
+
+- [ ] **Step 5: Commit.**
+
+```sh
+git add daml/governance-token-issuance-test/daml/Governance/TokenIssuance/Scripts/PopulateSandbox.daml \
+        daml/justfile
+git commit -m "feat(token-issuance): added populate-sandbox script and justfile recipes"
+```
+
+---
+
+## Task 11: Run the full test suite and verify nothing regressed
 
 **Files:** none modified.
 
@@ -1350,7 +1460,7 @@ Expected: both succeed with no warnings about unused imports/binds.
 cd daml/governance-token-issuance-test && daml test
 ```
 
-Expected: all four test scripts pass (setup, mint, burn, rotate) plus the earlier `IssuanceConfig` tests.
+Expected: all seven test scripts pass — four happy-path (setup, mint, burn, rotate) and three negative (non-member confirmation, zero-amount mint create, zero-amount burn create).
 
 - [ ] **Step 3: Run the full multi-package build to confirm no downstream breakage.**
 
