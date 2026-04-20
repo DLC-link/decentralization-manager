@@ -6,7 +6,7 @@
 
 ## Overview
 
-A Daml package that plugs into `governance-core`. Each plugin template implements the `GovernableAction` interface (see [GOVERNANCE_PLUGIN_ARCHITECTURE.md](GOVERNANCE_PLUGIN_ARCHITECTURE.md)) and wraps a privileged Daml operation: the mint and burn templates call `BurnMintFactory_BurnMint` from the Splice Token API (package `splice-api-token-burn-mint-v1`); the setup template wraps the Utility-Registry onboarding chain (`ProviderService` / `RegistrarService` calls); the pause and rotate templates both archive-and-recreate `IssuanceConfig`.
+A Daml package that plugs into `governance-core`. Each plugin template implements the `GovernableAction` interface (see [GOVERNANCE_PLUGIN_ARCHITECTURE.md](GOVERNANCE_PLUGIN_ARCHITECTURE.md)) and wraps a privileged Daml operation: the mint and burn templates call `AllocationFactory_OfferMint` / `AllocationFactory_OfferBurn` from `utility-registry-app-v0` (creating offer contracts the recipient / holder later accepts); the setup template wraps the Utility-Registry onboarding chain (`ProviderService` / `RegistrarService` calls); the factory-rotation template archives-and-recreates `IssuanceConfig`.
 
 **Goal.** Let a decentralized governance party (the signatory on `GovernanceRules`) mint and burn its own token instrument, with each mint or burn gated by a threshold of committee confirmations.
 
@@ -18,27 +18,25 @@ A Daml package that plugs into `governance-core`. Each plugin template implement
 
 The following two choices keep the plugin self-contained and simple, but they have real operational implications and foreclose certain use cases. They are proposed as the default but should be confirmed by the team before being locked in.
 
-### Treasury-first mint
+### Two-step mint via `AllocationFactory_OfferMint`
 
-**Proposal.** Every `MintProposal` mints into a treasury pool owned by the governance party itself. `BurnMintOutput.owner = governanceParty`, `extraActors = []` (see the appendix ["What `extraActors` means"](#appendix-what-extraactors-means) if the term needs unpacking). Delivery to the final recipient is a *separate* governance action, via the custody plugin's `TransferProposal`.
+**Proposal.** `MintProposal.executeImpl` calls `AllocationFactory_OfferMint` (controller: `registrar`, i.e. the governance party; defined in `utility-registry-app-v0-0.7.0`, module `Utility.Registry.App.V0.Service.AllocationFactory`, lines 479–494) to create a `MintOffer` contract addressed to the intended recipient. The recipient later exercises the accept choice on `MintOffer` to materialise the new holding. `AllocationFactory_RequestMint` (controller: `mint.holder`) is the reverse direction — the recipient requests a mint and the committee approves off the resulting `MintRequest`. The plugin's v1 shape is **OfferMint-first**, i.e. committee-initiated offers; `RequestMint` approval can be added later as its own proposal template if needed.
 
-**Why this simplifies the plugin.** The Splice `AllocationFactory` implementation requires the owner of a newly-minted holding to appear in `BurnMintFactory_BurnMint.extraActors`. A mint directly to an arbitrary third party would therefore need that party's authority in scope inside `executeImpl` — which forces either a recipient countersignature on every `MintProposal`, a pre-existing `MintPreapproval` contract, or a non-`AllocationFactory` implementation. Treasury-first sidesteps all three, because the governance party is both the admin and the owner of the new holding.
+**Why.** Both are standard utility-registry templates, so we do not need a custom `MintPreapproval` or any treasury indirection. The recipient's authority enters at accept time, not at propose or execute time — solving the recipient-authority problem that `BurnMintFactory_BurnMint` alone imposes (see the appendix ["What `extraActors` means"](#appendix-what-extraactors-means) for the underlying mechanism).
 
-**Trade-off.** "Mint and deliver to Alice" becomes two governance votes (one `MintProposal`, then one `TransferProposal` out of the custody plugin). This is fine for lower-frequency governance-controlled issuance, and potentially expensive for high-throughput bridge-style flows where every external event produces a mint.
+**Trade-off.** Minting is a two-step flow: committee offers, recipient accepts. Not atomic. If the recipient never accepts (lost keys, abandonment), the `MintOffer` sits on the ledger until it expires or is withdrawn — standard CIP-56 flow. The plugin does not model the accept step; that happens on the recipient side with no further governance involvement.
 
-**Deployment coordination.** `TransferProposal` in the custody plugin wraps `TransferFactory_Transfer` on a `TransferFactory` cid. Since the `AllocationFactory` provisioned by this plugin implements both `BurnMintFactory` and `TransferFactory` as the same on-ledger contract, the same cid can serve both plugins. The custody plugin and the issuance plugin should share the factory cid rather than each running their own Utility-Registry onboarding — otherwise the governance party ends up with two `AllocationFactory` contracts for the same registrar role, doubling the Utility-Registry onboarding surface area without adding any capability. Worth explicit coordination between the two plugin deployments.
+**Alternative if rejected.** Treasury-first mint — `MintProposal` mints into a treasury pool owned by the governance party itself (`BurnMintOutput.owner = governanceParty`, `extraActors = []`), with delivery to the final recipient as a separate governance action via the custody plugin's `TransferProposal`. Keeps mint atomic-with-governance (no recipient accept dependency) but adds a second governance vote per delivery and depends on the custody plugin being deployed alongside. The two plugins would need to share the same `AllocationFactory` cid rather than each running their own onboarding.
 
-**Alternative if rejected.** Use the utility-registry's built-in two-step mint workflows on `AllocationFactory` — `AllocationFactory_OfferMint` (controller: `registrar`, i.e. the governance party; defined in `utility-registry-app-v0-0.7.0`, module `Utility.Registry.App.V0.Service.AllocationFactory`, lines 479–494) lets the committee offer a mint that the recipient later accepts, and `AllocationFactory_RequestMint` (controller: `mint.holder`) lets the recipient request a mint the committee approves. Both land the recipient's authority at accept time, not at propose or execute time, and create standard registry templates (`MintOffer` / `MintRequest`) instead of anything we'd have to invent. This is the core-utility answer to the recipient-authority problem.
+### Two-step burn via `AllocationFactory_OfferBurn`
 
-### Treasury-only burn
+**Proposal.** Symmetric with mint. `BurnProposal.executeImpl` calls `AllocationFactory_OfferBurn` (controller: `registrar`, i.e. the governance party; same source module as above) to create a `BurnOffer` contract addressed to a specific holder. The holder later accepts, at which point their holdings are burnt. `AllocationFactory_RequestBurn` (controller: `burn.holder`) is the reverse direction — a holder requests their own holdings be burnt and the committee approves off the resulting `BurnRequest`. v1 shape is **OfferBurn-first**; `RequestBurn` approval can be added later.
 
-**Proposal.** Every `BurnProposal` consumes holdings from the same treasury pool — i.e. holdings owned by the governance party. `extraActors = []`. The governance party's authority is already present inside `executeImpl` via the governance exercise chain (`GovernanceRules` signed by `governanceParty` → `GovernanceRules_ExecuteConfirmedAction` → `GovernableAction_Execute` whose controller is the view's `governanceParty`); no third-party signatures required.
+**Why.** Standard utility-registry templates; no custom contract; holder authority lands at accept time, same pattern as mint.
 
-**Why this simplifies the plugin.** No redemption flow to model, no holder authority to collect, no proposer-outside-the-committee case to handle. Symmetric with treasury-first mint.
+**Trade-off.** Burn requires the holder's cooperation — the committee cannot unilaterally destroy holdings without the holder accepting the offer. This is a feature for token-as-bearer-asset models (the governance party cannot arbitrarily seize someone's balance), but it means burns for uncooperative holders are not possible through this path. For retirement of governance-party-owned tokens (holder == admin == governanceParty), both OfferBurn and its accept step need the governance party's authority — doable as two separate governance actions, but unwieldy compared to a direct `BurnMintFactory_BurnMint`.
 
-**Trade-off.** User-initiated redemption — where a holder hands their tokens back in exchange for something — is not supported. Burns reflect off-chain unwinds decided by the committee, not user surrender.
-
-**Alternative if rejected.** Add a `RedemptionBurnProposal` template whose signatories include the holder, with `extraActors = [holder]` in the burn call. This also means the proposer may be a user rather than a committee member, which is worth explicit validation against the governance-core flow.
+**Alternative if rejected.** Treasury-only burn — `BurnProposal.executeImpl` calls `BurnMintFactory_BurnMint` directly on holdings owned by the governance party, `extraActors = []`. No holder cooperation needed; works only for governance-owned tokens. Simpler for pure de-issuance of a treasury pool, but no user-redemption path.
 
 ---
 
@@ -58,7 +56,7 @@ Scope, policy, and feature choices. These define what the plugin does and doesn'
 
 #### Setup runs through the governance committee, not as an out-of-band script
 
-The Utility-Registry onboarding that produces the `AllocationFactory` and registers the instrument is performed under committee control, via a governance-gated proposal, rather than by a sysadmin running a one-off deployment script with the right keys. This keeps the full plugin lifecycle (setup → mint / burn → pause / rotate) within the same governance committee that signs the governance party.
+The Utility-Registry onboarding that produces the `AllocationFactory` and registers the instrument is performed under committee control, via a governance-gated proposal, rather than by a sysadmin running a one-off deployment script with the right keys. This keeps the full plugin lifecycle (setup → mint / burn → rotate) within the same governance committee that signs the governance party.
 
 (Unrelated: the Splice utility-registry has its own concept of an "operator" *Party* — a Daml party that represents the registry app itself and appears as a co-signatory on `ProviderService`, `UserService`, `RegistrarService`, etc. That operator party shows up as a field on `SetupIssuanceProposal` in the technical section below. The "operator-driven" we were ruling out here is the sysadmin sense, not the Splice operator-party sense.)
 
@@ -88,15 +86,17 @@ Ground-truth supply is the sum of live `Holding`s for the token instrument. The 
 
 The `GovernanceExecutionResult` that `governance-core` already emits per execution (`actionLabel`, `description`, `confirmers`, `executedAt`) is the plugin's audit trail. No additional structured fields (event id, recipient, amount) captured in a plugin template.
 
-#### Advanced feature: pause / resume
+#### Pause / resume — considered, not included
 
-Beyond strict minimalism; recommended. `IssuanceConfig` carries a `paused : Bool`. `MintProposal.executeImpl` and `BurnProposal.executeImpl` check it and fail if paused. A `SetPauseProposal { newPaused : Bool }` template lets the committee toggle it.
+We considered adding a governance-level pause toggle: a `paused : Bool` flag on `IssuanceConfig` checked by `MintProposal` and `BurnProposal` and toggled via a `SetPauseProposal { newPaused : Bool }` template. **Decision: not included in v1.**
 
-*Why include it:* gives the committee an explicit, on-chain "we are stopped" state. External systems (wallets, dashboards, backend integrations, off-chain attestation pipelines) can observe it rather than infer. Converts ongoing per-proposal vigilance into one committed action, which is also reversible. The minimalist alternative — committee members refusing to confirm during incidents — works but relies on out-of-band signalling and per-proposal attendance.
+*Rationale.* The committee can already halt issuance during an incident by refusing to confirm incoming proposals — the same off-chain-discipline mechanism the plugin already relies on for replay protection, one-shot setup, and duplicate-event detection. A dedicated pause toggle would duplicate that discipline without a compelling added benefit in v1.
+
+*What would change our mind.* If external systems (wallets, dashboards, backend integrations) need a programmatically-readable on-chain "we are stopped" signal that "no proposals are being confirmed" doesn't provide, or if committee-vigilance failure modes show up in practice, pause can be added back later. The implementation cost is small: one `Bool` field on `IssuanceConfig` and one new proposal template.
 
 #### Advanced feature: factory rotation (conditional)
 
-Beyond strict minimalism; recommended if factory rotation is a realistic operational scenario. A `RotateFactoryProposal { newFactoryCid : ContractId BurnMintFactory }` template archives the current `IssuanceConfig` and recreates it with the new `allocationFactoryCid`, leaving every other field on `IssuanceConfig` unchanged (`instrumentId`, `paused`, instrument-UX metadata). `executeImpl` validates that `(view newFactory).admin == governanceParty` via `BurnMintFactory_PublicFetch` before recreating.
+Beyond strict minimalism; recommended if factory rotation is a realistic operational scenario. Shape: `IssuanceConfig` carries a choice `IssuanceConfig_RotateFactory { newFactoryCid : ContractId AllocationFactory }` (controller: `governanceParty`) that archives `this` and creates a new `IssuanceConfig` with the new `allocationFactoryCid`, leaving every other field unchanged (`instrumentId`, instrument-UX metadata). The choice body validates that the new factory's admin equals `governanceParty` before recreating — e.g. via `BurnMintFactory_PublicFetch` through the `BurnMintFactory` interface. A thin `RotateFactoryProposal { issuanceConfigCid, newFactoryCid }` plugin template wraps the choice: its `executeImpl` is just `exercise issuanceConfigCid IssuanceConfig_RotateFactory with newFactoryCid`. The update logic lives on `IssuanceConfig` itself; the proposal template is the governance-gate.
 
 *Why include it:* if the Utility Registry ever issues a replacement factory for the same registrar (version upgrade, migration), rotating in place is far cheaper than redeploying the plugin. The instrument's identity on the Splice `InstrumentConfiguration` is untouched, so wallets and external observers tracking the token by `InstrumentId` see no change. Callers that held the old `IssuanceConfig` ContractId must re-acquire it via the identification pattern described in the schema section below. The minimalist alternative — redeploy the plugin — is disproportionately expensive for what is structurally a small config change.
 
@@ -124,23 +124,26 @@ Given the product-level decision that setup is governance-driven, the implementa
 
 #### `IssuanceConfig` schema
 
-Fields: `governanceParty : Party` (signatory), `instrumentId : InstrumentId`, `allocationFactoryCid : ContractId BurnMintFactory`, `paused : Bool`, plus the instrument-UX metadata set at setup time. Exactly one `IssuanceConfig` should exist per plugin deployment, for the plugin's lifetime — see the one-shot setup note below for how that is enforced. `paused` is `False` at setup.
+Fields: `governanceParty : Party` (signatory), `instrumentId : InstrumentId`, `allocationFactoryCid : ContractId AllocationFactory`, plus the instrument-UX metadata set at setup time. Exactly one `IssuanceConfig` should exist per plugin deployment, for the plugin's lifetime — see the one-shot setup note below for how that is enforced. (The cid is stored as the concrete `AllocationFactory` template type because the plugin calls template-level choices `AllocationFactory_OfferMint` / `AllocationFactory_OfferBurn` on it; the same contract can always be cast to the `BurnMintFactory` or `TransferFactory` interfaces when needed.)
+
+Choices (currently just one; future mutation actions would be added here):
+- `IssuanceConfig_RotateFactory { newFactoryCid : ContractId AllocationFactory }` — controller `governanceParty`. Validates the new factory's admin, archives `this`, creates a fresh `IssuanceConfig` with all other fields preserved. Called by `RotateFactoryProposal` (see below).
 
 **Identification pattern.** Daml 3 / LF 2.x removed contract keys, so `IssuanceConfig` is identified purely by `ContractId`. Proposals that operate on the config (pause, rotate) pass its current cid as a field; `executeImpl` fetches by cid and validates the fetched payload matches expectations (the `fetchChecked` idiom from `splice-util`) — in particular that its `governanceParty` equals the proposal's. Off-chain callers locate the current config by querying the ACS for `IssuanceConfig` contracts; the filter is `(governanceParty, instrumentId)`, not `governanceParty` alone, because a single governance party running multiple single-instrument plugin deployments will have several `IssuanceConfig` contracts live at once, one per instrument. There is no on-chain lookup primitive.
 
 #### `MintProposal` and `BurnProposal` carry no instrument selector
 
-They reference the `IssuanceConfig` by ContractId. `executeImpl` fetches the config, reads the `instrumentId` and `allocationFactoryCid`, and fails fast if `paused == True`. Validation: the config's `governanceParty` must match the proposal's `governanceParty`.
+They reference the `IssuanceConfig` by ContractId. `executeImpl` fetches the config and reads the `instrumentId` and `allocationFactoryCid`. Validation: the config's `governanceParty` must match the proposal's `governanceParty`.
 
-**Passed arguments to `BurnMintFactory_BurnMint`.** `expectedAdmin = governanceParty` (read from the config). `extraArgs.meta` carries the proposal's `description` under the standard Splice reason key (`splice.lfdecentralizedtrust.org/reason`) so the reason surfaces in wallet UIs that parse factory metadata. `extraArgs.context` is empty unless a specific factory implementation requires otherwise.
+**Passed arguments to `AllocationFactory_OfferMint` / `AllocationFactory_OfferBurn`.** `expectedAdmin = governanceParty` (read from the config). The proposal-specific payload is a `Mint` (for mint) or `Burn` (for burn) record built by `executeImpl` from the proposal's fields — recipient party, amount, instrument id (from the config), any deadlines. `extraArgs.meta` carries the proposal's `description` under the standard Splice reason key (`splice.lfdecentralizedtrust.org/reason`) so the reason surfaces in wallet UIs that parse factory metadata.
 
-#### One output per `MintProposal`
+#### One Mint per `MintProposal`, one Burn per `BurnProposal`
 
-Each `MintProposal` has exactly one `BurnMintOutput`. Under the treasury-first proposal (see "Proposals requiring team consensus" above) the single recipient is always the governance party, so batching has no effect anyway; even absent treasury-first, one-per-proposal keeps committee review focused on one mint at a time.
+Each mint proposal produces exactly one `MintOffer` for one recipient; each burn proposal produces exactly one `BurnOffer` against one holder. No batching in v1; keeps committee review focused on one recipient / holder at a time.
 
-#### Burn input holdings are supplied by the proposer
+#### Burn target holdings are supplied by the proposer
 
-Under the treasury-only burn proposal, the governance party owns the holdings to be burnt. The proposer drafts `BurnProposal` with a `holdingCids : [ContractId Holding]` field that they populate by querying the governance party's active-contract set (via their own participant, which hosts `governanceParty` with read rights) and selecting cids of the chosen instrument. `executeImpl` passes the list directly to `BurnMintFactory_BurnMint.inputHoldingCids`. Validation happens inside the factory implementation: the factory-level `expectedAdmin == (view this).admin` check, and the per-holding `instrumentId == supplied instrumentId` check. The plugin does not maintain any treasury inventory contract — the governance party's holdings are simply read from the ledger when needed.
+The proposer drafts `BurnProposal` with the holder party and the holdings to burn (the shape matches the `Burn` record expected by `AllocationFactory_OfferBurn`). They obtain the candidate holding cids by querying the holder's active-contract set (or the governance party's, for treasury retirement) and selecting cids of the chosen instrument. `executeImpl` packages them into the `Burn` record and calls `AllocationFactory_OfferBurn`. Validation is the factory implementation's job — it checks the admin, the instrument, and produces a `BurnOffer` for the holder to accept. The plugin does not maintain any treasury inventory contract.
 
 #### External-event metadata in the `description` field
 
@@ -148,27 +151,33 @@ Evidence of the off-ledger event that justifies each mint or burn (bridge tx has
 
 #### Proposer: committee members only
 
-With treasury-first mint and treasury-only burn proposed (pending team consensus), all proposals are committee-initiated; the plugin does not need to accommodate non-member proposers. (Contingent on those two proposals — if user-initiated redemption is wanted later, this would need to relax.)
+With OfferMint-first and OfferBurn-first (pending team consensus), all v1 proposals are committee-initiated — a committee member drafts a `MintProposal` or `BurnProposal`, the committee votes, a member executes. The plugin does not need to accommodate non-member proposers in v1. If `RequestMint` / `RequestBurn` approval flows are added later (recipients / holders initiate; committee approves off the resulting `MintRequest` / `BurnRequest`), those would be new plugin templates where the proposer's identity is distinct from the committee, and the governance-core flow against a non-member proposer would need explicit validation.
 
 #### `SetupIssuanceProposal` is one-shot (enforced by committee diligence)
 
 Without contract keys, a choice body in Daml 3 / LF 2.x cannot scan the ACS to discover whether an `IssuanceConfig` already exists — so there is no cheap on-chain check that a second setup is a duplicate. Enforcement is therefore off-chain: the committee is responsible for refusing to confirm a second `SetupIssuanceProposal` after the first has executed. Consistent with other off-chain-discipline decisions in this plugin (replay protection, event-id uniqueness). A dedicated "setup marker" template that setup would archive is possible if stronger enforcement becomes necessary, but adds a bootstrap step we have otherwise kept out of the plugin.
 
-#### `SetPauseProposal` and `RotateFactoryProposal` archive-and-recreate `IssuanceConfig`
+#### `IssuanceConfig` owns its own update choice
 
-Both administrative templates mutate the config by the standard Daml idiom: they carry `issuanceConfigCid : ContractId IssuanceConfig` as a proposal field. `executeImpl` fetches the contract (using `fetchChecked` or an equivalent verification that the fetched `governanceParty` matches the proposal's), archives it, and creates a new one with the changed field (`paused` in one case, `allocationFactoryCid` in the other). All other fields are copied over unchanged. The recreated `IssuanceConfig` has a new ContractId; holders re-acquire it via the identification pattern (see schema section above). The instrument identity on the Splice `InstrumentConfiguration` is untouched, so external observers tracking the instrument by `InstrumentId` see no change.
+The archive-and-recreate for factory rotation lives on `IssuanceConfig` as a choice `IssuanceConfig_RotateFactory { newFactoryCid : ContractId AllocationFactory }`, controller `governanceParty`. The choice body fetches `this`, validates the new factory's admin, archives, and creates a new `IssuanceConfig` copying every field unchanged except `allocationFactoryCid`.
 
-**In-flight proposals.** `MintProposal` and `BurnProposal` contracts already on the ledger point at the old `IssuanceConfig` cid; after a pause or rotate, those cids are archived and the pending proposals will fail at execute time when `executeImpl` tries to fetch the config. The committee must re-draft any pending mint or burn proposals against the new config cid. Not a defect — just an operational consequence of archive-and-recreate without keys, worth naming so it's not a surprise during incident response.
+The plugin-side `RotateFactoryProposal` template is a thin wrapper. It carries `issuanceConfigCid : ContractId IssuanceConfig` and `newFactoryCid : ContractId AllocationFactory` as proposal fields; its `executeImpl` verifies the fetched config's `governanceParty` matches the proposal's (the `fetchChecked` idiom from `splice-util`) and then calls `exercise issuanceConfigCid IssuanceConfig_RotateFactory with newFactoryCid`. Putting the mutation on the state contract rather than in `executeImpl` keeps the "how to update `IssuanceConfig`" knowledge co-located with the template itself; if more mutation choices are added later (e.g. re-introducing pause), they go on `IssuanceConfig` alongside this one.
+
+*Cost of this pattern.* Extra indirection: one more choice body to read through, one more jump in the call stack. The `IssuanceConfig` template file grows with update logic instead of staying a pure record. Worth accepting if we expect more than one mutation action in the plugin's lifetime; for a single mutator (just rotate) it is a minor tax.
+
+The recreated `IssuanceConfig` has a new ContractId; holders re-acquire it via the identification pattern (see schema section above). The instrument identity on the Splice `InstrumentConfiguration` is untouched, so external observers tracking the instrument by `InstrumentId` see no change.
+
+**In-flight proposals.** `MintProposal` and `BurnProposal` contracts already on the ledger point at the old `IssuanceConfig` cid; after a rotate, those cids are archived and the pending proposals will fail at execute time when `executeImpl` tries to fetch the config. The committee must re-draft any pending mint or burn proposals against the new config cid. Not a defect — just an operational consequence of archive-and-recreate without keys, worth naming so it's not a surprise during a rotation.
 
 #### `actionLabel` values
 
-`"SetupIssuance"`, `"Mint"`, `"Burn"`, `"SetPause"`, `"RotateFactory"`. Short and human-readable; they surface on `GovernanceExecutionResult` records and in any UI.
+`"SetupIssuance"`, `"Mint"`, `"Burn"`, `"RotateFactory"`. Short and human-readable; they surface on `GovernanceExecutionResult` records and in any UI.
 
 ---
 
 ## Next step
 
-Once the two proposals above are confirmed (or replaced), the next artefact is an implementation plan: concrete template fields and choices for `IssuanceConfig`, `SetupIssuanceProposal`, `MintProposal`, `BurnProposal`, `SetPauseProposal`, and (conditionally) `RotateFactoryProposal`; `executeImpl` bodies; and a test plan.
+Once the two proposals above are confirmed (or replaced), the next artefact is an implementation plan: concrete template fields and choices for `IssuanceConfig`, `SetupIssuanceProposal`, `MintProposal`, `BurnProposal`, and (conditionally) `RotateFactoryProposal`; `executeImpl` bodies; and a test plan.
 
 ---
 
@@ -207,7 +216,7 @@ template ProcessedEventLog
 
 - `SetupIssuanceProposal.executeImpl` creates a fresh `ProcessedEventLog` alongside `IssuanceConfig`, with empty `processedEventIds`.
 - `ProcessedEventLog` is located off-chain via an ACS query on `(governanceParty, instrumentId)` — the same pattern as `IssuanceConfig`.
-- `SetPauseProposal` and `RotateFactoryProposal` do not touch the log; it persists across config changes.
+- `RotateFactoryProposal` does not touch the log; it persists across config changes.
 
 ### Trade-offs (recap)
 
@@ -255,12 +264,9 @@ The interface says nothing about who `extraActors` has to be. The **implementati
 
 ### How this plugin uses it
 
-Because of treasury-first mint and treasury-only burn (see "Proposals requiring team consensus"):
+In the v1 OfferMint-first / OfferBurn-first design, `MintProposal` and `BurnProposal` do not call `BurnMintFactory_BurnMint` directly. They call the higher-level `AllocationFactory_OfferMint` / `AllocationFactory_OfferBurn`, which create `MintOffer` / `BurnOffer` contracts. The `extraActors` concern is therefore handled inside the utility-registry's implementation, not inside the plugin's `executeImpl`: when the recipient / holder later exercises the accept choice on the offer, the registry internally performs the underlying mint or burn with the appropriate controller set — the offer-accept flow is what contributes the recipient's / holder's authority.
 
-- **Mint** (`MintProposal.executeImpl`): `extraActors = []`. The recipient is the governance party itself — the same party as the admin — so no additional authority is needed.
-- **Burn** (`BurnProposal.executeImpl`): `extraActors = []`. Same reason — the burnt holdings belong to the governance party, already the admin.
-
-This is exactly why the treasury-first / treasury-only pair is so clean architecturally: it collapses every `extraActors` question into "nobody else needs to sign." If we ever drop treasury-first (e.g., mint directly to a third party), `extraActors = [recipient]` re-emerges, and the plugin has to find a way to get that recipient's authority into `executeImpl` — which is the whole point of the first proposal requiring consensus.
+If either treasury-* alternative is chosen (treasury-first mint or treasury-only burn — see "Proposals requiring team consensus"), the plugin would call `BurnMintFactory_BurnMint` directly with `extraActors = []`: in those models the governance party is both the admin and the holder of the new (mint) or existing (burn) holding, so no additional signature is needed.
 
 ### Summary
 
