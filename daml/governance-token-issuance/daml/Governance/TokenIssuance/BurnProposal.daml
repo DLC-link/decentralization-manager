@@ -1,0 +1,77 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Plugin template that offers a burn to a specific holder via the
+-- utility-registry's AllocationFactory_OfferBurn choice. The holder accepts
+-- the resulting BurnOffer later (outside the plugin) by supplying concrete
+-- Holding contract ids — the offer step itself does not consume holdings.
+module Governance.TokenIssuance.BurnProposal where
+
+import DA.TextMap qualified as TextMap
+
+import Splice.Api.Token.MetadataV1
+  (AnyValue(..), ChoiceContext(..), ExtraArgs(..), Metadata(..))
+import Splice.Util (require)
+
+import Utility.Registry.App.V0.Model.Burn (Burn(..))
+import Utility.Registry.App.V0.Service.AllocationFactory
+  (AllocationFactory_OfferBurn(..))
+import Utility.Registry.V0.Holding.TokenApiUtils
+  (instrumentConfigurationContextKey, issuerCredentialsContextKey)
+
+import Governance.Action
+
+import Governance.TokenIssuance.IssuanceConfig (IssuanceConfig(..))
+
+-- Standard Splice reason key for wallet-visible explanations.
+spliceReasonKey : Text
+spliceReasonKey = "splice.lfdecentralizedtrust.org/reason"
+
+template BurnProposal
+  with
+    governanceParty : Party
+    proposer : Party
+    issuanceConfigCid : ContractId IssuanceConfig
+    holder : Party
+    amount : Decimal
+    description : Text
+    requestedAt : Time
+    executeBefore : Time
+  where
+    signatory proposer
+    observer governanceParty
+
+    ensure amount > 0.0
+
+    interface instance GovernableAction for BurnProposal where
+      view = GovernableActionView with
+        governanceParty
+        actionLabel = "Burn"
+        description
+
+      executeImpl = do
+        config <- fetch issuanceConfigCid
+        require "IssuanceConfig governanceParty matches proposal"
+          (config.governanceParty == governanceParty)
+        let context = ChoiceContext with
+              values = TextMap.fromList
+                [ (instrumentConfigurationContextKey,
+                   AV_ContractId $ coerceContractId config.instrumentConfigurationCid)
+                , (issuerCredentialsContextKey,
+                   AV_List [])
+                ]
+        _ <- exercise config.allocationFactoryCid AllocationFactory_OfferBurn with
+          expectedAdmin = governanceParty
+          burn = Burn with
+            instrumentId = config.instrumentId
+            amount
+            holder
+            reference = description
+            requestedAt
+            executeBefore
+            meta = Metadata with values = TextMap.empty
+          extraArgs = ExtraArgs with
+            context
+            meta = Metadata with
+              values = TextMap.fromList [(spliceReasonKey, description)]
+        pure ()
