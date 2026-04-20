@@ -4,3 +4,4 @@ packages:
   - governance-token-custody
   - governance-token-custody-test
   - governance-token-issuance
+  - governance-token-issuance-test
