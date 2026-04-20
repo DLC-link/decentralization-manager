@@ -981,3 +981,76 @@ pub struct AuditLogResponse {
     pub entries: Vec<AuditLogEntry>,
     pub total_returned: usize,
 }
+
+// ============================================================================
+// Chain Audit Trail Types
+// ============================================================================
+
+/// Query parameters for the on-chain governance audit endpoint
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct ChainAuditQuery {
+    /// Decentralized party ID to query chain events for
+    pub party_id: CantonId,
+    /// Maximum number of entries to return (default 100)
+    #[serde(default = "default_chain_audit_limit")]
+    pub limit: usize,
+    /// When true, fetches fresh data from Canton and updates cache
+    #[serde(default)]
+    pub refresh: bool,
+}
+
+fn default_chain_audit_limit() -> usize {
+    100
+}
+
+/// A single on-chain governance audit entry
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct ChainAuditEntry {
+    /// Ledger offset (used for sort/pagination)
+    pub offset: i64,
+    /// Transaction effective_at in epoch seconds
+    pub timestamp: i64,
+    /// propose | confirm | execute | expire | cancel | create | other
+    pub event_type: String,
+    pub contract_id: String,
+    /// "Module:Entity"
+    pub template_id: String,
+    pub package_id: String,
+    /// vault | core_self | core_domain | cbtc | unknown
+    pub governance_type: String,
+    pub action_summary: String,
+    /// Exercised choice name (None for Created events)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub choice: Option<String>,
+    /// Signatories (Created) or actingParties (Exercised)
+    pub acting_parties: Vec<String>,
+    pub update_id: String,
+    /// Create arguments or choice argument as JSON
+    pub details: serde_json::Value,
+}
+
+impl From<crate::db::rows::ChainAuditCacheRow> for ChainAuditEntry {
+    fn from(row: crate::db::rows::ChainAuditCacheRow) -> Self {
+        Self {
+            offset: row.offset,
+            timestamp: row.timestamp,
+            event_type: row.event_type,
+            contract_id: row.contract_id,
+            template_id: row.template_id,
+            package_id: row.package_id,
+            governance_type: row.governance_type,
+            action_summary: row.action_summary,
+            choice: row.choice,
+            acting_parties: serde_json::from_str(&row.acting_parties).unwrap_or_default(),
+            update_id: row.update_id,
+            details: serde_json::from_str(&row.details).unwrap_or(serde_json::Value::Null),
+        }
+    }
+}
+
+/// Response for the on-chain governance audit endpoint
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct ChainAuditResponse {
+    pub entries: Vec<ChainAuditEntry>,
+    pub total_returned: usize,
+}

@@ -228,7 +228,7 @@ export const AuthSection = ({ partyId, authStatus, onRefresh }: AuthSectionProps
             </Alert>
           )}
 
-          <Box sx={{ mt: 2 }}>
+          <Box sx={{ mt: 2, mb: 2 }}>
             <Button
               variant="outlined"
               size="small"

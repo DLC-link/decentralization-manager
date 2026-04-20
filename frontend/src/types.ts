@@ -36,7 +36,6 @@ export interface PartyConfigRequest {
   keycloak_client_secret?: string;
   keycloak_username?: string;
   keycloak_password?: string;
-  packages: PackageConfig;
 }
 
 export interface PartyConfigResponse {
@@ -49,7 +48,6 @@ export interface PartyConfigResponse {
   has_client_secret: boolean;
   has_username: boolean;
   has_password: boolean;
-  packages: PackageConfig;
 }
 
 export interface VettedPackageInfo {
@@ -612,5 +610,25 @@ export interface AuditLogEntry {
 
 export interface AuditLogResponse {
   entries: AuditLogEntry[];
+  total_returned: number;
+}
+
+export interface ChainAuditEntry {
+  offset: number;
+  timestamp: number;
+  event_type: string;
+  contract_id: string;
+  template_id: string;
+  package_id: string;
+  governance_type: string;
+  action_summary: string;
+  choice?: string;
+  acting_parties: string[];
+  update_id: string;
+  details: Record<string, unknown>;
+}
+
+export interface ChainAuditResponse {
+  entries: ChainAuditEntry[];
   total_returned: number;
 }

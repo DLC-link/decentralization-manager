@@ -91,6 +91,7 @@ pub struct DecPartyRow {
     pub prefix: String,
     pub threshold: i64,
     pub updated_at: i64,
+    pub my_owner_key: Option<String>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -128,4 +129,21 @@ pub struct GovernanceAuditRow {
     pub status: String,
     pub error_message: Option<String>,
     pub created_at: i64,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct ChainAuditCacheRow {
+    pub party_id: String,
+    pub offset: i64,
+    pub timestamp: i64,
+    pub event_type: String,
+    pub contract_id: String,
+    pub template_id: String,
+    pub package_id: String,
+    pub governance_type: String,
+    pub action_summary: String,
+    pub choice: Option<String>,
+    pub acting_parties: String,
+    pub update_id: String,
+    pub details: String,
 }

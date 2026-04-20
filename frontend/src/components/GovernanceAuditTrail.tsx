@@ -1,4 +1,4 @@
-import { useState, useCallback, Fragment } from "react";
+import { useState, useCallback, useEffect, useRef, useMemo, Fragment } from "react";
 import {
   Box,
   Typography,
@@ -14,19 +14,22 @@ import {
   IconButton,
   Collapse,
   Tooltip,
+  useTheme,
 } from "@mui/material";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import ExpandLessIcon from "@mui/icons-material/ExpandLess";
+import ContentCopyIcon from "@mui/icons-material/ContentCopy";
+import { JSONTree } from "react-json-tree";
 import { API_BASE } from "../constants";
 import { zebraRow } from "../styles";
-import type { AuditLogEntry, AuditLogResponse } from "../types";
+import type { ChainAuditEntry, ChainAuditResponse } from "../types";
 
 interface GovernanceAuditTrailProps {
   partyId: string;
 }
 
-const PAGE_SIZE = 50;
+const CHAIN_LIMIT = 200;
 
 const formatTimestamp = (epochSeconds: number): string =>
   new Date(epochSeconds * 1000).toLocaleString();
@@ -50,32 +53,116 @@ const eventTypeColor = (
   }
 };
 
-export const GovernanceAuditTrail = ({ partyId }: GovernanceAuditTrailProps) => {
-  const [loading, setLoading] = useState(false);
-  const [loaded, setLoaded] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [entries, setEntries] = useState<AuditLogEntry[]>([]);
-  const [page, setPage] = useState(0);
-  const [hasMore, setHasMore] = useState(false);
-  const [expandedRow, setExpandedRow] = useState<number | null>(null);
+const truncateMiddle = (text: string, start = 8, end = 8): string => {
+  if (text.length <= start + end + 3) return text;
+  return `${text.slice(0, start)}…${text.slice(-end)}`;
+};
 
-  const fetchAuditTrail = useCallback(
-    async (targetPage: number) => {
+const useJsonTreeTheme = () => {
+  const theme = useTheme();
+  const dark = theme.palette.mode === "dark";
+  return useMemo(
+    () => ({
+      scheme: "custom",
+      base00: "transparent",
+      base01: dark ? "#424242" : "#e0e0e0",
+      base02: dark ? "#424242" : "#e0e0e0",
+      base03: dark ? "#bdbdbd" : "#9e9e9e",
+      base04: dark ? "#bdbdbd" : "#9e9e9e",
+      base05: dark ? "#e0e0e0" : "#212121",
+      base06: dark ? "#e0e0e0" : "#212121",
+      base07: dark ? "#e0e0e0" : "#212121",
+      base08: dark ? "#ef5350" : "#d32f2f",
+      base09: dark ? "#ff9100" : "#e65100",
+      base0A: dark ? "#ffee58" : "#f9a825",
+      base0B: dark ? "#66bb6a" : "#2e7d32",
+      base0C: dark ? "#4dd0e1" : "#00838f",
+      base0D: dark ? "#42a5f5" : "#1565c0",
+      base0E: dark ? "#ce93d8" : "#9c27b0",
+      base0F: dark ? "#ff9100" : "#e65100",
+    }),
+    [dark],
+  );
+};
+
+const CopyButton = ({
+  data,
+  label,
+  size = "small",
+}: {
+  data: unknown;
+  label: string;
+  size?: "small" | "medium";
+}) => {
+  const [copied, setCopied] = useState(false);
+  const text =
+    typeof data === "string" ? data : JSON.stringify(data, null, 2);
+  return (
+    <Tooltip title={copied ? "Copied!" : label}>
+      <IconButton
+        size={size}
+        onClick={() => {
+          navigator.clipboard.writeText(text);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1500);
+        }}
+      >
+        <ContentCopyIcon fontSize="small" />
+      </IconButton>
+    </Tooltip>
+  );
+};
+
+export const GovernanceAuditTrail = ({ partyId }: GovernanceAuditTrailProps) => {
+  const jsonTreeTheme = useJsonTreeTheme();
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [entries, setEntries] = useState<ChainAuditEntry[]>([]);
+  const [expandedRow, setExpandedRow] = useState<string | null>(null);
+  const [cacheLoaded, setCacheLoaded] = useState(false);
+  const [canScrollUp, setCanScrollUp] = useState(false);
+  const [canScrollDown, setCanScrollDown] = useState(false);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  const updateScrollShadows = useCallback(() => {
+    const el = scrollRef.current;
+    if (el) {
+      setCanScrollUp(el.scrollTop > 0);
+      setCanScrollDown(el.scrollTop < el.scrollHeight - el.clientHeight - 1);
+    }
+  }, []);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el) {
+      updateScrollShadows();
+      el.addEventListener("scroll", updateScrollShadows);
+      const observer = new ResizeObserver(updateScrollShadows);
+      observer.observe(el);
+      return () => {
+        el.removeEventListener("scroll", updateScrollShadows);
+        observer.disconnect();
+      };
+    }
+  }, [entries, updateScrollShadows]);
+
+  const fetchAudit = useCallback(
+    async (refresh: boolean) => {
       setLoading(true);
+      setError(null);
       try {
-        const offset = targetPage * PAGE_SIZE;
+        const params = new URLSearchParams({
+          party_id: partyId,
+          limit: String(CHAIN_LIMIT),
+        });
+        if (refresh) params.set("refresh", "true");
+
         const res = await fetch(
-          `${API_BASE}/governance/audit?party_id=${encodeURIComponent(
-            partyId,
-          )}&limit=${PAGE_SIZE}&offset=${offset}`,
+          `${API_BASE}/governance/chain-audit?${params}`,
         );
         if (res.ok) {
-          const response: AuditLogResponse = await res.json();
+          const response: ChainAuditResponse = await res.json();
           setEntries(response.entries);
-          setHasMore(response.total_returned === PAGE_SIZE);
-          setPage(targetPage);
-          setLoaded(true);
-          setError(null);
         } else {
           const errData = await res.json().catch(() => ({}));
           setError(errData.error || "Failed to fetch audit trail");
@@ -91,47 +178,27 @@ export const GovernanceAuditTrail = ({ partyId }: GovernanceAuditTrailProps) => 
     [partyId],
   );
 
+  // Load from cache on mount
+  useEffect(() => {
+    if (!cacheLoaded) {
+      setCacheLoaded(true);
+      fetchAudit(false);
+    }
+  }, [cacheLoaded, fetchAudit]);
+
   if (error) {
     return (
-      <Box sx={{ mt: 2 }}>
+      <Box sx={{ mt: 2, mb: 2 }}>
         <Alert severity="error" sx={{ mb: 2 }}>
           {error}
         </Alert>
         <Button
           startIcon={<RefreshIcon />}
-          onClick={() => fetchAuditTrail(page)}
+          onClick={() => fetchAudit(true)}
           size="small"
           variant="outlined"
         >
           Retry
-        </Button>
-      </Box>
-    );
-  }
-
-  if (!loaded) {
-    return (
-      <Box
-        sx={{
-          mt: 2,
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          py: 4,
-          gap: 2,
-        }}
-      >
-        <Typography variant="body2" color="text.secondary">
-          Audit trail is not loaded.
-        </Typography>
-        <Button
-          startIcon={loading ? <CircularProgress size={16} /> : <RefreshIcon />}
-          onClick={() => fetchAuditTrail(0)}
-          disabled={loading}
-          variant="contained"
-          size="small"
-        >
-          Load Audit Trail
         </Button>
       </Box>
     );
@@ -151,15 +218,17 @@ export const GovernanceAuditTrail = ({ partyId }: GovernanceAuditTrailProps) => 
           Audit Trail
           {entries.length > 0 && (
             <Chip
-              label={`${entries.length}${hasMore ? "+" : ""}`}
+              label={`${entries.length}${
+                entries.length === CHAIN_LIMIT ? "+" : ""
+              }`}
               size="small"
               sx={{ ml: 1 }}
             />
           )}
         </Typography>
         <Button
-          startIcon={<RefreshIcon />}
-          onClick={() => fetchAuditTrail(page)}
+          startIcon={loading ? <CircularProgress size={16} /> : <RefreshIcon />}
+          onClick={() => fetchAudit(true)}
           disabled={loading}
           size="small"
         >
@@ -169,10 +238,32 @@ export const GovernanceAuditTrail = ({ partyId }: GovernanceAuditTrailProps) => 
 
       {entries.length === 0 ? (
         <Typography variant="body2" color="text.secondary" sx={{ py: 2 }}>
-          No governance actions recorded yet.
+          No on-chain governance events found for this party.
         </Typography>
       ) : (
-        <Box sx={{ overflowX: "auto" }}>
+        <Box sx={{ position: "relative", mx: -3 }}>
+          <Box
+            sx={{
+              position: "absolute",
+              top: 0,
+              left: 0,
+              right: 0,
+              height: 16,
+              background: "linear-gradient(to bottom, rgba(0,0,0,0.08), transparent)",
+              pointerEvents: "none",
+              opacity: canScrollUp ? 1 : 0,
+              transition: "opacity 0.2s",
+              zIndex: 1,
+            }}
+          />
+          <Box
+            ref={scrollRef}
+            sx={{
+              maxHeight: 400,
+              overflowY: "auto",
+              overflowX: "auto",
+            }}
+          >
           <Table size="small">
             <TableHead>
               <TableRow>
@@ -181,20 +272,21 @@ export const GovernanceAuditTrail = ({ partyId }: GovernanceAuditTrailProps) => 
                 <TableCell sx={{ py: 1 }}>Event</TableCell>
                 <TableCell sx={{ py: 1 }}>Action</TableCell>
                 <TableCell sx={{ py: 1 }}>Type</TableCell>
-                <TableCell sx={{ py: 1 }}>Status</TableCell>
+                <TableCell sx={{ py: 1 }}>Contract</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
               {entries.map((entry, idx) => {
-                const isExpanded = expandedRow === entry.id;
+                const rowKey = `${entry.offset}-${entry.contract_id}`;
+                const isExpanded = expandedRow === rowKey;
                 return (
-                  <Fragment key={entry.id}>
+                  <Fragment key={rowKey}>
                     <TableRow sx={zebraRow(idx)}>
                       <TableCell sx={{ py: 0.5 }}>
                         <IconButton
                           size="small"
                           onClick={() =>
-                            setExpandedRow(isExpanded ? null : entry.id)
+                            setExpandedRow(isExpanded ? null : rowKey)
                           }
                         >
                           {isExpanded ? (
@@ -205,7 +297,9 @@ export const GovernanceAuditTrail = ({ partyId }: GovernanceAuditTrailProps) => 
                         </IconButton>
                       </TableCell>
                       <TableCell sx={{ py: 1, fontSize: "0.8rem" }}>
-                        {formatTimestamp(entry.created_at)}
+                        {entry.timestamp > 0
+                          ? formatTimestamp(entry.timestamp)
+                          : "—"}
                       </TableCell>
                       <TableCell sx={{ py: 1 }}>
                         <Chip
@@ -225,48 +319,98 @@ export const GovernanceAuditTrail = ({ partyId }: GovernanceAuditTrailProps) => 
                       <TableCell sx={{ py: 1, fontSize: "0.8rem" }}>
                         {entry.governance_type}
                       </TableCell>
-                      <TableCell sx={{ py: 1 }}>
-                        {entry.status === "success" ? (
-                          <Chip label="success" size="small" color="success" />
-                        ) : (
-                          <Tooltip title={entry.error_message ?? ""}>
-                            <Chip label="failed" size="small" color="error" />
-                          </Tooltip>
-                        )}
+                      <TableCell
+                        sx={{
+                          py: 1,
+                          fontFamily: "monospace",
+                          fontSize: "0.75rem",
+                        }}
+                      >
+                        <Tooltip title={entry.contract_id}>
+                          <span>{truncateMiddle(entry.contract_id)}</span>
+                        </Tooltip>
                       </TableCell>
                     </TableRow>
                     <TableRow>
                       <TableCell
                         colSpan={6}
-                        sx={{ py: 0, border: 0, ...zebraRow(idx) }}
+                        sx={{ py: 0, border: 0, maxWidth: 0, ...zebraRow(idx) }}
                       >
                         <Collapse in={isExpanded} timeout="auto" unmountOnExit>
-                          <Box sx={{ p: 2 }}>
+                          <Box sx={{ p: 2, overflow: "hidden" }}>
                             <Typography
                               variant="caption"
                               color="text.secondary"
+                              component="div"
                             >
-                              Member party: {entry.member_party_id}
+                              Template: {entry.template_id}
                             </Typography>
-                            {entry.error_message && (
-                              <Alert severity="error" sx={{ mt: 1, mb: 1 }}>
-                                {entry.error_message}
-                              </Alert>
+                            <Typography
+                              variant="caption"
+                              color="text.secondary"
+                              component="div"
+                            >
+                              Package: {entry.package_id}
+                            </Typography>
+                            <Typography
+                              variant="caption"
+                              color="text.secondary"
+                              component="div"
+                            >
+                              Acting parties: {entry.acting_parties.join(", ")}
+                            </Typography>
+                            <Typography
+                              variant="caption"
+                              color="text.secondary"
+                              component="div"
+                            >
+                              Update ID: {entry.update_id}
+                            </Typography>
+                            {entry.choice && (
+                              <Typography
+                                variant="caption"
+                                color="text.secondary"
+                                component="div"
+                              >
+                                Choice: {entry.choice}
+                              </Typography>
                             )}
-                            <Box
-                              component="pre"
+                            {entry.details != null && Object.keys(entry.details).length > 0 && <Box
                               sx={{
                                 mt: 1,
                                 p: 1.5,
                                 bgcolor: "action.hover",
                                 borderRadius: 1,
-                                fontSize: "0.75rem",
-                                overflow: "auto",
+                                overflowX: "auto",
+                                overflowY: "auto",
                                 maxHeight: 300,
+                                fontSize: "0.8rem",
+                                position: "relative",
                               }}
                             >
-                              {JSON.stringify(entry.details, null, 2)}
-                            </Box>
+                              <Box sx={{ position: "absolute", top: 4, right: 4, zIndex: 1 }}>
+                                <CopyButton data={entry.details} label="Copy JSON" />
+                              </Box>
+                              <JSONTree
+                                data={entry.details}
+                                theme={jsonTreeTheme}
+                                invertTheme={false}
+                                hideRoot
+                                shouldExpandNodeInitially={(_keyPath, _data, level) => level < 2}
+                                valueRenderer={(raw, value) => (
+                                  <span
+                                    style={{ cursor: "pointer" }}
+                                    title="Click to copy"
+                                    onClick={() => {
+                                      const text = typeof value === "string" ? value : String(raw);
+                                      navigator.clipboard.writeText(text);
+                                    }}
+                                  >
+                                    {String(raw)}
+                                  </span>
+                                )}
+                              />
+                            </Box>}
                           </Box>
                         </Collapse>
                       </TableCell>
@@ -276,34 +420,21 @@ export const GovernanceAuditTrail = ({ partyId }: GovernanceAuditTrailProps) => 
               })}
             </TableBody>
           </Table>
-        </Box>
-      )}
-
-      {(page > 0 || hasMore) && (
-        <Box
-          sx={{
-            display: "flex",
-            justifyContent: "space-between",
-            mt: 2,
-          }}
-        >
-          <Button
-            size="small"
-            disabled={page === 0 || loading}
-            onClick={() => fetchAuditTrail(Math.max(0, page - 1))}
-          >
-            Previous
-          </Button>
-          <Typography variant="body2" color="text.secondary">
-            Page {page + 1}
-          </Typography>
-          <Button
-            size="small"
-            disabled={!hasMore || loading}
-            onClick={() => fetchAuditTrail(page + 1)}
-          >
-            Next
-          </Button>
+          </Box>
+          <Box
+            sx={{
+              position: "absolute",
+              bottom: 0,
+              left: 0,
+              right: 0,
+              height: 16,
+              background: "linear-gradient(to top, rgba(0,0,0,0.08), transparent)",
+              pointerEvents: "none",
+              opacity: canScrollDown ? 1 : 0,
+              transition: "opacity 0.2s",
+              zIndex: 1,
+            }}
+          />
         </Box>
       )}
     </Box>

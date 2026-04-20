@@ -8,8 +8,8 @@ use sqlx::{
 
 use super::{
     rows::{
-        DecPartyContractRow, DecPartyParticipantRow, DecPartyRow, GovernanceAuditRow,
-        PartyCredentialsRow, PeerRow,
+        ChainAuditCacheRow, DecPartyContractRow, DecPartyParticipantRow, DecPartyRow,
+        GovernanceAuditRow, PartyCredentialsRow, PeerRow,
     },
     schema::{Commitable, SchemaRead, SchemaWrite},
 };
@@ -261,6 +261,27 @@ impl SchemaRead for SqlitePool {
 
         Ok(rows)
     }
+
+    async fn get_chain_audit_cache(
+        &self,
+        party_id: &str,
+        limit: i64,
+    ) -> Result<Vec<ChainAuditCacheRow>> {
+        let rows = sqlx::query_as::<_, ChainAuditCacheRow>(
+            r"
+            SELECT * FROM chain_audit_cache
+            WHERE party_id = ?
+            ORDER BY offset DESC
+            LIMIT ?
+            ",
+        )
+        .bind(party_id)
+        .bind(limit)
+        .fetch_all(self)
+        .await?;
+
+        Ok(rows)
+    }
 }
 
 impl SchemaWrite for SqlitePool {
@@ -351,14 +372,16 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                 party_id,
                 prefix,
                 threshold,
-                updated_at
-            ) VALUES (?, ?, ?, ?)
+                updated_at,
+                my_owner_key
+            ) VALUES (?, ?, ?, ?, ?)
             ",
         )
         .bind(&row.party_id)
         .bind(&row.prefix)
         .bind(row.threshold)
         .bind(row.updated_at)
+        .bind(&row.my_owner_key)
         .execute(&mut **self)
         .await?;
 
@@ -549,6 +572,7 @@ mod tests {
             prefix: prefix.to_string(),
             threshold: 2,
             updated_at: 1000,
+            my_owner_key: None,
         }
     }
 

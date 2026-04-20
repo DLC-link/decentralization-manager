@@ -293,7 +293,7 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
       )}
 
       {authStatus && (
-        <CardContent sx={{ pt: 1, pb: 0, "&:last-child": { pb: 0 } }}>
+        <CardContent sx={{ pt: 1, pb: authStatus.rights?.dec_party_act_as ? 0 : 2, "&:last-child": { pb: authStatus.rights?.dec_party_act_as ? 0 : 2 } }}>
           <AuthSection partyId={party.party_id} authStatus={authStatus} onRefresh={onAuthRefresh} />
           {authStatus.rights?.dec_party_act_as && (
             <>
