@@ -256,6 +256,7 @@ module Governance.TokenIssuance.IssuanceConfig where
 import Splice.Api.Token.BurnMintV1 (BurnMintFactory)
 import Splice.Api.Token.HoldingV1 (InstrumentId)
 
+import Utility.Registry.App.V0.Configuration.Registrar (InstrumentConfiguration)
 import Utility.Registry.App.V0.Service.AllocationFactory (AllocationFactory)
 
 -- | One-per-plugin-deployment state contract.
@@ -269,6 +270,10 @@ template IssuanceConfig
     allocationFactoryCid : ContractId AllocationFactory
       -- ^ The AllocationFactory used for mint/burn. Cast to BurnMintFactory /
       -- TransferFactory interfaces as needed inside executeImpl bodies.
+    instrumentConfigurationCid : ContractId InstrumentConfiguration
+      -- ^ The InstrumentConfiguration for `instrumentId`. Mint/Burn executeImpl
+      -- passes this as `extraArgs.context[instrumentConfigurationContextKey]`
+      -- to AllocationFactory_OfferMint / OfferBurn.
     displayName : Text
     symbol : Text
     decimals : Int
@@ -546,18 +551,21 @@ template SetupIssuanceProposal
         allocationFactoryCid <- (.allocationFactoryCid) <$>
           exercise registrarServiceCid RegistrarService_CreateAllocationFactory
 
-        -- 4. Register the instrument.
-        _ <- exercise registrarServiceCid RegistrarService_CreateInstrumentConfiguration with
-          instrumentId = instrumentIdText
-          additionalIdentifiers = []
-          issuerRequirements = []
-          holderRequirements = []
+        -- 4. Register the instrument; capture the InstrumentConfiguration cid
+        --    so we can pass it via extraArgs.context on mint/burn later.
+        instrumentConfigurationCid <- (.instrumentConfigurationCid) <$>
+          exercise registrarServiceCid RegistrarService_CreateInstrumentConfiguration with
+            instrumentId = instrumentIdText
+            additionalIdentifiers = []
+            issuerRequirements = []
+            holderRequirements = []
 
         -- 5. Create the IssuanceConfig.
         _ <- create IssuanceConfig with
           governanceParty
           instrumentId = InstrumentId with admin = governanceParty, id = instrumentIdText
           allocationFactoryCid
+          instrumentConfigurationCid
           displayName
           symbol
           decimals
@@ -713,14 +721,19 @@ Write `daml/governance-token-issuance/daml/Governance/TokenIssuance/MintProposal
 -- the resulting MintOffer later (outside the plugin).
 module Governance.TokenIssuance.MintProposal where
 
-import DA.TextMap as TextMap
+import DA.TextMap qualified as TextMap
 
-import Splice.Api.Token.MetadataV1 (ExtraArgs(..), Metadata(..), emptyChoiceContext)
+import Splice.Api.Token.MetadataV1
+  (AnyValue(..), ChoiceContext(..), ExtraArgs(..), Metadata(..))
 import Splice.Util (require)
+
+import Utility.Credential.V0.Credential (Credential)
 
 import Utility.Registry.App.V0.Model.Mint (Mint(..))
 import Utility.Registry.App.V0.Service.AllocationFactory
   (AllocationFactory_OfferMint(..))
+import Utility.Registry.V0.Holding.TokenApiUtils
+  (instrumentConfigurationContextKey, issuerCredentialsContextKey, toAnyValue)
 
 import Governance.Action
 
@@ -756,22 +769,35 @@ template MintProposal
         config <- fetch issuanceConfigCid
         require "IssuanceConfig governanceParty matches proposal"
           (config.governanceParty == governanceParty)
+        let context = ChoiceContext with
+              values = TextMap.fromList
+                [ (instrumentConfigurationContextKey,
+                   toAnyValue config.instrumentConfigurationCid)
+                , (issuerCredentialsContextKey,
+                   toAnyValue ([] : [ContractId Credential]))
+                ]
         _ <- exercise config.allocationFactoryCid AllocationFactory_OfferMint with
           expectedAdmin = governanceParty
           mint = Mint with
             instrumentId = config.instrumentId
-            holder = recipient
             amount
+            holder = recipient
+            reference = description
             requestedAt
             executeBefore
+            meta = Metadata with values = TextMap.empty
           extraArgs = ExtraArgs with
-            context = emptyChoiceContext
+            context
             meta = Metadata with
               values = TextMap.fromList [(spliceReasonKey, description)]
         pure ()
 ```
 
-> **`Mint` record fields.** The exact field shape of the `Mint` data type lives in `utility-registry-app-v0-0.7.0/…/Utility/Registry/App/V0/Model/Mint.daml`. Verify the fields above (`instrumentId`, `holder`, `amount`, `requestedAt`, `executeBefore`) match; adjust if the record has additional fields (e.g., `context` or operator-related fields). Similarly, verify `ExtraArgs.context` is what `emptyChoiceContext` produces, or use whatever the registry expects (see `AllocationFactory.daml:489-508` for the list of required context keys).
+> **`Mint` record fields.** `Mint` in `utility-registry-app-v0-0.7.0/…/Utility/Registry/App/V0/Model/Mint.daml` has seven fields in this order: `instrumentId`, `amount`, `holder`, `reference`, `requestedAt`, `executeBefore`, `meta`. The snippet above matches. Drift note: earlier plan drafts listed only five; the two extra (`reference`, `meta`) are required by the record constructor.
+>
+> **`extraArgs.context` requires two keys.** `AllocationFactory_OfferMint` (`AllocationFactory.daml:479-527`) calls `getFromContextU context instrumentConfigurationContextKey` and `getFromContextU context issuerCredentialsContextKey`; both are defined in `Utility.Registry.V0.Holding.TokenApiUtils`. We pass the `InstrumentConfiguration` cid we captured during setup (`config.instrumentConfigurationCid`) and an empty list of credentials (v1's empty `issuerRequirements` means the list can be empty; `assertFulfillsAllRequirements` against `[]` succeeds). `toAnyValue` is from `TokenApiUtils` and has instances for `ContractId t` (`AV_ContractId …`) and `[ContractId Credential]` (`AV_List …`).
+>
+> **Time constraints.** `AllocationFactory_OfferMint` asserts `mint.requestedAt` is in the past and `mint.executeBefore` is in the future (at the transaction's ledger time). Tests should pass `requestedAt = now` and `executeBefore = now `addRelTime` hours 24` so both conditions hold.
 
 - [ ] **Step 4: Run the test.**
 
@@ -781,7 +807,7 @@ cd daml/governance-token-issuance && daml build
 cd ../governance-token-issuance-test && daml test --files daml/Governance/TokenIssuance/Test/MintProposalTest.daml
 ```
 
-Expected: PASS. If the factory's `OfferMint` requires additional context (instrument configuration cid, issuer credentials), the test needs to pass them via `extraArgs.context`. Add whatever the factory demands; see the `AllocationFactory_OfferMint` body (line 479 onwards) for context keys like `instrumentConfigurationContextKey`, `issuerCredentialsContextKey`.
+Expected: PASS. The `MintOffer` is created for the governance party and the recipient. The test asserts one `MintOffer` contract exists for the governance party after `confirmAndExecute`.
 
 - [ ] **Step 5: Commit.**
 
@@ -813,8 +839,6 @@ module Governance.TokenIssuance.Test.BurnProposalTest where
 import DA.Time (addRelTime, hours)
 import Daml.Script
 
-import Splice.Api.Token.HoldingV1 (Holding)
-
 import Utility.Registry.App.V0.Model.Burn (BurnOffer)
 
 import Governance.Action (GovernableAction)
@@ -826,21 +850,22 @@ import Governance.TokenIssuance.TestUtils
 
 import TestHarness
 
+-- Same fixture shape as MintProposalTest: setup has run, IssuanceConfig exists.
+-- No prior mint needed — AllocationFactory_OfferBurn (the offer step) does not
+-- consume holdings. Holdings come in at BurnOffer_Accept time, which is outside
+-- the plugin's responsibility.
 data Fixture = Fixture
   with
     parties : IssuanceTestParties
     rulesCid : ContractId GovernanceRules
     configCid : ContractId IssuanceConfig
-    holderHoldingCids : [ContractId Holding]
   deriving (Eq, Show)
 
-given_holder_with_tokens : Script Fixture
-given_holder_with_tokens = do
+given_setup_done : Script Fixture
+given_setup_done = do
   parties <- allocateIssuanceTestParties
   rulesCid <- createTestGovernance parties
   configCid <- setupIssuanceForTest parties rulesCid
-  -- Mint some tokens to an outsider so we have real holdings to burn.
-  holderHoldingCids <- mintForTest parties rulesCid configCid parties.outsider 100.0
   pure Fixture with ..
 
 when_burn_offered : Fixture -> Script ()
@@ -851,7 +876,6 @@ when_burn_offered f = do
     proposer = f.parties.member1
     issuanceConfigCid = f.configCid
     holder = f.parties.outsider
-    holdingCids = f.holderHoldingCids
     amount = 100.0
     description = "Bridge unwind tx abcd1234"
     requestedAt = now
@@ -868,49 +892,10 @@ then_burn_offer_exists f _ = do
 
 test_when_burn_proposed_then_burn_offer_created = script do
   run Test with
-    given = given_holder_with_tokens
+    given = given_setup_done
     when = when_burn_offered
     then_ = then_burn_offer_exists
 ```
-
-> **`mintForTest` helper.** Needed to get real holdings into `outsider`'s hands. Before writing it, open `utility-registry-app-v0-0.7.0/…/Utility/Registry/App/V0/Model/Mint.daml` to confirm the `MintOffer` template's accept choice name, its controller, and what `extraArgs` it requires (most likely an `issuerCredentials` context key and possibly an `InstrumentConfiguration` cid, same shape as `AllocationFactory_OfferMint.extraArgs`).
->
-> Add to TestUtils.daml (substitute `MintOffer_Accept` with the actual choice name if it differs, and fill in the correct `extraArgs`):
->
-> ```daml
-> import Splice.Api.Token.HoldingV1 (Holding)
-> import Splice.Api.Token.MetadataV1 (ExtraArgs(..), emptyChoiceContext, emptyMetadata)
-> import Utility.Registry.App.V0.Model.Mint (MintOffer, MintOffer_Accept(..))
-> import Governance.TokenIssuance.MintProposal (MintProposal(..))
-> import DA.Time (addRelTime, hours)
->
-> mintForTest : IssuanceTestParties -> ContractId GovernanceRules -> ContractId IssuanceConfig -> Party -> Decimal -> Script [ContractId Holding]
-> mintForTest parties rulesCid configCid recipient amount = do
->   now <- getTime
->   proposalCid <- submit parties.member1 $ createCmd MintProposal with
->     governanceParty = parties.governanceParty
->     proposer = parties.member1
->     issuanceConfigCid = configCid
->     recipient
->     amount
->     description = "test mint"
->     requestedAt = now
->     executeBefore = now `addRelTime` hours 24
->   let iface : ContractId GovernableAction = toInterfaceContractId proposalCid
->   confirmAndExecute parties rulesCid iface
->     [parties.member1, parties.member2] parties.member1
->   -- After confirmAndExecute, a MintOffer contract is visible to the
->   -- governance party and the recipient. Query it, then have recipient
->   -- accept it to materialise the Holding.
->   [(offerCid, _)] <- query @MintOffer recipient
->   submit (actAs recipient <> readAs parties.governanceParty <> readAs parties.operator) $
->     exerciseCmd offerCid MintOffer_Accept with
->       extraArgs = ExtraArgs with
->         context = emptyChoiceContext   -- supply real context keys if the impl rejects empty
->         meta = emptyMetadata
->   results <- queryInterface @Holding recipient
->   pure (map fst results)
-> ```
 
 - [ ] **Step 2: Run the test to verify it fails.**
 
@@ -919,7 +904,7 @@ Run:
 cd daml/governance-token-issuance-test && daml test --files daml/Governance/TokenIssuance/Test/BurnProposalTest.daml
 ```
 
-Expected: FAIL — `BurnProposal` not defined, and `mintForTest` TODO.
+Expected: FAIL — `BurnProposal` not defined.
 
 - [ ] **Step 3: Implement `BurnProposal`.**
 
@@ -931,18 +916,23 @@ Write `daml/governance-token-issuance/daml/Governance/TokenIssuance/BurnProposal
 
 -- | Plugin template that offers a burn to a specific holder via the
 -- utility-registry's AllocationFactory_OfferBurn choice. The holder accepts
--- the resulting BurnOffer later (outside the plugin).
+-- the resulting BurnOffer later (outside the plugin) by supplying concrete
+-- Holding contract ids — the offer step itself does not consume holdings.
 module Governance.TokenIssuance.BurnProposal where
 
-import DA.TextMap as TextMap
+import DA.TextMap qualified as TextMap
 
-import Splice.Api.Token.HoldingV1 (Holding)
-import Splice.Api.Token.MetadataV1 (ExtraArgs(..), Metadata(..), emptyChoiceContext)
+import Splice.Api.Token.MetadataV1
+  (AnyValue(..), ChoiceContext(..), ExtraArgs(..), Metadata(..))
 import Splice.Util (require)
+
+import Utility.Credential.V0.Credential (Credential)
 
 import Utility.Registry.App.V0.Model.Burn (Burn(..))
 import Utility.Registry.App.V0.Service.AllocationFactory
   (AllocationFactory_OfferBurn(..))
+import Utility.Registry.V0.Holding.TokenApiUtils
+  (instrumentConfigurationContextKey, issuerCredentialsContextKey, toAnyValue)
 
 import Governance.Action
 
@@ -957,7 +947,6 @@ template BurnProposal
     proposer : Party
     issuanceConfigCid : ContractId IssuanceConfig
     holder : Party
-    holdingCids : [ContractId Holding]
     amount : Decimal
     description : Text
     requestedAt : Time
@@ -978,27 +967,35 @@ template BurnProposal
         config <- fetch issuanceConfigCid
         require "IssuanceConfig governanceParty matches proposal"
           (config.governanceParty == governanceParty)
+        let context = ChoiceContext with
+              values = TextMap.fromList
+                [ (instrumentConfigurationContextKey,
+                   toAnyValue config.instrumentConfigurationCid)
+                , (issuerCredentialsContextKey,
+                   toAnyValue ([] : [ContractId Credential]))
+                ]
         _ <- exercise config.allocationFactoryCid AllocationFactory_OfferBurn with
           expectedAdmin = governanceParty
           burn = Burn with
             instrumentId = config.instrumentId
-            holder
             amount
-            holdingCids
+            holder
+            reference = description
             requestedAt
             executeBefore
+            meta = Metadata with values = TextMap.empty
           extraArgs = ExtraArgs with
-            context = emptyChoiceContext
+            context
             meta = Metadata with
               values = TextMap.fromList [(spliceReasonKey, description)]
         pure ()
 ```
 
-> **`Burn` record fields.** Verify the shape against `utility-registry-app-v0-0.7.0/…/Utility/Registry/App/V0/Model/Burn.daml`. Likely fields include `instrumentId`, `holder`, `amount`, `holdingCids`, `requestedAt`, `executeBefore`. Same context-key caveats as for `Mint`.
+> **`Burn` record fields.** `Burn` in `utility-registry-app-v0-0.7.0/…/Utility/Registry/App/V0/Model/Burn.daml` has seven fields in this order: `instrumentId`, `amount`, `holder`, `reference`, `requestedAt`, `executeBefore`, `meta`. No `holdingCids` at offer time — those arrive at `BurnOffer_Accept`. Earlier plan drafts incorrectly listed `holdingCids` on both the proposal and the `Burn` record; that's been removed.
+>
+> **`extraArgs.context` requires two keys.** `AllocationFactory_OfferBurn` (`AllocationFactory.daml:381-428`) calls `getFromContextU context instrumentConfigurationContextKey` and `getFromContextU context issuerCredentialsContextKey` — same mechanics as `OfferMint`. Same `toAnyValue` treatment.
 
-- [ ] **Step 4: Finish `mintForTest` and run the test.**
-
-Complete the `mintForTest` helper by implementing the `MintOffer` accept step. Then:
+- [ ] **Step 4: Run the test.**
 
 ```sh
 cd daml/governance-token-issuance && daml build
@@ -1276,7 +1273,6 @@ when_zero_amount_burn f = do
     proposer = f.parties.member1
     issuanceConfigCid = f.configCid
     holder = f.parties.outsider
-    holdingCids = f.holderHoldingCids
     amount = 0.0
     description = "should be rejected"
     requestedAt = now
@@ -1287,7 +1283,7 @@ then_nothing_burn _ _ = pure []
 
 test_when_zero_amount_burn_then_create_rejected = script do
   run Test with
-    given = given_holder_with_tokens
+    given = given_setup_done
     when = when_zero_amount_burn
     then_ = then_nothing_burn
 ```

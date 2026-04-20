@@ -134,7 +134,7 @@ Given the product-level decision that setup is governance-driven, the implementa
 
 #### `IssuanceConfig` schema
 
-Fields: `governanceParty : Party` (signatory), `instrumentId : InstrumentId`, `allocationFactoryCid : ContractId AllocationFactory`, plus the instrument-UX metadata set at setup time. Exactly one `IssuanceConfig` should exist per plugin deployment, for the plugin's lifetime — see the one-shot setup note below for how that is enforced. (The cid is stored as the concrete `AllocationFactory` template type because the plugin calls template-level choices `AllocationFactory_OfferMint` / `AllocationFactory_OfferBurn` on it; the same contract can always be cast to the `BurnMintFactory` or `TransferFactory` interfaces when needed.)
+Fields: `governanceParty : Party` (signatory), `instrumentId : InstrumentId`, `allocationFactoryCid : ContractId AllocationFactory`, `instrumentConfigurationCid : ContractId InstrumentConfiguration`, plus the instrument-UX metadata set at setup time. Exactly one `IssuanceConfig` should exist per plugin deployment, for the plugin's lifetime — see the one-shot setup note below for how that is enforced. (The cid is stored as the concrete `AllocationFactory` template type because the plugin calls template-level choices `AllocationFactory_OfferMint` / `AllocationFactory_OfferBurn` on it; the same contract can always be cast to the `BurnMintFactory` or `TransferFactory` interfaces when needed. The `instrumentConfigurationCid` is kept because `AllocationFactory_OfferMint` / `OfferBurn` require the current `InstrumentConfiguration` via `extraArgs.context[instrumentConfigurationContextKey]`, and there is no on-chain lookup primitive to recover it from the allocation factory alone.)
 
 Choices (currently just one; future mutation actions would be added here):
 - `IssuanceConfig_RotateFactory { newFactoryCid : ContractId AllocationFactory }` — controller `governanceParty`. Validates the new factory's admin, archives `this`, creates a fresh `IssuanceConfig` with all other fields preserved. Called by `RotateFactoryProposal` (see below).
@@ -143,7 +143,7 @@ Choices (currently just one; future mutation actions would be added here):
 
 #### `MintProposal` and `BurnProposal` carry no instrument selector
 
-They reference the `IssuanceConfig` by ContractId. `executeImpl` fetches the config and reads the `instrumentId` and `allocationFactoryCid`. Validation: the config's `governanceParty` must match the proposal's `governanceParty`.
+They reference the `IssuanceConfig` by ContractId. `executeImpl` fetches the config and reads the `instrumentId`, `allocationFactoryCid`, and `instrumentConfigurationCid`. The `instrumentConfigurationCid` is placed under `extraArgs.context[instrumentConfigurationContextKey]` on the `AllocationFactory_OfferMint` / `OfferBurn` call; `issuerCredentialsContextKey` carries `[] : [ContractId Credential]` given v1's empty `issuerRequirements`. Validation: the config's `governanceParty` must match the proposal's `governanceParty`.
 
 **Passed arguments to `AllocationFactory_OfferMint` / `AllocationFactory_OfferBurn`.** `expectedAdmin = governanceParty` (read from the config). The proposal-specific payload is a `Mint` (for mint) or `Burn` (for burn) record built by `executeImpl` from the proposal's fields — recipient party, amount, instrument id (from the config), any deadlines. `extraArgs.meta` carries the proposal's `description` under the standard Splice reason key (`splice.lfdecentralizedtrust.org/reason`) so the reason surfaces in wallet UIs that parse factory metadata.
 
