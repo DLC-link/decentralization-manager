@@ -76,7 +76,7 @@ The proposer writes the mint amount on the proposal as a `Decimal` field; the co
 
 #### Replay protection: committee diligence only
 
-No `ProcessedEventLog` contract or audit-log scanning in v1. Committee members are responsible for refusing duplicate proposals for the same external event. If double-execution becomes a real problem in practice, a log can be added later.
+No `ProcessedEventLog` contract or audit-log scanning in v1. Committee members are responsible for refusing duplicate proposals for the same external event. If double-execution becomes a real problem in practice, a log can be added later — see the appendix ["Sketch of on-chain replay protection"](#appendix-sketch-of-on-chain-replay-protection-if-we-decide-we-need-it) for what that would concretely look like and the associated contention / growth trade-offs.
 
 #### No on-chain supply accounting
 
@@ -167,3 +167,57 @@ Both administrative templates mutate the config by the standard Daml idiom: they
 ## Next step
 
 Once the two proposals above are confirmed (or replaced), the next artefact is an implementation plan: concrete template fields and choices for `IssuanceConfig`, `SetupIssuanceProposal`, `MintProposal`, `BurnProposal`, `SetPauseProposal`, and (conditionally) `RotateFactoryProposal`; `executeImpl` bodies; and a test plan.
+
+---
+
+## Appendix: sketch of on-chain replay protection (if we decide we need it)
+
+The "Replay protection: committee diligence only" decision above leaves open the possibility of adding a `ProcessedEventLog` later. This appendix sketches what that would look like, so the team can judge the trade-off concretely.
+
+### Template
+
+```daml
+template ProcessedEventLog
+  with
+    governanceParty : Party
+    instrumentId : InstrumentId  -- scoped per plugin deployment, parallel to IssuanceConfig
+    processedEventIds : Set Text
+  where
+    signatory governanceParty
+
+    choice ProcessedEventLog_Record : ContractId ProcessedEventLog
+      with eventId : Text
+      controller governanceParty
+      do
+        require "event already processed"
+          (not (Set.member eventId processedEventIds))
+        create this with
+          processedEventIds = Set.insert eventId processedEventIds
+```
+
+### Integration with mint and burn
+
+- `MintProposal` and `BurnProposal` each gain two fields: `eventId : Text` and `processedEventLogCid : ContractId ProcessedEventLog`.
+- Inside each `executeImpl`, before calling `BurnMintFactory_BurnMint`, exercise `ProcessedEventLog_Record` on the log with the proposal's `eventId`. The record choice fails fast (with `"event already processed"`) if the id is already in the set, which aborts the whole execution.
+- The choice returns the new log cid; it can be discarded locally (the next proposer re-acquires via ACS).
+
+### Setup and lifecycle
+
+- `SetupIssuanceProposal.executeImpl` creates a fresh `ProcessedEventLog` alongside `IssuanceConfig`, with empty `processedEventIds`.
+- `ProcessedEventLog` is located off-chain via an ACS query on `(governanceParty, instrumentId)` — the same pattern as `IssuanceConfig`.
+- `SetPauseProposal` and `RotateFactoryProposal` do not touch the log; it persists across config changes.
+
+### Trade-offs (recap)
+
+- **Serialization bottleneck.** Every mint or burn archives-and-recreates the log. Concurrent proposals contend; later ones see a stale cid and have to re-draft with the fresh cid. Acceptable at low-frequency issuance, degrading as throughput rises.
+- **Unbounded growth.** `processedEventIds` grows without bound. Needs an eventual cleanup story — e.g. a "roll the log" action that migrates old entries into a history contract. Additional surface.
+- **Schema churn.** Every mint / burn proposal carries two more fields.
+- **UX.** Proposers have to include a fresh log cid on each proposal; if another member's proposal just executed, the cid they have is stale.
+
+### When this is actually worth adding
+
+- Multiple committee members draft mint / burn proposals against the same event feed without coordinated off-chain deduplication.
+- The attestation protocol (the out-of-scope prerequisite) exposes event ids in a way that can be forged or reused and the committee cannot reliably catch duplicates by inspection.
+- Regulatory or audit requirements demand on-chain evidence that each external event was processed at most once.
+
+If none of those apply, committee diligence (cross-referencing the proposal's `description` against recent `GovernanceExecutionResult` records) gives equivalent safety without the contention and growth costs.
