@@ -20,7 +20,7 @@ The following two choices keep the plugin self-contained and simple, but they ha
 
 ### Treasury-first mint
 
-**Proposal.** Every `MintProposal` mints into a treasury pool owned by the governance party itself. `BurnMintOutput.owner = governanceParty`, `extraActors = []`. Delivery to the final recipient is a *separate* governance action, via the custody plugin's `TransferProposal`.
+**Proposal.** Every `MintProposal` mints into a treasury pool owned by the governance party itself. `BurnMintOutput.owner = governanceParty`, `extraActors = []` (see the appendix ["What `extraActors` means"](#appendix-what-extraactors-means) if the term needs unpacking). Delivery to the final recipient is a *separate* governance action, via the custody plugin's `TransferProposal`.
 
 **Why this simplifies the plugin.** The Splice `AllocationFactory` implementation requires the owner of a newly-minted holding to appear in `BurnMintFactory_BurnMint.extraActors`. A mint directly to an arbitrary third party would therefore need that party's authority in scope inside `executeImpl` — which forces either a recipient countersignature on every `MintProposal`, a pre-existing `MintPreapproval` contract, or a non-`AllocationFactory` implementation. Treasury-first sidesteps all three, because the governance party is both the admin and the owner of the new holding.
 
@@ -221,3 +221,51 @@ template ProcessedEventLog
 - Regulatory or audit requirements demand on-chain evidence that each external event was processed at most once.
 
 If none of those apply, committee diligence (cross-referencing the proposal's `description` against recent `GovernanceExecutionResult` records) gives equivalent safety without the contention and growth costs.
+
+---
+
+## Appendix: what `extraActors` means
+
+`extraActors : [Party]` is a field on `BurnMintFactory_BurnMint` (and the analogous Splice factory choices). It lets the implementation require **additional signatures** beyond the instrument admin's.
+
+### At the Daml-interface level
+
+Look at the controller declaration on the choice ([`BurnMintV1.daml:55`](https://github.com/hyperledger-labs/splice/blob/main/daml/splice-api-token-burn-mint-v1/daml/Splice/Api/Token/BurnMintV1.daml#L55)):
+
+```daml
+controller (view this).admin :: extraActors
+```
+
+In Daml, the controller of a choice is the set of parties whose authority must be present when the choice is exercised. Here that set is the instrument admin (always required, drawn from the factory's view) *plus* whatever parties the caller put in `extraActors`. If any party in the resulting set does not have authority in scope, the exercise fails.
+
+### Why the interface exposes this
+
+The Splice interface keeps admin authority and *owner consent* separable by design. The module comment spells it out:
+
+> *"Note that this is jointly authorized by the admin and the `extraActors`. The `admin` thus controls all calls to this choice, and some implementations might require `extraActors` to be present, e.g., the owners of the minted and burnt holdings."*
+
+The interface says nothing about who `extraActors` has to be. The **implementation** (e.g., the utility-registry `AllocationFactory`) decides what it demands — in practice, typically the owners of the new (mint) or existing (burn) holdings, to prevent the admin unilaterally creating or destroying holdings belonging to other parties.
+
+### How canton-vault uses it
+
+- **Mint** (`DepositRequest_Process`): `extraActors = [user]`. The new share's owner is the user; the user must co-authorize so the admin (vault manager) can't mint shares to someone without their consent.
+- **Burn** (`WithdrawRequest_Process`): `extraActors = []`. The burn consumes holdings owned by `vaultManager` — who is already the admin — so no additional party needs to authorize. (The shares had moved into `vaultManager`'s custody via the preceding `TransferInstruction_Accept` step.)
+
+### How this plugin uses it
+
+Because of treasury-first mint and treasury-only burn (see "Proposals requiring team consensus"):
+
+- **Mint** (`MintProposal.executeImpl`): `extraActors = []`. The recipient is the governance party itself — the same party as the admin — so no additional authority is needed.
+- **Burn** (`BurnProposal.executeImpl`): `extraActors = []`. Same reason — the burnt holdings belong to the governance party, already the admin.
+
+This is exactly why the treasury-first / treasury-only pair is so clean architecturally: it collapses every `extraActors` question into "nobody else needs to sign." If we ever drop treasury-first (e.g., mint directly to a third party), `extraActors = [recipient]` re-emerges, and the plugin has to find a way to get that recipient's authority into `executeImpl` — which is the whole point of the first proposal requiring consensus.
+
+### Summary
+
+| Field | Meaning | Who supplies it | Enforced by |
+|---|---|---|---|
+| `expectedAdmin` | The admin party the caller expects (defends against malicious substitute factories) | Caller | Factory impl validates `expectedAdmin == (view this).admin` |
+| `extraActors` | Additional parties whose authority is required alongside the admin | Caller | Daml's authorization rules (controller must have authority in scope); factory impl *may* demand a specific shape |
+| (factory's `admin`) | The instrument admin, always required | Stored on the factory | Daml's authorization rules |
+
+In short: `extraActors` is how the factory interface lets *anyone else's consent* into the mint/burn operation without baking a specific "who" into the interface. Implementations make it concrete.
