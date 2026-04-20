@@ -34,11 +34,11 @@ Each deployment of this plugin governs issuance for exactly one instrument, fixe
 
 ### `IssuanceConfig` schema
 
-Fields: `governanceParty : Party` (signatory), `instrumentId : InstrumentId`, `allocationFactoryCid : ContractId BurnMintFactory`, plus the instrument-UX metadata set at setup time (display name, symbol, decimals, etc.). Exactly one `IssuanceConfig` exists per plugin deployment, for the plugin's lifetime.
+Fields: `governanceParty : Party` (signatory), `instrumentId : InstrumentId`, `allocationFactoryCid : ContractId BurnMintFactory`, `paused : Bool`, plus the instrument-UX metadata set at setup time (display name, symbol, decimals, etc.). Exactly one `IssuanceConfig` exists per plugin deployment, for the plugin's lifetime. `paused` is `False` at setup.
 
 ### `MintProposal` and `BurnProposal` carry no instrument selector
 
-They reference the `IssuanceConfig` by ContractId. `executeImpl` fetches the config and reads the `instrumentId` and `allocationFactoryCid` from it. Validation: the config's `governanceParty` must match the proposal's `governanceParty`.
+They reference the `IssuanceConfig` by ContractId. `executeImpl` fetches the config, reads the `instrumentId` and `allocationFactoryCid`, and fails fast if `paused == True`. Validation: the config's `governanceParty` must match the proposal's `governanceParty`.
 
 ### Token UX is decided at setup
 
@@ -50,7 +50,19 @@ Display name, symbol, decimals, and any other `InstrumentConfiguration` fields a
 
 ### `actionLabel` values
 
-`"SetupIssuance"`, `"Mint"`, `"Burn"`. Short and human-readable; they surface on `GovernanceExecutionResult` records and in any UI.
+`"SetupIssuance"`, `"Mint"`, `"Burn"`, `"SetPause"`, `"RotateFactory"`. Short and human-readable; they surface on `GovernanceExecutionResult` records and in any UI.
+
+### Advanced features included — beyond strict minimalism
+
+The next two decisions go beyond what a strictly minimal design would require. We recommend including them because the cost is small and the operational value is real. A team prioritising absolute minimalism could defer either to a later version; our default is to ship both in v1.
+
+**Pause / resume.** `IssuanceConfig` carries a `paused : Bool`. `MintProposal.executeImpl` and `BurnProposal.executeImpl` check it and fail if paused. A `SetPauseProposal { newPaused : Bool }` template lets the committee toggle it via a governance vote.
+
+*Why include it:* gives the committee an explicit, on-chain "we are stopped" state. External systems (wallets, dashboards, backend integrations, off-chain attestation pipelines) can observe it rather than infer. Converts ongoing per-proposal vigilance into one committed action, which is also reversible. The minimalist alternative — committee members refusing to confirm during incidents — works but relies on out-of-band signalling and per-proposal attendance.
+
+**Factory rotation.** A `RotateFactoryProposal { newFactoryCid : ContractId BurnMintFactory }` template archives the current `IssuanceConfig` and recreates it with the new factory cid, preserving everything else (instrument identity, pause state, UX metadata). `executeImpl` validates that `(view newFactory).admin == governanceParty` via `BurnMintFactory_PublicFetch` before recreating.
+
+*Why include it:* if the Utility Registry ever issues a replacement factory for the same registrar (version upgrade, migration), rotating in place is far cheaper than redeploying the plugin. Instrument identity and `IssuanceConfig` cid references held by downstream integrations are preserved. The minimalist alternative — redeploy the plugin — is disproportionately expensive for what is structurally a small config change. *Open confirmation for the team:* whether factory rotation is a realistic operational scenario at all; if factories are effectively immutable once created, this template is dead code and should be dropped.
 
 ---
 
@@ -115,31 +127,17 @@ If two proposals reference the same external event (same bridge tx, same oracle 
 - **(b) `ProcessedEventLog` contract.** A stateful contract keyed by external event id; `executeImpl` checks the log and either refuses (if present) or appends (on success). Robust; adds a new contract to the plugin model.
 - **(c) Scan past `GovernanceExecutionResult`s.** Reuse the existing audit log, structured so event ids can be read from prior executions. No new contract; requires discipline in how evidence is recorded.
 
-### Q8. Pause / emergency stop
-
-Should the plugin provide a governance-level pause toggle? An `IssuancePaused` flag on `IssuanceConfig` (or a separate signal contract) that `executeImpl` checks. Flipping it is itself a governance action. Lets the committee halt all issuance without revoking the factory — useful for incident response.
-
-### Q9. Supply accounting — any on-chain bookkeeping needed?
+### Q8. Supply accounting — any on-chain bookkeeping needed?
 
 Canton-vault maintains `YieldEpoch` because share value depends on total supply. This plugin is issuance-only; ground-truth supply is the sum of live `Holding`s, and the `GovernanceExecutionResult` audit record per mint/burn is the natural supply event log.
 
 Confirm this is sufficient, or call out specific reasons a live supply contract is needed (external systems polling, on-chain cap enforcement, etc.).
 
-### Q10. Audit expectations beyond `GovernanceExecutionResult`
+### Q9. Audit expectations beyond `GovernanceExecutionResult`
 
 `governance-core` already creates a `GovernanceExecutionResult` per execution with `actionLabel`, `description`, `confirmers`, `executedAt`. Does the team need additional structured fields (event id, recipient, amount, instrument) captured in a plugin-specific audit record?
 
-### Q11. Post-setup maintenance actions
-
-After the initial setup, should the plugin include additional governance actions for ongoing administration? Candidates:
-
-- `RotateFactoryProposal` — update `IssuanceConfig.allocationFactoryCid` when the factory needs replacing.
-- `UpdateInstrumentConfigProposal` — change the `InstrumentConfiguration` downstream (e.g. display-metadata updates).
-- `PauseIssuanceProposal` (if Q8 goes this way).
-
-Options: (a) include all three in v1; (b) only pause in v1, add rotate/update later if needed; (c) no maintenance actions in v1 — deploy a new plugin instance if anything needs to change. Worth team input.
-
-### Q12. Off-chain attestation pipeline (out of plugin scope, but shapes Q4)
+### Q10. Off-chain attestation pipeline (out of plugin scope, but shapes Q4)
 
 How committee members learn about the external event they're voting on — a bridge oracle, a signed attestation chain, a manual evidence process — is out of scope for the plugin itself. But the structure of that evidence determines the proposal fields (Q4). Worth a parallel team agreement on the attestation protocol before fixing the proposal schema.
 
@@ -147,4 +145,4 @@ How committee members learn about the external event they're voting on — a bri
 
 ## Next step
 
-After the open questions are answered, the next artefact is an implementation plan: concrete template fields and choices for `MintProposal`, `BurnProposal`, `SetupIssuanceProposal` (and any maintenance templates from Q11), `executeImpl` bodies, and a test plan.
+After the open questions are answered, the next artefact is an implementation plan: concrete template fields and choices for `IssuanceConfig`, `SetupIssuanceProposal`, `MintProposal`, `BurnProposal`, `SetPauseProposal`, and (conditionally) `RotateFactoryProposal`; `executeImpl` bodies; and a test plan.
