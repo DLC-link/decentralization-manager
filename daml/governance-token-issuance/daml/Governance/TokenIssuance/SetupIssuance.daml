@@ -52,10 +52,12 @@ template SetupIssuanceProposal
         -- 1. Create the provider configuration.
         providerConfigurationCid <- (.providerConfigurationCid) <$>
           exercise providerServiceCid ProviderService_CreateProviderConfiguration with
-            registrarRequirements = []
+            registrarRequirements = []  -- empty for v1; tighten if the registry requires
             holderRequirements = []
 
         -- 2. Obtain a RegistrarService with registrar = governanceParty.
+        --    Follows canton-vault's VaultGovernanceRules_SetupUtility pattern
+        --    (see VaultGovernance.daml lines 481-506).
         registrarServiceRequestCid <- create RegistrarServiceRequest with
           operator
           provider = governanceParty
