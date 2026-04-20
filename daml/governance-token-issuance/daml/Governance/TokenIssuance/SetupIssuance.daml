@@ -75,18 +75,21 @@ template SetupIssuanceProposal
         allocationFactoryCid <- (.allocationFactoryCid) <$>
           exercise registrarServiceCid RegistrarService_CreateAllocationFactory
 
-        -- 4. Register the instrument.
-        _ <- exercise registrarServiceCid RegistrarService_CreateInstrumentConfiguration with
-          instrumentId = instrumentIdText
-          additionalIdentifiers = []
-          issuerRequirements = []
-          holderRequirements = []
+        -- 4. Register the instrument; capture the InstrumentConfiguration cid
+        --    so we can pass it via extraArgs.context on mint/burn later.
+        instrumentConfigurationCid <- (.instrumentConfigurationCid) <$>
+          exercise registrarServiceCid RegistrarService_CreateInstrumentConfiguration with
+            instrumentId = instrumentIdText
+            additionalIdentifiers = []
+            issuerRequirements = []
+            holderRequirements = []
 
         -- 5. Create the IssuanceConfig.
         _ <- create IssuanceConfig with
           governanceParty
           instrumentId = InstrumentId with admin = governanceParty, id = instrumentIdText
           allocationFactoryCid
+          instrumentConfigurationCid
           displayName
           symbol
           decimals
