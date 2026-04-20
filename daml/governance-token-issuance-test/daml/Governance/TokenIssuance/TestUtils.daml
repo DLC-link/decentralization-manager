@@ -15,6 +15,9 @@ import Governance.Rules
 
 import Utility.Registry.App.V0.Service.Provider (ProviderService(..))
 
+import Governance.TokenIssuance.IssuanceConfig (IssuanceConfig)
+import Governance.TokenIssuance.SetupIssuance
+
 -- | Standard test party allocation for token issuance tests.
 -- NB: no separate `registrar` field — the governance party itself is the registrar.
 data IssuanceTestParties = IssuanceTestParties
@@ -92,3 +95,23 @@ initUtilityPrereqs parties =
     createCmd ProviderService with
       operator = parties.operator
       provider = parties.governanceParty
+
+-- | Run the full SetupIssuanceProposal flow and return the resulting IssuanceConfig cid.
+-- Convenience wrapper for tests that need an IssuanceConfig as a precondition.
+setupIssuanceForTest : IssuanceTestParties -> ContractId GovernanceRules -> Script (ContractId IssuanceConfig)
+setupIssuanceForTest parties rulesCid = do
+  providerCid <- initUtilityPrereqs parties
+  proposalCid <- submit parties.member1 $ createCmd SetupIssuanceProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    providerServiceCid = providerCid
+    operator = parties.operator
+    instrumentIdText = "TEST-TOKEN"
+    displayName = "Test Token"
+    symbol = "TEST"
+    decimals = 8
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  _ <- confirmAndExecute parties rulesCid proposalInterfaceCid
+    [parties.member1, parties.member2] parties.member1
+  [(configCid, _)] <- query @IssuanceConfig parties.governanceParty
+  pure configCid
