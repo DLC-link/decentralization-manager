@@ -1,0 +1,64 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+module Governance.TokenIssuance.Test.BurnProposalTest where
+
+import DA.Time (addRelTime, hours)
+import Daml.Script
+
+import Utility.Registry.App.V0.Model.Burn (BurnOffer)
+
+import Governance.Action (GovernableAction)
+import Governance.Rules (GovernanceRules)
+
+import Governance.TokenIssuance.BurnProposal
+import Governance.TokenIssuance.IssuanceConfig (IssuanceConfig)
+import Governance.TokenIssuance.TestUtils
+
+import TestHarness
+
+-- Same fixture shape as MintProposalTest: setup has run, IssuanceConfig exists.
+-- No prior mint needed — AllocationFactory_OfferBurn (the offer step) does not
+-- consume holdings. Holdings come in at BurnOffer_Accept time, which is outside
+-- the plugin's responsibility.
+data Fixture = Fixture
+  with
+    parties : IssuanceTestParties
+    rulesCid : ContractId GovernanceRules
+    configCid : ContractId IssuanceConfig
+  deriving (Eq, Show)
+
+given_setup_done : Script Fixture
+given_setup_done = do
+  parties <- allocateIssuanceTestParties
+  rulesCid <- createTestGovernance parties
+  configCid <- setupIssuanceForTest parties rulesCid
+  pure Fixture with ..
+
+when_burn_offered : Fixture -> Script ()
+when_burn_offered f = do
+  now <- getTime
+  proposalCid <- submit f.parties.member1 $ createCmd BurnProposal with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+    issuanceConfigCid = f.configCid
+    holder = f.parties.outsider
+    amount = 100.0
+    description = "Bridge unwind tx abcd1234"
+    requestedAt = now
+    executeBefore = now `addRelTime` hours 24
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  _ <- confirmAndExecute f.parties f.rulesCid proposalInterfaceCid
+    [f.parties.member1, f.parties.member2] f.parties.member1
+  pure ()
+
+then_burn_offer_exists : Fixture -> () -> Script Failures
+then_burn_offer_exists f _ = do
+  offers <- query @BurnOffer f.parties.governanceParty
+  pure $ shouldBe "BurnOffer count" 1 (length offers)
+
+test_when_burn_proposed_then_burn_offer_created = script do
+  run Test with
+    given = given_setup_done
+    when = when_burn_offered
+    then_ = then_burn_offer_exists
