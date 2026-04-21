@@ -831,7 +831,12 @@ pub async fn execute_action(
 
     let audit_pool = data.db.clone();
     let audit_summary = crate::server::audit::action_summary(&body.action);
-    let audit_details = serde_json::to_string(&*body).unwrap_or_default();
+    // Redact disclosed contract blobs (can be very large) before storing in audit
+    let mut redacted = body.clone();
+    for dc in &mut redacted.disclosed_contracts {
+        dc.blob = format!("<{} bytes>", dc.blob.len());
+    }
+    let audit_details = serde_json::to_string(&redacted).unwrap_or_default();
     let audit_party_id = party_id.to_string();
     let audit_member = member_party_id.clone();
     let audit_gov_type = body.governance_type;

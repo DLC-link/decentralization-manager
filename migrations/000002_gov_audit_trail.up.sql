@@ -14,8 +14,7 @@ CREATE TABLE IF NOT EXISTS governance_audit (
     created_at      INTEGER NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_governance_audit_party_id ON governance_audit(party_id);
-CREATE INDEX IF NOT EXISTS idx_governance_audit_created_at ON governance_audit(created_at);
+CREATE INDEX IF NOT EXISTS idx_governance_audit_party_created ON governance_audit(party_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS chain_audit_cache (
     party_id        TEXT NOT NULL,
