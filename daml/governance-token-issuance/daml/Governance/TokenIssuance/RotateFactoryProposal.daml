@@ -1,0 +1,53 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Plugin template for rotating the AllocationFactory cid on IssuanceConfig.
+-- Thin wrapper around IssuanceConfig_RotateFactory: verifies the new factory's
+-- admin equals the governance party via BurnMintFactory_PublicFetch, then
+-- exercises the choice on IssuanceConfig.
+module Governance.TokenIssuance.RotateFactoryProposal where
+
+import Splice.Api.Token.BurnMintV1
+  (BurnMintFactory, BurnMintFactory_PublicFetch(..))
+import Splice.Util (require)
+
+import Utility.Registry.App.V0.Service.AllocationFactory (AllocationFactory)
+
+import Governance.Action
+
+import Governance.TokenIssuance.IssuanceConfig
+  (IssuanceConfig(..), IssuanceConfig_RotateFactory(..))
+
+template RotateFactoryProposal
+  with
+    governanceParty : Party
+    proposer : Party
+    issuanceConfigCid : ContractId IssuanceConfig
+    newFactoryCid : ContractId AllocationFactory
+  where
+    signatory proposer
+    observer governanceParty
+
+    interface instance GovernableAction for RotateFactoryProposal where
+      view = GovernableActionView with
+        governanceParty
+        actionLabel = "RotateFactory"
+        description = "Rotate the AllocationFactory cid on IssuanceConfig"
+
+      executeImpl = do
+        -- Validate the fetched IssuanceConfig matches the proposal.
+        config <- fetch issuanceConfigCid
+        require "IssuanceConfig governanceParty matches proposal"
+          (config.governanceParty == governanceParty)
+        -- Cast AllocationFactory cid to BurnMintFactory interface cid and
+        -- validate the factory's admin.
+        let newFactoryBmfCid = toInterfaceContractId @BurnMintFactory newFactoryCid
+        factoryView <- exercise newFactoryBmfCid BurnMintFactory_PublicFetch with
+          expectedAdmin = governanceParty
+          actor = governanceParty
+        require "new factory admin is governance party"
+          (factoryView.admin == governanceParty)
+        -- Perform the archive-and-recreate via the choice on IssuanceConfig.
+        _ <- exercise issuanceConfigCid IssuanceConfig_RotateFactory with
+          newFactoryCid
+        pure ()

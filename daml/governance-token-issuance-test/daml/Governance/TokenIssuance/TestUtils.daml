@@ -13,6 +13,7 @@ import Governance.Confirmation (GovernanceConfirmation)
 import Governance.ExecutionResult
 import Governance.Rules
 
+import Utility.Registry.App.V0.Service.AllocationFactory (AllocationFactory(..))
 import Utility.Registry.App.V0.Service.Provider (ProviderService(..))
 
 import Governance.TokenIssuance.IssuanceConfig (IssuanceConfig)
@@ -115,3 +116,14 @@ setupIssuanceForTest parties rulesCid = do
     [parties.member1, parties.member2] parties.member1
   [(configCid, _)] <- query @IssuanceConfig parties.governanceParty
   pure configCid
+
+-- | Provision a standalone AllocationFactory for the governance party.
+-- Bypasses the full onboarding chain — just direct-creates the template.
+-- Used by RotateFactoryProposalTest as the rotate target.
+initSpareFactory : IssuanceTestParties -> Script (ContractId AllocationFactory)
+initSpareFactory parties =
+  submit parties.governanceParty $
+    createCmd AllocationFactory with
+      provider = parties.governanceParty
+      registrar = parties.governanceParty
+      operator = parties.operator
