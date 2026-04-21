@@ -62,3 +62,26 @@ test_when_burn_proposed_then_burn_offer_created = script do
     given = given_setup_done
     when = when_burn_offered
     then_ = then_burn_offer_exists
+
+-- | BurnProposal has `ensure amount > 0.0`. Same reasoning as for mint.
+when_zero_amount_burn : Fixture -> Script ()
+when_zero_amount_burn f = do
+  now <- getTime
+  submitMustFail f.parties.member1 $ createCmd BurnProposal with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+    issuanceConfigCid = f.configCid
+    holder = f.parties.outsider
+    amount = 0.0
+    description = "should be rejected"
+    requestedAt = now
+    executeBefore = now `addRelTime` hours 24
+
+then_nothing_burn : Fixture -> () -> Script Failures
+then_nothing_burn _ _ = pure []
+
+test_when_zero_amount_burn_then_create_rejected = script do
+  run Test with
+    given = given_setup_done
+    when = when_zero_amount_burn
+    then_ = then_nothing_burn
