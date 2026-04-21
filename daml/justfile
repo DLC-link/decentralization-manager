@@ -21,10 +21,19 @@ test-issuance:
 sandbox:
 	daml sandbox --port 6865
 
+# Upload the token-issuance DARs (and governance-core) to the running sandbox.
+# `daml script` auto-uploads only its top DAR, not transitive dependencies, so
+# `governance-core-v0-rc2` has to be vetted explicitly before the script runs.
+upload-dars: build-issuance
+	daml ledger upload-dar --host localhost --port 6865 governance-core/.daml/dist/governance-core-v0-rc2-0.1.0.dar
+	daml ledger upload-dar --host localhost --port 6865 governance-token-issuance/.daml/dist/governance-token-issuance-v0-rc2-0.1.0.dar
+	daml ledger upload-dar --host localhost --port 6865 governance-token-issuance-test/.daml/dist/governance-token-issuance-test-0.1.0.dar
+
 # Populate a running sandbox with a freshly-issued test instrument plus a
 # MintOffer for `outsider`. Assumes `just sandbox` (or equivalent) is running
-# on localhost:6865.
-populate-sandbox: build-issuance
+# on localhost:6865 with a clean state — the script calls `allocateParty` with
+# named hints and will fail if those parties already exist from a prior run.
+populate-sandbox: upload-dars
 	daml script \
 	  --dar governance-token-issuance-test/.daml/dist/governance-token-issuance-test-0.1.0.dar \
 	  --script-name Governance.TokenIssuance.Scripts.PopulateSandbox:populate \
