@@ -1,45 +1,48 @@
 # justfile for the dec-party-manager Daml packages
+#
+# Token-issuance recipes (build-issuance, test-issuance, populate-sandbox) use
+# DPM (the Digital Asset Package Manager, the replacement for the deprecated
+# `daml` assistant). Other packages still build via `daml`; that migration
+# is tracked separately.
 
 # Default recipe: list available recipes.
 default:
 	@just --list
 
-# Build all Daml packages.
+# Build all Daml packages (legacy `daml` — covers packages not yet on DPM).
 build:
 	daml build --all
 
-# Build only the token-issuance plugin and its test package.
+# Build only the token-issuance plugin and its test package via DPM.
 build-issuance:
-	cd governance-token-issuance && daml build
-	cd governance-token-issuance-test && daml build
+	cd governance-token-issuance && dpm build
+	cd governance-token-issuance-test && dpm build
 
-# Run the token-issuance test suite.
+# Run the token-issuance test suite via DPM.
 test-issuance:
-	cd governance-token-issuance-test && daml test
+	cd governance-token-issuance-test && dpm test
 
-# Start a local sandbox on port 6865 (run in a separate terminal).
+# Start a local sandbox on port 6865 (run in a separate terminal). Uses the
+# legacy `daml sandbox` since the other packages still rely on it; switch to
+# `dpm sandbox --ledger-api-port 6865` once the rest of the repo is migrated.
 sandbox:
 	daml sandbox --port 6865
 
-# Upload the token-issuance DARs (and governance-core) to the running sandbox.
-# `daml script` auto-uploads only its top DAR, not transitive dependencies, so
-# `governance-core-v0-rc2` has to be vetted explicitly before the script runs.
-upload-dars: build-issuance
-	daml ledger upload-dar --host localhost --port 6865 governance-core/.daml/dist/governance-core-v0-rc2-0.1.0.dar
-	daml ledger upload-dar --host localhost --port 6865 governance-token-issuance/.daml/dist/governance-token-issuance-v0-rc2-0.1.0.dar
-	daml ledger upload-dar --host localhost --port 6865 governance-token-issuance-test/.daml/dist/governance-token-issuance-test-0.1.0.dar
-
 # Populate a running sandbox with a freshly-issued test instrument plus a
-# MintOffer for `outsider`. Assumes `just sandbox` (or equivalent) is running
-# on localhost:6865 with a clean state — the script calls `allocateParty` with
-# named hints and will fail if those parties already exist from a prior run.
-populate-sandbox: upload-dars
-	daml script \
+# MintOffer for `outsider`. Assumes `just sandbox` is running on localhost:6865
+# with a clean state — the script calls `allocateParty` with named hints and
+# will fail if those parties already exist from a prior run.
+# `--upload-dar yes` uploads the test DAR (including the embedded transitive
+# DALFs such as governance-core) over gRPC before the script runs — no
+# separate upload-dar step is needed.
+populate-sandbox: build-issuance
+	dpm script \
 	  --dar governance-token-issuance-test/.daml/dist/governance-token-issuance-test-0.1.0.dar \
 	  --script-name Governance.TokenIssuance.Scripts.PopulateSandbox:populate \
 	  --ledger-host localhost \
 	  --ledger-port 6865 \
-	  --wall-clock-time
+	  --wall-clock-time \
+	  --upload-dar yes
 
 # Clean Daml build artefacts for token-issuance packages.
 clean-issuance:
