@@ -58,3 +58,28 @@ test_when_mint_proposed_then_mint_offer_created = script do
     given = given_setup_done
     when = when_mint_offered
     then_ = then_mint_offer_exists
+
+-- | MintProposal has `ensure amount > 0.0`. The ledger rejects a `createCmd`
+-- with `amount = 0.0` at template-precondition time, before the proposal
+-- even reaches the governance flow.
+when_zero_amount : Fixture -> Script ()
+when_zero_amount f = do
+  now <- getTime
+  submitMustFail f.parties.member1 $ createCmd MintProposal with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+    issuanceConfigCid = f.configCid
+    recipient = f.parties.outsider
+    amount = 0.0
+    description = "should be rejected"
+    requestedAt = now
+    executeBefore = now `addRelTime` hours 24
+
+then_nothing_mint : Fixture -> () -> Script Failures
+then_nothing_mint _ _ = pure []
+
+test_when_zero_amount_then_create_rejected = script do
+  run Test with
+    given = given_setup_done
+    when = when_zero_amount
+    then_ = then_nothing_mint

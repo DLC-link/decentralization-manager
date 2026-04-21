@@ -6,7 +6,7 @@ module Governance.TokenIssuance.Test.SetupIssuanceTest where
 import Daml.Script
 
 import Governance.Action (GovernableAction)
-import Governance.Rules (GovernanceRules)
+import Governance.Rules
 
 import Governance.TokenIssuance.IssuanceConfig (IssuanceConfig)
 import Governance.TokenIssuance.SetupIssuance
@@ -61,3 +61,32 @@ test_when_setup_proposed_then_config_created = script do
     given = given_governance
     when = when_setup_executed
     then_ = then_config_exists
+
+-- | An outsider (not a member of governance) cannot confirm an action.
+-- The rules contract rejects `GovernanceRules_ConfirmAction` from non-members.
+when_non_member_confirms : Fixture -> Script ()
+when_non_member_confirms f = do
+  providerCid <- initUtilityPrereqs f.parties
+  proposalCid <- submit f.parties.member1 $ createCmd SetupIssuanceProposal with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+    providerServiceCid = providerCid
+    operator = f.parties.operator
+    instrumentIdText = "TEST-TOKEN"
+    displayName = "Test Token"
+    symbol = "TEST"
+    decimals = 8
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  submitMustFail (memberContext f.parties.outsider f.parties.governanceParty) $
+    exerciseCmd f.rulesCid GovernanceRules_ConfirmAction with
+      confirmer = f.parties.outsider
+      actionProposalCid = proposalInterfaceCid
+
+then_nothing : Fixture -> () -> Script Failures
+then_nothing _ _ = pure []
+
+test_when_non_member_confirms_then_rejected = script do
+  run Test with
+    given = given_governance
+    when = when_non_member_confirms
+    then_ = then_nothing
