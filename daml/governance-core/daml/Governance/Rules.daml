@@ -14,6 +14,7 @@ import Splice.Util (require)
 
 import Governance.Action
 import Governance.Confirmation
+import Governance.ExecutionResult
 
 
 -- ============================================================================
@@ -90,6 +91,18 @@ data GovernanceRules_SetThresholdResult = GovernanceRules_SetThresholdResult
 
 data GovernanceRules_SetActionConfirmationTimeoutResult = GovernanceRules_SetActionConfirmationTimeoutResult
   with governanceRulesCid : ContractId GovernanceRules
+  deriving (Show, Eq)
+
+data GovernanceRules_ConfirmGovernanceActionResult = GovernanceRules_ConfirmGovernanceActionResult
+  with confirmationCid : ContractId GovernanceSelfConfirmation
+  deriving (Show, Eq)
+
+data GovernanceRules_ExecuteGovernanceActionResult = GovernanceRules_ExecuteGovernanceActionResult
+  with governanceRulesCid : ContractId GovernanceRules
+  deriving (Show, Eq)
+
+data GovernanceRules_ConfirmActionResult = GovernanceRules_ConfirmActionResult
+  with confirmationCid : ContractId GovernanceConfirmation
   deriving (Show, Eq)
 
 -- ============================================================================
@@ -196,7 +209,7 @@ template GovernanceRules
 
     -- | Confirm a governance self-management action.
     nonconsuming choice GovernanceRules_ConfirmGovernanceAction
-        : ContractId GovernanceSelfConfirmation
+        : GovernanceRules_ConfirmGovernanceActionResult
       with
         confirmer : Party
         action : GovernanceSelfAction
@@ -204,16 +217,18 @@ template GovernanceRules
       do
         require "Confirmer is a governance member" (confirmer `Set.member` members)
         now <- getTime
-        create GovernanceSelfConfirmation with
+        confirmationCid <- create GovernanceSelfConfirmation with
           governanceParty
           confirmer
           action
           expiresAt = now `addRelTime` actionConfirmationTimeout
+        pure GovernanceRules_ConfirmGovernanceActionResult with ..
 
     -- | Execute a governance self-management action after threshold confirmations.
     -- Note: this is nonconsuming — the inner choices (AddMember, SetThreshold, etc.)
     -- handle consuming `self` and creating the new contract.
-    nonconsuming choice GovernanceRules_ExecuteGovernanceAction : ContractId GovernanceRules
+    nonconsuming choice GovernanceRules_ExecuteGovernanceAction
+        : GovernanceRules_ExecuteGovernanceActionResult
       with
         executor : Party
         action : GovernanceSelfAction
@@ -236,7 +251,7 @@ template GovernanceRules
           (length valid >= threshold)
 
         -- Dispatch to the appropriate built-in choice
-        case action of
+        governanceRulesCid <- case action of
           SelfAction_AddMemberAndSetThreshold newMember newThresholdAfterAdd -> do
             result <- exercise self GovernanceRules_AddMemberAndSetThreshold with
               member = newMember
@@ -258,6 +273,7 @@ template GovernanceRules
             result <- exercise self GovernanceRules_SetActionConfirmationTimeout with
               newTimeout = updatedTimeout
             pure result.governanceRulesCid
+        pure GovernanceRules_ExecuteGovernanceActionResult with ..
 
     -- | Expire a stale self-management confirmation.
     nonconsuming choice GovernanceRules_ExpireGovernanceConfirmation : ()
@@ -277,7 +293,7 @@ template GovernanceRules
 
     -- | Confirm an action proposal (GovernableAction interface).
     nonconsuming choice GovernanceRules_ConfirmAction
-        : ContractId GovernanceConfirmation
+        : GovernanceRules_ConfirmActionResult
       with
         confirmer : Party
         actionProposalCid : ContractId GovernableAction
@@ -291,15 +307,18 @@ template GovernanceRules
         -- GovernanceRules instances for the same party. A static governance ID
         -- field should be added to provide strict matching.
         now <- getTime
-        create GovernanceConfirmation with
+        confirmationCid <- create GovernanceConfirmation with
           governanceParty
           confirmer
           actionProposalCid
           actionLabel = actionView.actionLabel
           expiresAt = now `addRelTime` actionConfirmationTimeout
+        pure GovernanceRules_ConfirmActionResult with ..
 
     -- | Execute a confirmed action proposal after threshold confirmations are collected.
-    nonconsuming choice GovernanceRules_ExecuteConfirmedAction : ()
+    -- Creates a GovernanceExecutionResult contract as an on-chain audit trail.
+    nonconsuming choice GovernanceRules_ExecuteConfirmedAction
+        : ExecuteConfirmedActionResult
       with
         executor : Party
         actionProposalCid : ContractId GovernableAction
@@ -321,8 +340,21 @@ template GovernanceRules
         require "Enough confirmations to execute action"
           (length valid >= threshold)
 
+        -- Capture proposal metadata before execution consumes the contract
+        actionView <- view <$> fetch actionProposalCid
+
         -- Execute: governanceParty's authority flows via exercise chain
         exercise actionProposalCid GovernableAction_Execute
+
+        -- Create audit trail
+        executionResultCid <- create GovernanceExecutionResult with
+          governanceParty
+          actionLabel = actionView.actionLabel
+          description = actionView.description
+          executor
+          confirmers = map (.confirmer) valid
+          executedAt = now
+        pure ExecuteConfirmedActionResult with ..
 
     -- Note: Proposal cancellation is NOT a governance choice. Proposers cancel
     -- their own proposals directly via template-specific choices. Governance-level

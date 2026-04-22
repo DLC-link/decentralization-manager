@@ -112,12 +112,12 @@ testDuplicateConfirmationsRejected = script do
 
   let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
 
-  conf1 <- submit (memberContext parties.member1 parties.governanceParty) $
+  confResult1 <- submit (memberContext parties.member1 parties.governanceParty) $
     exerciseCmd rulesCid GovernanceRules_ConfirmAction with
       confirmer = parties.member1
       actionProposalCid = proposalIfaceCid
 
-  conf2 <- submit (memberContext parties.member1 parties.governanceParty) $
+  confResult2 <- submit (memberContext parties.member1 parties.governanceParty) $
     exerciseCmd rulesCid GovernanceRules_ConfirmAction with
       confirmer = parties.member1
       actionProposalCid = proposalIfaceCid
@@ -126,4 +126,4 @@ testDuplicateConfirmationsRejected = script do
     exerciseCmd rulesCid GovernanceRules_ExecuteConfirmedAction with
       executor = parties.member1
       actionProposalCid = proposalIfaceCid
-      confirmations = [conf1, conf2]
+      confirmations = [confResult1.confirmationCid, confResult2.confirmationCid]

@@ -14,6 +14,7 @@ import Splice.Api.Token.HoldingV1 (InstrumentId(..))
 
 import Governance.Action (GovernableAction)
 import Governance.Confirmation (GovernanceConfirmation)
+import Governance.ExecutionResult
 import Governance.Rules
 
 -- Testlib imports used by setupTestToken and test files
@@ -85,17 +86,18 @@ setupTestToken parties =
 -- | Collect confirmations from a list of members for an interface action.
 submitConfirmations : Party -> ContractId GovernanceRules -> ContractId GovernableAction -> [Party] -> Script [ContractId GovernanceConfirmation]
 submitConfirmations governanceParty rulesCid proposalCid confirmers =
-  mapA (\confirmer ->
-    submit (memberContext confirmer governanceParty) $
+  mapA (\confirmer -> do
+    result <- submit (memberContext confirmer governanceParty) $
       exerciseCmd rulesCid GovernanceRules_ConfirmAction with
         confirmer
         actionProposalCid = proposalCid
+    pure result.confirmationCid
   ) confirmers
 
 -- | Confirm and execute an interface action in one go.
 -- Uses readAs on utility-registry parties and outsider to simulate Canton disclosures
 -- for utility-registry contracts and receiver's TransferPreapproval.
-confirmAndExecute : TokenTestParties -> ContractId GovernanceRules -> ContractId GovernableAction -> [Party] -> Party -> Script ()
+confirmAndExecute : TokenTestParties -> ContractId GovernanceRules -> ContractId GovernableAction -> [Party] -> Party -> Script ExecuteConfirmedActionResult
 confirmAndExecute parties rulesCid proposalCid confirmers executor = do
   confirmationCids <- submitConfirmations parties.governanceParty rulesCid proposalCid confirmers
   debug "WARNING: Multi-party submit (actAs executor <> readAs governance/outsider/registrar/operator/dso) is a test shortcut. Verify authorization pattern matches your production implementation."

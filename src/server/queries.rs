@@ -449,6 +449,8 @@ pub async fn get_governance_confirmations(
     // Collect domain confirmations grouped by proposal CID (core domain actions)
     let mut domain_confirmations: HashMap<String, (String, Vec<GovernanceConfirmation>)> =
         HashMap::new();
+    // Collect proposal descriptions by CID (from active GovernableAction proposals)
+    let mut proposal_descriptions: HashMap<String, String> = HashMap::new();
 
     if test_mode {
         tracing::debug!("Using WildcardFilter for governance query (test mode)");
@@ -458,6 +460,7 @@ pub async fn get_governance_confirmations(
             token,
             &mut confirmations_by_hash,
             &mut domain_confirmations,
+            &mut proposal_descriptions,
         )
         .await?;
     } else {
@@ -495,6 +498,18 @@ pub async fn get_governance_confirmations(
                 }
             }
         }
+        // Fetch proposal descriptions via GovernableAction interface query
+        if let Err(e) = fetch_proposal_descriptions(
+            config,
+            party_id,
+            token,
+            packages,
+            &mut proposal_descriptions,
+        )
+        .await
+        {
+            tracing::debug!("Could not fetch proposal descriptions: {e}");
+        }
     }
 
     // Convert to GovernanceAction list, deduplicating confirmations by confirming_party
@@ -519,7 +534,7 @@ pub async fn get_governance_confirmations(
         })
         .collect();
 
-    // Build domain actions from domain confirmations
+    // Build domain actions from domain confirmations, merging proposal descriptions
     let domain_actions: Vec<DomainGovernanceAction> = domain_confirmations
         .into_iter()
         .map(|(proposal_cid, (action_label, confirmations))| {
@@ -529,9 +544,11 @@ pub async fn get_governance_confirmations(
                 .filter(|c| seen_parties.insert(c.confirming_party.clone()))
                 .collect();
             let confirmation_count = unique_confirmations.len();
+            let description = proposal_descriptions.remove(&proposal_cid);
             DomainGovernanceAction {
                 proposal_cid,
                 action_label,
+                description,
                 confirmations: unique_confirmations,
                 confirmation_count,
                 can_execute: confirmation_count >= threshold,
@@ -549,6 +566,7 @@ async fn fetch_governance_with_wildcard(
     token: Option<String>,
     confirmations_by_hash: &mut HashMap<String, (ActionType, Vec<GovernanceConfirmation>)>,
     domain_confirmations: &mut HashMap<String, (String, Vec<GovernanceConfirmation>)>,
+    proposal_descriptions: &mut HashMap<String, String>,
 ) -> Result {
     let mut state_client = utils::create_state_client(config, token).await?;
 
@@ -590,14 +608,18 @@ async fn fetch_governance_with_wildcard(
         if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
             && let Some(created) = active.created_event
             && let Some(ref template_id) = created.template_id
-            && is_governance_template(&template_id.module_name, &template_id.entity_name)
         {
-            if template_id.module_name == "Governance.Confirmation"
-                && template_id.entity_name == "GovernanceConfirmation"
-            {
-                extract_and_add_domain_confirmation(&created, domain_confirmations);
+            if is_governance_template(&template_id.module_name, &template_id.entity_name) {
+                if template_id.module_name == "Governance.Confirmation"
+                    && template_id.entity_name == "GovernanceConfirmation"
+                {
+                    extract_and_add_domain_confirmation(&created, domain_confirmations);
+                } else {
+                    extract_and_add_confirmation(&created, confirmations_by_hash);
+                }
             } else {
-                extract_and_add_confirmation(&created, confirmations_by_hash);
+                // Capture proposal descriptions from GovernableAction contracts
+                extract_proposal_description(&created, proposal_descriptions);
             }
         }
     }
@@ -788,6 +810,110 @@ fn extract_and_add_domain_confirmation(
         .or_insert_with(|| (action_label, Vec::new()))
         .1
         .push(confirmation);
+}
+
+/// Extract a proposal description from a GovernableAction contract's create_arguments.
+///
+/// Looks for a `description` field (Text) on the contract. Only captures it if the
+/// contract also has a `governanceParty` field (to avoid matching unrelated contracts
+/// in wildcard mode).
+fn extract_proposal_description(
+    created: &CreatedEvent,
+    proposal_descriptions: &mut HashMap<String, String>,
+) {
+    let Some(record) = &created.create_arguments else {
+        return;
+    };
+
+    // Only capture contracts that look like GovernableAction proposals
+    let has_governance_party = record.fields.iter().any(|f| f.label == "governanceParty");
+    let has_proposer = record.fields.iter().any(|f| f.label == "proposer");
+
+    if !has_governance_party || !has_proposer {
+        return;
+    }
+
+    let description = record
+        .fields
+        .iter()
+        .find(|f| f.label == "description")
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Text(t)) => Some(t.clone()),
+            _ => None,
+        });
+
+    if let Some(desc) = description {
+        proposal_descriptions.insert(created.contract_id.clone(), desc);
+    }
+}
+
+/// Fetch proposal descriptions via GovernableAction interface query (production mode).
+///
+/// Queries active contracts implementing GovernableAction and extracts the
+/// `description` field from their create_arguments.
+async fn fetch_proposal_descriptions(
+    config: &NodeConfig,
+    party_id: &str,
+    token: Option<String>,
+    packages: &PackageConfig,
+    proposal_descriptions: &mut HashMap<String, String>,
+) -> Result {
+    let Some(ref pkg) = packages.governance_core else {
+        return Ok(());
+    };
+
+    let mut state_client = utils::create_state_client(config, token).await?;
+
+    let ledger_end = state_client
+        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
+        .await?
+        .into_inner()
+        .offset;
+
+    let mut filters_by_party = HashMap::new();
+    filters_by_party.insert(
+        party_id.to_string(),
+        Filters {
+            cumulative: vec![CumulativeFilter {
+                identifier_filter: Some(cumulative_filter::IdentifierFilter::InterfaceFilter(
+                    InterfaceFilter {
+                        interface_id: Some(Identifier {
+                            package_id: pkg.clone(),
+                            module_name: "Governance.Action".to_string(),
+                            entity_name: "GovernableAction".to_string(),
+                        }),
+                        include_created_event_blob: false,
+                        include_interface_view: true,
+                    },
+                )),
+            }],
+        },
+    );
+
+    let acs_request = GetActiveContractsRequest {
+        active_at_offset: ledger_end,
+        event_format: Some(EventFormat {
+            filters_by_party,
+            filters_for_any_party: None,
+            verbose: true,
+        }),
+    };
+
+    let mut stream = state_client
+        .get_active_contracts(tonic::Request::new(acs_request))
+        .await?
+        .into_inner();
+
+    while let Some(response) = stream.message().await? {
+        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
+            && let Some(created) = active.created_event
+        {
+            extract_proposal_description(&created, proposal_descriptions);
+        }
+    }
+
+    Ok(())
 }
 
 /// Compute a deterministic hash of an action for grouping confirmations

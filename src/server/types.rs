@@ -628,6 +628,8 @@ pub enum ProposalType {
     },
     /// Accept an incoming token transfer
     AcceptTransfer { transfer_instruction_cid: String },
+    /// Generic text-based vote (no on-chain effect beyond recording the result)
+    GenericVote { description: String },
 }
 
 /// Request to propose a governance domain action (creates proposal contract)
@@ -645,6 +647,9 @@ pub struct DomainGovernanceAction {
     pub proposal_cid: String,
     /// Human-readable label (e.g., "SetupCcPreapproval")
     pub action_label: String,
+    /// Human-readable description from the proposal's GovernableActionView
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// Confirmations for this proposal
     pub confirmations: Vec<GovernanceConfirmation>,
     /// Number of unique confirmers
