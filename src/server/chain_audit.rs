@@ -3,8 +3,9 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use canton_proto_rs::com::daml::ledger::api::v2::{
     CumulativeFilter, EventFormat, Filters, GetLatestPrunedOffsetsRequest, GetLedgerEndRequest,
-    GetUpdatesRequest, Identifier, Record, TemplateFilter, TransactionFormat, TransactionShape,
-    UpdateFormat, Value, cumulative_filter, event::Event, get_updates_response::Update, value,
+    GetUpdatesRequest, Identifier, InterfaceFilter, Record, TemplateFilter, TransactionFormat,
+    TransactionShape, UpdateFormat, Value, cumulative_filter, event::Event,
+    get_updates_response::Update, value,
 };
 use serde_json::{Value as JsonValue, json};
 
@@ -24,17 +25,30 @@ struct ChainTemplate {
     governance_type: &'static str,
 }
 
-fn chain_templates(packages: &PackageConfig) -> Vec<ChainTemplate> {
-    let mut v = Vec::new();
+struct ChainInterface {
+    package_id: String,
+    module_name: &'static str,
+    entity_name: &'static str,
+    governance_type: &'static str,
+}
+
+struct ChainFilters {
+    templates: Vec<ChainTemplate>,
+    interfaces: Vec<ChainInterface>,
+}
+
+fn chain_filters(packages: &PackageConfig) -> ChainFilters {
+    let mut templates = Vec::new();
+    let mut interfaces = Vec::new();
 
     if let Some(pkg) = &packages.vault_governance {
-        v.push(ChainTemplate {
+        templates.push(ChainTemplate {
             package_id: pkg.clone(),
             module_name: "BitsafeVault.VaultGovernance",
             entity_name: "VaultGovernanceRules",
             governance_type: "vault",
         });
-        v.push(ChainTemplate {
+        templates.push(ChainTemplate {
             package_id: pkg.clone(),
             module_name: "BitsafeVault.VaultGovernance",
             entity_name: "VaultGovernanceConfirmation",
@@ -43,40 +57,55 @@ fn chain_templates(packages: &PackageConfig) -> Vec<ChainTemplate> {
     }
 
     if let Some(pkg) = &packages.governance_core {
-        v.push(ChainTemplate {
+        templates.push(ChainTemplate {
             package_id: pkg.clone(),
             module_name: "Governance.Rules",
             entity_name: "GovernanceRules",
             governance_type: "core_self",
         });
-        v.push(ChainTemplate {
+        templates.push(ChainTemplate {
             package_id: pkg.clone(),
             module_name: "Governance.Rules",
             entity_name: "GovernanceSelfConfirmation",
             governance_type: "core_self",
         });
-        v.push(ChainTemplate {
+        templates.push(ChainTemplate {
             package_id: pkg.clone(),
             module_name: "Governance.Confirmation",
             entity_name: "GovernanceConfirmation",
             governance_type: "core_domain",
         });
+        templates.push(ChainTemplate {
+            package_id: pkg.clone(),
+            module_name: "Governance.ExecutionResult",
+            entity_name: "GovernanceExecutionResult",
+            governance_type: "core_domain",
+        });
+        interfaces.push(ChainInterface {
+            package_id: pkg.clone(),
+            module_name: "Governance.Action",
+            entity_name: "GovernableAction",
+            governance_type: "core_domain",
+        });
     }
 
-    v.push(ChainTemplate {
+    templates.push(ChainTemplate {
         package_id: "#cbtc-governance".to_string(),
         module_name: "CBTC.Governance",
         entity_name: "CBTCGovernanceRules",
         governance_type: "cbtc",
     });
-    v.push(ChainTemplate {
+    templates.push(ChainTemplate {
         package_id: "#cbtc-governance".to_string(),
         module_name: "CBTC.Governance",
         entity_name: "Confirmation",
         governance_type: "cbtc",
     });
 
-    v
+    ChainFilters {
+        templates,
+        interfaces,
+    }
 }
 
 fn classify_choice(choice: &str) -> String {
@@ -100,6 +129,8 @@ fn classify_created(tid: &Identifier) -> (String, String) {
         ("confirm".to_string(), entity.to_string())
     } else if entity.ends_with("Rules") {
         ("create".to_string(), entity.to_string())
+    } else if entity.contains("ExecutionResult") {
+        ("execute_result".to_string(), entity.to_string())
     } else {
         ("propose".to_string(), entity.to_string())
     }
@@ -208,13 +239,14 @@ pub async fn get_chain_audit(
 
     let begin_offset = pruned_offset.max(0);
 
-    let templates = chain_templates(packages);
-    if templates.is_empty() {
+    let filters = chain_filters(packages);
+    if filters.templates.is_empty() && filters.interfaces.is_empty() {
         tracing::warn!("No governance templates configured; returning empty chain audit");
         return Ok(Vec::new());
     }
 
-    let cumulative: Vec<CumulativeFilter> = templates
+    let mut cumulative: Vec<CumulativeFilter> = filters
+        .templates
         .iter()
         .map(|t| CumulativeFilter {
             identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
@@ -229,6 +261,20 @@ pub async fn get_chain_audit(
             )),
         })
         .collect();
+
+    cumulative.extend(filters.interfaces.iter().map(|i| CumulativeFilter {
+        identifier_filter: Some(cumulative_filter::IdentifierFilter::InterfaceFilter(
+            InterfaceFilter {
+                interface_id: Some(Identifier {
+                    package_id: i.package_id.clone(),
+                    module_name: i.module_name.to_string(),
+                    entity_name: i.entity_name.to_string(),
+                }),
+                include_created_event_blob: false,
+                include_interface_view: true,
+            },
+        )),
+    }));
 
     let mut filters_by_party = HashMap::new();
     filters_by_party.insert(party_id.to_string(), Filters { cumulative });
@@ -269,7 +315,8 @@ pub async fn get_chain_audit(
         }
     };
 
-    let template_index: HashMap<(String, String), &'static str> = templates
+    let template_index: HashMap<(String, String), &'static str> = filters
+        .templates
         .iter()
         .map(|t| {
             (
@@ -277,6 +324,12 @@ pub async fn get_chain_audit(
                 t.governance_type,
             )
         })
+        .chain(filters.interfaces.iter().map(|i| {
+            (
+                (i.module_name.to_string(), i.entity_name.to_string()),
+                i.governance_type,
+            )
+        }))
         .collect();
 
     let mut entries: Vec<ChainAuditEntry> = Vec::new();
@@ -303,6 +356,14 @@ pub async fn get_chain_audit(
                     let gov_type = template_index
                         .get(&(tid.module_name.clone(), tid.entity_name.clone()))
                         .copied()
+                        .or_else(|| {
+                            c.interface_views.iter().find_map(|iv| {
+                                let iid = iv.interface_id.as_ref()?;
+                                template_index
+                                    .get(&(iid.module_name.clone(), iid.entity_name.clone()))
+                                    .copied()
+                            })
+                        })
                         .unwrap_or("unknown");
 
                     let (event_type, action_summary) = classify_created(tid);
@@ -329,6 +390,12 @@ pub async fn get_chain_audit(
                     let gov_type = template_index
                         .get(&(tid.module_name.clone(), tid.entity_name.clone()))
                         .copied()
+                        .or_else(|| {
+                            let iid = x.interface_id.as_ref()?;
+                            template_index
+                                .get(&(iid.module_name.clone(), iid.entity_name.clone()))
+                                .copied()
+                        })
                         .unwrap_or("unknown");
 
                     let event_type = classify_choice(&x.choice);
