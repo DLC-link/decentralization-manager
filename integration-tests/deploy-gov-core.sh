@@ -128,7 +128,8 @@ update_party_config() {
             \"packages\": {
                 \"governance_core\": \"#governance-core-v0-rc2\",
                 \"governance_token_custody\": \"#governance-token-custody-v0-rc2\",
-                \"governance_token_issuance\": \"#governance-token-issuance-v0-rc2\"
+                \"governance_token_issuance\": \"#governance-token-issuance-v0-rc2\",
+                \"utility_registry\": \"#utility-registry-app-v0\"
             }
         }")
     http_code=$(echo "$response" | tail -1)
