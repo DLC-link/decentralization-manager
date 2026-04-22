@@ -6,8 +6,7 @@
 #
 # Exports: RULES_CONTRACT_ID, P1_MEMBER_PARTY, P2_MEMBER_PARTY, P3_MEMBER_PARTY
 
-# JWT token for Canton admin access (HS256, secret "unsafe", aud "https://canton.network.global")
-MOCK_TOKEN="eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJodHRwczovL2NhbnRvbi5uZXR3b3JrLmdsb2JhbCIsImlhdCI6MTc2Mzc0ODcwMiwic3ViIjoibGVkZ2VyLWFwaS11c2VyIn0.vpkfH4SoM9AZqbE38W4hrvl3xxy69jYs4u8gveskw9k"
+# MOCK_TOKEN lives in env.sh (shared with other workflow scripts).
 
 # Canton HTTP JSON API ports (participant port prefix + 975)
 P1_JSON_API=3975
