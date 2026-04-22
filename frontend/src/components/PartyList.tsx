@@ -73,10 +73,6 @@ export const PartyList = ({
                 sx={{
                   ...zebraRow(idx),
                   cursor: "pointer",
-                  "&:hover td": {
-                    backgroundColor: "rgba(255, 102, 51, 0.08)",
-                    transition: "background-color 0.15s ease",
-                  },
                 }}
                 onClick={() => onSelectParty(party.party_id)}
                 onKeyDown={(e) => {

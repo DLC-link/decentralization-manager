@@ -51,7 +51,7 @@ const TAB_HASHES = ["parties", "packages", "config"] as const;
 // Strip Keycloak OAuth params that get appended to the hash during check-sso.
 const SAVED_HASH = (
   (window as { __INITIAL_HASH__?: string }).__INITIAL_HASH__ ?? ""
-).replace(/[&?](state|session_state|iss|code)=.*/i, "");
+).replace(/[&?#](state|session_state|iss|code)=.*/i, "");
 const INITIAL_ROUTE = parseHash(SAVED_HASH);
 
 function parseHash(hash: string): {
