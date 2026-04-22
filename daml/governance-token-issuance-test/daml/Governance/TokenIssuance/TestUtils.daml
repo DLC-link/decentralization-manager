@@ -64,15 +64,16 @@ createTestGovernance parties =
 -- | Collect confirmations from a list of members for an interface action.
 submitConfirmations : Party -> ContractId GovernanceRules -> ContractId GovernableAction -> [Party] -> Script [ContractId GovernanceConfirmation]
 submitConfirmations governanceParty rulesCid proposalCid confirmers =
-  mapA (\confirmer ->
-    submit (memberContext confirmer governanceParty) $
+  mapA (\confirmer -> do
+    result <- submit (memberContext confirmer governanceParty) $
       exerciseCmd rulesCid GovernanceRules_ConfirmAction with
         confirmer
         actionProposalCid = proposalCid
+    pure result.confirmationCid
   ) confirmers
 
 -- | Confirm and execute an interface action in one go.
-confirmAndExecute : IssuanceTestParties -> ContractId GovernanceRules -> ContractId GovernableAction -> [Party] -> Party -> Script (ContractId GovernanceExecutionResult)
+confirmAndExecute : IssuanceTestParties -> ContractId GovernanceRules -> ContractId GovernableAction -> [Party] -> Party -> Script ExecuteConfirmedActionResult
 confirmAndExecute parties rulesCid proposalCid confirmers executor = do
   confirmationCids <- submitConfirmations parties.governanceParty rulesCid proposalCid confirmers
   debug "WARNING: Multi-party submit (actAs executor <> readAs governance/outsider/operator/dso) is a test shortcut. Verify authorization pattern matches your production implementation."

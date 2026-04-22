@@ -49,11 +49,11 @@ when_proposal_confirmed_and_executed f = do
 
   let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
 
-  resultCid <- confirmAndExecute f.parties f.rulesCid proposalIfaceCid
+  result <- confirmAndExecute f.parties f.rulesCid proposalIfaceCid
     [f.parties.member1, f.parties.member2] f.parties.member3
 
   [(_, mockResult)] <- query @MockActionResult f.parties.governanceParty
-  Some executionResult <- queryContractId f.parties.governanceParty resultCid
+  Some executionResult <- queryContractId f.parties.governanceParty result.executionResultCid
   remainingProposals <- query @MockProposal f.parties.governanceParty
   pure FullFlowResult with ..
 
@@ -155,14 +155,14 @@ testExpiredConfirmationsDontCount = script do
 
   let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
 
-  conf1 <- submit (memberContext parties.member1 parties.governanceParty) $
+  confResult1 <- submit (memberContext parties.member1 parties.governanceParty) $
     exerciseCmd rulesCid GovernanceRules_ConfirmAction with
       confirmer = parties.member1
       actionProposalCid = proposalIfaceCid
 
   passTime (minutes 4)
 
-  conf2 <- submit (memberContext parties.member2 parties.governanceParty) $
+  confResult2 <- submit (memberContext parties.member2 parties.governanceParty) $
     exerciseCmd rulesCid GovernanceRules_ConfirmAction with
       confirmer = parties.member2
       actionProposalCid = proposalIfaceCid
@@ -171,7 +171,7 @@ testExpiredConfirmationsDontCount = script do
     exerciseCmd rulesCid GovernanceRules_ExecuteConfirmedAction with
       executor = parties.member2
       actionProposalCid = proposalIfaceCid
-      confirmations = [conf1, conf2]
+      confirmations = [confResult1.confirmationCid, confResult2.confirmationCid]
 
 -- | Failing action: governance approves but execution fails.
 testFailingActionExecution = script do
@@ -213,12 +213,12 @@ testConfirmationsCannotBeMixed = script do
   let proposalACid = toInterfaceContractId @GovernableAction proposalA
   let proposalBCid = toInterfaceContractId @GovernableAction proposalB
 
-  confA <- submit (memberContext parties.member1 parties.governanceParty) $
+  confResultA <- submit (memberContext parties.member1 parties.governanceParty) $
     exerciseCmd rulesCid GovernanceRules_ConfirmAction with
       confirmer = parties.member1
       actionProposalCid = proposalACid
 
-  confB <- submit (memberContext parties.member2 parties.governanceParty) $
+  confResultB <- submit (memberContext parties.member2 parties.governanceParty) $
     exerciseCmd rulesCid GovernanceRules_ConfirmAction with
       confirmer = parties.member2
       actionProposalCid = proposalBCid
@@ -227,4 +227,4 @@ testConfirmationsCannotBeMixed = script do
     exerciseCmd rulesCid GovernanceRules_ExecuteConfirmedAction with
       executor = parties.member1
       actionProposalCid = proposalACid
-      confirmations = [confA, confB]
+      confirmations = [confResultA.confirmationCid, confResultB.confirmationCid]
