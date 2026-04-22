@@ -4,8 +4,11 @@
 # Sourced by run.sh — expects env.sh variables, PARTY_ID, RULES_CONTRACT_ID,
 # and P1/P2/P3_MEMBER_PARTY from deploy-gov-core.sh to be available.
 #
-# Prerequisite: PROVIDER_SERVICE_CID must be set to a pre-existing ProviderService
-# contract ID. If unset, this script prints a skip notice and exits 0.
+# SetupIssuanceProposal consumes a pre-existing ProviderService contract. If
+# PROVIDER_SERVICE_CID is pre-set (e.g., exported by a caller), this script
+# uses it as-is. Otherwise it auto-provisions one via a small daml-script
+# (Governance.TokenIssuance.Scripts.ProvisionProviderService:provision) run
+# through `dpm script` with `--upload-dar yes` against P1's ledger.
 
 # ============================================================================
 # Guard clauses
@@ -26,20 +29,66 @@ if [ -z "$P1_MEMBER_PARTY" ] || [ -z "$P2_MEMBER_PARTY" ] || [ -z "$P3_MEMBER_PA
     exit 1
 fi
 
-if [ -z "$PROVIDER_SERVICE_CID" ]; then
-    cat <<'SKIP'
-SKIP: governance-token-issuance.sh — PROVIDER_SERVICE_CID env var not set.
-
-This E2E requires a pre-existing ProviderService contract for the governance
-party. Auto-provisioning one on localnet requires a daml-script run (tracked
-as a follow-up). To run this test now, provision a ProviderService externally
-and export PROVIDER_SERVICE_CID before invoking run.sh.
-SKIP
-    exit 0
-fi
-
 echo "Using GovernanceRules contract: $RULES_CONTRACT_ID"
 echo "Members: P1=$P1_MEMBER_PARTY, P2=$P2_MEMBER_PARTY, P3=$P3_MEMBER_PARTY"
+
+# ============================================================================
+# Auto-provision ProviderService if the caller didn't supply one
+# ============================================================================
+
+if [ -z "$PROVIDER_SERVICE_CID" ]; then
+    echo ""
+    echo "PROVIDER_SERVICE_CID not set — auto-provisioning via dpm script..."
+
+    if ! command -v dpm &>/dev/null; then
+        echo "ERROR: dpm (Digital Asset Package Manager) is required for auto-provisioning."
+        echo "  See https://docs.digitalasset.com/build/3.4/dpm/dpm.html for install instructions,"
+        echo "  or export PROVIDER_SERVICE_CID externally to skip this step."
+        exit 1
+    fi
+
+    TEST_DAR="$SCRIPT_DIR/daml/governance-token-issuance-test/.daml/dist/governance-token-issuance-test-0.1.0.dar"
+    if [ ! -f "$TEST_DAR" ]; then
+        echo "Building test DAR (not found at $TEST_DAR)..."
+        (cd "$SCRIPT_DIR/daml/governance-token-issuance-test" && dpm build) || {
+            echo "ERROR: dpm build failed for governance-token-issuance-test"
+            exit 1
+        }
+    fi
+
+    PROVISION_INPUT="$DEV_DIR/provision-input.json"
+    PROVISION_OUTPUT="$DEV_DIR/provision-output.json"
+    PROVISION_TOKEN="$DEV_DIR/mock-token.txt"
+
+    cat > "$PROVISION_INPUT" <<EOF
+{
+  "governanceParty": "$PARTY_ID",
+  "operator": "$P1_MEMBER_PARTY"
+}
+EOF
+    echo "$MOCK_TOKEN" > "$PROVISION_TOKEN"
+
+    dpm script \
+        --dar "$TEST_DAR" \
+        --script-name 'Governance.TokenIssuance.Scripts.ProvisionProviderService:provision' \
+        --ledger-host localhost \
+        --ledger-port "$P1_CANTON_LEDGER" \
+        --access-token-file "$PROVISION_TOKEN" \
+        --input-file "$PROVISION_INPUT" \
+        --output-file "$PROVISION_OUTPUT" \
+        --upload-dar yes \
+        --wall-clock-time
+
+    PROVIDER_SERVICE_CID=$(jq -r '.providerServiceCid // empty' "$PROVISION_OUTPUT")
+    if [ -z "$PROVIDER_SERVICE_CID" ] || [ "$PROVIDER_SERVICE_CID" = "null" ]; then
+        echo "ERROR: Failed to extract providerServiceCid from $PROVISION_OUTPUT"
+        cat "$PROVISION_OUTPUT"
+        exit 1
+    fi
+
+    echo "Provisioned ProviderService: $PROVIDER_SERVICE_CID"
+fi
+
 echo "ProviderService CID: $PROVIDER_SERVICE_CID"
 
 # ============================================================================
