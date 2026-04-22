@@ -45,10 +45,38 @@ import type {
   AuthStatusResponse,
 } from "./types";
 
+const TAB_HASHES = ["parties", "packages", "config"] as const;
+
+// Saved in index.html <script> before any modules load.
+// Strip Keycloak OAuth params that get appended to the hash during check-sso.
+const SAVED_HASH = (
+  (window as { __INITIAL_HASH__?: string }).__INITIAL_HASH__ ?? ""
+).replace(/[&?](state|session_state|iss|code)=.*/i, "");
+const INITIAL_ROUTE = parseHash(SAVED_HASH);
+
+function parseHash(hash: string): {
+  tab: number;
+  partySlug: string | null;
+} {
+  const raw = hash.replace(/^#\/?/, "");
+  const [section, ...rest] = raw.split("/");
+  const slug = rest.join("/") || null;
+
+  const tabIndex = TAB_HASHES.indexOf(
+    section as (typeof TAB_HASHES)[number],
+  );
+  return { tab: tabIndex >= 0 ? tabIndex : 0, partySlug: tabIndex === 0 ? slug : null };
+}
+
+function buildHash(tab: number, partySlug?: string | null): string {
+  const section = TAB_HASHES[tab] ?? "parties";
+  return partySlug ? `#${section}/${partySlug}` : `#${section}`;
+}
+
 const App = () => {
   const muiTheme = useTheme();
   const isLargeScreen = useMediaQuery(muiTheme.breakpoints.up("lg"));
-  const [activeTab, setActiveTab] = useState(0);
+  const [activeTab, setActiveTab] = useState(INITIAL_ROUTE.tab);
   const [parties, setParties] = useState<DecentralizedParty[]>([]);
   const [nodeConfig, setNodeConfig] = useState<NodeConfig | null>(null);
   const [networkConfig, setNetworkConfig] = useState<NetworkConfig | null>(
@@ -70,14 +98,62 @@ const App = () => {
     useState<PendingInvitation | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [partyFilter, setPartyFilter] = useState("");
+  const [partyFilter, setPartyFilter] = useState(
+    INITIAL_ROUTE.partySlug ?? "",
+  );
   const [refreshingParties, setRefreshingParties] = useState(false);
   const [operatorParty, setOperatorParty] = useState("");
   const [selectedPartyId, setSelectedPartyId] = useState<string | null>(null);
   const [showSearchBar, setShowSearchBar] = useState(true);
   const lastScrollY = useRef(0);
   const savedScrollY = useRef(0);
+  const pendingSlug = useRef<string | null>(INITIAL_ROUTE.partySlug);
   const { showSnackbar } = useSnackbar();
+
+  // --- Hash-based routing ---
+
+  const navigate = useCallback(
+    (tab: number, partySlug?: string | null) => {
+      setActiveTab(tab);
+      if (tab !== 0) setSelectedPartyId(null);
+      window.history.pushState(null, "", buildHash(tab, partySlug));
+    },
+    [],
+  );
+
+  // Once parties are loaded, resolve pending slug → exact match opens detail
+  useEffect(() => {
+    if (loading || !pendingSlug.current) return;
+    const slug = pendingSlug.current;
+    pendingSlug.current = null;
+    const exactMatch = parties.find((p) => p.party_id === slug);
+    if (exactMatch) {
+      setSelectedPartyId(slug);
+    }
+  }, [loading, parties]);
+
+  // Listen for back/forward browser navigation
+  useEffect(() => {
+    const onPopState = () => {
+      const { tab, partySlug } = parseHash(window.location.hash);
+      setActiveTab(tab);
+      if (tab === 0) {
+        const exactMatch = parties.find((p) => p.party_id === partySlug);
+        if (exactMatch) {
+          setSelectedPartyId(partySlug);
+        } else {
+          setSelectedPartyId(null);
+          if (partySlug) {
+            setPartyFilter(partySlug);
+          }
+        }
+      } else {
+        setSelectedPartyId(null);
+      }
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, [parties]);
 
   useEffect(() => {
     if ("scrollRestoration" in history) {
@@ -113,6 +189,12 @@ const App = () => {
 
   const refreshParties = useCallback(async () => {
     setRefreshingParties(true);
+    // Update hash to reflect the current filter
+    window.history.replaceState(
+      null,
+      "",
+      buildHash(0, partyFilter || null),
+    );
     try {
       const params = partyFilter
         ? `?prefix=${encodeURIComponent(partyFilter)}`
@@ -185,23 +267,34 @@ const App = () => {
           return;
         }
 
-        const partiesParams = partyFilter
-          ? `?prefix=${encodeURIComponent(partyFilter)}`
-          : "";
-        const [partiesRes, authStatusRes, packagesRes] = await Promise.all([
-          fetch(`${API_BASE}/decentralized-parties${partiesParams}`),
+        const { tab: hashTab, partySlug: hashSlug } = INITIAL_ROUTE;
+
+        const fetches: Promise<Response>[] = [
           fetch(`${API_BASE}/auth/status`),
           fetch(`${API_BASE}/packages/vetted`),
-        ]);
+        ];
 
-        if (!partiesRes.ok) {
-          throw new Error("Failed to fetch data");
+        // Only fetch parties eagerly when the parties tab is active
+        if (hashTab === 0) {
+          const partiesParams = hashSlug
+            ? `?prefix=${encodeURIComponent(hashSlug)}`
+            : "";
+          fetches.push(
+            fetch(`${API_BASE}/decentralized-parties${partiesParams}`),
+          );
         }
 
-        const partiesData: DecentralizedPartiesResponse =
-          await partiesRes.json();
+        const [authStatusRes, packagesRes, partiesRes] =
+          await Promise.all(fetches);
 
-        setParties(partiesData.parties);
+        if (partiesRes) {
+          if (!partiesRes.ok) {
+            throw new Error("Failed to fetch data");
+          }
+          const partiesData: DecentralizedPartiesResponse =
+            await partiesRes.json();
+          setParties(partiesData.parties);
+        }
 
         if (authStatusRes.ok) {
           const authStatusData: AuthStatusResponse = await authStatusRes.json();
@@ -222,6 +315,14 @@ const App = () => {
     fetchData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Lazy-load parties when switching to parties tab (if not loaded on init)
+  const partiesLoaded = useRef(INITIAL_ROUTE.tab === 0);
+  useEffect(() => {
+    if (activeTab !== 0 || partiesLoaded.current) return;
+    partiesLoaded.current = true;
+    refreshParties();
+  }, [activeTab, refreshParties]);
 
   // Lazy-load config tab data when first opened
   useEffect(() => {
@@ -312,7 +413,7 @@ const App = () => {
       {isLargeScreen ? (
         <Sidebar
           activeTab={activeTab}
-          onTabChange={setActiveTab}
+          onTabChange={(tab) => navigate(tab)}
           partyCount={parties.length}
           packageCount={packageCount}
         />
@@ -438,7 +539,7 @@ const App = () => {
         <Box sx={{ pt: 16, px: 2 }}>
           <Tabs
             value={activeTab}
-            onChange={(_e, v) => setActiveTab(v)}
+            onChange={(_e, v) => navigate(v)}
             sx={{
               mb: 1,
               borderBottom: 1,
@@ -529,6 +630,7 @@ const App = () => {
               party={parties.find((p) => p.party_id === selectedPartyId)!}
               onBack={() => {
                 setSelectedPartyId(null);
+                navigate(0, partyFilter || null);
                 window.scrollTo(0, savedScrollY.current);
               }}
               onRefresh={refreshParties}
@@ -594,6 +696,7 @@ const App = () => {
                 onSelectParty={(id) => {
                   savedScrollY.current = window.scrollY;
                   setSelectedPartyId(id);
+                  navigate(0, id);
                   window.scrollTo(0, 0);
                 }}
               />

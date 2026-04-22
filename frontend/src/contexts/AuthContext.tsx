@@ -59,10 +59,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
         setKeycloak(kc);
 
+        // Save the original hash before Keycloak's check-sso redirect mangles it
+        const savedHash = (window as { __INITIAL_HASH__?: string })
+          .__INITIAL_HASH__ ?? "";
+        const cleanHash = savedHash.replace(
+          /[&?](state|session_state|iss|code)=.*/i,
+          "",
+        );
+
         const authenticated = await kc.init({
           onLoad: "check-sso",
           checkLoginIframe: false,
         });
+
+        // Restore the original hash (Keycloak appends OAuth params to it)
+        if (cleanHash) {
+          window.history.replaceState(null, "", cleanHash);
+        }
 
         if (authenticated && kc.token) {
           setToken(kc.token);
