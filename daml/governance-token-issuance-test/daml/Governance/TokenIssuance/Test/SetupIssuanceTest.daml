@@ -29,7 +29,7 @@ given_governance = do
 when_setup_executed : Fixture -> Script ()
 when_setup_executed f = do
   providerCid <- initUtilityPrereqs f.parties
-  proposalCid <- submit f.parties.member1 $ createCmd SetupIssuanceProposal with
+  proposalCid <- submit f.parties.member1 $ createCmd SetupIssuanceConfigProposal with
     governanceParty = f.parties.governanceParty
     proposer = f.parties.member1
     providerServiceCid = providerCid
@@ -67,7 +67,7 @@ test_when_setup_proposed_then_config_created = script do
 when_non_member_confirms : Fixture -> Script ()
 when_non_member_confirms f = do
   providerCid <- initUtilityPrereqs f.parties
-  proposalCid <- submit f.parties.member1 $ createCmd SetupIssuanceProposal with
+  proposalCid <- submit f.parties.member1 $ createCmd SetupIssuanceConfigProposal with
     governanceParty = f.parties.governanceParty
     proposer = f.parties.member1
     providerServiceCid = providerCid
