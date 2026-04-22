@@ -414,8 +414,8 @@ Response:
   "has_username": false,
   "has_password": false,
   "packages": {
-    "governance_core": "#governance-core-v0-rc1",
-    "governance_token_custody": "#governance-token-custody-v0-rc1",
+    "governance_core": "#governance-core-v0-rc2",
+    "governance_token_custody": "#governance-token-custody-v0-rc2",
     "utility_credential": "#utility-credential-app-v0",
     "utility_registry": "#utility-registry-app-v0",
     "vault": "#bitsafe-vault-v0-rc8",
@@ -703,7 +703,8 @@ curl "http://localhost:8080/decentralized-parties?prefix=my-vault-network"
 Encode your DAR files as base64:
 
 ```bash
-base64 -i bitsafe-vault-governance.dar -o governance.b64
+base64 -i governance-core.dar -o governance-core.b64
+base64 -i governance-token-custody.dar -o governance-token-custody.b64
 ```
 
 ### Step 2: Define Contracts
@@ -728,6 +729,8 @@ Contract definitions specify the Daml templates to instantiate. Each field uses 
 
 ### Step 3: Start Contracts Workflow
 
+**GovernanceRules (recommended for new deployments):**
+
 ```bash
 curl -X POST http://localhost:8080/contracts \
   -H "Content-Type: application/json" \
@@ -746,7 +749,53 @@ curl -X POST http://localhost:8080/contracts \
     "operator_party": "operator::1220...",
     "dar_files": [
       {
-        "filename": "governance.dar",
+        "filename": "governance-core.dar",
+        "data": "<base64-encoded-dar>"
+      },
+      {
+        "filename": "governance-token-custody.dar",
+        "data": "<base64-encoded-dar>"
+      }
+    ],
+    "contracts": [
+      {
+        "id": "governance-rules",
+        "name": "GovernanceRules",
+        "package_id": "#governance-core-v0-rc2",
+        "module_name": "Governance.Rules",
+        "entity_name": "GovernanceRules",
+        "fields": [
+          { "type": "decentralized_party" },
+          { "type": "attestors_set" },
+          { "type": "governance_threshold" },
+          { "type": "rel_time", "microseconds": 86400000000 }
+        ]
+      }
+    ]
+  }'
+```
+
+**VaultGovernanceRules (legacy, for existing vault deployments):**
+
+```bash
+curl -X POST http://localhost:8080/contracts \
+  -H "Content-Type: application/json" \
+  -d '{
+    "decentralized_party_id": "my-vault-network::1220abc...",
+    "participant_ids": [
+      "node1::1220...",
+      "node2::1220...",
+      "node3::1220..."
+    ],
+    "participant_parties": [
+      "member1::1220...",
+      "member2::1220...",
+      "member3::1220..."
+    ],
+    "operator_party": "operator::1220...",
+    "dar_files": [
+      {
+        "filename": "vault-governance.dar",
         "data": "<base64-encoded-dar>"
       }
     ],
@@ -776,7 +825,9 @@ After creating a decentralized party and deploying governance contracts, the par
 
 - Use the **decentralized party ID** (e.g., `my-vault-network::1220...`) as the `actAs` party in Daml commands
 - Each member's local `member_party_id` must have `actAs`/`readAs` rights for both itself and the decentralized party
-- Governance controls vault operations (deploy, pause, limits) while topology controls membership (add/remove participants)
+- **GovernanceRules** controls self-management (member changes, threshold) and domain actions (token transfers, voting, preapprovals) via the `GovernableAction` interface
+- **VaultGovernanceRules** (legacy) controls vault lifecycle operations (deploy, pause, limits) via its built-in action enum
+- Topology workflows control participant membership (onboarding, kick)
 
 ## Roles and Permissions
 
@@ -870,10 +921,128 @@ Each participant's Ledger API user needs:
 |--------|----------|-------------|------------|
 | GET | `/governance/confirmations` | List confirmations grouped by action | `?party_id=...` |
 | GET | `/governance/state` | Get governance contract state | `?party_id=...` |
-| POST | `/governance/confirm` | Submit a governance confirmation | `{ "party_id": "...", "rules_contract_id": "...", "action": { "type": "...", ... } }` |
-| POST | `/governance/execute` | Execute a confirmed action | `{ "party_id": "...", "rules_contract_id": "...", "action": { ... }, "confirmation_cids": [...] }` |
-| POST | `/governance/expire` | Expire stale confirmation | `{ "party_id": "...", "rules_contract_id": "...", "confirmation_cid": "..." }` |
-| POST | `/governance/cancel` | Cancel a governance confirmation | `{ "party_id": "...", "confirmation_cid": "..." }` |
+| POST | `/governance/propose` | Create a domain action proposal | `ProposeActionRequest` (see below) |
+| POST | `/governance/confirm` | Submit a governance confirmation | `ConfirmActionRequest` (see below) |
+| POST | `/governance/execute` | Execute a confirmed action | `ExecuteActionRequest` (see below) |
+| POST | `/governance/expire` | Expire stale confirmation | `ExpireConfirmationRequest` (see below) |
+| POST | `/governance/cancel` | Cancel (revoke) own confirmation | `CancelConfirmationRequest` (see below) |
+
+#### Governance Types
+
+All governance mutation endpoints accept a `governance_type` field that selects which governance system to use:
+
+| Value | Description |
+|-------|-------------|
+| `"vault"` | Legacy `VaultGovernanceRules` (default if omitted) |
+| `"core_self"` | `GovernanceRules` self-management actions (add/remove member, set threshold/timeout) |
+| `"core_domain"` | `GovernanceRules` domain actions via `GovernableAction` proposals |
+
+#### Propose (Domain Actions)
+
+`POST /governance/propose` creates a domain action proposal and auto-confirms it as the proposer. Only used with `GovernanceRules` (not `VaultGovernanceRules`).
+
+```json
+{
+  "party_id": "my-vault-network::1220abc...",
+  "rules_contract_id": "<governance-rules-cid>",
+  "proposal": {
+    "type": "generic_vote",
+    "description": "We should switch to dark theme for our website"
+  }
+}
+```
+
+Available proposal types:
+
+| Type | Fields | Description |
+|------|--------|-------------|
+| `generic_vote` | `description` | Free-text governance vote |
+| `setup_cc_preapproval` | `provider`, `expected_dso` | Set up Canton Coin transfer preapproval |
+| `setup_token_preapproval` | `operator`, `instrument_admin`, `instrument_allowances` (optional) | Set up utility token transfer preapproval |
+| `transfer` | `transfer_factory_cid`, `expected_admin`, `receiver`, `amount`, `instrument_id`, `input_holding_cids` (optional) | Transfer tokens from governance party |
+| `accept_transfer` | `transfer_instruction_cid` | Accept an incoming token transfer |
+
+#### Confirm
+
+`POST /governance/confirm` submits a confirmation for an action or proposal.
+
+**For vault governance (`governance_type: "vault"` or omitted):**
+
+```json
+{
+  "party_id": "my-vault-network::1220abc...",
+  "rules_contract_id": "<vault-governance-rules-cid>",
+  "action": { "type": "vault_pause", "vault_id": "<vault-cid>" }
+}
+```
+
+**For core self-management (`governance_type: "core_self"`):**
+
+```json
+{
+  "party_id": "my-vault-network::1220abc...",
+  "rules_contract_id": "<governance-rules-cid>",
+  "action": { "type": "governance_set_threshold", "new_threshold": 3 },
+  "governance_type": "core_self"
+}
+```
+
+**For domain actions (`governance_type: "core_domain"`):**
+
+```json
+{
+  "party_id": "my-vault-network::1220abc...",
+  "rules_contract_id": "<governance-rules-cid>",
+  "action": { "type": "governance_set_threshold", "new_threshold": 0 },
+  "governance_type": "core_domain",
+  "proposal_cid": "<proposal-contract-id>"
+}
+```
+
+Note: For `core_domain`, the `action` field is not used for matching -- the `proposal_cid` identifies the proposal. The `action` field is still required but can contain a placeholder value.
+
+#### Execute
+
+`POST /governance/execute` executes an action once threshold confirmations are met.
+
+```json
+{
+  "party_id": "my-vault-network::1220abc...",
+  "rules_contract_id": "<governance-rules-cid>",
+  "action": { "type": "governance_set_threshold", "new_threshold": 0 },
+  "confirmation_cids": ["<confirmation-cid-1>", "<confirmation-cid-2>"],
+  "disclosed_contracts": [],
+  "governance_type": "core_domain",
+  "proposal_cid": "<proposal-contract-id>"
+}
+```
+
+The `disclosed_contracts` field is used for token custody operations where the counterparty's contracts must be disclosed for execution.
+
+#### Expire
+
+`POST /governance/expire` removes a stale confirmation that has passed its expiry time.
+
+```json
+{
+  "party_id": "my-vault-network::1220abc...",
+  "rules_contract_id": "<governance-rules-cid>",
+  "confirmation_cid": "<stale-confirmation-cid>",
+  "governance_type": "core_self"
+}
+```
+
+#### Cancel
+
+`POST /governance/cancel` allows a member to revoke their own confirmation.
+
+```json
+{
+  "party_id": "my-vault-network::1220abc...",
+  "confirmation_cid": "<my-confirmation-cid>",
+  "governance_type": "core_domain"
+}
+```
 
 ### Contracts and Services
 
@@ -883,9 +1052,9 @@ Each participant's Ledger API user needs:
 | GET | `/services/provider` | List ProviderService contracts | `?party_id=...` |
 | GET | `/services/user` | List UserService contracts | `?party_id=...` |
 | GET | `/services/registrar` | List RegistrarService contracts | `?party_id=...` |
-| GET | `/contracts/query` | Query active contracts by template | `?party_id=...&package_id=...&module_name=...&entity_name=...&interface=false` |
+| GET | `/contracts/query` | Query active contracts by template or interface | `?party_id=...&package_id=...&module_name=...&entity_name=...&interface=false` |
 | GET | `/packages` | Get configured package IDs for a party | `?party_id=...` |
-| GET | `/amulet-rules` | Get AmuletRules contract from DSO API | -- |
+| GET | `/network-info` | Get DSO party ID and AmuletRules contract | -- |
 | POST | `/token-standard-contracts` | CORS proxy to devnet token standard contracts endpoint | JSON body (forwarded as-is) |
 
 ### Response Formats
@@ -899,6 +1068,9 @@ Each participant's Ledger API user needs:
 ```
 
 **Governance confirmations response:**
+
+The response includes two arrays: `actions` for value-matched actions (vault governance and core self-management) and `domain_actions` for proposal-matched domain actions.
+
 ```json
 {
   "actions": [
@@ -909,6 +1081,22 @@ Each participant's Ledger API user needs:
         {
           "contract_id": "confirmation-cid",
           "action": { "type": "vault_pause", "vault_id": "..." },
+          "confirming_party": "member1::1220..."
+        }
+      ],
+      "confirmation_count": 1,
+      "can_execute": false
+    }
+  ],
+  "domain_actions": [
+    {
+      "proposal_cid": "00abc123...",
+      "action_label": "GenericVote",
+      "description": "We should switch to dark theme for our website",
+      "confirmations": [
+        {
+          "contract_id": "confirmation-cid",
+          "action": { "type": "governance_set_threshold", "new_threshold": 0 },
           "confirming_party": "member1::1220..."
         }
       ],
