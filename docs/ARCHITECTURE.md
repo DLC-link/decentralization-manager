@@ -42,7 +42,7 @@ The system uses a majority threshold for both topology changes and governance ac
 | Operation | Threshold |
 |-----------|-----------|
 | Topology changes (DNS/P2P) | `floor(n/2) + 1` (strict majority) of namespace owners must sign |
-| Governance actions (vault ops) | Configurable per `VaultGovernanceRules` contract |
+| Governance actions | Configurable per `GovernanceRules` or `VaultGovernanceRules` contract |
 
 ### Key Types
 
@@ -342,28 +342,88 @@ Uploads DAR packages to all participants without deploying contracts.
 
 ## Governance System
 
-The governance system provides multi-party approval workflows for vault operations, built on Daml smart contracts.
+The governance system provides multi-party approval workflows built on Daml smart contracts. It uses a **modular, interface-based architecture** where a single `GovernanceRules` contract handles consensus logic (threshold validation, confirmation lifecycle) while domain-specific actions are defined as separate templates implementing the `GovernableAction` interface.
 
-### VaultGovernanceRules Contract
+The system is split into two Daml packages:
 
-The `VaultGovernanceRules` contract (from `BitsafeVault.VaultGovernance` module) is the central governance primitive:
+| Package | Purpose |
+|---------|---------|
+| `governance-core` | Core governance engine, interfaces, confirmation lifecycle, generic voting |
+| `governance-token-custody` | Token transfer and preapproval actions |
+
+A legacy `VaultGovernanceRules` contract (from the `bitsafe-vault-governance` package) is also supported for backward compatibility with existing vault deployments.
+
+### GovernableAction Interface
+
+The `GovernableAction` interface (from `Governance.Action`) is the single extension point for all domain-specific governance actions. Any Daml template implementing this interface can be governed without modifying the core governance contracts.
 
 ```
-VaultGovernanceRules {
-    vaultManager : Party        -- The decentralized party
-    members      : [Party]      -- Member parties authorized to vote
-    threshold    : Int          -- Minimum confirmations required
-    actionConfirmationTimeout : Optional RelTime  -- Auto-expiry for stale confirmations
+interface GovernableAction where
+  viewtype GovernableActionView
+
+  executeImpl : Update ()
+
+  choice GovernableAction_Execute : ()
+    controller (view this).governanceParty
+  choice GovernableAction_Cancel : ()
+    controller (view this).governanceParty
+
+data GovernableActionView = GovernableActionView with
+    governanceParty : Party    -- The party whose authority is required
+    actionLabel     : Text     -- Human-readable label (e.g., "Transfer", "GenericVote")
+    description     : Text     -- Description recorded in the execution result
+```
+
+Key design properties:
+- **Authority propagation**: When `GovernanceRules` executes a `GovernableAction`, the governance party's authority flows through the exercise chain, allowing domain actions to create contracts or exercise choices that require governance party authorization
+- **Open for extension**: New action types are added by creating new templates that implement the interface -- no changes to `GovernanceRules` required
+- **Permissionless proposals**: Anyone can create a proposal template instance, but only governance members can confirm and execute it
+
+### GovernanceRules Contract
+
+The `GovernanceRules` contract (from `Governance.Rules`) is the core governance engine:
+
+```
+GovernanceRules {
+    governanceParty          : Party      -- The decentralized governance party
+    members                  : Set Party  -- Committee members authorized to vote
+    threshold                : Int        -- Minimum confirmations required (1 <= threshold <= |members|)
+    actionConfirmationTimeout : RelTime   -- Confirmation validity period (minimum 10 seconds)
 }
 ```
 
-### Confirmation Lifecycle
+The contract provides two distinct paths for governance actions:
+
+#### Self-Management Path (Closed Enum)
+
+Self-management actions modify the `GovernanceRules` contract itself. They use a closed `GovernanceSelfAction` enum with value-based matching:
+
+| Variant | Fields | Description |
+|---------|--------|-------------|
+| `SelfAction_AddMemberAndSetThreshold` | newMember, newThresholdAfterAdd | Add a governance member |
+| `SelfAction_RemoveMemberAndSetThreshold` | removedMember, newThresholdAfterRemove | Remove a governance member |
+| `SelfAction_SetThreshold` | updatedThreshold | Change the approval threshold |
+| `SelfAction_SetTimeout` | updatedTimeout | Change the confirmation expiry timeout |
+
+Choices on `GovernanceRules` for self-management:
+- `GovernanceRules_ConfirmGovernanceAction` -- Submit a self-action confirmation
+- `GovernanceRules_ExecuteGovernanceAction` -- Execute when threshold is met (returns new `GovernanceRules`)
+- `GovernanceRules_ExpireGovernanceConfirmation` -- Remove a stale self-confirmation
+
+Self-confirmations are stored as `GovernanceSelfConfirmation` contracts, matched by value equality on the `GovernanceSelfAction` data.
+
+#### Domain Action Path (Interface-Based)
+
+Domain actions are governed via `GovernableAction` proposals. Each proposal is a separate contract matched by `ContractId` (globally unique):
 
 ```
-Member submits ConfirmAction
+Proposer creates GovernableAction proposal
         |
         v
-VaultGovernanceConfirmation created
+Members call GovernanceRules_ConfirmAction
+        |
+        v
+GovernanceConfirmation created (per member)
         |
         v
 Threshold met? ----No----> Wait for more / Expire stale
@@ -371,22 +431,97 @@ Threshold met? ----No----> Wait for more / Expire stale
        Yes
         |
         v
-Member calls ExecuteConfirmedAction
+Member calls GovernanceRules_ExecuteConfirmedAction
         |
         v
-Action executed on-ledger
+GovernableAction_Execute fires (domain logic runs)
+        |
+        v
+GovernanceExecutionResult created (immutable audit record)
 ```
 
-Available choices on `VaultGovernanceRules`:
+Choices on `GovernanceRules` for domain actions:
+- `GovernanceRules_ConfirmAction` -- Submit a confirmation for a proposal (args: `confirmer`, `actionProposalCid`)
+- `GovernanceRules_ExecuteConfirmedAction` -- Execute when threshold is met (args: `executor`, `actionProposalCid`, `confirmations`)
+- `GovernanceRules_ExpireConfirmation` -- Remove a stale confirmation
+
+### GovernanceConfirmation
+
+The `GovernanceConfirmation` contract (from `Governance.Confirmation`) represents a single member's approval of a domain action proposal:
+
+```
+GovernanceConfirmation {
+    governanceParty   : Party                      -- The governance party
+    confirmer         : Party                      -- The member who confirmed
+    actionProposalCid : ContractId GovernableAction -- The proposal being confirmed
+    actionLabel       : Text                       -- Label from the proposal (for UI/audit)
+    expiresAt         : Time                       -- When this confirmation becomes invalid
+}
+```
+
+Choices:
+- `GovernanceConfirmation_Consume` -- Used during execution (consumes the confirmation)
+- `GovernanceConfirmation_Expire` -- Remove if past `expiresAt`
+- `GovernanceConfirmation_Cancel` -- Confirmer revokes their own confirmation
+
+### GovernanceExecutionResult
+
+The `GovernanceExecutionResult` contract (from `Governance.ExecutionResult`) provides an immutable on-chain audit trail. It is created automatically when a domain action is executed:
+
+```
+GovernanceExecutionResult {
+    governanceParty : Party    -- The governance party that executed this action
+    actionLabel     : Text     -- The type of action (e.g., "Transfer", "GenericVote")
+    description     : Text     -- Human-readable description of what was executed
+    executor        : Party    -- The member who triggered execution
+    confirmers      : [Party]  -- All members who confirmed
+    executedAt      : Time     -- Ledger effective time
+}
+```
+
+### Domain Action Templates
+
+#### governance-core Actions
+
+| Template | Action Label | Description |
+|----------|-------------|-------------|
+| `GenericVoteProposal` | `GenericVote` | Free-text governance vote with no on-chain side effect -- the vote outcome is recorded solely via the `GovernanceExecutionResult` |
+
+#### governance-token-custody Actions
+
+| Template | Action Label | Description |
+|----------|-------------|-------------|
+| `TransferProposal` | `Transfer` | Transfer tokens from governance party via `TransferFactory` |
+| `AcceptTransferProposal` | `AcceptTransfer` | Accept an incoming token transfer instruction |
+| `SetupTokenPreapprovalProposal` | `SetupTokenPreapproval` | Set up utility token `TransferPreapproval` (one-step) |
+| `SetupCcPreapprovalProposal` | `SetupCcPreapproval` | Set up Canton Coin `TransferPreapproval` (two-step, requires provider acceptance) |
+
+### Legacy: VaultGovernanceRules
+
+The `VaultGovernanceRules` contract (from `BitsafeVault.VaultGovernance`, package `#bitsafe-vault-governance-v0-rc8`) is the original governance primitive used for vault operations. It remains supported for backward compatibility with existing vault deployments.
+
+```
+VaultGovernanceRules {
+    vaultManager : Party            -- The decentralized party
+    members      : [Party]          -- Member parties authorized to vote
+    threshold    : Int              -- Minimum confirmations required
+    actionConfirmationTimeout : Optional RelTime  -- Auto-expiry for stale confirmations
+}
+```
+
+Unlike the modular `GovernanceRules`, `VaultGovernanceRules` uses a monolithic design where all action types are encoded as variants of a closed `ActionRequiringConfirmation` enum. Confirmations are matched by value equality rather than `ContractId`.
+
+Choices on `VaultGovernanceRules`:
 - `VaultGovernanceRules_ConfirmAction` -- Submit a confirmation for an action
 - `VaultGovernanceRules_ExecuteConfirmedAction` -- Execute when threshold is met
 - `VaultGovernanceRules_ExpireConfirmation` -- Remove a stale confirmation
 
-### Action Types
+#### Vault Action Types
 
-The governance system supports 18 action types across 7 categories:
+The vault governance system supports 19 action types across 7 categories:
 
 **Governance (4 actions):**
+
 | Action | Parameters | Description |
 |--------|------------|-------------|
 | `GovernanceAddMember` | member, new_threshold | Add a new governance member |
@@ -395,12 +530,14 @@ The governance system supports 18 action types across 7 categories:
 | `GovernanceSetTimeout` | new_timeout_microseconds | Set confirmation expiry timeout |
 
 **Vault Deployment (2 actions):**
+
 | Action | Parameters | Description |
 |--------|------------|-------------|
 | `VaultDeployment` | vault_rules_cid, vault_name, share_symbol, asset_instrument_id, limits, vault_backend_signatory, vault_far_config, allocation_factory_cid, registrar_service_cid | Deploy a new BitsafeVault |
 | `YieldEpochDeployment` | vault_rules_cid, vault_cid, asset_instrument_id, vault_backend_signatory | Deploy a yield epoch |
 
 **Vault Operations (5 actions):**
+
 | Action | Parameters | Description |
 |--------|------------|-------------|
 | `VaultPause` | vault_id | Pause vault operations |
@@ -410,24 +547,29 @@ The governance system supports 18 action types across 7 categories:
 | `VaultUpdateFarBeneficiaries` | vault_id, new_beneficiaries | Update FAR reward distribution |
 
 **Processor (1 action):**
+
 | Action | Parameters | Description |
 |--------|------------|-------------|
 | `ProcessorDeploymentRequest` | vault_processor_rules_cid, vault_backend_signatory, allocation_factory_cid, processor_far_config, initial_supported_vaults | Deploy a vault processor |
 
-**Utility Onboarding (3 actions):**
+**Utility Onboarding (4 actions):**
+
 | Action | Parameters | Description |
 |--------|------------|-------------|
 | `UtilityCreateProviderRequest` | operator | Create a ProviderService |
 | `UtilityCreateUserRequest` | operator | Create a UserService |
 | `UtilitySetup` | operator, provider_service_cid, user_service_cid | Link provider and user services |
+| `UtilityAcceptHolderServiceRequest` | operator, provider_service_cid, holder_service_request_cid, holder | Accept a holder service request |
 
 **Credentials (2 actions):**
+
 | Action | Parameters | Description |
 |--------|------------|-------------|
 | `CredentialOfferFree` | operator, user_service_cid, holder, id, description, claims | Offer a free credential |
 | `CredentialAcceptFree` | operator, user_service_cid, credential_offer_cid | Accept a free credential |
 
 **DevNet (1 action):**
+
 | Action | Parameters | Description |
 |--------|------------|-------------|
 | `DevNetFeatureApp` | amulet_rules_cid | Register as featured app in Amulet ecosystem |
@@ -486,11 +628,13 @@ FAR configuration is used in:
 
 ### Daml Package Dependencies
 
-The governance system depends on the following Daml packages:
+The system depends on the following Daml packages:
 
 | Package ID | Purpose |
 |------------|---------|
-| `#bitsafe-vault-governance-v0-rc8` | VaultGovernanceRules contract templates |
+| `#governance-core-v0-rc2` | GovernanceRules, GovernableAction interface, GenericVoteProposal |
+| `#governance-token-custody-v0-rc2` | TransferProposal, AcceptTransferProposal, preapproval proposals |
+| `#bitsafe-vault-governance-v0-rc8` | Legacy VaultGovernanceRules contract templates |
 | `#bitsafe-vault-v0-rc8` | VaultRules and Vault contract templates |
 | `#utility-registry-app-v0` | ProviderService, UserService, AllocationFactory |
 | `#utility-credential-app-v0` | Credential offer/accept templates |
