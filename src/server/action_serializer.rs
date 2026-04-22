@@ -842,6 +842,10 @@ pub fn build_proposal_create_args(
             decimals,
         } => (
             ProposalPackage::GovernanceTokenIssuance,
+            // Module is SetupIssuance (not SetupIssuanceProposal) — the Daml file
+            // is Governance/TokenIssuance/SetupIssuance.daml. The three sibling
+            // proposals below each live in a module named for their template;
+            // this one does not, so the strings are deliberately different.
             "Governance.TokenIssuance.SetupIssuance",
             "SetupIssuanceProposal",
             Record {

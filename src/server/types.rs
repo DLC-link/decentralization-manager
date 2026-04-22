@@ -647,7 +647,8 @@ pub enum ProposalType {
         recipient: CantonId,
         amount: String,
         description: String,
-        /// Hours into the future after which the mint offer expires. Defaults to 24.
+        /// Reserved for a future iteration. In v1 this field is ignored; the
+        /// serializer hardcodes a far-future `executeBefore` timestamp.
         #[serde(default)]
         execute_before_hours: Option<i64>,
     },
@@ -658,7 +659,8 @@ pub enum ProposalType {
         holder: CantonId,
         amount: String,
         description: String,
-        /// Hours into the future after which the burn offer expires. Defaults to 24.
+        /// Reserved for a future iteration. In v1 this field is ignored; the
+        /// serializer hardcodes a far-future `executeBefore` timestamp.
         #[serde(default)]
         execute_before_hours: Option<i64>,
     },
