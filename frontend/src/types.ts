@@ -285,6 +285,7 @@ export interface GovernanceAction {
 export interface DomainGovernanceAction {
   proposal_cid: string;
   action_label: string;
+  description?: string;
   confirmations: GovernanceConfirmation[];
   confirmation_count: number;
   can_execute: boolean;
@@ -325,6 +326,10 @@ export type ProposalType =
   | {
       type: "accept_transfer";
       transfer_instruction_cid: string;
+    }
+  | {
+      type: "generic_vote";
+      description: string;
     };
 
 export interface ProposeActionRequest {

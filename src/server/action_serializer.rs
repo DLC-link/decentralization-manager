@@ -679,19 +679,27 @@ fn serialize_instrument_allowances(allowances: &[InstrumentAllowance]) -> Value 
     )
 }
 
+/// Which package a proposal template belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProposalPackage {
+    GovernanceCore,
+    GovernanceTokenCustody,
+}
+
 /// Build the create-command record fields for a governance domain action proposal.
 ///
-/// Returns (module_name, entity_name, record_fields) for the CreateCommand.
+/// Returns (package, module_name, entity_name, record_fields) for the CreateCommand.
 pub fn build_proposal_create_args(
     governance_party: &str,
     proposer: &str,
     proposal: &ProposalType,
-) -> (&'static str, &'static str, Record) {
+) -> (ProposalPackage, &'static str, &'static str, Record) {
     match proposal {
         ProposalType::SetupCcPreapproval {
             provider,
             expected_dso,
         } => (
+            ProposalPackage::GovernanceTokenCustody,
             "Governance.TokenCustody.SetupCcPreapproval",
             "SetupCcPreapprovalProposal",
             Record {
@@ -716,6 +724,7 @@ pub fn build_proposal_create_args(
             instrument_admin,
             instrument_allowances,
         } => (
+            ProposalPackage::GovernanceTokenCustody,
             "Governance.TokenCustody.SetupTokenPreapproval",
             "SetupTokenPreapprovalProposal",
             Record {
@@ -775,6 +784,7 @@ pub fn build_proposal_create_args(
                 field("meta", make_empty_metadata()),
             ]);
             (
+                ProposalPackage::GovernanceTokenCustody,
                 "Governance.TokenCustody.TransferProposal",
                 "TransferProposal",
                 Record {
@@ -793,6 +803,7 @@ pub fn build_proposal_create_args(
         ProposalType::AcceptTransfer {
             transfer_instruction_cid,
         } => (
+            ProposalPackage::GovernanceTokenCustody,
             "Governance.TokenCustody.AcceptTransfer",
             "AcceptTransferProposal",
             Record {
@@ -805,6 +816,19 @@ pub fn build_proposal_create_args(
                         make_contract_id(transfer_instruction_cid),
                     ),
                     field("extraArgs", make_empty_extra_args()),
+                ],
+            },
+        ),
+        ProposalType::GenericVote { description } => (
+            ProposalPackage::GovernanceCore,
+            "Governance.GenericVote",
+            "GenericVoteProposal",
+            Record {
+                record_id: None,
+                fields: vec![
+                    field("governanceParty", make_party(governance_party)),
+                    field("proposer", make_party(proposer)),
+                    field("description", make_text(description)),
                 ],
             },
         ),

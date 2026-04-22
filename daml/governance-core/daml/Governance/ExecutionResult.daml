@@ -1,0 +1,33 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Result contract created after a governance domain action is executed.
+-- Provides an on-chain audit trail of governance decisions.
+module Governance.ExecutionResult where
+
+-- | Return type for GovernanceRules_ExecuteConfirmedAction.
+-- Wrapped in a struct so the return type can be extended in upgrades.
+data ExecuteConfirmedActionResult = ExecuteConfirmedActionResult
+  with
+    executionResultCid : ContractId GovernanceExecutionResult
+  deriving (Eq, Show)
+
+-- | Immutable record of a governance action execution.
+-- Created by GovernanceRules_ExecuteConfirmedAction after threshold
+-- confirmations are collected and the action is successfully exercised.
+template GovernanceExecutionResult
+  with
+    governanceParty : Party
+      -- ^ The governance party that executed this action.
+    actionLabel : Text
+      -- ^ The type of action that was executed (e.g., "Transfer", "GenericVote").
+    description : Text
+      -- ^ Human-readable description of what was executed.
+    executor : Party
+      -- ^ The governance member who triggered execution.
+    confirmers : [Party]
+      -- ^ The governance members who confirmed the action.
+    executedAt : Time
+      -- ^ When the action was executed (ledger effective time).
+  where
+    signatory governanceParty

@@ -40,7 +40,7 @@ P3_NOISE=9003
 
 # Paths
 DEV_DIR=$(mktemp -d "${TMPDIR:-/tmp}/dpm-it-XXXXXX")
-DARS_DIR="$SCRIPT_DIR/releases/v0/rc1"
+DARS_DIR="$SCRIPT_DIR/releases/v0/rc2"
 BINARY="$SCRIPT_DIR/target/release/dec-party-manager"
 
 # Process tracking

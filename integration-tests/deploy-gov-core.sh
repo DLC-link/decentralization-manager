@@ -127,8 +127,8 @@ update_party_config() {
             \"keycloak_realm\": \"\",
             \"keycloak_client_id\": \"\",
             \"packages\": {
-                \"governance_core\": \"#governance-core-v0-rc1\",
-                \"governance_token_custody\": \"#governance-token-custody-v0-rc1\"
+                \"governance_core\": \"#governance-core-v0-rc2\",
+                \"governance_token_custody\": \"#governance-token-custody-v0-rc2\"
             }
         }")
     http_code=$(echo "$response" | tail -1)
@@ -158,7 +158,7 @@ CONTRACTS_REQUEST=$(cat <<EOF
     {
       "id": "governance-rules",
       "name": "GovernanceRules",
-      "package_id": "#governance-core-v0-rc1",
+      "package_id": "#governance-core-v0-rc2",
       "module_name": "Governance.Rules",
       "entity_name": "GovernanceRules",
       "fields": [

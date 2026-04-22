@@ -10,9 +10,10 @@ import DA.Set as Set hiding (filter)
 import DA.Time (minutes)
 import Daml.Script
 
-import Governance.Rules
-import Governance.Confirmation
 import Governance.Action (GovernableAction)
+import Governance.Confirmation
+import Governance.ExecutionResult
+import Governance.Rules
 
 -- | Standard test party allocation.
 data TestParties = TestParties
@@ -55,25 +56,27 @@ createTestGovernance parties =
 -- | Collect confirmations from a list of members for an interface action.
 submitConfirmations : Party -> ContractId GovernanceRules -> ContractId GovernableAction -> [Party] -> Script [ContractId GovernanceConfirmation]
 submitConfirmations governanceParty rulesCid proposalCid confirmers =
-  mapA (\confirmer ->
-    submit (memberContext confirmer governanceParty) $
+  mapA (\confirmer -> do
+    result <- submit (memberContext confirmer governanceParty) $
       exerciseCmd rulesCid GovernanceRules_ConfirmAction with
         confirmer
         actionProposalCid = proposalCid
+    pure result.confirmationCid
   ) confirmers
 
 -- | Collect confirmations from a list of members for a self-management action.
 submitSelfConfirmations : Party -> ContractId GovernanceRules -> GovernanceSelfAction -> [Party] -> Script [ContractId GovernanceSelfConfirmation]
 submitSelfConfirmations governanceParty rulesCid action confirmers =
-  mapA (\confirmer ->
-    submit (memberContext confirmer governanceParty) $
+  mapA (\confirmer -> do
+    result <- submit (memberContext confirmer governanceParty) $
       exerciseCmd rulesCid GovernanceRules_ConfirmGovernanceAction with
         confirmer
         action
+    pure result.confirmationCid
   ) confirmers
 
 -- | Confirm and execute an interface action in one go.
-confirmAndExecute : TestParties -> ContractId GovernanceRules -> ContractId GovernableAction -> [Party] -> Party -> Script ()
+confirmAndExecute : TestParties -> ContractId GovernanceRules -> ContractId GovernableAction -> [Party] -> Party -> Script ExecuteConfirmedActionResult
 confirmAndExecute parties rulesCid proposalCid confirmers executor = do
   confirmationCids <- submitConfirmations parties.governanceParty rulesCid proposalCid confirmers
   submit (memberContext executor parties.governanceParty) $
@@ -86,8 +89,9 @@ confirmAndExecute parties rulesCid proposalCid confirmers executor = do
 confirmAndExecuteSelf : TestParties -> ContractId GovernanceRules -> GovernanceSelfAction -> [Party] -> Party -> Script (ContractId GovernanceRules)
 confirmAndExecuteSelf parties rulesCid action confirmers executor = do
   confirmationCids <- submitSelfConfirmations parties.governanceParty rulesCid action confirmers
-  submit (memberContext executor parties.governanceParty) $
+  result <- submit (memberContext executor parties.governanceParty) $
     exerciseCmd rulesCid GovernanceRules_ExecuteGovernanceAction with
       executor
       action
       confirmations = confirmationCids
+  pure result.governanceRulesCid

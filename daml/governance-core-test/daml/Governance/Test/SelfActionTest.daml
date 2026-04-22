@@ -172,12 +172,12 @@ testMismatchedSelfAction = script do
   let actionA = SelfAction_SetThreshold with updatedThreshold = 3
   let actionB = SelfAction_SetThreshold with updatedThreshold = 2
 
-  confA <- submit (memberContext parties.member1 parties.governanceParty) $
+  confResultA <- submit (memberContext parties.member1 parties.governanceParty) $
     exerciseCmd rulesCid GovernanceRules_ConfirmGovernanceAction with
       confirmer = parties.member1
       action = actionA
 
-  confB <- submit (memberContext parties.member2 parties.governanceParty) $
+  confResultB <- submit (memberContext parties.member2 parties.governanceParty) $
     exerciseCmd rulesCid GovernanceRules_ConfirmGovernanceAction with
       confirmer = parties.member2
       action = actionB
@@ -186,4 +186,4 @@ testMismatchedSelfAction = script do
     exerciseCmd rulesCid GovernanceRules_ExecuteGovernanceAction with
       executor = parties.member1
       action = actionA
-      confirmations = [confA, confB]
+      confirmations = [confResultA.confirmationCid, confResultB.confirmationCid]

@@ -8,15 +8,15 @@ DARS_REQUEST_FILE=$(mktemp)
 TEMP_FILES+=("$DARS_REQUEST_FILE")
 
 # Read and base64 encode DAR files
-DAR1_B64=$(base64 -i "$DARS_DIR/governance-core-v0-rc1-0.1.0.dar")
-DAR2_B64=$(base64 -i "$DARS_DIR/governance-token-custody-v0-rc1-0.1.0.dar")
+DAR1_B64=$(base64 -i "$DARS_DIR/governance-core-v0-rc2-0.1.0.dar")
+DAR2_B64=$(base64 -i "$DARS_DIR/governance-token-custody-v0-rc2-0.1.0.dar")
 
 # Write JSON to temp file (avoids "argument list too long" error)
 cat > "$DARS_REQUEST_FILE" <<EOF
 {
   "dar_files": [
-    {"filename": "governance-core-v0-rc1-0.1.0.dar", "data": "$DAR1_B64"},
-    {"filename": "governance-token-custody-v0-rc1-0.1.0.dar", "data": "$DAR2_B64"}
+    {"filename": "governance-core-v0-rc2-0.1.0.dar", "data": "$DAR1_B64"},
+    {"filename": "governance-token-custody-v0-rc2-0.1.0.dar", "data": "$DAR2_B64"}
   ]
 }
 EOF
