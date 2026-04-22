@@ -139,8 +139,8 @@ export const PackagesPanel = ({
   };
 
   return (
-    <Box sx={{ display: "flex", flexDirection: "column", height: "calc(100vh - 200px)" }}>
-      <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 2, flexShrink: 0 }}>
+    <Box sx={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
+      <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 2, flexShrink: 0, px: 3, pt: 2 }}>
         <Box>
           <Typography variant="body2" color="text.secondary">
             {loadingPackages

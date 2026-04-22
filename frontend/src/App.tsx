@@ -1,10 +1,10 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import {
+  Badge,
   Container,
-  Typography,
   Box,
   Alert,
-  Button,
+  Fab,
   TextField,
   InputAdornment,
   LinearProgress,
@@ -13,11 +13,15 @@ import {
   Tab,
   Card,
   Divider,
+  Tooltip,
+  useMediaQuery,
+  useTheme,
 } from "@mui/material";
 import FilterListIcon from "@mui/icons-material/FilterList";
 import SearchIcon from "@mui/icons-material/Search";
 import AddIcon from "@mui/icons-material/Add";
 import { Header } from "./components/Header";
+import { Sidebar, SIDEBAR_WIDTH } from "./components/Sidebar";
 import { PartyCard } from "./components/PartyCard";
 import { NodeConfigAccordion } from "./components/NodeConfigAccordion";
 import { NetworkConfigAccordion } from "./components/NetworkConfigAccordion";
@@ -42,6 +46,8 @@ import type {
 } from "./types";
 
 const App = () => {
+  const muiTheme = useTheme();
+  const isLargeScreen = useMediaQuery(muiTheme.breakpoints.up("lg"));
   const [activeTab, setActiveTab] = useState(0);
   const [parties, setParties] = useState<DecentralizedParty[]>([]);
   const [nodeConfig, setNodeConfig] = useState<NodeConfig | null>(null);
@@ -53,6 +59,7 @@ const App = () => {
   >([]);
   const [keyStatus, setKeyStatus] = useState<KeyStatusResponse | null>(null);
   const [authStatuses, setAuthStatuses] = useState<PartyAuthStatus[]>([]);
+  const [packageCount, setPackageCount] = useState(0);
   const [onboardingDialogOpen, setOnboardingDialogOpen] = useState(false);
   const [darsDialogOpen, setDarsDialogOpen] = useState(false);
   const [uploadDarsDialogOpen, setUploadDarsDialogOpen] = useState(false);
@@ -65,10 +72,9 @@ const App = () => {
   const [error, setError] = useState<string | null>(null);
   const [partyFilter, setPartyFilter] = useState("");
   const [refreshingParties, setRefreshingParties] = useState(false);
-  const [partiesSource, setPartiesSource] = useState<"live" | "cache" | null>(
-    null,
-  );
   const [operatorParty, setOperatorParty] = useState("");
+  const [showSearchBar, setShowSearchBar] = useState(true);
+  const lastScrollY = useRef(0);
   const { showSnackbar } = useSnackbar();
 
   useEffect(() => {
@@ -76,6 +82,21 @@ const App = () => {
       history.scrollRestoration = "manual";
     }
     window.scrollTo(0, 0);
+  }, []);
+
+  useEffect(() => {
+    const handleScroll = () => {
+      const currentScrollY = window.scrollY;
+      if (currentScrollY > lastScrollY.current && currentScrollY > 100) {
+        setShowSearchBar(false);
+      } else {
+        setShowSearchBar(true);
+      }
+      lastScrollY.current = currentScrollY;
+    };
+
+    window.addEventListener("scroll", handleScroll, { passive: true });
+    return () => window.removeEventListener("scroll", handleScroll);
   }, []);
 
   useEffect(() => {
@@ -98,7 +119,6 @@ const App = () => {
       if (res.ok) {
         const data: DecentralizedPartiesResponse = await res.json();
         setParties(data.parties);
-        setPartiesSource(data.source ?? "live");
       } else {
         showSnackbar("Failed to refresh parties");
       }
@@ -166,9 +186,10 @@ const App = () => {
         const partiesParams = partyFilter
           ? `?prefix=${encodeURIComponent(partyFilter)}`
           : "";
-        const [partiesRes, authStatusRes] = await Promise.all([
+        const [partiesRes, authStatusRes, packagesRes] = await Promise.all([
           fetch(`${API_BASE}/decentralized-parties${partiesParams}`),
           fetch(`${API_BASE}/auth/status`),
+          fetch(`${API_BASE}/packages/vetted`),
         ]);
 
         if (!partiesRes.ok) {
@@ -179,11 +200,15 @@ const App = () => {
           await partiesRes.json();
 
         setParties(partiesData.parties);
-        setPartiesSource(partiesData.source ?? "live");
 
         if (authStatusRes.ok) {
           const authStatusData: AuthStatusResponse = await authStatusRes.json();
           setAuthStatuses(authStatusData.parties);
+        }
+
+        if (packagesRes.ok) {
+          const packagesData = await packagesRes.json();
+          setPackageCount(Array.isArray(packagesData) ? packagesData.length : 0);
         }
       } catch (err) {
         setError(err instanceof Error ? err.message : "Unknown error");
@@ -278,9 +303,126 @@ const App = () => {
         backgroundColor: (theme) => theme.palette.background.default,
       }}
     >
-      <Header />
+      {isLargeScreen ? (
+        <Sidebar
+          activeTab={activeTab}
+          onTabChange={setActiveTab}
+          partyCount={parties.length}
+          packageCount={packageCount}
+        />
+      ) : (
+        <Header />
+      )}
 
-      <Container maxWidth="md" sx={{ pt: 16, pb: 0 }}>
+      {isLargeScreen && activeTab === 0 && !loading && !error && (
+        <Box
+          sx={{
+            position: "fixed",
+            top: 16,
+            left: `${SIDEBAR_WIDTH}px`,
+            right: 0,
+            zIndex: 1050,
+            display: "flex",
+            justifyContent: "center",
+            opacity: showSearchBar ? 1 : 0,
+            transform: showSearchBar
+              ? "translateY(0)"
+              : "translateY(-20px)",
+            transition: "opacity 0.3s ease, transform 0.3s ease",
+            pointerEvents: showSearchBar ? "auto" : "none",
+          }}
+        >
+          <Box
+            sx={{
+              display: "flex",
+              alignItems: "center",
+              gap: 1,
+              backdropFilter: "blur(16px)",
+              backgroundColor: (theme) =>
+                theme.palette.mode === "light"
+                  ? "rgba(255, 255, 255, 0.85)"
+                  : "rgba(42, 42, 42, 0.85)",
+              borderRadius: 100,
+              pl: 0.5,
+              pr: 0.5,
+              py: 0.5,
+              boxShadow: (theme) =>
+                theme.palette.mode === "light"
+                  ? "0 2px 12px rgba(0,0,0,0.08)"
+                  : "0 2px 12px rgba(0,0,0,0.3)",
+              border: (theme) =>
+                `1px solid ${theme.palette.mode === "light" ? "rgba(0,0,0,0.08)" : "rgba(255,255,255,0.08)"}`,
+            }}
+          >
+            <TextField
+              size="small"
+              placeholder="Filter by full prefix (e.g. cbtc-network)"
+              value={partyFilter}
+              onChange={(e) => setPartyFilter(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  refreshParties();
+                }
+              }}
+              disabled={refreshingParties}
+              InputProps={{
+                startAdornment: (
+                  <InputAdornment position="start">
+                    <FilterListIcon fontSize="small" color="action" />
+                  </InputAdornment>
+                ),
+              }}
+              sx={{
+                width: 300,
+                "& .MuiOutlinedInput-root": {
+                  borderRadius: 100,
+                },
+                "& .MuiOutlinedInput-notchedOutline": {
+                  border: "none",
+                },
+              }}
+            />
+            <IconButton
+              onClick={refreshParties}
+              disabled={refreshingParties}
+              color="primary"
+              sx={{
+                backgroundColor: "primary.main",
+                color: "white",
+                "&:hover": {
+                  backgroundColor: "primary.dark",
+                },
+                "&.Mui-disabled": {
+                  backgroundColor: "action.disabledBackground",
+                  color: "action.disabled",
+                },
+              }}
+            >
+              <SearchIcon />
+            </IconButton>
+          </Box>
+        </Box>
+      )}
+
+      <Box
+        sx={{
+          ...(isLargeScreen && { ml: `${SIDEBAR_WIDTH}px` }),
+          ...(activeTab === 1 && {
+            height: "100vh",
+            overflow: "hidden",
+            display: "flex",
+            flexDirection: "column",
+          }),
+        }}
+      >
+      <Container
+        maxWidth="md"
+        sx={{
+          pt: isLargeScreen ? 4 : 16,
+          pb: 0,
+          ...(isLargeScreen && activeTab === 1 && { display: "none" }),
+        }}
+      >
         {window.location.pathname.startsWith("/swagger-ui") &&
         nodeConfig &&
         !nodeConfig.test_mode ? (
@@ -295,86 +437,85 @@ const App = () => {
           <Alert severity="error">{error}</Alert>
         ) : (
           <>
-            <Tabs
-              value={activeTab}
-              onChange={(_e, v) => setActiveTab(v)}
-              sx={{ mb: 3, borderBottom: 1, borderColor: "divider" }}
-            >
-              <Tab label={`Parties (${parties.length})`} />
-              <Tab label="Packages" />
-              <Tab label="Configuration" />
-            </Tabs>
+            {!isLargeScreen && (
+              <Tabs
+                value={activeTab}
+                onChange={(_e, v) => setActiveTab(v)}
+                sx={{
+                  mb: 3,
+                  borderBottom: 1,
+                  borderColor: "divider",
+                  overflow: "visible",
+                  "& .MuiTabs-scroller": { overflow: "visible !important" },
+                }}
+              >
+                <Tab
+                  label={
+                    <Badge badgeContent={parties.length} color="primary" sx={{ pr: parties.length ? 2.5 : 0 }}>
+                      Parties
+                    </Badge>
+                  }
+                />
+                <Tab
+                  label={
+                    <Badge badgeContent={packageCount} color="primary" sx={{ pr: packageCount ? 2.5 : 0 }}>
+                      Packages
+                    </Badge>
+                  }
+                />
+                <Tab label="Configuration" />
+              </Tabs>
+            )}
 
             {/* Tab 0: Decentralized Parties */}
             {activeTab === 0 && (
               <>
-                <Box sx={{ mb: 3 }}>
-                  <Box
-                    sx={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "flex-start",
-                      mb: 2,
-                    }}
-                  >
-                    <Box>
-                      <Typography variant="body2" color="text.secondary">
-                        {parties.length} decentralized parties
-                        {partiesSource === "cache" && refreshingParties && (
-                          <Typography
-                            component="span"
-                            variant="body2"
-                            sx={{ ml: 1, fontStyle: "italic", color: "warning.main" }}
-                          >
-                            (cached — refreshing from network...)
-                          </Typography>
-                        )}
-                      </Typography>
+                {isLargeScreen ? (
+                  <Box sx={{ height: 48 }} />
+                ) : (
+                  <Box sx={{ mb: 3 }}>
+                    <Box
+                      sx={{
+                        display: "flex",
+                        alignItems: "flex-start",
+                        gap: 1,
+                      }}
+                    >
+                      <TextField
+                        size="small"
+                        label="Filter by full prefix (e.g. cbtc-network)"
+                        placeholder="Enter full party prefix"
+                        value={partyFilter}
+                        onChange={(e) => setPartyFilter(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            refreshParties();
+                          }
+                        }}
+                        disabled={refreshingParties}
+                        InputProps={{
+                          startAdornment: (
+                            <InputAdornment position="start">
+                              <FilterListIcon fontSize="small" color="action" />
+                            </InputAdornment>
+                          ),
+                        }}
+                        sx={{ width: 300 }}
+                      />
+                      <IconButton
+                        onClick={refreshParties}
+                        disabled={refreshingParties}
+                        color="primary"
+                        sx={{ mt: "1px" }}
+                      >
+                        <SearchIcon />
+                      </IconButton>
                     </Box>
-                    <Button
-                      variant="contained"
-                      startIcon={<AddIcon />}
-                      onClick={() => setOnboardingDialogOpen(true)}
-                      disabled={!ADMIN_ACCESS}
-                    >
-                      Create Party
-                    </Button>
+                    {refreshingParties && (
+                      <LinearProgress sx={{ mt: 1, borderRadius: 1 }} />
+                    )}
                   </Box>
-                  <Box sx={{ display: "flex", alignItems: "flex-start", gap: 1 }}>
-                    <TextField
-                      size="small"
-                      label="Filter by full prefix (e.g. cbtc-network)"
-                      placeholder="Enter full party prefix"
-                      value={partyFilter}
-                      onChange={(e) => setPartyFilter(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") {
-                          refreshParties();
-                        }
-                      }}
-                      disabled={refreshingParties}
-                      InputProps={{
-                        startAdornment: (
-                          <InputAdornment position="start">
-                            <FilterListIcon fontSize="small" color="action" />
-                          </InputAdornment>
-                        ),
-                      }}
-                      sx={{ width: 300 }}
-                    />
-                    <IconButton
-                      onClick={refreshParties}
-                      disabled={refreshingParties}
-                      color="primary"
-                      sx={{ mt: "1px" }}
-                    >
-                      <SearchIcon />
-                    </IconButton>
-                  </Box>
-                  {refreshingParties && (
-                    <LinearProgress sx={{ mt: 1, borderRadius: 1 }} />
-                  )}
-                </Box>
+                )}
 
                 {parties.map((party) => (
                   <PartyCard
@@ -382,22 +523,34 @@ const App = () => {
                     party={party}
                     onRefresh={refreshParties}
                     selfParticipantId={nodeConfig?.node.participant_id}
-                    authStatus={authStatuses.find((a) => a.dec_party_id === party.party_id)}
+                    authStatus={authStatuses.find(
+                      (a) => a.dec_party_id === party.party_id,
+                    )}
                     onAuthRefresh={refreshAuthStatus}
                     operatorParty={operatorParty}
                     network={nodeConfig?.canton.network}
                   />
                 ))}
+
+                {ADMIN_ACCESS && (
+                  <Tooltip title="Create Party" arrow>
+                    <Fab
+                      color="primary"
+                      onClick={() => setOnboardingDialogOpen(true)}
+                      sx={{
+                        position: "fixed",
+                        bottom: 24,
+                        right: 24,
+                      }}
+                    >
+                      <AddIcon />
+                    </Fab>
+                  </Tooltip>
+                )}
               </>
             )}
 
-            {/* Tab 1: Package Management */}
-            {activeTab === 1 && (
-              <PackagesPanel
-                onUploadDars={() => setUploadDarsDialogOpen(true)}
-                onDistributeDars={() => setDarsDialogOpen(true)}
-              />
-            )}
+            {/* Tab 1: rendered outside Container below */}
 
             {/* Tab 2: Configuration */}
             {activeTab === 2 && (
@@ -458,6 +611,24 @@ const App = () => {
           </>
         )}
       </Container>
+
+      {/* Tab 1: Package Management — edge-to-edge */}
+      {activeTab === 1 && !loading && !error && (
+        <Box
+          sx={{
+            display: "flex",
+            flexDirection: "column",
+            flex: 1,
+            minHeight: 0,
+          }}
+        >
+          <PackagesPanel
+            onUploadDars={() => setUploadDarsDialogOpen(true)}
+            onDistributeDars={() => setDarsDialogOpen(true)}
+          />
+        </Box>
+      )}
+      </Box>
     </Box>
   );
 };

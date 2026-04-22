@@ -1,4 +1,4 @@
-import { Box, Card, CardContent, Skeleton, Tabs, Tab } from "@mui/material";
+import { Box, Card, CardContent, Skeleton, Tabs, Tab, useMediaQuery, useTheme } from "@mui/material";
 
 const PartyCardSkeleton = () => (
   <Card sx={{ mb: 3, borderRadius: 2 }}>
@@ -28,26 +28,37 @@ const TableRowSkeleton = () => (
   </Box>
 );
 
-export const LoadingSkeleton = () => (
-  <>
-    <Tabs value={0} sx={{ mb: 3, borderBottom: 1, borderColor: "divider" }}>
-      <Tab label="Parties" disabled />
-      <Tab label="Packages" disabled />
-      <Tab label="Configuration" disabled />
-    </Tabs>
+export const LoadingSkeleton = () => {
+  const muiTheme = useTheme();
+  const isLargeScreen = useMediaQuery(muiTheme.breakpoints.up("lg"));
 
-    <Box sx={{ mb: 3 }}>
-      <Box sx={{ display: "flex", justifyContent: "space-between", mb: 2 }}>
-        <Skeleton variant="text" width="140px" height={20} />
-        <Skeleton variant="rounded" width={120} height={36} />
-      </Box>
-      <Skeleton variant="rounded" width={300} height={40} />
-    </Box>
+  return (
+    <>
+      {!isLargeScreen && (
+        <Tabs value={0} sx={{ mb: 3, borderBottom: 1, borderColor: "divider" }}>
+          <Tab label="Parties" disabled />
+          <Tab label="Packages" disabled />
+          <Tab label="Configuration" disabled />
+        </Tabs>
+      )}
 
-    <PartyCardSkeleton />
-    <PartyCardSkeleton />
-  </>
-);
+      {isLargeScreen ? (
+        <Box sx={{ height: 48 }} />
+      ) : (
+        <Box sx={{ mb: 3 }}>
+          <Box sx={{ display: "flex", justifyContent: "space-between", mb: 2 }}>
+            <Skeleton variant="text" width="140px" height={20} />
+            <Skeleton variant="rounded" width={120} height={36} />
+          </Box>
+          <Skeleton variant="rounded" width={300} height={40} />
+        </Box>
+      )}
+
+      <PartyCardSkeleton />
+      <PartyCardSkeleton />
+    </>
+  );
+};
 
 export const PackagesTabSkeleton = () => (
   <>
