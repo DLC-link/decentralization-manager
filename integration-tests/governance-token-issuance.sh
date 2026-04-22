@@ -1,14 +1,19 @@
 #!/bin/bash
 
-# Test governance token issuance plugin: propose SetupIssuance → confirm → execute.
+# Test governance token issuance plugin end-to-end: exercise all four
+# GovernableAction templates (SetupIssuance → Mint → Burn → RotateFactory)
+# through the HTTP governance flow (propose → confirm → execute) on localnet.
+#
 # Sourced by run.sh — expects env.sh variables, PARTY_ID, RULES_CONTRACT_ID,
 # and P1/P2/P3_MEMBER_PARTY from deploy-gov-core.sh to be available.
 #
-# SetupIssuanceProposal consumes a pre-existing ProviderService contract. If
-# PROVIDER_SERVICE_CID is pre-set (e.g., exported by a caller), this script
-# uses it as-is. Otherwise it auto-provisions one via a small daml-script
-# (Governance.TokenIssuance.Scripts.ProvisionProviderService:provision) run
-# through `dpm script` with `--upload-dar yes` against P1's ledger.
+# Two Utility-Registry contracts that the committee cannot create from on-chain
+# governance (they need the operator's signature or a fresh registrar record)
+# are auto-provisioned up front via small daml-scripts:
+#   - `ProvisionProviderService`   → ProviderService cid for SetupIssuance
+#   - `ProvisionSpareFactory`      → spare AllocationFactory cid for RotateFactory
+# Callers may pre-set PROVIDER_SERVICE_CID / SPARE_FACTORY_CID to bypass
+# the corresponding provisioning step.
 
 # ============================================================================
 # Guard clauses
@@ -33,21 +38,18 @@ echo "Using GovernanceRules contract: $RULES_CONTRACT_ID"
 echo "Members: P1=$P1_MEMBER_PARTY, P2=$P2_MEMBER_PARTY, P3=$P3_MEMBER_PARTY"
 
 # ============================================================================
-# Auto-provision ProviderService if the caller didn't supply one
+# dpm / test-DAR setup (shared by all dpm-script invocations below)
 # ============================================================================
 
-if [ -z "$PROVIDER_SERVICE_CID" ]; then
-    echo ""
-    echo "PROVIDER_SERVICE_CID not set — auto-provisioning via dpm script..."
+TEST_DAR="$SCRIPT_DIR/daml/governance-token-issuance-test/.daml/dist/governance-token-issuance-test-0.1.0.dar"
 
+ensure_dpm_and_test_dar() {
     if ! command -v dpm &>/dev/null; then
         echo "ERROR: dpm (Digital Asset Package Manager) is required for auto-provisioning."
-        echo "  See https://docs.digitalasset.com/build/3.4/dpm/dpm.html for install instructions,"
-        echo "  or export PROVIDER_SERVICE_CID externally to skip this step."
+        echo "  See https://docs.digitalasset.com/build/3.4/dpm/dpm.html for install instructions."
         exit 1
     fi
 
-    TEST_DAR="$SCRIPT_DIR/daml/governance-token-issuance-test/.daml/dist/governance-token-issuance-test-0.1.0.dar"
     if [ ! -f "$TEST_DAR" ]; then
         echo "Building test DAR (not found at $TEST_DAR)..."
         (cd "$SCRIPT_DIR/daml/governance-token-issuance-test" && dpm build) || {
@@ -55,247 +57,319 @@ if [ -z "$PROVIDER_SERVICE_CID" ]; then
             exit 1
         }
     fi
+}
 
-    PROVISION_INPUT="$DEV_DIR/provision-input.json"
-    PROVISION_OUTPUT="$DEV_DIR/provision-output.json"
-    PROVISION_TOKEN="$DEV_DIR/mock-token.txt"
+PROVISION_TOKEN="$DEV_DIR/mock-token.txt"
+echo "$MOCK_TOKEN" > "$PROVISION_TOKEN"
 
-    cat > "$PROVISION_INPUT" <<EOF
+# ============================================================================
+# Auto-provision ProviderService (unless caller supplied one)
+# ============================================================================
+
+if [ -z "$PROVIDER_SERVICE_CID" ]; then
+    echo ""
+    echo "Auto-provisioning ProviderService via dpm script..."
+    ensure_dpm_and_test_dar
+
+    PS_INPUT="$DEV_DIR/provision-provider-input.json"
+    PS_OUTPUT="$DEV_DIR/provision-provider-output.json"
+    cat > "$PS_INPUT" <<EOF
 {
   "governanceParty": "$PARTY_ID",
   "operator": "$P1_MEMBER_PARTY"
 }
 EOF
-    echo "$MOCK_TOKEN" > "$PROVISION_TOKEN"
 
     dpm script \
         --dar "$TEST_DAR" \
         --script-name 'Governance.TokenIssuance.Scripts.ProvisionProviderService:provision' \
-        --ledger-host localhost \
-        --ledger-port "$P1_CANTON_LEDGER" \
+        --ledger-host localhost --ledger-port "$P1_CANTON_LEDGER" \
         --access-token-file "$PROVISION_TOKEN" \
-        --input-file "$PROVISION_INPUT" \
-        --output-file "$PROVISION_OUTPUT" \
-        --upload-dar yes \
-        --wall-clock-time
+        --input-file "$PS_INPUT" --output-file "$PS_OUTPUT" \
+        --upload-dar yes --wall-clock-time
 
-    PROVIDER_SERVICE_CID=$(jq -r '.providerServiceCid // empty' "$PROVISION_OUTPUT")
+    PROVIDER_SERVICE_CID=$(jq -r '.providerServiceCid // empty' "$PS_OUTPUT")
     if [ -z "$PROVIDER_SERVICE_CID" ] || [ "$PROVIDER_SERVICE_CID" = "null" ]; then
-        echo "ERROR: Failed to extract providerServiceCid from $PROVISION_OUTPUT"
-        cat "$PROVISION_OUTPUT"
+        echo "ERROR: Failed to extract providerServiceCid"
+        cat "$PS_OUTPUT"
         exit 1
     fi
-
     echo "Provisioned ProviderService: $PROVIDER_SERVICE_CID"
 fi
 
 echo "ProviderService CID: $PROVIDER_SERVICE_CID"
 
 # ============================================================================
-# Step 1: Participant-1 proposes a SetupIssuance action
+# Helper: run one propose → confirm → execute flow through HTTP governance.
+#
+# Usage: run_proposal_flow "<label>" "<proposal_json>"
+#
+# Exports: PROPOSAL_CID (the cid of the proposal template created by P1)
 # ============================================================================
 
-# The propose endpoint creates the proposal contract AND auto-confirms as proposer.
-# So after this step we have 1 confirmation from P1.
+run_proposal_flow() {
+    local label="$1"
+    local proposal_json="$2"
 
-PROPOSE_REQUEST=$(cat <<EOF
+    echo ""
+    echo "=========================================="
+    echo "Flow: $label"
+    echo "=========================================="
+
+    # --- Propose (P1 auto-confirms as proposer) ---
+    local propose_req
+    propose_req=$(cat <<EOF
 {
   "party_id": "$PARTY_ID",
   "rules_contract_id": "$RULES_CONTRACT_ID",
-  "proposal": {
-    "type": "setup_issuance",
-    "provider_service_cid": "$PROVIDER_SERVICE_CID",
-    "operator": "$P1_MEMBER_PARTY",
-    "instrument_id_text": "TEST-E2E-TOKEN",
-    "display_name": "Test E2E Token",
-    "symbol": "TEE",
-    "decimals": 8
-  }
+  "proposal": $proposal_json
 }
 EOF
 )
+    echo "Step 1: Participant-1 proposes $label..."
+    local propose_resp
+    propose_resp=$(curl -s -X POST "http://localhost:$P1_HTTP/governance/propose" \
+        -H "Content-Type: application/json" -d "$propose_req")
+    echo "  Response: $propose_resp"
+    local propose_err
+    propose_err=$(echo "$propose_resp" | jq -r '.error // empty')
+    if [ -n "$propose_err" ]; then
+        echo "ERROR: Proposal failed: $propose_err"
+        exit 1
+    fi
 
-echo ""
-echo "Step 1: Participant-1 proposes SetupIssuance..."
-PROPOSE_RESPONSE=$(curl -s -X POST "http://localhost:$P1_HTTP/governance/propose" \
-    -H "Content-Type: application/json" \
-    -d "$PROPOSE_REQUEST")
-echo "  Response: $PROPOSE_RESPONSE"
+    # --- Query confirmations, extract proposal cid ---
+    echo "Step 2: Querying governance confirmations..."
+    sleep 2
+    local gov_resp
+    gov_resp=$(curl -s "http://localhost:$P1_HTTP/governance/confirmations?party_id=$PARTY_ID")
+    local action_count
+    action_count=$(echo "$gov_resp" | jq '.domain_actions | length')
+    if [ "$action_count" != "1" ]; then
+        echo "ERROR: Expected 1 domain action after proposal, got $action_count"
+        echo "  Full response: $gov_resp"
+        exit 1
+    fi
+    PROPOSAL_CID=$(echo "$gov_resp" | jq -r '.domain_actions[0].proposal_cid // empty')
+    if [ -z "$PROPOSAL_CID" ]; then
+        echo "ERROR: Could not find proposal in governance confirmations"
+        echo "  Full response: $gov_resp"
+        exit 1
+    fi
+    echo "  Proposal CID: $PROPOSAL_CID"
 
-PROPOSE_ERROR=$(echo "$PROPOSE_RESPONSE" | jq -r '.error // empty')
-if [ -n "$PROPOSE_ERROR" ]; then
-    echo "ERROR: Proposal failed: $PROPOSE_ERROR"
-    exit 1
-fi
-
-# ============================================================================
-# Step 2: Query governance state to find the proposal
-# ============================================================================
-
-echo ""
-echo "Step 2: Querying governance confirmations..."
-sleep 2
-
-GOVERNANCE_RESPONSE=$(curl -s "http://localhost:$P1_HTTP/governance/confirmations?party_id=$PARTY_ID")
-echo "  Domain actions: $(echo "$GOVERNANCE_RESPONSE" | jq '.domain_actions | length')"
-echo "  Threshold: $(echo "$GOVERNANCE_RESPONSE" | jq '.threshold')"
-
-ACTION_COUNT=$(echo "$GOVERNANCE_RESPONSE" | jq '.domain_actions | length')
-if [ "$ACTION_COUNT" != "1" ]; then
-    echo "ERROR: Expected 1 domain action after proposal, got $ACTION_COUNT"
-    echo "  Full response: $GOVERNANCE_RESPONSE"
-    exit 1
-fi
-
-# Extract the proposal contract ID from domain_actions
-PROPOSAL_CID=$(echo "$GOVERNANCE_RESPONSE" | jq -r '.domain_actions[0].proposal_cid // empty')
-if [ -z "$PROPOSAL_CID" ]; then
-    echo "ERROR: Could not find proposal in governance confirmations"
-    echo "  Full response: $GOVERNANCE_RESPONSE"
-    exit 1
-fi
-
-echo "  Proposal CID: $PROPOSAL_CID"
-
-# Get the confirmation CID from P1's auto-confirm
-P1_CONFIRMATION_CID=$(echo "$GOVERNANCE_RESPONSE" | jq -r \
-    '.domain_actions[0].confirmations[0].contract_id // empty')
-echo "  P1 confirmation CID: $P1_CONFIRMATION_CID"
-
-CURRENT_CONFIRMATIONS=$(echo "$GOVERNANCE_RESPONSE" | jq '.domain_actions[0].confirmation_count')
-echo "  Current confirmations: $CURRENT_CONFIRMATIONS"
-
-# ============================================================================
-# Step 3: Participant-2 confirms the action
-# ============================================================================
-
-echo ""
-echo "Step 3: Participant-2 confirms the action..."
-
-# For CoreDomain governance, confirm needs the proposal_cid.
-# The action type must match a valid action shape; for domain actions the confirm
-# choice uses the proposal_cid to identify the action — the action payload is a dummy.
-CONFIRM_REQUEST=$(cat <<EOF
+    # --- P2 confirms ---
+    echo "Step 3: Participant-2 confirms..."
+    local confirm_req
+    confirm_req=$(cat <<EOF
 {
   "party_id": "$PARTY_ID",
   "rules_contract_id": "$RULES_CONTRACT_ID",
-  "action": {
-    "type": "governance_set_threshold",
-    "new_threshold": 0
-  },
+  "action": {"type": "governance_set_threshold", "new_threshold": 0},
   "governance_type": "core_domain",
   "proposal_cid": "$PROPOSAL_CID"
 }
 EOF
 )
+    local confirm_resp
+    confirm_resp=$(curl -s -X POST "http://localhost:$P2_HTTP/governance/confirm" \
+        -H "Content-Type: application/json" -d "$confirm_req")
+    local confirm_err
+    confirm_err=$(echo "$confirm_resp" | jq -r '.error // empty')
+    if [ -n "$confirm_err" ]; then
+        echo "ERROR: Confirmation failed: $confirm_err"
+        exit 1
+    fi
 
-CONFIRM_RESPONSE=$(curl -s -X POST "http://localhost:$P2_HTTP/governance/confirm" \
-    -H "Content-Type: application/json" \
-    -d "$CONFIRM_REQUEST")
-echo "  Response: $CONFIRM_RESPONSE"
+    # --- Verify can_execute, collect confirmation cids ---
+    echo "Step 4: Verifying 2 confirmations..."
+    sleep 2
+    gov_resp=$(curl -s "http://localhost:$P1_HTTP/governance/confirmations?party_id=$PARTY_ID")
+    local can_execute
+    can_execute=$(echo "$gov_resp" | jq '.domain_actions[0].can_execute')
+    if [ "$can_execute" != "true" ]; then
+        echo "ERROR: Expected can_execute=true after 2 confirmations"
+        echo "  Full response: $(echo "$gov_resp" | jq '.domain_actions[0]')"
+        exit 1
+    fi
+    local confirmation_cids
+    confirmation_cids=$(echo "$gov_resp" | jq '[.domain_actions[0].confirmations[].contract_id]')
 
-CONFIRM_ERROR=$(echo "$CONFIRM_RESPONSE" | jq -r '.error // empty')
-if [ -n "$CONFIRM_ERROR" ]; then
-    echo "ERROR: Confirmation failed: $CONFIRM_ERROR"
-    exit 1
-fi
-
-# ============================================================================
-# Step 4: Verify we now have 2 confirmations (threshold met)
-# ============================================================================
-
-echo ""
-echo "Step 4: Verifying confirmations..."
-sleep 2
-
-GOVERNANCE_RESPONSE=$(curl -s "http://localhost:$P1_HTTP/governance/confirmations?party_id=$PARTY_ID")
-CURRENT_CONFIRMATIONS=$(echo "$GOVERNANCE_RESPONSE" | jq '.domain_actions[0].confirmation_count')
-CAN_EXECUTE=$(echo "$GOVERNANCE_RESPONSE" | jq '.domain_actions[0].can_execute')
-
-echo "  Confirmations: $CURRENT_CONFIRMATIONS"
-echo "  Can execute: $CAN_EXECUTE"
-
-if [ "$CAN_EXECUTE" != "true" ]; then
-    echo "ERROR: Expected can_execute=true after 2 confirmations (threshold=2)"
-    echo "  Full response: $(echo "$GOVERNANCE_RESPONSE" | jq '.domain_actions[0]')"
-    exit 1
-fi
-
-# Collect all confirmation CIDs
-CONFIRMATION_CIDS=$(echo "$GOVERNANCE_RESPONSE" | jq '[.domain_actions[0].confirmations[].contract_id]')
-echo "  Confirmation CIDs: $CONFIRMATION_CIDS"
-
-# ============================================================================
-# Step 5: Participant-3 executes the confirmed action
-# ============================================================================
-
-echo ""
-echo "Step 5: Participant-3 executes the confirmed action..."
-
-EXECUTE_REQUEST=$(cat <<EOF
+    # --- P3 executes ---
+    echo "Step 5: Participant-3 executes..."
+    local execute_req
+    execute_req=$(cat <<EOF
 {
   "party_id": "$PARTY_ID",
   "rules_contract_id": "$RULES_CONTRACT_ID",
-  "action": {
-    "type": "governance_set_threshold",
-    "new_threshold": 0
-  },
-  "confirmation_cids": $CONFIRMATION_CIDS,
+  "action": {"type": "governance_set_threshold", "new_threshold": 0},
+  "confirmation_cids": $confirmation_cids,
   "disclosed_contracts": [],
   "governance_type": "core_domain",
   "proposal_cid": "$PROPOSAL_CID"
 }
 EOF
 )
+    local execute_resp
+    execute_resp=$(curl -s -X POST "http://localhost:$P3_HTTP/governance/execute" \
+        -H "Content-Type: application/json" -d "$execute_req")
+    local execute_err
+    execute_err=$(echo "$execute_resp" | jq -r '.error // empty')
+    if [ -n "$execute_err" ]; then
+        echo "ERROR: Execution failed: $execute_err"
+        echo "  Full response: $execute_resp"
+        exit 1
+    fi
 
-EXECUTE_RESPONSE=$(curl -s -X POST "http://localhost:$P3_HTTP/governance/execute" \
-    -H "Content-Type: application/json" \
-    -d "$EXECUTE_REQUEST")
-echo "  Response: $EXECUTE_RESPONSE"
+    # --- Verify cleanup ---
+    echo "Step 6: Verifying cleanup..."
+    sleep 2
+    gov_resp=$(curl -s "http://localhost:$P1_HTTP/governance/confirmations?party_id=$PARTY_ID")
+    local remaining
+    remaining=$(echo "$gov_resp" | jq '.domain_actions | length')
+    if [ "$remaining" != "0" ]; then
+        echo "ERROR: Expected 0 domain actions after execution, got $remaining"
+        exit 1
+    fi
 
-EXECUTE_ERROR=$(echo "$EXECUTE_RESPONSE" | jq -r '.error // empty')
-if [ -n "$EXECUTE_ERROR" ]; then
-    echo "ERROR: Execution failed: $EXECUTE_ERROR"
+    echo "Flow '$label' completed."
+}
+
+# Query the current IssuanceConfig contract id visible to the governance party.
+# Expects exactly one live config; errors otherwise.
+current_issuance_config_cid() {
+    local resp
+    resp=$(curl -s "http://localhost:$P1_HTTP/contracts?party_id=$PARTY_ID")
+    local count
+    count=$(echo "$resp" | jq '[.contracts[] | select(.template_id | contains("IssuanceConfig"))] | length')
+    if [ "$count" -lt 1 ]; then
+        echo "ERROR: No IssuanceConfig contract visible to $PARTY_ID" >&2
+        return 1
+    fi
+    echo "$resp" | jq -r '[.contracts[] | select(.template_id | contains("IssuanceConfig"))][0].contract_id'
+}
+
+# ============================================================================
+# Flow 1: SetupIssuance — creates the IssuanceConfig
+# ============================================================================
+
+SETUP_PROPOSAL=$(cat <<EOF
+{
+  "type": "setup_issuance",
+  "provider_service_cid": "$PROVIDER_SERVICE_CID",
+  "operator": "$P1_MEMBER_PARTY",
+  "instrument_id_text": "TEST-E2E-TOKEN",
+  "display_name": "Test E2E Token",
+  "symbol": "TEE",
+  "decimals": 8
+}
+EOF
+)
+run_proposal_flow "SetupIssuance" "$SETUP_PROPOSAL"
+
+ISSUANCE_CONFIG_CID=$(current_issuance_config_cid) || exit 1
+echo "IssuanceConfig created: $ISSUANCE_CONFIG_CID"
+
+# ============================================================================
+# Flow 2: Mint — offers 100 TEST-E2E-TOKEN to the governance party (self-mint
+# for E2E; a real run would target an outsider, but self is a valid holder too)
+# ============================================================================
+
+MINT_PROPOSAL=$(cat <<EOF
+{
+  "type": "mint",
+  "issuance_config_cid": "$ISSUANCE_CONFIG_CID",
+  "recipient": "$P1_MEMBER_PARTY",
+  "amount": "100.0",
+  "description": "E2E test mint"
+}
+EOF
+)
+run_proposal_flow "Mint" "$MINT_PROPOSAL"
+
+# ============================================================================
+# Flow 3: Burn — offers to burn 10 tokens from the same holder
+# ============================================================================
+
+BURN_PROPOSAL=$(cat <<EOF
+{
+  "type": "burn",
+  "issuance_config_cid": "$ISSUANCE_CONFIG_CID",
+  "holder": "$P1_MEMBER_PARTY",
+  "amount": "10.0",
+  "description": "E2E test burn"
+}
+EOF
+)
+run_proposal_flow "Burn" "$BURN_PROPOSAL"
+
+# ============================================================================
+# Flow 4: RotateFactory — swaps the AllocationFactory on the IssuanceConfig
+# ============================================================================
+
+if [ -z "$SPARE_FACTORY_CID" ]; then
+    echo ""
+    echo "Auto-provisioning spare AllocationFactory via dpm script..."
+    ensure_dpm_and_test_dar
+
+    SF_INPUT="$DEV_DIR/provision-factory-input.json"
+    SF_OUTPUT="$DEV_DIR/provision-factory-output.json"
+    cat > "$SF_INPUT" <<EOF
+{
+  "governanceParty": "$PARTY_ID",
+  "operator": "$P1_MEMBER_PARTY"
+}
+EOF
+
+    dpm script \
+        --dar "$TEST_DAR" \
+        --script-name 'Governance.TokenIssuance.Scripts.ProvisionSpareFactory:provision' \
+        --ledger-host localhost --ledger-port "$P1_CANTON_LEDGER" \
+        --access-token-file "$PROVISION_TOKEN" \
+        --input-file "$SF_INPUT" --output-file "$SF_OUTPUT" \
+        --upload-dar yes --wall-clock-time
+
+    SPARE_FACTORY_CID=$(jq -r '.allocationFactoryCid // empty' "$SF_OUTPUT")
+    if [ -z "$SPARE_FACTORY_CID" ] || [ "$SPARE_FACTORY_CID" = "null" ]; then
+        echo "ERROR: Failed to extract allocationFactoryCid"
+        cat "$SF_OUTPUT"
+        exit 1
+    fi
+    echo "Provisioned spare AllocationFactory: $SPARE_FACTORY_CID"
+fi
+
+OLD_ISSUANCE_CONFIG_CID="$ISSUANCE_CONFIG_CID"
+
+ROTATE_PROPOSAL=$(cat <<EOF
+{
+  "type": "rotate_factory",
+  "issuance_config_cid": "$OLD_ISSUANCE_CONFIG_CID",
+  "new_factory_cid": "$SPARE_FACTORY_CID"
+}
+EOF
+)
+run_proposal_flow "RotateFactory" "$ROTATE_PROPOSAL"
+
+NEW_ISSUANCE_CONFIG_CID=$(current_issuance_config_cid) || exit 1
+echo "IssuanceConfig after rotate: $NEW_ISSUANCE_CONFIG_CID"
+
+if [ "$NEW_ISSUANCE_CONFIG_CID" = "$OLD_ISSUANCE_CONFIG_CID" ]; then
+    echo "ERROR: RotateFactory did not produce a new IssuanceConfig cid"
+    echo "  old: $OLD_ISSUANCE_CONFIG_CID"
+    echo "  new: $NEW_ISSUANCE_CONFIG_CID"
     exit 1
 fi
 
 # ============================================================================
-# Step 6: Verify cleanup AND IssuanceConfig creation
+# Summary
 # ============================================================================
-
-echo ""
-echo "Step 6: Verifying execution..."
-sleep 2
-
-GOVERNANCE_RESPONSE=$(curl -s "http://localhost:$P1_HTTP/governance/confirmations?party_id=$PARTY_ID")
-REMAINING_ACTIONS=$(echo "$GOVERNANCE_RESPONSE" | jq '.domain_actions | length')
-
-echo "  Remaining domain actions: $REMAINING_ACTIONS"
-
-if [ "$REMAINING_ACTIONS" != "0" ]; then
-    echo "ERROR: Expected 0 domain actions after execution, got $REMAINING_ACTIONS"
-    exit 1
-fi
-
-# Verify IssuanceConfig contract was created
-CONTRACTS_RESPONSE=$(curl -s "http://localhost:$P1_HTTP/contracts?party_id=$PARTY_ID")
-ISSUANCE_CONFIG_COUNT=$(echo "$CONTRACTS_RESPONSE" | jq \
-    '[.contracts[] | select(.template_id | contains("IssuanceConfig"))] | length')
-
-echo "  IssuanceConfig contracts found: $ISSUANCE_CONFIG_COUNT"
-
-if [ "$ISSUANCE_CONFIG_COUNT" -lt 1 ]; then
-    echo "ERROR: Expected at least 1 IssuanceConfig contract after execution, found $ISSUANCE_CONFIG_COUNT"
-    echo "  Contracts response: $CONTRACTS_RESPONSE"
-    exit 1
-fi
-
-ISSUANCE_CONFIG_CID=$(echo "$CONTRACTS_RESPONSE" | jq -r \
-    '[.contracts[] | select(.template_id | contains("IssuanceConfig"))][0].contract_id')
-echo "  IssuanceConfig contract ID: $ISSUANCE_CONFIG_CID"
 
 echo ""
 echo "Governance token issuance flow completed successfully!"
+echo "  SetupIssuance → IssuanceConfig: $OLD_ISSUANCE_CONFIG_CID"
+echo "  Mint          → offered 100 TEE to $P1_MEMBER_PARTY"
+echo "  Burn          → offered to burn 10 TEE from $P1_MEMBER_PARTY"
+echo "  RotateFactory → new IssuanceConfig: $NEW_ISSUANCE_CONFIG_CID"
 echo "  Proposer:  participant-1 ($P1_MEMBER_PARTY)"
 echo "  Confirmer: participant-2 ($P2_MEMBER_PARTY)"
 echo "  Executor:  participant-3 ($P3_MEMBER_PARTY)"
