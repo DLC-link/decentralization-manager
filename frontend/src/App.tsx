@@ -22,7 +22,8 @@ import SearchIcon from "@mui/icons-material/Search";
 import AddIcon from "@mui/icons-material/Add";
 import { Header } from "./components/Header";
 import { Sidebar, SIDEBAR_WIDTH } from "./components/Sidebar";
-import { PartyCard } from "./components/PartyCard";
+import { PartyList } from "./components/PartyList";
+import { PartyDetail } from "./components/PartyDetail";
 import { NodeConfigAccordion } from "./components/NodeConfigAccordion";
 import { NetworkConfigAccordion } from "./components/NetworkConfigAccordion";
 import { PackagesPanel } from "./components/PackagesPanel";
@@ -73,8 +74,10 @@ const App = () => {
   const [partyFilter, setPartyFilter] = useState("");
   const [refreshingParties, setRefreshingParties] = useState(false);
   const [operatorParty, setOperatorParty] = useState("");
+  const [selectedPartyId, setSelectedPartyId] = useState<string | null>(null);
   const [showSearchBar, setShowSearchBar] = useState(true);
   const lastScrollY = useRef(0);
+  const savedScrollY = useRef(0);
   const { showSnackbar } = useSnackbar();
 
   useEffect(() => {
@@ -314,7 +317,7 @@ const App = () => {
         <Header />
       )}
 
-      {isLargeScreen && activeTab === 0 && !loading && !error && (
+      {isLargeScreen && activeTab === 0 && !selectedPartyId && !loading && !error && (
         <Box
           sx={{
             position: "fixed",
@@ -420,7 +423,7 @@ const App = () => {
         sx={{
           pt: isLargeScreen ? 4 : 16,
           pb: 0,
-          ...(isLargeScreen && activeTab === 1 && { display: "none" }),
+          ...(isLargeScreen && (activeTab === 0 || activeTab === 1) && { display: "none" }),
         }}
       >
         {window.location.pathname.startsWith("/swagger-ui") &&
@@ -470,67 +473,82 @@ const App = () => {
             {/* Tab 0: Decentralized Parties */}
             {activeTab === 0 && (
               <>
-                {isLargeScreen ? (
-                  <Box sx={{ height: 48 }} />
-                ) : (
-                  <Box sx={{ mb: 3 }}>
-                    <Box
-                      sx={{
-                        display: "flex",
-                        alignItems: "flex-start",
-                        gap: 1,
-                      }}
-                    >
-                      <TextField
-                        size="small"
-                        label="Filter by full prefix (e.g. cbtc-network)"
-                        placeholder="Enter full party prefix"
-                        value={partyFilter}
-                        onChange={(e) => setPartyFilter(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") {
-                            refreshParties();
-                          }
-                        }}
-                        disabled={refreshingParties}
-                        InputProps={{
-                          startAdornment: (
-                            <InputAdornment position="start">
-                              <FilterListIcon fontSize="small" color="action" />
-                            </InputAdornment>
-                          ),
-                        }}
-                        sx={{ width: 300 }}
-                      />
-                      <IconButton
-                        onClick={refreshParties}
-                        disabled={refreshingParties}
-                        color="primary"
-                        sx={{ mt: "1px" }}
-                      >
-                        <SearchIcon />
-                      </IconButton>
-                    </Box>
-                    {refreshingParties && (
-                      <LinearProgress sx={{ mt: 1, borderRadius: 1 }} />
-                    )}
-                  </Box>
-                )}
-
-                {parties.map((party) => (
-                  <PartyCard
-                    key={party.party_id}
-                    party={party}
+                {selectedPartyId && parties.find((p) => p.party_id === selectedPartyId) ? (
+                  <PartyDetail
+                    party={parties.find((p) => p.party_id === selectedPartyId)!}
+                    onBack={() => {
+                      setSelectedPartyId(null);
+                      window.scrollTo(0, savedScrollY.current);
+                    }}
                     onRefresh={refreshParties}
                     selfParticipantId={nodeConfig?.node.participant_id}
                     authStatus={authStatuses.find(
-                      (a) => a.dec_party_id === party.party_id,
+                      (a) => a.dec_party_id === selectedPartyId,
                     )}
                     onAuthRefresh={refreshAuthStatus}
                     operatorParty={operatorParty}
                     network={nodeConfig?.canton.network}
                   />
-                ))}
+                ) : (
+                  <>
+                    {isLargeScreen ? (
+                      <Box sx={{ height: 48 }} />
+                    ) : (
+                      <Box sx={{ mb: 3 }}>
+                        <Box
+                          sx={{
+                            display: "flex",
+                            alignItems: "flex-start",
+                            gap: 1,
+                          }}
+                        >
+                          <TextField
+                            size="small"
+                            label="Filter by full prefix (e.g. cbtc-network)"
+                            placeholder="Enter full party prefix"
+                            value={partyFilter}
+                            onChange={(e) => setPartyFilter(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") {
+                                refreshParties();
+                              }
+                            }}
+                            disabled={refreshingParties}
+                            InputProps={{
+                              startAdornment: (
+                                <InputAdornment position="start">
+                                  <FilterListIcon fontSize="small" color="action" />
+                                </InputAdornment>
+                              ),
+                            }}
+                            sx={{ width: 300 }}
+                          />
+                          <IconButton
+                            onClick={refreshParties}
+                            disabled={refreshingParties}
+                            color="primary"
+                            sx={{ mt: "1px" }}
+                          >
+                            <SearchIcon />
+                          </IconButton>
+                        </Box>
+                        {refreshingParties && (
+                          <LinearProgress sx={{ mt: 1, borderRadius: 1 }} />
+                        )}
+                      </Box>
+                    )}
+
+                    <PartyList
+                      parties={parties}
+                      authStatuses={authStatuses}
+                      onSelectParty={(id) => {
+                        savedScrollY.current = window.scrollY;
+                        setSelectedPartyId(id);
+                        window.scrollTo(0, 0);
+                      }}
+                    />
+                  </>
+                )}
 
                 {ADMIN_ACCESS && (
                   <Tooltip title="Create Party" arrow>
@@ -611,6 +629,58 @@ const App = () => {
           </>
         )}
       </Container>
+
+      {/* Tab 0: Parties — edge-to-edge on large screens */}
+      {isLargeScreen && activeTab === 0 && !loading && !error && (
+        <Box sx={{ pt: 4 }}>
+          {selectedPartyId && parties.find((p) => p.party_id === selectedPartyId) ? (
+            <PartyDetail
+              party={parties.find((p) => p.party_id === selectedPartyId)!}
+              onBack={() => {
+                setSelectedPartyId(null);
+                window.scrollTo(0, savedScrollY.current);
+              }}
+              onRefresh={refreshParties}
+              selfParticipantId={nodeConfig?.node.participant_id}
+              authStatus={authStatuses.find(
+                (a) => a.dec_party_id === selectedPartyId,
+              )}
+              onAuthRefresh={refreshAuthStatus}
+              operatorParty={operatorParty}
+              network={nodeConfig?.canton.network}
+            />
+          ) : (
+            <>
+              <Box sx={{ height: 48 }} />
+              <PartyList
+                parties={parties}
+                authStatuses={authStatuses}
+                onSelectParty={(id) => {
+                  savedScrollY.current = window.scrollY;
+                  setSelectedPartyId(id);
+                  window.scrollTo(0, 0);
+                }}
+              />
+            </>
+          )}
+
+          {ADMIN_ACCESS && (
+            <Tooltip title="Create Party" arrow>
+              <Fab
+                color="primary"
+                onClick={() => setOnboardingDialogOpen(true)}
+                sx={{
+                  position: "fixed",
+                  bottom: 24,
+                  right: 24,
+                }}
+              >
+                <AddIcon />
+              </Fab>
+            </Tooltip>
+          )}
+        </Box>
+      )}
 
       {/* Tab 1: Package Management — edge-to-edge */}
       {activeTab === 1 && !loading && !error && (

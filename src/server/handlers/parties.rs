@@ -862,13 +862,10 @@ async fn fetch_peer_packages(
                 let psk = keypair.derive_psk(&peer_pub_key);
                 let identity = current_participant_id.to_string();
 
-                match tokio::time::timeout(
-                    Duration::from_secs(5),
-                    send_noise_message(&peer.address, peer.port, &psk, identity.as_bytes(), &msg),
-                )
-                .await
+                match send_noise_message(&peer.address, peer.port, &psk, identity.as_bytes(), &msg)
+                    .await
                 {
-                    Ok(Ok(response)) => {
+                    Ok(response) => {
                         if let Ok(response_msg) = Message::from_bytes(&response)
                             && response_msg.msg_type == MessageType::Data
                             && let Ok(packages) =

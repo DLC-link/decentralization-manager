@@ -1,22 +1,26 @@
-import { Box, Card, CardContent, Skeleton, Tabs, Tab, useMediaQuery, useTheme } from "@mui/material";
+import { Box, Card, Skeleton, Tabs, Tab, useMediaQuery, useTheme } from "@mui/material";
 
-const PartyCardSkeleton = () => (
-  <Card sx={{ mb: 3, borderRadius: 2 }}>
-    <CardContent sx={{ p: 3 }}>
-      <Skeleton variant="text" width="70%" height={32} />
-      <Box sx={{ display: "flex", gap: 1, mt: 1.5, mb: 2 }}>
-        <Skeleton variant="rounded" width={100} height={24} />
-        <Skeleton variant="rounded" width={80} height={24} />
-        <Skeleton variant="rounded" width={110} height={24} />
-        <Skeleton variant="rounded" width={90} height={24} />
+const PartyListSkeleton = () => (
+  <Card sx={{ borderRadius: 2, overflow: "hidden" }}>
+    {/* Header row */}
+    <Box sx={{ display: "flex", gap: 2, py: 1.5, px: 2, bgcolor: "action.hover" }}>
+      <Skeleton variant="text" width="40%" height={16} />
+      <Skeleton variant="text" width="8%" height={16} />
+      <Skeleton variant="text" width="8%" height={16} />
+      <Skeleton variant="text" width="10%" height={16} />
+      <Skeleton variant="text" width="10%" height={16} />
+      <Skeleton variant="text" width="8%" height={16} />
+    </Box>
+    {Array.from({ length: 6 }).map((_, i) => (
+      <Box key={i} sx={{ display: "flex", gap: 2, py: 1.5, px: 2 }}>
+        <Skeleton variant="text" width="40%" height={20} />
+        <Skeleton variant="text" width="8%" height={20} />
+        <Skeleton variant="text" width="8%" height={20} />
+        <Skeleton variant="text" width="10%" height={20} />
+        <Skeleton variant="rounded" width={32} height={20} />
+        <Skeleton variant="circular" width={20} height={20} />
       </Box>
-      <Skeleton variant="text" width="30%" height={20} sx={{ mt: 3 }} />
-      <Box sx={{ mt: 1.5 }}>
-        <Skeleton variant="rounded" width="100%" height={40} />
-        <Skeleton variant="rounded" width="100%" height={40} sx={{ mt: 1 }} />
-        <Skeleton variant="rounded" width="100%" height={40} sx={{ mt: 1 }} />
-      </Box>
-    </CardContent>
+    ))}
   </Card>
 );
 
@@ -54,8 +58,7 @@ export const LoadingSkeleton = () => {
         </Box>
       )}
 
-      <PartyCardSkeleton />
-      <PartyCardSkeleton />
+      <PartyListSkeleton />
     </>
   );
 };

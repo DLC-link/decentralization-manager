@@ -1,22 +1,22 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import {
-  Card,
-  CardContent,
-  Chip,
   Box,
-  Typography,
+  Button,
+  Chip,
+  Collapse,
+  Divider,
+  IconButton,
   Table,
   TableBody,
   TableCell,
   TableHead,
   TableRow,
-  IconButton,
-  Tooltip,
-  Button,
-  Collapse,
   Tabs,
   Tab,
+  Tooltip,
+  Typography,
 } from "@mui/material";
+import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import PersonRemoveIcon from "@mui/icons-material/PersonRemove";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import ExpandLessIcon from "@mui/icons-material/ExpandLess";
@@ -29,12 +29,13 @@ import { PartyConfigDialog } from "./PartyConfigDialog";
 import { GovernanceSection } from "./GovernanceSection";
 import { GovernanceAuditTrail } from "./GovernanceAuditTrail";
 import { AuthSection } from "./AuthSection";
-import type { DecentralizedParty, Network, PartyAuthStatus } from "../types";
-import { ADMIN_ACCESS } from "../constants";
 import { zebraRow } from "../styles";
+import { ADMIN_ACCESS } from "../constants";
+import type { DecentralizedParty, Network, PartyAuthStatus } from "../types";
 
-interface PartyCardProps {
+interface PartyDetailProps {
   party: DecentralizedParty;
+  onBack: () => void;
   onRefresh: () => void;
   selfParticipantId?: string;
   authStatus?: PartyAuthStatus;
@@ -43,27 +44,40 @@ interface PartyCardProps {
   network?: Network;
 }
 
-export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onAuthRefresh, operatorParty, network }: PartyCardProps) => {
+export const PartyDetail = ({
+  party,
+  onBack,
+  onRefresh,
+  selfParticipantId,
+  authStatus,
+  onAuthRefresh,
+  operatorParty,
+  network,
+}: PartyDetailProps) => {
   const [kickDialogOpen, setKickDialogOpen] = useState(false);
   const [contractsDialogOpen, setContractsDialogOpen] = useState(false);
   const [configDialogOpen, setConfigDialogOpen] = useState(false);
-  const [selectedParticipant, setSelectedParticipant] = useState<string>("");
+  const [selectedParticipant, setSelectedParticipant] = useState("");
   const [contractsExpanded, setContractsExpanded] = useState(true);
   const [governanceTab, setGovernanceTab] = useState(0);
   const [canScrollUp, setCanScrollUp] = useState(false);
   const [canScrollDown, setCanScrollDown] = useState(false);
   const contractsScrollRef = useRef<HTMLDivElement>(null);
 
-  // Find governance rules contracts from party's contracts (vault or core)
-  const governanceContracts = party.contracts?.filter(
-    (c) => c.template_id.includes("VaultGovernanceRules")
-        || c.template_id.includes("VaultGovernance")
-        || c.template_id === "Governance.Rules:GovernanceRules"
-  ) ?? [];
+  const governanceContracts =
+    party.contracts?.filter(
+      (c) =>
+        c.template_id.includes("VaultGovernanceRules") ||
+        c.template_id.includes("VaultGovernance") ||
+        c.template_id === "Governance.Rules:GovernanceRules",
+    ) ?? [];
   const rulesContract = governanceContracts[0];
-  const governanceType = rulesContract?.template_id === "Governance.Rules:GovernanceRules"
-    ? "core_self" as const
-    : "vault" as const;
+  const governanceType =
+    rulesContract?.template_id === "Governance.Rules:GovernanceRules"
+      ? ("core_self" as const)
+      : ("vault" as const);
+
+  const isOwner = Boolean(party.my_owner_key);
 
   const updateScrollShadows = useCallback(() => {
     const el = contractsScrollRef.current;
@@ -87,75 +101,101 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
     setKickDialogOpen(true);
   };
 
-  const isOwner = Boolean(party.my_owner_key);
   return (
-    <Card sx={{ mb: 3, borderRadius: 2 }}>
-      <CardContent sx={{ p: 3, pb: 0, "&:last-child": { pb: 0 } }}>
+    <Box>
+      {/* Header */}
+      <Box
+        sx={{
+          display: "flex",
+          alignItems: "center",
+          gap: 1,
+          mb: 2,
+        }}
+      >
+        <IconButton onClick={onBack}>
+          <ArrowBackIcon />
+        </IconButton>
         <CopyableText
           text={party.party_id}
           truncate={{ start: party.party_id.indexOf("::") + 18, end: 16 }}
           variant="h6"
         />
+      </Box>
 
-        <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1, mb: 2, mt: 1.5, alignItems: "center" }}>
-          <Chip label={`Threshold: ${party.threshold}`} size="small" />
-          <Chip label={`Owners: ${party.owners.length}`} size="small" />
+      <Box
+        sx={{
+          display: "flex",
+          flexWrap: "wrap",
+          gap: 1,
+          mb: 3,
+          alignItems: "center",
+        }}
+      >
+        <Chip label={`Threshold: ${party.threshold}`} size="small" />
+        <Chip label={`Owners: ${party.owners.length}`} size="small" />
+        <Chip
+          label={`Participants: ${party.participants.length}`}
+          size="small"
+        />
+        {party.contracts && (
           <Chip
-            label={`Participants: ${party.participants.length}`}
+            label={`Contracts: ${party.contracts.length}`}
             size="small"
+            color="primary"
           />
-          {party.contracts && (
-            <Chip
-              label={`Contracts: ${party.contracts.length}`}
-              size="small"
-              color="primary"
-            />
-          )}
-          <Tooltip title="Party configuration">
-            <IconButton
-              size="small"
-              onClick={() => setConfigDialogOpen(true)}
-            >
-              <SettingsIcon fontSize="small" />
-            </IconButton>
-          </Tooltip>
-          {isOwner && (
-            <Button
-              variant="outlined"
-              size="small"
-              startIcon={<UploadFileIcon />}
-              onClick={() => setContractsDialogOpen(true)}
-              disabled={!ADMIN_ACCESS}
-            >
-              {governanceType === "core_self" ? "Manage Plugins" : "Deploy Contracts"}
-            </Button>
-          )}
-        </Box>
-
-        {party.my_owner_key && (
-          <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-            <Typography variant="body2" color="text.secondary">
-              <strong>My Owner Key:</strong>
-            </Typography>
-            <CopyableText
-              text={party.my_owner_key}
-              truncate={{ start: 16, end: 16 }}
-              variant="body2"
-            />
-          </Box>
         )}
+        <Tooltip title="Party configuration">
+          <IconButton
+            size="small"
+            onClick={() => setConfigDialogOpen(true)}
+          >
+            <SettingsIcon fontSize="small" />
+          </IconButton>
+        </Tooltip>
+        {isOwner && (
+          <Button
+            variant="outlined"
+            size="small"
+            startIcon={<UploadFileIcon />}
+            onClick={() => setContractsDialogOpen(true)}
+            disabled={!ADMIN_ACCESS}
+          >
+            {governanceType === "core_self"
+              ? "Manage Plugins"
+              : "Deploy Contracts"}
+          </Button>
+        )}
+      </Box>
 
-        <Typography variant="subtitle2" sx={{ mt: 3, mb: 1.5 }}>
-          Participants
-        </Typography>
-      </CardContent>
-      <Box sx={{ overflowX: "auto" }}>
+      {/* Owner Key */}
+      {party.my_owner_key && (
+        <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: 2 }}>
+          <Typography variant="body2" color="text.secondary">
+            <strong>My Owner Key:</strong>
+          </Typography>
+          <CopyableText
+            text={party.my_owner_key}
+            truncate={{ start: 16, end: 16 }}
+            variant="body2"
+          />
+        </Box>
+      )}
+
+      <Divider sx={{ mb: 2 }} />
+
+      {/* Participants */}
+      <Typography variant="subtitle2" sx={{ mb: 1.5 }}>
+        Participants
+      </Typography>
+      <Box sx={{ overflowX: "auto", mb: 2 }}>
         <Table size="small">
           <TableHead>
             <TableRow>
               <TableCell sx={{ py: 1 }}>Participant</TableCell>
               <TableCell sx={{ py: 1 }}>Permission</TableCell>
-              <TableCell sx={{ py: 1 }} align="right">Actions</TableCell>
+              <TableCell sx={{ py: 1 }} align="right">
+                Actions
+              </TableCell>
             </TableRow>
           </TableHead>
           <TableBody>
@@ -178,13 +218,22 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
                   />
                 </TableCell>
                 <TableCell sx={{ py: 1 }} align="right">
-                  <Tooltip title={p.participant_uid === selfParticipantId ? "Cannot kick yourself" : "Kick participant"}>
+                  <Tooltip
+                    title={
+                      p.participant_uid === selfParticipantId
+                        ? "Cannot kick yourself"
+                        : "Kick participant"
+                    }
+                  >
                     <span>
                       <IconButton
                         size="small"
                         color="error"
                         onClick={() => handleKickClick(p.participant_uid)}
-                        disabled={!ADMIN_ACCESS || p.participant_uid === selfParticipantId}
+                        disabled={
+                          !ADMIN_ACCESS ||
+                          p.participant_uid === selfParticipantId
+                        }
                       >
                         <PersonRemoveIcon fontSize="small" />
                       </IconButton>
@@ -197,35 +246,34 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
         </Table>
       </Box>
 
+      {/* Contracts */}
       {party.contracts && party.contracts.length > 0 && (
         <>
-          <CardContent sx={{ pb: 0, "&:last-child": { pb: 0 } }}>
-            <Box
-              sx={{
-                display: "flex",
-                alignItems: "center",
-                cursor: "pointer",
-                mb: 1,
-              }}
-              onClick={() => setContractsExpanded(!contractsExpanded)}
-            >
-              <IconButton size="small">
-                {contractsExpanded ? <ExpandLessIcon /> : <ExpandMoreIcon />}
-              </IconButton>
-              <Typography variant="subtitle2">
-                Contracts
-                <Chip
-                  label={party.contracts.length}
-                  size="small"
-                  sx={{ ml: 1 }}
-                  color="primary"
-                />
-              </Typography>
-            </Box>
-          </CardContent>
+          <Divider sx={{ mb: 2 }} />
+          <Box
+            sx={{
+              display: "flex",
+              alignItems: "center",
+              cursor: "pointer",
+              mb: 1,
+            }}
+            onClick={() => setContractsExpanded(!contractsExpanded)}
+          >
+            <IconButton size="small">
+              {contractsExpanded ? <ExpandLessIcon /> : <ExpandMoreIcon />}
+            </IconButton>
+            <Typography variant="subtitle2">
+              Contracts
+              <Chip
+                label={party.contracts.length}
+                size="small"
+                sx={{ ml: 1 }}
+                color="primary"
+              />
+            </Typography>
+          </Box>
           <Collapse in={contractsExpanded}>
-            <Box sx={{ position: "relative" }}>
-              {/* Top shadow */}
+            <Box sx={{ position: "relative", mb: 2 }}>
               <Box
                 sx={{
                   position: "absolute",
@@ -233,18 +281,18 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
                   left: 0,
                   right: 0,
                   height: 16,
-                  background: "linear-gradient(to bottom, rgba(0,0,0,0.08), transparent)",
+                  background:
+                    "linear-gradient(to bottom, rgba(0,0,0,0.08), transparent)",
                   pointerEvents: "none",
                   opacity: canScrollUp ? 1 : 0,
                   transition: "opacity 0.2s",
                   zIndex: 1,
                 }}
               />
-              {/* Scrollable container */}
               <Box
                 ref={contractsScrollRef}
                 sx={{
-                  maxHeight: 180, // ~4-5 rows
+                  maxHeight: 180,
                   overflowY: "auto",
                   overflowX: "auto",
                 }}
@@ -259,7 +307,9 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
                   <TableBody>
                     {party.contracts.map((c, idx) => (
                       <TableRow key={c.contract_id} sx={zebraRow(idx)}>
-                        <TableCell sx={{ py: 1 }}>{c.template_id}</TableCell>
+                        <TableCell sx={{ py: 1 }}>
+                          {c.template_id}
+                        </TableCell>
                         <TableCell sx={{ py: 1 }}>
                           <CopyableText
                             text={c.contract_id}
@@ -272,7 +322,6 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
                   </TableBody>
                 </Table>
               </Box>
-              {/* Bottom shadow */}
               <Box
                 sx={{
                   position: "absolute",
@@ -280,7 +329,8 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
                   left: 0,
                   right: 0,
                   height: 16,
-                  background: "linear-gradient(to top, rgba(0,0,0,0.08), transparent)",
+                  background:
+                    "linear-gradient(to top, rgba(0,0,0,0.08), transparent)",
                   pointerEvents: "none",
                   opacity: canScrollDown ? 1 : 0,
                   transition: "opacity 0.2s",
@@ -292,9 +342,15 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
         </>
       )}
 
+      {/* Auth & Governance */}
       {authStatus && (
-        <CardContent sx={{ pt: 1, pb: authStatus.rights?.dec_party_act_as ? 0 : 2, "&:last-child": { pb: authStatus.rights?.dec_party_act_as ? 0 : 2 } }}>
-          <AuthSection partyId={party.party_id} authStatus={authStatus} onRefresh={onAuthRefresh} />
+        <>
+          <Divider sx={{ mb: 2 }} />
+          <AuthSection
+            partyId={party.party_id}
+            authStatus={authStatus}
+            onRefresh={onAuthRefresh}
+          />
           {authStatus.rights?.dec_party_act_as && (
             <>
               <Tabs
@@ -309,7 +365,9 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
                 <GovernanceSection
                   partyId={party.party_id}
                   rulesContractId={rulesContract?.contract_id}
-                  governanceContractIds={governanceContracts.map((c) => c.contract_id)}
+                  governanceContractIds={governanceContracts.map(
+                    (c) => c.contract_id,
+                  )}
                   memberPartyId={authStatus.member_party_id}
                   defaultOperatorParty={operatorParty}
                   network={network}
@@ -321,9 +379,10 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
               )}
             </>
           )}
-        </CardContent>
+        </>
       )}
 
+      {/* Dialogs */}
       <KickDialog
         open={kickDialogOpen}
         onClose={() => setKickDialogOpen(false)}
@@ -346,10 +405,11 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
         partyId={party.party_id}
         participantIds={party.participants.map((p) => p.participant_uid)}
         defaultOperatorParty={operatorParty}
-        knownPackageIds={[...new Set(party.contracts?.map((c) => c.package_id) ?? [])]}
+        knownPackageIds={[
+          ...new Set(party.contracts?.map((c) => c.package_id) ?? []),
+        ]}
         deployedContracts={party.contracts ?? []}
       />
-
 
       <PartyConfigDialog
         open={configDialogOpen}
@@ -360,6 +420,6 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
         }}
         partyId={party.party_id}
       />
-    </Card>
+    </Box>
   );
 };
