@@ -119,6 +119,9 @@ pub trait Commitable {
     /// Delete decentralized parties by prefix (cascades to owners, participants, contracts)
     async fn delete_dec_parties_by_prefix(&mut self, prefix: &str) -> Result;
 
+    /// Delete decentralized parties not in the given set of IDs (within a prefix scope)
+    async fn delete_stale_dec_parties(&mut self, prefix: &str, fresh_ids: &[String]) -> Result;
+
     /// Update the owner key for a specific participant in a decentralized party
     async fn update_participant_owner_key(
         &mut self,

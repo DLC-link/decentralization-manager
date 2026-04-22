@@ -59,7 +59,6 @@ export const PartyList = ({
             <TableCell sx={{ py: 1 }} align="center">Participants</TableCell>
             <TableCell sx={{ py: 1 }} align="center">Contracts</TableCell>
             <TableCell sx={{ py: 1 }} align="center">Auth</TableCell>
-            <TableCell sx={{ py: 1 }} align="right" />
           </TableRow>
         </TableHead>
         <TableBody>
@@ -70,20 +69,29 @@ export const PartyList = ({
             return (
               <TableRow
                 key={party.party_id}
-                sx={{ ...zebraRow(idx), cursor: "pointer" }}
+                tabIndex={0}
+                sx={{
+                  ...zebraRow(idx),
+                  cursor: "pointer",
+                  "&:hover td": {
+                    backgroundColor: "rgba(255, 102, 51, 0.08)",
+                    transition: "background-color 0.15s ease",
+                  },
+                }}
                 onClick={() => onSelectParty(party.party_id)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") onSelectParty(party.party_id);
+                }}
               >
                 <TableCell sx={{ py: 1.5 }}>
-                  <Box onClick={(e) => e.stopPropagation()}>
-                    <CopyableText
-                      text={party.party_id}
-                      truncate={{
-                        start: party.party_id.indexOf("::") + 18,
-                        end: 16,
-                      }}
-                      variant="body2"
-                    />
-                  </Box>
+                  <CopyableText
+                    text={party.party_id}
+                    truncate={{
+                      start: party.party_id.indexOf("::") + 18,
+                      end: 16,
+                    }}
+                    variant="body2"
+                  />
                 </TableCell>
                 <TableCell sx={{ py: 1.5 }} align="center">
                   {party.threshold}
@@ -107,11 +115,6 @@ export const PartyList = ({
                 </TableCell>
                 <TableCell sx={{ py: 1.5 }} align="center">
                   <AuthStatusIcon status={auth} />
-                </TableCell>
-                <TableCell sx={{ py: 1.5 }} align="right">
-                  {party.my_owner_key && (
-                    <Chip label="Owner" size="small" color="success" variant="outlined" />
-                  )}
                 </TableCell>
               </TableRow>
             );

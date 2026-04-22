@@ -1,32 +1,12 @@
-import { useRef, useState } from "react";
-import { Box, Container, IconButton, Tooltip, Typography, useTheme } from "@mui/material";
+import { Box, Container, IconButton, Tooltip } from "@mui/material";
 import LogoutIcon from "@mui/icons-material/Logout";
 
-import BitSafeLogoDark from "../assets/bitsafe-logo-dark.svg";
-import BitSafeLogoLight from "../assets/bitsafe-logo-light.svg";
 import { useAuth } from "../contexts";
+import { Logo } from "./Logo";
 import { ThemeSwitcher } from "./ThemeSwitcher";
 
-declare const __BUILD_DATE__: string;
-
 export const Header = () => {
-  const theme = useTheme();
   const { token, logout } = useAuth();
-  const logo =
-    theme.palette.mode === "light" ? BitSafeLogoDark : BitSafeLogoLight;
-  const [showBuildDate, setShowBuildDate] = useState(false);
-  const clickCount = useRef(0);
-
-  const handleSubtitleClick = () => {
-    clickCount.current += 1;
-    if (clickCount.current >= 10) {
-      clickCount.current = 0;
-      setShowBuildDate(false);
-      window.location.href = "/swagger-ui/";
-    } else if (clickCount.current >= 5) {
-      setShowBuildDate(true);
-    }
-  };
 
   return (
     <Box
@@ -55,24 +35,7 @@ export const Header = () => {
           justifyContent: "space-between",
         }}
       >
-        <Box>
-          <img
-            src={logo}
-            alt="BitSafe"
-            onClick={() => window.location.reload()}
-            style={{ height: 28, cursor: "pointer" }}
-          />
-          <Typography
-            variant="body2"
-            color="text.secondary"
-            onClick={handleSubtitleClick}
-            sx={{ cursor: "default", userSelect: "none" }}
-          >
-            {showBuildDate
-              ? `Build date: ${new Date(__BUILD_DATE__).toLocaleString("hu-HU", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false })}`
-              : "Monitor and manage your decentralized parties"}
-          </Typography>
-        </Box>
+        <Logo subtitle="Monitor and manage your decentralized parties" />
         <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
           <ThemeSwitcher />
           {token && (

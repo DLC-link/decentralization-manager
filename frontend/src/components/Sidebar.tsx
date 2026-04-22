@@ -7,7 +7,6 @@ import {
   ListItemIcon,
   ListItemText,
   Tooltip,
-  Typography,
   useTheme,
 } from "@mui/material";
 import GroupsIcon from "@mui/icons-material/Groups";
@@ -15,9 +14,8 @@ import Inventory2Icon from "@mui/icons-material/Inventory2";
 import SettingsIcon from "@mui/icons-material/Settings";
 import LogoutIcon from "@mui/icons-material/Logout";
 
-import BitSafeLogoDark from "../assets/bitsafe-logo-dark.svg";
-import BitSafeLogoLight from "../assets/bitsafe-logo-light.svg";
 import { useAuth } from "../contexts";
+import { Logo } from "./Logo";
 import { ThemeSwitcher } from "./ThemeSwitcher";
 
 export const SIDEBAR_WIDTH = 260;
@@ -38,8 +36,6 @@ const navItems = [
 export const Sidebar = ({ activeTab, onTabChange, partyCount, packageCount }: SidebarProps) => {
   const theme = useTheme();
   const { token, logout } = useAuth();
-  const logo =
-    theme.palette.mode === "light" ? BitSafeLogoDark : BitSafeLogoLight;
 
   return (
     <Box
@@ -58,15 +54,7 @@ export const Sidebar = ({ activeTab, onTabChange, partyCount, packageCount }: Si
     >
       {/* Logo */}
       <Box sx={{ px: 3, pt: 3, pb: 1 }}>
-        <img
-          src={logo}
-          alt="BitSafe"
-          onClick={() => window.location.reload()}
-          style={{ height: 28, cursor: "pointer" }}
-        />
-        <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-          Party Manager
-        </Typography>
+        <Logo />
       </Box>
 
       {/* Navigation */}

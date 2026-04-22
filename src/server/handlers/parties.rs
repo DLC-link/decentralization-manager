@@ -376,7 +376,7 @@ pub async fn store_parties_to_db(
         .as_secs() as i64;
 
     let mut tx = db.begin_transaction().await?;
-    tx.delete_dec_parties_by_prefix(prefix).await?;
+    let fresh_party_ids: Vec<String> = parties.iter().map(|p| p.party_id.to_string()).collect();
 
     for party in parties {
         // Extract the real prefix from party_id (everything before "::")
@@ -430,6 +430,10 @@ pub async fn store_parties_to_db(
         tx.replace_dec_party_contracts(&row.party_id, &contracts)
             .await?;
     }
+
+    // Remove stale parties no longer returned by Canton
+    tx.delete_stale_dec_parties(prefix, &fresh_party_ids)
+        .await?;
 
     Commitable::commit(tx).await
 }

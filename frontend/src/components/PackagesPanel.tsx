@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import {
   Typography,
   Box,
+  Skeleton,
   Table,
   TableHead,
   TableBody,
@@ -143,9 +144,7 @@ export const PackagesPanel = ({
       <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 2, flexShrink: 0, px: 3, pt: 2 }}>
         <Box>
           <Typography variant="body2" color="text.secondary">
-            {loadingPackages
-              ? "Loading vetted packages..."
-              : `${packages.length} packages vetted on this participant`}
+            {`${packages.length} packages vetted on this participant`}
           </Typography>
         </Box>
         <Box sx={{ display: "flex", gap: 1 }}>
@@ -214,7 +213,26 @@ export const PackagesPanel = ({
               overflowX: "auto",
             }}
           >
-            {comparison ? (
+            {loadingPackages ? (
+              <Table size="small" sx={{ minWidth: 650 }}>
+                <TableHead>
+                  <TableRow>
+                    <TableCell sx={{ py: 1 }}><Skeleton width="60%" /></TableCell>
+                    <TableCell sx={{ py: 1 }}><Skeleton width={50} /></TableCell>
+                    <TableCell sx={{ py: 1 }}><Skeleton width="70%" /></TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {Array.from({ length: 20 }).map((_, i) => (
+                    <TableRow key={i} sx={zebraRow(i)}>
+                      <TableCell sx={{ py: 1 }}><Skeleton width={`${50 + (i % 3) * 15}%`} /></TableCell>
+                      <TableCell sx={{ py: 1 }}><Skeleton width={40} /></TableCell>
+                      <TableCell sx={{ py: 1 }}><Skeleton width={`${55 + (i % 4) * 10}%`} /></TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            ) : comparison ? (
               /* Comparison table */
               <Table size="small" sx={{ minWidth: 650 }}>
                 <TableHead>
