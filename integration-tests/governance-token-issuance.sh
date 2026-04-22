@@ -249,6 +249,30 @@ current_issuance_config_cid() {
     echo "$resp" | jq -r '[.contracts[] | select(.template_id | contains("IssuanceConfig"))][0].contract_id'
 }
 
+# Count contracts of a given template (substring match on template_id) visible
+# to the governance party.
+count_contracts_by_template() {
+    local template_substr="$1"
+    curl -s "http://localhost:$P1_HTTP/contracts?party_id=$PARTY_ID" \
+        | jq --arg t "$template_substr" \
+            '[.contracts[] | select(.template_id | contains($t))] | length'
+}
+
+# Assert that at least `expected_min` contracts matching the given template
+# substring exist. Prints count on success, errors out on failure.
+assert_contract_count_at_least() {
+    local template_substr="$1"
+    local expected_min="$2"
+    local label="$3"
+    local count
+    count=$(count_contracts_by_template "$template_substr")
+    if [ "$count" -lt "$expected_min" ]; then
+        echo "ERROR: Expected at least $expected_min $label contract(s), found $count"
+        exit 1
+    fi
+    echo "$label contracts found: $count"
+}
+
 # ============================================================================
 # Flow 1: SetupIssuance — creates the IssuanceConfig
 # ============================================================================
@@ -286,6 +310,7 @@ MINT_PROPOSAL=$(cat <<EOF
 EOF
 )
 run_proposal_flow "Mint" "$MINT_PROPOSAL"
+assert_contract_count_at_least "MintOffer" 1 "MintOffer"
 
 # ============================================================================
 # Flow 3: Burn — offers to burn 10 tokens from the same holder
@@ -302,6 +327,7 @@ BURN_PROPOSAL=$(cat <<EOF
 EOF
 )
 run_proposal_flow "Burn" "$BURN_PROPOSAL"
+assert_contract_count_at_least "BurnOffer" 1 "BurnOffer"
 
 # ============================================================================
 # Flow 4: RotateFactory — swaps the AllocationFactory on the IssuanceConfig
@@ -367,8 +393,8 @@ fi
 echo ""
 echo "Governance token issuance flow completed successfully!"
 echo "  SetupIssuance → IssuanceConfig: $OLD_ISSUANCE_CONFIG_CID"
-echo "  Mint          → offered 100 TEE to $P1_MEMBER_PARTY"
-echo "  Burn          → offered to burn 10 TEE from $P1_MEMBER_PARTY"
+echo "  Mint          → MintOffer created for $P1_MEMBER_PARTY (100 TEE)"
+echo "  Burn          → BurnOffer created for $P1_MEMBER_PARTY (10 TEE)"
 echo "  RotateFactory → new IssuanceConfig: $NEW_ISSUANCE_CONFIG_CID"
 echo "  Proposer:  participant-1 ($P1_MEMBER_PARTY)"
 echo "  Confirmer: participant-2 ($P2_MEMBER_PARTY)"

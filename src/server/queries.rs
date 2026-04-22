@@ -85,6 +85,20 @@ fn contract_templates(packages: &PackageConfig) -> Vec<TemplateId> {
             entity_name: "IssuanceConfig",
         });
     }
+    // Utility-Registry offer contracts produced by AllocationFactory_OfferMint /
+    // AllocationFactory_OfferBurn (used by the token-issuance plugin).
+    if let Some(ref pkg) = packages.utility_registry {
+        templates.push(TemplateId {
+            package_id: pkg.clone(),
+            module_name: "Utility.Registry.App.V0.Model.Mint",
+            entity_name: "MintOffer",
+        });
+        templates.push(TemplateId {
+            package_id: pkg.clone(),
+            module_name: "Utility.Registry.App.V0.Model.Burn",
+            entity_name: "BurnOffer",
+        });
+    }
     templates
 }
 
