@@ -13,7 +13,7 @@ import Utility.Registry.App.V0.Service.AllocationFactory (AllocationFactory)
 import Utility.Registry.V0.Configuration.Instrument (InstrumentConfiguration)
 
 -- | One-per-plugin-deployment state contract.
--- Created by SetupIssuanceConfigProposal. Updated in place by IssuanceConfig_RotateFactory.
+-- Created by SetupIssuanceProposal. Updated in place by IssuanceConfig_RotateFactory.
 template IssuanceConfig
   with
     governanceParty : Party

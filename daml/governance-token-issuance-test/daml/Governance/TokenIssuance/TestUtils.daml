@@ -97,12 +97,12 @@ initUtilityPrereqs parties =
       operator = parties.operator
       provider = parties.governanceParty
 
--- | Run the full SetupIssuanceConfigProposal flow and return the resulting IssuanceConfig cid.
+-- | Run the full SetupIssuanceProposal flow and return the resulting IssuanceConfig cid.
 -- Convenience wrapper for tests that need an IssuanceConfig as a precondition.
 setupIssuanceForTest : IssuanceTestParties -> ContractId GovernanceRules -> Script (ContractId IssuanceConfig)
 setupIssuanceForTest parties rulesCid = do
   providerCid <- initUtilityPrereqs parties
-  proposalCid <- submit parties.member1 $ createCmd SetupIssuanceConfigProposal with
+  proposalCid <- submit parties.member1 $ createCmd SetupIssuanceProposal with
     governanceParty = parties.governanceParty
     proposer = parties.member1
     providerServiceCid = providerCid

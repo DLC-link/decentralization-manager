@@ -27,7 +27,7 @@ import Governance.TokenIssuance.IssuanceConfig
 -- beforehand via governance-token-custody or equivalent), runs the four
 -- Utility-Registry onboarding steps, and creates IssuanceConfig. V1 uses
 -- empty registrar/holder requirements, so no UserService / credential path.
-template SetupIssuanceConfigProposal
+template SetupIssuanceProposal
   with
     governanceParty : Party
     proposer : Party
@@ -41,10 +41,10 @@ template SetupIssuanceConfigProposal
     signatory proposer
     observer governanceParty
 
-    interface instance GovernableAction for SetupIssuanceConfigProposal where
+    interface instance GovernableAction for SetupIssuanceProposal where
       view = GovernableActionView with
         governanceParty
-        actionLabel = "SetupIssuanceConfig"
+        actionLabel = "SetupIssuance"
         description = "Initial setup: register instrument " <> instrumentIdText
                        <> " and create AllocationFactory"
 
