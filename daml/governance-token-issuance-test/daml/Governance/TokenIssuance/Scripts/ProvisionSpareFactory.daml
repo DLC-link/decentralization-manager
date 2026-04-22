@@ -1,0 +1,45 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Provisions a spare Utility-Registry `AllocationFactory` for a
+-- pre-allocated governance party, and returns the created contract id.
+--
+-- Called from the E2E integration-test harness (governance-token-issuance.sh)
+-- to produce the second factory that `RotateFactoryProposal` swaps to.
+-- Analogous to `initSpareFactory` in TestUtils, but takes an already-allocated
+-- governance party as input (via --input-file) instead of allocating fresh
+-- test parties. The provider and registrar both resolve to the same
+-- governance party — matching the plugin's v1 assumption that the committee
+-- IS the registrar.
+--
+-- Run via:
+--   dpm script --dar <test.dar> \
+--     --script-name Governance.TokenIssuance.Scripts.ProvisionSpareFactory:provision \
+--     --ledger-host ... --ledger-port ... --access-token-file <jwt> \
+--     --input-file <input.json> --output-file <output.json> \
+--     --upload-dar yes --wall-clock-time
+module Governance.TokenIssuance.Scripts.ProvisionSpareFactory where
+
+import Daml.Script
+
+import Utility.Registry.App.V0.Service.AllocationFactory (AllocationFactory(..))
+
+data Input = Input
+  with
+    governanceParty : Party
+    operator : Party
+  deriving (Show, Eq)
+
+data Output = Output
+  with
+    allocationFactoryCid : ContractId AllocationFactory
+  deriving (Show, Eq)
+
+provision : Input -> Script Output
+provision i = do
+  cid <- submit (actAs i.governanceParty) $
+    createCmd AllocationFactory with
+      provider = i.governanceParty
+      registrar = i.governanceParty
+      operator = i.operator
+  pure Output with allocationFactoryCid = cid
