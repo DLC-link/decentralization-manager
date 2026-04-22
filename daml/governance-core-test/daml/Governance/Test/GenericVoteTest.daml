@@ -59,10 +59,10 @@ when_vote_proposed_confirmed_executed f = do
 
   let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
 
-  resultCid <- confirmAndExecute f.parties f.rulesCid proposalIfaceCid
+  result <- confirmAndExecute f.parties f.rulesCid proposalIfaceCid
     [f.parties.member1, f.parties.member2] f.parties.member3
 
-  Some executionResult <- queryContractId f.parties.governanceParty resultCid
+  Some executionResult <- queryContractId f.parties.governanceParty result.executionResultCid
   remainingProposals <- query @GenericVoteProposal f.parties.governanceParty
   pure VoteResult with ..
 
@@ -75,10 +75,10 @@ when_all_members_confirm_and_execute f = do
 
   let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
 
-  resultCid <- confirmAndExecute f.parties f.rulesCid proposalIfaceCid
+  result <- confirmAndExecute f.parties f.rulesCid proposalIfaceCid
     [f.parties.member1, f.parties.member2, f.parties.member3] f.parties.member1
 
-  Some executionResult <- queryContractId f.parties.governanceParty resultCid
+  Some executionResult <- queryContractId f.parties.governanceParty result.executionResultCid
   remainingProposals <- query @GenericVoteProposal f.parties.governanceParty
   pure VoteResult with ..
 
@@ -97,14 +97,14 @@ when_two_votes_proposed_and_executed f = do
   let proposalACid = toInterfaceContractId @GovernableAction proposalA
   let proposalBCid = toInterfaceContractId @GovernableAction proposalB
 
-  resultACid <- confirmAndExecute f.parties f.rulesCid proposalACid
+  resultA' <- confirmAndExecute f.parties f.rulesCid proposalACid
     [f.parties.member1, f.parties.member2] f.parties.member1
 
-  resultBCid <- confirmAndExecute f.parties f.rulesCid proposalBCid
+  resultB' <- confirmAndExecute f.parties f.rulesCid proposalBCid
     [f.parties.member2, f.parties.member3] f.parties.member3
 
-  Some resultA <- queryContractId f.parties.governanceParty resultACid
-  Some resultB <- queryContractId f.parties.governanceParty resultBCid
+  Some resultA <- queryContractId f.parties.governanceParty resultA'.executionResultCid
+  Some resultB <- queryContractId f.parties.governanceParty resultB'.executionResultCid
   pure MultiVoteResult with ..
 
 -- ============================================================================

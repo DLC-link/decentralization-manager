@@ -5,6 +5,13 @@
 -- Provides an on-chain audit trail of governance decisions.
 module Governance.ExecutionResult where
 
+-- | Return type for GovernanceRules_ExecuteConfirmedAction.
+-- Wrapped in a struct so the return type can be extended in upgrades.
+data ExecuteConfirmedActionResult = ExecuteConfirmedActionResult
+  with
+    executionResultCid : ContractId GovernanceExecutionResult
+  deriving (Eq, Show)
+
 -- | Immutable record of a governance action execution.
 -- Created by GovernanceRules_ExecuteConfirmedAction after threshold
 -- confirmations are collected and the action is successfully exercised.

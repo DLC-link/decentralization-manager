@@ -27,7 +27,7 @@ testMemberCanConfirm = script do
 
   let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
 
-  _confCid <- submit (memberContext parties.member1 parties.governanceParty) $
+  _confResult <- submit (memberContext parties.member1 parties.governanceParty) $
     exerciseCmd rulesCid GovernanceRules_ConfirmAction with
       confirmer = parties.member1
       actionProposalCid = proposalIfaceCid
@@ -67,12 +67,12 @@ testConfirmerCanCancel = script do
 
   let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
 
-  confCid <- submit (memberContext parties.member1 parties.governanceParty) $
+  confResult <- submit (memberContext parties.member1 parties.governanceParty) $
     exerciseCmd rulesCid GovernanceRules_ConfirmAction with
       confirmer = parties.member1
       actionProposalCid = proposalIfaceCid
 
-  submit parties.member1 $ exerciseCmd confCid GovernanceConfirmation_Cancel
+  submit parties.member1 $ exerciseCmd confResult.confirmationCid GovernanceConfirmation_Cancel
 
   confs <- query @GovernanceConfirmation parties.governanceParty
   confs === []
@@ -95,7 +95,7 @@ testExpireStaleConfirmation = script do
 
   let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
 
-  confCid <- submit (memberContext parties.member1 parties.governanceParty) $
+  confResult <- submit (memberContext parties.member1 parties.governanceParty) $
     exerciseCmd rulesCid GovernanceRules_ConfirmAction with
       confirmer = parties.member1
       actionProposalCid = proposalIfaceCid
@@ -105,7 +105,7 @@ testExpireStaleConfirmation = script do
   submit (memberContext parties.member2 parties.governanceParty) $
     exerciseCmd rulesCid GovernanceRules_ExpireConfirmation with
       member = parties.member2
-      staleConfirmationCid = confCid
+      staleConfirmationCid = confResult.confirmationCid
 
   confs <- query @GovernanceConfirmation parties.governanceParty
   confs === []
@@ -123,7 +123,7 @@ testCannotExpireValidConfirmation = script do
 
   let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
 
-  confCid <- submit (memberContext parties.member1 parties.governanceParty) $
+  confResult <- submit (memberContext parties.member1 parties.governanceParty) $
     exerciseCmd rulesCid GovernanceRules_ConfirmAction with
       confirmer = parties.member1
       actionProposalCid = proposalIfaceCid
@@ -131,7 +131,7 @@ testCannotExpireValidConfirmation = script do
   submitMustFail (memberContext parties.member2 parties.governanceParty) $
     exerciseCmd rulesCid GovernanceRules_ExpireConfirmation with
       member = parties.member2
-      staleConfirmationCid = confCid
+      staleConfirmationCid = confResult.confirmationCid
 
 -- | Non-member cannot expire confirmations.
 testNonMemberCannotExpire = script do
@@ -146,7 +146,7 @@ testNonMemberCannotExpire = script do
 
   let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
 
-  confCid <- submit (memberContext parties.member1 parties.governanceParty) $
+  confResult <- submit (memberContext parties.member1 parties.governanceParty) $
     exerciseCmd rulesCid GovernanceRules_ConfirmAction with
       confirmer = parties.member1
       actionProposalCid = proposalIfaceCid
@@ -156,7 +156,7 @@ testNonMemberCannotExpire = script do
   submitMustFail (memberContext parties.outsider parties.governanceParty) $
     exerciseCmd rulesCid GovernanceRules_ExpireConfirmation with
       member = parties.outsider
-      staleConfirmationCid = confCid
+      staleConfirmationCid = confResult.confirmationCid
 
 -- | Proposal targeting wrong governance party is rejected at confirmation.
 testRejectWrongGovernanceParty = script do
