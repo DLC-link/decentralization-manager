@@ -681,6 +681,7 @@ fn serialize_instrument_allowances(allowances: &[InstrumentAllowance]) -> Value 
 
 /// Which package a proposal template belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)]
 pub enum ProposalPackage {
     GovernanceCore,
     GovernanceTokenCustody,
