@@ -1,7 +1,11 @@
-use super::rows::{DecPartyContractRow, DecPartyParticipantRow, DecPartyRow};
+use super::rows::{
+    ChainAuditCacheRow, DecPartyContractRow, DecPartyParticipantRow, DecPartyRow,
+    GovernanceAuditRow,
+};
 use crate::{
     config::{PartyCredentials, Peer},
     error::Result,
+    participant_id::CantonId,
 };
 
 /// Read operations on the database
@@ -51,6 +55,21 @@ pub trait SchemaRead {
 
     /// Get all contracts for parties matching a prefix (bulk query)
     async fn get_all_dec_party_contracts(&self, prefix: &str) -> Result<Vec<DecPartyContractRow>>;
+
+    /// Get paginated governance audit entries for a party, newest first
+    async fn get_governance_audit(
+        &self,
+        party_id: &CantonId,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<GovernanceAuditRow>>;
+
+    /// Get cached chain audit entries for a party, newest first
+    async fn get_chain_audit_cache(
+        &self,
+        party_id: &str,
+        limit: i64,
+    ) -> Result<Vec<ChainAuditCacheRow>>;
 }
 
 /// Write operations on the database

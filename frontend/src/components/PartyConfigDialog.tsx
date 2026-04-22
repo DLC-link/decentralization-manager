@@ -18,7 +18,6 @@ import { API_BASE } from "../constants";
 import type {
   PartyConfigResponse,
   PartyConfigRequest,
-  PackageConfig,
 } from "../types";
 
 type AuthMethod = "client_credentials" | "password";
@@ -51,7 +50,6 @@ export const PartyConfigDialog = ({
   const [keycloakPassword, setKeycloakPassword] = useState("");
   const [authMethod, setAuthMethod] =
     useState<AuthMethod>("client_credentials");
-  const [packages, setPackages] = useState<PackageConfig>({});
 
   const [canScrollUp, setCanScrollUp] = useState(false);
   const [canScrollDown, setCanScrollDown] = useState(false);
@@ -106,7 +104,6 @@ export const PartyConfigDialog = ({
         setKeycloakUrl(data.keycloak_url);
         setKeycloakRealm(data.keycloak_realm);
         setKeycloakClientId(data.keycloak_client_id);
-        setPackages(data.packages);
         setKeycloakClientSecret("");
         setKeycloakUsername("");
         setKeycloakPassword("");
@@ -136,7 +133,6 @@ export const PartyConfigDialog = ({
       keycloak_realm: keycloakRealm,
       keycloak_client_id:
         authMethod === "client_credentials" ? keycloakClientId : "",
-      packages,
     };
 
     if (authMethod === "client_credentials") {
@@ -322,88 +318,6 @@ export const PartyConfigDialog = ({
                   />
                 </>
               )}
-
-              <Divider />
-
-              <Typography variant="subtitle2">Packages</Typography>
-
-              <TextField
-                label="Governance Core"
-                value={packages.governance_core ?? ""}
-                onChange={(e) =>
-                  setPackages({
-                    ...packages,
-                    governance_core: e.target.value,
-                  })
-                }
-                fullWidth
-                size="small"
-                disabled={saving}
-              />
-
-              <TextField
-                label="Governance Token Custody"
-                value={packages.governance_token_custody ?? ""}
-                onChange={(e) =>
-                  setPackages({
-                    ...packages,
-                    governance_token_custody: e.target.value,
-                  })
-                }
-                fullWidth
-                size="small"
-                disabled={saving}
-              />
-
-              <TextField
-                label="Vault Governance"
-                value={packages.vault_governance ?? ""}
-                onChange={(e) =>
-                  setPackages({ ...packages, vault_governance: e.target.value })
-                }
-                fullWidth
-                size="small"
-                disabled={saving}
-              />
-
-              <TextField
-                label="Vault"
-                value={packages.vault ?? ""}
-                onChange={(e) =>
-                  setPackages({ ...packages, vault: e.target.value })
-                }
-                fullWidth
-                size="small"
-                disabled={saving}
-              />
-
-              <TextField
-                label="Utility Registry"
-                value={packages.utility_registry ?? ""}
-                onChange={(e) =>
-                  setPackages({
-                    ...packages,
-                    utility_registry: e.target.value,
-                  })
-                }
-                fullWidth
-                size="small"
-                disabled={saving}
-              />
-
-              <TextField
-                label="Utility Credential"
-                value={packages.utility_credential ?? ""}
-                onChange={(e) =>
-                  setPackages({
-                    ...packages,
-                    utility_credential: e.target.value,
-                  })
-                }
-                fullWidth
-                size="small"
-                disabled={saving}
-              />
 
               {error && <Alert severity="error">{error}</Alert>}
               {success && (

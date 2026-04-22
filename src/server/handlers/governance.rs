@@ -17,21 +17,25 @@ use serde::Deserialize;
 
 use crate::{
     auth::WorkflowAuth,
-    config::{NodeConfig, PackageConfig},
+    config::{NodeConfig, PackageConfig, default_package_config},
+    db::schema::SchemaRead,
     error::Result,
     participant_id::CantonId,
     server::{
         AppState, action_serializer,
+        audit::{AuditEvent, AuditParams, spawn_audit_log},
+        chain_audit,
         queries::{
             ContractQueryParams as QueryContractParams, get_governance_confirmations,
             get_governance_state as query_governance_state, get_provider_services,
             get_registrar_services, get_user_services, get_vaults, query_contracts_by_template,
         },
         types::{
-            CancelConfirmationRequest, ConfirmActionRequest, ContractQueryResponse, ErrorResponse,
-            ExecuteActionRequest, ExpireConfirmationRequest, GovernanceResponse,
-            GovernanceStateResponse, GovernanceType, MessageResponse, NetworkInfo,
-            ProposeActionRequest, ProviderServicesResponse, RegistrarServicesResponse,
+            AuditLogEntry, AuditLogQuery, AuditLogResponse, CancelConfirmationRequest,
+            ChainAuditEntry, ChainAuditQuery, ChainAuditResponse, ConfirmActionRequest,
+            ContractQueryResponse, ErrorResponse, ExecuteActionRequest, ExpireConfirmationRequest,
+            GovernanceResponse, GovernanceStateResponse, GovernanceType, MessageResponse,
+            NetworkInfo, ProposeActionRequest, ProviderServicesResponse, RegistrarServicesResponse,
             UserServicesResponse, VaultsResponse,
         },
     },
@@ -87,7 +91,7 @@ pub async fn get_governance(
     let threshold = get_party_threshold(&data, &party_id_str).await.unwrap_or(2);
 
     let member_party_id = get_member_party_id(&data, party_id).await;
-    let packages = get_packages_for_party(&data, &party_id_str).await;
+    let packages = packages();
 
     match get_governance_confirmations(
         &data.config,
@@ -133,7 +137,7 @@ pub async fn get_governance_state(
 
     let token = get_party_token(&data, party_id).await;
     let test_mode = data.test_mode;
-    let packages = get_packages_for_party(&data, &party_id_str).await;
+    let packages = packages();
 
     match query_governance_state(&data.config, &party_id_str, token, test_mode, &packages).await {
         Ok(state) => HttpResponse::Ok().json(GovernanceStateResponse { state }),
@@ -165,7 +169,7 @@ pub async fn get_vaults_handler(
 
     let token = get_party_token(&data, party_id).await;
     let test_mode = data.test_mode;
-    let packages = get_packages_for_party(&data, &party_id_str).await;
+    let packages = packages();
 
     match get_vaults(&data.config, &party_id_str, token, test_mode, &packages).await {
         Ok(vaults) => HttpResponse::Ok().json(VaultsResponse { vaults }),
@@ -197,7 +201,7 @@ pub async fn get_provider_services_handler(
 
     let token = get_party_token(&data, party_id).await;
     let test_mode = data.test_mode;
-    let packages = get_packages_for_party(&data, &party_id_str).await;
+    let packages = packages();
 
     match get_provider_services(&data.config, &party_id_str, token, test_mode, &packages).await {
         Ok(services) => HttpResponse::Ok().json(ProviderServicesResponse { services }),
@@ -229,7 +233,7 @@ pub async fn get_user_services_handler(
 
     let token = get_party_token(&data, party_id).await;
     let test_mode = data.test_mode;
-    let packages = get_packages_for_party(&data, &party_id_str).await;
+    let packages = packages();
 
     match get_user_services(&data.config, &party_id_str, token, test_mode, &packages).await {
         Ok(services) => HttpResponse::Ok().json(UserServicesResponse { services }),
@@ -261,7 +265,7 @@ pub async fn get_registrar_services_handler(
 
     let token = get_party_token(&data, party_id).await;
     let test_mode = data.test_mode;
-    let packages = get_packages_for_party(&data, &party_id_str).await;
+    let packages = packages();
 
     match get_registrar_services(&data.config, &party_id_str, token, test_mode, &packages).await {
         Ok(services) => HttpResponse::Ok().json(RegistrarServicesResponse { services }),
@@ -320,6 +324,128 @@ pub async fn query_contracts_handler(
     }
 }
 
+/// Get paginated governance audit trail
+#[utoipa::path(
+    tag = "Governance",
+    params(AuditLogQuery),
+    responses(
+        (status = 200, description = "Governance audit entries", body = AuditLogResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+#[get("/governance/audit")]
+pub async fn get_governance_audit(
+    data: web::Data<AppState>,
+    query: web::Query<AuditLogQuery>,
+) -> impl Responder {
+    match data
+        .db
+        .get_governance_audit(&query.party_id, query.limit, query.offset)
+        .await
+    {
+        Ok(rows) => {
+            let entries: Vec<AuditLogEntry> = rows
+                .into_iter()
+                .map(|row| AuditLogEntry {
+                    id: row.id,
+                    timestamp: row.timestamp,
+                    event_type: row.event_type,
+                    party_id: row.party_id,
+                    member_party_id: row.member_party_id,
+                    governance_type: row.governance_type,
+                    action_summary: row.action_summary,
+                    details: serde_json::from_str(&row.details)
+                        .unwrap_or(serde_json::Value::String(row.details)),
+                    status: row.status,
+                    error_message: row.error_message,
+                    created_at: row.created_at,
+                })
+                .collect();
+            let total_returned = entries.len();
+            HttpResponse::Ok().json(AuditLogResponse {
+                entries,
+                total_returned,
+            })
+        }
+        Err(e) => {
+            tracing::error!("Failed to fetch governance audit: {e}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch governance audit: {e}"),
+            })
+        }
+    }
+}
+
+/// Get on-chain governance audit entries.
+/// Returns cached data by default. Pass `refresh=true` to fetch from Canton and update cache.
+#[utoipa::path(
+    tag = "Governance",
+    params(ChainAuditQuery),
+    responses(
+        (status = 200, description = "On-chain governance audit entries", body = ChainAuditResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+#[get("/governance/chain-audit")]
+pub async fn get_governance_chain_audit(
+    data: web::Data<AppState>,
+    query: web::Query<ChainAuditQuery>,
+) -> impl Responder {
+    let party_id = &query.party_id;
+    let party_id_str = party_id.to_string();
+
+    if !query.refresh {
+        // Return from cache
+        match data
+            .db
+            .get_chain_audit_cache(&party_id_str, query.limit as i64)
+            .await
+        {
+            Ok(rows) => {
+                let entries: Vec<ChainAuditEntry> = rows.into_iter().map(Into::into).collect();
+                let total_returned = entries.len();
+                return HttpResponse::Ok().json(ChainAuditResponse {
+                    entries,
+                    total_returned,
+                });
+            }
+            Err(e) => {
+                tracing::warn!("Failed to read chain audit cache: {e}");
+                // Fall through to live query
+            }
+        }
+    }
+
+    // Fetch from Canton
+    let token = get_party_token(&data, party_id).await;
+    let pkgs = packages();
+
+    match chain_audit::get_chain_audit(&data.config, &party_id_str, token, &pkgs, query.limit).await
+    {
+        Ok(entries) => {
+            // Save to cache in background
+            let pool = data.db.clone();
+            let pid = party_id_str.clone();
+            let cached = entries.clone();
+            tokio::spawn(async move {
+                chain_audit::save_chain_audit_cache(&pool, &pid, &cached).await;
+            });
+
+            let total_returned = entries.len();
+            HttpResponse::Ok().json(ChainAuditResponse {
+                entries,
+                total_returned,
+            })
+        }
+        Err(e) => {
+            tracing::error!("Failed to fetch chain audit for {party_id_str}: {e:#}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to query chain audit: {e}"),
+            })
+        }
+    }
+}
+
 // ============================================================================
 // Action Endpoints
 // ============================================================================
@@ -349,7 +475,13 @@ pub async fn propose_action(
         }
     };
 
-    let packages = get_packages_for_party(&data, &party_id.to_string()).await;
+    let audit_pool = data.db.clone();
+    let audit_summary = crate::server::audit::proposal_summary(&body.proposal);
+    let audit_details = serde_json::to_string(&*body).unwrap_or_default();
+    let audit_party_id = party_id.to_string();
+    let audit_member = member_party_id.clone();
+
+    let packages = packages();
 
     let (package_source, module_name, entity_name, create_args) =
         action_serializer::build_proposal_create_args(
@@ -462,6 +594,19 @@ pub async fn propose_action(
         }
         Err(e) => {
             tracing::error!("Failed to create proposal: {e}");
+            spawn_audit_log(
+                audit_pool,
+                AuditParams {
+                    event_type: AuditEvent::Propose,
+                    party_id: audit_party_id,
+                    member_party_id: audit_member,
+                    governance_type: GovernanceType::CoreDomain,
+                    action_summary: audit_summary,
+                    details: audit_details,
+                    status: "failed",
+                    error_message: Some(format!("Failed to create proposal: {e}")),
+                },
+            );
             return HttpResponse::InternalServerError().json(ErrorResponse {
                 error: format!("Failed to create proposal: {e}"),
             });
@@ -525,12 +670,38 @@ pub async fn propose_action(
     match client.submit_and_wait(confirm_req).await {
         Ok(_) => {
             tracing::info!("Proposal {proposal_cid} confirmed by proposer");
+            spawn_audit_log(
+                audit_pool,
+                AuditParams {
+                    event_type: AuditEvent::Propose,
+                    party_id: audit_party_id,
+                    member_party_id: audit_member,
+                    governance_type: GovernanceType::CoreDomain,
+                    action_summary: audit_summary,
+                    details: audit_details,
+                    status: "success",
+                    error_message: None,
+                },
+            );
             HttpResponse::Ok().json(MessageResponse {
                 message: "Proposal created and confirmed".to_string(),
             })
         }
         Err(e) => {
             tracing::error!("Proposal created but confirmation failed: {e}");
+            spawn_audit_log(
+                audit_pool,
+                AuditParams {
+                    event_type: AuditEvent::Propose,
+                    party_id: audit_party_id,
+                    member_party_id: audit_member,
+                    governance_type: GovernanceType::CoreDomain,
+                    action_summary: audit_summary,
+                    details: audit_details,
+                    status: "failed",
+                    error_message: Some(format!("Proposal created but confirmation failed: {e}")),
+                },
+            );
             HttpResponse::InternalServerError().json(ErrorResponse {
                 error: format!(
                     "Proposal created (CID: {proposal_cid}) but confirmation failed: {e}"
@@ -574,14 +745,49 @@ pub async fn confirm_action(
         }
     };
 
-    let packages = get_packages_for_party(&data, &body.party_id.to_string()).await;
+    let audit_pool = data.db.clone();
+    let audit_summary = crate::server::audit::action_summary(&body.action);
+    let audit_details = serde_json::to_string(&*body).unwrap_or_default();
+    let audit_party_id = party_id.to_string();
+    let audit_member = member_party_id.clone();
+    let audit_gov_type = body.governance_type;
+
+    let packages = packages();
 
     match execute_confirm_action(&data.config, &body, &token, &member_party_id, &packages).await {
-        Ok(()) => HttpResponse::Ok().json(MessageResponse {
-            message: "Confirmation submitted successfully".to_string(),
-        }),
+        Ok(()) => {
+            spawn_audit_log(
+                audit_pool,
+                AuditParams {
+                    event_type: AuditEvent::Confirm,
+                    party_id: audit_party_id,
+                    member_party_id: audit_member,
+                    governance_type: audit_gov_type,
+                    action_summary: audit_summary,
+                    details: audit_details,
+                    status: "success",
+                    error_message: None,
+                },
+            );
+            HttpResponse::Ok().json(MessageResponse {
+                message: "Confirmation submitted successfully".to_string(),
+            })
+        }
         Err(e) => {
             tracing::error!("Failed to submit confirmation: {e}");
+            spawn_audit_log(
+                audit_pool,
+                AuditParams {
+                    event_type: AuditEvent::Confirm,
+                    party_id: audit_party_id,
+                    member_party_id: audit_member,
+                    governance_type: audit_gov_type,
+                    action_summary: audit_summary,
+                    details: audit_details,
+                    status: "failed",
+                    error_message: Some(format!("{e}")),
+                },
+            );
             HttpResponse::InternalServerError().json(ErrorResponse {
                 error: format!("Failed to submit confirmation: {e}"),
             })
@@ -623,14 +829,54 @@ pub async fn execute_action(
         }
     };
 
-    let packages = get_packages_for_party(&data, &body.party_id.to_string()).await;
+    let audit_pool = data.db.clone();
+    let audit_summary = crate::server::audit::action_summary(&body.action);
+    // Redact disclosed contract blobs (can be very large) before storing in audit
+    let mut redacted = body.clone();
+    for dc in &mut redacted.disclosed_contracts {
+        dc.blob = format!("<{} bytes>", dc.blob.len());
+    }
+    let audit_details = serde_json::to_string(&redacted).unwrap_or_default();
+    let audit_party_id = party_id.to_string();
+    let audit_member = member_party_id.clone();
+    let audit_gov_type = body.governance_type;
+
+    let packages = packages();
 
     match execute_confirmed_action(&data.config, &body, &token, &member_party_id, &packages).await {
-        Ok(()) => HttpResponse::Ok().json(MessageResponse {
-            message: "Action executed successfully".to_string(),
-        }),
+        Ok(()) => {
+            spawn_audit_log(
+                audit_pool,
+                AuditParams {
+                    event_type: AuditEvent::Execute,
+                    party_id: audit_party_id,
+                    member_party_id: audit_member,
+                    governance_type: audit_gov_type,
+                    action_summary: audit_summary,
+                    details: audit_details,
+                    status: "success",
+                    error_message: None,
+                },
+            );
+            HttpResponse::Ok().json(MessageResponse {
+                message: "Action executed successfully".to_string(),
+            })
+        }
         Err(e) => {
             tracing::error!("Failed to execute action: {e}");
+            spawn_audit_log(
+                audit_pool,
+                AuditParams {
+                    event_type: AuditEvent::Execute,
+                    party_id: audit_party_id,
+                    member_party_id: audit_member,
+                    governance_type: audit_gov_type,
+                    action_summary: audit_summary,
+                    details: audit_details,
+                    status: "failed",
+                    error_message: Some(format!("{e}")),
+                },
+            );
             HttpResponse::InternalServerError().json(ErrorResponse {
                 error: format!("Failed to execute action: {e}"),
             })
@@ -665,16 +911,50 @@ pub async fn expire_confirmation(
         }
     };
 
-    let packages = get_packages_for_party(&data, &body.party_id.to_string()).await;
+    let audit_pool = data.db.clone();
+    let audit_details = serde_json::to_string(&*body).unwrap_or_default();
+    let audit_party_id = party_id.to_string();
+    let audit_member = member_party_id.clone();
+    let audit_gov_type = body.governance_type;
+
+    let packages = packages();
 
     match execute_expire_confirmation(&data.config, &body, &token, &member_party_id, &packages)
         .await
     {
-        Ok(()) => HttpResponse::Ok().json(MessageResponse {
-            message: "Confirmation expired successfully".to_string(),
-        }),
+        Ok(()) => {
+            spawn_audit_log(
+                audit_pool,
+                AuditParams {
+                    event_type: AuditEvent::Expire,
+                    party_id: audit_party_id,
+                    member_party_id: audit_member,
+                    governance_type: audit_gov_type,
+                    action_summary: "expire_confirmation".to_string(),
+                    details: audit_details,
+                    status: "success",
+                    error_message: None,
+                },
+            );
+            HttpResponse::Ok().json(MessageResponse {
+                message: "Confirmation expired successfully".to_string(),
+            })
+        }
         Err(e) => {
             tracing::error!("Failed to expire confirmation: {e}");
+            spawn_audit_log(
+                audit_pool,
+                AuditParams {
+                    event_type: AuditEvent::Expire,
+                    party_id: audit_party_id,
+                    member_party_id: audit_member,
+                    governance_type: audit_gov_type,
+                    action_summary: "expire_confirmation".to_string(),
+                    details: audit_details,
+                    status: "failed",
+                    error_message: Some(format!("{e}")),
+                },
+            );
             HttpResponse::InternalServerError().json(ErrorResponse {
                 error: format!("Failed to expire confirmation: {e}"),
             })
@@ -708,16 +988,50 @@ pub async fn cancel_confirmation(
         }
     };
 
-    let packages = get_packages_for_party(&data, &body.party_id.to_string()).await;
+    let audit_pool = data.db.clone();
+    let audit_details = serde_json::to_string(&*body).unwrap_or_default();
+    let audit_party_id = party_id.to_string();
+    let audit_member = member_party_id.clone();
+    let audit_gov_type = body.governance_type;
+
+    let packages = packages();
 
     match execute_cancel_confirmation(&data.config, &body, &token, &member_party_id, &packages)
         .await
     {
-        Ok(()) => HttpResponse::Ok().json(MessageResponse {
-            message: "Confirmation cancelled successfully".to_string(),
-        }),
+        Ok(()) => {
+            spawn_audit_log(
+                audit_pool,
+                AuditParams {
+                    event_type: AuditEvent::Cancel,
+                    party_id: audit_party_id,
+                    member_party_id: audit_member,
+                    governance_type: audit_gov_type,
+                    action_summary: "cancel_confirmation".to_string(),
+                    details: audit_details,
+                    status: "success",
+                    error_message: None,
+                },
+            );
+            HttpResponse::Ok().json(MessageResponse {
+                message: "Confirmation cancelled successfully".to_string(),
+            })
+        }
         Err(e) => {
             tracing::error!("Failed to cancel confirmation: {e}");
+            spawn_audit_log(
+                audit_pool,
+                AuditParams {
+                    event_type: AuditEvent::Cancel,
+                    party_id: audit_party_id,
+                    member_party_id: audit_member,
+                    governance_type: audit_gov_type,
+                    action_summary: "cancel_confirmation".to_string(),
+                    details: audit_details,
+                    status: "failed",
+                    error_message: Some(format!("{e}")),
+                },
+            );
             HttpResponse::InternalServerError().json(ErrorResponse {
                 error: format!("Failed to cancel confirmation: {e}"),
             })
@@ -734,12 +1048,8 @@ pub async fn cancel_confirmation(
     )
 )]
 #[get("/packages")]
-pub async fn get_packages(
-    data: web::Data<AppState>,
-    query: web::Query<GovernanceQuery>,
-) -> impl Responder {
-    let packages = get_packages_for_party(&data, &query.party_id.to_string()).await;
-    HttpResponse::Ok().json(packages)
+pub async fn get_packages() -> impl Responder {
+    HttpResponse::Ok().json(packages())
 }
 
 /// Get DSO network info (DSO party ID + amulet rules contract)
@@ -920,14 +1230,9 @@ async fn get_party_credentials(
     }
 }
 
-/// Get package config for a party from the live party_credentials
-async fn get_packages_for_party(data: &web::Data<AppState>, dec_party_id: &str) -> PackageConfig {
-    let party_creds = data.party_credentials.read().await;
-    CantonId::parse(dec_party_id)
-        .ok()
-        .and_then(|id| party_creds.iter().find(|p| p.dec_party_id == id))
-        .map(|c| c.packages.clone())
-        .unwrap_or_default()
+/// Get the hardcoded default package config (package IDs are constants, not per-party)
+fn packages() -> PackageConfig {
+    default_package_config()
 }
 
 // ============================================================================
