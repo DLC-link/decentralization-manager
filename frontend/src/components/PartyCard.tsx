@@ -14,6 +14,8 @@ import {
   Tooltip,
   Button,
   Collapse,
+  Tabs,
+  Tab,
 } from "@mui/material";
 import PersonRemoveIcon from "@mui/icons-material/PersonRemove";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
@@ -25,6 +27,7 @@ import { KickDialog } from "./KickDialog";
 import { ContractsDialog } from "./ContractsDialog";
 import { PartyConfigDialog } from "./PartyConfigDialog";
 import { GovernanceSection } from "./GovernanceSection";
+import { GovernanceAuditTrail } from "./GovernanceAuditTrail";
 import { AuthSection } from "./AuthSection";
 import type { DecentralizedParty, Network, PartyAuthStatus } from "../types";
 import { ADMIN_ACCESS } from "../constants";
@@ -46,6 +49,7 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
   const [configDialogOpen, setConfigDialogOpen] = useState(false);
   const [selectedParticipant, setSelectedParticipant] = useState<string>("");
   const [contractsExpanded, setContractsExpanded] = useState(true);
+  const [governanceTab, setGovernanceTab] = useState(0);
   const [canScrollUp, setCanScrollUp] = useState(false);
   const [canScrollDown, setCanScrollDown] = useState(false);
   const contractsScrollRef = useRef<HTMLDivElement>(null);
@@ -289,18 +293,33 @@ export const PartyCard = ({ party, onRefresh, selfParticipantId, authStatus, onA
       )}
 
       {authStatus && (
-        <CardContent sx={{ pt: 1, pb: 0, "&:last-child": { pb: 0 } }}>
+        <CardContent sx={{ pt: 1, pb: authStatus.rights?.dec_party_act_as ? 0 : 2, "&:last-child": { pb: authStatus.rights?.dec_party_act_as ? 0 : 2 } }}>
           <AuthSection partyId={party.party_id} authStatus={authStatus} onRefresh={onAuthRefresh} />
           {authStatus.rights?.dec_party_act_as && (
-            <GovernanceSection
-              partyId={party.party_id}
-              rulesContractId={rulesContract?.contract_id}
-              governanceContractIds={governanceContracts.map((c) => c.contract_id)}
-              memberPartyId={authStatus.member_party_id}
-              defaultOperatorParty={operatorParty}
-              network={network}
-              governanceType={governanceType}
-            />
+            <>
+              <Tabs
+                value={governanceTab}
+                onChange={(_e, v) => setGovernanceTab(v)}
+                sx={{ mt: 2, borderBottom: 1, borderColor: "divider" }}
+              >
+                <Tab label="Governance" />
+                <Tab label="Audit Trail" />
+              </Tabs>
+              {governanceTab === 0 && (
+                <GovernanceSection
+                  partyId={party.party_id}
+                  rulesContractId={rulesContract?.contract_id}
+                  governanceContractIds={governanceContracts.map((c) => c.contract_id)}
+                  memberPartyId={authStatus.member_party_id}
+                  defaultOperatorParty={operatorParty}
+                  network={network}
+                  governanceType={governanceType}
+                />
+              )}
+              {governanceTab === 1 && (
+                <GovernanceAuditTrail partyId={party.party_id} />
+              )}
+            </>
           )}
         </CardContent>
       )}
