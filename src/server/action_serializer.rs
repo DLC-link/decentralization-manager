@@ -684,6 +684,7 @@ fn serialize_instrument_allowances(allowances: &[InstrumentAllowance]) -> Value 
 pub enum ProposalPackage {
     GovernanceCore,
     GovernanceTokenCustody,
+    GovernanceTokenIssuance,
 }
 
 /// Build the create-command record fields for a governance domain action proposal.
@@ -829,6 +830,116 @@ pub fn build_proposal_create_args(
                     field("governanceParty", make_party(governance_party)),
                     field("proposer", make_party(proposer)),
                     field("description", make_text(description)),
+                ],
+            },
+        ),
+        ProposalType::SetupIssuance {
+            provider_service_cid,
+            operator,
+            instrument_id_text,
+            display_name,
+            symbol,
+            decimals,
+        } => (
+            ProposalPackage::GovernanceTokenIssuance,
+            "Governance.TokenIssuance.SetupIssuance",
+            "SetupIssuanceProposal",
+            Record {
+                record_id: None,
+                fields: vec![
+                    field("governanceParty", make_party(governance_party)),
+                    field("proposer", make_party(proposer)),
+                    field("providerServiceCid", make_contract_id(provider_service_cid)),
+                    field("operator", make_party(operator)),
+                    field("instrumentIdText", make_text(instrument_id_text)),
+                    field("displayName", make_text(display_name)),
+                    field("symbol", make_text(symbol)),
+                    field("decimals", make_int64(*decimals)),
+                ],
+            },
+        ),
+        ProposalType::Mint {
+            issuance_config_cid,
+            recipient,
+            amount,
+            description,
+            execute_before_hours: _,
+        } => (
+            ProposalPackage::GovernanceTokenIssuance,
+            "Governance.TokenIssuance.MintProposal",
+            "MintProposal",
+            Record {
+                record_id: None,
+                fields: vec![
+                    field("governanceParty", make_party(governance_party)),
+                    field("proposer", make_party(proposer)),
+                    field("issuanceConfigCid", make_contract_id(issuance_config_cid)),
+                    field("recipient", make_party(recipient)),
+                    field("amount", make_numeric(amount)),
+                    field("description", make_text(description)),
+                    field(
+                        "requestedAt",
+                        Value {
+                            sum: Some(value::Sum::Timestamp(0)),
+                        },
+                    ),
+                    field(
+                        "executeBefore",
+                        Value {
+                            sum: Some(value::Sum::Timestamp(i64::MAX / 1000)),
+                        },
+                    ),
+                ],
+            },
+        ),
+        ProposalType::Burn {
+            issuance_config_cid,
+            holder,
+            amount,
+            description,
+            execute_before_hours: _,
+        } => (
+            ProposalPackage::GovernanceTokenIssuance,
+            "Governance.TokenIssuance.BurnProposal",
+            "BurnProposal",
+            Record {
+                record_id: None,
+                fields: vec![
+                    field("governanceParty", make_party(governance_party)),
+                    field("proposer", make_party(proposer)),
+                    field("issuanceConfigCid", make_contract_id(issuance_config_cid)),
+                    field("holder", make_party(holder)),
+                    field("amount", make_numeric(amount)),
+                    field("description", make_text(description)),
+                    field(
+                        "requestedAt",
+                        Value {
+                            sum: Some(value::Sum::Timestamp(0)),
+                        },
+                    ),
+                    field(
+                        "executeBefore",
+                        Value {
+                            sum: Some(value::Sum::Timestamp(i64::MAX / 1000)),
+                        },
+                    ),
+                ],
+            },
+        ),
+        ProposalType::RotateFactory {
+            issuance_config_cid,
+            new_factory_cid,
+        } => (
+            ProposalPackage::GovernanceTokenIssuance,
+            "Governance.TokenIssuance.RotateFactoryProposal",
+            "RotateFactoryProposal",
+            Record {
+                record_id: None,
+                fields: vec![
+                    field("governanceParty", make_party(governance_party)),
+                    field("proposer", make_party(proposer)),
+                    field("issuanceConfigCid", make_contract_id(issuance_config_cid)),
+                    field("newFactoryCid", make_contract_id(new_factory_cid)),
                 ],
             },
         ),
