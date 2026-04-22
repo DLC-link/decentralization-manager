@@ -590,6 +590,7 @@ mod tests {
             packages: PackageConfig {
                 governance_core: Some("#gov-core".to_string()),
                 governance_token_custody: None,
+                governance_token_issuance: None,
                 utility_credential: None,
                 utility_registry: None,
                 vault: None,
