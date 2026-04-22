@@ -49,6 +49,9 @@ source "$SCRIPT_DIR/integration-tests/deploy-gov-core.sh"
 log_phase "Testing governance token custody flow"
 source "$SCRIPT_DIR/integration-tests/governance-token-custody.sh"
 
+log_phase "Testing governance token issuance flow (requires PROVIDER_SERVICE_CID)"
+source "$SCRIPT_DIR/integration-tests/governance-token-issuance.sh"
+
 log_phase "Testing generic vote governance flow"
 source "$SCRIPT_DIR/integration-tests/governance-generic-vote.sh"
 
