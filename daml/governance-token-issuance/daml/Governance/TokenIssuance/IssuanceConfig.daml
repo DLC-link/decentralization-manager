@@ -39,6 +39,12 @@ template IssuanceConfig
     -- NB: we do NOT validate the new factory's admin here; the calling
     -- proposal is responsible for that via BurnMintFactory_PublicFetch.
     -- Keeping the choice body minimal makes it easy to audit.
+    --
+    -- This choice is consuming (Daml's default when no `nonconsuming` /
+    -- `preconsuming` / `postconsuming` prefix is given): `self` is archived
+    -- when the choice is exercised, then the body creates a fresh
+    -- IssuanceConfig with the new factory cid. RotateFactoryTest asserts
+    -- this archive-and-recreate shape end-to-end.
     choice IssuanceConfig_RotateFactory : ContractId IssuanceConfig
       with
         newFactoryCid : ContractId AllocationFactory
