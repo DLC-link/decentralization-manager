@@ -630,6 +630,44 @@ pub enum ProposalType {
     AcceptTransfer { transfer_instruction_cid: String },
     /// Generic text-based vote (no on-chain effect beyond recording the result)
     GenericVote { description: String },
+    /// Run the full Utility-Registry onboarding for an instrument issued by the
+    /// governance party and produce an IssuanceConfig. One-shot per deployment.
+    SetupIssuance {
+        provider_service_cid: String,
+        operator: CantonId,
+        instrument_id_text: String,
+        display_name: String,
+        symbol: String,
+        decimals: i64,
+    },
+    /// Offer a mint of `amount` tokens to `recipient` via AllocationFactory_OfferMint.
+    /// The resulting MintOffer is accepted later by the recipient, outside this plugin.
+    Mint {
+        issuance_config_cid: String,
+        recipient: CantonId,
+        amount: String,
+        description: String,
+        /// Hours into the future after which the mint offer expires. Defaults to 24.
+        #[serde(default)]
+        execute_before_hours: Option<i64>,
+    },
+    /// Offer a burn of `amount` tokens held by `holder` via AllocationFactory_OfferBurn.
+    /// Holdings are supplied by the holder at BurnOffer_Accept time, not here.
+    Burn {
+        issuance_config_cid: String,
+        holder: CantonId,
+        amount: String,
+        description: String,
+        /// Hours into the future after which the burn offer expires. Defaults to 24.
+        #[serde(default)]
+        execute_before_hours: Option<i64>,
+    },
+    /// Swap the AllocationFactory cid on an existing IssuanceConfig to `new_factory_cid`
+    /// after validating that the new factory's admin matches the governance party.
+    RotateFactory {
+        issuance_config_cid: String,
+        new_factory_cid: String,
+    },
 }
 
 /// Request to propose a governance domain action (creates proposal contract)

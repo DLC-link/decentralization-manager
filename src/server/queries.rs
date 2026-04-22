@@ -77,6 +77,14 @@ fn contract_templates(packages: &PackageConfig) -> Vec<TemplateId> {
             entity_name: "VaultGovernanceRules",
         });
     }
+    // Governance Token Issuance contracts (configurable package ID)
+    if let Some(ref pkg) = packages.governance_token_issuance {
+        templates.push(TemplateId {
+            package_id: pkg.clone(),
+            module_name: "Governance.TokenIssuance.IssuanceConfig",
+            entity_name: "IssuanceConfig",
+        });
+    }
     templates
 }
 

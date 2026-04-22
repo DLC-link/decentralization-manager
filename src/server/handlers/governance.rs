@@ -379,6 +379,16 @@ pub async fn propose_action(
                 }
             }
         }
+        action_serializer::ProposalPackage::GovernanceTokenIssuance => {
+            match packages.governance_token_issuance.as_deref() {
+                Some(pkg) => pkg,
+                None => {
+                    return HttpResponse::BadRequest().json(ErrorResponse {
+                        error: "governance_token_issuance package not configured".to_string(),
+                    });
+                }
+            }
+        }
     };
 
     let template_id = Identifier {
