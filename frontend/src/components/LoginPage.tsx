@@ -6,10 +6,9 @@ import BitSafeLogoLight from "../assets/bitsafe-logo-light.svg";
 
 interface LoginPageProps {
   onLogin: () => void;
-  error?: string | null;
 }
 
-export const LoginPage = ({ onLogin, error }: LoginPageProps) => {
+export const LoginPage = ({ onLogin }: LoginPageProps) => {
   const theme = useTheme();
   const logo =
     theme.palette.mode === "light" ? BitSafeLogoDark : BitSafeLogoLight;
@@ -30,16 +29,6 @@ export const LoginPage = ({ onLogin, error }: LoginPageProps) => {
       <Typography variant="body1" color="text.secondary">
         Decentralized Party Manager
       </Typography>
-
-      {error && (
-        <Typography
-          variant="body2"
-          color="error"
-          sx={{ maxWidth: 400, textAlign: "center" }}
-        >
-          {error}
-        </Typography>
-      )}
 
       <Button
         variant="contained"

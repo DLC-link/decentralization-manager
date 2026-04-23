@@ -489,6 +489,38 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         Ok(())
     }
 
+    async fn delete_stale_dec_parties(&mut self, prefix: &str, fresh_ids: &[String]) -> Result {
+        if fresh_ids.is_empty() {
+            // No fresh parties — delete all for this prefix
+            self.delete_dec_parties_by_prefix(prefix).await?;
+            return Ok(());
+        }
+
+        // Build placeholders for the IN clause
+        let placeholders: Vec<&str> = fresh_ids.iter().map(|_| "?").collect();
+        let in_clause = placeholders.join(",");
+
+        if prefix.is_empty() {
+            let query = format!("DELETE FROM dec_party WHERE party_id NOT IN ({in_clause})");
+            let mut q = sqlx::query(&query);
+            for id in fresh_ids {
+                q = q.bind(id);
+            }
+            q.execute(&mut **self).await?;
+        } else {
+            let query =
+                format!("DELETE FROM dec_party WHERE prefix = ? AND party_id NOT IN ({in_clause})");
+            let mut q = sqlx::query(&query);
+            q = q.bind(prefix);
+            for id in fresh_ids {
+                q = q.bind(id);
+            }
+            q.execute(&mut **self).await?;
+        }
+
+        Ok(())
+    }
+
     async fn update_participant_owner_key(
         &mut self,
         party_id: &str,

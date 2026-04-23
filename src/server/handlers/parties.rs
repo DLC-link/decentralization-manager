@@ -376,7 +376,7 @@ pub async fn store_parties_to_db(
         .as_secs() as i64;
 
     let mut tx = db.begin_transaction().await?;
-    tx.delete_dec_parties_by_prefix(prefix).await?;
+    let fresh_party_ids: Vec<String> = parties.iter().map(|p| p.party_id.to_string()).collect();
 
     for party in parties {
         // Extract the real prefix from party_id (everything before "::")
@@ -430,6 +430,10 @@ pub async fn store_parties_to_db(
         tx.replace_dec_party_contracts(&row.party_id, &contracts)
             .await?;
     }
+
+    // Remove stale parties no longer returned by Canton
+    tx.delete_stale_dec_parties(prefix, &fresh_party_ids)
+        .await?;
 
     Commitable::commit(tx).await
 }
@@ -862,13 +866,10 @@ async fn fetch_peer_packages(
                 let psk = keypair.derive_psk(&peer_pub_key);
                 let identity = current_participant_id.to_string();
 
-                match tokio::time::timeout(
-                    Duration::from_secs(5),
-                    send_noise_message(&peer.address, peer.port, &psk, identity.as_bytes(), &msg),
-                )
-                .await
+                match send_noise_message(&peer.address, peer.port, &psk, identity.as_bytes(), &msg)
+                    .await
                 {
-                    Ok(Ok(response)) => {
+                    Ok(response) => {
                         if let Ok(response_msg) = Message::from_bytes(&response)
                             && response_msg.msg_type == MessageType::Data
                             && let Ok(packages) =
