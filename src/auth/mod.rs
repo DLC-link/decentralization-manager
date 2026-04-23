@@ -214,14 +214,23 @@ impl AuthRegistry {
                 party.member_party_id
             );
 
-            let manager = TokenManager::new(
+            match TokenManager::new(
                 party.keycloak.clone(),
                 party.user_id.clone(),
                 party.member_party_id.clone(),
             )
-            .await?;
-
-            managers.insert(dec_party_id, Arc::new(manager));
+            .await
+            {
+                Ok(manager) => {
+                    managers.insert(dec_party_id, Arc::new(manager));
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to initialize auth for dec_party={dec_party_id}: {e}. \
+                         Skipping — workflows for this party will fail until credentials are fixed."
+                    );
+                }
+            }
         }
 
         Ok(Self { managers })

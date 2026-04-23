@@ -231,6 +231,7 @@ export const GovernanceAuditTrail = ({ partyId }: GovernanceAuditTrailProps) => 
           onClick={() => fetchAudit(true)}
           disabled={loading}
           size="small"
+          sx={{ mr: 1 }}
         >
           Refresh
         </Button>

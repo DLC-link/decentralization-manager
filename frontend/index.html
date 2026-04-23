@@ -6,6 +6,8 @@
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
         <title>Decentralized Party Manager</title>
         <script>
+            // Save hash before Keycloak auth redirects can clear it
+            window.__INITIAL_HASH__ = window.location.hash;
             (function () {
                 const mode = localStorage.getItem("theme-mode");
                 const prefersDark = window.matchMedia(

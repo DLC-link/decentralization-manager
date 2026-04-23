@@ -55,7 +55,8 @@ export const CopyableText = ({ text, truncate, variant = "body1" }: CopyableText
     return `${text.slice(0, start)}...${text.slice(-end)}`;
   };
 
-  const handleCopy = async () => {
+  const handleCopy = async (e: React.MouseEvent) => {
+    e.stopPropagation();
     const success = await copyToClipboard(text);
     showSnackbar(success ? "Copied to clipboard" : "Failed to copy");
   };

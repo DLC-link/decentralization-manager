@@ -15,6 +15,8 @@ export const ThemeSwitcher = () => {
       size="small"
       sx={{
         backgroundColor: "background.paper",
+        border: 1,
+        borderColor: "divider",
         "& .MuiToggleButton-root": {
           border: "none",
           px: 1.5,

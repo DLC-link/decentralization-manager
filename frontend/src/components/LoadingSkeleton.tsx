@@ -1,52 +1,39 @@
-import { Box, Card, CardContent, Skeleton, Tabs, Tab } from "@mui/material";
-
-const PartyCardSkeleton = () => (
-  <Card sx={{ mb: 3, borderRadius: 2 }}>
-    <CardContent sx={{ p: 3 }}>
-      <Skeleton variant="text" width="70%" height={32} />
-      <Box sx={{ display: "flex", gap: 1, mt: 1.5, mb: 2 }}>
-        <Skeleton variant="rounded" width={100} height={24} />
-        <Skeleton variant="rounded" width={80} height={24} />
-        <Skeleton variant="rounded" width={110} height={24} />
-        <Skeleton variant="rounded" width={90} height={24} />
-      </Box>
-      <Skeleton variant="text" width="30%" height={20} sx={{ mt: 3 }} />
-      <Box sx={{ mt: 1.5 }}>
-        <Skeleton variant="rounded" width="100%" height={40} />
-        <Skeleton variant="rounded" width="100%" height={40} sx={{ mt: 1 }} />
-        <Skeleton variant="rounded" width="100%" height={40} sx={{ mt: 1 }} />
-      </Box>
-    </CardContent>
-  </Card>
-);
-
-const TableRowSkeleton = () => (
-  <Box sx={{ display: "flex", gap: 2, py: 1.5, px: 1 }}>
-    <Skeleton variant="text" width="35%" />
-    <Skeleton variant="text" width="15%" />
-    <Skeleton variant="text" width="40%" />
-  </Box>
-);
+import {
+  Box,
+  Skeleton,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableRow,
+} from "@mui/material";
+import { zebraRow } from "../styles";
 
 export const LoadingSkeleton = () => (
-  <>
-    <Tabs value={0} sx={{ mb: 3, borderBottom: 1, borderColor: "divider" }}>
-      <Tab label="Parties" disabled />
-      <Tab label="Packages" disabled />
-      <Tab label="Configuration" disabled />
-    </Tabs>
-
-    <Box sx={{ mb: 3 }}>
-      <Box sx={{ display: "flex", justifyContent: "space-between", mb: 2 }}>
-        <Skeleton variant="text" width="140px" height={20} />
-        <Skeleton variant="rounded" width={120} height={36} />
-      </Box>
-      <Skeleton variant="rounded" width={300} height={40} />
-    </Box>
-
-    <PartyCardSkeleton />
-    <PartyCardSkeleton />
-  </>
+  <Table size="small">
+    <TableHead>
+      <TableRow>
+        <TableCell sx={{ py: 1 }}><Skeleton width="60%" /></TableCell>
+        <TableCell sx={{ py: 1 }} align="center"><Skeleton width={50} sx={{ mx: "auto" }} /></TableCell>
+        <TableCell sx={{ py: 1 }} align="center"><Skeleton width={45} sx={{ mx: "auto" }} /></TableCell>
+        <TableCell sx={{ py: 1 }} align="center"><Skeleton width={70} sx={{ mx: "auto" }} /></TableCell>
+        <TableCell sx={{ py: 1 }} align="center"><Skeleton width={55} sx={{ mx: "auto" }} /></TableCell>
+        <TableCell sx={{ py: 1 }} align="center"><Skeleton variant="circular" width={18} height={18} sx={{ mx: "auto" }} /></TableCell>
+      </TableRow>
+    </TableHead>
+    <TableBody>
+      {Array.from({ length: 20 }).map((_, i) => (
+        <TableRow key={i} sx={zebraRow(i)}>
+          <TableCell sx={{ py: 1.5 }}><Skeleton width={`${55 + (i % 3) * 10}%`} /></TableCell>
+          <TableCell sx={{ py: 1.5 }} align="center"><Skeleton width={20} sx={{ mx: "auto" }} /></TableCell>
+          <TableCell sx={{ py: 1.5 }} align="center"><Skeleton width={20} sx={{ mx: "auto" }} /></TableCell>
+          <TableCell sx={{ py: 1.5 }} align="center"><Skeleton width={20} sx={{ mx: "auto" }} /></TableCell>
+          <TableCell sx={{ py: 1.5 }} align="center"><Skeleton variant="rounded" width={32} height={20} sx={{ mx: "auto" }} /></TableCell>
+          <TableCell sx={{ py: 1.5 }} align="center"><Skeleton variant="circular" width={18} height={18} sx={{ mx: "auto" }} /></TableCell>
+        </TableRow>
+      ))}
+    </TableBody>
+  </Table>
 );
 
 export const PackagesTabSkeleton = () => (
@@ -59,7 +46,11 @@ export const PackagesTabSkeleton = () => (
       </Box>
     </Box>
     {Array.from({ length: 8 }).map((_, i) => (
-      <TableRowSkeleton key={i} />
+      <Box key={i} sx={{ display: "flex", gap: 2, py: 1.5, px: 1 }}>
+        <Skeleton variant="text" width="35%" />
+        <Skeleton variant="text" width="15%" />
+        <Skeleton variant="text" width="40%" />
+      </Box>
     ))}
   </>
 );
