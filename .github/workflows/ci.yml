@@ -126,8 +126,16 @@ jobs:
         with:
           path: .localnet/
           key: localnet-0.5.17
+      - name: Install dpm
+        run: curl -sSL https://get.digitalasset.com/install/install.sh | sh
+      - name: Install DAML SDK
+        run: ~/.dpm/bin/dpm install 3.4.11
+      - name: Build DAML packages
+        run: cd daml && ~/.dpm/bin/dpm build --all
       - name: Run integration tests
-        run: ./integration-tests/run.sh
+        run: |
+          export PATH="$HOME/.dpm/bin:$PATH"
+          ./integration-tests/run.sh
 
   daml:
     name: DAML Build & Test
