@@ -6,7 +6,6 @@
 #
 # Exports: RULES_CONTRACT_ID, P1_MEMBER_PARTY, P2_MEMBER_PARTY, P3_MEMBER_PARTY
 
-# MOCK_TOKEN lives in env.sh (shared with other workflow scripts).
 
 # Canton HTTP JSON API ports (participant port prefix + 975)
 P1_JSON_API=3975
@@ -126,9 +125,9 @@ update_party_config() {
             \"keycloak_realm\": \"\",
             \"keycloak_client_id\": \"\",
             \"packages\": {
-                \"governance_core\": \"#governance-core-v0-rc2\",
-                \"governance_token_custody\": \"#governance-token-custody-v0-rc2\",
-                \"governance_token_issuance\": \"#governance-token-issuance-v0-rc2\",
+                \"governance_core\": \"#governance-core-v0-rc3\",
+                \"governance_token_custody\": \"#governance-token-custody-v0-rc3\",
+                \"governance_token_issuance\": \"#governance-token-issuance-v0-rc3\",
                 \"utility_registry\": \"#utility-registry-app-v0\"
             }
         }")
@@ -159,7 +158,7 @@ CONTRACTS_REQUEST=$(cat <<EOF
     {
       "id": "governance-rules",
       "name": "GovernanceRules",
-      "package_id": "#governance-core-v0-rc2",
+      "package_id": "#governance-core-v0-rc3",
       "module_name": "Governance.Rules",
       "entity_name": "GovernanceRules",
       "fields": [

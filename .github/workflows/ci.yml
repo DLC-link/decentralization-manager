@@ -130,10 +130,12 @@ jobs:
         run: curl -sSL https://get.digitalasset.com/install/install.sh | sh
       - name: Install DAML SDK
         run: ~/.dpm/bin/dpm install 3.4.11
-      - name: Build DAML test package
+      - name: Build DAML packages
         run: |
-          cd daml/governance-core && ~/.dpm/bin/dpm build
-          cd ../governance-token-issuance-test && ~/.dpm/bin/dpm build
+          cd daml && ~/.dpm/bin/dpm build --all
+          cp governance-core/.daml/dist/governance-core-v0-rc3-0.1.0.dar ../releases/v0/rc3/
+          cp governance-token-custody/.daml/dist/governance-token-custody-v0-rc3-0.1.0.dar ../releases/v0/rc3/
+          cp governance-token-issuance/.daml/dist/governance-token-issuance-v0-rc3-0.1.0.dar ../releases/v0/rc3/
       - name: Run integration tests
         run: |
           export PATH="$HOME/.dpm/bin:$PATH"
