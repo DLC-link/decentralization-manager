@@ -999,7 +999,6 @@ pub fn build_proposal_create_args(
             recipient,
             amount,
             description,
-            execute_before_hours: _,
         } => (
             ProposalPackage::GovernanceUtilityOnboarding,
             "Governance.TokenIssuance.MintProposal",
@@ -1045,7 +1044,6 @@ pub fn build_proposal_create_args(
             holder,
             amount,
             description,
-            execute_before_hours: _,
         } => (
             ProposalPackage::GovernanceUtilityOnboarding,
             "Governance.TokenIssuance.BurnProposal",
