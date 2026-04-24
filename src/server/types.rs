@@ -677,10 +677,6 @@ pub enum ProposalType {
         recipient: CantonId,
         amount: String,
         description: String,
-        /// Reserved for a future iteration. In v1 this field is ignored; the
-        /// serializer hardcodes a far-future `executeBefore` timestamp.
-        #[serde(default)]
-        execute_before_hours: Option<i64>,
     },
     /// Offer a burn of `amount` tokens held by `holder` via
     /// `AllocationFactory_OfferBurn`. Holdings are supplied by the holder at
@@ -692,10 +688,6 @@ pub enum ProposalType {
         holder: CantonId,
         amount: String,
         description: String,
-        /// Reserved for a future iteration. In v1 this field is ignored; the
-        /// serializer hardcodes a far-future `executeBefore` timestamp.
-        #[serde(default)]
-        execute_before_hours: Option<i64>,
     },
 }
 
