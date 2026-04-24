@@ -127,7 +127,7 @@ update_party_config() {
             \"packages\": {
                 \"governance_core\": \"#governance-core-v0-rc3\",
                 \"governance_token_custody\": \"#governance-token-custody-v0-rc3\",
-                \"governance_token_issuance\": \"#governance-token-issuance-v0-rc3\",
+                \"governance_utility_onboarding\": \"#governance-utility-onboarding-v0-rc3\",
                 \"utility_registry\": \"#utility-registry-app-v0\"
             }
         }")

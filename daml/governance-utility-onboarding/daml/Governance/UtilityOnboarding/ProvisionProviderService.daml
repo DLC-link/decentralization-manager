@@ -1,0 +1,47 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Granular onboarding action: ProvisionProviderService.
+--
+-- `ProviderService` has `signatory operator, provider`. When `provider` is the
+-- decentralized governance party, creating this contract via direct ledger
+-- submission, multi-party daml-script submit, or `POST /contracts` fails on
+-- Canton with DAML_AUTHORIZATION_ERROR because the governance party is
+-- externally signed (threshold > 1) and the DPM contracts workflow does not
+-- carry that signing flow. See issue #51.
+--
+-- The fix: wrap the create in a `GovernableAction` proposal. Inside
+-- `executeImpl` both authorities are present in the same transaction:
+-- the proposer's authority flows from `signatory proposer` on this template,
+-- and the governance party's authority flows from the enclosing
+-- `GovernanceRules_ExecuteConfirmedAction → GovernableAction_Execute` chain.
+--
+-- The proposer IS the utility-registry operator party (i.e. a party
+-- controlling the Splice / utility-registry app), so `operator = proposer`
+-- on the resulting `ProviderService`. This is different from Mint/Burn
+-- proposals where the proposer is any committee member.
+module Governance.UtilityOnboarding.ProvisionProviderService where
+
+import Utility.Registry.App.V0.Service.Provider (ProviderService(..))
+
+import Governance.Action
+
+template ProvisionProviderService
+  with
+    governanceParty : Party
+    proposer : Party
+  where
+    signatory proposer
+    observer governanceParty
+
+    interface instance GovernableAction for ProvisionProviderService where
+      view = GovernableActionView with
+        governanceParty
+        actionLabel = "ProvisionProviderService"
+        description = "Provision a ProviderService with operator = proposer and provider = governanceParty."
+
+      executeImpl = do
+        _ <- create ProviderService with
+          operator = proposer
+          provider = governanceParty
+        pure ()

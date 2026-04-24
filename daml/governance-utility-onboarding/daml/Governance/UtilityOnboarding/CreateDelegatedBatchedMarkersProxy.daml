@@ -1,0 +1,33 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Granular onboarding action: CreateDelegatedBatchedMarkersProxy
+module Governance.UtilityOnboarding.CreateDelegatedBatchedMarkersProxy where
+
+import Utility.Commercials.V0.Model.DelegatedBatchedMarkersProxy
+  (DelegatedBatchedMarkersProxy(..))
+
+import Governance.Action
+
+-- | Creates a DelegatedBatchedMarkersProxy that authorizes the operator to
+-- create batched activity markers on behalf of the provider (governance party).
+template CreateDelegatedBatchedMarkersProxy
+  with
+    governanceParty : Party
+    proposer : Party
+    operator : Party
+  where
+    signatory proposer
+    observer governanceParty
+
+    interface instance GovernableAction for CreateDelegatedBatchedMarkersProxy where
+      view = GovernableActionView with
+        governanceParty
+        actionLabel = "CreateDelegatedBatchedMarkersProxy"
+        description = "Authorize operator to create batched markers for the provider."
+
+      executeImpl = do
+        _ <- create DelegatedBatchedMarkersProxy with
+          operator
+          provider = governanceParty
+        pure ()

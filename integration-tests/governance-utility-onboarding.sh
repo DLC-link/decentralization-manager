@@ -1,22 +1,18 @@
 #!/bin/bash
 
-# Test governance token issuance plugin end-to-end: exercise all four
-# GovernableAction templates (SetupIssuance → Mint → Burn → RotateFactory)
-# through the HTTP governance flow (propose → confirm → execute) on localnet.
+# Test governance utility-onboarding plugin end-to-end: exercise
+# ProvisionProviderService → SetupUtility → Mint → Burn through the HTTP
+# governance flow (propose → confirm → execute) on localnet.
 #
 # Sourced by run.sh — expects env.sh variables, PARTY_ID, RULES_CONTRACT_ID,
 # and P1/P2/P3_MEMBER_PARTY from deploy-gov-core.sh to be available.
 #
-# The ProviderService required by SetupIssuance is also provisioned via the
-# same governance flow (ProvisionProviderService action), since it has
-# `signatory operator, provider` and the operator authority comes from the
+# The ProviderService required by SetupUtility has `signatory operator,
+# provider` and is also provisioned via the same governance flow
+# (ProvisionProviderService action); the operator authority comes from the
 # proposer of the action while the provider (decentralized-party) authority
-# flows through the GovernanceRules exercise chain. The spare
-# AllocationFactory consumed by RotateFactory only has the decentralized
-# party as signatory (operator is an observer), so it is created via the
-# single-signatory contracts workflow. Callers may pre-set
-# PROVIDER_SERVICE_CID / SPARE_FACTORY_CID to bypass either provisioning
-# step.
+# flows through the GovernanceRules exercise chain. Callers may pre-set
+# PROVIDER_SERVICE_CID to bypass the provisioning step.
 
 # ============================================================================
 # Guard clauses
@@ -179,23 +175,8 @@ EOF
 
 # URL-encode the '#' in package symbolic names so curl passes it as a query
 # value rather than treating it as a URL fragment.
-ISSUANCE_PKG="%23governance-token-issuance-v0-rc3"
 UTILITY_APP_PKG="%23utility-registry-app-v0"
-
-# Query the current IssuanceConfig contract id visible to the governance party.
-# Uses /contracts/query (live Canton ACS) rather than /decentralized-parties
-# (which is 60s-cached). Expects exactly one live config; errors otherwise.
-current_issuance_config_cid() {
-    local resp
-    resp=$(curl -s "http://localhost:$P1_HTTP/contracts/query?party_id=$PARTY_ID&package_id=$ISSUANCE_PKG&module_name=Governance.TokenIssuance.IssuanceConfig&entity_name=IssuanceConfig")
-    local count
-    count=$(echo "$resp" | jq '.contracts | length')
-    if [ "$count" -lt 1 ]; then
-        echo "ERROR: No IssuanceConfig contract visible to $PARTY_ID" >&2
-        return 1
-    fi
-    echo "$resp" | jq -r '.contracts[0].contract_id'
-}
+UTILITY_REGISTRY_PKG="%23utility-registry-v0"
 
 # Count contracts of a given template visible to the governance party.
 #
@@ -226,6 +207,17 @@ assert_contract_count_at_least() {
     echo "$label contracts found: $count"
 }
 
+# Return the first contract id for a given template, or empty if none.
+#
+# Usage: first_contract_id <url-encoded-package-id> <module_name> <entity_name>
+first_contract_id() {
+    local package_id="$1"
+    local module_name="$2"
+    local entity_name="$3"
+    curl -s "http://localhost:$P1_HTTP/contracts/query?party_id=$PARTY_ID&package_id=$package_id&module_name=$module_name&entity_name=$entity_name" \
+        | jq -r '.contracts[0].contract_id // empty'
+}
+
 # ============================================================================
 # Auto-provision ProviderService (unless caller supplied one) via the
 # governance flow. Produces a ProviderService with
@@ -235,9 +227,6 @@ assert_contract_count_at_least() {
 if [ -z "$PROVIDER_SERVICE_CID" ]; then
     run_proposal_flow "ProvisionProviderService" '{"type": "provision_provider_service"}'
 
-    # Use /services/provider (live Canton ACS query) rather than
-    # /decentralized-parties, which has a 60s cache that stays stale right
-    # after deploy-gov-core.sh populated it.
     sleep 2
     PROVIDER_SERVICE_CID=$(curl -s "http://localhost:$P1_HTTP/services/provider?party_id=$PARTY_ID" \
         | jq -r '.services[0].contract_id // empty')
@@ -252,35 +241,51 @@ fi
 echo "ProviderService CID: $PROVIDER_SERVICE_CID"
 
 # ============================================================================
-# Flow 1: SetupIssuance — creates the IssuanceConfig
+# Flow: SetupUtility — runs the full utility-registry onboarding chain in one
+# vote. The createTransferRule and createAllocationFactory flags on the
+# underlying RegistrarServiceRequest produce the TransferRule and
+# AllocationFactory as side effects of the accept step.
 # ============================================================================
 
 SETUP_PROPOSAL=$(cat <<EOF
 {
-  "type": "setup_issuance",
+  "type": "setup_utility",
   "provider_service_cid": "$PROVIDER_SERVICE_CID",
   "operator": "$P1_MEMBER_PARTY",
   "instrument_id_text": "TEST-E2E-TOKEN",
-  "display_name": "Test E2E Token",
-  "symbol": "TEE",
-  "decimals": 8
+  "create_transfer_rule": true,
+  "create_allocation_factory": true
 }
 EOF
 )
-run_proposal_flow "SetupIssuance" "$SETUP_PROPOSAL"
+run_proposal_flow "SetupUtility" "$SETUP_PROPOSAL"
 
-ISSUANCE_CONFIG_CID=$(current_issuance_config_cid) || exit 1
-echo "IssuanceConfig created: $ISSUANCE_CONFIG_CID"
+sleep 2
+ALLOCATION_FACTORY_CID=$(first_contract_id "$UTILITY_APP_PKG" "Utility.Registry.App.V0.Service.AllocationFactory" "AllocationFactory")
+INSTRUMENT_CONFIGURATION_CID=$(first_contract_id "$UTILITY_REGISTRY_PKG" "Utility.Registry.V0.Configuration.Instrument" "InstrumentConfiguration")
+
+if [ -z "$ALLOCATION_FACTORY_CID" ]; then
+    echo "ERROR: SetupUtility did not produce an AllocationFactory"
+    exit 1
+fi
+if [ -z "$INSTRUMENT_CONFIGURATION_CID" ]; then
+    echo "ERROR: SetupUtility did not produce an InstrumentConfiguration"
+    exit 1
+fi
+echo "AllocationFactory: $ALLOCATION_FACTORY_CID"
+echo "InstrumentConfiguration: $INSTRUMENT_CONFIGURATION_CID"
 
 # ============================================================================
-# Flow 2: Mint — offers 100 TEST-E2E-TOKEN to the governance party (self-mint
-# for E2E; a real run would target an outsider, but self is a valid holder too)
+# Flow: Mint — offers 100 TEST-E2E-TOKEN to P1_MEMBER_PARTY (self-mint for E2E;
+# a real run would target an outsider, but self is a valid holder too).
 # ============================================================================
 
 MINT_PROPOSAL=$(cat <<EOF
 {
   "type": "mint",
-  "issuance_config_cid": "$ISSUANCE_CONFIG_CID",
+  "allocation_factory_cid": "$ALLOCATION_FACTORY_CID",
+  "instrument_id": {"admin": "$PARTY_ID", "id": "TEST-E2E-TOKEN"},
+  "instrument_configuration_cid": "$INSTRUMENT_CONFIGURATION_CID",
   "recipient": "$P1_MEMBER_PARTY",
   "amount": "100.0",
   "description": "E2E test mint"
@@ -291,13 +296,15 @@ run_proposal_flow "Mint" "$MINT_PROPOSAL"
 assert_contract_count_at_least "$UTILITY_APP_PKG" "Utility.Registry.App.V0.Model.Mint" "MintOffer" 1 "MintOffer"
 
 # ============================================================================
-# Flow 3: Burn — offers to burn 10 tokens from the same holder
+# Flow: Burn — offers to burn 10 tokens from the same holder.
 # ============================================================================
 
 BURN_PROPOSAL=$(cat <<EOF
 {
   "type": "burn",
-  "issuance_config_cid": "$ISSUANCE_CONFIG_CID",
+  "allocation_factory_cid": "$ALLOCATION_FACTORY_CID",
+  "instrument_id": {"admin": "$PARTY_ID", "id": "TEST-E2E-TOKEN"},
+  "instrument_configuration_cid": "$INSTRUMENT_CONFIGURATION_CID",
   "holder": "$P1_MEMBER_PARTY",
   "amount": "10.0",
   "description": "E2E test burn"
@@ -308,106 +315,16 @@ run_proposal_flow "Burn" "$BURN_PROPOSAL"
 assert_contract_count_at_least "$UTILITY_APP_PKG" "Utility.Registry.App.V0.Model.Burn" "BurnOffer" 1 "BurnOffer"
 
 # ============================================================================
-# Flow 4: RotateFactory — swaps the AllocationFactory on the IssuanceConfig
-# ============================================================================
-
-if [ -z "$SPARE_FACTORY_CID" ]; then
-    echo ""
-    echo "Auto-provisioning spare AllocationFactory via contracts workflow..."
-
-    ALLOCATION_FACTORY_QUERY="http://localhost:$P1_HTTP/contracts/query?party_id=$PARTY_ID&package_id=$UTILITY_APP_PKG&module_name=Utility.Registry.App.V0.Service.AllocationFactory&entity_name=AllocationFactory"
-
-    # Snapshot existing AllocationFactory cids so we can diff out the new one
-    # after the create. (SetupIssuance already produced one, and both the old
-    # and the new share all the same signatories and fields, so querying
-    # after-the-fact can't tell them apart without this diff.)
-    EXISTING_FACTORY_CIDS=$(curl -s "$ALLOCATION_FACTORY_QUERY" | jq -r '.contracts[].contract_id' | sort)
-
-    FACTORY_REQUEST=$(cat <<EOF
-{
-  "decentralized_party_id": "$PARTY_ID",
-  "participant_ids": ["$P1_UID", "$P2_UID", "$P3_UID"],
-  "participant_parties": ["$P1_MEMBER_PARTY", "$P2_MEMBER_PARTY", "$P3_MEMBER_PARTY"],
-  "operator_party": "$P1_MEMBER_PARTY",
-  "contracts": [
-    {
-      "id": "spare-allocation-factory",
-      "name": "AllocationFactory",
-      "package_id": "#utility-registry-app-v0",
-      "module_name": "Utility.Registry.App.V0.Service.AllocationFactory",
-      "entity_name": "AllocationFactory",
-      "fields": [
-        {"type": "decentralized_party"},
-        {"type": "decentralized_party"},
-        {"type": "operator_party"}
-      ]
-    }
-  ]
-}
-EOF
-)
-
-    curl -s -X POST "http://localhost:$P1_HTTP/contracts" \
-        -H "Content-Type: application/json" \
-        -d "$FACTORY_REQUEST"
-    echo ""
-
-    # Accept invitations on attestors in parallel
-    accept_invitation $P2_HTTP "participant-2" "Contracts" &
-    PID_ACCEPT1=$!
-    accept_invitation $P3_HTTP "participant-3" "Contracts" &
-    PID_ACCEPT2=$!
-    wait $PID_ACCEPT1 $PID_ACCEPT2
-
-    poll_status $P1_HTTP "contracts/status"
-
-    sleep 2
-    AFTER_FACTORY_CIDS=$(curl -s "$ALLOCATION_FACTORY_QUERY" | jq -r '.contracts[].contract_id' | sort)
-
-    # Pick the cid that appears in `after` but not in `before` — that's the spare
-    SPARE_FACTORY_CID=$(comm -13 <(echo "$EXISTING_FACTORY_CIDS") <(echo "$AFTER_FACTORY_CIDS") | head -1)
-
-    if [ -z "$SPARE_FACTORY_CID" ] || [ "$SPARE_FACTORY_CID" = "null" ]; then
-        echo "ERROR: Failed to extract AllocationFactory contract ID"
-        echo "  Before: $EXISTING_FACTORY_CIDS"
-        echo "  After:  $AFTER_FACTORY_CIDS"
-        exit 1
-    fi
-    echo "Provisioned spare AllocationFactory: $SPARE_FACTORY_CID"
-fi
-
-OLD_ISSUANCE_CONFIG_CID="$ISSUANCE_CONFIG_CID"
-
-ROTATE_PROPOSAL=$(cat <<EOF
-{
-  "type": "rotate_factory",
-  "issuance_config_cid": "$OLD_ISSUANCE_CONFIG_CID",
-  "new_factory_cid": "$SPARE_FACTORY_CID"
-}
-EOF
-)
-run_proposal_flow "RotateFactory" "$ROTATE_PROPOSAL"
-
-NEW_ISSUANCE_CONFIG_CID=$(current_issuance_config_cid) || exit 1
-echo "IssuanceConfig after rotate: $NEW_ISSUANCE_CONFIG_CID"
-
-if [ "$NEW_ISSUANCE_CONFIG_CID" = "$OLD_ISSUANCE_CONFIG_CID" ]; then
-    echo "ERROR: RotateFactory did not produce a new IssuanceConfig cid"
-    echo "  old: $OLD_ISSUANCE_CONFIG_CID"
-    echo "  new: $NEW_ISSUANCE_CONFIG_CID"
-    exit 1
-fi
-
-# ============================================================================
 # Summary
 # ============================================================================
 
 echo ""
-echo "Governance token issuance flow completed successfully!"
-echo "  SetupIssuance → IssuanceConfig: $OLD_ISSUANCE_CONFIG_CID"
-echo "  Mint          → MintOffer created for $P1_MEMBER_PARTY (100 TEE)"
-echo "  Burn          → BurnOffer created for $P1_MEMBER_PARTY (10 TEE)"
-echo "  RotateFactory → new IssuanceConfig: $NEW_ISSUANCE_CONFIG_CID"
+echo "Governance utility-onboarding flow completed successfully!"
+echo "  ProvisionProviderService → ProviderService: $PROVIDER_SERVICE_CID"
+echo "  SetupUtility             → AllocationFactory: $ALLOCATION_FACTORY_CID"
+echo "                              InstrumentConfiguration: $INSTRUMENT_CONFIGURATION_CID"
+echo "  Mint                     → MintOffer created for $P1_MEMBER_PARTY (100 TEST-E2E-TOKEN)"
+echo "  Burn                     → BurnOffer created for $P1_MEMBER_PARTY (10 TEST-E2E-TOKEN)"
 echo "  Proposer:  participant-1 ($P1_MEMBER_PARTY)"
 echo "  Confirmer: participant-2 ($P2_MEMBER_PARTY)"
 echo "  Executor:  participant-3 ($P3_MEMBER_PARTY)"

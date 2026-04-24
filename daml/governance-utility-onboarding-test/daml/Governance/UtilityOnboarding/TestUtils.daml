@@ -1,0 +1,128 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Test utilities for the utility onboarding governance plugin.
+module Governance.UtilityOnboarding.TestUtils where
+
+import DA.Set as Set hiding (filter)
+import DA.Time (minutes)
+import Daml.Script
+
+import Utility.Registry.App.V0.Service.AllocationFactory (AllocationFactory)
+import Utility.Registry.App.V0.Service.Provider (ProviderService(..))
+import Utility.Registry.App.V0.Service.Registrar (RegistrarService)
+import Utility.Registry.V0.Configuration.Instrument (InstrumentConfiguration)
+
+import Governance.Action (GovernableAction)
+import Governance.Confirmation (GovernanceConfirmation)
+import Governance.ExecutionResult
+import Governance.Rules
+
+import Governance.UtilityOnboarding.SetupUtility
+
+-- | Standard test party allocation for utility onboarding tests.
+data OnboardingTestParties = OnboardingTestParties
+  with
+    governanceParty : Party
+    member1 : Party
+    member2 : Party
+    member3 : Party
+    outsider : Party
+    operator : Party
+    dso : Party
+  deriving (Show, Eq)
+
+allocateOnboardingTestParties : Script OnboardingTestParties
+allocateOnboardingTestParties = do
+  governanceParty <- allocateParty "GovernanceParty"
+  member1 <- allocateParty "Member1"
+  member2 <- allocateParty "Member2"
+  member3 <- allocateParty "Member3"
+  outsider <- allocateParty "Outsider"
+  operator <- allocateParty "Operator"
+  dso <- allocateParty "DSO"
+  pure OnboardingTestParties with ..
+
+getMembers : OnboardingTestParties -> Set Party
+getMembers parties = Set.fromList [parties.member1, parties.member2, parties.member3]
+
+memberContext : Party -> Party -> SubmitOptions
+memberContext member gp = actAs member <> readAs gp
+
+createTestGovernance : OnboardingTestParties -> Script (ContractId GovernanceRules)
+createTestGovernance parties =
+  submit parties.governanceParty $ createCmd GovernanceRules with
+    governanceParty = parties.governanceParty
+    members = getMembers parties
+    threshold = 2
+    actionConfirmationTimeout = minutes 30
+
+submitConfirmations
+  : Party -> ContractId GovernanceRules -> ContractId GovernableAction -> [Party]
+  -> Script [ContractId GovernanceConfirmation]
+submitConfirmations governanceParty rulesCid proposalCid confirmers =
+  mapA (\confirmer -> do
+    result <- submit (memberContext confirmer governanceParty) $
+      exerciseCmd rulesCid GovernanceRules_ConfirmAction with
+        confirmer
+        actionProposalCid = proposalCid
+    pure result.confirmationCid
+  ) confirmers
+
+confirmAndExecute
+  : OnboardingTestParties -> ContractId GovernanceRules
+  -> ContractId GovernableAction -> [Party] -> Party
+  -> Script ExecuteConfirmedActionResult
+confirmAndExecute parties rulesCid proposalCid confirmers executor = do
+  confirmationCids <- submitConfirmations parties.governanceParty rulesCid proposalCid confirmers
+  submit (actAs executor
+    <> readAs parties.governanceParty
+    <> readAs parties.outsider
+    <> readAs parties.operator
+    <> readAs parties.dso) $
+    exerciseCmd rulesCid GovernanceRules_ExecuteConfirmedAction with
+      executor
+      actionProposalCid = proposalCid
+      confirmations = confirmationCids
+
+-- | Provision a ProviderService for the governance party via multi-party submit.
+-- Stands in for the full utility-registry onboarding chain.
+initProviderService : OnboardingTestParties -> Script (ContractId ProviderService)
+initProviderService parties =
+  submit (actAs parties.governanceParty <> actAs parties.operator) $
+    createCmd ProviderService with
+      operator = parties.operator
+      provider = parties.governanceParty
+
+-- | After setup has run, resolve the single CIDs we expect on-ledger.
+data SetupArtifacts = SetupArtifacts
+  with
+    registrarServiceCid : ContractId RegistrarService
+    allocationFactoryCid : ContractId AllocationFactory
+    instrumentConfigurationCid : ContractId InstrumentConfiguration
+  deriving (Eq, Show)
+
+resolveSetupArtifacts : OnboardingTestParties -> Script SetupArtifacts
+resolveSetupArtifacts parties = do
+  [(registrarServiceCid, _)] <- query @RegistrarService parties.governanceParty
+  [(allocationFactoryCid, _)] <- query @AllocationFactory parties.governanceParty
+  [(instrumentConfigurationCid, _)] <- query @InstrumentConfiguration parties.governanceParty
+  pure SetupArtifacts with ..
+
+-- | Run the full SetupUtility flow end-to-end and return the resulting on-ledger CIDs.
+setupUtilityForTest
+  : OnboardingTestParties -> ContractId GovernanceRules -> Script SetupArtifacts
+setupUtilityForTest parties rulesCid = do
+  providerCid <- initProviderService parties
+  proposalCid <- submit parties.member1 $ createCmd SetupUtility with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    providerServiceCid = providerCid
+    operator = parties.operator
+    instrumentIdText = "TEST-TOKEN"
+    createTransferRule = True
+    createAllocationFactory = True
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  _ <- confirmAndExecute parties rulesCid proposalInterfaceCid
+    [parties.member1, parties.member2] parties.member1
+  resolveSetupArtifacts parties

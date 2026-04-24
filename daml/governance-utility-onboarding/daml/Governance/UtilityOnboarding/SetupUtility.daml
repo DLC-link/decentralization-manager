@@ -1,0 +1,60 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Composite onboarding action: SetupUtility
+module Governance.UtilityOnboarding.SetupUtility where
+
+import Utility.Registry.App.V0.Service.Provider
+  (ProviderService,
+   ProviderService_CreateProviderConfiguration(..),
+   ProviderService_AcceptRegistrarServiceRequest(..))
+import Utility.Registry.App.V0.Service.Registrar
+  (RegistrarService_CreateInstrumentConfiguration(..),
+   RegistrarServiceRequest(..),
+   RegistrarServiceRequest_Accept(..))
+
+import Governance.Action
+
+-- | Composite onboarding action: runs the full onboarding chain in one vote.
+-- Flags drive optional steps on the RegistrarServiceRequest.
+template SetupUtility
+  with
+    governanceParty : Party
+    proposer : Party
+    providerServiceCid : ContractId ProviderService
+    operator : Party
+    instrumentIdText : Text
+    createTransferRule : Bool
+    createAllocationFactory : Bool
+  where
+    signatory proposer
+    observer governanceParty
+
+    interface instance GovernableAction for SetupUtility where
+      view = GovernableActionView with
+        governanceParty
+        actionLabel = "SetupUtility"
+        description = "Composite onboarding: register instrument " <> instrumentIdText
+
+      executeImpl = do
+        providerConfigurationCid <- (.providerConfigurationCid) <$>
+          exercise providerServiceCid ProviderService_CreateProviderConfiguration with
+            registrarRequirements = []
+            holderRequirements = []
+        registrarServiceRequestCid <- create RegistrarServiceRequest with
+          operator
+          provider = governanceParty
+          registrar = governanceParty
+          createTransferRule = if createTransferRule then Some True else None
+          createAllocationFactory = if createAllocationFactory then Some True else None
+        result <- exercise providerServiceCid ProviderService_AcceptRegistrarServiceRequest with
+          cid = registrarServiceRequestCid
+          payload = RegistrarServiceRequest_Accept with
+            providerConfigurationCid
+            credentialCids = []
+        _ <- exercise result.registrarServiceCid RegistrarService_CreateInstrumentConfiguration with
+          instrumentId = instrumentIdText
+          additionalIdentifiers = []
+          issuerRequirements = []
+          holderRequirements = []
+        pure ()

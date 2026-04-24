@@ -1,0 +1,32 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Granular onboarding action: SetEnableResultContracts
+module Governance.UtilityOnboarding.SetEnableResultContracts where
+
+import Utility.Registry.App.V0.Service.Registrar
+  (RegistrarService, RegistrarService_Set(..))
+
+import Governance.Action
+
+-- | Toggles result-contract emission on a RegistrarService.
+template SetEnableResultContracts
+  with
+    governanceParty : Party
+    proposer : Party
+    registrarServiceCid : ContractId RegistrarService
+    enableResultContracts : Optional Bool
+  where
+    signatory proposer
+    observer governanceParty
+
+    interface instance GovernableAction for SetEnableResultContracts where
+      view = GovernableActionView with
+        governanceParty
+        actionLabel = "SetEnableResultContracts"
+        description = "Toggle result-contract emission on RegistrarService."
+
+      executeImpl = do
+        _ <- exercise registrarServiceCid RegistrarService_Set with
+          enableResultContracts
+        pure ()

@@ -1,0 +1,123 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+module Governance.UtilityOnboarding.Test.SetupUtilityTest where
+
+import Daml.Script
+
+import Utility.Registry.App.V0.Service.AllocationFactory (AllocationFactory)
+import Utility.Registry.App.V0.Service.Registrar (RegistrarService)
+import Utility.Registry.V0.Configuration.Instrument (InstrumentConfiguration)
+import Utility.Registry.V0.Rule.Transfer (TransferRule)
+
+import Governance.Action (GovernableAction)
+import Governance.Rules
+
+import Governance.UtilityOnboarding.SetupUtility
+import Governance.UtilityOnboarding.TestUtils
+
+import TestHarness
+
+data Fixture = Fixture
+  with
+    parties : OnboardingTestParties
+    rulesCid : ContractId GovernanceRules
+  deriving (Eq, Show)
+
+given_governance : Script Fixture
+given_governance = do
+  parties <- allocateOnboardingTestParties
+  rulesCid <- createTestGovernance parties
+  pure Fixture with ..
+
+when_setup_executed : Fixture -> Script ()
+when_setup_executed f = do
+  providerCid <- initProviderService f.parties
+  proposalCid <- submit f.parties.member1 $ createCmd SetupUtility with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+    providerServiceCid = providerCid
+    operator = f.parties.operator
+    instrumentIdText = "TEST-TOKEN"
+    createTransferRule = True
+    createAllocationFactory = True
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  _ <- confirmAndExecute f.parties f.rulesCid proposalInterfaceCid
+    [f.parties.member1, f.parties.member2] f.parties.member1
+  pure ()
+
+then_setup_artifacts_created : Fixture -> () -> Script Failures
+then_setup_artifacts_created f _ = do
+  registrars <- query @RegistrarService f.parties.governanceParty
+  factories <- query @AllocationFactory f.parties.governanceParty
+  configs <- query @InstrumentConfiguration f.parties.governanceParty
+  rules <- query @TransferRule f.parties.governanceParty
+  pure $
+    shouldBe "RegistrarService count" 1 (length registrars) <>
+    shouldBe "AllocationFactory count" 1 (length factories) <>
+    shouldBe "InstrumentConfiguration count" 1 (length configs) <>
+    shouldBe "TransferRule count" 1 (length rules)
+
+test_when_setup_proposed_then_artifacts_created = script do
+  run Test with
+    given = given_governance
+    when = when_setup_executed
+    then_ = then_setup_artifacts_created
+
+when_setup_without_optional_steps : Fixture -> Script ()
+when_setup_without_optional_steps f = do
+  providerCid <- initProviderService f.parties
+  proposalCid <- submit f.parties.member1 $ createCmd SetupUtility with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+    providerServiceCid = providerCid
+    operator = f.parties.operator
+    instrumentIdText = "TEST-TOKEN"
+    createTransferRule = False
+    createAllocationFactory = False
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  _ <- confirmAndExecute f.parties f.rulesCid proposalInterfaceCid
+    [f.parties.member1, f.parties.member2] f.parties.member1
+  pure ()
+
+then_no_factory_no_rule : Fixture -> () -> Script Failures
+then_no_factory_no_rule f _ = do
+  factories <- query @AllocationFactory f.parties.governanceParty
+  rules <- query @TransferRule f.parties.governanceParty
+  configs <- query @InstrumentConfiguration f.parties.governanceParty
+  pure $
+    shouldBe "AllocationFactory count" 0 (length factories) <>
+    shouldBe "TransferRule count" 0 (length rules) <>
+    shouldBe "InstrumentConfiguration count" 1 (length configs)
+
+test_when_setup_without_flags_then_no_optional_artifacts = script do
+  run Test with
+    given = given_governance
+    when = when_setup_without_optional_steps
+    then_ = then_no_factory_no_rule
+
+when_non_member_confirms : Fixture -> Script ()
+when_non_member_confirms f = do
+  providerCid <- initProviderService f.parties
+  proposalCid <- submit f.parties.member1 $ createCmd SetupUtility with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+    providerServiceCid = providerCid
+    operator = f.parties.operator
+    instrumentIdText = "TEST-TOKEN"
+    createTransferRule = True
+    createAllocationFactory = True
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  submitMustFail (memberContext f.parties.outsider f.parties.governanceParty) $
+    exerciseCmd f.rulesCid GovernanceRules_ConfirmAction with
+      confirmer = f.parties.outsider
+      actionProposalCid = proposalInterfaceCid
+
+then_nothing : Fixture -> () -> Script Failures
+then_nothing _ _ = pure []
+
+test_when_non_member_confirms_then_rejected = script do
+  run Test with
+    given = given_governance
+    when = when_non_member_confirms
+    then_ = then_nothing

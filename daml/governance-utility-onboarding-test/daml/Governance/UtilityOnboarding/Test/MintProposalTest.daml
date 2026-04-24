@@ -1,35 +1,42 @@
 -- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
-module Governance.TokenIssuance.Test.MintProposalTest where
+module Governance.UtilityOnboarding.Test.MintProposalTest where
 
+import DA.TextMap qualified as TextMap
 import DA.Time (addRelTime, hours)
 import Daml.Script
 
+import Splice.Api.Token.HoldingV1 (InstrumentId(..))
+import Splice.Api.Token.MetadataV1 (Metadata(..))
 import Utility.Registry.App.V0.Model.Mint (MintOffer)
 
 import Governance.Action (GovernableAction)
 import Governance.Rules (GovernanceRules)
 
-import Governance.TokenIssuance.IssuanceConfig (IssuanceConfig)
 import Governance.TokenIssuance.MintProposal
-import Governance.TokenIssuance.TestUtils
+import Governance.UtilityOnboarding.TestUtils
 
 import TestHarness
 
 data Fixture = Fixture
   with
-    parties : IssuanceTestParties
+    parties : OnboardingTestParties
     rulesCid : ContractId GovernanceRules
-    configCid : ContractId IssuanceConfig
+    artifacts : SetupArtifacts
   deriving (Eq, Show)
 
 given_setup_done : Script Fixture
 given_setup_done = do
-  parties <- allocateIssuanceTestParties
+  parties <- allocateOnboardingTestParties
   rulesCid <- createTestGovernance parties
-  configCid <- setupIssuanceForTest parties rulesCid
+  artifacts <- setupUtilityForTest parties rulesCid
   pure Fixture with ..
+
+mkInstrumentId : OnboardingTestParties -> InstrumentId
+mkInstrumentId parties = InstrumentId with
+  admin = parties.governanceParty
+  id = "TEST-TOKEN"
 
 when_mint_offered : Fixture -> Script ()
 when_mint_offered f = do
@@ -37,12 +44,16 @@ when_mint_offered f = do
   proposalCid <- submit f.parties.member1 $ createCmd MintProposal with
     governanceParty = f.parties.governanceParty
     proposer = f.parties.member1
-    issuanceConfigCid = f.configCid
+    allocationFactoryCid = f.artifacts.allocationFactoryCid
+    instrumentId = mkInstrumentId f.parties
+    instrumentConfigurationCid = f.artifacts.instrumentConfigurationCid
     recipient = f.parties.outsider
     amount = 100.0
     description = "Bridge tx abcd1234"
     requestedAt = now
     executeBefore = now `addRelTime` hours 24
+    meta = Metadata with values = TextMap.empty
+    extraArgsMeta = Metadata with values = TextMap.empty
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
   _ <- confirmAndExecute f.parties f.rulesCid proposalInterfaceCid
     [f.parties.member1, f.parties.member2] f.parties.member1
@@ -59,21 +70,22 @@ test_when_mint_proposed_then_mint_offer_created = script do
     when = when_mint_offered
     then_ = then_mint_offer_exists
 
--- | MintProposal has `ensure amount > 0.0`. The ledger rejects a `createCmd`
--- with `amount = 0.0` at template-precondition time, before the proposal
--- even reaches the governance flow.
 when_zero_amount : Fixture -> Script ()
 when_zero_amount f = do
   now <- getTime
   submitMustFail f.parties.member1 $ createCmd MintProposal with
     governanceParty = f.parties.governanceParty
     proposer = f.parties.member1
-    issuanceConfigCid = f.configCid
+    allocationFactoryCid = f.artifacts.allocationFactoryCid
+    instrumentId = mkInstrumentId f.parties
+    instrumentConfigurationCid = f.artifacts.instrumentConfigurationCid
     recipient = f.parties.outsider
     amount = 0.0
     description = "should be rejected"
     requestedAt = now
     executeBefore = now `addRelTime` hours 24
+    meta = Metadata with values = TextMap.empty
+    extraArgsMeta = Metadata with values = TextMap.empty
 
 then_nothing_mint : Fixture -> () -> Script Failures
 then_nothing_mint _ _ = pure []

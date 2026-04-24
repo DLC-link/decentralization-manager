@@ -1,0 +1,30 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Granular onboarding action: CreateProviderServiceRequest
+module Governance.UtilityOnboarding.CreateProviderServiceRequest where
+
+import Utility.Registry.App.V0.Service.Provider (ProviderServiceRequest(..))
+
+import Governance.Action
+
+-- | Creates a ProviderServiceRequest for onboarding
+template CreateProviderServiceRequest
+  with
+    governanceParty : Party
+    proposer : Party
+    operator : Party
+    provider : Party
+  where
+    signatory proposer
+    observer governanceParty
+
+    interface instance GovernableAction for CreateProviderServiceRequest where
+      view = GovernableActionView with
+        governanceParty
+        actionLabel = "CreateProviderServiceRequest"
+        description = "Create a ProviderServiceRequest for onboarding."
+
+      executeImpl = do
+        _ <- create ProviderServiceRequest with operator, provider
+        pure ()
