@@ -630,6 +630,10 @@ pub enum ProposalType {
     AcceptTransfer { transfer_instruction_cid: String },
     /// Generic text-based vote (no on-chain effect beyond recording the result)
     GenericVote { description: String },
+    /// Provision a Utility-Registry `ProviderService` with
+    /// `operator = proposer` and `provider = governanceParty`. Produces the
+    /// ProviderService cid consumed by `SetupIssuance`.
+    ProvisionProviderService,
     /// Run the full Utility-Registry onboarding for an instrument issued by the
     /// governance party and produce an IssuanceConfig. One-shot per deployment.
     SetupIssuance {

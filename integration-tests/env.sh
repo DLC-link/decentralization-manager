@@ -40,7 +40,7 @@ P3_NOISE=9003
 
 # Paths
 DEV_DIR=$(mktemp -d "${TMPDIR:-/tmp}/dpm-it-XXXXXX")
-DARS_DIR="$SCRIPT_DIR/releases/v0/rc2"
+DARS_DIR="$SCRIPT_DIR/releases/v0/rc3"
 BINARY="$SCRIPT_DIR/target/release/dec-party-manager"
 
 # JWT token for Canton ledger access (HS256, secret "unsafe",
