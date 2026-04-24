@@ -834,6 +834,18 @@ pub fn build_proposal_create_args(
                 ],
             },
         ),
+        ProposalType::ProvisionProviderService => (
+            ProposalPackage::GovernanceTokenIssuance,
+            "Governance.TokenIssuance.ProvisionProviderService",
+            "ProvisionProviderServiceProposal",
+            Record {
+                record_id: None,
+                fields: vec![
+                    field("governanceParty", make_party(governance_party)),
+                    field("proposer", make_party(proposer)),
+                ],
+            },
+        ),
         ProposalType::SetupIssuance {
             provider_service_cid,
             operator,
