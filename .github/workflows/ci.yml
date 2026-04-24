@@ -126,20 +126,8 @@ jobs:
         with:
           path: .localnet/
           key: localnet-0.5.17
-      - name: Install dpm
-        run: curl -sSL https://get.digitalasset.com/install/install.sh | sh
-      - name: Install DAML SDK
-        run: ~/.dpm/bin/dpm install 3.4.11
-      - name: Build DAML packages
-        run: |
-          cd daml && ~/.dpm/bin/dpm build --all
-          cp governance-core/.daml/dist/governance-core-v0-rc3-0.1.0.dar ../releases/v0/rc3/
-          cp governance-token-custody/.daml/dist/governance-token-custody-v0-rc3-0.1.0.dar ../releases/v0/rc3/
-          cp governance-token-issuance/.daml/dist/governance-token-issuance-v0-rc3-0.1.0.dar ../releases/v0/rc3/
       - name: Run integration tests
-        run: |
-          export PATH="$HOME/.dpm/bin:$PATH"
-          ./integration-tests/run.sh
+        run: ./integration-tests/run.sh
 
   daml:
     name: DAML Build & Test

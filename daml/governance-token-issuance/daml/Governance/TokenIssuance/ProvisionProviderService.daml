@@ -1,0 +1,46 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Plugin template that provisions a Utility-Registry `ProviderService` via
+-- the committee's governance flow. `ProviderService` has
+-- `signatory operator, provider`; in this plugin the provider is the
+-- governance (decentralized) party and the operator is the proposing member.
+-- Both authorities are available inside `executeImpl`:
+--   - proposer's authority flows from the proposal's `signatory proposer`
+--   - governanceParty's authority flows from the enclosing
+--     `GovernanceRules_ExecuteConfirmedAction` exercise chain
+-- which lets the two-signatory create succeed without external signing.
+--
+-- One-shot per deployment: `SetupIssuanceProposal` consumes the resulting
+-- ProviderService cid. The committee is expected to confirm and execute
+-- exactly one of these before kicking off `SetupIssuance`.
+module Governance.TokenIssuance.ProvisionProviderService where
+
+import Utility.Registry.App.V0.Service.Provider (ProviderService(..))
+
+import Governance.Action
+
+-- | Proposal to provision a `ProviderService` with
+-- `operator = proposer`, `provider = governanceParty`.
+template ProvisionProviderServiceProposal
+  with
+    governanceParty : Party
+      -- ^ The governance (decentralized) party that will own the service as provider.
+    proposer : Party
+      -- ^ The member proposing this provisioning. Becomes the `operator`
+      -- of the resulting `ProviderService`.
+  where
+    signatory proposer
+    observer governanceParty
+
+    interface instance GovernableAction for ProvisionProviderServiceProposal where
+      view = GovernableActionView with
+        governanceParty
+        actionLabel = "ProvisionProviderService"
+        description = "Provision ProviderService with operator=proposer, provider=governanceParty"
+
+      executeImpl = do
+        _ <- create ProviderService with
+          operator = proposer
+          provider = governanceParty
+        pure ()
