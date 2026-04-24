@@ -632,22 +632,48 @@ pub enum ProposalType {
     GenericVote { description: String },
     /// Provision a Utility-Registry `ProviderService` with
     /// `operator = proposer` and `provider = governanceParty`. Produces the
-    /// ProviderService cid consumed by `SetupIssuance`.
+    /// ProviderService cid consumed by `SetupUtility`.
     ProvisionProviderService,
-    /// Run the full Utility-Registry onboarding for an instrument issued by the
-    /// governance party and produce an IssuanceConfig. One-shot per deployment.
-    SetupIssuance {
+    /// Run the full Utility-Registry onboarding in one vote. Flags control
+    /// whether a `TransferRule` / `AllocationFactory` are created during the
+    /// `RegistrarServiceRequest` accept.
+    SetupUtility {
         provider_service_cid: String,
         operator: CantonId,
         instrument_id_text: String,
-        display_name: String,
-        symbol: String,
-        decimals: i64,
+        create_transfer_rule: bool,
+        create_allocation_factory: bool,
     },
-    /// Offer a mint of `amount` tokens to `recipient` via AllocationFactory_OfferMint.
-    /// The resulting MintOffer is accepted later by the recipient, outside this plugin.
+    /// Create a `ProviderServiceRequest` for a given `operator` and `provider`.
+    CreateProviderServiceRequest {
+        operator: CantonId,
+        provider: CantonId,
+    },
+    /// Create a `UserServiceRequest` for a given `operator` and `user`.
+    CreateUserServiceRequest { operator: CantonId, user: CantonId },
+    /// Set the provider-app reward beneficiaries on an `InstrumentConfiguration`.
+    /// `providerAppRewardBeneficiaries = None` clears the current setting.
+    SetProviderAppRewardBeneficiaries {
+        instrument_configuration_cid: String,
+        #[serde(default)]
+        provider_app_reward_beneficiaries: Option<Vec<AppRewardBeneficiary>>,
+    },
+    /// Toggle result-contract emission on a `RegistrarService`.
+    SetEnableResultContracts {
+        registrar_service_cid: String,
+        #[serde(default)]
+        enable_result_contracts: Option<bool>,
+    },
+    /// Authorize the `operator` to create batched activity markers on behalf
+    /// of the governance party via a `DelegatedBatchedMarkersProxy`.
+    CreateDelegatedBatchedMarkersProxy { operator: CantonId },
+    /// Offer a mint of `amount` tokens to `recipient` via
+    /// `AllocationFactory_OfferMint`. The resulting `MintOffer` is accepted
+    /// later by the recipient, outside this plugin.
     Mint {
-        issuance_config_cid: String,
+        allocation_factory_cid: String,
+        instrument_id: InstrumentId,
+        instrument_configuration_cid: String,
         recipient: CantonId,
         amount: String,
         description: String,
@@ -656,10 +682,13 @@ pub enum ProposalType {
         #[serde(default)]
         execute_before_hours: Option<i64>,
     },
-    /// Offer a burn of `amount` tokens held by `holder` via AllocationFactory_OfferBurn.
-    /// Holdings are supplied by the holder at BurnOffer_Accept time, not here.
+    /// Offer a burn of `amount` tokens held by `holder` via
+    /// `AllocationFactory_OfferBurn`. Holdings are supplied by the holder at
+    /// `BurnOffer_Accept` time, not here.
     Burn {
-        issuance_config_cid: String,
+        allocation_factory_cid: String,
+        instrument_id: InstrumentId,
+        instrument_configuration_cid: String,
         holder: CantonId,
         amount: String,
         description: String,
@@ -667,12 +696,6 @@ pub enum ProposalType {
         /// serializer hardcodes a far-future `executeBefore` timestamp.
         #[serde(default)]
         execute_before_hours: Option<i64>,
-    },
-    /// Swap the AllocationFactory cid on an existing IssuanceConfig to `new_factory_cid`
-    /// after validating that the new factory's admin matches the governance party.
-    RotateFactory {
-        issuance_config_cid: String,
-        new_factory_cid: String,
     },
 }
 

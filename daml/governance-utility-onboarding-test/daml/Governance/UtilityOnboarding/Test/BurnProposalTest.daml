@@ -1,39 +1,42 @@
 -- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
-module Governance.TokenIssuance.Test.BurnProposalTest where
+module Governance.UtilityOnboarding.Test.BurnProposalTest where
 
+import DA.TextMap qualified as TextMap
 import DA.Time (addRelTime, hours)
 import Daml.Script
 
+import Splice.Api.Token.HoldingV1 (InstrumentId(..))
+import Splice.Api.Token.MetadataV1 (Metadata(..))
 import Utility.Registry.App.V0.Model.Burn (BurnOffer)
 
 import Governance.Action (GovernableAction)
 import Governance.Rules (GovernanceRules)
 
 import Governance.TokenIssuance.BurnProposal
-import Governance.TokenIssuance.IssuanceConfig (IssuanceConfig)
-import Governance.TokenIssuance.TestUtils
+import Governance.UtilityOnboarding.TestUtils
 
 import TestHarness
 
--- Same fixture shape as MintProposalTest: setup has run, IssuanceConfig exists.
--- No prior mint needed — AllocationFactory_OfferBurn (the offer step) does not
--- consume holdings. Holdings come in at BurnOffer_Accept time, which is outside
--- the plugin's responsibility.
 data Fixture = Fixture
   with
-    parties : IssuanceTestParties
+    parties : OnboardingTestParties
     rulesCid : ContractId GovernanceRules
-    configCid : ContractId IssuanceConfig
+    artifacts : SetupArtifacts
   deriving (Eq, Show)
 
 given_setup_done : Script Fixture
 given_setup_done = do
-  parties <- allocateIssuanceTestParties
+  parties <- allocateOnboardingTestParties
   rulesCid <- createTestGovernance parties
-  configCid <- setupIssuanceForTest parties rulesCid
+  artifacts <- setupUtilityForTest parties rulesCid
   pure Fixture with ..
+
+mkInstrumentId : OnboardingTestParties -> InstrumentId
+mkInstrumentId parties = InstrumentId with
+  admin = parties.governanceParty
+  id = "TEST-TOKEN"
 
 when_burn_offered : Fixture -> Script ()
 when_burn_offered f = do
@@ -41,12 +44,16 @@ when_burn_offered f = do
   proposalCid <- submit f.parties.member1 $ createCmd BurnProposal with
     governanceParty = f.parties.governanceParty
     proposer = f.parties.member1
-    issuanceConfigCid = f.configCid
+    allocationFactoryCid = f.artifacts.allocationFactoryCid
+    instrumentId = mkInstrumentId f.parties
+    instrumentConfigurationCid = f.artifacts.instrumentConfigurationCid
     holder = f.parties.outsider
     amount = 100.0
     description = "Bridge unwind tx abcd1234"
     requestedAt = now
     executeBefore = now `addRelTime` hours 24
+    meta = Metadata with values = TextMap.empty
+    extraArgsMeta = Metadata with values = TextMap.empty
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
   _ <- confirmAndExecute f.parties f.rulesCid proposalInterfaceCid
     [f.parties.member1, f.parties.member2] f.parties.member1
@@ -63,19 +70,22 @@ test_when_burn_proposed_then_burn_offer_created = script do
     when = when_burn_offered
     then_ = then_burn_offer_exists
 
--- | BurnProposal has `ensure amount > 0.0`. Same reasoning as for mint.
 when_zero_amount_burn : Fixture -> Script ()
 when_zero_amount_burn f = do
   now <- getTime
   submitMustFail f.parties.member1 $ createCmd BurnProposal with
     governanceParty = f.parties.governanceParty
     proposer = f.parties.member1
-    issuanceConfigCid = f.configCid
+    allocationFactoryCid = f.artifacts.allocationFactoryCid
+    instrumentId = mkInstrumentId f.parties
+    instrumentConfigurationCid = f.artifacts.instrumentConfigurationCid
     holder = f.parties.outsider
     amount = 0.0
     description = "should be rejected"
     requestedAt = now
     executeBefore = now `addRelTime` hours 24
+    meta = Metadata with values = TextMap.empty
+    extraArgsMeta = Metadata with values = TextMap.empty
 
 then_nothing_burn : Fixture -> () -> Script Failures
 then_nothing_burn _ _ = pure []

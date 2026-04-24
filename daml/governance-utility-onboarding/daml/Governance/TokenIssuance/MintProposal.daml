@@ -8,34 +8,33 @@ module Governance.TokenIssuance.MintProposal where
 
 import DA.TextMap qualified as TextMap
 
+import Splice.Api.Token.HoldingV1 (InstrumentId)
 import Splice.Api.Token.MetadataV1
-  (AnyValue(..), ChoiceContext(..), ExtraArgs(..), Metadata(..))
-import Splice.Util (require)
+  (AnyValue(..), ChoiceContext(..), ExtraArgs(..), Metadata)
 
 import Utility.Registry.App.V0.Model.Mint (Mint(..))
 import Utility.Registry.App.V0.Service.AllocationFactory
-  (AllocationFactory_OfferMint(..))
+  (AllocationFactory, AllocationFactory_OfferMint(..))
+import Utility.Registry.V0.Configuration.Instrument (InstrumentConfiguration)
 import Utility.Registry.V0.Holding.TokenApiUtils
   (instrumentConfigurationContextKey, issuerCredentialsContextKey)
 
 import Governance.Action
 
-import Governance.TokenIssuance.IssuanceConfig (IssuanceConfig(..))
-
--- Standard Splice reason key for wallet-visible explanations.
-spliceReasonKey : Text
-spliceReasonKey = "splice.lfdecentralizedtrust.org/reason"
-
 template MintProposal
   with
     governanceParty : Party
     proposer : Party
-    issuanceConfigCid : ContractId IssuanceConfig
+    allocationFactoryCid : ContractId AllocationFactory
+    instrumentId : InstrumentId
+    instrumentConfigurationCid : ContractId InstrumentConfiguration
     recipient : Party
     amount : Decimal
     description : Text
     requestedAt : Time
     executeBefore : Time
+    meta : Metadata
+    extraArgsMeta : Metadata
   where
     signatory proposer
     observer governanceParty
@@ -49,28 +48,24 @@ template MintProposal
         description
 
       executeImpl = do
-        config <- fetch issuanceConfigCid
-        require "IssuanceConfig governanceParty matches proposal"
-          (config.governanceParty == governanceParty)
         let context = ChoiceContext with
               values = TextMap.fromList
                 [ (instrumentConfigurationContextKey,
-                   AV_ContractId $ coerceContractId config.instrumentConfigurationCid)
+                   AV_ContractId $ coerceContractId instrumentConfigurationCid)
                 , (issuerCredentialsContextKey,
                    AV_List [])
                 ]
-        _ <- exercise config.allocationFactoryCid AllocationFactory_OfferMint with
+        _ <- exercise allocationFactoryCid AllocationFactory_OfferMint with
           expectedAdmin = governanceParty
           mint = Mint with
-            instrumentId = config.instrumentId
+            instrumentId
             amount
             holder = recipient
             reference = description
             requestedAt
             executeBefore
-            meta = Metadata with values = TextMap.empty
+            meta
           extraArgs = ExtraArgs with
             context
-            meta = Metadata with
-              values = TextMap.fromList [(spliceReasonKey, description)]
+            meta = extraArgsMeta
         pure ()

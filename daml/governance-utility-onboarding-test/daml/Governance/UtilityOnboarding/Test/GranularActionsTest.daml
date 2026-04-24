@@ -1,0 +1,209 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Tests for granular onboarding actions.
+module Governance.UtilityOnboarding.Test.GranularActionsTest where
+
+import Daml.Script
+
+import Utility.Commercials.V0.Model.DelegatedBatchedMarkersProxy (DelegatedBatchedMarkersProxy)
+import Utility.Credential.App.V0.Service.User (UserServiceRequest)
+import Utility.Registry.App.V0.Service.Provider (ProviderService, ProviderServiceRequest)
+import Utility.Registry.App.V0.Service.Registrar (RegistrarService(..))
+import Utility.Registry.V0.Configuration.Instrument (InstrumentConfiguration(..))
+
+import Governance.Action (GovernableAction)
+import Governance.Rules (GovernanceRules)
+
+import Governance.UtilityOnboarding.CreateDelegatedBatchedMarkersProxy
+import Governance.UtilityOnboarding.CreateProviderServiceRequest
+import Governance.UtilityOnboarding.CreateUserServiceRequest
+import Governance.UtilityOnboarding.ProvisionProviderService
+import Governance.UtilityOnboarding.SetEnableResultContracts
+import Governance.UtilityOnboarding.SetProviderAppRewardBeneficiaries
+import Governance.UtilityOnboarding.TestUtils
+
+import TestHarness
+
+data GovFixture = GovFixture
+  with
+    parties : OnboardingTestParties
+    rulesCid : ContractId GovernanceRules
+  deriving (Eq, Show)
+
+given_governance : Script GovFixture
+given_governance = do
+  parties <- allocateOnboardingTestParties
+  rulesCid <- createTestGovernance parties
+  pure GovFixture with ..
+
+data SetupFixture = SetupFixture
+  with
+    parties : OnboardingTestParties
+    rulesCid : ContractId GovernanceRules
+    artifacts : SetupArtifacts
+  deriving (Eq, Show)
+
+given_setup_done : Script SetupFixture
+given_setup_done = do
+  parties <- allocateOnboardingTestParties
+  rulesCid <- createTestGovernance parties
+  artifacts <- setupUtilityForTest parties rulesCid
+  pure SetupFixture with ..
+
+-- * ProvisionProviderService
+--
+-- The operator party is the proposer, so the operator's authority flows via
+-- `signatory proposer` into executeImpl where the ProviderService is created
+-- with `operator = proposer, provider = governanceParty`.
+
+when_provision_provider_service : GovFixture -> Script ()
+when_provision_provider_service f = do
+  proposalCid <- submit f.parties.operator $ createCmd ProvisionProviderService with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.operator
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  _ <- confirmAndExecute f.parties f.rulesCid proposalInterfaceCid
+    [f.parties.member1, f.parties.member2] f.parties.member1
+  pure ()
+
+then_provider_service_exists : GovFixture -> () -> Script Failures
+then_provider_service_exists f _ = do
+  services <- query @ProviderService f.parties.governanceParty
+  pure $ shouldBe "ProviderService count" 1 (length services)
+
+test_provision_provider_service = script do
+  run Test with
+    given = given_governance
+    when = when_provision_provider_service
+    then_ = then_provider_service_exists
+
+-- * CreateProviderServiceRequest
+
+when_create_provider_service_request : GovFixture -> Script ()
+when_create_provider_service_request f = do
+  proposalCid <- submit f.parties.member1 $ createCmd CreateProviderServiceRequest with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+    operator = f.parties.operator
+    provider = f.parties.governanceParty
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  _ <- confirmAndExecute f.parties f.rulesCid proposalInterfaceCid
+    [f.parties.member1, f.parties.member2] f.parties.member1
+  pure ()
+
+then_provider_service_request_exists : GovFixture -> () -> Script Failures
+then_provider_service_request_exists f _ = do
+  requests <- query @ProviderServiceRequest f.parties.governanceParty
+  pure $ shouldBe "ProviderServiceRequest count" 1 (length requests)
+
+test_create_provider_service_request = script do
+  run Test with
+    given = given_governance
+    when = when_create_provider_service_request
+    then_ = then_provider_service_request_exists
+
+-- * CreateUserServiceRequest
+
+when_create_user_service_request : GovFixture -> Script ()
+when_create_user_service_request f = do
+  proposalCid <- submit f.parties.member1 $ createCmd CreateUserServiceRequest with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+    operator = f.parties.operator
+    user = f.parties.governanceParty
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  _ <- confirmAndExecute f.parties f.rulesCid proposalInterfaceCid
+    [f.parties.member1, f.parties.member2] f.parties.member1
+  pure ()
+
+then_user_service_request_exists : GovFixture -> () -> Script Failures
+then_user_service_request_exists f _ = do
+  requests <- query @UserServiceRequest f.parties.governanceParty
+  pure $ shouldBe "UserServiceRequest count" 1 (length requests)
+
+test_create_user_service_request = script do
+  run Test with
+    given = given_governance
+    when = when_create_user_service_request
+    then_ = then_user_service_request_exists
+
+-- * SetProviderAppRewardBeneficiaries
+
+when_set_beneficiaries : SetupFixture -> Script ()
+when_set_beneficiaries f = do
+  proposalCid <- submit f.parties.member1 $ createCmd SetProviderAppRewardBeneficiaries with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+    instrumentConfigurationCid = f.artifacts.instrumentConfigurationCid
+    providerAppRewardBeneficiaries = None
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  _ <- confirmAndExecute f.parties f.rulesCid proposalInterfaceCid
+    [f.parties.member1, f.parties.member2] f.parties.member1
+  pure ()
+
+then_beneficiaries_cleared : SetupFixture -> () -> Script Failures
+then_beneficiaries_cleared f _ = do
+  configs <- query @InstrumentConfiguration f.parties.governanceParty
+  case configs of
+    [(_, config)] -> pure $
+      shouldBe "providerAppRewardBeneficiaries" None config.providerAppRewardBeneficiaries
+    _ -> pure $ shouldBe "InstrumentConfiguration count" 1 (length configs)
+
+test_set_provider_app_reward_beneficiaries = script do
+  run Test with
+    given = given_setup_done
+    when = when_set_beneficiaries
+    then_ = then_beneficiaries_cleared
+
+-- * SetEnableResultContracts
+
+when_set_enable_result_contracts : SetupFixture -> Script ()
+when_set_enable_result_contracts f = do
+  proposalCid <- submit f.parties.member1 $ createCmd SetEnableResultContracts with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+    registrarServiceCid = f.artifacts.registrarServiceCid
+    enableResultContracts = Some True
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  _ <- confirmAndExecute f.parties f.rulesCid proposalInterfaceCid
+    [f.parties.member1, f.parties.member2] f.parties.member1
+  pure ()
+
+then_enable_result_contracts_set : SetupFixture -> () -> Script Failures
+then_enable_result_contracts_set f _ = do
+  services <- query @RegistrarService f.parties.governanceParty
+  case services of
+    [(_, svc)] -> pure $
+      shouldBe "enableResultContracts" (Some True) svc.enableResultContracts
+    _ -> pure $ shouldBe "RegistrarService count" 1 (length services)
+
+test_set_enable_result_contracts = script do
+  run Test with
+    given = given_setup_done
+    when = when_set_enable_result_contracts
+    then_ = then_enable_result_contracts_set
+
+-- * CreateDelegatedBatchedMarkersProxy
+
+when_create_delegated_proxy : GovFixture -> Script ()
+when_create_delegated_proxy f = do
+  proposalCid <- submit f.parties.member1 $ createCmd CreateDelegatedBatchedMarkersProxy with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+    operator = f.parties.operator
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  _ <- confirmAndExecute f.parties f.rulesCid proposalInterfaceCid
+    [f.parties.member1, f.parties.member2] f.parties.member1
+  pure ()
+
+then_proxy_exists : GovFixture -> () -> Script Failures
+then_proxy_exists f _ = do
+  proxies <- query @DelegatedBatchedMarkersProxy f.parties.governanceParty
+  pure $ shouldBe "DelegatedBatchedMarkersProxy count" 1 (length proxies)
+
+test_create_delegated_batched_markers_proxy = script do
+  run Test with
+    given = given_governance
+    when = when_create_delegated_proxy
+    then_ = then_proxy_exists

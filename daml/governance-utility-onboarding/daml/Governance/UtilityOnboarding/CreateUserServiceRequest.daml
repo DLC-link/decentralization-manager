@@ -1,0 +1,30 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Granular onboarding action: CreateUserServiceRequest
+module Governance.UtilityOnboarding.CreateUserServiceRequest where
+
+import Utility.Credential.App.V0.Service.User (UserServiceRequest(..))
+
+import Governance.Action
+
+-- | Creates a UserServiceRequest for onboarding a user.
+template CreateUserServiceRequest
+  with
+    governanceParty : Party
+    proposer : Party
+    operator : Party
+    user : Party
+  where
+    signatory proposer
+    observer governanceParty
+
+    interface instance GovernableAction for CreateUserServiceRequest where
+      view = GovernableActionView with
+        governanceParty
+        actionLabel = "CreateUserServiceRequest"
+        description = "Create a UserServiceRequest for onboarding."
+
+      executeImpl = do
+        _ <- create UserServiceRequest with operator, user
+        pure ()

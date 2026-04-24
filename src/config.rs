@@ -74,7 +74,7 @@ pub struct KeycloakConfig {
 pub struct PackageConfig {
     pub governance_core: Option<String>,
     pub governance_token_custody: Option<String>,
-    pub governance_token_issuance: Option<String>,
+    pub governance_utility_onboarding: Option<String>,
     pub utility_credential: Option<String>,
     pub utility_registry: Option<String>,
     pub vault: Option<String>,
@@ -227,7 +227,7 @@ pub fn default_package_config() -> PackageConfig {
     PackageConfig {
         governance_core: Some("#governance-core-v0-rc3".to_string()),
         governance_token_custody: Some("#governance-token-custody-v0-rc3".to_string()),
-        governance_token_issuance: Some("#governance-token-issuance-v0-rc3".to_string()),
+        governance_utility_onboarding: Some("#governance-utility-onboarding-v0-rc3".to_string()),
         utility_credential: Some("#utility-credential-app-v0".to_string()),
         utility_registry: Some("#utility-registry-app-v0".to_string()),
         vault: Some("#bitsafe-vault-v0-rc8".to_string()),
@@ -391,8 +391,8 @@ mod tests {
             Some("#governance-token-custody-v0-rc3"),
         );
         assert_eq!(
-            packages.governance_token_issuance.as_deref(),
-            Some("#governance-token-issuance-v0-rc3"),
+            packages.governance_utility_onboarding.as_deref(),
+            Some("#governance-utility-onboarding-v0-rc3"),
         );
         assert_eq!(
             packages.utility_credential.as_deref(),
