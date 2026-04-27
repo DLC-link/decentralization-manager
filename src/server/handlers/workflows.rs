@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
-use actix_web::{HttpResponse, Responder, get, post, web};
+use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 use tokio::sync::RwLock;
 
 use sqlx::SqlitePool;
@@ -17,6 +17,7 @@ use crate::{
     participant_id::CantonId,
     server::{
         AppState,
+        middleware::require_admin,
         types::{
             ContractsRequest, DarsRequest, ErrorResponse, HttpWorkflowState, KickRequest,
             KickResponse, KickStatus, ListenerPauseGuard, OnboardingRequest, OnboardingResponse,
@@ -59,10 +60,15 @@ pub type DarsWorkflowState = HttpWorkflowState<WorkflowProgress>;
 )]
 #[post("/kick")]
 pub async fn start_kick(
+    http_req: HttpRequest,
     data: web::Data<AppState>,
     kick_state: web::Data<Arc<KickWorkflowState>>,
     body: web::Json<KickRequest>,
 ) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, &data.admin_role) {
+        return resp;
+    }
+
     tracing::info!(
         "Kick request received: party={}, participant_to_kick={}, threshold={}",
         body.decentralized_party_id,

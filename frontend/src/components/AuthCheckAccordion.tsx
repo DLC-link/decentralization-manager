@@ -19,6 +19,7 @@ import ScienceIcon from "@mui/icons-material/Science";
 import WarningIcon from "@mui/icons-material/Warning";
 import { CopyableText } from "./CopyableText";
 import { API_BASE } from "../constants";
+import { authenticatedFetch } from "../api";
 import type { PartyAuthStatus, AuthStatusResponse, AuthTestResponse, RightsStatus } from "../types";
 
 const accordionSx = {
@@ -39,7 +40,7 @@ export const AuthCheckAccordion = () => {
     try {
       setLoading(true);
       setError(null);
-      const res = await fetch(`${API_BASE}/auth/status`);
+      const res = await authenticatedFetch(`${API_BASE}/auth/status`);
       if (res.ok) {
         const data: AuthStatusResponse = await res.json();
         setAuthStatuses(data.parties);
@@ -61,7 +62,7 @@ export const AuthCheckAccordion = () => {
     try {
       setTesting(true);
       setError(null);
-      const res = await fetch(`${API_BASE}/auth/test`, { method: "POST" });
+      const res = await authenticatedFetch(`${API_BASE}/auth/test`, { method: "POST" });
       if (res.ok) {
         const data: AuthTestResponse = await res.json();
         // Update statuses based on test results

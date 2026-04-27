@@ -1,4 +1,8 @@
-mod mock;
+mod validators;
+
+pub(crate) mod mock;
+
+pub mod validator;
 
 use std::{
     collections::HashMap,
@@ -11,6 +15,8 @@ use thiserror::Error;
 use tokio::sync::RwLock;
 
 pub use mock::{MockAuthRegistry, MockTokenManager};
+pub use validator::{Principal, TokenValidator, ValidationError};
+pub use validators::{JwtValidator, MockValidator, OidcIntrospectionValidator};
 
 use crate::{
     config::{KeycloakConfig, PartyCredentials},

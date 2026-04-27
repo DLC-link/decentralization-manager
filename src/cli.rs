@@ -93,6 +93,11 @@ pub enum Commands {
         #[arg(long, env = "DECPM_KEYCLOAK_CLIENT_ID")]
         keycloak_client_id: Option<String>,
 
+        /// Role name that grants admin access to sensitive endpoints
+        /// (PUT /party-config, POST /kick). Defaults to "dpm-admin".
+        #[arg(long, env = "DECPM_ADMIN_ROLE", default_value = "dpm-admin")]
+        admin_role: String,
+
         // Timeouts
         /// Noise handshake timeout in seconds
         #[arg(long, env = "DECPM_TIMEOUT_HANDSHAKE")]

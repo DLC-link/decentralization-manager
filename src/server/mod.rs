@@ -3,6 +3,7 @@ mod assets;
 mod audit;
 mod chain_audit;
 mod handlers;
+mod middleware;
 mod queries;
 mod types;
 
@@ -28,17 +29,20 @@ use canton_proto_rs::com::digitalasset::canton::{
 };
 use hyper::{Body, Response, StatusCode};
 use sqlx::SqlitePool;
-use tokio::sync::{Notify, RwLock};
+use tokio::sync::{Mutex, Notify, RwLock};
 use tokio_noise::handshakes::nn_psk2::Responder;
 use utoipa_actix_web::AppExt;
 use utoipa_swagger_ui::SwaggerUi;
 
 use crate::{
-    auth::{AuthRegistry, MockAuthRegistry, WorkflowAuth},
+    auth::{
+        AuthRegistry, JwtValidator, MockAuthRegistry, MockValidator, TokenValidator, WorkflowAuth,
+    },
     config::{NodeConfig, PartyCredentials},
     db::schema::SchemaRead,
     error::Result,
     noise::{Message, MessageType, NoiseKeypair, load_or_generate_keypair, parse_public_key},
+    server::middleware::AuthMiddleware,
     utils::{compute_fingerprint, get_synchronizer_id_from_url},
     workflow,
 };
@@ -62,8 +66,17 @@ pub struct AppState {
     pub pending_invitations: Arc<RwLock<Vec<PendingInvitation>>>,
     /// Authentication registry (real Keycloak or mock for test mode)
     pub auth: Arc<RwLock<Option<WorkflowAuth>>>,
+    /// Inbound token validator — authenticates API callers.
+    pub token_validator: TokenValidator,
+    /// Role name that grants admin access to sensitive endpoints.
+    pub admin_role: String,
     /// Party credentials (mutable, hot-reloadable)
     pub party_credentials: Arc<RwLock<Vec<PartyCredentials>>>,
+    /// Serializes unauthenticated `PUT /party-config` bootstrap calls so two
+    /// concurrent first-run requests cannot both pass the empty-table auth
+    /// exemption and overwrite each other. Held by the auth middleware for
+    /// the lifetime of a bootstrap request.
+    pub bootstrap_mu: Arc<Mutex<()>>,
     /// Whether the server is running in test mode
     pub test_mode: bool,
     /// Prefixes currently being refreshed from Canton (deduplication)
@@ -90,6 +103,7 @@ pub async fn start_server(
     config: NodeConfig,
     test_mode: bool,
     db: SqlitePool,
+    admin_role: String,
 ) -> Result {
     if !test_mode {
         tracing::warn!(
@@ -125,6 +139,34 @@ pub async fn start_server(
 
     let auth = Arc::new(RwLock::new(auth));
 
+    // Inbound token validator. Test mode accepts anything; production verifies
+    // JWT signatures locally against the JWKS of any trusted issuer derived
+    // from the top-level keycloak config plus any `party_credentials` rows.
+    let token_validator = if test_mode {
+        TokenValidator::Mock(Arc::new(MockValidator::new(admin_role.clone())))
+    } else {
+        let no_top_level_config = config.keycloak.is_none();
+        let no_party_creds = party_credentials.read().await.is_empty();
+        if no_top_level_config && no_party_creds {
+            tracing::warn!(
+                "No top-level Keycloak config (--keycloak-url/realm/client-id) and no \
+                 party credentials yet. Inbound auth will reject every request except \
+                 the first-run PUT /party-config bootstrap. Configure the IdP and \
+                 provision a party to make the node usable."
+            );
+        } else if no_top_level_config {
+            tracing::info!(
+                "No top-level Keycloak config; trusting only issuers from \
+                 party_credentials ({} configured).",
+                party_credentials.read().await.len()
+            );
+        }
+        TokenValidator::Jwt(Arc::new(JwtValidator::new(
+            config.keycloak.clone(),
+            party_credentials.clone(),
+        )))
+    };
+
     let peer_status = Arc::new(RwLock::new(HashMap::new()));
     let listener_control = Arc::new(RwLock::new(ListenerControl {
         should_pause: false,
@@ -150,7 +192,10 @@ pub async fn start_server(
         coordinator_pubkey: coordinator_pubkey.clone(),
         pending_invitations: pending_invitations.clone(),
         auth,
+        token_validator,
+        admin_role,
         party_credentials,
+        bootstrap_mu: Arc::new(Mutex::new(())),
         test_mode,
         refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
     });
@@ -310,7 +355,10 @@ pub async fn start_server(
     tracing::info!("Frontend available at http://{host}:{port}/");
 
     HttpServer::new(move || {
-        let cors = Cors::permissive();
+        // Frontend is embedded and served from this same origin, so no
+        // cross-origin access is required. `Cors::default()` is same-origin
+        // only — tightening the previous `Cors::permissive()`.
+        let cors = Cors::default();
 
         // Increase payload limit to 100MB for DAR file uploads
         let json_config = web::JsonConfig::default().limit(100 * 1024 * 1024);
@@ -372,7 +420,7 @@ pub async fn start_server(
             .service(handlers::save_party_config)
             .split_for_parts();
 
-        let mut app = app.wrap(cors);
+        let mut app = app.wrap(AuthMiddleware).wrap(cors);
         if test_mode {
             app = app
                 .service(SwaggerUi::new("/swagger-ui/{_:.*}").url("/api-docs/openapi.json", api));

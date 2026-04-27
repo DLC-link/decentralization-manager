@@ -14,6 +14,7 @@ import {
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import DeleteIcon from "@mui/icons-material/Delete";
 import { API_BASE } from "../constants";
+import { authenticatedFetch } from "../api";
 import type { DarsStatusResponse, DarFile } from "../types";
 
 interface DarsDialogProps {
@@ -47,7 +48,7 @@ export const DarsDialog = ({
 
   const pollStatus = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/dars/distribute/status`);
+      const res = await authenticatedFetch(`${API_BASE}/dars/distribute/status`);
       if (res.ok) {
         const data: DarsStatusResponse = await res.json();
         setStatus(data);
@@ -124,7 +125,7 @@ export const DarsDialog = ({
         mode === "upload"
           ? `${API_BASE}/dars/upload`
           : `${API_BASE}/dars/distribute`;
-      const res = await fetch(endpoint, {
+      const res = await authenticatedFetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ dar_files: darFiles }),

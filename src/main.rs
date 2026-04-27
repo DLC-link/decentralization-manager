@@ -162,9 +162,18 @@ async fn main() -> Result {
             ref host,
             port,
             test,
+            ref admin_role,
             ..
         } => {
-            dec_party_manager::server::start_server(host, port, config, test, pool).await?;
+            dec_party_manager::server::start_server(
+                host,
+                port,
+                config,
+                test,
+                pool,
+                admin_role.clone(),
+            )
+            .await?;
         }
     }
 

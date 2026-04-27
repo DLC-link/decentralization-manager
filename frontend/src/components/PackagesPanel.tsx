@@ -19,6 +19,7 @@ import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import ErrorIcon from "@mui/icons-material/Error";
 import { CopyableText } from "./CopyableText";
 import { API_BASE } from "../constants";
+import { authenticatedFetch } from "../api";
 import { zebraRow } from "../styles";
 import type {
   VettedPackageInfo,
@@ -40,7 +41,7 @@ export const PackagesPanel = ({
 
   useEffect(() => {
     setLoadingPackages(true);
-    fetch(`${API_BASE}/packages/vetted`)
+    authenticatedFetch(`${API_BASE}/packages/vetted`)
       .then((res) => (res.ok ? res.json() : []))
       .then((data: VettedPackageInfo[]) => setPackages(data))
       .catch(() => {})
@@ -88,7 +89,7 @@ export const PackagesPanel = ({
   const handleComparePeers = async () => {
     setComparing(true);
     try {
-      const res = await fetch(`${API_BASE}/packages/compare-peers`);
+      const res = await authenticatedFetch(`${API_BASE}/packages/compare-peers`);
       if (res.ok) {
         const data: PeerPackageComparison = await res.json();
         setComparison(data);

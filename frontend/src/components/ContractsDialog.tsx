@@ -34,6 +34,7 @@ import HandymanIcon from "@mui/icons-material/Handyman";
 import LockIcon from "@mui/icons-material/Lock";
 import StorageIcon from "@mui/icons-material/Storage";
 import { API_BASE } from "../constants";
+import { authenticatedFetch } from "../api";
 import type {
   ContractsStatusResponse,
   ContractsRequest,
@@ -1033,7 +1034,7 @@ export const ContractsDialog = ({
   // Fetch fresh vetted packages when dialog opens
   useEffect(() => {
     if (open) {
-      fetch(`${API_BASE}/packages/vetted`)
+      authenticatedFetch(`${API_BASE}/packages/vetted`)
         .then((res) => (res.ok ? res.json() : []))
         .then((data: VettedPackageInfo[]) => setVettedPackages(data))
         .catch(() => {});
@@ -1082,7 +1083,7 @@ export const ContractsDialog = ({
   // Fetch packages config when dialog opens
   useEffect(() => {
     if (open && partyId) {
-      fetch(`${API_BASE}/packages?party_id=${encodeURIComponent(partyId)}`)
+      authenticatedFetch(`${API_BASE}/packages?party_id=${encodeURIComponent(partyId)}`)
         .then((res) => res.json())
         .then((data: PackageConfig) => setPackages(data))
         .catch((e) => console.warn("Failed to fetch packages:", e));
@@ -1114,7 +1115,7 @@ export const ContractsDialog = ({
 
   const pollStatus = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/contracts/status`);
+      const res = await authenticatedFetch(`${API_BASE}/contracts/status`);
       if (res.ok) {
         const data: ContractsStatusResponse = await res.json();
         setStatus(data);
@@ -1191,7 +1192,7 @@ export const ContractsDialog = ({
         contracts: contracts,
       };
 
-      const res = await fetch(`${API_BASE}/contracts`, {
+      const res = await authenticatedFetch(`${API_BASE}/contracts`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(request),

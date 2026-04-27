@@ -11,6 +11,7 @@ import {
   Chip,
 } from "@mui/material";
 import { API_BASE } from "../constants";
+import { authenticatedFetch } from "../api";
 import { useSnackbar } from "../contexts";
 import type { PendingInvitation } from "../types";
 
@@ -77,7 +78,7 @@ export const InvitationModal = ({
     setLoading(true);
 
     try {
-      const res = await fetch(`${API_BASE}/invitations/accept`, {
+      const res = await authenticatedFetch(`${API_BASE}/invitations/accept`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id: invitation.id }),
@@ -102,7 +103,7 @@ export const InvitationModal = ({
     setLoading(true);
 
     try {
-      const res = await fetch(`${API_BASE}/invitations/decline`, {
+      const res = await authenticatedFetch(`${API_BASE}/invitations/decline`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id: invitation.id }),

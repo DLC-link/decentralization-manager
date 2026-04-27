@@ -1,8 +1,9 @@
-import { getToken } from "./auth";
+import { clearToken, getToken } from "./auth";
 
 /**
  * Wrapper around fetch() that attaches the Bearer token from sessionStorage.
- * Drop-in replacement for fetch().
+ * Drop-in replacement for fetch(). On 401 we drop the stale session and
+ * reload so the AuthProvider kicks the user back to Keycloak login.
  */
 export async function authenticatedFetch(
   input: RequestInfo | URL,
@@ -13,5 +14,10 @@ export async function authenticatedFetch(
   if (token) {
     headers.set("Authorization", `Bearer ${token}`);
   }
-  return fetch(input, { ...init, headers });
+  const response = await fetch(input, { ...init, headers });
+  if (response.status === 401) {
+    clearToken();
+    window.location.reload();
+  }
+  return response;
 }

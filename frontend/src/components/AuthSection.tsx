@@ -14,6 +14,7 @@ import WarningIcon from "@mui/icons-material/Warning";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import { CopyableText } from "./CopyableText";
 import { API_BASE } from "../constants";
+import { authenticatedFetch } from "../api";
 import type { PartyAuthStatus, RightsStatus, AuthTestResponse } from "../types";
 
 interface AuthSectionProps {
@@ -70,7 +71,7 @@ export const AuthSection = ({ partyId, authStatus, onRefresh }: AuthSectionProps
     try {
       setTesting(true);
       setTestError(null);
-      const res = await fetch(`${API_BASE}/auth/test`, { method: "POST" });
+      const res = await authenticatedFetch(`${API_BASE}/auth/test`, { method: "POST" });
       if (res.ok) {
         const data: AuthTestResponse = await res.json();
         const result = data.results.find((r) => r.party_id === partyId);
