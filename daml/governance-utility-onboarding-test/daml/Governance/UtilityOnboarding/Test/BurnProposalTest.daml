@@ -26,6 +26,19 @@ data Fixture = Fixture
     artifacts : SetupArtifacts
   deriving (Eq, Show)
 
+-- Carries the values supplied to BurnProposal so the `then_` stage can assert
+-- they round-trip into the resulting BurnOffer instead of being silently
+-- dropped or replaced by hardcoded defaults.
+data BurnInputs = BurnInputs
+  with
+    holder : Party
+    amount : Decimal
+    description : Text
+    requestedAt : Time
+    executeBefore : Time
+    meta : Metadata
+  deriving (Eq, Show)
+
 given_setup_done : Script Fixture
 given_setup_done = do
   parties <- allocateOnboardingTestParties
@@ -38,37 +51,52 @@ mkInstrumentId parties = InstrumentId with
   admin = parties.governanceParty
   id = "TEST-TOKEN"
 
-when_burn_offered : Fixture -> Script ()
+when_burn_offered : Fixture -> Script BurnInputs
 when_burn_offered f = do
   now <- getTime
+  let inputs = BurnInputs with
+        holder = f.parties.outsider
+        amount = 100.0
+        description = "Bridge unwind tx abcd1234"
+        requestedAt = now
+        executeBefore = now `addRelTime` hours 24
+        meta = Metadata with values = TextMap.fromList [("bridge-id", "xyz-789")]
   proposalCid <- submit f.parties.member1 $ createCmd BurnProposal with
     governanceParty = f.parties.governanceParty
     proposer = f.parties.member1
     allocationFactoryCid = f.artifacts.allocationFactoryCid
     instrumentId = mkInstrumentId f.parties
     instrumentConfigurationCid = f.artifacts.instrumentConfigurationCid
-    holder = f.parties.outsider
-    amount = 100.0
-    description = "Bridge unwind tx abcd1234"
-    requestedAt = now
-    executeBefore = now `addRelTime` hours 24
-    meta = Metadata with values = TextMap.empty
+    holder = inputs.holder
+    amount = inputs.amount
+    description = inputs.description
+    requestedAt = inputs.requestedAt
+    executeBefore = inputs.executeBefore
+    meta = inputs.meta
     extraArgsMeta = Metadata with values = TextMap.empty
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
   _ <- confirmAndExecute f.parties f.rulesCid proposalInterfaceCid
     [f.parties.member1, f.parties.member2] f.parties.member1
-  pure ()
+  pure inputs
 
-then_burn_offer_exists : Fixture -> () -> Script Failures
-then_burn_offer_exists f _ = do
+then_burn_offer_fields_match : Fixture -> BurnInputs -> Script Failures
+then_burn_offer_fields_match f inputs = do
   offers <- query @BurnOffer f.parties.governanceParty
-  pure $ shouldBe "BurnOffer count" 1 (length offers)
+  case offers of
+    [(_, offer)] -> pure $
+      shouldBe "burn.reference" inputs.description offer.burn.reference <>
+      shouldBe "burn.amount" inputs.amount offer.burn.amount <>
+      shouldBe "burn.holder" inputs.holder offer.burn.holder <>
+      shouldBe "burn.requestedAt" inputs.requestedAt offer.burn.requestedAt <>
+      shouldBe "burn.executeBefore" inputs.executeBefore offer.burn.executeBefore <>
+      shouldBe "burn.meta" inputs.meta offer.burn.meta
+    _ -> pure $ shouldBe "BurnOffer count" 1 (length offers)
 
 test_when_burn_proposed_then_burn_offer_created = script do
   run Test with
     given = given_setup_done
     when = when_burn_offered
-    then_ = then_burn_offer_exists
+    then_ = then_burn_offer_fields_match
 
 when_zero_amount_burn : Fixture -> Script ()
 when_zero_amount_burn f = do
