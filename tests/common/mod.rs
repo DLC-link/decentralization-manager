@@ -2,6 +2,7 @@
 
 pub mod http;
 pub mod phases;
+pub mod types;
 
 use std::sync::Mutex;
 
