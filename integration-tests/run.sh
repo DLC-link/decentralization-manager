@@ -12,6 +12,7 @@ source "$SCRIPT_DIR/integration-tests/env.sh"
 trap cleanup EXIT
 
 check_prerequisites
+check_dpm_ports_free
 
 # Build
 log_phase "Building release binary"

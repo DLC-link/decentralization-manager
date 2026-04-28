@@ -86,8 +86,46 @@ check_prerequisites() {
         missing+=("curl")
     fi
 
+    if ! command -v lsof &>/dev/null; then
+        missing+=("lsof")
+    fi
+
     if [ ${#missing[@]} -gt 0 ]; then
         echo "ERROR: Missing required tools: ${missing[*]}"
+        exit 1
+    fi
+}
+
+# ============================================================================
+# Port availability
+# ============================================================================
+
+# Checks that the dec-party-manager HTTP and Noise ports are free.
+# A leftover process (e.g. a dpm started by a previous run that didn't clean up,
+# or a different worktree's dpm still running) would silently steal one of these
+# ports and the e2e would time out 60s into the first invitation accept.
+# Failing fast here turns that into an instant, actionable error.
+check_dpm_ports_free() {
+    local ports=("$P1_HTTP" "$P2_HTTP" "$P3_HTTP" "$P1_NOISE" "$P2_NOISE" "$P3_NOISE")
+    local busy=()
+
+    for p in "${ports[@]}"; do
+        if lsof -nP -i:"$p" -sTCP:LISTEN >/dev/null 2>&1; then
+            busy+=("$p")
+        fi
+    done
+
+    if [ ${#busy[@]} -gt 0 ]; then
+        echo "ERROR: required port(s) already in use: ${busy[*]}"
+        echo ""
+        echo "Process(es) holding the port(s):"
+        for p in "${busy[@]}"; do
+            echo "  port $p:"
+            lsof -nP -i:"$p" -sTCP:LISTEN 2>/dev/null | tail -n +2 | sed 's/^/    /'
+        done
+        echo ""
+        echo "Stop the offending process(es) (often a dpm leftover from a previous run"
+        echo "or another worktree), then re-run integration-tests/run.sh."
         exit 1
     fi
 }
