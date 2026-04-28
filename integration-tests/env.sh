@@ -293,9 +293,21 @@ start_nodes() {
 }
 
 stop_nodes() {
+    # Same SIGTERM-ignoring problem as in `cleanup`: plain `kill` leaves the
+    # processes alive, holding their HTTP/Noise ports. When `configure_peers`
+    # then calls `start_nodes` to reload peer config, the new processes can't
+    # bind, the test silently runs against the old (peer-config-stale)
+    # instances, and Noise calls fail later with "Connection refused".
+    # Send SIGTERM, give a 2s grace, then SIGKILL anything still alive.
     for pid in "${PIDS[@]}"; do
         if kill -0 "$pid" 2>/dev/null; then
             kill "$pid" 2>/dev/null || true
+        fi
+    done
+    sleep 2
+    for pid in "${PIDS[@]}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+            kill -9 "$pid" 2>/dev/null || true
         fi
     done
     wait 2>/dev/null || true
