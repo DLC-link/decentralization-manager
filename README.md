@@ -304,7 +304,9 @@ cargo build
 # Release build
 cargo build --release
 
-# Run tests
+# Run unit tests — includes the integration-test binary's helpers
+# (Fixture, poll_until, Scenario DSL); the end-to-end test itself is
+# gated by `#[ignore]` and is invoked separately via run.sh below.
 cargo test
 
 # Run linter
@@ -313,6 +315,35 @@ cargo clippy --all-targets --all-features -- -D warnings
 # Format code
 cargo fmt
 ```
+
+### Integration tests
+
+The full integration test boots a Splice localnet (Docker), spawns 3
+`dec-party-manager` instances, configures peers, and runs an end-to-end
+governance workflow exercising onboarding, DAR distribution, governance
+contract deployment, the token-custody / utility-onboarding / generic-vote
+plugins, and the kick workflow.
+
+```bash
+# Run the full suite (quiet by default — only the Given-When-Then
+# scenario trace and bash phase banners surface).
+./integration-tests/run.sh
+
+# Same, with full INFO from dec-party-manager processes and Canton/Noise
+# libraries — useful when diagnosing a stuck or failing run.
+./integration-tests/run.sh --verbose
+
+# Or override RUST_LOG explicitly (wins over the preset).
+RUST_LOG=debug ./integration-tests/run.sh
+
+# Show options
+./integration-tests/run.sh --help
+```
+
+Prerequisites: `docker`, `docker compose v2`, `jq`, `curl`, `lsof`. The
+script verifies them up front and bails with a clear message if any are
+missing or if a previous run leaked a manager process holding one of the
+HTTP/Noise ports (8081–8083, 9001–9003).
 
 ### Frontend Development
 
