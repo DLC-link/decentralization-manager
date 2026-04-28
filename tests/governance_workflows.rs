@@ -15,5 +15,6 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
 
     let mut f = Fixture::from_env()?;
     phases::create_dec_party::run(&mut f).await?;
+    phases::distribute_dars::run(&mut f).await?;
     Ok(())
 }
