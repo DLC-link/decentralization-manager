@@ -66,9 +66,12 @@ if [ -z "${RUST_LOG:-}" ]; then
     if [ "$VERBOSE" = 1 ]; then
         export RUST_LOG="dec_party_manager=info,tokio_noise=error,hyper_noise=error,governance_workflows=info"
     else
-        # Quiet default: only WARN+ from everything except the test crate's
-        # GWT scenario trace, which stays at INFO.
-        export RUST_LOG="warn,governance_workflows=info"
+        # Quiet default: only WARN+ from everything except the GWT scenario
+        # DSL output and per-phase headers from the test crate. The test
+        # crate's helpers (invitations, http) stay at WARN — readers see the
+        # scenario structure without helper-internal chatter. Pass --verbose
+        # to surface the helpers and the dec-party-manager INFO stream.
+        export RUST_LOG="warn,governance_workflows::common::scenario=info,governance_workflows::common::phases=info"
     fi
 fi
 
