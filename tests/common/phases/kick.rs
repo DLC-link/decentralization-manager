@@ -20,7 +20,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 Ok(())
             })
         })
-        .then_eventually(
+        .given_eventually(
             "P3 owner_key resolved via Noise",
             Duration::from_secs(60),
             |f, _| {

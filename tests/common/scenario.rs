@@ -15,6 +15,7 @@ pub enum StepKind {
     Given,
     When,
     Then,
+    GivenEventually,
     ThenEventually,
 }
 
@@ -24,7 +25,19 @@ impl StepKind {
             StepKind::Given => "GIVEN",
             StepKind::When => "WHEN ",
             StepKind::Then => "THEN ",
+            StepKind::GivenEventually => "GIVEN_EVENTUALLY",
             StepKind::ThenEventually => "THEN_EVENTUALLY",
+        }
+    }
+
+    /// For eventually-style steps, the bare kind word ("GIVEN" or "THEN")
+    /// used in log lines and error context, without the `_EVENTUALLY` suffix.
+    /// Panics if called on an immediate kind (Given/When/Then).
+    fn eventually_word(self) -> &'static str {
+        match self {
+            StepKind::GivenEventually => "GIVEN",
+            StepKind::ThenEventually => "THEN",
+            _ => unreachable!("eventually_word called on non-eventually kind: {self:?}"),
         }
     }
 }
@@ -42,6 +55,7 @@ enum Step<Ctx> {
         body: ImmediateBody<Ctx>,
     },
     Eventually {
+        kind: StepKind,
         name: String,
         deadline: Duration,
         probe: ProbeBody<Ctx>,
@@ -105,6 +119,29 @@ impl<Ctx: Send + 'static> Scenario<Ctx> {
         self
     }
 
+    /// Add a polling precondition step. Same shape as `then_eventually` but
+    /// conceptually a Given — the scenario waits for `probe` to return
+    /// `Some(Ok(()))` before any subsequent step runs. Used when a precondition
+    /// is async (e.g. waiting for state to propagate via a background channel).
+    /// In logs the kind word is `GIVEN`; in error context it's `GIVEN_EVENTUALLY`.
+    pub fn given_eventually<F>(
+        mut self,
+        name: impl Into<String>,
+        deadline: Duration,
+        probe: F,
+    ) -> Self
+    where
+        F: for<'a> FnMut(&'a mut Fixture, &'a mut Ctx) -> BoxProbe<'a> + Send + 'static,
+    {
+        self.steps.push(Step::Eventually {
+            kind: StepKind::GivenEventually,
+            name: name.into(),
+            deadline,
+            probe: Box::new(probe),
+        });
+        self
+    }
+
     pub fn then_eventually<F>(
         mut self,
         name: impl Into<String>,
@@ -115,6 +152,7 @@ impl<Ctx: Send + 'static> Scenario<Ctx> {
         F: for<'a> FnMut(&'a mut Fixture, &'a mut Ctx) -> BoxProbe<'a> + Send + 'static,
     {
         self.steps.push(Step::Eventually {
+            kind: StepKind::ThenEventually,
             name: name.into(),
             deadline,
             probe: Box::new(probe),
@@ -150,14 +188,16 @@ impl<Ctx: Send + 'static> Scenario<Ctx> {
                     }
                 }
                 Step::Eventually {
+                    kind,
                     name,
                     deadline,
                     probe,
                 } => {
                     info!(
-                        step_kind = ?StepKind::ThenEventually,
+                        step_kind = ?kind,
                         step_name = %name,
-                        "  THEN  eventually {}",
+                        "  {:<5} eventually {}",
+                        kind.eventually_word(),
                         name
                     );
                     let step_start = Instant::now();
@@ -182,14 +222,17 @@ impl<Ctx: Send + 'static> Scenario<Ctx> {
                         Err(e) => {
                             error!(
                                 scenario = %self.name,
-                                "Scenario \"{}\" failed at THEN_EVENTUALLY \"{}\"",
+                                "Scenario \"{}\" failed at {} \"{}\"",
                                 self.name,
+                                kind.label(),
                                 name
                             );
                             return Err(e
                                 .context(format!(
-                                    "THEN eventually \"{}\" timed out after {:?}",
-                                    name, *deadline
+                                    "{} eventually \"{}\" timed out after {:?}",
+                                    kind.eventually_word(),
+                                    name,
+                                    *deadline
                                 ))
                                 .context(format!("scenario \"{}\" failed", self.name)));
                         }
@@ -366,6 +409,69 @@ mod tests {
             .run(&mut f)
             .await
             .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn given_eventually_runs_before_when() {
+        // Verifies that `given_eventually` polls until success and that the
+        // step it gates (the When that follows) only runs after the precondition
+        // holds. Also verifies the kind word in the failure error context is
+        // GIVEN, not THEN.
+        let mut f = Fixture::for_test();
+        let probe_count = std::sync::Arc::new(AtomicU32::new(0));
+        let when_count = std::sync::Arc::new(AtomicU32::new(0));
+        let pc = probe_count.clone();
+        let wc = when_count.clone();
+
+        Scenario::new("given-eventually")
+            .given_eventually(
+                "precondition holds eventually",
+                Duration::from_secs(10),
+                move |_f, _c| {
+                    let pc = pc.clone();
+                    Box::pin(async move {
+                        let n = pc.fetch_add(1, Ordering::SeqCst) + 1;
+                        if n >= 2 { Some(Ok(())) } else { None }
+                    })
+                },
+            )
+            .when("after precondition", move |_f, _c| {
+                let wc = wc.clone();
+                Box::pin(async move {
+                    wc.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            })
+            .run(&mut f)
+            .await
+            .unwrap();
+
+        assert!(probe_count.load(Ordering::SeqCst) >= 2);
+        assert_eq!(when_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn given_eventually_timeout_error_uses_given_word() {
+        let mut f = Fixture::for_test();
+        let err = Scenario::new("never-precondition")
+            .given_eventually("never holds", Duration::from_millis(50), |_f, _c| {
+                Box::pin(async move { None })
+            })
+            .run(&mut f)
+            .await
+            .unwrap_err();
+
+        let chain = format!("{err:#}");
+        // Error context must say GIVEN eventually, not THEN eventually.
+        assert!(
+            chain.contains("GIVEN eventually \"never holds\""),
+            "expected GIVEN in chain, got: {chain}"
+        );
+        assert!(!chain.contains("THEN eventually"), "got: {chain}");
+        assert!(
+            chain.contains("scenario \"never-precondition\" failed"),
+            "got: {chain}"
+        );
     }
 
     /// Smoke test for the HRTB closure pattern used by all phase tasks:
