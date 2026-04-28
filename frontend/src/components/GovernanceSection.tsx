@@ -232,6 +232,20 @@ export const GovernanceSection = ({
   const [proposalInputHoldingCids, setProposalInputHoldingCids] = useState("");
   const [proposalTransferInstructionCid, setProposalTransferInstructionCid] = useState("");
   const [proposalDescription, setProposalDescription] = useState("");
+  // Utility-onboarding proposal state
+  const [proposalProviderServiceCid, setProposalProviderServiceCid] = useState("");
+  const [proposalInstrumentIdText, setProposalInstrumentIdText] = useState("");
+  const [proposalCreateTransferRule, setProposalCreateTransferRule] = useState(true);
+  const [proposalCreateAllocationFactory, setProposalCreateAllocationFactory] = useState(true);
+  const [proposalUser, setProposalUser] = useState("");
+  const [proposalInstrumentConfigurationCid, setProposalInstrumentConfigurationCid] = useState("");
+  const [proposalBeneficiariesText, setProposalBeneficiariesText] = useState("");
+  const [proposalClearBeneficiaries, setProposalClearBeneficiaries] = useState(false);
+  const [proposalRegistrarServiceCid, setProposalRegistrarServiceCid] = useState("");
+  const [proposalEnableResultContracts, setProposalEnableResultContracts] = useState<"true" | "false" | "clear">("true");
+  const [proposalAllocationFactoryCid, setProposalAllocationFactoryCid] = useState("");
+  const [proposalRecipient, setProposalRecipient] = useState("");
+  const [proposalHolder, setProposalHolder] = useState("");
   const [proposalLoading, setProposalLoading] = useState(false);
   const [rulesContractId, setRulesContractId] = useState(
     initialRulesContractId || "",
@@ -1012,6 +1026,95 @@ export const GovernanceSection = ({
         case "generic_vote":
           proposal = {
             type: "generic_vote",
+            description: proposalDescription,
+          };
+          break;
+        case "provision_provider_service":
+          proposal = { type: "provision_provider_service" };
+          break;
+        case "setup_utility":
+          proposal = {
+            type: "setup_utility",
+            provider_service_cid: proposalProviderServiceCid,
+            operator: proposalOperator,
+            instrument_id_text: proposalInstrumentIdText,
+            create_transfer_rule: proposalCreateTransferRule,
+            create_allocation_factory: proposalCreateAllocationFactory,
+          };
+          break;
+        case "create_provider_service_request":
+          proposal = {
+            type: "create_provider_service_request",
+            operator: proposalOperator,
+            provider: proposalProvider,
+          };
+          break;
+        case "create_user_service_request":
+          proposal = {
+            type: "create_user_service_request",
+            operator: proposalOperator,
+            user: proposalUser,
+          };
+          break;
+        case "set_provider_app_reward_beneficiaries": {
+          let beneficiaries: AppRewardBeneficiary[] | null = null;
+          if (!proposalClearBeneficiaries) {
+            const lines = proposalBeneficiariesText
+              .split("\n")
+              .map((line) => line.trim())
+              .filter(Boolean);
+            beneficiaries = lines.map((line, idx) => {
+              const parts = line.split(",").map((s) => s.trim());
+              if (parts.length !== 2 || !parts[0] || !parts[1]) {
+                throw new Error(
+                  `Beneficiary line ${idx + 1}: expected "<party>,<weight>", got "${line}"`,
+                );
+              }
+              return { beneficiary: parts[0], weight: parts[1] };
+            });
+          }
+          proposal = {
+            type: "set_provider_app_reward_beneficiaries",
+            instrument_configuration_cid: proposalInstrumentConfigurationCid,
+            provider_app_reward_beneficiaries: beneficiaries,
+          };
+          break;
+        }
+        case "set_enable_result_contracts":
+          proposal = {
+            type: "set_enable_result_contracts",
+            registrar_service_cid: proposalRegistrarServiceCid,
+            enable_result_contracts:
+              proposalEnableResultContracts === "clear"
+                ? null
+                : proposalEnableResultContracts === "true",
+          };
+          break;
+        case "create_delegated_batched_markers_proxy":
+          proposal = {
+            type: "create_delegated_batched_markers_proxy",
+            operator: proposalOperator,
+          };
+          break;
+        case "mint":
+          proposal = {
+            type: "mint",
+            allocation_factory_cid: proposalAllocationFactoryCid,
+            instrument_id: { admin: proposalInstrumentIdAdmin, id: proposalInstrumentIdId },
+            instrument_configuration_cid: proposalInstrumentConfigurationCid,
+            recipient: proposalRecipient,
+            amount: proposalAmount,
+            description: proposalDescription,
+          };
+          break;
+        case "burn":
+          proposal = {
+            type: "burn",
+            allocation_factory_cid: proposalAllocationFactoryCid,
+            instrument_id: { admin: proposalInstrumentIdAdmin, id: proposalInstrumentIdId },
+            instrument_configuration_cid: proposalInstrumentConfigurationCid,
+            holder: proposalHolder,
+            amount: proposalAmount,
             description: proposalDescription,
           };
           break;
@@ -2708,6 +2811,16 @@ export const GovernanceSection = ({
                   <MenuItem value="setup_token_preapproval">Setup Token Preapproval</MenuItem>
                   <MenuItem value="transfer">Transfer</MenuItem>
                   <MenuItem value="accept_transfer">Accept Transfer</MenuItem>
+                  <Divider />
+                  <MenuItem value="provision_provider_service">Provision Provider Service</MenuItem>
+                  <MenuItem value="setup_utility">Setup Utility</MenuItem>
+                  <MenuItem value="create_provider_service_request">Create Provider Service Request</MenuItem>
+                  <MenuItem value="create_user_service_request">Create User Service Request</MenuItem>
+                  <MenuItem value="set_provider_app_reward_beneficiaries">Set Provider App Reward Beneficiaries</MenuItem>
+                  <MenuItem value="set_enable_result_contracts">Set Enable Result Contracts</MenuItem>
+                  <MenuItem value="create_delegated_batched_markers_proxy">Create Delegated Batched Markers Proxy</MenuItem>
+                  <MenuItem value="mint">Mint</MenuItem>
+                  <MenuItem value="burn">Burn</MenuItem>
                 </Select>
               </FormControl>
 
@@ -2743,6 +2856,99 @@ export const GovernanceSection = ({
 
               {proposalType === "accept_transfer" && (
                 <TextField size="small" label="TransferInstruction Contract ID" value={proposalTransferInstructionCid} onChange={(e) => setProposalTransferInstructionCid(e.target.value)} fullWidth required />
+              )}
+
+              {proposalType === "provision_provider_service" && (
+                <Typography variant="caption" color="text.secondary">
+                  Provisions a Utility-Registry ProviderService with operator = proposer and provider = governance party. No parameters required.
+                </Typography>
+              )}
+
+              {proposalType === "setup_utility" && (
+                <>
+                  <TextField size="small" label="ProviderService Contract ID" value={proposalProviderServiceCid} onChange={(e) => setProposalProviderServiceCid(e.target.value)} fullWidth required />
+                  <TextField size="small" label="Operator Party" value={proposalOperator} onChange={(e) => setProposalOperator(e.target.value)} fullWidth required />
+                  <TextField size="small" label="Instrument ID" value={proposalInstrumentIdText} onChange={(e) => setProposalInstrumentIdText(e.target.value)} fullWidth required />
+                  <FormControlLabel
+                    control={<Checkbox size="small" checked={proposalCreateTransferRule} onChange={(e) => setProposalCreateTransferRule(e.target.checked)} />}
+                    label="Create TransferRule"
+                  />
+                  <FormControlLabel
+                    control={<Checkbox size="small" checked={proposalCreateAllocationFactory} onChange={(e) => setProposalCreateAllocationFactory(e.target.checked)} />}
+                    label="Create AllocationFactory"
+                  />
+                </>
+              )}
+
+              {proposalType === "create_provider_service_request" && (
+                <>
+                  <TextField size="small" label="Operator Party" value={proposalOperator} onChange={(e) => setProposalOperator(e.target.value)} fullWidth required />
+                  <TextField size="small" label="Provider Party" value={proposalProvider} onChange={(e) => setProposalProvider(e.target.value)} fullWidth required />
+                </>
+              )}
+
+              {proposalType === "create_user_service_request" && (
+                <>
+                  <TextField size="small" label="Operator Party" value={proposalOperator} onChange={(e) => setProposalOperator(e.target.value)} fullWidth required />
+                  <TextField size="small" label="User Party" value={proposalUser} onChange={(e) => setProposalUser(e.target.value)} fullWidth required />
+                </>
+              )}
+
+              {proposalType === "set_provider_app_reward_beneficiaries" && (
+                <>
+                  <TextField size="small" label="InstrumentConfiguration Contract ID" value={proposalInstrumentConfigurationCid} onChange={(e) => setProposalInstrumentConfigurationCid(e.target.value)} fullWidth required />
+                  <FormControlLabel
+                    control={<Checkbox size="small" checked={proposalClearBeneficiaries} onChange={(e) => setProposalClearBeneficiaries(e.target.checked)} />}
+                    label="Clear beneficiaries (set to None)"
+                  />
+                  {!proposalClearBeneficiaries && (
+                    <TextField
+                      size="small"
+                      label="Beneficiaries (one per line: party,weight)"
+                      value={proposalBeneficiariesText}
+                      onChange={(e) => setProposalBeneficiariesText(e.target.value)}
+                      fullWidth
+                      multiline
+                      minRows={2}
+                      maxRows={6}
+                      helperText="Each line: <party>,<weight>"
+                    />
+                  )}
+                </>
+              )}
+
+              {proposalType === "set_enable_result_contracts" && (
+                <>
+                  <TextField size="small" label="RegistrarService Contract ID" value={proposalRegistrarServiceCid} onChange={(e) => setProposalRegistrarServiceCid(e.target.value)} fullWidth required />
+                  <FormControl size="small" fullWidth>
+                    <InputLabel>Enable Result Contracts</InputLabel>
+                    <Select
+                      label="Enable Result Contracts"
+                      value={proposalEnableResultContracts}
+                      onChange={(e) => setProposalEnableResultContracts(e.target.value as "true" | "false" | "clear")}
+                    >
+                      <MenuItem value="true">Enable</MenuItem>
+                      <MenuItem value="false">Disable</MenuItem>
+                      <MenuItem value="clear">Clear (None)</MenuItem>
+                    </Select>
+                  </FormControl>
+                </>
+              )}
+
+              {proposalType === "create_delegated_batched_markers_proxy" && (
+                <TextField size="small" label="Operator Party" value={proposalOperator} onChange={(e) => setProposalOperator(e.target.value)} fullWidth required />
+              )}
+
+              {(proposalType === "mint" || proposalType === "burn") && (
+                <>
+                  <TextField size="small" label="AllocationFactory Contract ID" value={proposalAllocationFactoryCid} onChange={(e) => setProposalAllocationFactoryCid(e.target.value)} fullWidth required />
+                  <TextField size="small" label="Instrument Admin" value={proposalInstrumentIdAdmin} onChange={(e) => setProposalInstrumentIdAdmin(e.target.value)} fullWidth required />
+                  <TextField size="small" label="Instrument ID" value={proposalInstrumentIdId} onChange={(e) => setProposalInstrumentIdId(e.target.value)} fullWidth required />
+                  <TextField size="small" label="InstrumentConfiguration Contract ID" value={proposalInstrumentConfigurationCid} onChange={(e) => setProposalInstrumentConfigurationCid(e.target.value)} fullWidth required />
+                  <TextField size="small" label={proposalType === "mint" ? "Recipient Party" : "Holder Party"} value={proposalType === "mint" ? proposalRecipient : proposalHolder} onChange={(e) => proposalType === "mint" ? setProposalRecipient(e.target.value) : setProposalHolder(e.target.value)} fullWidth required />
+                  <TextField size="small" label="Amount" value={proposalAmount} onChange={(e) => setProposalAmount(e.target.value)} fullWidth required />
+                  <TextField size="small" label="Description" value={proposalDescription} onChange={(e) => setProposalDescription(e.target.value)} fullWidth required />
+                </>
               )}
 
               <Button variant="contained" size="small" onClick={handleSubmitProposal} disabled={proposalLoading}>
