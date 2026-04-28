@@ -17,5 +17,6 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     phases::create_dec_party::run(&mut f).await?;
     phases::distribute_dars::run(&mut f).await?;
     phases::deploy_gov_core::run(&mut f).await?;
+    phases::token_custody::run(&mut f).await?;
     Ok(())
 }
