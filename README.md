@@ -325,25 +325,87 @@ contract deployment, the token-custody / utility-onboarding / generic-vote
 plugins, and the kick workflow.
 
 ```bash
-# Run the full suite (quiet by default — only the Given-When-Then
-# scenario trace and bash phase banners surface).
+# Quiet mode (default) — focused Given-When-Then trace
 ./integration-tests/run.sh
 
-# Same, with full INFO from dec-party-manager processes and Canton/Noise
-# libraries — useful when diagnosing a stuck or failing run.
+# Verbose mode — full INFO from dec-party-manager + Canton/Noise libs
 ./integration-tests/run.sh --verbose
 
-# Or override RUST_LOG explicitly (wins over the preset).
+# Custom RUST_LOG (overrides both presets)
 RUST_LOG=debug ./integration-tests/run.sh
 
-# Show options
+# Help
 ./integration-tests/run.sh --help
 ```
 
-Prerequisites: `docker`, `docker compose v2`, `jq`, `curl`, `lsof`. The
-script verifies them up front and bails with a clear message if any are
-missing or if a previous run leaked a manager process holding one of the
-HTTP/Noise ports (8081–8083, 9001–9003).
+#### Quiet mode (default)
+
+Quiet mode is the recommended way to run the suite — it surfaces only
+what a tester needs to verify a passing run, suppressing the
+dec-party-manager INFO chatter and Canton/Noise convergence warnings.
+Sample of a passing run:
+
+```
+==========================================
+Running governance workflow e2e (Rust)
+==========================================
+running 1 test
+
+INFO Phase: create_dec_party
+INFO Using prefix: test-network-1
+INFO Scenario "create decentralized party test-network-1"
+INFO   GIVEN no party at this prefix yet
+INFO   WHEN  P1 starts onboarding and P2/P3 accept invitations
+INFO   THEN  eventually party visible in /decentralized-parties
+INFO     ✓ (took 18.4s)
+INFO Scenario "create decentralized party test-network-1" complete (18.7s)
+
+INFO Phase: distribute_dars
+INFO Scenario "distribute DARs"
+INFO   GIVEN 3 DAR files on disk
+INFO   WHEN  P1 uploads + distributes DARs, P2/P3 accept, status reaches completed
+INFO Scenario "distribute DARs" complete (11.4s)
+
+... (14 scenarios total) ...
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured;
+==========================================
+Integration tests completed successfully!
+==========================================
+```
+
+Each scenario follows the Given-When-Then DSL: `Given` is a precondition,
+`When` is the test action, `Then` (or `Then eventually`) is the
+postcondition assertion. A failure renders as
+`ERROR Scenario "<name>" failed at <KIND> "<step>"` with a chained
+`anyhow` cause trail pinpointing the failing HTTP call.
+
+The exact `RUST_LOG` quiet preset is:
+```
+warn,hyper_noise::server=error,
+governance_workflows::common::scenario=info,
+governance_workflows::common::phases=info
+```
+
+#### Verbose mode
+
+Use `--verbose` when diagnosing a stuck or failing run. Sets:
+```
+dec_party_manager=info,tokio_noise=error,hyper_noise=error,
+governance_workflows=info
+```
+
+Surfaces all dec-party-manager INFO output (peer connections, Noise
+handshakes, workflow internals) plus the test crate's full helper
+chatter (`Waiting for invitation on …`, `Accepting invitation …`).
+The cargo test runner is also INFO, so individual test cases narrate.
+
+#### Prerequisites
+
+`docker`, `docker compose v2`, `jq`, `curl`, `lsof`. The script
+verifies these up front and bails with a clear message if any are
+missing or if a previous run leaked a manager process holding one of
+the HTTP/Noise ports (8081–8083, 9001–9003).
 
 ### Frontend Development
 
