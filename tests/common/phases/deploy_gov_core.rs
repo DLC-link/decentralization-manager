@@ -9,7 +9,7 @@ use crate::common::{
     http::poll_workflow_status,
     invitations::accept_invitation,
     scenario::Scenario,
-    types::{AllocatePartyResponse, DecentralizedPartiesResponse},
+    types::{AllocatePartyResponse, DecentralizedPartiesResponse, GovernanceStateLookup},
 };
 
 const P1_JSON_API: u16 = 3975;
@@ -172,14 +172,34 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             |f, _| {
                 Box::pin(async move {
                     let party_id = f.party_id().ok()?.to_string();
+
+                    // Primary: scan /decentralized-parties for the contract.
                     let r: DecentralizedPartiesResponse =
                         f.get_json(f.p1.http, "/decentralized-parties").await.ok()?;
-                    let party = r.parties.into_iter().find(|p| p.party_id == party_id)?;
-                    let cid = party
-                        .contracts
+                    let cid = r
+                        .parties
                         .into_iter()
-                        .find(|c| c.template_id.contains("GovernanceRules"))?
-                        .contract_id;
+                        .find(|p| p.party_id == party_id)
+                        .and_then(|p| {
+                            p.contracts
+                                .into_iter()
+                                .find(|c| c.template_id.contains("GovernanceRules"))
+                                .map(|c| c.contract_id)
+                        });
+
+                    // Fallback: /governance/state, mirroring the bash workflow's safety net.
+                    // If /decentralized-parties has not yet refreshed but the governance
+                    // state already exposes the contract, accept that.
+                    let cid = match cid {
+                        Some(c) => c,
+                        None => {
+                            let path = format!("/governance/state?party_id={party_id}");
+                            let r: GovernanceStateLookup =
+                                f.get_json(f.p1.http, &path).await.ok()?;
+                            r.state?.contract_id
+                        }
+                    };
+
                     f.rules_contract_id = Some(cid);
                     Some(Ok(()))
                 })

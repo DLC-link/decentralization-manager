@@ -92,3 +92,17 @@ pub struct AllocatePartyResponse {
     #[serde(rename = "partyDetails")]
     pub party_details: PartyDetails,
 }
+
+/// Response shape for `GET /governance/state?party_id=...`.
+/// Used as a fallback in `deploy_gov_core` when `/decentralized-parties`
+/// hasn't yet exposed the GovernanceRules contract.
+#[derive(Debug, Deserialize)]
+pub struct GovernanceStateContract {
+    pub contract_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GovernanceStateLookup {
+    #[serde(default)]
+    pub state: Option<GovernanceStateContract>,
+}
