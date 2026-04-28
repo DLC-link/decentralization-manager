@@ -39,7 +39,8 @@ fn read_env(key: &str) -> anyhow::Result<String> {
 
 fn read_port(key: &str) -> anyhow::Result<u16> {
     let raw = read_env(key)?;
-    raw.parse::<u16>().with_context(|| format!("env var {key} is not a u16: {raw}"))
+    raw.parse::<u16>()
+        .with_context(|| format!("env var {key} is not a u16: {raw}"))
 }
 
 impl Fixture {
@@ -65,31 +66,52 @@ impl Fixture {
             .build()
             .context("build reqwest client")?;
         Ok(Fixture {
-            client, jwt, p1, p2, p3,
-            party_id: None, party_prefix: None, rules_contract_id: None,
-            p1_member_party: None, p2_member_party: None, p3_member_party: None,
-            provider_service_cid: None, allocation_factory_cid: None,
+            client,
+            jwt,
+            p1,
+            p2,
+            p3,
+            party_id: None,
+            party_prefix: None,
+            rules_contract_id: None,
+            p1_member_party: None,
+            p2_member_party: None,
+            p3_member_party: None,
+            provider_service_cid: None,
+            allocation_factory_cid: None,
             instrument_configuration_cid: None,
         })
     }
 
     pub fn party_id(&self) -> anyhow::Result<&str> {
-        self.party_id.as_deref().context("party_id not set — create_dec_party must run first")
+        self.party_id
+            .as_deref()
+            .context("party_id not set — create_dec_party must run first")
     }
     pub fn party_prefix(&self) -> anyhow::Result<&str> {
-        self.party_prefix.as_deref().context("party_prefix not set — create_dec_party must run first")
+        self.party_prefix
+            .as_deref()
+            .context("party_prefix not set — create_dec_party must run first")
     }
     pub fn rules_contract_id(&self) -> anyhow::Result<&str> {
-        self.rules_contract_id.as_deref().context("rules_contract_id not set — deploy_gov_core must run first")
+        self.rules_contract_id
+            .as_deref()
+            .context("rules_contract_id not set — deploy_gov_core must run first")
     }
     pub fn p1_member_party(&self) -> anyhow::Result<&str> {
-        self.p1_member_party.as_deref().context("p1_member_party not set")
+        self.p1_member_party
+            .as_deref()
+            .context("p1_member_party not set")
     }
     pub fn p2_member_party(&self) -> anyhow::Result<&str> {
-        self.p2_member_party.as_deref().context("p2_member_party not set")
+        self.p2_member_party
+            .as_deref()
+            .context("p2_member_party not set")
     }
     pub fn p3_member_party(&self) -> anyhow::Result<&str> {
-        self.p3_member_party.as_deref().context("p3_member_party not set")
+        self.p3_member_party
+            .as_deref()
+            .context("p3_member_party not set")
     }
 
     /// Build a `Fixture` with hardcoded test values, bypassing env vars entirely.
@@ -98,14 +120,33 @@ impl Fixture {
     #[cfg(test)]
     pub fn for_test() -> Self {
         Self {
-            client: Client::builder().build().expect("build reqwest client for test"),
+            client: Client::builder()
+                .build()
+                .expect("build reqwest client for test"),
             jwt: "test-jwt".to_string(),
-            p1: NodePorts { http: 8081, noise: 9001, participant_id: "p1".to_string() },
-            p2: NodePorts { http: 8082, noise: 9002, participant_id: "p2".to_string() },
-            p3: NodePorts { http: 8083, noise: 9003, participant_id: "p3".to_string() },
-            party_id: None, party_prefix: None, rules_contract_id: None,
-            p1_member_party: None, p2_member_party: None, p3_member_party: None,
-            provider_service_cid: None, allocation_factory_cid: None,
+            p1: NodePorts {
+                http: 8081,
+                noise: 9001,
+                participant_id: "p1".to_string(),
+            },
+            p2: NodePorts {
+                http: 8082,
+                noise: 9002,
+                participant_id: "p2".to_string(),
+            },
+            p3: NodePorts {
+                http: 8083,
+                noise: 9003,
+                participant_id: "p3".to_string(),
+            },
+            party_id: None,
+            party_prefix: None,
+            rules_contract_id: None,
+            p1_member_party: None,
+            p2_member_party: None,
+            p3_member_party: None,
+            provider_service_cid: None,
+            allocation_factory_cid: None,
             instrument_configuration_cid: None,
         }
     }
@@ -135,8 +176,18 @@ mod tests {
 
     fn clear_all_env() {
         unsafe {
-            for k in ["P1_HTTP","P2_HTTP","P3_HTTP","P1_NOISE","P2_NOISE","P3_NOISE",
-                      "P1_PARTICIPANT_ID","P2_PARTICIPANT_ID","P3_PARTICIPANT_ID","MOCK_TOKEN"] {
+            for k in [
+                "P1_HTTP",
+                "P2_HTTP",
+                "P3_HTTP",
+                "P1_NOISE",
+                "P2_NOISE",
+                "P3_NOISE",
+                "P1_PARTICIPANT_ID",
+                "P2_PARTICIPANT_ID",
+                "P3_PARTICIPANT_ID",
+                "MOCK_TOKEN",
+            ] {
                 std::env::remove_var(k);
             }
         }
@@ -145,7 +196,8 @@ mod tests {
     #[test]
     fn from_env_succeeds_when_all_vars_present() {
         let _g = ENV_LOCK.lock().unwrap();
-        clear_all_env(); set_all_env();
+        clear_all_env();
+        set_all_env();
         let f = Fixture::from_env().unwrap();
         assert_eq!(f.p1.http, 8081);
         assert_eq!(f.p3.noise, 9003);
@@ -156,7 +208,8 @@ mod tests {
     #[test]
     fn from_env_reports_missing_var() {
         let _g = ENV_LOCK.lock().unwrap();
-        clear_all_env(); set_all_env();
+        clear_all_env();
+        set_all_env();
         unsafe { std::env::remove_var("P2_HTTP") };
         let err = Fixture::from_env().unwrap_err();
         assert!(format!("{err:#}").contains("P2_HTTP"));
@@ -165,7 +218,8 @@ mod tests {
     #[test]
     fn from_env_reports_invalid_port() {
         let _g = ENV_LOCK.lock().unwrap();
-        clear_all_env(); set_all_env();
+        clear_all_env();
+        set_all_env();
         unsafe { std::env::set_var("P1_NOISE", "not-a-port") };
         let err = Fixture::from_env().unwrap_err();
         assert!(format!("{err:#}").contains("P1_NOISE"));
