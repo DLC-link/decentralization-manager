@@ -1,0 +1,72 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Plugin template that offers a burn to a specific holder via the
+-- utility-registry's AllocationFactory_OfferBurn choice. The holder accepts
+-- the resulting BurnOffer later (outside the plugin) by supplying concrete
+-- Holding contract ids — the offer step itself does not consume holdings.
+module Governance.TokenIssuance.BurnProposal where
+
+import DA.TextMap qualified as TextMap
+
+import Splice.Api.Token.HoldingV1 (InstrumentId)
+import Splice.Api.Token.MetadataV1
+  (AnyValue(..), ChoiceContext(..), ExtraArgs(..), Metadata)
+
+import Utility.Registry.App.V0.Model.Burn (Burn(..))
+import Utility.Registry.App.V0.Service.AllocationFactory
+  (AllocationFactory, AllocationFactory_OfferBurn(..))
+import Utility.Registry.V0.Configuration.Instrument (InstrumentConfiguration)
+import Utility.Registry.V0.Holding.TokenApiUtils
+  (instrumentConfigurationContextKey, issuerCredentialsContextKey)
+
+import Governance.Action
+
+template BurnProposal
+  with
+    governanceParty : Party
+    proposer : Party
+    allocationFactoryCid : ContractId AllocationFactory
+    instrumentId : InstrumentId
+    instrumentConfigurationCid : ContractId InstrumentConfiguration
+    holder : Party
+    amount : Decimal
+    description : Text
+    requestedAt : Time
+    executeBefore : Time
+    meta : Metadata
+    extraArgsMeta : Metadata
+  where
+    signatory proposer
+    observer governanceParty
+
+    ensure amount > 0.0
+
+    interface instance GovernableAction for BurnProposal where
+      view = GovernableActionView with
+        governanceParty
+        actionLabel = "Burn"
+        description
+
+      executeImpl = do
+        let context = ChoiceContext with
+              values = TextMap.fromList
+                [ (instrumentConfigurationContextKey,
+                   AV_ContractId $ coerceContractId instrumentConfigurationCid)
+                , (issuerCredentialsContextKey,
+                   AV_List [])
+                ]
+        _ <- exercise allocationFactoryCid AllocationFactory_OfferBurn with
+          expectedAdmin = governanceParty
+          burn = Burn with
+            instrumentId
+            amount
+            holder
+            reference = description
+            requestedAt
+            executeBefore
+            meta
+          extraArgs = ExtraArgs with
+            context
+            meta = extraArgsMeta
+        pure ()

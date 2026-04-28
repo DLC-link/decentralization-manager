@@ -18,6 +18,17 @@ use crate::{
     workflow::{WorkflowState, state::WorkflowStep},
 };
 
+/// Whether an outgoing command should carry the workflow's `command_payload`.
+///
+/// `Disconnect` is a pure control signal marking the end of a workflow and
+/// must never inherit the residual payload from an earlier step (e.g. the
+/// DAR bundle from `UploadDars`). Shipping it would turn a small control
+/// message into a multi-MB chunked transfer and delay the attestor's invite
+/// listener from resuming, which has caused Contracts-invite races in CI.
+const fn command_carries_payload(command: MessageType) -> bool {
+    !matches!(command, MessageType::Disconnect)
+}
+
 /// Coordinator server that accepts connections from attestors
 pub struct NoiseServer<S: WorkflowStep + 'static> {
     node_config: Arc<NodeConfig>,
@@ -242,8 +253,13 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         // Get current command from workflow state
         if let Some(command) = self.workflow_state.current_command().await {
             tracing::info!("Sending command {command:?} to {peer_id}");
-            // Include payload for commands that need data (e.g., SignDns, SignP2p)
-            let payload = self.workflow_state.get_command_payload().await;
+            // Include payload only for commands that carry data (e.g. UploadDars,
+            // SignDns). See `command_carries_payload` for why Disconnect is excluded.
+            let payload = if command_carries_payload(command) {
+                self.workflow_state.get_command_payload().await
+            } else {
+                Vec::new()
+            };
             if payload.is_empty() {
                 Ok(Message::new_empty(command))
             } else if payload.len() <= MAX_PAYLOAD_SIZE {
@@ -339,5 +355,25 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         self.workflow_state.attestor_completed(peer_id).await;
 
         Ok(Message::new_empty(MessageType::Ack))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disconnect_never_carries_a_payload() {
+        assert!(!command_carries_payload(MessageType::Disconnect));
+    }
+
+    #[test]
+    fn data_carrying_commands_preserve_their_payload() {
+        assert!(command_carries_payload(MessageType::UploadDars));
+        assert!(command_carries_payload(MessageType::SignDns));
+        assert!(command_carries_payload(MessageType::SignP2p));
+        assert!(command_carries_payload(MessageType::SignSubmissions));
+        assert!(command_carries_payload(MessageType::SignKick));
+        assert!(command_carries_payload(MessageType::GenerateKeys));
     }
 }

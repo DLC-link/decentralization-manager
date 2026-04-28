@@ -1,0 +1,25 @@
+sdk-version: 3.4.11
+name: governance-utility-onboarding-v0-rc3
+version: 0.1.0
+source: daml
+dependencies:
+  - daml-prim
+  - daml-stdlib
+data-dependencies:
+  - ../governance-core/.daml/dist/governance-core-v0-rc3-0.1.0.dar
+  - ../dars/splice-api-featured-app-v1-1.0.0.dar
+  - ../dars/splice-api-token-burn-mint-v1-1.0.0.dar
+  - ../dars/splice-api-token-holding-v1-1.0.0.dar
+  - ../dars/splice-api-token-metadata-v1-1.0.0.dar
+  - ../dars/splice-api-token-transfer-instruction-v1-1.0.0.dar
+  - ../dars/splice-util-0.1.4.dar
+  - ../dars/utility-commercials-v0-0.4.1.dar
+  - ../dars/utility-credential-app-v0-0.4.1.dar
+  - ../dars/utility-credential-v0-0.1.0.dar
+  - ../dars/utility-registry-app-v0-0.7.0.dar
+  - ../dars/utility-registry-v0-0.6.0.dar
+build-options:
+  - --target=2.2
+  - -Wupgrade-interfaces
+  - --ghc-option=-Wunused-binds
+  - --ghc-option=-Wunused-matches

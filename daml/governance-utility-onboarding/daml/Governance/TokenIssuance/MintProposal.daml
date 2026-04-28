@@ -1,0 +1,71 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Plugin template that offers a mint to a specific recipient via the
+-- utility-registry's AllocationFactory_OfferMint choice. The recipient accepts
+-- the resulting MintOffer later (outside the plugin).
+module Governance.TokenIssuance.MintProposal where
+
+import DA.TextMap qualified as TextMap
+
+import Splice.Api.Token.HoldingV1 (InstrumentId)
+import Splice.Api.Token.MetadataV1
+  (AnyValue(..), ChoiceContext(..), ExtraArgs(..), Metadata)
+
+import Utility.Registry.App.V0.Model.Mint (Mint(..))
+import Utility.Registry.App.V0.Service.AllocationFactory
+  (AllocationFactory, AllocationFactory_OfferMint(..))
+import Utility.Registry.V0.Configuration.Instrument (InstrumentConfiguration)
+import Utility.Registry.V0.Holding.TokenApiUtils
+  (instrumentConfigurationContextKey, issuerCredentialsContextKey)
+
+import Governance.Action
+
+template MintProposal
+  with
+    governanceParty : Party
+    proposer : Party
+    allocationFactoryCid : ContractId AllocationFactory
+    instrumentId : InstrumentId
+    instrumentConfigurationCid : ContractId InstrumentConfiguration
+    recipient : Party
+    amount : Decimal
+    description : Text
+    requestedAt : Time
+    executeBefore : Time
+    meta : Metadata
+    extraArgsMeta : Metadata
+  where
+    signatory proposer
+    observer governanceParty
+
+    ensure amount > 0.0
+
+    interface instance GovernableAction for MintProposal where
+      view = GovernableActionView with
+        governanceParty
+        actionLabel = "Mint"
+        description
+
+      executeImpl = do
+        let context = ChoiceContext with
+              values = TextMap.fromList
+                [ (instrumentConfigurationContextKey,
+                   AV_ContractId $ coerceContractId instrumentConfigurationCid)
+                , (issuerCredentialsContextKey,
+                   AV_List [])
+                ]
+        _ <- exercise allocationFactoryCid AllocationFactory_OfferMint with
+          expectedAdmin = governanceParty
+          mint = Mint with
+            instrumentId
+            amount
+            holder = recipient
+            reference = description
+            requestedAt
+            executeBefore
+            meta
+          extraArgs = ExtraArgs with
+            context
+            meta = extraArgsMeta
+        pure ()

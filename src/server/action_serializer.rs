@@ -4,6 +4,7 @@
 //! and DAML `Value` representations for use with the Ledger API.
 
 use anyhow::Context;
+use canton_common::decimal::DamlDecimal;
 use canton_proto_rs::com::daml::ledger::api::v2::{
     List, Optional, Record, RecordField, Value, Variant, value,
 };
@@ -40,6 +41,12 @@ fn make_int64(n: i64) -> Value {
 fn make_numeric(d: &str) -> Value {
     Value {
         sum: Some(value::Sum::Numeric(d.to_string())),
+    }
+}
+
+fn make_bool(b: bool) -> Value {
+    Value {
+        sum: Some(value::Sum::Bool(b)),
     }
 }
 
@@ -81,23 +88,27 @@ fn make_list(values: Vec<Value>) -> Value {
     }
 }
 
-fn make_empty_gen_map() -> Value {
+fn make_empty_text_map() -> Value {
     Value {
-        sum: Some(value::Sum::GenMap(
-            canton_proto_rs::com::daml::ledger::api::v2::GenMap { entries: vec![] },
+        sum: Some(value::Sum::TextMap(
+            canton_proto_rs::com::daml::ledger::api::v2::TextMap { entries: vec![] },
         )),
     }
 }
 
+// Splice's `Metadata.values` is typed `TextMap Text` and `ChoiceContext.values`
+// is typed `TextMap AnyValue` (see `Splice.Api.Token.MetadataV1`). Both must be
+// sent as a `TextMap` value — an empty `GenMap` is rejected by Canton's command
+// preprocessor with `mismatching type: TextMap ... and value: ValueGenMap()`.
 fn make_empty_metadata() -> Value {
-    make_record(vec![field("values", make_empty_gen_map())])
+    make_record(vec![field("values", make_empty_text_map())])
 }
 
 fn make_empty_extra_args() -> Value {
     make_record(vec![
         field(
             "context",
-            make_record(vec![field("values", make_empty_gen_map())]),
+            make_record(vec![field("values", make_empty_text_map())]),
         ),
         field("meta", make_empty_metadata()),
     ])
@@ -114,10 +125,33 @@ fn serialize_instrument_id(id: &InstrumentId) -> Value {
     ])
 }
 
-fn make_optional_numeric(opt: &Option<String>) -> Value {
+fn make_optional_numeric(opt: &Option<DamlDecimal>) -> Value {
     Value {
         sum: Some(value::Sum::Optional(Box::new(Optional {
-            value: opt.as_ref().map(|n| Box::new(make_numeric(n))),
+            value: opt.as_ref().map(|n| Box::new(make_numeric(&n.to_string()))),
+        }))),
+    }
+}
+
+fn make_optional_bool(opt: &Option<bool>) -> Value {
+    Value {
+        sum: Some(value::Sum::Optional(Box::new(Optional {
+            value: opt.as_ref().map(|b| Box::new(make_bool(*b))),
+        }))),
+    }
+}
+
+fn make_optional_beneficiaries(opt: &Option<Vec<AppRewardBeneficiary>>) -> Value {
+    Value {
+        sum: Some(value::Sum::Optional(Box::new(Optional {
+            value: opt.as_ref().map(|beneficiaries| {
+                Box::new(make_list(
+                    beneficiaries
+                        .iter()
+                        .map(serialize_app_reward_beneficiary)
+                        .collect(),
+                ))
+            }),
         }))),
     }
 }
@@ -150,7 +184,7 @@ fn serialize_claim(claim: &Claim) -> Value {
 fn serialize_app_reward_beneficiary(b: &AppRewardBeneficiary) -> Value {
     make_record(vec![
         field("beneficiary", make_party(&b.beneficiary)),
-        field("weight", make_numeric(&b.weight)),
+        field("weight", make_numeric(&b.weight.to_string())),
     ])
 }
 
@@ -681,9 +715,11 @@ fn serialize_instrument_allowances(allowances: &[InstrumentAllowance]) -> Value 
 
 /// Which package a proposal template belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)]
 pub enum ProposalPackage {
     GovernanceCore,
     GovernanceTokenCustody,
+    GovernanceUtilityOnboarding,
 }
 
 /// Build the create-command record fields for a governance domain action proposal.
@@ -752,7 +788,7 @@ pub fn build_proposal_create_args(
             let transfer_record = make_record(vec![
                 field("sender", make_party(governance_party)),
                 field("receiver", make_party(receiver)),
-                field("amount", make_numeric(amount)),
+                field("amount", make_numeric(&amount.to_string())),
                 field(
                     "instrumentId",
                     make_record(vec![
@@ -829,6 +865,221 @@ pub fn build_proposal_create_args(
                     field("governanceParty", make_party(governance_party)),
                     field("proposer", make_party(proposer)),
                     field("description", make_text(description)),
+                ],
+            },
+        ),
+        ProposalType::ProvisionProviderService => (
+            ProposalPackage::GovernanceUtilityOnboarding,
+            "Governance.UtilityOnboarding.ProvisionProviderService",
+            "ProvisionProviderService",
+            Record {
+                record_id: None,
+                fields: vec![
+                    field("governanceParty", make_party(governance_party)),
+                    field("proposer", make_party(proposer)),
+                ],
+            },
+        ),
+        ProposalType::SetupUtility {
+            provider_service_cid,
+            operator,
+            instrument_id_text,
+            create_transfer_rule,
+            create_allocation_factory,
+        } => (
+            ProposalPackage::GovernanceUtilityOnboarding,
+            "Governance.UtilityOnboarding.SetupUtility",
+            "SetupUtility",
+            Record {
+                record_id: None,
+                fields: vec![
+                    field("governanceParty", make_party(governance_party)),
+                    field("proposer", make_party(proposer)),
+                    field("providerServiceCid", make_contract_id(provider_service_cid)),
+                    field("operator", make_party(operator)),
+                    field("instrumentIdText", make_text(instrument_id_text)),
+                    field("createTransferRule", make_bool(*create_transfer_rule)),
+                    field(
+                        "createAllocationFactory",
+                        make_bool(*create_allocation_factory),
+                    ),
+                ],
+            },
+        ),
+        ProposalType::CreateProviderServiceRequest { operator, provider } => (
+            ProposalPackage::GovernanceUtilityOnboarding,
+            "Governance.UtilityOnboarding.CreateProviderServiceRequest",
+            "CreateProviderServiceRequest",
+            Record {
+                record_id: None,
+                fields: vec![
+                    field("governanceParty", make_party(governance_party)),
+                    field("proposer", make_party(proposer)),
+                    field("operator", make_party(operator)),
+                    field("provider", make_party(provider)),
+                ],
+            },
+        ),
+        ProposalType::CreateUserServiceRequest { operator, user } => (
+            ProposalPackage::GovernanceUtilityOnboarding,
+            "Governance.UtilityOnboarding.CreateUserServiceRequest",
+            "CreateUserServiceRequest",
+            Record {
+                record_id: None,
+                fields: vec![
+                    field("governanceParty", make_party(governance_party)),
+                    field("proposer", make_party(proposer)),
+                    field("operator", make_party(operator)),
+                    field("user", make_party(user)),
+                ],
+            },
+        ),
+        ProposalType::SetProviderAppRewardBeneficiaries {
+            instrument_configuration_cid,
+            provider_app_reward_beneficiaries,
+        } => (
+            ProposalPackage::GovernanceUtilityOnboarding,
+            "Governance.UtilityOnboarding.SetProviderAppRewardBeneficiaries",
+            "SetProviderAppRewardBeneficiaries",
+            Record {
+                record_id: None,
+                fields: vec![
+                    field("governanceParty", make_party(governance_party)),
+                    field("proposer", make_party(proposer)),
+                    field(
+                        "instrumentConfigurationCid",
+                        make_contract_id(instrument_configuration_cid),
+                    ),
+                    field(
+                        "providerAppRewardBeneficiaries",
+                        make_optional_beneficiaries(provider_app_reward_beneficiaries),
+                    ),
+                ],
+            },
+        ),
+        ProposalType::SetEnableResultContracts {
+            registrar_service_cid,
+            enable_result_contracts,
+        } => (
+            ProposalPackage::GovernanceUtilityOnboarding,
+            "Governance.UtilityOnboarding.SetEnableResultContracts",
+            "SetEnableResultContracts",
+            Record {
+                record_id: None,
+                fields: vec![
+                    field("governanceParty", make_party(governance_party)),
+                    field("proposer", make_party(proposer)),
+                    field(
+                        "registrarServiceCid",
+                        make_contract_id(registrar_service_cid),
+                    ),
+                    field(
+                        "enableResultContracts",
+                        make_optional_bool(enable_result_contracts),
+                    ),
+                ],
+            },
+        ),
+        ProposalType::CreateDelegatedBatchedMarkersProxy { operator } => (
+            ProposalPackage::GovernanceUtilityOnboarding,
+            "Governance.UtilityOnboarding.CreateDelegatedBatchedMarkersProxy",
+            "CreateDelegatedBatchedMarkersProxy",
+            Record {
+                record_id: None,
+                fields: vec![
+                    field("governanceParty", make_party(governance_party)),
+                    field("proposer", make_party(proposer)),
+                    field("operator", make_party(operator)),
+                ],
+            },
+        ),
+        ProposalType::Mint {
+            allocation_factory_cid,
+            instrument_id,
+            instrument_configuration_cid,
+            recipient,
+            amount,
+            description,
+        } => (
+            ProposalPackage::GovernanceUtilityOnboarding,
+            "Governance.TokenIssuance.MintProposal",
+            "MintProposal",
+            Record {
+                record_id: None,
+                fields: vec![
+                    field("governanceParty", make_party(governance_party)),
+                    field("proposer", make_party(proposer)),
+                    field(
+                        "allocationFactoryCid",
+                        make_contract_id(allocation_factory_cid),
+                    ),
+                    field("instrumentId", serialize_instrument_id(instrument_id)),
+                    field(
+                        "instrumentConfigurationCid",
+                        make_contract_id(instrument_configuration_cid),
+                    ),
+                    field("recipient", make_party(recipient)),
+                    field("amount", make_numeric(&amount.to_string())),
+                    field("description", make_text(description)),
+                    field(
+                        "requestedAt",
+                        Value {
+                            sum: Some(value::Sum::Timestamp(0)),
+                        },
+                    ),
+                    field(
+                        "executeBefore",
+                        Value {
+                            sum: Some(value::Sum::Timestamp(i64::MAX / 1000)),
+                        },
+                    ),
+                    field("meta", make_empty_metadata()),
+                    field("extraArgsMeta", make_empty_metadata()),
+                ],
+            },
+        ),
+        ProposalType::Burn {
+            allocation_factory_cid,
+            instrument_id,
+            instrument_configuration_cid,
+            holder,
+            amount,
+            description,
+        } => (
+            ProposalPackage::GovernanceUtilityOnboarding,
+            "Governance.TokenIssuance.BurnProposal",
+            "BurnProposal",
+            Record {
+                record_id: None,
+                fields: vec![
+                    field("governanceParty", make_party(governance_party)),
+                    field("proposer", make_party(proposer)),
+                    field(
+                        "allocationFactoryCid",
+                        make_contract_id(allocation_factory_cid),
+                    ),
+                    field("instrumentId", serialize_instrument_id(instrument_id)),
+                    field(
+                        "instrumentConfigurationCid",
+                        make_contract_id(instrument_configuration_cid),
+                    ),
+                    field("holder", make_party(holder)),
+                    field("amount", make_numeric(&amount.to_string())),
+                    field("description", make_text(description)),
+                    field(
+                        "requestedAt",
+                        Value {
+                            sum: Some(value::Sum::Timestamp(0)),
+                        },
+                    ),
+                    field(
+                        "executeBefore",
+                        Value {
+                            sum: Some(value::Sum::Timestamp(i64::MAX / 1000)),
+                        },
+                    ),
+                    field("meta", make_empty_metadata()),
+                    field("extraArgsMeta", make_empty_metadata()),
                 ],
             },
         ),
@@ -944,10 +1195,13 @@ fn deserialize_instrument_id(value: &Value) -> Result<InstrumentId> {
     })
 }
 
-fn deserialize_optional_numeric(value: &Value) -> Result<Option<String>> {
+fn deserialize_optional_numeric(value: &Value) -> Result<Option<DamlDecimal>> {
     match &value.sum {
         Some(value::Sum::Optional(opt)) => match opt.value.as_ref() {
-            Some(inner) => Ok(Some(extract_numeric(inner)?)),
+            Some(inner) => {
+                let s = extract_numeric(inner)?;
+                Ok(Some(DamlDecimal::parse(&s)?))
+            }
             None => Ok(None),
         },
         _ => anyhow::bail!("Expected Optional value for numeric"),
@@ -979,7 +1233,7 @@ fn deserialize_app_reward_beneficiary(value: &Value) -> Result<AppRewardBenefici
     let record = extract_record(value)?;
     Ok(AppRewardBeneficiary {
         beneficiary: extract_party_id(get_field(record, "beneficiary")?)?,
-        weight: extract_numeric(get_field(record, "weight")?)?,
+        weight: DamlDecimal::parse(&extract_numeric(get_field(record, "weight")?)?)?,
     })
 }
 

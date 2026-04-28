@@ -40,8 +40,13 @@ P3_NOISE=9003
 
 # Paths
 DEV_DIR=$(mktemp -d "${TMPDIR:-/tmp}/dpm-it-XXXXXX")
-DARS_DIR="$SCRIPT_DIR/releases/v0/rc2"
+DARS_DIR="$SCRIPT_DIR/releases/v0/rc3"
 BINARY="$SCRIPT_DIR/target/release/dec-party-manager"
+
+# JWT token for Canton ledger access (HS256, secret "unsafe",
+# aud "https://canton.network.global"). Shared by deploy-gov-core.sh and any
+# workflow script that calls the JSON Ledger API or runs `dpm script` directly.
+MOCK_TOKEN="eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJodHRwczovL2NhbnRvbi5uZXR3b3JrLmdsb2JhbCIsImlhdCI6MTc2Mzc0ODcwMiwic3ViIjoibGVkZ2VyLWFwaS11c2VyIn0.vpkfH4SoM9AZqbE38W4hrvl3xxy69jYs4u8gveskw9k"
 
 # Process tracking
 PIDS=()

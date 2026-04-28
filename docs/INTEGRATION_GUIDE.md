@@ -414,8 +414,8 @@ Response:
   "has_username": false,
   "has_password": false,
   "packages": {
-    "governance_core": "#governance-core-v0-rc2",
-    "governance_token_custody": "#governance-token-custody-v0-rc2",
+    "governance_core": "#governance-core-v0-rc3",
+    "governance_token_custody": "#governance-token-custody-v0-rc3",
     "utility_credential": "#utility-credential-app-v0",
     "utility_registry": "#utility-registry-app-v0",
     "vault": "#bitsafe-vault-v0-rc8",
@@ -761,7 +761,7 @@ curl -X POST http://localhost:8080/contracts \
       {
         "id": "governance-rules",
         "name": "GovernanceRules",
-        "package_id": "#governance-core-v0-rc2",
+        "package_id": "#governance-core-v0-rc3",
         "module_name": "Governance.Rules",
         "entity_name": "GovernanceRules",
         "fields": [

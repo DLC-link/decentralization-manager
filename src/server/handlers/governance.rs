@@ -511,6 +511,16 @@ pub async fn propose_action(
                 }
             }
         }
+        action_serializer::ProposalPackage::GovernanceUtilityOnboarding => {
+            match packages.governance_utility_onboarding.as_deref() {
+                Some(pkg) => pkg,
+                None => {
+                    return HttpResponse::BadRequest().json(ErrorResponse {
+                        error: "governance_utility_onboarding package not configured".to_string(),
+                    });
+                }
+            }
+        }
     };
 
     let template_id = Identifier {

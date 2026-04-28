@@ -350,6 +350,7 @@ The system is split into two Daml packages:
 |---------|---------|
 | `governance-core` | Core governance engine, interfaces, confirmation lifecycle, generic voting |
 | `governance-token-custody` | Token transfer and preapproval actions |
+| `governance-utility-onboarding` | Utility-registry onboarding actions and token mint / burn |
 
 A legacy `VaultGovernanceRules` contract (from the `bitsafe-vault-governance` package) is also supported for backward compatibility with existing vault deployments.
 
@@ -496,6 +497,38 @@ GovernanceExecutionResult {
 | `SetupTokenPreapprovalProposal` | `SetupTokenPreapproval` | Set up utility token `TransferPreapproval` (one-step) |
 | `SetupCcPreapprovalProposal` | `SetupCcPreapproval` | Set up Canton Coin `TransferPreapproval` (two-step, requires provider acceptance) |
 
+#### governance-utility-onboarding Actions
+
+The governance party bootstraps itself as a utility-registry provider and registrar via these actions, then mints and burns its own token instrument once onboarded. All contract IDs that the templates operate on are passed directly as fields — there is no intermediate state contract.
+
+**Composite onboarding:**
+
+| Template | Action Label | Description |
+|----------|-------------|-------------|
+| `SetupUtility` | `SetupUtility` | Runs the full onboarding chain in one vote: creates a `ProviderConfiguration`, accepts a `RegistrarServiceRequest`, and registers the instrument. Flags `createTransferRule` and `createAllocationFactory` drive optional artifact creation during the registrar-service-request accept. |
+
+**Granular onboarding:**
+
+| Template | Action Label | Description |
+|----------|-------------|-------------|
+| `ProvisionProviderService` | `ProvisionProviderService` | Create a `ProviderService` with `operator = proposer` and `provider = governanceParty`. Wraps a two-signatory create in a governance action so the operator's and governance party's authorities land in one transaction — direct creation fails on Canton when the governance party is externally signed. |
+| `CreateProviderServiceRequest` | `CreateProviderServiceRequest` | Create a `ProviderServiceRequest` for a given `operator` and `provider` |
+| `CreateUserServiceRequest` | `CreateUserServiceRequest` | Create a `UserServiceRequest` for a given `operator` and `user` |
+| `SetProviderAppRewardBeneficiaries` | `SetProviderAppRewardBeneficiaries` | Set the provider-app reward beneficiaries on an `InstrumentConfiguration` |
+| `SetEnableResultContracts` | `SetEnableResultContracts` | Toggle result-contract emission on a `RegistrarService` |
+| `CreateDelegatedBatchedMarkersProxy` | `CreateDelegatedBatchedMarkersProxy` | Authorize the operator to create batched activity markers on behalf of the governance party |
+
+**Token issuance:**
+
+| Template | Action Label | Description |
+|----------|-------------|-------------|
+| `MintProposal` | `Mint` | Offer a mint to a specific recipient via `AllocationFactory_OfferMint`. The recipient accepts the resulting `MintOffer` outside the plugin. Proposal carries `allocationFactoryCid`, `instrumentId`, and `instrumentConfigurationCid` directly. |
+| `BurnProposal` | `Burn` | Offer a burn against a specific holder via `AllocationFactory_OfferBurn`. The holder accepts the resulting `BurnOffer` outside the plugin. Same CID fields as `MintProposal`. |
+
+`MintProposal` and `BurnProposal` enforce `amount > 0.0` at the template-precondition level.
+
+**Prerequisite.** `SetupUtility` consumes an existing `ProviderService` for the governance party. Use `ProvisionProviderService` to create one through the governance flow — direct creation of `ProviderService` via `POST /contracts` or a multi-party daml-script submit fails on Canton when the governance party is externally signed, because `ProviderService` has two signatories (`operator, provider`).
+
 ### Legacy: VaultGovernanceRules
 
 The `VaultGovernanceRules` contract (from `BitsafeVault.VaultGovernance`, package `#bitsafe-vault-governance-v0-rc8`) is the original governance primitive used for vault operations. It remains supported for backward compatibility with existing vault deployments.
@@ -632,11 +665,13 @@ The system depends on the following Daml packages:
 
 | Package ID | Purpose |
 |------------|---------|
-| `#governance-core-v0-rc2` | GovernanceRules, GovernableAction interface, GenericVoteProposal |
-| `#governance-token-custody-v0-rc2` | TransferProposal, AcceptTransferProposal, preapproval proposals |
+| `#governance-core-v0-rc3` | GovernanceRules, GovernableAction interface, GenericVoteProposal |
+| `#governance-token-custody-v0-rc3` | TransferProposal, AcceptTransferProposal, preapproval proposals |
+| `#governance-utility-onboarding-v0-rc3` | SetupUtility, six granular onboarding proposals, MintProposal, BurnProposal |
 | `#bitsafe-vault-governance-v0-rc8` | Legacy VaultGovernanceRules contract templates |
 | `#bitsafe-vault-v0-rc8` | VaultRules and Vault contract templates |
 | `#utility-registry-app-v0` | ProviderService, UserService, AllocationFactory |
 | `#utility-credential-app-v0` | Credential offer/accept templates |
+| `#utility-commercials-v0` | DelegatedBatchedMarkersProxy (required by `CreateDelegatedBatchedMarkersProxy`) |
 
 Package IDs prefixed with `#` use symbolic lookup (resolved at runtime by Canton).
