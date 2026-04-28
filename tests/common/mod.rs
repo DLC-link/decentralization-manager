@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 pub mod http;
+pub mod invitations;
 pub mod phases;
 pub mod types;
 
