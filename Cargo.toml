@@ -56,4 +56,5 @@ canton-proto-rs = { git = "ssh://git@github.com/DLC-link/canton-lib", branch = "
 keycloak = { git = "ssh://git@github.com/DLC-link/canton-lib", branch = "main" }
 
 [dev-dependencies]
+pretty_assertions = { version = "1.4" }
 tempfile = { version = "3.14" }
