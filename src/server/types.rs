@@ -1,5 +1,6 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use canton_common::decimal::DamlDecimal;
 use canton_proto_rs::com::digitalasset::canton::protocol::v30::enums::ParticipantPermission;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, RwLock};
@@ -406,19 +407,23 @@ pub struct InstrumentId {
 /// Vault limits configuration (all fields are optional in DAML)
 #[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct VaultLimits {
+    #[schema(value_type = Option<String>)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_total_deposit: Option<String>,
+    pub max_total_deposit: Option<DamlDecimal>,
+    #[schema(value_type = Option<String>)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub min_deposit_amount: Option<String>,
+    pub min_deposit_amount: Option<DamlDecimal>,
+    #[schema(value_type = Option<String>)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub min_withdrawal_amount: Option<String>,
+    pub min_withdrawal_amount: Option<DamlDecimal>,
 }
 
 /// Featured App Right beneficiary
 #[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct AppRewardBeneficiary {
     pub beneficiary: CantonId,
-    pub weight: String,
+    #[schema(value_type = String)]
+    pub weight: DamlDecimal,
 }
 
 /// Featured App Right configuration
@@ -561,11 +566,9 @@ fn validate_beneficiary_weights(beneficiaries: &[AppRewardBeneficiary]) -> Resul
     if beneficiaries.is_empty() {
         return Ok(());
     }
-    let sum: f64 = beneficiaries
-        .iter()
-        .map(|b| b.weight.parse::<f64>().unwrap_or(0.0))
-        .sum();
-    if (sum - 1.0).abs() > 1e-9 {
+    let sum: DamlDecimal = beneficiaries.iter().map(|b| b.weight).sum();
+    let one: DamlDecimal = "1".parse().expect("'1' is a valid DamlDecimal");
+    if sum != one {
         return Err(format!(
             "FAR beneficiary weights must sum to exactly 1.0, got {sum}"
         ));
@@ -621,7 +624,8 @@ pub enum ProposalType {
         transfer_factory_cid: String,
         expected_admin: CantonId,
         receiver: CantonId,
-        amount: String,
+        #[schema(value_type = String)]
+        amount: DamlDecimal,
         instrument_id: InstrumentId,
         #[serde(default)]
         input_holding_cids: Vec<String>,
@@ -675,7 +679,8 @@ pub enum ProposalType {
         instrument_id: InstrumentId,
         instrument_configuration_cid: String,
         recipient: CantonId,
-        amount: String,
+        #[schema(value_type = String)]
+        amount: DamlDecimal,
         description: String,
     },
     /// Offer a burn of `amount` tokens held by `holder` via
@@ -686,7 +691,8 @@ pub enum ProposalType {
         instrument_id: InstrumentId,
         instrument_configuration_cid: String,
         holder: CantonId,
-        amount: String,
+        #[schema(value_type = String)]
+        amount: DamlDecimal,
         description: String,
     },
 }
