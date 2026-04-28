@@ -37,26 +37,15 @@ log_phase "Configuring peers"
 configure_peers
 
 # Workflows
-log_phase "Creating decentralized party"
-source "$SCRIPT_DIR/integration-tests/create-dec-party.sh"
+log_phase "Running governance workflow e2e (Rust)"
 
-log_phase "Distributing DARs"
-source "$SCRIPT_DIR/integration-tests/distribute-dars.sh"
+export P1_HTTP P2_HTTP P3_HTTP
+export P1_NOISE P2_NOISE P3_NOISE
+export P1_PARTICIPANT_ID P2_PARTICIPANT_ID P3_PARTICIPANT_ID
+export MOCK_TOKEN
+export RUST_LOG="${RUST_LOG:-info}"
 
-log_phase "Deploying governance core contract"
-source "$SCRIPT_DIR/integration-tests/deploy-gov-core.sh"
-
-log_phase "Testing governance token custody flow"
-source "$SCRIPT_DIR/integration-tests/governance-token-custody.sh"
-
-log_phase "Testing governance utility-onboarding flow (provisions ProviderService via governance)"
-source "$SCRIPT_DIR/integration-tests/governance-utility-onboarding.sh"
-
-log_phase "Testing generic vote governance flow"
-source "$SCRIPT_DIR/integration-tests/governance-generic-vote.sh"
-
-log_phase "Kicking participant-3"
-source "$SCRIPT_DIR/integration-tests/kick.sh"
+cargo test --release --test governance_workflows -- --ignored --nocapture
 
 echo ""
 echo "=========================================="
