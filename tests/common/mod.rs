@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+pub mod http;
 pub mod phases;
 
 use std::sync::Mutex;
