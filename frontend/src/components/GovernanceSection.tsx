@@ -580,7 +580,7 @@ export const GovernanceSection = ({
 
   const handleConfirm = async (action: GovernanceAction) => {
     if (!rulesContractId) {
-      setError("Please enter the VaultGovernanceRules contract ID");
+      setError("Please enter the Governance contract ID");
       return;
     }
 
@@ -622,7 +622,7 @@ export const GovernanceSection = ({
     disclosedContracts: DisclosedContractInput[],
   ) => {
     if (!rulesContractId) {
-      setExecuteError("Please enter the VaultGovernanceRules contract ID");
+      setExecuteError("Please enter the Governance contract ID");
       return;
     }
 
@@ -703,7 +703,7 @@ export const GovernanceSection = ({
     confirmationCid: string,
   ) => {
     if (!rulesContractId) {
-      setError("Please enter the VaultGovernanceRules contract ID");
+      setError("Please enter the Governance contract ID");
       return;
     }
 
@@ -900,7 +900,7 @@ export const GovernanceSection = ({
 
   const handleSubmitAction = async () => {
     if (!rulesContractId) {
-      setError("Please enter the VaultGovernanceRules contract ID");
+      setError("Please enter the Governance contract ID");
       return;
     }
 
@@ -2420,7 +2420,7 @@ export const GovernanceSection = ({
             renderInput={(params) => (
               <TextField
                 {...params}
-                label={governanceType === "core_self" ? "GovernanceRules Contract ID" : "VaultGovernanceRules Contract ID"}
+                label="Governance Contract ID"
                 placeholder="Enter or select contract ID"
               />
             )}

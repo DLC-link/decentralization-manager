@@ -4,6 +4,7 @@
 //! and DAML `Value` representations for use with the Ledger API.
 
 use anyhow::Context;
+use canton_common::decimal::DamlDecimal;
 use canton_proto_rs::com::daml::ledger::api::v2::{
     List, Optional, Record, RecordField, Value, Variant, value,
 };
@@ -124,10 +125,33 @@ fn serialize_instrument_id(id: &InstrumentId) -> Value {
     ])
 }
 
-fn make_optional_numeric(opt: &Option<String>) -> Value {
+fn make_optional_numeric(opt: &Option<DamlDecimal>) -> Value {
     Value {
         sum: Some(value::Sum::Optional(Box::new(Optional {
-            value: opt.as_ref().map(|n| Box::new(make_numeric(n))),
+            value: opt.as_ref().map(|n| Box::new(make_numeric(&n.to_string()))),
+        }))),
+    }
+}
+
+fn make_optional_bool(opt: &Option<bool>) -> Value {
+    Value {
+        sum: Some(value::Sum::Optional(Box::new(Optional {
+            value: opt.as_ref().map(|b| Box::new(make_bool(*b))),
+        }))),
+    }
+}
+
+fn make_optional_beneficiaries(opt: &Option<Vec<AppRewardBeneficiary>>) -> Value {
+    Value {
+        sum: Some(value::Sum::Optional(Box::new(Optional {
+            value: opt.as_ref().map(|beneficiaries| {
+                Box::new(make_list(
+                    beneficiaries
+                        .iter()
+                        .map(serialize_app_reward_beneficiary)
+                        .collect(),
+                ))
+            }),
         }))),
     }
 }
@@ -183,7 +207,7 @@ fn serialize_claim(claim: &Claim) -> Value {
 fn serialize_app_reward_beneficiary(b: &AppRewardBeneficiary) -> Value {
     make_record(vec![
         field("beneficiary", make_party(&b.beneficiary)),
-        field("weight", make_numeric(&b.weight)),
+        field("weight", make_numeric(&b.weight.to_string())),
     ])
 }
 
@@ -787,7 +811,7 @@ pub fn build_proposal_create_args(
             let transfer_record = make_record(vec![
                 field("sender", make_party(governance_party)),
                 field("receiver", make_party(receiver)),
-                field("amount", make_numeric(amount)),
+                field("amount", make_numeric(&amount.to_string())),
                 field(
                     "instrumentId",
                     make_record(vec![
@@ -1018,7 +1042,7 @@ pub fn build_proposal_create_args(
                         make_contract_id(instrument_configuration_cid),
                     ),
                     field("recipient", make_party(recipient)),
-                    field("amount", make_numeric(amount)),
+                    field("amount", make_numeric(&amount.to_string())),
                     field("description", make_text(description)),
                     field(
                         "requestedAt",
@@ -1063,7 +1087,7 @@ pub fn build_proposal_create_args(
                         make_contract_id(instrument_configuration_cid),
                     ),
                     field("holder", make_party(holder)),
-                    field("amount", make_numeric(amount)),
+                    field("amount", make_numeric(&amount.to_string())),
                     field("description", make_text(description)),
                     field(
                         "requestedAt",
@@ -1194,10 +1218,13 @@ fn deserialize_instrument_id(value: &Value) -> Result<InstrumentId> {
     })
 }
 
-fn deserialize_optional_numeric(value: &Value) -> Result<Option<String>> {
+fn deserialize_optional_numeric(value: &Value) -> Result<Option<DamlDecimal>> {
     match &value.sum {
         Some(value::Sum::Optional(opt)) => match opt.value.as_ref() {
-            Some(inner) => Ok(Some(extract_numeric(inner)?)),
+            Some(inner) => {
+                let s = extract_numeric(inner)?;
+                Ok(Some(DamlDecimal::parse(&s)?))
+            }
             None => Ok(None),
         },
         _ => anyhow::bail!("Expected Optional value for numeric"),
@@ -1229,7 +1256,7 @@ fn deserialize_app_reward_beneficiary(value: &Value) -> Result<AppRewardBenefici
     let record = extract_record(value)?;
     Ok(AppRewardBeneficiary {
         beneficiary: extract_party_id(get_field(record, "beneficiary")?)?,
-        weight: extract_numeric(get_field(record, "weight")?)?,
+        weight: DamlDecimal::parse(&extract_numeric(get_field(record, "weight")?)?)?,
     })
 }
 

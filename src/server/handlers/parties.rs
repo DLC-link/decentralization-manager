@@ -21,7 +21,7 @@ use sqlx::SqlitePool;
 
 use crate::{
     auth::WorkflowAuth,
-    config::{NetworkConfig, NodeConfig, PartyCredentials},
+    config::{NetworkConfig, NodeConfig, PartyCredentials, default_package_config},
     db::{
         rows::{DecPartyContractRow, DecPartyParticipantRow, DecPartyRow},
         schema::{Commitable, SchemaRead, SchemaWrite},
@@ -96,6 +96,21 @@ pub async fn get_decentralized_parties(
         }
 
         response.refreshing = is_stale && data.refreshing_prefixes.read().await.contains(&prefix);
+
+        // Resolve my_owner_key for parties where it's missing (e.g. old cache)
+        if response.parties.iter().any(|p| p.my_owner_key.is_none())
+            && let Ok(fingerprints) = get_local_namespace_fingerprints(&data.config).await
+        {
+            for party in &mut response.parties {
+                if party.my_owner_key.is_none() {
+                    party.my_owner_key = party
+                        .owners
+                        .iter()
+                        .find(|o| fingerprints.contains(o.as_str()))
+                        .cloned();
+                }
+            }
+        }
 
         return HttpResponse::Ok().json(response);
     }
@@ -332,7 +347,7 @@ async fn load_cached_parties(
             party_id: CantonId::parse(&row.party_id)?,
             threshold: row.threshold as i32,
             owners: owners_map.remove(&row.party_id).unwrap_or_default(),
-            my_owner_key: None,
+            my_owner_key: row.my_owner_key,
             participants: participants_map.remove(&row.party_id).unwrap_or_default(),
             contracts: contracts_map.remove(&row.party_id).unwrap_or_default(),
             local_metadata: None,
@@ -361,7 +376,7 @@ pub async fn store_parties_to_db(
         .as_secs() as i64;
 
     let mut tx = db.begin_transaction().await?;
-    tx.delete_dec_parties_by_prefix(prefix).await?;
+    let fresh_party_ids: Vec<String> = parties.iter().map(|p| p.party_id.to_string()).collect();
 
     for party in parties {
         // Extract the real prefix from party_id (everything before "::")
@@ -376,6 +391,7 @@ pub async fn store_parties_to_db(
             prefix: real_prefix.to_string(),
             threshold: party.threshold as i64,
             updated_at: now,
+            my_owner_key: party.my_owner_key.clone(),
         };
         tx.upsert_dec_party(&row).await?;
 
@@ -415,6 +431,10 @@ pub async fn store_parties_to_db(
             .await?;
     }
 
+    // Remove stale parties no longer returned by Canton
+    tx.delete_stale_dec_parties(prefix, &fresh_party_ids)
+        .await?;
+
     Commitable::commit(tx).await
 }
 
@@ -423,7 +443,7 @@ pub async fn fetch_decentralized_parties(
     config: &NodeConfig,
     prefix_filter: Option<&str>,
     auth: Option<WorkflowAuth>,
-    party_credentials: &[PartyCredentials],
+    _party_credentials: &[PartyCredentials], // TODO: remove this parameter, packages are now hardcoded
 ) -> Result<DecentralizedPartiesResponse> {
     let channel = tonic::transport::Channel::from_shared(config.admin_api_url())?
         .connect()
@@ -550,28 +570,30 @@ pub async fn fetch_decentralized_parties(
                     None => None,
                 };
 
-                let packages = CantonId::parse(&party_id_str)
-                    .ok()
-                    .and_then(|id| party_credentials.iter().find(|p| p.dec_party_id == id))
-                    .map(|c| c.packages.clone())
-                    .unwrap_or_default();
+                let packages = default_package_config();
                 let token_clone = token.clone();
-                let (contracts, local_metadata) = tokio::join!(
-                    async {
-                        get_contracts(&config, &party_id_str, token, test_mode, &packages)
-                            .await
-                            .unwrap_or_else(|e| {
-                                tracing::warn!("Failed to get contracts for {party_id_str}: {e}");
-                                Vec::new()
-                            })
-                    },
-                    async {
-                        get_party_metadata(&config, &party_id_str, token_clone)
-                            .await
-                            .ok()
-                            .flatten()
-                    }
-                );
+                let (contracts, local_metadata) = if token.is_some() || test_mode {
+                    tokio::join!(
+                        async {
+                            get_contracts(&config, &party_id_str, token, test_mode, &packages)
+                                .await
+                                .unwrap_or_else(|e| {
+                                    tracing::warn!(
+                                        "Failed to get contracts for {party_id_str}: {e}"
+                                    );
+                                    Vec::new()
+                                })
+                        },
+                        async {
+                            get_party_metadata(&config, &party_id_str, token_clone)
+                                .await
+                                .ok()
+                                .flatten()
+                        }
+                    )
+                } else {
+                    (Vec::new(), None)
+                };
 
                 let party_id = CantonId::parse(&p2p.party)?;
                 let participants = p2p
@@ -844,13 +866,10 @@ async fn fetch_peer_packages(
                 let psk = keypair.derive_psk(&peer_pub_key);
                 let identity = current_participant_id.to_string();
 
-                match tokio::time::timeout(
-                    Duration::from_secs(5),
-                    send_noise_message(&peer.address, peer.port, &psk, identity.as_bytes(), &msg),
-                )
-                .await
+                match send_noise_message(&peer.address, peer.port, &psk, identity.as_bytes(), &msg)
+                    .await
                 {
-                    Ok(Ok(response)) => {
+                    Ok(response) => {
                         if let Ok(response_msg) = Message::from_bytes(&response)
                             && response_msg.msg_type == MessageType::Data
                             && let Ok(packages) =
@@ -887,4 +906,33 @@ async fn fetch_peer_packages(
         local_packages,
         peers,
     })
+}
+
+/// Query the local participant's vault for namespace key fingerprints.
+/// Returns a set of fingerprints that identify this node as an owner.
+async fn get_local_namespace_fingerprints(config: &NodeConfig) -> Result<HashSet<String>> {
+    let channel = tonic::transport::Channel::from_shared(config.admin_api_url())?
+        .connect()
+        .await?;
+
+    let mut vault_client =
+        VaultServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
+
+    let keys_response = vault_client
+        .list_my_keys(tonic::Request::new(ListMyKeysRequest { filters: None }))
+        .await?
+        .into_inner();
+
+    let mut fingerprints = HashSet::new();
+    for key_meta in keys_response.private_keys_metadata {
+        if let Some(pub_key_with_name) = &key_meta.public_key_with_name
+            && let Some(pub_key) = &pub_key_with_name.public_key
+            && let Some(public_key::Key::SigningPublicKey(signing_key)) = &pub_key.key
+            && signing_key.usage.contains(&1)
+        {
+            fingerprints.insert(utils::compute_fingerprint(signing_key));
+        }
+    }
+
+    Ok(fingerprints)
 }

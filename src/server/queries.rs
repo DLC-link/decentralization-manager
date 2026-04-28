@@ -731,7 +731,7 @@ fn extract_and_add_confirmation(
         Err(_) => match action_serializer::deserialize_self_action(action_field) {
             Ok(a) => a,
             Err(e) => {
-                tracing::warn!("Failed to deserialize action: {e}");
+                tracing::debug!("Skipping confirmation with unrecognized action shape: {e}");
                 return;
             }
         },

@@ -1,5 +1,6 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use canton_common::decimal::DamlDecimal;
 use canton_proto_rs::com::digitalasset::canton::protocol::v30::enums::ParticipantPermission;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, RwLock};
@@ -406,19 +407,23 @@ pub struct InstrumentId {
 /// Vault limits configuration (all fields are optional in DAML)
 #[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct VaultLimits {
+    #[schema(value_type = Option<String>)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_total_deposit: Option<String>,
+    pub max_total_deposit: Option<DamlDecimal>,
+    #[schema(value_type = Option<String>)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub min_deposit_amount: Option<String>,
+    pub min_deposit_amount: Option<DamlDecimal>,
+    #[schema(value_type = Option<String>)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub min_withdrawal_amount: Option<String>,
+    pub min_withdrawal_amount: Option<DamlDecimal>,
 }
 
 /// Featured App Right beneficiary
 #[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct AppRewardBeneficiary {
     pub beneficiary: CantonId,
-    pub weight: String,
+    #[schema(value_type = String)]
+    pub weight: DamlDecimal,
 }
 
 /// Featured App Right configuration
@@ -561,11 +566,9 @@ fn validate_beneficiary_weights(beneficiaries: &[AppRewardBeneficiary]) -> Resul
     if beneficiaries.is_empty() {
         return Ok(());
     }
-    let sum: f64 = beneficiaries
-        .iter()
-        .map(|b| b.weight.parse::<f64>().unwrap_or(0.0))
-        .sum();
-    if (sum - 1.0).abs() > 1e-9 {
+    let sum: DamlDecimal = beneficiaries.iter().map(|b| b.weight).sum();
+    let one: DamlDecimal = "1".parse().expect("'1' is a valid DamlDecimal");
+    if sum != one {
         return Err(format!(
             "FAR beneficiary weights must sum to exactly 1.0, got {sum}"
         ));
@@ -621,7 +624,8 @@ pub enum ProposalType {
         transfer_factory_cid: String,
         expected_admin: CantonId,
         receiver: CantonId,
-        amount: String,
+        #[schema(value_type = String)]
+        amount: DamlDecimal,
         instrument_id: InstrumentId,
         #[serde(default)]
         input_holding_cids: Vec<String>,
@@ -675,7 +679,8 @@ pub enum ProposalType {
         instrument_id: InstrumentId,
         instrument_configuration_cid: String,
         recipient: CantonId,
-        amount: String,
+        #[schema(value_type = String)]
+        amount: DamlDecimal,
         description: String,
     },
     /// Offer a burn of `amount` tokens held by `holder` via
@@ -686,13 +691,14 @@ pub enum ProposalType {
         instrument_id: InstrumentId,
         instrument_configuration_cid: String,
         holder: CantonId,
-        amount: String,
+        #[schema(value_type = String)]
+        amount: DamlDecimal,
         description: String,
     },
 }
 
 /// Request to propose a governance domain action (creates proposal contract)
-#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct ProposeActionRequest {
     pub party_id: CantonId,
     pub rules_contract_id: String,
@@ -718,7 +724,7 @@ pub struct DomainGovernanceAction {
 }
 
 /// Request to submit a confirmation for an action with structured type
-#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct ConfirmActionRequest {
     pub party_id: CantonId,
     pub rules_contract_id: String,
@@ -731,14 +737,14 @@ pub struct ConfirmActionRequest {
 }
 
 /// A disclosed contract to include in the ledger submission
-#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct DisclosedContractInput {
     pub contract_id: String,
     pub blob: String, // base64-encoded created_event_blob
 }
 
 /// Request to execute a confirmed action with structured type
-#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct ExecuteActionRequest {
     pub party_id: CantonId,
     pub rules_contract_id: String,
@@ -790,7 +796,7 @@ pub struct GovernanceResponse {
 }
 
 /// Request to expire a stale confirmation
-#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct ExpireConfirmationRequest {
     pub party_id: CantonId,
     pub rules_contract_id: String,
@@ -800,7 +806,7 @@ pub struct ExpireConfirmationRequest {
 }
 
 /// Request to cancel (revoke) own confirmation
-#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct CancelConfirmationRequest {
     pub party_id: CantonId,
     pub confirmation_cid: String,
@@ -994,4 +1000,122 @@ pub struct SuccessResponse {
 pub struct WorkflowStatusResponse {
     pub status: WorkflowProgress,
     pub error: Option<String>,
+}
+
+// ============================================================================
+// Audit Trail Types
+// ============================================================================
+
+/// Query parameters for the governance audit endpoint
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct AuditLogQuery {
+    /// Decentralized party ID to filter audit entries
+    pub party_id: CantonId,
+    /// Maximum number of entries to return (default 50)
+    #[serde(default = "default_audit_limit")]
+    pub limit: i64,
+    /// Offset for pagination (default 0)
+    #[serde(default)]
+    pub offset: i64,
+}
+
+fn default_audit_limit() -> i64 {
+    50
+}
+
+/// A single governance audit log entry
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct AuditLogEntry {
+    pub id: i64,
+    pub timestamp: i64,
+    pub event_type: String,
+    pub party_id: String,
+    pub member_party_id: String,
+    pub governance_type: String,
+    pub action_summary: String,
+    pub details: serde_json::Value,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+    pub created_at: i64,
+}
+
+/// Response for the governance audit endpoint
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct AuditLogResponse {
+    pub entries: Vec<AuditLogEntry>,
+    pub total_returned: usize,
+}
+
+// ============================================================================
+// Chain Audit Trail Types
+// ============================================================================
+
+/// Query parameters for the on-chain governance audit endpoint
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct ChainAuditQuery {
+    /// Decentralized party ID to query chain events for
+    pub party_id: CantonId,
+    /// Maximum number of entries to return (default 100)
+    #[serde(default = "default_chain_audit_limit")]
+    pub limit: usize,
+    /// When true, fetches fresh data from Canton and updates cache
+    #[serde(default)]
+    pub refresh: bool,
+}
+
+fn default_chain_audit_limit() -> usize {
+    100
+}
+
+/// A single on-chain governance audit entry
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct ChainAuditEntry {
+    /// Ledger offset (used for sort/pagination)
+    pub offset: i64,
+    /// Transaction effective_at in epoch seconds
+    pub timestamp: i64,
+    /// propose | confirm | execute | expire | cancel | create | other
+    pub event_type: String,
+    pub contract_id: String,
+    /// "Module:Entity"
+    pub template_id: String,
+    pub package_id: String,
+    /// vault | core_self | core_domain | cbtc | unknown
+    pub governance_type: String,
+    pub action_summary: String,
+    /// Exercised choice name (None for Created events)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub choice: Option<String>,
+    /// Signatories (Created) or actingParties (Exercised)
+    pub acting_parties: Vec<String>,
+    pub update_id: String,
+    /// Create arguments or choice argument as JSON
+    pub details: serde_json::Value,
+}
+
+impl From<crate::db::rows::ChainAuditCacheRow> for ChainAuditEntry {
+    fn from(row: crate::db::rows::ChainAuditCacheRow) -> Self {
+        Self {
+            offset: row.offset,
+            timestamp: row.timestamp,
+            event_type: row.event_type,
+            contract_id: row.contract_id,
+            template_id: row.template_id,
+            package_id: row.package_id,
+            governance_type: row.governance_type,
+            action_summary: row.action_summary,
+            choice: row.choice,
+            acting_parties: serde_json::from_str(&row.acting_parties).unwrap_or_default(),
+            update_id: row.update_id,
+            details: serde_json::from_str(&row.details).unwrap_or(serde_json::Value::Null),
+        }
+    }
+}
+
+/// Response for the on-chain governance audit endpoint
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct ChainAuditResponse {
+    pub entries: Vec<ChainAuditEntry>,
+    pub total_returned: usize,
 }

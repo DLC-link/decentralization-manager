@@ -54,7 +54,7 @@ pub async fn get_party_config(
             has_client_secret: c.keycloak.client_secret.is_some(),
             has_username: c.keycloak.username.is_some(),
             has_password: c.keycloak.password.is_some(),
-            packages: c.packages.clone(),
+            packages: default_package_config(),
         }),
         None => {
             let kc_defaults = data.config.canton.network.keycloak_defaults();
@@ -126,7 +126,7 @@ pub async fn save_party_config(
         member_party_id: req.member_party_id,
         user_id: req.user_id,
         keycloak,
-        packages: req.packages,
+        packages: default_package_config(),
     };
 
     // Primary write: save to database
