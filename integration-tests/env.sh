@@ -290,6 +290,15 @@ start_nodes() {
     wait_for_server $P1_HTTP "participant-1" $P1_NOISE
     wait_for_server $P2_HTTP "participant-2" $P2_NOISE
     wait_for_server $P3_HTTP "participant-3" $P3_NOISE
+
+    # Settle delay before returning. wait_for_server only checks "is the port
+    # bound", not "are all peers reachable from each other through the Noise
+    # mesh". Without this delay, configure_peers' restart cycle can leave the
+    # workflow client and the parties handler hammering each freshly-restarted
+    # peer for ~30-50s with Connection-refused / handshake-rejection log spam
+    # while the cross-node Noise sessions converge. 5s catches the common case;
+    # noisy networks will still produce some log lines but the storm is short.
+    sleep 5
 }
 
 stop_nodes() {
