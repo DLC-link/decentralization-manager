@@ -1,5 +1,8 @@
 mod common;
 
+use common::Fixture;
+use common::phases;
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires running localnet — invoke via integration-tests/run.sh"]
 async fn governance_workflows_e2e() -> anyhow::Result<()> {
@@ -9,5 +12,8 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .try_init();
+
+    let mut f = Fixture::from_env()?;
+    phases::create_dec_party::run(&mut f).await?;
     Ok(())
 }
