@@ -20,5 +20,6 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     phases::token_custody::run(&mut f).await?;
     phases::utility_onboarding::run(&mut f).await?;
     phases::generic_vote::run(&mut f).await?;
+    phases::kick::run(&mut f).await?;
     Ok(())
 }
