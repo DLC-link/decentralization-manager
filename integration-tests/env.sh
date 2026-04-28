@@ -138,10 +138,20 @@ cleanup() {
     echo ""
     echo "Cleaning up..."
 
-    # Kill dec-party-manager processes
+    # Kill dec-party-manager processes. The binary ignores SIGTERM today, so
+    # plain `kill` without escalation leaks orphaned processes that hold the
+    # Noise/HTTP ports until the host reboots. Send SIGTERM first (give the
+    # process a chance to shut down cleanly if it ever starts honoring it),
+    # wait briefly, then SIGKILL anything still alive.
     for pid in "${PIDS[@]}"; do
         if kill -0 "$pid" 2>/dev/null; then
             kill "$pid" 2>/dev/null || true
+        fi
+    done
+    sleep 2
+    for pid in "${PIDS[@]}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+            kill -9 "$pid" 2>/dev/null || true
         fi
     done
 
