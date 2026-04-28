@@ -1,5 +1,6 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use canton_common::decimal::DamlDecimal;
 use canton_proto_rs::com::digitalasset::canton::protocol::v30::enums::ParticipantPermission;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, RwLock};
@@ -406,19 +407,23 @@ pub struct InstrumentId {
 /// Vault limits configuration (all fields are optional in DAML)
 #[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct VaultLimits {
+    #[schema(value_type = Option<String>)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_total_deposit: Option<String>,
+    pub max_total_deposit: Option<DamlDecimal>,
+    #[schema(value_type = Option<String>)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub min_deposit_amount: Option<String>,
+    pub min_deposit_amount: Option<DamlDecimal>,
+    #[schema(value_type = Option<String>)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub min_withdrawal_amount: Option<String>,
+    pub min_withdrawal_amount: Option<DamlDecimal>,
 }
 
 /// Featured App Right beneficiary
 #[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct AppRewardBeneficiary {
     pub beneficiary: CantonId,
-    pub weight: String,
+    #[schema(value_type = String)]
+    pub weight: DamlDecimal,
 }
 
 /// Featured App Right configuration
@@ -561,11 +566,9 @@ fn validate_beneficiary_weights(beneficiaries: &[AppRewardBeneficiary]) -> Resul
     if beneficiaries.is_empty() {
         return Ok(());
     }
-    let sum: f64 = beneficiaries
-        .iter()
-        .map(|b| b.weight.parse::<f64>().unwrap_or(0.0))
-        .sum();
-    if (sum - 1.0).abs() > 1e-9 {
+    let sum: DamlDecimal = beneficiaries.iter().map(|b| b.weight).sum();
+    let one: DamlDecimal = "1".parse().expect("'1' is a valid DamlDecimal");
+    if sum != one {
         return Err(format!(
             "FAR beneficiary weights must sum to exactly 1.0, got {sum}"
         ));
@@ -621,7 +624,8 @@ pub enum ProposalType {
         transfer_factory_cid: String,
         expected_admin: CantonId,
         receiver: CantonId,
-        amount: String,
+        #[schema(value_type = String)]
+        amount: DamlDecimal,
         instrument_id: InstrumentId,
         #[serde(default)]
         input_holding_cids: Vec<String>,
@@ -630,6 +634,67 @@ pub enum ProposalType {
     AcceptTransfer { transfer_instruction_cid: String },
     /// Generic text-based vote (no on-chain effect beyond recording the result)
     GenericVote { description: String },
+    /// Provision a Utility-Registry `ProviderService` with
+    /// `operator = proposer` and `provider = governanceParty`. Produces the
+    /// ProviderService cid consumed by `SetupUtility`.
+    ProvisionProviderService,
+    /// Run the full Utility-Registry onboarding in one vote. Flags control
+    /// whether a `TransferRule` / `AllocationFactory` are created during the
+    /// `RegistrarServiceRequest` accept.
+    SetupUtility {
+        provider_service_cid: String,
+        operator: CantonId,
+        instrument_id_text: String,
+        create_transfer_rule: bool,
+        create_allocation_factory: bool,
+    },
+    /// Create a `ProviderServiceRequest` for a given `operator` and `provider`.
+    CreateProviderServiceRequest {
+        operator: CantonId,
+        provider: CantonId,
+    },
+    /// Create a `UserServiceRequest` for a given `operator` and `user`.
+    CreateUserServiceRequest { operator: CantonId, user: CantonId },
+    /// Set the provider-app reward beneficiaries on an `InstrumentConfiguration`.
+    /// `providerAppRewardBeneficiaries = None` clears the current setting.
+    SetProviderAppRewardBeneficiaries {
+        instrument_configuration_cid: String,
+        #[serde(default)]
+        provider_app_reward_beneficiaries: Option<Vec<AppRewardBeneficiary>>,
+    },
+    /// Toggle result-contract emission on a `RegistrarService`.
+    SetEnableResultContracts {
+        registrar_service_cid: String,
+        #[serde(default)]
+        enable_result_contracts: Option<bool>,
+    },
+    /// Authorize the `operator` to create batched activity markers on behalf
+    /// of the governance party via a `DelegatedBatchedMarkersProxy`.
+    CreateDelegatedBatchedMarkersProxy { operator: CantonId },
+    /// Offer a mint of `amount` tokens to `recipient` via
+    /// `AllocationFactory_OfferMint`. The resulting `MintOffer` is accepted
+    /// later by the recipient, outside this plugin.
+    Mint {
+        allocation_factory_cid: String,
+        instrument_id: InstrumentId,
+        instrument_configuration_cid: String,
+        recipient: CantonId,
+        #[schema(value_type = String)]
+        amount: DamlDecimal,
+        description: String,
+    },
+    /// Offer a burn of `amount` tokens held by `holder` via
+    /// `AllocationFactory_OfferBurn`. Holdings are supplied by the holder at
+    /// `BurnOffer_Accept` time, not here.
+    Burn {
+        allocation_factory_cid: String,
+        instrument_id: InstrumentId,
+        instrument_configuration_cid: String,
+        holder: CantonId,
+        #[schema(value_type = String)]
+        amount: DamlDecimal,
+        description: String,
+    },
 }
 
 /// Request to propose a governance domain action (creates proposal contract)

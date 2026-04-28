@@ -1,0 +1,125 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+module Governance.UtilityOnboarding.Test.MintProposalTest where
+
+import DA.TextMap qualified as TextMap
+import DA.Time (addRelTime, hours)
+import Daml.Script
+
+import Splice.Api.Token.HoldingV1 (InstrumentId(..))
+import Splice.Api.Token.MetadataV1 (Metadata(..))
+import Utility.Registry.App.V0.Model.Mint (MintOffer)
+
+import Governance.Action (GovernableAction)
+import Governance.Rules (GovernanceRules)
+
+import Governance.TokenIssuance.MintProposal
+import Governance.UtilityOnboarding.TestUtils
+
+import TestHarness
+
+data Fixture = Fixture
+  with
+    parties : OnboardingTestParties
+    rulesCid : ContractId GovernanceRules
+    artifacts : SetupArtifacts
+  deriving (Eq, Show)
+
+-- Carries the values supplied to MintProposal so the `then_` stage can assert
+-- they round-trip into the resulting MintOffer instead of being silently
+-- dropped or replaced by hardcoded defaults.
+data MintInputs = MintInputs
+  with
+    recipient : Party
+    amount : Decimal
+    description : Text
+    requestedAt : Time
+    executeBefore : Time
+    meta : Metadata
+  deriving (Eq, Show)
+
+given_setup_done : Script Fixture
+given_setup_done = do
+  parties <- allocateOnboardingTestParties
+  rulesCid <- createTestGovernance parties
+  artifacts <- setupUtilityForTest parties rulesCid
+  pure Fixture with ..
+
+mkInstrumentId : OnboardingTestParties -> InstrumentId
+mkInstrumentId parties = InstrumentId with
+  admin = parties.governanceParty
+  id = "TEST-TOKEN"
+
+when_mint_offered : Fixture -> Script MintInputs
+when_mint_offered f = do
+  now <- getTime
+  let inputs = MintInputs with
+        recipient = f.parties.outsider
+        amount = 100.0
+        description = "Bridge tx abcd1234"
+        requestedAt = now
+        executeBefore = now `addRelTime` hours 24
+        meta = Metadata with values = TextMap.fromList [("bridge-id", "xyz-789")]
+  proposalCid <- submit f.parties.member1 $ createCmd MintProposal with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+    allocationFactoryCid = f.artifacts.allocationFactoryCid
+    instrumentId = mkInstrumentId f.parties
+    instrumentConfigurationCid = f.artifacts.instrumentConfigurationCid
+    recipient = inputs.recipient
+    amount = inputs.amount
+    description = inputs.description
+    requestedAt = inputs.requestedAt
+    executeBefore = inputs.executeBefore
+    meta = inputs.meta
+    extraArgsMeta = Metadata with values = TextMap.empty
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  _ <- confirmAndExecute f.parties f.rulesCid proposalInterfaceCid
+    [f.parties.member1, f.parties.member2] f.parties.member1
+  pure inputs
+
+then_mint_offer_fields_match : Fixture -> MintInputs -> Script Failures
+then_mint_offer_fields_match f inputs = do
+  offers <- query @MintOffer f.parties.governanceParty
+  case offers of
+    [(_, offer)] -> pure $
+      shouldBe "mint.reference" inputs.description offer.mint.reference <>
+      shouldBe "mint.amount" inputs.amount offer.mint.amount <>
+      shouldBe "mint.holder" inputs.recipient offer.mint.holder <>
+      shouldBe "mint.requestedAt" inputs.requestedAt offer.mint.requestedAt <>
+      shouldBe "mint.executeBefore" inputs.executeBefore offer.mint.executeBefore <>
+      shouldBe "mint.meta" inputs.meta offer.mint.meta
+    _ -> pure $ shouldBe "MintOffer count" 1 (length offers)
+
+test_when_mint_proposed_then_mint_offer_created = script do
+  run Test with
+    given = given_setup_done
+    when = when_mint_offered
+    then_ = then_mint_offer_fields_match
+
+when_zero_amount : Fixture -> Script ()
+when_zero_amount f = do
+  now <- getTime
+  submitMustFail f.parties.member1 $ createCmd MintProposal with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+    allocationFactoryCid = f.artifacts.allocationFactoryCid
+    instrumentId = mkInstrumentId f.parties
+    instrumentConfigurationCid = f.artifacts.instrumentConfigurationCid
+    recipient = f.parties.outsider
+    amount = 0.0
+    description = "should be rejected"
+    requestedAt = now
+    executeBefore = now `addRelTime` hours 24
+    meta = Metadata with values = TextMap.empty
+    extraArgsMeta = Metadata with values = TextMap.empty
+
+then_nothing_mint : Fixture -> () -> Script Failures
+then_nothing_mint _ _ = pure []
+
+test_when_zero_amount_then_create_rejected = script do
+  run Test with
+    given = given_setup_done
+    when = when_zero_amount
+    then_ = then_nothing_mint

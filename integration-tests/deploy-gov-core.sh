@@ -6,8 +6,6 @@
 #
 # Exports: RULES_CONTRACT_ID, P1_MEMBER_PARTY, P2_MEMBER_PARTY, P3_MEMBER_PARTY
 
-# JWT token for Canton admin access (HS256, secret "unsafe", aud "https://canton.network.global")
-MOCK_TOKEN="eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJodHRwczovL2NhbnRvbi5uZXR3b3JrLmdsb2JhbCIsImlhdCI6MTc2Mzc0ODcwMiwic3ViIjoibGVkZ2VyLWFwaS11c2VyIn0.vpkfH4SoM9AZqbE38W4hrvl3xxy69jYs4u8gveskw9k"
 
 # Canton HTTP JSON API ports (participant port prefix + 975)
 P1_JSON_API=3975
@@ -127,8 +125,10 @@ update_party_config() {
             \"keycloak_realm\": \"\",
             \"keycloak_client_id\": \"\",
             \"packages\": {
-                \"governance_core\": \"#governance-core-v0-rc2\",
-                \"governance_token_custody\": \"#governance-token-custody-v0-rc2\"
+                \"governance_core\": \"#governance-core-v0-rc3\",
+                \"governance_token_custody\": \"#governance-token-custody-v0-rc3\",
+                \"governance_utility_onboarding\": \"#governance-utility-onboarding-v0-rc3\",
+                \"utility_registry\": \"#utility-registry-app-v0\"
             }
         }")
     http_code=$(echo "$response" | tail -1)
@@ -158,7 +158,7 @@ CONTRACTS_REQUEST=$(cat <<EOF
     {
       "id": "governance-rules",
       "name": "GovernanceRules",
-      "package_id": "#governance-core-v0-rc2",
+      "package_id": "#governance-core-v0-rc3",
       "module_name": "Governance.Rules",
       "entity_name": "GovernanceRules",
       "fields": [

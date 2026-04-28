@@ -1,0 +1,35 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Granular onboarding action: SetProviderAppRewardBeneficiaries
+module Governance.UtilityOnboarding.SetProviderAppRewardBeneficiaries where
+
+import Splice.Api.FeaturedAppRightV1 (AppRewardBeneficiary)
+import Utility.Registry.V0.Configuration.Instrument
+  (InstrumentConfiguration,
+   InstrumentConfiguration_SetProviderAppRewardBeneficiaries(..))
+
+import Governance.Action
+
+-- | Sets the provider app reward beneficiaries on an InstrumentConfiguration.
+template SetProviderAppRewardBeneficiaries
+  with
+    governanceParty : Party
+    proposer : Party
+    instrumentConfigurationCid : ContractId InstrumentConfiguration
+    providerAppRewardBeneficiaries : Optional [AppRewardBeneficiary]
+  where
+    signatory proposer
+    observer governanceParty
+
+    interface instance GovernableAction for SetProviderAppRewardBeneficiaries where
+      view = GovernableActionView with
+        governanceParty
+        actionLabel = "SetProviderAppRewardBeneficiaries"
+        description = "Set provider app reward beneficiaries on InstrumentConfiguration."
+
+      executeImpl = do
+        _ <- exercise instrumentConfigurationCid
+          InstrumentConfiguration_SetProviderAppRewardBeneficiaries with
+            providerAppRewardBeneficiaries
+        pure ()
