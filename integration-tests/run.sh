@@ -71,7 +71,13 @@ if [ -z "${RUST_LOG:-}" ]; then
         # crate's helpers (invitations, http) stay at WARN — readers see the
         # scenario structure without helper-internal chatter. Pass --verbose
         # to surface the helpers and the dec-party-manager INFO stream.
-        export RUST_LOG="warn,governance_workflows::common::scenario=info,governance_workflows::common::phases=info"
+        #
+        # `hyper_noise::server` is pinned to ERROR rather than WARN: it logs
+        # one warning per failed Noise handshake, and during the
+        # configure_peers restart window stale clients spam ~20 of these
+        # over ~50s while the mesh converges. They're not actionable for
+        # readers of a passing test; --verbose surfaces them.
+        export RUST_LOG="warn,hyper_noise::server=error,governance_workflows::common::scenario=info,governance_workflows::common::phases=info"
     fi
 fi
 
