@@ -3,6 +3,7 @@
 pub mod http;
 pub mod invitations;
 pub mod phases;
+pub mod scenario;
 pub mod types;
 
 use std::sync::Mutex;
