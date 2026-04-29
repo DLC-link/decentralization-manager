@@ -156,29 +156,6 @@ fn make_optional_beneficiaries(opt: &Option<Vec<AppRewardBeneficiary>>) -> Value
     }
 }
 
-fn make_optional_bool(opt: &Option<bool>) -> Value {
-    Value {
-        sum: Some(value::Sum::Optional(Box::new(Optional {
-            value: opt.as_ref().map(|b| Box::new(make_bool(*b))),
-        }))),
-    }
-}
-
-fn make_optional_beneficiaries(opt: &Option<Vec<AppRewardBeneficiary>>) -> Value {
-    Value {
-        sum: Some(value::Sum::Optional(Box::new(Optional {
-            value: opt.as_ref().map(|beneficiaries| {
-                Box::new(make_list(
-                    beneficiaries
-                        .iter()
-                        .map(serialize_app_reward_beneficiary)
-                        .collect(),
-                ))
-            }),
-        }))),
-    }
-}
-
 fn serialize_vault_limits(limits: &VaultLimits) -> Value {
     make_record(vec![
         field(
