@@ -15,6 +15,7 @@ import {
   ToggleButton,
 } from "@mui/material";
 import { API_BASE } from "../constants";
+import { authenticatedFetch } from "../api";
 import type {
   PartyConfigResponse,
   PartyConfigRequest,
@@ -94,7 +95,7 @@ export const PartyConfigDialog = ({
   const fetchConfig = async () => {
     setLoading(true);
     try {
-      const res = await fetch(
+      const res = await authenticatedFetch(
         `${API_BASE}/party-config/${encodeURIComponent(partyId)}`,
       );
       if (res.ok) {
@@ -146,7 +147,7 @@ export const PartyConfigDialog = ({
     }
 
     try {
-      const res = await fetch(`${API_BASE}/party-config`, {
+      const res = await authenticatedFetch(`${API_BASE}/party-config`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),

@@ -48,6 +48,7 @@ import {
   INTERFACE_FEATURED_APP_RIGHT,
   TEMPLATE_REGISTRAR_SERVICE,
 } from "../constants";
+import { authenticatedFetch } from "../api";
 import { zebraRow } from "../styles";
 import type {
   GovernanceResponse,
@@ -325,7 +326,7 @@ export const GovernanceSection = ({
 
   const fetchGovernance = useCallback(async () => {
     try {
-      const res = await fetch(
+      const res = await authenticatedFetch(
         `${API_BASE}/governance/confirmations?party_id=${encodeURIComponent(partyId)}`,
       );
       if (res.ok) {
@@ -355,7 +356,7 @@ export const GovernanceSection = ({
   const fetchVaults = useCallback(async () => {
     setVaultsLoading(true);
     try {
-      const res = await fetch(
+      const res = await authenticatedFetch(
         `${API_BASE}/vaults?party_id=${encodeURIComponent(partyId)}`,
       );
       if (res.ok) {
@@ -395,10 +396,10 @@ export const GovernanceSection = ({
     setServicesLoading(true);
     try {
       const [providerRes, userRes] = await Promise.all([
-        fetch(
+        authenticatedFetch(
           `${API_BASE}/services/provider?party_id=${encodeURIComponent(partyId)}`,
         ),
-        fetch(
+        authenticatedFetch(
           `${API_BASE}/services/user?party_id=${encodeURIComponent(partyId)}`,
         ),
       ]);
@@ -454,7 +455,7 @@ export const GovernanceSection = ({
         entity_name: template.entity,
       });
       if (template.interface) params.set("interface", "true");
-      const res = await fetch(`${API_BASE}/contracts/query?${params}`);
+      const res = await authenticatedFetch(`${API_BASE}/contracts/query?${params}`);
       if (res.ok) {
         const data: ContractQueryResponse = await res.json();
         return data.contracts;
@@ -498,7 +499,7 @@ export const GovernanceSection = ({
   const fetchBurnMintFactory = useCallback(async () => {
     setBurnMintFactoryLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/token-standard-contracts`, {
+      const res = await authenticatedFetch(`${API_BASE}/token-standard-contracts`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ chain: "canton-devnet" }),
@@ -523,7 +524,7 @@ export const GovernanceSection = ({
   const fetchNetworkInfo = useCallback(async () => {
     setAmuletRulesLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/network-info`);
+      const res = await authenticatedFetch(`${API_BASE}/network-info`);
       if (res.ok) {
         const data: NetworkInfo = await res.json();
         setAmuletRulesContract({
@@ -595,7 +596,7 @@ export const GovernanceSection = ({
         governance_type: governanceType,
       };
 
-      const res = await fetch(`${API_BASE}/governance/confirm`, {
+      const res = await authenticatedFetch(`${API_BASE}/governance/confirm`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(request),
@@ -639,7 +640,7 @@ export const GovernanceSection = ({
         governance_type: governanceType,
       };
 
-      const res = await fetch(`${API_BASE}/governance/execute`, {
+      const res = await authenticatedFetch(`${API_BASE}/governance/execute`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(request),
@@ -676,7 +677,7 @@ export const GovernanceSection = ({
         governance_type: governanceType,
       };
 
-      const res = await fetch(`${API_BASE}/governance/cancel`, {
+      const res = await authenticatedFetch(`${API_BASE}/governance/cancel`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(request),
@@ -718,7 +719,7 @@ export const GovernanceSection = ({
         governance_type: governanceType,
       };
 
-      const res = await fetch(`${API_BASE}/governance/expire`, {
+      const res = await authenticatedFetch(`${API_BASE}/governance/expire`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(request),
@@ -945,7 +946,7 @@ export const GovernanceSection = ({
         governance_type: governanceType,
       };
 
-      const res = await fetch(`${API_BASE}/governance/confirm`, {
+      const res = await authenticatedFetch(`${API_BASE}/governance/confirm`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(request),
@@ -1022,7 +1023,7 @@ export const GovernanceSection = ({
         proposal,
       };
 
-      const res = await fetch(`${API_BASE}/governance/propose`, {
+      const res = await authenticatedFetch(`${API_BASE}/governance/propose`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(request),
@@ -1048,7 +1049,7 @@ export const GovernanceSection = ({
     setError(null);
 
     try {
-      const res = await fetch(`${API_BASE}/governance/confirm`, {
+      const res = await authenticatedFetch(`${API_BASE}/governance/confirm`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1079,7 +1080,7 @@ export const GovernanceSection = ({
     setError(null);
 
     try {
-      const res = await fetch(`${API_BASE}/governance/execute`, {
+      const res = await authenticatedFetch(`${API_BASE}/governance/execute`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

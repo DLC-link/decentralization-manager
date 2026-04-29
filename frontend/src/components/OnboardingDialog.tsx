@@ -16,6 +16,7 @@ import {
   Divider,
 } from "@mui/material";
 import { API_BASE } from "../constants";
+import { authenticatedFetch } from "../api";
 import type { OnboardingStatusResponse, Peer, NodeConfig } from "../types";
 
 interface OnboardingDialogProps {
@@ -47,8 +48,8 @@ export const OnboardingDialog = ({
         setLoadingPeers(true);
         try {
           const [networkRes, nodeRes] = await Promise.all([
-            fetch(`${API_BASE}/network-config`),
-            fetch(`${API_BASE}/node-config`),
+            authenticatedFetch(`${API_BASE}/network-config`),
+            authenticatedFetch(`${API_BASE}/node-config`),
           ]);
           if (networkRes.ok) {
             const data = await networkRes.json();
@@ -102,7 +103,7 @@ export const OnboardingDialog = ({
 
   const pollStatus = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/onboarding/status`);
+      const res = await authenticatedFetch(`${API_BASE}/onboarding/status`);
       if (res.ok) {
         const data: OnboardingStatusResponse = await res.json();
         setStatus(data);
@@ -147,7 +148,7 @@ export const OnboardingDialog = ({
     setError(null);
 
     try {
-      const res = await fetch(`${API_BASE}/onboarding`, {
+      const res = await authenticatedFetch(`${API_BASE}/onboarding`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

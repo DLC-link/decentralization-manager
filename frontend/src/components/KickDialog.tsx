@@ -12,6 +12,7 @@ import {
   Box,
 } from "@mui/material";
 import { API_BASE } from "../constants";
+import { authenticatedFetch } from "../api";
 import type { KickRequest, KickStatusResponse } from "../types";
 
 interface KickDialogProps {
@@ -63,7 +64,7 @@ export const KickDialog = ({
 
   const pollStatus = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/kick/status`);
+      const res = await authenticatedFetch(`${API_BASE}/kick/status`);
       if (res.ok) {
         const data: KickStatusResponse = await res.json();
         setStatus(data);
@@ -105,7 +106,7 @@ export const KickDialog = ({
     };
 
     try {
-      const res = await fetch(`${API_BASE}/kick`, {
+      const res = await authenticatedFetch(`${API_BASE}/kick`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(request),
