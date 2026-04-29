@@ -16,11 +16,11 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use base64::Engine;
-use jsonwebtoken::{DecodingKey, Validation, decode, decode_header};
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::Deserialize;
 use tokio::sync::RwLock;
 
+use super::common::{RealmAccess, collect_roles, extract_issuer, oidc_issuer_of};
 use crate::{
     auth::validator::{Principal, ValidationError},
     config::{KeycloakConfig, PartyCredentials},
@@ -40,8 +40,18 @@ pub struct JwtValidator {
 }
 
 struct CachedJwks {
-    keys: HashMap<String, DecodingKey>,
+    keys: HashMap<String, KeyEntry>,
     expires_at: SystemTime,
+}
+
+#[derive(Clone)]
+struct KeyEntry {
+    key: DecodingKey,
+    /// Algorithm pinned at JWKS-fetch time. Either taken from the JWK's
+    /// own `alg` field or derived from `kty`. Used to verify the signature
+    /// and to reject any token whose header advertises a different alg —
+    /// closes JWT alg-confusion attacks (e.g. switching RS256 → HS256).
+    alg: Algorithm,
 }
 
 #[derive(Deserialize)]
@@ -66,6 +76,10 @@ struct Jwk {
     kty: Option<String>,
     #[serde(rename = "use", default)]
     use_: Option<String>,
+    /// Signing algorithm advertised by the IdP. When present, pinned and
+    /// cross-checked against the token header's alg.
+    #[serde(default)]
+    alg: Option<String>,
     /// RSA modulus (base64url). Present for `kty: "RSA"`.
     #[serde(default)]
     n: Option<String>,
@@ -89,18 +103,18 @@ struct Claims {
     sub: Option<String>,
     #[serde(default)]
     email: Option<String>,
+    /// OIDC "authorized party" — the client_id this token was issued to.
+    /// We require it to equal the matched `KeycloakConfig.client_id` so a
+    /// token issued to a different client in the same realm cannot be
+    /// reused against this service even if the realm-level role set matches.
+    #[serde(default)]
+    azp: Option<String>,
     #[serde(default)]
     realm_access: Option<RealmAccess>,
     #[serde(default)]
     scope: Option<String>,
     #[serde(default)]
     roles: Option<Vec<String>>,
-}
-
-#[derive(Deserialize)]
-struct RealmAccess {
-    #[serde(default)]
-    roles: Vec<String>,
 }
 
 impl JwtValidator {
@@ -128,38 +142,77 @@ impl JwtValidator {
     /// `::MalformedToken` for shape problems, `::UntrustedIssuer` if the `iss`
     /// claim does not match a configured IdP, `::DiscoveryFailed` for OIDC
     /// metadata or JWKS fetch failures, or `::InactiveToken` for an invalid
-    /// signature, expired token, or wrong algorithm.
+    /// signature, expired token, wrong algorithm, or `azp` that doesn't
+    /// match the matched config's `client_id`.
     pub async fn validate(&self, token: &str) -> Result<Principal, ValidationError> {
         if token.is_empty() {
             return Err(ValidationError::MissingToken);
         }
 
         let issuer = extract_issuer(token)?;
-        if !self.is_trusted_issuer(&issuer).await {
+        let Some(config) = self.find_trusted_config(&issuer).await else {
             tracing::warn!("rejected token from untrusted issuer: {issuer}");
             return Err(ValidationError::UntrustedIssuer(issuer));
-        }
+        };
 
         let header = decode_header(token).map_err(|_| ValidationError::MalformedToken)?;
         let kid = header.kid.ok_or(ValidationError::MalformedToken)?;
 
-        let key = self.resolve_key(&issuer, &kid).await?;
+        let entry = self.resolve_key(&issuer, &kid).await?;
 
-        let mut validation = Validation::new(header.alg);
+        // Pin algorithm: reject if the token's header advertises an alg
+        // different from the JWK's. Without this, an attacker who could
+        // forge a token with `alg: HS256` would have it verified against
+        // an HMAC key derived from the public modulus — classic JWT
+        // alg-confusion. The jsonwebtoken crate cross-checks key-type
+        // versus alg internally, so this is defense in depth, but the
+        // explicit check keeps the invariant local.
+        if header.alg != entry.alg {
+            tracing::warn!(
+                "jwt header alg {:?} does not match JWK alg {:?}",
+                header.alg,
+                entry.alg
+            );
+            return Err(ValidationError::InactiveToken);
+        }
+
+        let mut validation = Validation::new(entry.alg);
         validation.set_issuer(&[&issuer]);
-        // Audience varies per Keycloak client; verify it at the role-check
-        // layer instead of the signature layer to keep this validator usable
-        // across multiple frontend clients.
+        // Audience is intentionally not enforced — Keycloak's `aud` claim
+        // varies per realm config and often points to a sibling service
+        // (e.g. the wallet API) rather than this service. Cross-client
+        // privilege escalation is closed below by requiring `azp` (the
+        // OIDC "authorized party") to equal this validator's matched
+        // client_id, which Keycloak fixes to the client that obtained
+        // the token.
         validation.validate_aud = false;
         // `leeway` defaults to 60s which is fine.
 
-        let data = decode::<Claims>(token, &key, &validation).map_err(|e| {
+        let data = decode::<Claims>(token, &entry.key, &validation).map_err(|e| {
             tracing::warn!("jwt verify failed: {e}");
             ValidationError::InactiveToken
         })?;
 
         let claims = data.claims;
-        let roles = collect_roles(&claims);
+
+        // Enforce azp == matched config's client_id.
+        match claims.azp.as_deref() {
+            Some(azp) if azp == config.client_id => {}
+            other => {
+                tracing::warn!(
+                    "jwt azp {:?} does not match expected client_id {}",
+                    other,
+                    config.client_id
+                );
+                return Err(ValidationError::InactiveToken);
+            }
+        }
+
+        let roles = collect_roles(
+            claims.realm_access.as_ref(),
+            claims.roles.as_deref(),
+            claims.scope.as_deref(),
+        );
         Ok(Principal {
             sub: claims.sub.unwrap_or_default(),
             issuer,
@@ -168,17 +221,22 @@ impl JwtValidator {
         })
     }
 
-    async fn is_trusted_issuer(&self, issuer: &str) -> bool {
+    /// Find the `KeycloakConfig` whose canonical OIDC issuer matches
+    /// `issuer`. Mirrors `OidcIntrospectionValidator::find_trusted_config`.
+    async fn find_trusted_config(&self, issuer: &str) -> Option<KeycloakConfig> {
         if let Some(ref cfg) = self.inbound
             && oidc_issuer_of(cfg) == issuer
         {
-            return true;
+            return Some(cfg.clone());
         }
         let creds = self.party_credentials.read().await;
-        creds.iter().any(|p| oidc_issuer_of(&p.keycloak) == issuer)
+        creds
+            .iter()
+            .find(|p| oidc_issuer_of(&p.keycloak) == issuer)
+            .map(|p| p.keycloak.clone())
     }
 
-    async fn resolve_key(&self, issuer: &str, kid: &str) -> Result<DecodingKey, ValidationError> {
+    async fn resolve_key(&self, issuer: &str, kid: &str) -> Result<KeyEntry, ValidationError> {
         // Fast path: cached JWKS still fresh.
         {
             let cache = self.jwks_cache.read().await;
@@ -191,7 +249,7 @@ impl JwtValidator {
         }
 
         let keys = self.fetch_jwks(issuer).await?;
-        let key = keys
+        let entry = keys
             .get(kid)
             .cloned()
             .ok_or_else(|| ValidationError::DiscoveryFailed {
@@ -207,13 +265,10 @@ impl JwtValidator {
                 expires_at: SystemTime::now() + JWKS_TTL,
             },
         );
-        Ok(key)
+        Ok(entry)
     }
 
-    async fn fetch_jwks(
-        &self,
-        issuer: &str,
-    ) -> Result<HashMap<String, DecodingKey>, ValidationError> {
+    async fn fetch_jwks(&self, issuer: &str) -> Result<HashMap<String, KeyEntry>, ValidationError> {
         let discovery_url = format!("{issuer}/.well-known/openid-configuration");
         let discovery: OidcDiscovery = self
             .http
@@ -259,9 +314,16 @@ impl JwtValidator {
             {
                 continue;
             }
+            let alg = match resolve_algorithm(&jwk) {
+                Ok(a) => a,
+                Err(e) => {
+                    tracing::warn!("skipping JWK kid={kid}: {e}");
+                    continue;
+                }
+            };
             match decoding_key_from_jwk(&jwk) {
                 Ok(key) => {
-                    keys.insert(kid, key);
+                    keys.insert(kid, KeyEntry { key, alg });
                 }
                 Err(e) => {
                     tracing::warn!("skipping JWK kid={kid}: {e}");
@@ -272,55 +334,39 @@ impl JwtValidator {
     }
 }
 
-fn oidc_issuer_of(cfg: &KeycloakConfig) -> String {
-    format!("{}/realms/{}", cfg.url.trim_end_matches('/'), cfg.realm)
-}
-
-fn extract_issuer(token: &str) -> Result<String, ValidationError> {
-    let mut parts = token.split('.');
-    let _header = parts.next().ok_or(ValidationError::MalformedToken)?;
-    let payload = parts.next().ok_or(ValidationError::MalformedToken)?;
-
-    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload)
-        .or_else(|_| {
-            let padding = (4 - payload.len() % 4) % 4;
-            let padded = format!("{payload}{}", "=".repeat(padding));
-            base64::engine::general_purpose::STANDARD.decode(padded)
-        })
-        .map_err(|_| ValidationError::MalformedToken)?;
-
-    let claims: serde_json::Value =
-        serde_json::from_slice(&decoded).map_err(|_| ValidationError::MalformedToken)?;
-
-    claims
-        .get("iss")
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim_end_matches('/').to_string())
-        .ok_or(ValidationError::MalformedToken)
-}
-
-fn collect_roles(claims: &Claims) -> Vec<String> {
-    let mut roles = Vec::new();
-    if let Some(ref r) = claims.realm_access {
-        roles.extend(r.roles.iter().cloned());
+/// Determine which `Algorithm` to verify with for a given JWK.
+///
+/// Prefers the JWK's own `alg` field when present; falls back to a
+/// `kty`-based default (RSA → RS256, EC → ES256). Restricts to a small
+/// asymmetric allowlist; symmetric algorithms (HS256/384/512) and `none`
+/// are rejected because we never want to verify a token with them
+/// against a key fetched from a public JWKS.
+///
+/// # Errors
+///
+/// Returns an error string if the JWK declares a disallowed `alg`
+/// (symmetric, `none`, or otherwise unrecognised), or if both `alg` and
+/// a recognisable `kty` default are missing.
+fn resolve_algorithm(jwk: &Jwk) -> Result<Algorithm, String> {
+    if let Some(alg_str) = jwk.alg.as_deref() {
+        return match alg_str {
+            "RS256" => Ok(Algorithm::RS256),
+            "RS384" => Ok(Algorithm::RS384),
+            "RS512" => Ok(Algorithm::RS512),
+            "ES256" => Ok(Algorithm::ES256),
+            "ES384" => Ok(Algorithm::ES384),
+            "PS256" => Ok(Algorithm::PS256),
+            "PS384" => Ok(Algorithm::PS384),
+            "PS512" => Ok(Algorithm::PS512),
+            "EdDSA" => Ok(Algorithm::EdDSA),
+            other => Err(format!("disallowed JWK alg: {other}")),
+        };
     }
-    if let Some(ref r) = claims.roles {
-        for role in r {
-            if !roles.contains(role) {
-                roles.push(role.clone());
-            }
-        }
+    match jwk.kty.as_deref() {
+        Some("RSA") => Ok(Algorithm::RS256),
+        Some("EC") => Ok(Algorithm::ES256),
+        _ => Err("JWK has no alg and no resolvable kty default".to_string()),
     }
-    if let Some(ref scope) = claims.scope {
-        for s in scope.split_whitespace() {
-            let s = s.to_string();
-            if !roles.contains(&s) {
-                roles.push(s);
-            }
-        }
-    }
-    roles
 }
 
 /// Build a `DecodingKey` from a parsed JWK. Goes through the raw
@@ -352,44 +398,51 @@ fn decoding_key_from_jwk(jwk: &Jwk) -> Result<DecodingKey, String> {
 mod tests {
     use super::*;
 
-    fn make_jwt(payload: &serde_json::Value) -> String {
-        let header =
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"{\"alg\":\"RS256\"}");
-        let body = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(serde_json::to_vec(payload).unwrap());
-        format!("{header}.{body}.sig")
+    fn jwk(alg: Option<&str>, kty: Option<&str>) -> Jwk {
+        Jwk {
+            kid: Some("k".into()),
+            kty: kty.map(str::to_string),
+            use_: None,
+            alg: alg.map(str::to_string),
+            n: None,
+            e: None,
+            crv: None,
+            x: None,
+            y: None,
+        }
     }
 
     #[test]
-    fn extract_issuer_strips_trailing_slash() {
-        let token = make_jwt(&serde_json::json!({ "iss": "https://kc.example/realms/r/" }));
+    fn resolve_algorithm_prefers_jwk_alg() {
         assert_eq!(
-            extract_issuer(&token).unwrap(),
-            "https://kc.example/realms/r"
+            resolve_algorithm(&jwk(Some("RS256"), Some("RSA"))).unwrap(),
+            Algorithm::RS256
+        );
+        assert_eq!(
+            resolve_algorithm(&jwk(Some("ES256"), Some("EC"))).unwrap(),
+            Algorithm::ES256
         );
     }
 
     #[test]
-    fn extract_issuer_handles_missing_iss() {
-        let token = make_jwt(&serde_json::json!({ "sub": "x" }));
-        assert!(matches!(
-            extract_issuer(&token),
-            Err(ValidationError::MalformedToken)
-        ));
+    fn resolve_algorithm_rejects_symmetric_and_none() {
+        // Symmetric and `none` would let an attacker forge tokens against
+        // a key fetched from a public JWKS — never honour them.
+        for bad in ["HS256", "HS384", "HS512", "none", "NoNe"] {
+            assert!(resolve_algorithm(&jwk(Some(bad), Some("RSA"))).is_err());
+        }
     }
 
     #[test]
-    fn collect_roles_merges_realm_scope_and_roles() {
-        let claims = Claims {
-            sub: None,
-            email: None,
-            realm_access: Some(RealmAccess {
-                roles: vec!["admin".into(), "user".into()],
-            }),
-            roles: Some(vec!["user".into(), "viewer".into()]),
-            scope: Some("openid email viewer".into()),
-        };
-        let roles = collect_roles(&claims);
-        assert_eq!(roles, vec!["admin", "user", "viewer", "openid", "email"]);
+    fn resolve_algorithm_falls_back_to_kty_default() {
+        assert_eq!(
+            resolve_algorithm(&jwk(None, Some("RSA"))).unwrap(),
+            Algorithm::RS256
+        );
+        assert_eq!(
+            resolve_algorithm(&jwk(None, Some("EC"))).unwrap(),
+            Algorithm::ES256
+        );
+        assert!(resolve_algorithm(&jwk(None, None)).is_err());
     }
 }

@@ -14,8 +14,13 @@ trap cleanup EXIT
 check_prerequisites
 
 # Build
-log_phase "Building release binary"
-cargo build --release
+#
+# Integration tests run against a permissive `MockValidator` so the test
+# binary needs to be compiled with the `test-mode` Cargo feature. Production
+# builds intentionally omit this feature so a release binary cannot select
+# mock auth at runtime.
+log_phase "Building release binary (with test-mode feature)"
+cargo build --release --features test-mode
 
 if [ ! -f "$BINARY" ]; then
     echo "ERROR: Binary not found at $BINARY"

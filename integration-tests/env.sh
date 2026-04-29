@@ -234,7 +234,7 @@ start_nodes() {
         DECPM_CANTON_NETWORK=devnet \
         DECPM_NOISE_PORT="${noise_ports[$idx]}" \
         "$BINARY" -d "$DEV_DIR/participant-$i" serve \
-            --host 0.0.0.0 --port "${http_ports[$idx]}" --test &
+            --host 0.0.0.0 --port "${http_ports[$idx]}" &
         PIDS+=($!)
     done
 

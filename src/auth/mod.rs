@@ -16,7 +16,9 @@ use tokio::sync::RwLock;
 
 pub use mock::{MockAuthRegistry, MockTokenManager};
 pub use validator::{Principal, TokenValidator, ValidationError};
-pub use validators::{JwtValidator, MockValidator, OidcIntrospectionValidator};
+#[cfg(any(test, feature = "test-mode"))]
+pub use validators::MockValidator;
+pub use validators::{JwtValidator, OidcIntrospectionValidator};
 
 use crate::{
     config::{KeycloakConfig, PartyCredentials},

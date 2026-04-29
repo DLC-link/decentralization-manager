@@ -34,10 +34,12 @@ use tokio_noise::handshakes::nn_psk2::Responder;
 use utoipa_actix_web::AppExt;
 use utoipa_swagger_ui::SwaggerUi;
 
+#[cfg(not(any(test, feature = "test-mode")))]
+use crate::auth::{AuthRegistry, JwtValidator};
+#[cfg(any(test, feature = "test-mode"))]
+use crate::auth::{MockAuthRegistry, MockValidator};
 use crate::{
-    auth::{
-        AuthRegistry, JwtValidator, MockAuthRegistry, MockValidator, TokenValidator, WorkflowAuth,
-    },
+    auth::{TokenValidator, WorkflowAuth},
     config::{NodeConfig, PartyCredentials},
     db::schema::SchemaRead,
     error::Result,
@@ -101,14 +103,20 @@ pub async fn start_server(
     host: &str,
     port: u16,
     config: NodeConfig,
-    test_mode: bool,
     db: SqlitePool,
     admin_role: String,
+    allowed_origin: Option<String>,
 ) -> Result {
+    // Test-mode is a compile-time decision: it's `true` iff the binary was
+    // built with `--features test-mode` (or under `cargo test`). Production
+    // binaries cannot run with mock auth — the `MockValidator` and
+    // `MockAuthRegistry` selections below are gated by the same cfg.
+    let test_mode = cfg!(any(test, feature = "test-mode"));
+
     if !test_mode {
-        tracing::warn!(
-            "Running without --test flag. Swagger UI is disabled. \
-             Use `serve --test` to enable mock auth and Swagger UI."
+        tracing::info!(
+            "Running production build (no `test-mode` feature). Swagger UI disabled, \
+             real JWT validation in effect."
         );
     }
 
@@ -119,12 +127,15 @@ pub async fn start_server(
     let party_credentials = Arc::new(RwLock::new(db_party_creds.clone()));
 
     // Initialize auth based on mode
-    let auth = if test_mode {
+    #[cfg(any(test, feature = "test-mode"))]
+    let auth = {
         tracing::info!("Running in TEST MODE - using mock authentication");
         Some(WorkflowAuth::Mock(Arc::new(MockAuthRegistry::new(
             party_credentials.clone(),
         ))))
-    } else if db_party_creds.is_empty() {
+    };
+    #[cfg(not(any(test, feature = "test-mode")))]
+    let auth = if db_party_creds.is_empty() {
         tracing::info!("No party credentials configured, auth disabled");
         None
     } else {
@@ -139,12 +150,15 @@ pub async fn start_server(
 
     let auth = Arc::new(RwLock::new(auth));
 
-    // Inbound token validator. Test mode accepts anything; production verifies
-    // JWT signatures locally against the JWKS of any trusted issuer derived
-    // from the top-level keycloak config plus any `party_credentials` rows.
-    let token_validator = if test_mode {
-        TokenValidator::Mock(Arc::new(MockValidator::new(admin_role.clone())))
-    } else {
+    // Inbound token validator. Production verifies JWT signatures locally
+    // against the JWKS of any trusted issuer derived from the top-level
+    // keycloak config plus any `party_credentials` rows. The permissive
+    // `MockValidator` is compiled in only behind `cfg(any(test, feature =
+    // "test-mode"))`, so a release binary cannot select it.
+    #[cfg(any(test, feature = "test-mode"))]
+    let token_validator = TokenValidator::Mock(Arc::new(MockValidator::new(admin_role.clone())));
+    #[cfg(not(any(test, feature = "test-mode")))]
+    let token_validator = {
         let no_top_level_config = config.keycloak.is_none();
         let no_party_creds = party_credentials.read().await.is_empty();
         if no_top_level_config && no_party_creds {
@@ -356,9 +370,20 @@ pub async fn start_server(
 
     HttpServer::new(move || {
         // Frontend is embedded and served from this same origin, so no
-        // cross-origin access is required. `Cors::default()` is same-origin
-        // only — tightening the previous `Cors::permissive()`.
-        let cors = Cors::default();
+        // cross-origin access is required by default. `Cors::default()` is
+        // same-origin only — tightening the previous `Cors::permissive()`.
+        //
+        // For split-origin deployments (reverse proxy, separate dev server,
+        // etc.) the operator can set `--allowed-origin` to permit one
+        // additional origin with credentials.
+        let cors = match allowed_origin.as_deref() {
+            Some(origin) => Cors::default()
+                .allowed_origin(origin)
+                .allow_any_method()
+                .allow_any_header()
+                .supports_credentials(),
+            None => Cors::default(),
+        };
 
         // Increase payload limit to 100MB for DAR file uploads
         let json_config = web::JsonConfig::default().limit(100 * 1024 * 1024);

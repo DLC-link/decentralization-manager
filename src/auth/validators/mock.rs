@@ -3,7 +3,8 @@ use crate::auth::{
     validator::{Principal, ValidationError},
 };
 
-/// Inbound validator used in `--test` mode.
+/// Inbound validator used when the binary is built with the `test-mode`
+/// Cargo feature (or under `cargo test`).
 ///
 /// Accepts either the hardcoded mock token or an empty/missing token, so
 /// test-mode UX (swagger, unauthenticated curls) keeps working while the
