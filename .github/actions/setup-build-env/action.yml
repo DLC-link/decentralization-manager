@@ -1,0 +1,66 @@
+name: Setup build environment
+description: Install system deps, configure SSH for git, and cache cargo + npm artifacts.
+
+inputs:
+  ssh-private-key:
+    description: SSH private key used to fetch git dependencies
+    required: true
+  extra-packages:
+    description: Additional apt packages to install (space-separated)
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Detect environment
+      id: env
+      shell: bash
+      run: |
+        if [ "$(id -u)" = "0" ]; then
+          echo "ssh-dir=/root/.ssh" >> $GITHUB_OUTPUT
+          echo "cargo-registry=/usr/local/cargo/registry" >> $GITHUB_OUTPUT
+          echo "cargo-git=/usr/local/cargo/git" >> $GITHUB_OUTPUT
+          echo "sudo=" >> $GITHUB_OUTPUT
+        else
+          echo "ssh-dir=$HOME/.ssh" >> $GITHUB_OUTPUT
+          echo "cargo-registry=$HOME/.cargo/registry" >> $GITHUB_OUTPUT
+          echo "cargo-git=$HOME/.cargo/git" >> $GITHUB_OUTPUT
+          echo "sudo=sudo" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Install system dependencies
+      shell: bash
+      run: |
+        ${{ steps.env.outputs.sudo }} apt-get update
+        ${{ steps.env.outputs.sudo }} apt-get install -y \
+          pkg-config libssl-dev protobuf-compiler \
+          git openssh-client nodejs npm curl \
+          ${{ inputs.extra-packages }}
+
+    - name: Setup SSH
+      shell: bash
+      env:
+        SSH_DIR: ${{ steps.env.outputs.ssh-dir }}
+        SSH_PRIVATE_KEY: ${{ inputs.ssh-private-key }}
+      run: |
+        mkdir -p "$SSH_DIR"
+        ssh-keyscan github.com >> "$SSH_DIR/known_hosts"
+        echo "$SSH_PRIVATE_KEY" > "$SSH_DIR/id_ed25519"
+        chmod 600 "$SSH_DIR/id_ed25519"
+        git config --global core.sshCommand "ssh -i $SSH_DIR/id_ed25519 -o StrictHostKeyChecking=no"
+
+    - name: Cache cargo
+      uses: actions/cache@v4
+      with:
+        path: |
+          ${{ steps.env.outputs.cargo-registry }}
+          ${{ steps.env.outputs.cargo-git }}
+          target
+        key: cargo-${{ hashFiles('Cargo.lock') }}
+
+    - name: Cache npm
+      uses: actions/cache@v4
+      with:
+        path: frontend/node_modules
+        key: npm-${{ hashFiles('frontend/package-lock.json') }}
