@@ -3,9 +3,8 @@ name: CI
 on:
   push:
     branches: [main]
-    tags:
-      - v[0-9]*
   pull_request:
+  workflow_call:
 
 env:
   CARGO_TERM_COLOR: always
@@ -29,28 +28,9 @@ jobs:
     container: rust:slim-bookworm
     steps:
       - uses: actions/checkout@v4
-      - name: Install dependencies
-        run: apt-get update && apt-get install -y pkg-config libssl-dev protobuf-compiler git openssh-client nodejs npm curl
-      - name: Setup SSH
-        run: |
-          mkdir -p /root/.ssh
-          ssh-keyscan github.com >> /root/.ssh/known_hosts
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > /root/.ssh/id_ed25519
-          chmod 600 /root/.ssh/id_ed25519
-          git config --global core.sshCommand "ssh -i /root/.ssh/id_ed25519 -o StrictHostKeyChecking=no"
-      - name: Cache cargo
-        uses: actions/cache@v4
+      - uses: ./.github/actions/setup-build-env
         with:
-          path: |
-            /usr/local/cargo/registry
-            /usr/local/cargo/git
-            target
-          key: cargo-${{ hashFiles('Cargo.lock') }}
-      - name: Cache npm
-        uses: actions/cache@v4
-        with:
-          path: frontend/node_modules
-          key: npm-${{ hashFiles('frontend/package-lock.json') }}
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
       - run: rustup component add clippy
       - run: cargo clippy --all-targets --all-features
 
@@ -61,31 +41,14 @@ jobs:
     container: rust:slim-bookworm
     steps:
       - uses: actions/checkout@v4
-      - name: Install dependencies
+      - uses: ./.github/actions/setup-build-env
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+          extra-packages: jq bc
+      - name: Install coverage tooling
         run: |
-          apt-get update && apt-get install -y pkg-config libssl-dev protobuf-compiler git openssh-client nodejs npm jq bc curl
           rustup component add llvm-tools-preview
           cargo install grcov
-      - name: Setup SSH
-        run: |
-          mkdir -p /root/.ssh
-          ssh-keyscan github.com >> /root/.ssh/known_hosts
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > /root/.ssh/id_ed25519
-          chmod 600 /root/.ssh/id_ed25519
-          git config --global core.sshCommand "ssh -i /root/.ssh/id_ed25519 -o StrictHostKeyChecking=no"
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            /usr/local/cargo/registry
-            /usr/local/cargo/git
-            target
-          key: cargo-${{ hashFiles('Cargo.lock') }}
-      - name: Cache npm
-        uses: actions/cache@v4
-        with:
-          path: frontend/node_modules
-          key: npm-${{ hashFiles('frontend/package-lock.json') }}
       - name: Run tests with coverage
         run: ./code-coverage.sh
 
@@ -95,32 +58,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y pkg-config libssl-dev protobuf-compiler git openssh-client nodejs npm jq curl
+      - uses: ./.github/actions/setup-build-env
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+          extra-packages: jq
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-      - name: Setup SSH
-        run: |
-          mkdir -p ~/.ssh
-          ssh-keyscan github.com >> ~/.ssh/known_hosts
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-          git config --global core.sshCommand "ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no"
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-${{ hashFiles('Cargo.lock') }}
-      - name: Cache npm
-        uses: actions/cache@v4
-        with:
-          path: frontend/node_modules
-          key: npm-${{ hashFiles('frontend/package-lock.json') }}
       - name: Cache localnet bundle
         uses: actions/cache@v4
         with:
@@ -147,66 +90,3 @@ jobs:
         run: cd governance-core-test && ~/.dpm/bin/dpm test
       - name: Test governance-token-custody
         run: cd governance-token-custody-test && ~/.dpm/bin/dpm test
-
-  docker:
-    name: Build & Push Docker Images
-    needs: [test, daml]
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.TF_AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.TF_AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
-
-      - name: Login to Amazon ECR Public
-        id: login-ecr-public
-        uses: aws-actions/amazon-ecr-login@v2
-        with:
-          registry-type: public
-
-      - name: Extract version from tag
-        id: version
-        run: |
-          VERSION=${GITHUB_REF_NAME#v}
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Setup SSH
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
-
-      - name: Build and push internal image
-        env:
-          ECR_PUBLIC_REGISTRY: ${{ steps.login-ecr-public.outputs.registry }}
-          REGISTRY_ALIAS: dlc-link
-          ECR_REPOSITORY: canton-decparty-manager
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          echo "VITE_ADMIN_ACCESS=true" > frontend/.env
-          docker build --ssh default \
-            -t $ECR_PUBLIC_REGISTRY/$REGISTRY_ALIAS/$ECR_REPOSITORY:v$VERSION \
-            -t $ECR_PUBLIC_REGISTRY/$REGISTRY_ALIAS/$ECR_REPOSITORY:latest .
-          docker push $ECR_PUBLIC_REGISTRY/$REGISTRY_ALIAS/$ECR_REPOSITORY:v$VERSION
-          docker push $ECR_PUBLIC_REGISTRY/$REGISTRY_ALIAS/$ECR_REPOSITORY:latest
-
-      - name: Build and push demo image
-        env:
-          ECR_PUBLIC_REGISTRY: ${{ steps.login-ecr-public.outputs.registry }}
-          REGISTRY_ALIAS: dlc-link
-          ECR_REPOSITORY: canton-decparty-manager
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          echo "VITE_ADMIN_ACCESS=false" > frontend/.env
-          docker build --ssh default \
-            -t $ECR_PUBLIC_REGISTRY/$REGISTRY_ALIAS/$ECR_REPOSITORY:v$VERSION-demo \
-            -t $ECR_PUBLIC_REGISTRY/$REGISTRY_ALIAS/$ECR_REPOSITORY:demo .
-          docker push $ECR_PUBLIC_REGISTRY/$REGISTRY_ALIAS/$ECR_REPOSITORY:v$VERSION-demo
-          docker push $ECR_PUBLIC_REGISTRY/$REGISTRY_ALIAS/$ECR_REPOSITORY:demo
