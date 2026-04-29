@@ -387,6 +387,8 @@ governance_workflows::common::scenario=info,
 governance_workflows::common::phases=info
 ```
 
+The trace itself is rendered with a minimal format locally — just the message text, no timestamps, targets, levels, or structured fields. CI runs (auto-detected via the `CI` env var that GitHub Actions sets) get the full structured format with timestamps + structured fields for log archives and JSON parsing. To force the full format locally, set `INTEGRATION_TEST_FULL_LOG=1`.
+
 #### Verbose mode
 
 Use `--verbose` when diagnosing a stuck or failing run. Sets:
