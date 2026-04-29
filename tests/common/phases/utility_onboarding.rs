@@ -25,7 +25,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         .run(f)
         .await?;
         Scenario::new("ProviderService visible")
-            .then_eventually(
+            .then(
                 "services/provider returns one",
                 Duration::from_secs(30),
                 |f, _| {
@@ -69,7 +69,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     .await?;
 
     Scenario::new("SetupUtility side effects")
-        .then_eventually(
+        .then(
             "AllocationFactory visible",
             Duration::from_secs(30),
             |f, _| {
@@ -90,7 +90,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 })
             },
         )
-        .then_eventually(
+        .then(
             "InstrumentConfiguration visible",
             Duration::from_secs(30),
             |f, _| {
@@ -139,7 +139,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     .await?;
 
     Scenario::new("Mint side effects")
-        .then_eventually("MintOffer count >= 1", Duration::from_secs(30), |f, _| {
+        .then("MintOffer count >= 1", Duration::from_secs(30), |f, _| {
             Box::pin(async move {
                 let party_id = match f.party_id() {
                     Ok(p) => p,
@@ -173,7 +173,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     .await?;
 
     Scenario::new("Burn side effects")
-        .then_eventually("BurnOffer count >= 1", Duration::from_secs(30), |f, _| {
+        .then("BurnOffer count >= 1", Duration::from_secs(30), |f, _| {
             Box::pin(async move {
                 let party_id = match f.party_id() {
                     Ok(p) => p,

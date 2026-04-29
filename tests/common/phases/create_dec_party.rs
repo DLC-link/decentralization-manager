@@ -69,7 +69,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 })
             }
         })
-        .then_eventually(
+        .then(
             "party visible in /decentralized-parties",
             Duration::from_secs(30),
             {

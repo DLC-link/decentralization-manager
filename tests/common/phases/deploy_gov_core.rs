@@ -166,7 +166,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 })
             },
         )
-        .then_eventually(
+        .then(
             "GovernanceRules contract visible",
             Duration::from_secs(30),
             |f, _| {

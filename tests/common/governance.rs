@@ -35,7 +35,7 @@ pub fn propose_confirm_execute(label: &str, proposal: Value) -> Scenario<Proposa
                 })
             }
         })
-        .then_eventually(
+        .then(
             "proposal visible in confirmations on P1",
             Duration::from_secs(60),
             |f, ctx| {
@@ -55,7 +55,7 @@ pub fn propose_confirm_execute(label: &str, proposal: Value) -> Scenario<Proposa
                 })
             },
         )
-        .given_eventually(
+        .then(
             "proposal visible on P2",
             Duration::from_secs(60),
             |f, ctx| {
@@ -97,7 +97,7 @@ pub fn propose_confirm_execute(label: &str, proposal: Value) -> Scenario<Proposa
                 Ok(())
             })
         })
-        .then_eventually(
+        .then(
             "can_execute=true on P1",
             Duration::from_secs(60),
             |f, ctx| {
@@ -118,7 +118,7 @@ pub fn propose_confirm_execute(label: &str, proposal: Value) -> Scenario<Proposa
                 })
             },
         )
-        .given_eventually(
+        .then(
             "proposal + confirmations visible on P3",
             Duration::from_secs(60),
             |f, ctx| {
@@ -168,7 +168,7 @@ pub fn propose_confirm_execute(label: &str, proposal: Value) -> Scenario<Proposa
                 Ok(())
             })
         })
-        .then_eventually(
+        .then(
             "no pending domain actions",
             Duration::from_secs(60),
             |f, _| {

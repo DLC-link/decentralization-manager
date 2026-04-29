@@ -17,8 +17,6 @@ pub enum StepKind {
     Given,
     When,
     Then,
-    GivenEventually,
-    ThenEventually,
 }
 
 impl StepKind {
@@ -27,19 +25,6 @@ impl StepKind {
             StepKind::Given => "GIVEN",
             StepKind::When => "WHEN ",
             StepKind::Then => "THEN ",
-            StepKind::GivenEventually => "GIVEN_EVENTUALLY",
-            StepKind::ThenEventually => "THEN_EVENTUALLY",
-        }
-    }
-
-    /// For eventually-style steps, the bare kind word ("GIVEN" or "THEN")
-    /// used in log lines and error context, without the `_EVENTUALLY` suffix.
-    /// Panics if called on an immediate kind (Given/When/Then).
-    fn eventually_word(self) -> &'static str {
-        match self {
-            StepKind::GivenEventually => "GIVEN",
-            StepKind::ThenEventually => "THEN",
-            _ => unreachable!("eventually_word called on non-eventually kind: {self:?}"),
         }
     }
 }
@@ -56,8 +41,7 @@ enum Step<Ctx> {
         name: String,
         body: ImmediateBody<Ctx>,
     },
-    Eventually {
-        kind: StepKind,
+    Polled {
         name: String,
         deadline: Duration,
         probe: ProbeBody<Ctx>,
@@ -76,6 +60,20 @@ impl Scenario<()> {
     }
 }
 
+/// A propose / confirm / observe scenario builder.
+///
+/// The DSL distinguishes only three kinds of step, matching how the test
+/// reads against an asynchronous distributed SUT (3 Canton participants):
+///
+/// - **Given** (synchronous fact / setup): runs once. Use for state the test
+///   directly knows or can directly verify before acting.
+/// - **When** (synchronous action): runs once. Submits work to the SUT.
+/// - **Then** (observation): polls a probe until it returns `Some(Ok(()))`,
+///   times out at `deadline`, or fails fast on `Some(Err(_))`. Every "wait
+///   until X is observable on participant N" is a Then — cross-participant
+///   visibility waits are observations, not setup. A Then probe may write
+///   observed state into `ctx` for use by later steps; capture is intrinsic
+///   to "wait until observable, remember what was observed".
 impl<Ctx: Send + 'static> Scenario<Ctx> {
     pub fn with_ctx(name: impl Into<String>, ctx: Ctx) -> Self {
         Self {
@@ -109,52 +107,11 @@ impl<Ctx: Send + 'static> Scenario<Ctx> {
         self
     }
 
-    pub fn then<F>(mut self, name: impl Into<String>, body: F) -> Self
-    where
-        F: for<'a> FnMut(&'a mut Fixture, &'a mut Ctx) -> BoxFut<'a> + Send + 'static,
-    {
-        self.steps.push(Step::Immediate {
-            kind: StepKind::Then,
-            name: name.into(),
-            body: Box::new(body),
-        });
-        self
-    }
-
-    /// Add a polling precondition step. Same shape as `then_eventually` but
-    /// conceptually a Given — the scenario waits for `probe` to return
-    /// `Some(Ok(()))` before any subsequent step runs. Used when a precondition
-    /// is async (e.g. waiting for state to propagate via a background channel).
-    /// In logs the kind word is `GIVEN`; in error context it's `GIVEN_EVENTUALLY`.
-    pub fn given_eventually<F>(
-        mut self,
-        name: impl Into<String>,
-        deadline: Duration,
-        probe: F,
-    ) -> Self
+    pub fn then<F>(mut self, name: impl Into<String>, deadline: Duration, probe: F) -> Self
     where
         F: for<'a> FnMut(&'a mut Fixture, &'a mut Ctx) -> BoxProbe<'a> + Send + 'static,
     {
-        self.steps.push(Step::Eventually {
-            kind: StepKind::GivenEventually,
-            name: name.into(),
-            deadline,
-            probe: Box::new(probe),
-        });
-        self
-    }
-
-    pub fn then_eventually<F>(
-        mut self,
-        name: impl Into<String>,
-        deadline: Duration,
-        probe: F,
-    ) -> Self
-    where
-        F: for<'a> FnMut(&'a mut Fixture, &'a mut Ctx) -> BoxProbe<'a> + Send + 'static,
-    {
-        self.steps.push(Step::Eventually {
-            kind: StepKind::ThenEventually,
+        self.steps.push(Step::Polled {
             name: name.into(),
             deadline,
             probe: Box::new(probe),
@@ -189,36 +146,25 @@ impl<Ctx: Send + 'static> Scenario<Ctx> {
                         }
                     }
                 }
-                Step::Eventually {
-                    kind,
+                Step::Polled {
                     name,
                     deadline,
                     probe,
                 } => {
-                    info!(
-                        step_kind = ?kind,
-                        step_name = %name,
-                        "  {:<5} eventually {}",
-                        kind.eventually_word(),
-                        name
-                    );
+                    let kind = StepKind::Then;
+                    info!(step_kind = ?kind, step_name = %name, "  {} {}", kind.label(), name);
                     let step_start = Instant::now();
                     let outcome: Result<()> = loop {
                         match probe(f, &mut self.ctx).await {
                             Some(Ok(())) => break Ok(()),
                             Some(Err(e)) => {
-                                break Err(e.context(format!(
-                                    "{} eventually \"{}\" failed",
-                                    kind.eventually_word(),
-                                    name
-                                )));
+                                break Err(e.context(format!("THEN \"{name}\" failed")));
                             }
                             None => {
                                 let elapsed = step_start.elapsed();
                                 if elapsed >= *deadline {
                                     break Err(anyhow::anyhow!(
-                                        "{} eventually \"{}\" timed out after {:?}",
-                                        kind.eventually_word(),
+                                        "THEN \"{}\" timed out after {:?}",
                                         name,
                                         *deadline
                                     ));
@@ -234,9 +180,8 @@ impl<Ctx: Send + 'static> Scenario<Ctx> {
                         Err(e) => {
                             error!(
                                 scenario = %self.name,
-                                "Scenario \"{}\" failed at {} \"{}\"",
+                                "Scenario \"{}\" failed at THEN \"{}\"",
                                 self.name,
-                                kind.label(),
                                 name
                             );
                             return Err(e.context(format!("scenario \"{}\" failed", self.name)));
@@ -291,11 +236,11 @@ mod tests {
                     Ok(())
                 })
             })
-            .then("t", move |_f, _c| {
+            .then("t", Duration::from_secs(1), move |_f, _c| {
                 let o = o3.clone();
                 Box::pin(async move {
                     o.lock().unwrap().push(3);
-                    Ok(())
+                    Some(Ok(()))
                 })
             })
             .run(&mut f)
@@ -326,12 +271,12 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn then_eventually_retries_until_some_ok() {
+    async fn then_retries_until_some_ok() {
         let mut f = Fixture::for_test();
         let counter = Arc::new(AtomicU32::new(0));
         let c = counter.clone();
         Scenario::new("retry")
-            .then_eventually(
+            .then(
                 "eventually ready",
                 Duration::from_secs(10),
                 move |_f, _c| {
@@ -349,11 +294,11 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn then_eventually_fail_fasts_on_some_err() {
+    async fn then_fail_fasts_on_some_err() {
         let mut f = Fixture::for_test();
         let started = Instant::now();
         let err = Scenario::new("fast-fail")
-            .then_eventually("explodes", Duration::from_secs(30), |_f, _c| {
+            .then("explodes", Duration::from_secs(30), |_f, _c| {
                 Box::pin(async move { Some(Err(anyhow::anyhow!("kaboom"))) })
             })
             .run(&mut f)
@@ -370,19 +315,16 @@ mod tests {
         assert!(chain.contains("kaboom"), "got: {chain}");
         assert!(chain.contains("scenario \"fast-fail\""), "got: {chain}");
         // Probe-error path must wrap with "failed", not "timed out".
-        assert!(
-            chain.contains("THEN eventually \"explodes\" failed"),
-            "got: {chain}"
-        );
+        assert!(chain.contains("THEN \"explodes\" failed"), "got: {chain}");
         assert!(!chain.contains("timed out"), "got: {chain}");
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn then_eventually_times_out_when_probe_only_returns_none() {
+    async fn then_times_out_when_probe_only_returns_none() {
         let mut f = Fixture::for_test();
         let started = Instant::now();
         let err = Scenario::new("never-ready")
-            .then_eventually("eternal None", Duration::from_millis(100), |_f, _c| {
+            .then("eternal None", Duration::from_millis(100), |_f, _c| {
                 Box::pin(async move { None })
             })
             .run(&mut f)
@@ -424,10 +366,10 @@ mod tests {
                     Ok(())
                 })
             })
-            .then("read", |_f, c| {
+            .then("read", Duration::from_secs(1), |_f, c| {
                 Box::pin(async move {
                     assert_eq!(c.n, 42);
-                    Ok(())
+                    Some(Ok(()))
                 })
             })
             .run(&mut f)
@@ -436,20 +378,18 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn given_eventually_runs_before_when() {
-        // Verifies that `given_eventually` polls until success and that the
-        // step it gates (the When that follows) only runs after the precondition
-        // holds. Also verifies the kind word in the failure error context is
-        // GIVEN, not THEN.
+    async fn polled_then_completes_before_subsequent_step() {
+        // A polled Then that takes multiple probe attempts must finish
+        // (probe returns Some(Ok)) before the next step runs.
         let mut f = Fixture::for_test();
         let probe_count = Arc::new(AtomicU32::new(0));
         let when_count = Arc::new(AtomicU32::new(0));
         let pc = probe_count.clone();
         let wc = when_count.clone();
 
-        Scenario::new("given-eventually")
-            .given_eventually(
-                "precondition holds eventually",
+        Scenario::new("polled-blocks-next")
+            .then(
+                "ready after a few probes",
                 Duration::from_secs(10),
                 move |_f, _c| {
                     let pc = pc.clone();
@@ -459,7 +399,7 @@ mod tests {
                     })
                 },
             )
-            .when("after precondition", move |_f, _c| {
+            .when("after polled then", move |_f, _c| {
                 let wc = wc.clone();
                 Box::pin(async move {
                     wc.fetch_add(1, Ordering::SeqCst);
@@ -474,35 +414,11 @@ mod tests {
         assert_eq!(when_count.load(Ordering::SeqCst), 1);
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn given_eventually_timeout_error_uses_given_word() {
-        let mut f = Fixture::for_test();
-        let err = Scenario::new("never-precondition")
-            .given_eventually("never holds", Duration::from_millis(50), |_f, _c| {
-                Box::pin(async move { None })
-            })
-            .run(&mut f)
-            .await
-            .unwrap_err();
-
-        let chain = format!("{err:#}");
-        // Error context must say GIVEN eventually, not THEN eventually.
-        assert!(
-            chain.contains("GIVEN eventually \"never holds\""),
-            "expected GIVEN in chain, got: {chain}"
-        );
-        assert!(!chain.contains("THEN eventually"), "got: {chain}");
-        assert!(
-            chain.contains("scenario \"never-precondition\" failed"),
-            "got: {chain}"
-        );
-    }
-
     /// Smoke test for the HRTB closure pattern used by all phase tasks:
     /// a closure that captures a non-static `String` AND borrows the
     /// `&mut Fixture` parameter inside the future. If this fails to compile,
-    /// every phase in plan-pt2 will also fail. Locks the type-system shape
-    /// before phase work begins.
+    /// every phase will also fail. Locks the type-system shape before phase
+    /// work begins.
     #[tokio::test(flavor = "multi_thread")]
     async fn closure_can_capture_string_and_borrow_fixture() {
         let mut f = Fixture::for_test();
@@ -520,8 +436,8 @@ mod tests {
                     })
                 }
             })
-            .then_eventually(
-                "captured string still readable in eventually",
+            .then(
+                "captured string still readable in polled then",
                 Duration::from_secs(1),
                 {
                     let label = label.clone();
