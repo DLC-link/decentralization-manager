@@ -1,13 +1,13 @@
 mod common;
 
 use tracing::field::{Field, Visit};
-use tracing_subscriber::EnvFilter;
-use tracing_subscriber::field::RecordFields;
-use tracing_subscriber::fmt::FormatFields;
-use tracing_subscriber::fmt::format::Writer;
+use tracing_subscriber::{
+    EnvFilter,
+    field::RecordFields,
+    fmt::{FormatFields, format::Writer},
+};
 
-use common::Fixture;
-use common::phases;
+use common::{Fixture, phases};
 
 /// Initializes the tracing subscriber with one of two formats:
 ///

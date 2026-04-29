@@ -1,6 +1,8 @@
-use std::future::Future;
-use std::pin::Pin;
-use std::time::{Duration, Instant};
+use std::{
+    future::Future,
+    pin::Pin,
+    time::{Duration, Instant},
+};
 
 use anyhow::Result;
 use tracing::{error, info};
@@ -256,17 +258,20 @@ impl<Ctx: Send + 'static> Scenario<Ctx> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    use std::time::{Duration, Instant};
-
-    use pretty_assertions::assert_eq;
+    use std::{
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicU32, Ordering},
+        },
+        time::{Duration, Instant},
+    };
 
     use super::*;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn steps_execute_in_order() {
         let mut f = Fixture::for_test();
-        let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u32>::new()));
+        let order = Arc::new(Mutex::new(Vec::<u32>::new()));
         let o1 = order.clone();
         let o2 = order.clone();
         let o3 = order.clone();
@@ -323,7 +328,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn then_eventually_retries_until_some_ok() {
         let mut f = Fixture::for_test();
-        let counter = std::sync::Arc::new(AtomicU32::new(0));
+        let counter = Arc::new(AtomicU32::new(0));
         let c = counter.clone();
         Scenario::new("retry")
             .then_eventually(
@@ -437,8 +442,8 @@ mod tests {
         // holds. Also verifies the kind word in the failure error context is
         // GIVEN, not THEN.
         let mut f = Fixture::for_test();
-        let probe_count = std::sync::Arc::new(AtomicU32::new(0));
-        let when_count = std::sync::Arc::new(AtomicU32::new(0));
+        let probe_count = Arc::new(AtomicU32::new(0));
+        let when_count = Arc::new(AtomicU32::new(0));
         let pc = probe_count.clone();
         let wc = when_count.clone();
 

@@ -4,7 +4,7 @@
 # Downloads and starts a Splice localnet, spins up 3 dec-party-manager
 # instances, and runs the full workflow suite against them.
 
-set -e
+set -eu
 
 # ---------------------------------------------------------------------------
 # Flag parsing

@@ -3,8 +3,8 @@
 # Integration test environment — shared variables and utility functions.
 # Sourced by run.sh and all workflow scripts.
 
-# Exit on error
-set -e
+# Exit on error; treat unset variables as failure
+set -eu
 
 # ============================================================================
 # Constants

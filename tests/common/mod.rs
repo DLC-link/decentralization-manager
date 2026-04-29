@@ -1,12 +1,13 @@
 #![allow(dead_code)]
 
+pub mod governance;
 pub mod http;
 pub mod invitations;
 pub mod phases;
 pub mod scenario;
 pub mod types;
 
-use std::sync::Mutex;
+use std::{sync::Mutex, time::Duration};
 
 use anyhow::Context;
 use reqwest::Client;
@@ -66,7 +67,7 @@ impl Fixture {
         };
         let jwt = read_env("MOCK_TOKEN")?;
         let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(Duration::from_secs(30))
             .build()
             .context("build reqwest client")?;
         Ok(Fixture {

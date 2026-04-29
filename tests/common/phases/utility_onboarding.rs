@@ -1,129 +1,18 @@
 use std::time::Duration;
 
 use anyhow::Context;
-use serde_json::{Value, json};
+use serde_json::json;
 use tracing::info;
 
 use crate::common::{
     Fixture,
+    governance::propose_confirm_execute,
     scenario::Scenario,
-    types::{ContractsQueryResponse, GovernanceState, ProviderServicesResponse},
+    types::{ContractsQueryResponse, ProviderServicesResponse},
 };
 
 const UTILITY_APP_PKG: &str = "%23utility-registry-app-v0";
 const UTILITY_REGISTRY_PKG: &str = "%23utility-registry-v0";
-
-#[derive(Default)]
-struct ProposalCycleCtx {
-    proposal_cid: Option<String>,
-    confirmation_cids: Vec<String>,
-}
-
-fn propose_confirm_execute(label: &str, proposal: Value) -> Scenario<ProposalCycleCtx> {
-    let label = label.to_string();
-    Scenario::with_ctx(label.clone(), ProposalCycleCtx::default())
-        .when(format!("P1 proposes {label}"), {
-            let proposal = proposal.clone();
-            move |f, _ctx| {
-                let proposal = proposal.clone();
-                Box::pin(async move {
-                    let req = json!({
-                        "party_id": f.party_id()?,
-                        "rules_contract_id": f.rules_contract_id()?,
-                        "proposal": proposal,
-                    });
-                    let _: Value = f.post_json(f.p1.http, "/governance/propose", &req).await?;
-                    Ok(())
-                })
-            }
-        })
-        .then_eventually(
-            "proposal visible in confirmations",
-            Duration::from_secs(60),
-            |f, ctx| {
-                Box::pin(async move {
-                    let party_id = match f.party_id() {
-                        Ok(p) => p,
-                        Err(e) => return Some(Err(e)),
-                    };
-                    let path = format!("/governance/confirmations?party_id={party_id}");
-                    let s: GovernanceState = f.get_json(f.p1.http, &path).await.ok()?;
-                    if s.domain_actions.len() != 1 {
-                        return None;
-                    }
-                    let action = s.domain_actions.into_iter().next()?;
-                    ctx.proposal_cid = Some(action.proposal_cid);
-                    Some(Ok(()))
-                })
-            },
-        )
-        .when("P2 confirms", |f, ctx| {
-            Box::pin(async move {
-                let proposal_cid = ctx
-                    .proposal_cid
-                    .as_deref()
-                    .context("proposal_cid not set")?
-                    .to_string();
-                let req = json!({
-                    "party_id": f.party_id()?, "rules_contract_id": f.rules_contract_id()?,
-                    "action": {"type": "governance_set_threshold", "new_threshold": 0},
-                    "governance_type": "core_domain", "proposal_cid": proposal_cid,
-                });
-                let _: Value = f.post_json(f.p2.http, "/governance/confirm", &req).await?;
-                Ok(())
-            })
-        })
-        .then_eventually("can_execute=true", Duration::from_secs(60), |f, ctx| {
-            Box::pin(async move {
-                let party_id = match f.party_id() {
-                    Ok(p) => p,
-                    Err(e) => return Some(Err(e)),
-                };
-                let path = format!("/governance/confirmations?party_id={party_id}");
-                let s: GovernanceState = f.get_json(f.p1.http, &path).await.ok()?;
-                let action = s.domain_actions.into_iter().find(|a| a.can_execute)?;
-                ctx.confirmation_cids = action
-                    .confirmations
-                    .iter()
-                    .map(|c| c.contract_id.clone())
-                    .collect();
-                Some(Ok(()))
-            })
-        })
-        .when("P3 executes", |f, ctx| {
-            Box::pin(async move {
-                let proposal_cid = ctx
-                    .proposal_cid
-                    .as_deref()
-                    .context("proposal_cid not set")?
-                    .to_string();
-                let confirmation_cids = ctx.confirmation_cids.clone();
-                let req = json!({
-                    "party_id": f.party_id()?, "rules_contract_id": f.rules_contract_id()?,
-                    "action": {"type": "governance_set_threshold", "new_threshold": 0},
-                    "confirmation_cids": confirmation_cids, "disclosed_contracts": [],
-                    "governance_type": "core_domain", "proposal_cid": proposal_cid,
-                });
-                let _: Value = f.post_json(f.p3.http, "/governance/execute", &req).await?;
-                Ok(())
-            })
-        })
-        .then_eventually(
-            "no pending domain actions",
-            Duration::from_secs(60),
-            |f, _| {
-                Box::pin(async move {
-                    let party_id = match f.party_id() {
-                        Ok(p) => p,
-                        Err(e) => return Some(Err(e)),
-                    };
-                    let path = format!("/governance/confirmations?party_id={party_id}");
-                    let s: GovernanceState = f.get_json(f.p1.http, &path).await.ok()?;
-                    s.domain_actions.is_empty().then_some(Ok(()))
-                })
-            },
-        )
-}
 
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     info!("Phase: utility_onboarding");
@@ -190,7 +79,9 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         Err(e) => return Some(Err(e)),
                     };
                     let path = format!(
-                        "/contracts/query?party_id={party_id}&package_id={UTILITY_APP_PKG}&module_name=Utility.Registry.App.V0.Service.AllocationFactory&entity_name=AllocationFactory"
+                        "/contracts/query?party_id={party_id}&package_id={UTILITY_APP_PKG}\
+                         &module_name=Utility.Registry.App.V0.Service.AllocationFactory\
+                         &entity_name=AllocationFactory"
                     );
                     let r: ContractsQueryResponse = f.get_json(f.p1.http, &path).await.ok()?;
                     let cid = r.contracts.into_iter().next()?.contract_id;
@@ -209,7 +100,9 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         Err(e) => return Some(Err(e)),
                     };
                     let path = format!(
-                        "/contracts/query?party_id={party_id}&package_id={UTILITY_REGISTRY_PKG}&module_name=Utility.Registry.V0.Configuration.Instrument&entity_name=InstrumentConfiguration"
+                        "/contracts/query?party_id={party_id}&package_id={UTILITY_REGISTRY_PKG}\
+                         &module_name=Utility.Registry.V0.Configuration.Instrument\
+                         &entity_name=InstrumentConfiguration"
                     );
                     let r: ContractsQueryResponse = f.get_json(f.p1.http, &path).await.ok()?;
                     let cid = r.contracts.into_iter().next()?.contract_id;
@@ -253,7 +146,9 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     Err(e) => return Some(Err(e)),
                 };
                 let path = format!(
-                    "/contracts/query?party_id={party_id}&package_id={UTILITY_APP_PKG}&module_name=Utility.Registry.App.V0.Model.Mint&entity_name=MintOffer"
+                    "/contracts/query?party_id={party_id}&package_id={UTILITY_APP_PKG}\
+                     &module_name=Utility.Registry.App.V0.Model.Mint\
+                     &entity_name=MintOffer"
                 );
                 let r: ContractsQueryResponse = f.get_json(f.p1.http, &path).await.ok()?;
                 (!r.contracts.is_empty()).then_some(Ok(()))
@@ -285,7 +180,9 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     Err(e) => return Some(Err(e)),
                 };
                 let path = format!(
-                    "/contracts/query?party_id={party_id}&package_id={UTILITY_APP_PKG}&module_name=Utility.Registry.App.V0.Model.Burn&entity_name=BurnOffer"
+                    "/contracts/query?party_id={party_id}&package_id={UTILITY_APP_PKG}\
+                     &module_name=Utility.Registry.App.V0.Model.Burn\
+                     &entity_name=BurnOffer"
                 );
                 let r: ContractsQueryResponse = f.get_json(f.p1.http, &path).await.ok()?;
                 (!r.contracts.is_empty()).then_some(Ok(()))
