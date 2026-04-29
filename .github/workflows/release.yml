@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - v[0-9]*
+
+jobs:
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+    secrets: inherit
+
+  docker:
+    name: Build & Push Docker Images
+    needs: ci
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::903295530547:role/gh-oidc-build-dec-party-manager
+          role-session-name: gha-${{ github.run_id }}
+          aws-region: us-east-1
+
+      - name: Login to Amazon ECR Public
+        id: login-ecr-public
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          registry-type: public
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.BOT_SSH_PRIVATE_KEY }}
+
+      - name: Build and push internal image
+        env:
+          ECR_PUBLIC_REGISTRY: ${{ steps.login-ecr-public.outputs.registry }}
+          REGISTRY_ALIAS: dlc-link
+          ECR_REPOSITORY: canton-decparty-manager
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          echo "VITE_ADMIN_ACCESS=true" > frontend/.env
+          docker build --ssh default \
+            -t $ECR_PUBLIC_REGISTRY/$REGISTRY_ALIAS/$ECR_REPOSITORY:v$VERSION \
+            -t $ECR_PUBLIC_REGISTRY/$REGISTRY_ALIAS/$ECR_REPOSITORY:latest .
+          docker push $ECR_PUBLIC_REGISTRY/$REGISTRY_ALIAS/$ECR_REPOSITORY:v$VERSION
+          docker push $ECR_PUBLIC_REGISTRY/$REGISTRY_ALIAS/$ECR_REPOSITORY:latest
+
+      - name: Build and push demo image
+        env:
+          ECR_PUBLIC_REGISTRY: ${{ steps.login-ecr-public.outputs.registry }}
+          REGISTRY_ALIAS: dlc-link
+          ECR_REPOSITORY: canton-decparty-manager
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          echo "VITE_ADMIN_ACCESS=false" > frontend/.env
+          docker build --ssh default \
+            -t $ECR_PUBLIC_REGISTRY/$REGISTRY_ALIAS/$ECR_REPOSITORY:v$VERSION-demo \
+            -t $ECR_PUBLIC_REGISTRY/$REGISTRY_ALIAS/$ECR_REPOSITORY:demo .
+          docker push $ECR_PUBLIC_REGISTRY/$REGISTRY_ALIAS/$ECR_REPOSITORY:v$VERSION-demo
+          docker push $ECR_PUBLIC_REGISTRY/$REGISTRY_ALIAS/$ECR_REPOSITORY:demo
