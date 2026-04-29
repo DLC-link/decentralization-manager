@@ -42,7 +42,11 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(60),
             |f, ctx| {
                 Box::pin(async move {
-                    let path = format!("/governance/confirmations?party_id={}", f.party_id().ok()?);
+                    let party_id = match f.party_id() {
+                        Ok(p) => p,
+                        Err(e) => return Some(Err(e)),
+                    };
+                    let path = format!("/governance/confirmations?party_id={party_id}");
                     let s: GovernanceState = f.get_json(f.p1.http, &path).await.ok()?;
                     let action = s.domain_actions.into_iter().next()?;
                     ctx.proposal_cid = Some(action.proposal_cid);
@@ -68,7 +72,11 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         })
         .then_eventually("can_execute=true", Duration::from_secs(60), |f, ctx| {
             Box::pin(async move {
-                let path = format!("/governance/confirmations?party_id={}", f.party_id().ok()?);
+                let party_id = match f.party_id() {
+                    Ok(p) => p,
+                    Err(e) => return Some(Err(e)),
+                };
+                let path = format!("/governance/confirmations?party_id={party_id}");
                 let s: GovernanceState = f.get_json(f.p1.http, &path).await.ok()?;
                 let action = s.domain_actions.into_iter().find(|a| a.can_execute)?;
                 ctx.confirmation_cids = action
@@ -102,7 +110,11 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(60),
             |f, _| {
                 Box::pin(async move {
-                    let path = format!("/governance/confirmations?party_id={}", f.party_id().ok()?);
+                    let party_id = match f.party_id() {
+                        Ok(p) => p,
+                        Err(e) => return Some(Err(e)),
+                    };
+                    let path = format!("/governance/confirmations?party_id={party_id}");
                     let s: GovernanceState = f.get_json(f.p1.http, &path).await.ok()?;
                     s.domain_actions.is_empty().then_some(Ok(()))
                 })

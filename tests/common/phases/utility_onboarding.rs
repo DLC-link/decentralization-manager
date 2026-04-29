@@ -42,7 +42,11 @@ fn propose_confirm_execute(label: &str, proposal: Value) -> Scenario<ProposalCyc
             Duration::from_secs(60),
             |f, ctx| {
                 Box::pin(async move {
-                    let path = format!("/governance/confirmations?party_id={}", f.party_id().ok()?);
+                    let party_id = match f.party_id() {
+                        Ok(p) => p,
+                        Err(e) => return Some(Err(e)),
+                    };
+                    let path = format!("/governance/confirmations?party_id={party_id}");
                     let s: GovernanceState = f.get_json(f.p1.http, &path).await.ok()?;
                     if s.domain_actions.len() != 1 {
                         return None;
@@ -71,7 +75,11 @@ fn propose_confirm_execute(label: &str, proposal: Value) -> Scenario<ProposalCyc
         })
         .then_eventually("can_execute=true", Duration::from_secs(60), |f, ctx| {
             Box::pin(async move {
-                let path = format!("/governance/confirmations?party_id={}", f.party_id().ok()?);
+                let party_id = match f.party_id() {
+                    Ok(p) => p,
+                    Err(e) => return Some(Err(e)),
+                };
+                let path = format!("/governance/confirmations?party_id={party_id}");
                 let s: GovernanceState = f.get_json(f.p1.http, &path).await.ok()?;
                 let action = s.domain_actions.into_iter().find(|a| a.can_execute)?;
                 ctx.confirmation_cids = action
@@ -105,7 +113,11 @@ fn propose_confirm_execute(label: &str, proposal: Value) -> Scenario<ProposalCyc
             Duration::from_secs(60),
             |f, _| {
                 Box::pin(async move {
-                    let path = format!("/governance/confirmations?party_id={}", f.party_id().ok()?);
+                    let party_id = match f.party_id() {
+                        Ok(p) => p,
+                        Err(e) => return Some(Err(e)),
+                    };
+                    let path = format!("/governance/confirmations?party_id={party_id}");
                     let s: GovernanceState = f.get_json(f.p1.http, &path).await.ok()?;
                     s.domain_actions.is_empty().then_some(Ok(()))
                 })
@@ -129,7 +141,11 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 Duration::from_secs(30),
                 |f, _| {
                     Box::pin(async move {
-                        let path = format!("/services/provider?party_id={}", f.party_id().ok()?);
+                        let party_id = match f.party_id() {
+                            Ok(p) => p,
+                            Err(e) => return Some(Err(e)),
+                        };
+                        let path = format!("/services/provider?party_id={party_id}");
                         let r: ProviderServicesResponse =
                             f.get_json(f.p1.http, &path).await.ok()?;
                         let cid = r.services.into_iter().next()?.contract_id;
@@ -169,7 +185,10 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(30),
             |f, _| {
                 Box::pin(async move {
-                    let party_id = f.party_id().ok()?.to_string();
+                    let party_id = match f.party_id() {
+                        Ok(p) => p,
+                        Err(e) => return Some(Err(e)),
+                    };
                     let path = format!(
                         "/contracts/query?party_id={party_id}&package_id={UTILITY_APP_PKG}&module_name=Utility.Registry.App.V0.Service.AllocationFactory&entity_name=AllocationFactory"
                     );
@@ -185,7 +204,10 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(30),
             |f, _| {
                 Box::pin(async move {
-                    let party_id = f.party_id().ok()?.to_string();
+                    let party_id = match f.party_id() {
+                        Ok(p) => p,
+                        Err(e) => return Some(Err(e)),
+                    };
                     let path = format!(
                         "/contracts/query?party_id={party_id}&package_id={UTILITY_REGISTRY_PKG}&module_name=Utility.Registry.V0.Configuration.Instrument&entity_name=InstrumentConfiguration"
                     );
@@ -226,7 +248,10 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     Scenario::new("Mint side effects")
         .then_eventually("MintOffer count >= 1", Duration::from_secs(30), |f, _| {
             Box::pin(async move {
-                let party_id = f.party_id().ok()?.to_string();
+                let party_id = match f.party_id() {
+                    Ok(p) => p,
+                    Err(e) => return Some(Err(e)),
+                };
                 let path = format!(
                     "/contracts/query?party_id={party_id}&package_id={UTILITY_APP_PKG}&module_name=Utility.Registry.App.V0.Model.Mint&entity_name=MintOffer"
                 );
@@ -255,7 +280,10 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     Scenario::new("Burn side effects")
         .then_eventually("BurnOffer count >= 1", Duration::from_secs(30), |f, _| {
             Box::pin(async move {
-                let party_id = f.party_id().ok()?.to_string();
+                let party_id = match f.party_id() {
+                    Ok(p) => p,
+                    Err(e) => return Some(Err(e)),
+                };
                 let path = format!(
                     "/contracts/query?party_id={party_id}&package_id={UTILITY_APP_PKG}&module_name=Utility.Registry.App.V0.Model.Burn&entity_name=BurnOffer"
                 );

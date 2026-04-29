@@ -171,7 +171,10 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(30),
             |f, _| {
                 Box::pin(async move {
-                    let party_id = f.party_id().ok()?.to_string();
+                    let party_id = match f.party_id() {
+                        Ok(p) => p.to_string(),
+                        Err(e) => return Some(Err(e)),
+                    };
 
                     // Primary: scan /decentralized-parties for the contract.
                     let r: DecentralizedPartiesResponse =
