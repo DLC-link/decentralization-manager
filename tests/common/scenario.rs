@@ -204,15 +204,25 @@ impl<Ctx: Send + 'static> Scenario<Ctx> {
                     let outcome: Result<()> = loop {
                         match probe(f, &mut self.ctx).await {
                             Some(Ok(())) => break Ok(()),
-                            Some(Err(e)) => break Err(e),
+                            Some(Err(e)) => {
+                                break Err(e.context(format!(
+                                    "{} eventually \"{}\" failed",
+                                    kind.eventually_word(),
+                                    name
+                                )));
+                            }
                             None => {
-                                if step_start.elapsed() >= *deadline {
+                                let elapsed = step_start.elapsed();
+                                if elapsed >= *deadline {
                                     break Err(anyhow::anyhow!(
-                                        "polling timed out after {:?}",
+                                        "{} eventually \"{}\" timed out after {:?}",
+                                        kind.eventually_word(),
+                                        name,
                                         *deadline
                                     ));
                                 }
-                                tokio::time::sleep(POLL_INTERVAL).await;
+                                let remaining = *deadline - elapsed;
+                                tokio::time::sleep(std::cmp::min(POLL_INTERVAL, remaining)).await;
                             }
                         }
                     };
@@ -227,14 +237,7 @@ impl<Ctx: Send + 'static> Scenario<Ctx> {
                                 kind.label(),
                                 name
                             );
-                            return Err(e
-                                .context(format!(
-                                    "{} eventually \"{}\" timed out after {:?}",
-                                    kind.eventually_word(),
-                                    name,
-                                    *deadline
-                                ))
-                                .context(format!("scenario \"{}\" failed", self.name)));
+                            return Err(e.context(format!("scenario \"{}\" failed", self.name)));
                         }
                     }
                 }
@@ -361,6 +364,12 @@ mod tests {
         let chain = format!("{err:#}");
         assert!(chain.contains("kaboom"), "got: {chain}");
         assert!(chain.contains("scenario \"fast-fail\""), "got: {chain}");
+        // Probe-error path must wrap with "failed", not "timed out".
+        assert!(
+            chain.contains("THEN eventually \"explodes\" failed"),
+            "got: {chain}"
+        );
+        assert!(!chain.contains("timed out"), "got: {chain}");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -375,7 +384,17 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(started.elapsed() >= Duration::from_millis(100));
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(100),
+            "elapsed: {elapsed:?}"
+        );
+        // Sleep must respect the remaining deadline, not always wait the full
+        // POLL_INTERVAL. Loose upper bound to avoid flakes on slow CI.
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "deadline overshoot: {elapsed:?}"
+        );
         let chain = format!("{err:#}");
         assert!(
             chain.contains("scenario \"never-ready\" failed"),
