@@ -46,7 +46,7 @@ jobs:
       - name: Setup SSH
         uses: webfactory/ssh-agent@v0.9.0
         with:
-          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+          ssh-private-key: ${{ secrets.BOT_SSH_PRIVATE_KEY }}
 
       - name: Build and push internal image
         env:
