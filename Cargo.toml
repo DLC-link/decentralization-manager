@@ -10,6 +10,14 @@ codegen-units = 1
 lto = true
 panic = "unwind"
 
+[features]
+# Compile-time gate for the permissive `MockValidator` (admin-by-default,
+# accepts any token) and `MockAuthRegistry`. Enabled automatically under
+# `cargo test`. Production builds must NOT enable this: leaving it off
+# means the mock types are not compiled in at all, so the binary cannot
+# select mock auth at runtime.
+test-mode = []
+
 [dependencies]
 actix-cors = { version = "0.7" }
 actix-web = { version = "4" }
@@ -26,6 +34,7 @@ hex = { version = "0.4" }
 http = { version = "0.2" }
 hyper = { version = "0.14", features = ["full"] }
 hyper-noise = { version = "0.0.2" }
+jsonwebtoken = { version = "9.3" }
 mime_guess = { version = "2.0" }
 prost = { version = "0.14.1" }
 prost-types = { version = "0.14.1" }

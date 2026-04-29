@@ -161,10 +161,19 @@ async fn main() -> Result {
         Commands::Serve {
             ref host,
             port,
-            test,
+            ref admin_role,
+            ref allowed_origin,
             ..
         } => {
-            dec_party_manager::server::start_server(host, port, config, test, pool).await?;
+            dec_party_manager::server::start_server(
+                host,
+                port,
+                config,
+                pool,
+                admin_role.clone(),
+                allowed_origin.clone(),
+            )
+            .await?;
         }
     }
 

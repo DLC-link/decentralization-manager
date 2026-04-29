@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use actix_web::{HttpResponse, Responder, get, put, web};
+use actix_web::{HttpRequest, HttpResponse, Responder, get, put, web};
 use tokio::sync::RwLock;
 
 use crate::{
@@ -11,6 +11,7 @@ use crate::{
     participant_id::CantonId,
     server::{
         AppState,
+        middleware::require_admin,
         types::{ErrorResponse, PartyConfigRequest, PartyConfigResponse, SuccessResponse},
     },
 };
@@ -87,6 +88,7 @@ pub async fn get_party_config(
 )]
 #[put("/party-config")]
 pub async fn save_party_config(
+    http_req: HttpRequest,
     data: web::Data<AppState>,
     body: web::Json<PartyConfigRequest>,
 ) -> impl Responder {
@@ -100,6 +102,14 @@ pub async fn save_party_config(
             .find(|p| p.dec_party_id == req.dec_party_id)
             .map(|p| p.keycloak.clone())
     };
+
+    // Bootstrap exemption: the middleware lets first-run PUT /party-config
+    // through unauthenticated. Once any party credential exists, require the
+    // caller to carry the admin role.
+    let is_fresh = data.party_credentials.read().await.is_empty();
+    if !is_fresh && let Err(resp) = require_admin(&http_req, &data.admin_role) {
+        return resp;
+    }
 
     let keycloak = KeycloakConfig {
         url: req.keycloak_url,

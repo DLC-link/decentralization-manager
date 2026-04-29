@@ -32,6 +32,7 @@ import { OnboardingDialog } from "./components/OnboardingDialog";
 import { InvitationModal } from "./components/InvitationModal";
 import { useSnackbar } from "./contexts";
 import { API_BASE, ADMIN_ACCESS, OPERATOR_API_URLS } from "./constants";
+import { authenticatedFetch } from "./api";
 import type {
   DecentralizedParty,
   DecentralizedPartiesResponse,
@@ -199,7 +200,7 @@ const App = () => {
       const params = partyFilter
         ? `?prefix=${encodeURIComponent(partyFilter)}`
         : "";
-      const res = await fetch(`${API_BASE}/decentralized-parties${params}`);
+      const res = await authenticatedFetch(`${API_BASE}/decentralized-parties${params}`);
       if (res.ok) {
         const data: DecentralizedPartiesResponse = await res.json();
         setParties(data.parties);
@@ -217,7 +218,7 @@ const App = () => {
 
   const savePeers = useCallback(
     async (peers: Peer[]) => {
-      const res = await fetch(`${API_BASE}/network-config`, {
+      const res = await authenticatedFetch(`${API_BASE}/network-config`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(peers),
@@ -227,7 +228,7 @@ const App = () => {
         throw new Error(data.error || "Failed to save peers");
       }
       // Refresh the network config
-      const networkRes = await fetch(`${API_BASE}/network-config`);
+      const networkRes = await authenticatedFetch(`${API_BASE}/network-config`);
       if (networkRes.ok) {
         const networkData = await networkRes.json();
         setNetworkConfig(networkData);
@@ -239,7 +240,7 @@ const App = () => {
 
   const refreshAuthStatus = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/auth/status`);
+      const res = await authenticatedFetch(`${API_BASE}/auth/status`);
       if (res.ok) {
         const data: AuthStatusResponse = await res.json();
         setAuthStatuses(data.parties);
@@ -253,7 +254,7 @@ const App = () => {
     const fetchData = async () => {
       try {
         // Fetch node config first to check test_mode early
-        const nodeRes = await fetch(`${API_BASE}/node-config`);
+        const nodeRes = await authenticatedFetch(`${API_BASE}/node-config`);
         if (!nodeRes.ok) throw new Error("Failed to fetch node config");
         const nodeData = await nodeRes.json();
         setNodeConfig(nodeData);
@@ -270,8 +271,8 @@ const App = () => {
         const { tab: hashTab, partySlug: hashSlug } = INITIAL_ROUTE;
 
         const fetches: Promise<Response>[] = [
-          fetch(`${API_BASE}/auth/status`),
-          fetch(`${API_BASE}/packages/vetted`),
+          authenticatedFetch(`${API_BASE}/auth/status`),
+          authenticatedFetch(`${API_BASE}/packages/vetted`),
         ];
 
         // Only fetch parties eagerly when the parties tab is active
@@ -280,7 +281,7 @@ const App = () => {
             ? `?prefix=${encodeURIComponent(hashSlug)}`
             : "";
           fetches.push(
-            fetch(`${API_BASE}/decentralized-parties${partiesParams}`),
+            authenticatedFetch(`${API_BASE}/decentralized-parties${partiesParams}`),
           );
         }
 
@@ -331,8 +332,8 @@ const App = () => {
     const fetchConfigData = async () => {
       try {
         const [networkRes, keyStatusRes] = await Promise.all([
-          fetch(`${API_BASE}/network-config`),
-          fetch(`${API_BASE}/keys/status`),
+          authenticatedFetch(`${API_BASE}/network-config`),
+          authenticatedFetch(`${API_BASE}/keys/status`),
         ]);
         if (networkRes.ok) setNetworkConfig(await networkRes.json());
         if (keyStatusRes.ok) setKeyStatus(await keyStatusRes.json());
@@ -347,7 +348,7 @@ const App = () => {
   useEffect(() => {
     const fetchStatuses = async () => {
       try {
-        const res = await fetch(`${API_BASE}/participants-status`);
+        const res = await authenticatedFetch(`${API_BASE}/participants-status`);
         if (res.ok) {
           const data = await res.json();
           setParticipantStatuses(data.statuses);
@@ -367,7 +368,7 @@ const App = () => {
   useEffect(() => {
     const fetchInvitations = async () => {
       try {
-        const res = await fetch(`${API_BASE}/invitations`);
+        const res = await authenticatedFetch(`${API_BASE}/invitations`);
         if (res.ok) {
           const data = await res.json();
           setPendingInvitations(data.invitations);

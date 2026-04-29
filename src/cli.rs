@@ -30,10 +30,6 @@ pub enum Commands {
         #[arg(long, default_value = "8080")]
         port: u16,
 
-        /// Enable test mode with mock authentication (uses static JWT token)
-        #[arg(long, default_value = "false")]
-        test: bool,
-
         /// Path to SQLite database file (defaults to {dir}/data/decpm.db)
         #[arg(long)]
         db: Option<PathBuf>,
@@ -92,6 +88,17 @@ pub enum Commands {
         /// Keycloak client ID for frontend auth
         #[arg(long, env = "DECPM_KEYCLOAK_CLIENT_ID")]
         keycloak_client_id: Option<String>,
+
+        /// Role name that grants admin access to sensitive endpoints
+        /// (PUT /party-config, POST /kick). Defaults to "dpm-admin".
+        #[arg(long, env = "DECPM_ADMIN_ROLE", default_value = "dpm-admin")]
+        admin_role: String,
+
+        /// Origin permitted by CORS (e.g. `https://dpm.example.com`).
+        /// Defaults to same-origin only — set this when the SPA is served
+        /// from a different host than the API (reverse proxy, dev server).
+        #[arg(long, env = "DECPM_ALLOWED_ORIGIN")]
+        allowed_origin: Option<String>,
 
         // Timeouts
         /// Noise handshake timeout in seconds

@@ -22,6 +22,7 @@ import ExpandLessIcon from "@mui/icons-material/ExpandLess";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import { JSONTree } from "react-json-tree";
 import { API_BASE } from "../constants";
+import { authenticatedFetch } from "../api";
 import { zebraRow } from "../styles";
 import type { ChainAuditEntry, ChainAuditResponse } from "../types";
 
@@ -157,7 +158,7 @@ export const GovernanceAuditTrail = ({ partyId }: GovernanceAuditTrailProps) => 
         });
         if (refresh) params.set("refresh", "true");
 
-        const res = await fetch(
+        const res = await authenticatedFetch(
           `${API_BASE}/governance/chain-audit?${params}`,
         );
         if (res.ok) {
