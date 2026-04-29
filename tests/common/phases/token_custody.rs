@@ -54,6 +54,32 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 })
             },
         )
+        .given_eventually(
+            "proposal visible on P2",
+            Duration::from_secs(60),
+            |f, ctx| {
+                Box::pin(async move {
+                    let cid = match ctx.proposal_cid.as_ref() {
+                        Some(c) => c.clone(),
+                        None => {
+                            return Some(Err(anyhow::anyhow!(
+                                "proposal_cid not set by previous step"
+                            )));
+                        }
+                    };
+                    let party_id = match f.party_id() {
+                        Ok(p) => p,
+                        Err(e) => return Some(Err(e)),
+                    };
+                    let path = format!("/governance/confirmations?party_id={party_id}");
+                    let s: GovernanceState = f.get_json(f.p2.http, &path).await.ok()?;
+                    s.domain_actions
+                        .iter()
+                        .any(|a| a.proposal_cid == cid)
+                        .then_some(Ok(()))
+                })
+            },
+        )
         .when("P2 confirms", |f, ctx| {
             Box::pin(async move {
                 let proposal_cid = ctx
@@ -87,6 +113,38 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 Some(Ok(()))
             })
         })
+        .given_eventually(
+            "proposal + confirmations visible on P3",
+            Duration::from_secs(60),
+            |f, ctx| {
+                Box::pin(async move {
+                    let cid = match ctx.proposal_cid.as_ref() {
+                        Some(c) => c.clone(),
+                        None => {
+                            return Some(Err(anyhow::anyhow!(
+                                "proposal_cid not set by previous step"
+                            )));
+                        }
+                    };
+                    let party_id = match f.party_id() {
+                        Ok(p) => p,
+                        Err(e) => return Some(Err(e)),
+                    };
+                    let path = format!("/governance/confirmations?party_id={party_id}");
+                    let s: GovernanceState = f.get_json(f.p3.http, &path).await.ok()?;
+                    let action = s
+                        .domain_actions
+                        .into_iter()
+                        .find(|a| a.proposal_cid == cid && a.can_execute)?;
+                    ctx.confirmation_cids = action
+                        .confirmations
+                        .iter()
+                        .map(|c| c.contract_id.clone())
+                        .collect();
+                    Some(Ok(()))
+                })
+            },
+        )
         .when("P3 executes", |f, ctx| {
             Box::pin(async move {
                 let proposal_cid = ctx
