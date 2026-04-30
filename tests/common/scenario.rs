@@ -1,3 +1,9 @@
+//! Given/When/Then DSL for cross-participant integration tests.
+//!
+//! See [`Scenario`] for the runner and the three step kinds (single-shot
+//! Given/When, polled Then) and how they map onto an asynchronous
+//! distributed SUT.
+
 use std::{
     future::Future,
     pin::Pin,
