@@ -6,8 +6,8 @@ use tracing::info;
 
 use crate::common::{
     Fixture,
-    http::poll_workflow_status,
-    invitations::accept_invitation,
+    http::probe_workflow_status,
+    invitations::{InvitationIds, post_accept_invitation, probe_pending_invitation},
     scenario::Scenario,
     types::{AllocatePartyResponse, DecentralizedPartiesResponse, GovernanceStateLookup},
 };
@@ -73,7 +73,7 @@ async fn update_party_config(
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     info!("Phase: deploy_gov_core");
 
-    Scenario::new("deploy gov core")
+    Scenario::with_ctx("deploy gov core", InvitationIds::default())
         .given("party + DARs present", |f, _| {
             Box::pin(async move {
                 f.party_id()?;
@@ -81,7 +81,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             })
         })
         .when(
-            "member parties allocated, rights granted, configs PUT, contracts deployed",
+            "member parties allocated, rights granted, configs PUT, contracts posted",
             |f, _| {
                 Box::pin(async move {
                     let party_id = f.party_id()?.to_string();
@@ -152,17 +152,61 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         .await
                         .context("POST /contracts")?;
 
-                    let p2_accept = accept_invitation(&*f, f.p2.http, "participant-2", "Contracts");
-                    let p3_accept = accept_invitation(&*f, f.p3.http, "participant-3", "Contracts");
-                    let (r2, r3) = tokio::join!(p2_accept, p3_accept);
-                    r2.context("accept Contracts on P2")?;
-                    r3.context("accept Contracts on P3")?;
-                    poll_workflow_status(&*f, f.p1.http, "/contracts/status", "contracts").await?;
-
                     f.p1_member_party = Some(p1m);
                     f.p2_member_party = Some(p2m);
                     f.p3_member_party = Some(p3m);
                     Ok(())
+                })
+            },
+        )
+        .then(
+            "Contracts invitation visible on P2",
+            Duration::from_secs(60),
+            |f, ctx| {
+                Box::pin(async move {
+                    let id = probe_pending_invitation(f, f.p2.http, "Contracts").await?;
+                    ctx.p2 = Some(id);
+                    Some(Ok(()))
+                })
+            },
+        )
+        .then(
+            "Contracts invitation visible on P3",
+            Duration::from_secs(60),
+            |f, ctx| {
+                Box::pin(async move {
+                    let id = probe_pending_invitation(f, f.p3.http, "Contracts").await?;
+                    ctx.p3 = Some(id);
+                    Some(Ok(()))
+                })
+            },
+        )
+        .when("P2 + P3 accept Contracts invitations", |f, ctx| {
+            Box::pin(async move {
+                let p2_id = ctx
+                    .p2
+                    .as_deref()
+                    .context("P2 invitation id not set")?
+                    .to_string();
+                let p3_id = ctx
+                    .p3
+                    .as_deref()
+                    .context("P3 invitation id not set")?
+                    .to_string();
+                let p2_accept = post_accept_invitation(f, f.p2.http, &p2_id);
+                let p3_accept = post_accept_invitation(f, f.p3.http, &p3_id);
+                let (r2, r3) = tokio::join!(p2_accept, p3_accept);
+                r2.context("accept Contracts on P2")?;
+                r3.context("accept Contracts on P3")?;
+                Ok(())
+            })
+        })
+        .then(
+            "contracts workflow reaches completed",
+            Duration::from_secs(240),
+            |f, _| {
+                Box::pin(async move {
+                    probe_workflow_status(&*f, f.p1.http, "/contracts/status", "contracts").await
                 })
             },
         )

@@ -5,14 +5,17 @@ use serde_json::{Value, json};
 use tracing::info;
 
 use crate::common::{
-    Fixture, http::poll_workflow_status, invitations::accept_invitation, scenario::Scenario,
+    Fixture,
+    http::probe_workflow_status,
+    invitations::{InvitationIds, post_accept_invitation, probe_pending_invitation},
+    scenario::Scenario,
     types::DecentralizedPartiesResponse,
 };
 
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     info!("Phase: kick");
 
-    Scenario::new("kick participant-3")
+    Scenario::with_ctx("kick participant-3", InvitationIds::default())
         .given("party + member parties present", |f, _| {
             Box::pin(async move {
                 f.party_id()?;
@@ -42,7 +45,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 })
             },
         )
-        .when("P1 starts kick + P2 accepts invitation", |f, _| {
+        .when("P1 posts /kick", |f, _| {
             Box::pin(async move {
                 let party_id = f.party_id()?.to_string();
                 let prefix = f.party_prefix()?.to_string();
@@ -72,12 +75,41 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     .post_json(f.p1.http, "/kick", &req)
                     .await
                     .context("POST /kick")?;
-                accept_invitation(&*f, f.p2.http, "participant-2", "Kick")
-                    .await
-                    .context("accept Kick on P2")?;
-                poll_workflow_status(&*f, f.p1.http, "/kick/status", "kick").await
+                Ok(())
             })
         })
+        .then(
+            "Kick invitation visible on P2",
+            Duration::from_secs(60),
+            |f, ctx| {
+                Box::pin(async move {
+                    let id = probe_pending_invitation(f, f.p2.http, "Kick").await?;
+                    ctx.p2 = Some(id);
+                    Some(Ok(()))
+                })
+            },
+        )
+        .when("P2 accepts Kick invitation", |f, ctx| {
+            Box::pin(async move {
+                let id = ctx
+                    .p2
+                    .as_deref()
+                    .context("P2 invitation id not set")?
+                    .to_string();
+                post_accept_invitation(f, f.p2.http, &id)
+                    .await
+                    .context("accept Kick on P2")
+            })
+        })
+        .then(
+            "kick workflow reaches completed",
+            Duration::from_secs(240),
+            |f, _| {
+                Box::pin(async move {
+                    probe_workflow_status(&*f, f.p1.http, "/kick/status", "kick").await
+                })
+            },
+        )
         .run(f)
         .await
 }

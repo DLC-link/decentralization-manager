@@ -1,5 +1,3 @@
-use std::time::{Duration, Instant};
-
 use anyhow::Context;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -138,108 +136,19 @@ struct WorkflowStatusResponse {
     error: Option<String>,
 }
 
-pub async fn poll_until<T, F, Fut>(
-    deadline: Duration,
-    interval: Duration,
-    label: &str,
-    mut probe: F,
-) -> anyhow::Result<T>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Option<T>>,
-{
-    let start = Instant::now();
-    loop {
-        if let Some(v) = probe().await {
-            return Ok(v);
-        }
-        if start.elapsed() >= deadline {
-            anyhow::bail!("polling timed out after {deadline:?}: {label}");
-        }
-        tokio::time::sleep(interval).await;
-    }
-}
-
-pub async fn poll_workflow_status(
+pub async fn probe_workflow_status(
     f: &Fixture,
     port: u16,
     path: &str,
     label: &str,
-) -> anyhow::Result<()> {
-    let label_owned = label.to_string();
-    let result: anyhow::Result<()> = poll_until(
-        Duration::from_secs(240),
-        Duration::from_secs(2),
-        &format!("{label} workflow completion"),
-        || {
-            let label = label_owned.clone();
-            async move {
-                let s: WorkflowStatusResponse = f.get_json(port, path).await.ok()?;
-                match s.status.as_deref() {
-                    Some("completed") | Some("Completed") => Some(Ok(())),
-                    Some("failed") | Some("Failed") => Some(Err(anyhow::anyhow!(
-                        "{label} failed: {}",
-                        s.error.unwrap_or_else(|| "unknown".into())
-                    ))),
-                    _ => None,
-                }
-            }
-        },
-    )
-    .await?;
-    result
-}
-
-#[cfg(test)]
-mod poll_tests {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    use std::time::{Duration, Instant};
-
-    use super::*;
-
-    #[tokio::test]
-    async fn poll_until_returns_immediately_on_success() {
-        let v: u32 = poll_until(
-            Duration::from_secs(1),
-            Duration::from_millis(10),
-            "always-some",
-            || async { Some(42u32) },
-        )
-        .await
-        .unwrap();
-        assert_eq!(v, 42);
-    }
-
-    #[tokio::test]
-    async fn poll_until_retries_until_success() {
-        let counter = AtomicU32::new(0);
-        let v: u32 = poll_until(
-            Duration::from_secs(2),
-            Duration::from_millis(10),
-            "succeed-on-third",
-            || async {
-                let n = counter.fetch_add(1, Ordering::SeqCst) + 1;
-                (n >= 3).then_some(n)
-            },
-        )
-        .await
-        .unwrap();
-        assert_eq!(v, 3);
-    }
-
-    #[tokio::test]
-    async fn poll_until_times_out_with_label() {
-        let started = Instant::now();
-        let err = poll_until::<u32, _, _>(
-            Duration::from_millis(80),
-            Duration::from_millis(20),
-            "never-ready",
-            || async { None },
-        )
-        .await
-        .unwrap_err();
-        assert!(started.elapsed() >= Duration::from_millis(80));
-        let msg = format!("{err}");
-        assert!(msg.contains("never-ready") && msg.contains("timed out"));
+) -> Option<anyhow::Result<()>> {
+    let s: WorkflowStatusResponse = f.get_json(port, path).await.ok()?;
+    match s.status.as_deref() {
+        Some("completed") | Some("Completed") => Some(Ok(())),
+        Some("failed") | Some("Failed") => Some(Err(anyhow::anyhow!(
+            "{label} failed: {}",
+            s.error.unwrap_or_else(|| "unknown".into())
+        ))),
+        _ => None,
     }
 }
