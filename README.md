@@ -359,6 +359,20 @@ The suite is organised into two layers:
   ProvisionProviderService, SetupUtility, Mint, Burn — plus four
   side-effect assertion scenarios), for **14 scenarios total**.
 
+A scenario may omit `Given` and/or `When` and contain only `Then`s.
+That happens when the action has already been taken by an earlier
+scenario in the same phase, and this scenario only needs to observe its
+after-state — the four "side-effect assertion scenarios" in
+`utility_onboarding` (`ProviderService visible`, `SetupUtility side
+effects`, `Mint side effects`, `Burn side effects`) follow exactly this
+pattern. The runner does **not** carry steps between scenarios; cross-
+scenario state flows through the **`Fixture`**, which `Scenario::run`
+borrows as `&mut Fixture`. An action-side scenario mutates the SUT and
+records captured ids on the fixture (`f.provider_service_cid`,
+`f.allocation_factory_cid`, etc.); a follow-up observation-side
+scenario reads them back via `f.get_json(...)` and stores anything new
+it captures on the same fixture for later scenarios to use.
+
 Sample of a passing run:
 
 ```
