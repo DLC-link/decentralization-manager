@@ -119,6 +119,10 @@ export const GovernanceAuditTrail = ({ partyId }: GovernanceAuditTrailProps) => 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [entries, setEntries] = useState<ChainAuditEntry[]>([]);
+  const sortedEntries = useMemo(
+    () => [...entries].sort((a, b) => b.timestamp - a.timestamp),
+    [entries],
+  );
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
   const [cacheLoaded, setCacheLoaded] = useState(false);
   const [canScrollUp, setCanScrollUp] = useState(false);
@@ -278,7 +282,7 @@ export const GovernanceAuditTrail = ({ partyId }: GovernanceAuditTrailProps) => 
               </TableRow>
             </TableHead>
             <TableBody>
-              {entries.map((entry, idx) => {
+              {sortedEntries.map((entry, idx) => {
                 const rowKey = `${entry.offset}-${entry.contract_id}`;
                 const isExpanded = expandedRow === rowKey;
                 return (
