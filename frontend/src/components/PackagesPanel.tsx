@@ -10,8 +10,11 @@ import {
   TableCell,
   Button,
   CircularProgress,
+  TextField,
   Tooltip,
+  InputAdornment,
 } from "@mui/material";
+import SearchIcon from "@mui/icons-material/Search";
 import CloudUploadIcon from "@mui/icons-material/CloudUpload";
 import CompareArrowsIcon from "@mui/icons-material/CompareArrows";
 import SignalWifiOffIcon from "@mui/icons-material/SignalWifiOff";
@@ -53,6 +56,7 @@ export const PackagesPanel = ({
     null,
   );
   const [comparing, setComparing] = useState(false);
+  const [search, setSearch] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const sorted = useMemo(
@@ -68,6 +72,25 @@ export const PackagesPanel = ({
       }),
     [packages],
   );
+
+  const filteredSorted = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return sorted;
+    return sorted.filter(
+      (p) =>
+        (p.package_name || "").toLowerCase().includes(q) ||
+        (p.package_id || "").toLowerCase().includes(q),
+    );
+  }, [sorted, search]);
+
+  const filteredComparison = useMemo(() => {
+    if (!comparison) return null;
+    const q = search.trim().toLowerCase();
+    if (!q) return comparison.local_packages;
+    return comparison.local_packages.filter((p) =>
+      (p.name || "").toLowerCase().includes(q),
+    );
+  }, [comparison, search]);
 
   const updateScrollShadows = useCallback(() => {
     const el = scrollRef.current;
@@ -142,10 +165,28 @@ export const PackagesPanel = ({
 
   return (
     <Box sx={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
-      <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 2, flexShrink: 0, px: 3, pt: 2 }}>
-        <Box>
-          <Typography variant="body2" color="text.secondary">
-            {`${packages.length} packages vetted on this participant`}
+      <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 2, mb: 2, flexShrink: 0, px: 3, pt: 2 }}>
+        <Box sx={{ display: "flex", alignItems: "center", gap: 2, flex: 1, minWidth: 0 }}>
+          <TextField
+            size="small"
+            placeholder="Search packages"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            slotProps={{
+              input: {
+                startAdornment: (
+                  <InputAdornment position="start">
+                    <SearchIcon fontSize="small" />
+                  </InputAdornment>
+                ),
+              },
+            }}
+            sx={{ width: 280 }}
+          />
+          <Typography variant="body2" color="text.secondary" noWrap>
+            {search.trim()
+              ? `${comparison ? (filteredComparison?.length ?? 0) : filteredSorted.length} of ${comparison ? comparison.local_packages.length : packages.length} packages`
+              : `${packages.length} packages vetted on this participant`}
           </Typography>
         </Box>
         <Box sx={{ display: "flex", gap: 1 }}>
@@ -276,7 +317,7 @@ export const PackagesPanel = ({
                   </TableRow>
                 </TableHead>
                 <TableBody>
-                  {comparison.local_packages
+                  {(filteredComparison ?? [])
                     .slice()
                     .sort((a, b) => a.name.localeCompare(b.name))
                     .map((pkg, idx) => (
@@ -343,7 +384,7 @@ export const PackagesPanel = ({
                   </TableRow>
                 </TableHead>
                 <TableBody>
-                  {sorted.map((p, idx) => (
+                  {filteredSorted.map((p, idx) => (
                     <TableRow key={p.package_id} sx={zebraRow(idx)}>
                       <TableCell sx={{ py: 1 }}>
                         {p.package_name || "-"}
