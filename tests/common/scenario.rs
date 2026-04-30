@@ -63,17 +63,22 @@ impl Scenario<()> {
 /// A propose / confirm / observe scenario builder.
 ///
 /// The DSL distinguishes only three kinds of step, matching how the test
-/// reads against an asynchronous distributed SUT (3 Canton participants):
+/// reads against an asynchronous distributed SUT (3 Canton participants).
+/// All step bodies are `async` (they return a `BoxFut`); the kinds differ
+/// in *how the runner executes them*, not in whether they can do I/O:
 ///
-/// - **Given** (synchronous fact / setup): runs once. Use for state the test
-///   directly knows or can directly verify before acting.
-/// - **When** (synchronous action): runs once. Submits work to the SUT.
-/// - **Then** (observation): polls a probe until it returns `Some(Ok(()))`,
-///   times out at `deadline`, or fails fast on `Some(Err(_))`. Every "wait
-///   until X is observable on participant N" is a Then — cross-participant
-///   visibility waits are observations, not setup. A Then probe may write
-///   observed state into `ctx` for use by later steps; capture is intrinsic
-///   to "wait until observable, remember what was observed".
+/// - **Given** (single-shot fact / setup): the body is awaited exactly once.
+///   Use for state the test directly knows or can directly verify before
+///   acting.
+/// - **When** (single-shot action): the body is awaited exactly once.
+///   Submits work to the SUT.
+/// - **Then** (polled observation): the probe is awaited in a loop until it
+///   returns `Some(Ok(()))`, the `deadline` elapses, or it fails fast on
+///   `Some(Err(_))`. Every "wait until X is observable on participant N"
+///   is a Then — cross-participant visibility waits are observations, not
+///   setup. A Then probe may write observed state into `ctx` for use by
+///   later steps; capture is intrinsic to "wait until observable,
+///   remember what was observed".
 impl<Ctx: Send + 'static> Scenario<Ctx> {
     pub fn with_ctx(name: impl Into<String>, ctx: Ctx) -> Self {
         Self {
