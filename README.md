@@ -305,8 +305,8 @@ cargo build
 cargo build --release
 
 # Run unit tests — includes the integration-test binary's helpers
-# (Fixture, poll_until, Scenario DSL); the end-to-end test itself is
-# gated by `#[ignore]` and is invoked separately via run.sh below.
+# (Fixture, Scenario DSL); the end-to-end test itself is gated by
+# `#[ignore]` and is invoked separately via run.sh below.
 cargo test
 
 # Run linter
@@ -371,15 +371,29 @@ INFO Phase: create_dec_party
 INFO Using prefix: test-network-1
 INFO   Scenario "create decentralized party test-network-1"
 INFO     GIVEN no party at this prefix yet
-INFO     WHEN  P1 starts onboarding and P2/P3 accept invitations
+INFO     WHEN  P1 posts /onboarding
+INFO     THEN  Onboarding invitation visible on P2
+INFO       ✓ (took 2.1s)
+INFO     THEN  Onboarding invitation visible on P3
+INFO       ✓ (took 0.0s)
+INFO     WHEN  P2 + P3 accept Onboarding invitations
+INFO     THEN  onboarding workflow reaches completed
+INFO       ✓ (took 8.4s)
 INFO     THEN  party visible in /decentralized-parties
-INFO       ✓ (took 18.4s)
+INFO       ✓ (took 1.9s)
 INFO   Scenario "create decentralized party test-network-1" complete (18.7s)
 
 INFO Phase: distribute_dars
 INFO   Scenario "distribute DARs"
 INFO     GIVEN 3 DAR files on disk
-INFO     WHEN  P1 uploads + distributes DARs, P2/P3 accept, status reaches completed
+INFO     WHEN  P1 uploads and distributes DARs
+INFO     THEN  Dars invitation visible on P2
+INFO       ✓ (took 1.4s)
+INFO     THEN  Dars invitation visible on P3
+INFO       ✓ (took 0.0s)
+INFO     WHEN  P2 + P3 accept Dars invitations
+INFO     THEN  dars/distribute workflow reaches completed
+INFO       ✓ (took 5.6s)
 INFO   Scenario "distribute DARs" complete (11.4s)
 
 ... (14 scenarios total) ...
@@ -415,9 +429,8 @@ governance_workflows=info
 ```
 
 Surfaces all dec-party-manager INFO output (peer connections, Noise
-handshakes, workflow internals) plus the test crate's full helper
-chatter (`Waiting for invitation on …`, `Accepting invitation …`).
-The cargo test runner is also INFO, so individual test cases narrate.
+handshakes, workflow internals). The cargo test runner is also INFO,
+so individual test cases narrate.
 
 #### Prerequisites
 
