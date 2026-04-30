@@ -106,6 +106,7 @@ export const PartyDetail = ({
   const [authExpanded, setAuthExpanded] = useState(true);
   const [governanceExpanded, setGovernanceExpanded] = useState(true);
   const [governanceTab, setGovernanceTab] = useState(0);
+  const [governanceRefreshNonce, setGovernanceRefreshNonce] = useState(0);
   const [canScrollUp, setCanScrollUp] = useState(false);
   const [canScrollDown, setCanScrollDown] = useState(false);
   const contractsScrollRef = useRef<HTMLDivElement>(null);
@@ -426,12 +427,18 @@ export const PartyDetail = ({
                 defaultOperatorParty={operatorParty}
                 network={network}
                 governanceType={governanceType}
+                onAfterAction={() =>
+                  setGovernanceRefreshNonce((n) => n + 1)
+                }
               />
             </Box>
           )}
           {governanceTab === 1 && (
             <Box sx={{ pl: 3 }}>
-              <GovernanceAuditTrail partyId={party.party_id} />
+              <GovernanceAuditTrail
+                partyId={party.party_id}
+                refreshNonce={governanceRefreshNonce}
+              />
             </Box>
           )}
         </CollapsibleSection>

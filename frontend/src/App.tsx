@@ -101,6 +101,7 @@ const App = () => {
     INITIAL_ROUTE.partySlug ?? "",
   );
   const [refreshingParties, setRefreshingParties] = useState(false);
+  const [packagesRefreshNonce, setPackagesRefreshNonce] = useState(0);
   const [operatorParty, setOperatorParty] = useState("");
   const [selectedPartyId, setSelectedPartyId] = useState<string | null>(null);
   const [showSearchBar, setShowSearchBar] = useState(true);
@@ -186,33 +187,37 @@ const App = () => {
       .catch(() => {});
   }, [nodeConfig]);
 
-  const refreshParties = useCallback(async () => {
-    setRefreshingParties(true);
-    // Update hash to reflect the current filter
-    window.history.replaceState(
-      null,
-      "",
-      buildHash(0, partyFilter || null),
-    );
-    try {
-      const params = partyFilter
-        ? `?prefix=${encodeURIComponent(partyFilter)}`
-        : "";
-      const res = await authenticatedFetch(`${API_BASE}/decentralized-parties${params}`);
-      if (res.ok) {
-        const data: DecentralizedPartiesResponse = await res.json();
-        setParties(data.parties);
-      } else {
-        showSnackbar("Failed to refresh parties");
-      }
-    } catch (err) {
-      showSnackbar(
-        err instanceof Error ? err.message : "Failed to refresh parties",
+  const refreshParties = useCallback(
+    async (force = false) => {
+      setRefreshingParties(true);
+      // Update hash to reflect the current filter
+      window.history.replaceState(
+        null,
+        "",
+        buildHash(0, partyFilter || null),
       );
-    } finally {
-      setRefreshingParties(false);
-    }
-  }, [showSnackbar, partyFilter]);
+      try {
+        const qs = new URLSearchParams();
+        if (partyFilter) qs.set("prefix", partyFilter);
+        if (force) qs.set("refresh", "true");
+        const params = qs.toString() ? `?${qs.toString()}` : "";
+        const res = await authenticatedFetch(`${API_BASE}/decentralized-parties${params}`);
+        if (res.ok) {
+          const data: DecentralizedPartiesResponse = await res.json();
+          setParties(data.parties);
+        } else {
+          showSnackbar("Failed to refresh parties");
+        }
+      } catch (err) {
+        showSnackbar(
+          err instanceof Error ? err.message : "Failed to refresh parties",
+        );
+      } finally {
+        setRefreshingParties(false);
+      }
+    },
+    [showSnackbar, partyFilter],
+  );
 
   const savePeers = useCallback(
     async (peers: Peer[]) => {
@@ -487,7 +492,7 @@ const App = () => {
               }}
             />
             <IconButton
-              onClick={refreshParties}
+              onClick={() => refreshParties()}
               disabled={refreshingParties}
               color="primary"
               sx={{
@@ -593,21 +598,27 @@ const App = () => {
             <DarsDialog
               open={darsDialogOpen}
               onClose={() => setDarsDialogOpen(false)}
-              onComplete={refreshParties}
+              onComplete={() => {
+                refreshParties(true);
+                setPackagesRefreshNonce((n) => n + 1);
+              }}
               mode="distribute"
             />
 
             <DarsDialog
               open={uploadDarsDialogOpen}
               onClose={() => setUploadDarsDialogOpen(false)}
-              onComplete={refreshParties}
+              onComplete={() => {
+                refreshParties(true);
+                setPackagesRefreshNonce((n) => n + 1);
+              }}
               mode="upload"
             />
 
             <OnboardingDialog
               open={onboardingDialogOpen}
               onClose={() => setOnboardingDialogOpen(false)}
-              onComplete={refreshParties}
+              onComplete={() => refreshParties(true)}
             />
 
             <InvitationModal
@@ -630,7 +641,7 @@ const App = () => {
                 navigate(0, partyFilter || null);
                 window.scrollTo(0, savedScrollY.current);
               }}
-              onRefresh={refreshParties}
+              onRefresh={() => refreshParties(true)}
               selfParticipantId={nodeConfig?.node.participant_id}
               authStatus={authStatuses.find(
                 (a) => a.dec_party_id === selectedPartyId,
@@ -673,7 +684,7 @@ const App = () => {
                       sx={{ width: 300 }}
                     />
                     <IconButton
-                      onClick={refreshParties}
+                      onClick={() => refreshParties()}
                       disabled={refreshingParties}
                       color="primary"
                       sx={{ mt: "1px" }}
@@ -732,6 +743,7 @@ const App = () => {
           <PackagesPanel
             onUploadDars={() => setUploadDarsDialogOpen(true)}
             onDistributeDars={() => setDarsDialogOpen(true)}
+            refreshNonce={packagesRefreshNonce}
           />
         </Box>
       )}

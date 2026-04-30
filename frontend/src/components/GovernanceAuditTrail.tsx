@@ -28,6 +28,9 @@ import type { ChainAuditEntry, ChainAuditResponse } from "../types";
 
 interface GovernanceAuditTrailProps {
   partyId: string;
+  /// Bumped by the parent after a sibling governance action mutates state, to
+  /// trigger a fresh fetch without the operator clicking Refresh.
+  refreshNonce?: number;
 }
 
 const CHAIN_LIMIT = 200;
@@ -114,7 +117,10 @@ const CopyButton = ({
   );
 };
 
-export const GovernanceAuditTrail = ({ partyId }: GovernanceAuditTrailProps) => {
+export const GovernanceAuditTrail = ({
+  partyId,
+  refreshNonce,
+}: GovernanceAuditTrailProps) => {
   const jsonTreeTheme = useJsonTreeTheme();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -190,6 +196,13 @@ export const GovernanceAuditTrail = ({ partyId }: GovernanceAuditTrailProps) => 
       fetchAudit(false);
     }
   }, [cacheLoaded, fetchAudit]);
+
+  // Re-fetch (force fresh) whenever the parent bumps the nonce after a
+  // sibling governance mutation.
+  useEffect(() => {
+    if (refreshNonce === undefined || refreshNonce === 0) return;
+    fetchAudit(true);
+  }, [refreshNonce, fetchAudit]);
 
   if (error) {
     return (

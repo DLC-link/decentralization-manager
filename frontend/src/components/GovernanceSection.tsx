@@ -179,6 +179,10 @@ interface GovernanceSectionProps {
   defaultOperatorParty?: string;
   network?: Network;
   governanceType?: "vault" | "core_self" | "core_domain";
+  /// Called after every successful mutating action (propose / confirm /
+  /// execute / revoke / expire / domain confirm / domain execute) so the
+  /// parent can refresh sibling views (e.g. the audit trail tab).
+  onAfterAction?: () => void;
 }
 
 // Default values for action form
@@ -208,6 +212,7 @@ export const GovernanceSection = ({
   defaultOperatorParty,
   network,
   governanceType = "vault",
+  onAfterAction,
 }: GovernanceSectionProps) => {
   const [expanded, setExpanded] = useState(true);
   const [loading, setLoading] = useState(true);
@@ -624,6 +629,7 @@ export const GovernanceSection = ({
 
       // Refresh data
       await fetchGovernance();
+      onAfterAction?.();
     } catch (e) {
       setError(
         e instanceof Error ? e.message : "Failed to submit confirmation",
@@ -669,6 +675,7 @@ export const GovernanceSection = ({
       // Close dialog and refresh data
       setExecuteDialogAction(null);
       await fetchGovernance();
+      onAfterAction?.();
     } catch (e) {
       setExecuteError(
         e instanceof Error ? e.message : "Failed to execute action",
@@ -705,6 +712,7 @@ export const GovernanceSection = ({
 
       // Refresh data
       await fetchGovernance();
+      onAfterAction?.();
     } catch (e) {
       setError(
         e instanceof Error ? e.message : "Failed to revoke confirmation",
@@ -746,6 +754,7 @@ export const GovernanceSection = ({
       }
 
       await fetchGovernance();
+      onAfterAction?.();
     } catch (e) {
       setError(
         e instanceof Error ? e.message : "Failed to expire confirmation",
@@ -975,6 +984,7 @@ export const GovernanceSection = ({
       // Reset form and refresh data
       setShowNewActionForm(false);
       await fetchGovernance();
+      onAfterAction?.();
     } catch (e) {
       setError(
         e instanceof Error ? e.message : "Failed to submit confirmation",
@@ -1140,6 +1150,7 @@ export const GovernanceSection = ({
 
       setShowProposalForm(false);
       await fetchGovernance();
+      onAfterAction?.();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to create proposal");
     } finally {
@@ -1171,6 +1182,7 @@ export const GovernanceSection = ({
       }
 
       await fetchGovernance();
+      onAfterAction?.();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to confirm proposal");
     } finally {
@@ -1204,6 +1216,7 @@ export const GovernanceSection = ({
       }
 
       await fetchGovernance();
+      onAfterAction?.();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to execute proposal");
     } finally {

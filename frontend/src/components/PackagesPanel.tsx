@@ -33,11 +33,15 @@ import type {
 interface PackagesPanelProps {
   onUploadDars?: () => void;
   onDistributeDars?: () => void;
+  /// Bumped by the parent after a DAR upload/distribute completes, to trigger
+  /// a fresh fetch of the vetted-packages list without a manual refresh.
+  refreshNonce?: number;
 }
 
 export const PackagesPanel = ({
   onUploadDars,
   onDistributeDars,
+  refreshNonce,
 }: PackagesPanelProps) => {
   const [packages, setPackages] = useState<VettedPackageInfo[]>([]);
   const [loadingPackages, setLoadingPackages] = useState(true);
@@ -49,7 +53,7 @@ export const PackagesPanel = ({
       .then((data: VettedPackageInfo[]) => setPackages(data))
       .catch(() => {})
       .finally(() => setLoadingPackages(false));
-  }, []);
+  }, [refreshNonce]);
   const [canScrollUp, setCanScrollUp] = useState(false);
   const [canScrollDown, setCanScrollDown] = useState(false);
   const [comparison, setComparison] = useState<PeerPackageComparison | null>(
