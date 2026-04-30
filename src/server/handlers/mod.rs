@@ -7,7 +7,7 @@ mod parties;
 mod party_config;
 mod workflows;
 
-pub use auth::{get_auth_config, get_auth_status, test_auth};
+pub use auth::{get_auth_config, get_auth_status, grant_rights, test_auth};
 pub use config::{get_network_config, get_node_config, save_network_config};
 pub use governance::{
     cancel_confirmation, confirm_action, execute_action, expire_confirmation, get_governance,

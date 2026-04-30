@@ -399,6 +399,27 @@ pub struct AuthTestResponse {
     pub results: Vec<AuthTestResult>,
 }
 
+/// Request to grant the configured user the rights they need to act on a dec party
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct GrantRightsRequest {
+    /// Decentralized party whose coordinator user should receive rights
+    pub dec_party_id: CantonId,
+    /// Keycloak client_id of the admin (validator) client whose service-account
+    /// user has ParticipantAdmin on Canton. Provided per-call by the operator;
+    /// never stored.
+    pub admin_client_id: String,
+    /// Keycloak client_secret matching admin_client_id. Provided per-call by
+    /// the operator; never stored.
+    pub admin_client_secret: String,
+}
+
+/// Response for the grant-rights endpoint
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct GrantRightsResponse {
+    /// Refreshed rights status after the grant call
+    pub rights: RightsStatus,
+}
+
 // ============================================================================
 // Governance Types (Structured Actions)
 // ============================================================================

@@ -13,7 +13,9 @@ import ErrorIcon from "@mui/icons-material/Error";
 import ScienceIcon from "@mui/icons-material/Science";
 import WarningIcon from "@mui/icons-material/Warning";
 import RefreshIcon from "@mui/icons-material/Refresh";
+import VpnKeyIcon from "@mui/icons-material/VpnKey";
 import { CopyableText } from "./CopyableText";
+import { GrantRightsDialog } from "./GrantRightsDialog";
 import { API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
 import type { PartyAuthStatus, RightsStatus, AuthTestResponse } from "../types";
@@ -63,10 +65,16 @@ const getAuthStatusChip = (authStatus: PartyAuthStatus) => {
 export const AuthSection = ({ partyId, authStatus, onRefresh }: AuthSectionProps) => {
   const [testing, setTesting] = useState(false);
   const [testError, setTestError] = useState<string | null>(null);
+  const [grantDialogOpen, setGrantDialogOpen] = useState(false);
 
   if (!authStatus) {
     return null;
   }
+
+  const canGrant =
+    authStatus.status.status === "authenticated" &&
+    authStatus.rights !== undefined &&
+    !isRightsValid(authStatus.rights);
 
   const handleTestAuth = async () => {
     try {
@@ -203,7 +211,7 @@ export const AuthSection = ({ partyId, authStatus, onRefresh }: AuthSectionProps
         </Alert>
       )}
 
-      <Box sx={{ mt: 2 }}>
+      <Box sx={{ mt: 2, display: "flex", gap: 1, flexWrap: "wrap" }}>
         <Button
           variant="outlined"
           size="small"
@@ -213,7 +221,25 @@ export const AuthSection = ({ partyId, authStatus, onRefresh }: AuthSectionProps
         >
           {testing ? "Testing..." : "Test Auth"}
         </Button>
+        {canGrant && (
+          <Button
+            variant="contained"
+            color="primary"
+            size="small"
+            startIcon={<VpnKeyIcon />}
+            onClick={() => setGrantDialogOpen(true)}
+          >
+            Grant Rights
+          </Button>
+        )}
       </Box>
+
+      <GrantRightsDialog
+        open={grantDialogOpen}
+        onClose={() => setGrantDialogOpen(false)}
+        onGranted={() => onRefresh?.()}
+        partyId={partyId}
+      />
     </Box>
   );
 };

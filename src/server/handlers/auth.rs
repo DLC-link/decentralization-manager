@@ -1,9 +1,10 @@
-use actix_web::{HttpResponse, Responder, get, post, web};
+use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 use base64::Engine;
 use canton_proto_rs::com::daml::ledger::api::v2::admin::{
-    ListUserRightsRequest,
+    GrantUserRightsRequest, ListUserRightsRequest, Right,
     right::{CanActAs, CanReadAs, Kind},
 };
+use keycloak::login::{ClientCredentialsParams, client_credentials, password_url};
 
 use crate::{
     auth::WorkflowAuth,
@@ -11,9 +12,10 @@ use crate::{
     error::Result,
     server::{
         AppState,
+        middleware::require_admin,
         types::{
             AuthConfigResponse, AuthStatus, AuthStatusResponse, AuthTestResponse, AuthTestResult,
-            PartyAuthStatus, RightsStatus,
+            ErrorResponse, GrantRightsRequest, GrantRightsResponse, PartyAuthStatus, RightsStatus,
         },
     },
     utils,
@@ -255,6 +257,187 @@ pub async fn test_auth(data: web::Data<AppState>) -> impl Responder {
     }
 
     HttpResponse::Ok().json(AuthTestResponse { results })
+}
+
+/// Grant actAs + readAs rights on the member party and the dec party to the
+/// configured coordinator user, using the participant admin API
+#[utoipa::path(
+    tag = "Authentication",
+    request_body = GrantRightsRequest,
+    responses(
+        (status = 200, description = "Rights granted; current rights returned", body = GrantRightsResponse),
+        (status = 400, description = "Bad request", body = ErrorResponse),
+        (status = 404, description = "Party not configured", body = ErrorResponse),
+        (status = 500, description = "Grant failed", body = ErrorResponse)
+    )
+)]
+#[post("/auth/grant-rights")]
+pub async fn grant_rights(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    body: web::Json<GrantRightsRequest>,
+) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
+
+    let admin_client_id = body.admin_client_id.trim().to_string();
+    let admin_client_secret = body.admin_client_secret.trim().to_string();
+    if admin_client_id.is_empty() || admin_client_secret.is_empty() {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: "admin_client_id and admin_client_secret are required".to_string(),
+        });
+    }
+
+    let auth = data.auth.read().await;
+    if matches!(*auth, Some(WorkflowAuth::Mock(_))) {
+        return HttpResponse::Ok().json(GrantRightsResponse {
+            rights: RightsStatus {
+                member_party_act_as: true,
+                member_party_read_as: true,
+                dec_party_act_as: true,
+                dec_party_read_as: true,
+            },
+        });
+    }
+
+    let party_creds_list = data.party_credentials.read().await;
+    let Some(party_creds) = party_creds_list
+        .iter()
+        .find(|c| c.dec_party_id == body.dec_party_id)
+    else {
+        return HttpResponse::NotFound().json(ErrorResponse {
+            error: format!(
+                "Party {dec_party_id} is not configured",
+                dec_party_id = body.dec_party_id
+            ),
+        });
+    };
+
+    let party_token = match &*auth {
+        Some(WorkflowAuth::Keycloak(registry)) => match registry.get(&party_creds.dec_party_id) {
+            Some(tm) => match tm.get_token().await {
+                Ok(t) => t,
+                Err(e) => {
+                    return HttpResponse::InternalServerError().json(ErrorResponse {
+                        error: format!("Failed to get auth token: {e}"),
+                    });
+                }
+            },
+            None => {
+                return HttpResponse::InternalServerError().json(ErrorResponse {
+                    error: "No token manager configured for this party".to_string(),
+                });
+            }
+        },
+        _ => {
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: "Auth not configured".to_string(),
+            });
+        }
+    };
+
+    let member_party_id = party_creds.member_party_id.to_string();
+    let dec_party_id = party_creds.dec_party_id.to_string();
+    let user_id = party_creds.user_id.clone();
+    let token_url = password_url(&party_creds.keycloak.url, &party_creds.keycloak.realm);
+
+    drop(party_creds_list);
+    drop(auth);
+
+    let admin_token = match client_credentials(ClientCredentialsParams {
+        url: token_url,
+        client_id: admin_client_id,
+        client_secret: admin_client_secret,
+    })
+    .await
+    {
+        Ok(resp) => resp.access_token,
+        Err(e) => {
+            tracing::warn!("Failed to mint admin token for grant-rights: {e}");
+            return HttpResponse::Unauthorized().json(ErrorResponse {
+                error: format!("Admin Keycloak auth failed: {e}"),
+            });
+        }
+    };
+
+    match grant_user_rights(
+        &data.config,
+        &admin_token,
+        &party_token,
+        &user_id,
+        &member_party_id,
+        &dec_party_id,
+    )
+    .await
+    {
+        Ok(rights) => HttpResponse::Ok().json(GrantRightsResponse { rights }),
+        Err(e) => {
+            tracing::error!("Failed to grant rights: {e:#}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to grant rights: {e}"),
+            })
+        }
+    }
+}
+
+/// Grant actAs+readAs for both parties to the user using the admin token,
+/// then re-check rights using the per-party token (read-only).
+async fn grant_user_rights(
+    config: &NodeConfig,
+    admin_token: &str,
+    party_token: &str,
+    user_id: &str,
+    member_party_id: &str,
+    dec_party_id: &str,
+) -> Result<RightsStatus> {
+    let mut client = utils::create_user_client(config, Some(admin_token.to_string())).await?;
+
+    let effective_user_id =
+        extract_user_id_from_jwt(party_token).unwrap_or_else(|| user_id.to_string());
+
+    tracing::info!(
+        "Granting rights for user_id={effective_user_id}, member_party={member_party_id}, dec_party={dec_party_id}"
+    );
+
+    let rights = vec![
+        right_act_as(member_party_id),
+        right_read_as(member_party_id),
+        right_act_as(dec_party_id),
+        right_read_as(dec_party_id),
+    ];
+
+    let response = client
+        .grant_user_rights(tonic::Request::new(GrantUserRightsRequest {
+            user_id: effective_user_id.clone(),
+            rights,
+            identity_provider_id: String::new(),
+        }))
+        .await?
+        .into_inner();
+
+    tracing::info!(
+        "GrantUserRights newly granted {count} right(s)",
+        count = response.newly_granted_rights.len()
+    );
+
+    check_user_rights(config, party_token, user_id, member_party_id, dec_party_id).await
+}
+
+fn right_act_as(party: &str) -> Right {
+    Right {
+        kind: Some(Kind::CanActAs(CanActAs {
+            party: party.to_string(),
+        })),
+    }
+}
+
+fn right_read_as(party: &str) -> Right {
+    Right {
+        kind: Some(Kind::CanReadAs(CanReadAs {
+            party: party.to_string(),
+        })),
+    }
 }
 
 async fn test_keycloak_auth(

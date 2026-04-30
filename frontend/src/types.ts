@@ -264,6 +264,10 @@ export interface AuthTestResponse {
   results: AuthTestResult[];
 }
 
+export interface GrantRightsResponse {
+  rights: RightsStatus;
+}
+
 // Governance types
 export interface GovernanceConfirmation {
   contract_id: string;
