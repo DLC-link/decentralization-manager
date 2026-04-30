@@ -369,18 +369,18 @@ running 1 test
 
 INFO Phase: create_dec_party
 INFO Using prefix: test-network-1
-INFO Scenario "create decentralized party test-network-1"
-INFO   GIVEN no party at this prefix yet
-INFO   WHEN  P1 starts onboarding and P2/P3 accept invitations
-INFO   THEN  party visible in /decentralized-parties
-INFO     ✓ (took 18.4s)
-INFO Scenario "create decentralized party test-network-1" complete (18.7s)
+INFO   Scenario "create decentralized party test-network-1"
+INFO     GIVEN no party at this prefix yet
+INFO     WHEN  P1 starts onboarding and P2/P3 accept invitations
+INFO     THEN  party visible in /decentralized-parties
+INFO       ✓ (took 18.4s)
+INFO   Scenario "create decentralized party test-network-1" complete (18.7s)
 
 INFO Phase: distribute_dars
-INFO Scenario "distribute DARs"
-INFO   GIVEN 3 DAR files on disk
-INFO   WHEN  P1 uploads + distributes DARs, P2/P3 accept, status reaches completed
-INFO Scenario "distribute DARs" complete (11.4s)
+INFO   Scenario "distribute DARs"
+INFO     GIVEN 3 DAR files on disk
+INFO     WHEN  P1 uploads + distributes DARs, P2/P3 accept, status reaches completed
+INFO   Scenario "distribute DARs" complete (11.4s)
 
 ... (14 scenarios total) ...
 

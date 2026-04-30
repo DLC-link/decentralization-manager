@@ -131,7 +131,7 @@ impl<Ctx: Send + 'static> Scenario<Ctx> {
     }
 
     pub async fn run(mut self, f: &mut Fixture) -> Result<()> {
-        info!(scenario = %self.name, "Scenario \"{}\"", self.name);
+        info!(scenario = %self.name, "  Scenario \"{}\"", self.name);
         let scenario_start = Instant::now();
 
         const POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -139,7 +139,7 @@ impl<Ctx: Send + 'static> Scenario<Ctx> {
         for step in &mut self.steps {
             match step {
                 Step::Immediate { kind, name, body } => {
-                    info!(step_kind = ?kind, step_name = %name, "  {} {}", kind.label(), name);
+                    info!(step_kind = ?kind, step_name = %name, "    {} {}", kind.label(), name);
                     let fut = body(f, &mut self.ctx);
                     match fut.await {
                         Ok(()) => {}
@@ -163,7 +163,7 @@ impl<Ctx: Send + 'static> Scenario<Ctx> {
                     probe,
                 } => {
                     let kind = StepKind::Then;
-                    info!(step_kind = ?kind, step_name = %name, "  {} {}", kind.label(), name);
+                    info!(step_kind = ?kind, step_name = %name, "    {} {}", kind.label(), name);
                     let step_start = Instant::now();
                     let outcome: Result<()> = loop {
                         match probe(f, &mut self.ctx).await {
@@ -187,7 +187,7 @@ impl<Ctx: Send + 'static> Scenario<Ctx> {
                     };
                     let took = step_start.elapsed();
                     match outcome {
-                        Ok(()) => info!("    ✓ (took {:.1}s)", took.as_secs_f64()),
+                        Ok(()) => info!("      ✓ (took {:.1}s)", took.as_secs_f64()),
                         Err(e) => {
                             error!(
                                 scenario = %self.name,
@@ -204,7 +204,7 @@ impl<Ctx: Send + 'static> Scenario<Ctx> {
 
         info!(
             scenario = %self.name,
-            "Scenario \"{}\" complete ({:.1}s)",
+            "  Scenario \"{}\" complete ({:.1}s)",
             self.name,
             scenario_start.elapsed().as_secs_f64()
         );
