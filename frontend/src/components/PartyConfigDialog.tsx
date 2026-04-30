@@ -40,6 +40,8 @@ export const PartyConfigDialog = ({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
+  const [discovering, setDiscovering] = useState(false);
+  const [discoverInfo, setDiscoverInfo] = useState<string | null>(null);
 
   const [memberPartyId, setMemberPartyId] = useState("");
   const [userId, setUserId] = useState("");
@@ -87,6 +89,7 @@ export const PartyConfigDialog = ({
     if (open) {
       setError(null);
       setSuccess(false);
+      setDiscoverInfo(null);
       fetchConfig();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -101,7 +104,7 @@ export const PartyConfigDialog = ({
       if (res.ok) {
         const data: PartyConfigResponse = await res.json();
         setMemberPartyId(data.member_party_id ?? "");
-        setUserId(data.user_id);
+        setUserId(data.user_id ?? "");
         setKeycloakUrl(data.keycloak_url);
         setKeycloakRealm(data.keycloak_realm);
         setKeycloakClientId(data.keycloak_client_id);
@@ -118,6 +121,74 @@ export const PartyConfigDialog = ({
       // Config not found, fields stay empty
     } finally {
       setLoading(false);
+    }
+  };
+
+  const canDiscover = (() => {
+    if (
+      !keycloakUrl.trim() ||
+      !keycloakRealm.trim() ||
+      !keycloakClientId.trim()
+    ) {
+      return false;
+    }
+    if (authMethod === "client_credentials") {
+      return keycloakClientSecret.length > 0;
+    }
+    return keycloakUsername.length > 0 && keycloakPassword.length > 0;
+  })();
+
+  const handleDiscover = async () => {
+    setDiscovering(true);
+    setError(null);
+    setDiscoverInfo(null);
+    try {
+      const body: Record<string, string> = {
+        keycloak_url: keycloakUrl.trim(),
+        keycloak_realm: keycloakRealm.trim(),
+        keycloak_client_id: keycloakClientId.trim(),
+      };
+      if (authMethod === "client_credentials") {
+        body.keycloak_client_secret = keycloakClientSecret;
+      } else {
+        body.keycloak_username = keycloakUsername;
+        body.keycloak_password = keycloakPassword;
+      }
+      const res = await authenticatedFetch(
+        `${API_BASE}/party-config/discover-member-party`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        },
+      );
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setError(data.error || "Discovery failed");
+        return;
+      }
+      const data: {
+        user_id: string;
+        primary_party?: string;
+        description?: string;
+      } = await res.json();
+      if (data.user_id) setUserId(data.user_id);
+      if (data.primary_party) {
+        setMemberPartyId(data.primary_party);
+        setDiscoverInfo(
+          data.description
+            ? `Found ${data.description}`
+            : "Member party discovered.",
+        );
+      } else {
+        setDiscoverInfo(
+          "Authenticated, but Canton has no primary party for this user. Enter the member party manually.",
+        );
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Discovery failed");
+    } finally {
+      setDiscovering(false);
     }
   };
 
@@ -319,6 +390,21 @@ export const PartyConfigDialog = ({
                   />
                 </>
               )}
+
+              <Box>
+                <Button
+                  size="small"
+                  variant="outlined"
+                  onClick={handleDiscover}
+                  disabled={!canDiscover || discovering || saving}
+                  startIcon={
+                    discovering ? <CircularProgress size={16} /> : undefined
+                  }
+                >
+                  {discovering ? "Discovering…" : "Discover Member Party"}
+                </Button>
+              </Box>
+              {discoverInfo && <Alert severity="success">{discoverInfo}</Alert>}
 
               {error && <Alert severity="error">{error}</Alert>}
               {success && (

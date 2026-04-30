@@ -1,6 +1,10 @@
 use std::sync::Arc;
 
-use actix_web::{HttpRequest, HttpResponse, Responder, get, put, web};
+use actix_web::{HttpRequest, HttpResponse, Responder, get, post, put, web};
+use canton_proto_rs::com::daml::ledger::api::v2::admin::GetUserRequest;
+use keycloak::login::{
+    ClientCredentialsParams, PasswordParams, client_credentials, password, password_url,
+};
 use tokio::sync::RwLock;
 
 use crate::{
@@ -12,8 +16,12 @@ use crate::{
     server::{
         AppState,
         middleware::require_admin,
-        types::{ErrorResponse, PartyConfigRequest, PartyConfigResponse, SuccessResponse},
+        types::{
+            DiscoverMemberPartyRequest, DiscoverMemberPartyResponse, ErrorResponse,
+            PartyConfigRequest, PartyConfigResponse, SuccessResponse,
+        },
     },
+    utils,
 };
 
 /// Get party configuration (secrets masked)
@@ -48,7 +56,7 @@ pub async fn get_party_config(
         Some(c) => HttpResponse::Ok().json(PartyConfigResponse {
             dec_party_id: c.dec_party_id.clone(),
             member_party_id: Some(c.member_party_id.clone()),
-            user_id: c.user_id.clone(),
+            user_id: Some(c.user_id.clone()),
             keycloak_url: c.keycloak.url.clone(),
             keycloak_realm: c.keycloak.realm.clone(),
             keycloak_client_id: c.keycloak.client_id.clone(),
@@ -63,7 +71,7 @@ pub async fn get_party_config(
             HttpResponse::Ok().json(PartyConfigResponse {
                 dec_party_id,
                 member_party_id: None,
-                user_id: "CoordinatorUser".to_string(),
+                user_id: None,
                 keycloak_url: kc_defaults.url,
                 keycloak_realm: kc_defaults.realm,
                 keycloak_client_id: String::new(),
@@ -209,4 +217,117 @@ pub async fn reload_auth(
         );
     }
     Ok(())
+}
+
+/// Discover the member party of the user the given Keycloak credentials
+/// authenticate as, by minting a token + calling Canton's
+/// `UserManagementService.GetUser`. Used to pre-fill the Member Party ID
+/// field in the Party Configuration dialog.
+#[utoipa::path(
+    tag = "Configuration",
+    request_body = DiscoverMemberPartyRequest,
+    responses(
+        (status = 200, description = "Discovered user record", body = DiscoverMemberPartyResponse),
+        (status = 400, description = "Bad request", body = ErrorResponse),
+        (status = 401, description = "Keycloak auth failed", body = ErrorResponse),
+        (status = 500, description = "Canton call failed", body = ErrorResponse)
+    )
+)]
+#[post("/party-config/discover-member-party")]
+pub async fn discover_member_party(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    body: web::Json<DiscoverMemberPartyRequest>,
+) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
+
+    let token_url = password_url(&body.keycloak_url, &body.keycloak_realm);
+
+    let token_result = if let Some(secret) = body
+        .keycloak_client_secret
+        .as_ref()
+        .filter(|s| !s.is_empty())
+    {
+        client_credentials(ClientCredentialsParams {
+            url: token_url,
+            client_id: body.keycloak_client_id.clone(),
+            client_secret: secret.clone(),
+        })
+        .await
+    } else if let (Some(username), Some(pw)) = (
+        body.keycloak_username.as_ref().filter(|s| !s.is_empty()),
+        body.keycloak_password.as_ref().filter(|s| !s.is_empty()),
+    ) {
+        password(PasswordParams {
+            url: token_url,
+            client_id: body.keycloak_client_id.clone(),
+            username: username.clone(),
+            password: pw.clone(),
+        })
+        .await
+    } else {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: "Provide either keycloak_client_secret or keycloak_username + keycloak_password"
+                .to_string(),
+        });
+    };
+
+    let token = match token_result {
+        Ok(resp) => resp.access_token,
+        Err(e) => {
+            return HttpResponse::Unauthorized().json(ErrorResponse {
+                error: format!("Keycloak auth failed: {e}"),
+            });
+        }
+    };
+
+    let mut client = match utils::create_user_client(&data.config, Some(token)).await {
+        Ok(c) => c,
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to create user client: {e}"),
+            });
+        }
+    };
+
+    let response = match client
+        .get_user(tonic::Request::new(GetUserRequest {
+            user_id: String::new(),
+            identity_provider_id: String::new(),
+        }))
+        .await
+    {
+        Ok(r) => r.into_inner(),
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Canton GetUser failed: {e}"),
+            });
+        }
+    };
+
+    let Some(user) = response.user else {
+        return HttpResponse::InternalServerError().json(ErrorResponse {
+            error: "Canton returned no user".to_string(),
+        });
+    };
+
+    let primary_party = if user.primary_party.is_empty() {
+        None
+    } else {
+        CantonId::parse(&user.primary_party).ok()
+    };
+
+    let description = user
+        .metadata
+        .as_ref()
+        .and_then(|m| m.annotations.get("description").cloned())
+        .filter(|s| !s.is_empty());
+
+    HttpResponse::Ok().json(DiscoverMemberPartyResponse {
+        user_id: user.id,
+        primary_party,
+        description,
+    })
 }

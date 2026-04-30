@@ -452,6 +452,7 @@ pub async fn start_server(
             .service(handlers::get_network_info)
             .service(handlers::get_party_config)
             .service(handlers::save_party_config)
+            .service(handlers::discover_member_party)
             .split_for_parts();
 
         let mut app = app.wrap(AuthMiddleware).wrap(cors);

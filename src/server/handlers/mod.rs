@@ -23,7 +23,7 @@ pub use parties::{
     get_participants_status, get_vetted_packages, resolve_owner_keys_from_peers,
     store_parties_to_db,
 };
-pub use party_config::{get_party_config, save_party_config};
+pub use party_config::{discover_member_party, get_party_config, save_party_config};
 pub use workflows::{
     ContractsWorkflowState, DarsWorkflowState, KickWorkflowState, OnboardingWorkflowState,
     get_contracts_status, get_dars_status, get_kick_status, get_onboarding_status, start_contracts,

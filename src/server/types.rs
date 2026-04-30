@@ -415,17 +415,45 @@ pub struct AuthTestResponse {
     pub results: Vec<AuthTestResult>,
 }
 
-/// One participant's member party for a given dec party. Empty `member_party_id` = peer not configured / unreachable.
+/// One participant's member party for a given dec party. `None` member_party_id = peer not configured / unreachable.
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct KnownMember {
     pub participant_uid: String,
-    pub member_party_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub member_party_id: Option<CantonId>,
 }
 
 /// Response for `GET /governance/known-members`.
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct KnownMembersResponse {
     pub members: Vec<KnownMember>,
+}
+
+/// Request body for `POST /party-config/discover-member-party`. Same Keycloak
+/// shape as `PartyConfigRequest`, used to mint a one-shot token and look up
+/// the authenticated user's primary party from Canton's UserManagementService.
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct DiscoverMemberPartyRequest {
+    pub keycloak_url: String,
+    pub keycloak_realm: String,
+    pub keycloak_client_id: String,
+    #[serde(default)]
+    pub keycloak_client_secret: Option<String>,
+    #[serde(default)]
+    pub keycloak_username: Option<String>,
+    #[serde(default)]
+    pub keycloak_password: Option<String>,
+}
+
+/// Response for `POST /party-config/discover-member-party`. `primary_party`
+/// is `None` when Canton's user has no primary party assigned.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct DiscoverMemberPartyResponse {
+    pub user_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_party: Option<CantonId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// Request to grant the configured user the rights they need to act on a dec party
@@ -1000,12 +1028,12 @@ pub struct PartyConfigRequest {
 pub struct PartyConfigResponse {
     /// The decentralized party ID
     pub dec_party_id: CantonId,
-    /// The member party ID (local to this node). `None` if no credentials
-    /// have been saved yet — the operator must provide one via PUT.
+    /// `None` when no credentials are saved yet — operator must provide one via PUT.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub member_party_id: Option<CantonId>,
-    /// Canton/Ledger API user ID
-    pub user_id: String,
+    /// `None` when no credentials are saved yet — operator picks via Discover or types.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
     /// Keycloak server URL
     pub keycloak_url: String,
     /// Keycloak realm name

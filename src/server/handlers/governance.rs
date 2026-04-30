@@ -196,8 +196,7 @@ async fn collect_known_members(
         let self_member = creds
             .iter()
             .find(|c| c.dec_party_id == *dec_party_id)
-            .map(|c| c.member_party_id.to_string())
-            .unwrap_or_default();
+            .map(|c| c.member_party_id.clone());
         out.push(KnownMember {
             participant_uid: identity.clone(),
             member_party_id: self_member,
@@ -212,7 +211,7 @@ async fn collect_known_members(
         if peer.public_key.is_empty() {
             out.push(KnownMember {
                 participant_uid: peer.participant_id.to_string(),
-                member_party_id: String::new(),
+                member_party_id: None,
             });
             continue;
         }
@@ -225,7 +224,7 @@ async fn collect_known_members(
                 );
                 out.push(KnownMember {
                     participant_uid: peer.participant_id.to_string(),
-                    member_party_id: String::new(),
+                    member_party_id: None,
                 });
                 continue;
             }
@@ -249,7 +248,7 @@ async fn collect_known_members(
                 );
                 out.push(KnownMember {
                     participant_uid: peer.participant_id.to_string(),
-                    member_party_id: String::new(),
+                    member_party_id: None,
                 });
                 continue;
             }
@@ -257,9 +256,12 @@ async fn collect_known_members(
 
         let member_party = match Message::from_bytes(&response) {
             Ok(msg) if msg.msg_type == MessageType::MemberPartyResponse => {
-                String::from_utf8(msg.payload).unwrap_or_default()
+                String::from_utf8(msg.payload)
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .and_then(|s| CantonId::parse(&s).ok())
             }
-            _ => String::new(),
+            _ => None,
         };
         out.push(KnownMember {
             participant_uid: peer.participant_id.to_string(),
