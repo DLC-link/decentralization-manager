@@ -285,18 +285,20 @@ export const GovernanceAuditTrail = ({ partyId }: GovernanceAuditTrailProps) => 
                   <Fragment key={rowKey}>
                     <TableRow sx={zebraRow(idx)}>
                       <TableCell sx={{ py: 0.5 }}>
-                        <IconButton
-                          size="small"
-                          onClick={() =>
-                            setExpandedRow(isExpanded ? null : rowKey)
-                          }
-                        >
-                          {isExpanded ? (
-                            <ExpandLessIcon fontSize="small" />
-                          ) : (
-                            <ExpandMoreIcon fontSize="small" />
-                          )}
-                        </IconButton>
+                        <Tooltip title={isExpanded ? "Hide details" : "Show details"}>
+                          <IconButton
+                            size="small"
+                            onClick={() =>
+                              setExpandedRow(isExpanded ? null : rowKey)
+                            }
+                          >
+                            {isExpanded ? (
+                              <ExpandLessIcon fontSize="small" />
+                            ) : (
+                              <ExpandMoreIcon fontSize="small" />
+                            )}
+                          </IconButton>
+                        </Tooltip>
                       </TableCell>
                       <TableCell sx={{ py: 1, fontSize: "0.8rem" }}>
                         {entry.timestamp > 0

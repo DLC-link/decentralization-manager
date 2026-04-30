@@ -1102,7 +1102,7 @@ export const ContractsDialog = ({
       setParticipantParties([]);
       setPackages({});
     }
-  }, [open]);
+  }, [open, defaultOperatorParty]);
 
   // Initialize contracts when type is selected
   useEffect(() => {

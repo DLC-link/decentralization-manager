@@ -92,9 +92,7 @@ const App = () => {
   const [onboardingDialogOpen, setOnboardingDialogOpen] = useState(false);
   const [darsDialogOpen, setDarsDialogOpen] = useState(false);
   const [uploadDarsDialogOpen, setUploadDarsDialogOpen] = useState(false);
-  const [_pendingInvitations, setPendingInvitations] = useState<
-    PendingInvitation[]
-  >([]);
+  const [, setPendingInvitations] = useState<PendingInvitation[]>([]);
   const [currentInvitation, setCurrentInvitation] =
     useState<PendingInvitation | null>(null);
   const [loading, setLoading] = useState(true);
@@ -314,7 +312,6 @@ const App = () => {
     };
 
     fetchData();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Lazy-load parties when switching to parties tab (if not loaded on init)
@@ -389,7 +386,6 @@ const App = () => {
     const interval = window.setInterval(fetchInvitations, 2000);
 
     return () => clearInterval(interval);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleInvitationAction = useCallback(() => {

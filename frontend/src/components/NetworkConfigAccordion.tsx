@@ -26,7 +26,7 @@ import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import ContentPasteIcon from "@mui/icons-material/ContentPaste";
 import { useSnackbar } from "../contexts";
 import { zebraRow } from "../styles";
-import { copyToClipboard } from "./CopyableText";
+import { copyToClipboard } from "../clipboard";
 import type {
   NetworkConfig,
   Peer,
@@ -245,13 +245,15 @@ export const NetworkConfigAccordion = ({
                     updatePeer(index, "public_key", e.target.value)
                   }
                 />
-                <IconButton
-                  color="error"
-                  onClick={() => removePeer(index)}
-                  size="small"
-                >
-                  <DeleteIcon />
-                </IconButton>
+                <Tooltip title="Remove peer">
+                  <IconButton
+                    color="error"
+                    onClick={() => removePeer(index)}
+                    size="small"
+                  >
+                    <DeleteIcon />
+                  </IconButton>
+                </Tooltip>
               </Box>
             ))}
             <Box
@@ -322,9 +324,11 @@ export const NetworkConfigAccordion = ({
                 </Button>
               )}
               {onSave && (
-                <IconButton size="small" onClick={startEditing}>
-                  <EditIcon fontSize="small" />
-                </IconButton>
+                <Tooltip title="Edit peers">
+                  <IconButton size="small" onClick={startEditing}>
+                    <EditIcon fontSize="small" />
+                  </IconButton>
+                </Tooltip>
               )}
             </Box>
           </Box>
@@ -342,7 +346,9 @@ export const NetworkConfigAccordion = ({
               {selfEntry && (
                 <TableRow sx={{ bgcolor: "action.selected" }}>
                   <TableCell sx={{ py: 1 }}>
-                    <PersonIcon sx={{ fontSize: 14, color: "primary.main" }} />
+                    <Tooltip title="This is your node" arrow>
+                      <PersonIcon sx={{ fontSize: 14, color: "primary.main" }} />
+                    </Tooltip>
                   </TableCell>
                   <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>
                     <Typography variant="body2" color="text.secondary">

@@ -159,9 +159,11 @@ export const PartyDetail = ({
           px: 3,
         }}
       >
-        <IconButton onClick={onBack}>
-          <ArrowBackIcon />
-        </IconButton>
+        <Tooltip title="Back to parties">
+          <IconButton onClick={onBack}>
+            <ArrowBackIcon />
+          </IconButton>
+        </Tooltip>
         <CopyableText
           text={party.party_id}
           truncate={{ start: party.party_id.indexOf("::") + 18, end: 16 }}

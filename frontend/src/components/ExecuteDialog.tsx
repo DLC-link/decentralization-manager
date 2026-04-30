@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useMemo } from "react";
 import {
   Dialog,
   DialogTitle,
@@ -11,6 +11,7 @@ import {
   Alert,
   Box,
   IconButton,
+  Tooltip,
 } from "@mui/material";
 import DeleteIcon from "@mui/icons-material/Delete";
 import AddIcon from "@mui/icons-material/Add";
@@ -89,37 +90,33 @@ interface ExecuteDialogProps {
   blobMap?: Record<string, string>;
 }
 
-export const ExecuteDialog = ({
-  open,
-  onClose,
-  onExecute,
+interface ExecuteFormProps {
+  action: GovernanceAction;
+  fullBlobMap: Record<string, string>;
+  loading: boolean;
+  error: string | null;
+  onClose: () => void;
+  onExecute: (disclosedContracts: DisclosedContractInput[]) => void;
+}
+
+// Inner form. The parent re-keys it on action.action_hash so it remounts —
+// state is initialized lazily from the action prop instead of via an effect.
+const ExecuteForm = ({
   action,
+  fullBlobMap,
   loading,
   error,
-  blobMap = {},
-}: ExecuteDialogProps) => {
-  const fullBlobMap = useMemo(
-    () => ({ ...STATIC_BLOB_MAP, ...blobMap }),
-    [blobMap],
-  );
+  onClose,
+  onExecute,
+}: ExecuteFormProps) => {
   const [disclosedContracts, setDisclosedContracts] = useState<
     DisclosedContractInput[]
-  >([]);
-
-  // Populate disclosed contracts from blob map when dialog opens
-  useEffect(() => {
-    if (open && action) {
-      const contractIds = getRequiredContractIds(action.action);
-      setDisclosedContracts(
-        contractIds.map((cid) => ({
-          contract_id: cid,
-          blob: fullBlobMap[cid] || "",
-        })),
-      );
-    } else {
-      setDisclosedContracts([]);
-    }
-  }, [open, action, fullBlobMap]);
+  >(() =>
+    getRequiredContractIds(action.action).map((cid) => ({
+      contract_id: cid,
+      blob: fullBlobMap[cid] || "",
+    })),
+  );
 
   const handleAdd = () => {
     setDisclosedContracts((prev) => [
@@ -142,10 +139,8 @@ export const ExecuteDialog = ({
     );
   };
 
-  if (!action) return null;
-
   return (
-    <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth>
+    <>
       <DialogTitle>Execute Governance Action</DialogTitle>
       <DialogContent>
         <Box sx={{ display: "flex", flexDirection: "column", gap: 2, mt: 1 }}>
@@ -217,13 +212,17 @@ export const ExecuteDialog = ({
                       <Typography variant="caption" color="text.secondary">
                         Disclosed Contract #{index + 1}
                       </Typography>
-                      <IconButton
-                        size="small"
-                        onClick={() => handleRemove(index)}
-                        disabled={loading}
-                      >
-                        <DeleteIcon fontSize="small" />
-                      </IconButton>
+                      <Tooltip title="Remove disclosed contract">
+                        <span>
+                          <IconButton
+                            size="small"
+                            onClick={() => handleRemove(index)}
+                            disabled={loading}
+                          >
+                            <DeleteIcon fontSize="small" />
+                          </IconButton>
+                        </span>
+                      </Tooltip>
                     </Box>
                     <TextField
                       label="Contract ID"
@@ -271,6 +270,37 @@ export const ExecuteDialog = ({
           {loading ? <CircularProgress size={20} color="inherit" /> : "Execute"}
         </Button>
       </DialogActions>
+    </>
+  );
+};
+
+export const ExecuteDialog = ({
+  open,
+  onClose,
+  onExecute,
+  action,
+  loading,
+  error,
+  blobMap = {},
+}: ExecuteDialogProps) => {
+  const fullBlobMap = useMemo(
+    () => ({ ...STATIC_BLOB_MAP, ...blobMap }),
+    [blobMap],
+  );
+
+  return (
+    <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth>
+      {action && (
+        <ExecuteForm
+          key={action.action_hash}
+          action={action}
+          fullBlobMap={fullBlobMap}
+          loading={loading}
+          error={error}
+          onClose={onClose}
+          onExecute={onExecute}
+        />
+      )}
     </Dialog>
   );
 };

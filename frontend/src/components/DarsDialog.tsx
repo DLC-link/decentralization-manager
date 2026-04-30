@@ -10,6 +10,7 @@ import {
   Alert,
   Box,
   IconButton,
+  Tooltip,
 } from "@mui/material";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import DeleteIcon from "@mui/icons-material/Delete";
@@ -247,12 +248,14 @@ export const DarsDialog = ({
                       }}
                     >
                       <Typography variant="body2">{file.filename}</Typography>
-                      <IconButton
-                        size="small"
-                        onClick={() => handleRemoveDarFile(index)}
-                      >
-                        <DeleteIcon fontSize="small" />
-                      </IconButton>
+                      <Tooltip title="Remove file">
+                        <IconButton
+                          size="small"
+                          onClick={() => handleRemoveDarFile(index)}
+                        >
+                          <DeleteIcon fontSize="small" />
+                        </IconButton>
+                      </Tooltip>
                     </Box>
                   ))}
                 </Box>

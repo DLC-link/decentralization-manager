@@ -1,24 +1,7 @@
-import { createContext, useContext, useState, useEffect, useMemo, type ReactNode } from "react";
+import { useState, useEffect, useMemo, type ReactNode } from "react";
 import { ThemeProvider as MuiThemeProvider, createTheme } from "@mui/material/styles";
 import { CssBaseline } from "@mui/material";
-
-type ThemeMode = "light" | "dark" | "auto";
-
-interface ThemeContextType {
-  mode: ThemeMode;
-  setMode: (mode: ThemeMode) => void;
-  resolvedMode: "light" | "dark";
-}
-
-const ThemeContext = createContext<ThemeContextType | undefined>(undefined);
-
-export const useThemeMode = () => {
-  const context = useContext(ThemeContext);
-  if (!context) {
-    throw new Error("useThemeMode must be used within ThemeProvider");
-  }
-  return context;
-};
+import { ThemeContext, type ThemeMode } from "./ThemeContextValue";
 
 // BitSafe Brand Colors
 // Primary: Orange #ff6633

@@ -6,6 +6,7 @@ import {
   Button,
   CircularProgress,
   Alert,
+  Tooltip,
 } from "@mui/material";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import ErrorIcon from "@mui/icons-material/Error";
@@ -33,7 +34,7 @@ const isRightsValid = (rights: RightsStatus | undefined): boolean => {
   );
 };
 
-export const getAuthStatusIcon = (authStatus: PartyAuthStatus) => {
+const getAuthStatusIcon = (authStatus: PartyAuthStatus) => {
   switch (authStatus.status.status) {
     case "authenticated":
       return <CheckCircleIcon color="success" fontSize="small" />;
@@ -46,7 +47,7 @@ export const getAuthStatusIcon = (authStatus: PartyAuthStatus) => {
   }
 };
 
-export const getAuthStatusChip = (authStatus: PartyAuthStatus) => {
+const getAuthStatusChip = (authStatus: PartyAuthStatus) => {
   switch (authStatus.status.status) {
     case "authenticated":
       return <Chip label="Authenticated" color="success" size="small" />;
@@ -121,9 +122,13 @@ export const AuthSection = ({ partyId, authStatus, onRefresh }: AuthSectionProps
           <Typography variant="subtitle2" sx={{ mb: 1 }}>
             User Rights
             {isRightsValid(authStatus.rights) ? (
-              <CheckCircleIcon color="success" fontSize="small" sx={{ ml: 1, verticalAlign: "middle" }} />
+              <Tooltip title="All required rights granted">
+                <CheckCircleIcon color="success" fontSize="small" sx={{ ml: 1, verticalAlign: "middle" }} />
+              </Tooltip>
             ) : (
-              <WarningIcon color="warning" fontSize="small" sx={{ ml: 1, verticalAlign: "middle" }} />
+              <Tooltip title="Missing required rights">
+                <WarningIcon color="warning" fontSize="small" sx={{ ml: 1, verticalAlign: "middle" }} />
+              </Tooltip>
             )}
           </Typography>
           <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>

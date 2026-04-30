@@ -304,9 +304,11 @@ export const PackagesPanel = ({
                               }}
                             >
                               {status === "match" && (
-                                <CheckCircleIcon
-                                  sx={{ fontSize: 16, color: "success.main" }}
-                                />
+                                <Tooltip title="Matches local package" arrow>
+                                  <CheckCircleIcon
+                                    sx={{ fontSize: 16, color: "success.main" }}
+                                  />
+                                </Tooltip>
                               )}
                               {status === "mismatch" && (
                                 <Tooltip title="Missing or version mismatch" arrow>
