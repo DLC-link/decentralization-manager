@@ -237,6 +237,22 @@ pub struct OnboardingRequest {
     pub peer_ids: Vec<String>,
 }
 
+/// One directed missing edge in the peer mesh: `from` does not have `to`
+/// configured as a peer.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct MissingPeerEdge {
+    pub from: String,
+    pub to: String,
+}
+
+/// Returned when onboarding pre-flight detects that selected peers are not
+/// fully meshed. The workflow is not started.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct OnboardingMeshErrorResponse {
+    pub error: String,
+    pub missing_edges: Vec<MissingPeerEdge>,
+}
+
 /// Request to deploy contracts for a decentralized party
 #[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
 pub struct ContractsRequest {

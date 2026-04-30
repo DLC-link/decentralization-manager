@@ -32,6 +32,9 @@ export const OnboardingDialog = ({
 }: OnboardingDialogProps) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [meshErrors, setMeshErrors] = useState<
+    Array<{ from: string; to: string }> | null
+  >(null);
   const [status, setStatus] = useState<OnboardingStatusResponse | null>(null);
   const [partyIdPrefix, setPartyIdPrefix] = useState("");
   const [peers, setPeers] = useState<Peer[]>([]);
@@ -77,6 +80,7 @@ export const OnboardingDialog = ({
   useEffect(() => {
     if (!open) {
       setError(null);
+      setMeshErrors(null);
       setStatus(null);
       setLoading(false);
       setPartyIdPrefix("");
@@ -146,6 +150,7 @@ export const OnboardingDialog = ({
 
     setLoading(true);
     setError(null);
+    setMeshErrors(null);
 
     try {
       const res = await authenticatedFetch(`${API_BASE}/onboarding`, {
@@ -158,7 +163,17 @@ export const OnboardingDialog = ({
       });
 
       if (!res.ok) {
-        const data = await res.json();
+        const data = await res.json().catch(() => ({}));
+        if (
+          res.status === 422 &&
+          Array.isArray(data.missing_edges) &&
+          data.missing_edges.length > 0
+        ) {
+          setMeshErrors(data.missing_edges);
+          setError(data.error || "Selected peers are not mutually connected");
+          setLoading(false);
+          return;
+        }
         throw new Error(data.error || "Failed to start onboarding workflow");
       }
 
@@ -174,6 +189,25 @@ export const OnboardingDialog = ({
       onClose();
     }
   };
+
+  const peerName = (id: string) =>
+    peers.find((p) => p.participant_id === id)?.name || id;
+
+  // Group missing directed edges by the node that needs to be edited.
+  // The user's task on `from` = add each `to` to its network config.
+  const groupedMissing = (() => {
+    if (!meshErrors) return [] as Array<{ node: string; missing: string[] }>;
+    const map = new Map<string, string[]>();
+    for (const edge of meshErrors) {
+      const list = map.get(edge.from) ?? [];
+      list.push(edge.to);
+      map.set(edge.from, list);
+    }
+    return Array.from(map.entries()).map(([node, missing]) => ({
+      node,
+      missing,
+    }));
+  })();
 
   return (
     <Dialog open={open} onClose={handleClose} maxWidth="sm" fullWidth>
@@ -239,7 +273,43 @@ export const OnboardingDialog = ({
             )}
           </Box>
 
-          {error && <Alert severity="error">{error}</Alert>}
+          {error && !meshErrors && <Alert severity="error">{error}</Alert>}
+
+          {meshErrors && (
+            <Alert severity="error">
+              <Typography variant="body2" sx={{ fontWeight: 600, mb: 1 }}>
+                Update network configs:
+              </Typography>
+              <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+                {groupedMissing.map(({ node, missing }, i) => (
+                  <Box key={i}>
+                    <Typography variant="body2">
+                      On <strong>{peerName(node)}</strong>, add:
+                    </Typography>
+                    <Box component="ul" sx={{ pl: 2.5, m: 0 }}>
+                      {missing.map((toId, j) => (
+                        <Typography
+                          component="li"
+                          variant="body2"
+                          key={j}
+                          color="text.secondary"
+                        >
+                          {peerName(toId)}
+                        </Typography>
+                      ))}
+                    </Box>
+                  </Box>
+                ))}
+              </Box>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ display: "block", mt: 1 }}
+              >
+                Then retry.
+              </Typography>
+            </Alert>
+          )}
 
           {status?.status === "inprogress" && (
             <Alert severity="info" icon={<CircularProgress size={20} />}>

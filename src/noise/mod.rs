@@ -34,6 +34,7 @@ pub enum MessageType {
     Ping = 0x000A,
     ListPackages = 0x000B,
     RequestOwnerKeys = 0x000C,
+    ListPeers = 0x000D,
 
     // Invites (0x0010 - 0x001F)
     InviteOnboarding = 0x0010,
@@ -49,6 +50,7 @@ pub enum MessageType {
     Wait = 0x0105,
     Pong = 0x0106,
     OwnerKeys = 0x0107,
+    PeerList = 0x0108,
 
     // Data Transfers (0x0200 - 0x02FF)
     KeysUpload = 0x0201,
@@ -89,6 +91,7 @@ impl TryFrom<u16> for MessageType {
             0x000A => Ok(Self::Ping),
             0x000B => Ok(Self::ListPackages),
             0x000C => Ok(Self::RequestOwnerKeys),
+            0x000D => Ok(Self::ListPeers),
             0x0010 => Ok(Self::InviteOnboarding),
             0x0011 => Ok(Self::InviteKick),
             0x0012 => Ok(Self::InviteContracts),
@@ -100,6 +103,7 @@ impl TryFrom<u16> for MessageType {
             0x0105 => Ok(Self::Wait),
             0x0106 => Ok(Self::Pong),
             0x0107 => Ok(Self::OwnerKeys),
+            0x0108 => Ok(Self::PeerList),
             0x0201 => Ok(Self::KeysUpload),
             0x0202 => Ok(Self::DnsSignature),
             0x0203 => Ok(Self::P2pSignatures),

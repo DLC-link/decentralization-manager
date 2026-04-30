@@ -1,4 +1,8 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 use tokio::sync::RwLock;
@@ -20,9 +24,9 @@ use crate::{
         middleware::require_admin,
         types::{
             ContractsRequest, DarsRequest, ErrorResponse, HttpWorkflowState, KickRequest,
-            KickResponse, KickStatus, ListenerPauseGuard, OnboardingRequest, OnboardingResponse,
-            OnboardingStatus, SuccessResponse, WorkflowProgress, WorkflowResponse,
-            WorkflowStatusResponse,
+            KickResponse, KickStatus, ListenerPauseGuard, MissingPeerEdge,
+            OnboardingMeshErrorResponse, OnboardingRequest, OnboardingResponse, OnboardingStatus,
+            SuccessResponse, WorkflowProgress, WorkflowResponse, WorkflowStatusResponse,
         },
     },
     workflow,
@@ -356,7 +360,8 @@ async fn send_kick_invites(
     request_body = OnboardingRequest,
     responses(
         (status = 202, description = "Onboarding workflow started", body = WorkflowResponse),
-        (status = 409, description = "Workflow already in progress", body = ErrorResponse)
+        (status = 409, description = "Workflow already in progress", body = ErrorResponse),
+        (status = 422, description = "Selected peers are not mutually meshed", body = OnboardingMeshErrorResponse)
     )
 )]
 #[post("/onboarding")]
@@ -371,6 +376,36 @@ pub async fn start_onboarding(
         if *status == OnboardingStatus::InProgress {
             return HttpResponse::Conflict().json(ErrorResponse {
                 error: "An onboarding workflow is already in progress".to_string(),
+            });
+        }
+    }
+
+    // Pre-flight: every selected peer must have every other selected peer in
+    // its network config, otherwise the coordinator workflow will hang waiting
+    // for attestor connections that can never be established.
+    match verify_peer_mesh(&data.config, &data.db, &body.peer_ids).await {
+        Ok(missing) if !missing.is_empty() => {
+            let edge_summary = missing
+                .iter()
+                .map(|e| format!("{from} → {to}", from = e.from, to = e.to))
+                .collect::<Vec<_>>()
+                .join("; ");
+            tracing::warn!(
+                "Onboarding rejected: {n} missing peer mesh edge(s): {edge_summary}",
+                n = missing.len()
+            );
+            return HttpResponse::UnprocessableEntity().json(OnboardingMeshErrorResponse {
+                error: format!(
+                    "Selected peers are not mutually connected. Missing peer-to-peer config: {edge_summary}"
+                ),
+                missing_edges: missing,
+            });
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::error!("Failed to run mesh pre-flight: {e:#}");
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to verify peer mesh: {e}"),
             });
         }
     }
@@ -610,6 +645,136 @@ async fn send_onboarding_invites(
     }
 
     Ok(())
+}
+
+/// Pre-flight check: query each selected peer for its known peer list and
+/// verify every pair within `peer_ids` knows each other. Returns the list of
+/// missing directed edges (`from` does not have `to` configured). Empty Vec
+/// on success.
+///
+/// Coordinator → peer reachability is implicitly verified: if a peer can
+/// answer our Noise call, it already has us in its peer list. We only check
+/// peer ↔ peer mesh — that's the case the user can't see otherwise.
+async fn verify_peer_mesh(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    peer_ids: &[String],
+) -> Result<Vec<MissingPeerEdge>> {
+    let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
+    let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
+    let request = Message::new_empty(MessageType::ListPeers);
+    let identity = config.participant_id().to_string();
+
+    let mut missing_edges = Vec::new();
+    let mut peer_views: HashMap<String, HashSet<String>> = HashMap::new();
+
+    for peer_id in peer_ids {
+        let peer = match network_config
+            .peers
+            .iter()
+            .find(|p| p.participant_id.to_string() == *peer_id)
+        {
+            Some(p) => p,
+            None => {
+                // Coordinator doesn't know this peer — won't be able to invite them.
+                missing_edges.push(MissingPeerEdge {
+                    from: identity.clone(),
+                    to: peer_id.clone(),
+                });
+                continue;
+            }
+        };
+
+        if peer.public_key.is_empty() {
+            tracing::warn!("Peer {peer_id} has no public key configured — cannot mesh-check");
+            missing_edges.push(MissingPeerEdge {
+                from: identity.clone(),
+                to: peer_id.clone(),
+            });
+            continue;
+        }
+
+        let peer_pub_key = match parse_public_key(&peer.public_key) {
+            Ok(pk) => pk,
+            Err(e) => {
+                tracing::warn!("Peer {peer_id} has invalid public key: {e}");
+                missing_edges.push(MissingPeerEdge {
+                    from: identity.clone(),
+                    to: peer_id.clone(),
+                });
+                continue;
+            }
+        };
+
+        let psk = keypair.derive_psk(&peer_pub_key);
+
+        let response = match send_noise_message(
+            &peer.address,
+            peer.port,
+            &psk,
+            identity.as_bytes(),
+            &request,
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("Failed to query peers from {peer_id}: {e}");
+                missing_edges.push(MissingPeerEdge {
+                    from: identity.clone(),
+                    to: peer_id.clone(),
+                });
+                continue;
+            }
+        };
+
+        let msg = match Message::from_bytes(&response) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!("Malformed response from {peer_id}: {e}");
+                continue;
+            }
+        };
+
+        if msg.msg_type != MessageType::PeerList {
+            tracing::warn!(
+                "Peer {peer_id} responded with {msg_type:?} instead of PeerList",
+                msg_type = msg.msg_type
+            );
+            continue;
+        }
+
+        let view: HashSet<String> = match serde_json::from_slice(&msg.payload) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("Could not parse peer list from {peer_id}: {e}");
+                continue;
+            }
+        };
+        peer_views.insert(peer_id.clone(), view);
+    }
+
+    // For every directed pair within selected peers, check that A's peer view
+    // includes B. Missing means A and B aren't mutually connected.
+    for a in peer_ids {
+        let Some(a_view) = peer_views.get(a) else {
+            // Already recorded a coordinator→A reachability problem above.
+            continue;
+        };
+        for b in peer_ids {
+            if a == b {
+                continue;
+            }
+            if !a_view.contains(b) {
+                missing_edges.push(MissingPeerEdge {
+                    from: a.clone(),
+                    to: b.clone(),
+                });
+            }
+        }
+    }
+
+    Ok(missing_edges)
 }
 
 // ============================================================================

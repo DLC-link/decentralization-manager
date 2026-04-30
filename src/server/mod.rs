@@ -96,6 +96,7 @@ struct WorkflowTriggers {
     pending_invitations: Arc<RwLock<Vec<PendingInvitation>>>,
     admin_api_url: String,
     synchronizer: String,
+    db: SqlitePool,
 }
 
 /// Start the HTTP server and a heartbeat system for peer status tracking
@@ -230,6 +231,7 @@ pub async fn start_server(
         pending_invitations: pending_invitations.clone(),
         admin_api_url: config.admin_api_url(),
         synchronizer: config.synchronizer().to_string(),
+        db: db.clone(),
     };
     tokio::spawn(async move {
         run_heartbeat(
@@ -674,6 +676,27 @@ async fn handle_incoming_connection(
                                 }
                             };
                             let response_msg = Message::new(MessageType::OwnerKeys, payload);
+                            return Ok(Response::builder()
+                                .status(StatusCode::OK)
+                                .body(Body::from(response_msg.to_bytes()))
+                                .unwrap());
+                        }
+                        MessageType::ListPeers => {
+                            tracing::debug!("Received ListPeers request");
+                            let payload = match triggers.db.get_all_peers().await {
+                                Ok(peers) => {
+                                    let ids: Vec<String> = peers
+                                        .into_iter()
+                                        .map(|p| p.participant_id.to_string())
+                                        .collect();
+                                    serde_json::to_vec(&ids).unwrap_or_else(|_| b"[]".to_vec())
+                                }
+                                Err(e) => {
+                                    tracing::error!("Failed to list peers: {e}");
+                                    b"[]".to_vec()
+                                }
+                            };
+                            let response_msg = Message::new(MessageType::PeerList, payload);
                             return Ok(Response::builder()
                                 .status(StatusCode::OK)
                                 .body(Body::from(response_msg.to_bytes()))
