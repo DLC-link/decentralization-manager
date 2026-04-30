@@ -107,7 +107,7 @@ pub async fn save_party_config(
     // through unauthenticated. Once any party credential exists, require the
     // caller to carry the admin role.
     let is_fresh = data.party_credentials.read().await.is_empty();
-    if !is_fresh && let Err(resp) = require_admin(&http_req, &data.admin_role) {
+    if !is_fresh && let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
     }
 

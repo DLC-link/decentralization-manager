@@ -71,7 +71,7 @@ pub struct AppState {
     /// Inbound token validator — authenticates API callers.
     pub token_validator: TokenValidator,
     /// Role name that grants admin access to sensitive endpoints.
-    pub admin_role: String,
+    pub admin_role: Option<String>,
     /// Party credentials (mutable, hot-reloadable)
     pub party_credentials: Arc<RwLock<Vec<PartyCredentials>>>,
     /// Serializes unauthenticated `PUT /party-config` bootstrap calls so two
@@ -104,7 +104,7 @@ pub async fn start_server(
     port: u16,
     config: NodeConfig,
     db: SqlitePool,
-    admin_role: String,
+    admin_role: Option<String>,
     allowed_origin: Option<String>,
 ) -> Result {
     // Test-mode is a compile-time decision: it's `true` iff the binary was
@@ -156,7 +156,9 @@ pub async fn start_server(
     // `MockValidator` is compiled in only behind `cfg(any(test, feature =
     // "test-mode"))`, so a release binary cannot select it.
     #[cfg(any(test, feature = "test-mode"))]
-    let token_validator = TokenValidator::Mock(Arc::new(MockValidator::new(admin_role.clone())));
+    let token_validator = TokenValidator::Mock(Arc::new(MockValidator::new(
+        admin_role.clone().unwrap_or_default(),
+    )));
     #[cfg(not(any(test, feature = "test-mode")))]
     let token_validator = {
         let no_top_level_config = config.keycloak.is_none();

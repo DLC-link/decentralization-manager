@@ -66,7 +66,7 @@ pub async fn start_kick(
     kick_state: web::Data<Arc<KickWorkflowState>>,
     body: web::Json<KickRequest>,
 ) -> impl Responder {
-    if let Err(resp) = require_admin(&http_req, &data.admin_role) {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
     }
 
