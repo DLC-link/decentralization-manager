@@ -63,10 +63,10 @@ const FIELD_TYPES = [
   { value: "decentralized_party", label: "Dec. Party" },
   { value: "operator_party", label: "Operator" },
   { value: "participant_party", label: "Party" },
-  { value: "party_set", label: "Party Set" },
+  { value: "party_set", label: "Member Set" },
   { value: "attestors_set", label: "Attestors Set" },
   { value: "governance_threshold", label: "Threshold" },
-  { value: "rel_time", label: "RelTime" },
+  { value: "rel_time", label: "Proposal Timeout" },
   { value: "optional", label: "Optional" },
   { value: "instrument", label: "Instrument" },
   { value: "text", label: "Text" },
@@ -773,7 +773,7 @@ const ContractEditor = ({
             renderInput={(params) => (
               <TextField
                 {...params}
-                label="Package ID"
+                label="Package Name / ID"
                 placeholder="Enter or select package ID"
               />
             )}

@@ -2833,12 +2833,12 @@ export const GovernanceSection = ({
         )}
       </Collapse>
 
-      {/* Domain Proposals — only for governance-core */}
+      {/* Proposals — only for governance-core */}
       {governanceType === "core_self" && data && (
         <Box sx={{ mt: 2, mx: -2 }}>
           <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 1, px: 2 }}>
             <Typography variant="subtitle2">
-              Domain Proposals
+              Proposals
               {(data.domain_actions?.length ?? 0) > 0 && (
                 <Chip label={data.domain_actions!.length} size="small" sx={{ ml: 1 }} color="secondary" />
               )}
