@@ -343,6 +343,22 @@ RUST_LOG=debug ./integration-tests/run.sh
 Quiet mode is the recommended way to run the suite — it surfaces only
 what a tester needs to verify a passing run, suppressing the
 dec-party-manager INFO chatter and Canton/Noise convergence warnings.
+
+The suite is organised into two layers:
+
+- **Phases** — top-level workflow chunks, one file in `tests/common/phases/`
+  per phase (`create_dec_party`, `distribute_dars`, `deploy_gov_core`,
+  `token_custody`, `utility_onboarding`, `generic_vote`, `kick`). Each
+  phase corresponds 1:1 to one of the original bash scripts and is logged
+  as `INFO Phase: <name>`.
+- **Scenarios** — Given-When-Then story arcs built with the
+  [`Scenario`](tests/common/scenario.rs) DSL. Each scenario has its own
+  header, indented step trace, and completion line. A phase runs **one or
+  more scenarios**: six of the seven phases run a single scenario;
+  `utility_onboarding` runs eight (four propose-confirm-execute cycles —
+  ProvisionProviderService, SetupUtility, Mint, Burn — plus four
+  side-effect assertion scenarios), for **14 scenarios total**.
+
 Sample of a passing run:
 
 ```
