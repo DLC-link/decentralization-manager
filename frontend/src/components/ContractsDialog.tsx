@@ -688,6 +688,7 @@ interface ContractEditorProps {
   participantCount: number;
   partyId: string;
   knownPackageIds: string[];
+  lockStructure?: boolean;
 }
 
 const ContractEditor = ({
@@ -698,6 +699,7 @@ const ContractEditor = ({
   participantCount,
   partyId,
   knownPackageIds,
+  lockStructure = false,
 }: ContractEditorProps) => {
   const handleFieldChange = (fieldIndex: number, newField: FieldDefinition) => {
     const newFields = [...contract.fields];
@@ -812,14 +814,16 @@ const ContractEditor = ({
               partyId={partyId}
             />
           ))}
-          <Button
-            startIcon={<AddIcon />}
-            onClick={handleAddField}
-            variant="outlined"
-            size="small"
-          >
-            Add Field
-          </Button>
+          {!lockStructure && (
+            <Button
+              startIcon={<AddIcon />}
+              onClick={handleAddField}
+              variant="outlined"
+              size="small"
+            >
+              Add Field
+            </Button>
+          )}
         </Box>
       </AccordionDetails>
     </Accordion>
@@ -1408,20 +1412,23 @@ export const ContractsDialog = ({
                 <Typography variant="subtitle1">
                   Contract Definitions
                 </Typography>
-                <Button
-                  startIcon={<AddIcon />}
-                  onClick={handleAddContract}
-                  variant="outlined"
-                  size="small"
-                >
-                  Add Contract
-                </Button>
+                {contractType !== "governance-core" && (
+                  <Button
+                    startIcon={<AddIcon />}
+                    onClick={handleAddContract}
+                    variant="outlined"
+                    size="small"
+                  >
+                    Add Contract
+                  </Button>
+                )}
               </Box>
 
               {contracts.length === 0 ? (
                 <Typography variant="body2" color="text.secondary">
-                  No contracts defined. Click "Add Contract" to define contracts
-                  to deploy, or leave empty to skip contract creation.
+                  {contractType === "governance-core"
+                    ? "No contracts to deploy."
+                    : 'No contracts defined. Click "Add Contract" to define contracts to deploy, or leave empty to skip contract creation.'}
                 </Typography>
               ) : (
                 contracts.map((contract, index) => (
@@ -1434,6 +1441,7 @@ export const ContractsDialog = ({
                     participantCount={participantIds.length}
                     partyId={partyId}
                     knownPackageIds={allPackageIds}
+                    lockStructure={contractType === "governance-core"}
                   />
                 ))
               )}
