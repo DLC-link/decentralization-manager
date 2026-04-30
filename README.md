@@ -356,7 +356,7 @@ INFO Using prefix: test-network-1
 INFO Scenario "create decentralized party test-network-1"
 INFO   GIVEN no party at this prefix yet
 INFO   WHEN  P1 starts onboarding and P2/P3 accept invitations
-INFO   THEN  eventually party visible in /decentralized-parties
+INFO   THEN  party visible in /decentralized-parties
 INFO     ✓ (took 18.4s)
 INFO Scenario "create decentralized party test-network-1" complete (18.7s)
 
@@ -375,8 +375,9 @@ Integration tests completed successfully!
 ```
 
 Each scenario follows the Given-When-Then DSL: `Given` is a precondition,
-`When` is the test action, `Then` (or `Then eventually`) is the
-postcondition assertion. A failure renders as
+`When` is the test action, `Then` is the postcondition assertion (its
+probe is polled until it observes the expected state or the per-step
+deadline elapses). A failure renders as
 `ERROR Scenario "<name>" failed at <KIND> "<step>"` with a chained
 `anyhow` cause trail pinpointing the failing HTTP call.
 
