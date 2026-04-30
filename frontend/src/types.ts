@@ -328,6 +328,59 @@ export type ProposalType =
   | {
       type: "generic_vote";
       description: string;
+    }
+  | {
+      type: "provision_provider_service";
+    }
+  | {
+      type: "setup_utility";
+      provider_service_cid: string;
+      operator: string;
+      instrument_id_text: string;
+      create_transfer_rule: boolean;
+      create_allocation_factory: boolean;
+    }
+  | {
+      type: "create_provider_service_request";
+      operator: string;
+      provider: string;
+    }
+  | {
+      type: "create_user_service_request";
+      operator: string;
+      user: string;
+    }
+  | {
+      type: "set_provider_app_reward_beneficiaries";
+      instrument_configuration_cid: string;
+      provider_app_reward_beneficiaries: AppRewardBeneficiary[] | null;
+    }
+  | {
+      type: "set_enable_result_contracts";
+      registrar_service_cid: string;
+      enable_result_contracts: boolean | null;
+    }
+  | {
+      type: "create_delegated_batched_markers_proxy";
+      operator: string;
+    }
+  | {
+      type: "mint";
+      allocation_factory_cid: string;
+      instrument_id: { admin: string; id: string };
+      instrument_configuration_cid: string;
+      recipient: string;
+      amount: string;
+      description: string;
+    }
+  | {
+      type: "burn";
+      allocation_factory_cid: string;
+      instrument_id: { admin: string; id: string };
+      instrument_configuration_cid: string;
+      holder: string;
+      amount: string;
+      description: string;
     };
 
 export interface ProposeActionRequest {
