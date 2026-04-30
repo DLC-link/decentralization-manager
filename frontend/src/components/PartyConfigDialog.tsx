@@ -100,7 +100,7 @@ export const PartyConfigDialog = ({
       );
       if (res.ok) {
         const data: PartyConfigResponse = await res.json();
-        setMemberPartyId(data.member_party_id);
+        setMemberPartyId(data.member_party_id ?? "");
         setUserId(data.user_id);
         setKeycloakUrl(data.keycloak_url);
         setKeycloakRealm(data.keycloak_realm);

@@ -97,6 +97,8 @@ struct WorkflowTriggers {
     admin_api_url: String,
     synchronizer: String,
     db: SqlitePool,
+    /// Read by the `RequestMemberParty` listener arm.
+    party_credentials: Arc<RwLock<Vec<PartyCredentials>>>,
 }
 
 /// Start the HTTP server and a heartbeat system for peer status tracking
@@ -211,7 +213,7 @@ pub async fn start_server(
         auth,
         token_validator,
         admin_role,
-        party_credentials,
+        party_credentials: party_credentials.clone(),
         bootstrap_mu: Arc::new(Mutex::new(())),
         test_mode,
         refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
@@ -232,6 +234,7 @@ pub async fn start_server(
         admin_api_url: config.admin_api_url(),
         synchronizer: config.synchronizer().to_string(),
         db: db.clone(),
+        party_credentials: party_credentials.clone(),
     };
     tokio::spawn(async move {
         run_heartbeat(
@@ -431,6 +434,7 @@ pub async fn start_server(
             .service(handlers::grant_rights)
             .service(handlers::get_governance)
             .service(handlers::get_governance_state)
+            .service(handlers::get_known_members)
             .service(handlers::get_vaults_handler)
             .service(handlers::get_provider_services_handler)
             .service(handlers::get_user_services_handler)
@@ -697,6 +701,25 @@ async fn handle_incoming_connection(
                                 }
                             };
                             let response_msg = Message::new(MessageType::PeerList, payload);
+                            return Ok(Response::builder()
+                                .status(StatusCode::OK)
+                                .body(Body::from(response_msg.to_bytes()))
+                                .unwrap());
+                        }
+                        MessageType::RequestMemberParty => {
+                            let dec_party_id =
+                                std::str::from_utf8(&msg.payload).unwrap_or("").to_string();
+                            tracing::debug!("Received RequestMemberParty for {dec_party_id}",);
+                            let payload = {
+                                let creds = triggers.party_credentials.read().await;
+                                creds
+                                    .iter()
+                                    .find(|c| c.dec_party_id.to_string() == dec_party_id)
+                                    .map(|c| c.member_party_id.to_string().into_bytes())
+                                    .unwrap_or_default()
+                            };
+                            let response_msg =
+                                Message::new(MessageType::MemberPartyResponse, payload);
                             return Ok(Response::builder()
                                 .status(StatusCode::OK)
                                 .body(Body::from(response_msg.to_bytes()))

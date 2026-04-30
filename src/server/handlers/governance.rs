@@ -17,9 +17,10 @@ use serde::Deserialize;
 
 use crate::{
     auth::WorkflowAuth,
-    config::{NodeConfig, PackageConfig, default_package_config},
+    config::{NetworkConfig, NodeConfig, PackageConfig, default_package_config},
     db::schema::SchemaRead,
     error::Result,
+    noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
     participant_id::CantonId,
     server::{
         AppState, action_serializer,
@@ -34,9 +35,10 @@ use crate::{
             AuditLogEntry, AuditLogQuery, AuditLogResponse, CancelConfirmationRequest,
             ChainAuditEntry, ChainAuditQuery, ChainAuditResponse, ConfirmActionRequest,
             ContractQueryResponse, ErrorResponse, ExecuteActionRequest, ExpireConfirmationRequest,
-            GovernanceResponse, GovernanceStateResponse, GovernanceType, MessageResponse,
-            NetworkInfo, ProposeActionRequest, ProviderServicesResponse, RegistrarServicesResponse,
-            UserServicesResponse, VaultsResponse,
+            GovernanceResponse, GovernanceStateResponse, GovernanceType, KnownMember,
+            KnownMembersResponse, MessageResponse, NetworkInfo, ProposeActionRequest,
+            ProviderServicesResponse, RegistrarServicesResponse, UserServicesResponse,
+            VaultsResponse,
         },
     },
     utils,
@@ -148,6 +150,124 @@ pub async fn get_governance_state(
             })
         }
     }
+}
+
+#[utoipa::path(
+    tag = "Governance",
+    params(GovernanceQuery),
+    responses(
+        (status = 200, description = "Member parties known to each participant", body = KnownMembersResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+#[get("/governance/known-members")]
+pub async fn get_known_members(
+    data: web::Data<AppState>,
+    query: web::Query<GovernanceQuery>,
+) -> impl Responder {
+    match collect_known_members(&data, &query.party_id).await {
+        Ok(members) => HttpResponse::Ok().json(KnownMembersResponse { members }),
+        Err(e) => {
+            tracing::error!("Failed to collect known members: {e:#}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to collect known members: {e}"),
+            })
+        }
+    }
+}
+
+async fn collect_known_members(
+    data: &web::Data<AppState>,
+    dec_party_id: &CantonId,
+) -> Result<Vec<KnownMember>> {
+    let dec_party_str = dec_party_id.to_string();
+    let network_config = NetworkConfig::from_peers(data.db.get_all_peers().await?);
+    let keypair = NoiseKeypair::from_file(&data.config.key_file_path()).await?;
+    let identity = data.config.participant_id().to_string();
+    let request = Message::new(
+        MessageType::RequestMemberParty,
+        dec_party_str.as_bytes().to_vec(),
+    );
+
+    let mut out = Vec::new();
+
+    {
+        let creds = data.party_credentials.read().await;
+        let self_member = creds
+            .iter()
+            .find(|c| c.dec_party_id == *dec_party_id)
+            .map(|c| c.member_party_id.to_string())
+            .unwrap_or_default();
+        out.push(KnownMember {
+            participant_uid: identity.clone(),
+            member_party_id: self_member,
+        });
+    }
+
+    let self_id = data.config.participant_id();
+    for peer in &network_config.peers {
+        if peer.participant_id == *self_id {
+            continue;
+        }
+        if peer.public_key.is_empty() {
+            out.push(KnownMember {
+                participant_uid: peer.participant_id.to_string(),
+                member_party_id: String::new(),
+            });
+            continue;
+        }
+        let peer_pub_key = match parse_public_key(&peer.public_key) {
+            Ok(pk) => pk,
+            Err(e) => {
+                tracing::warn!(
+                    "Skipping member-party query to {pid}: invalid public key: {e}",
+                    pid = peer.participant_id,
+                );
+                out.push(KnownMember {
+                    participant_uid: peer.participant_id.to_string(),
+                    member_party_id: String::new(),
+                });
+                continue;
+            }
+        };
+
+        let psk = keypair.derive_psk(&peer_pub_key);
+        let response = match send_noise_message(
+            &peer.address,
+            peer.port,
+            &psk,
+            identity.as_bytes(),
+            &request,
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to query member party from {pid}: {e}",
+                    pid = peer.participant_id,
+                );
+                out.push(KnownMember {
+                    participant_uid: peer.participant_id.to_string(),
+                    member_party_id: String::new(),
+                });
+                continue;
+            }
+        };
+
+        let member_party = match Message::from_bytes(&response) {
+            Ok(msg) if msg.msg_type == MessageType::MemberPartyResponse => {
+                String::from_utf8(msg.payload).unwrap_or_default()
+            }
+            _ => String::new(),
+        };
+        out.push(KnownMember {
+            participant_uid: peer.participant_id.to_string(),
+            member_party_id: member_party,
+        });
+    }
+
+    Ok(out)
 }
 
 /// Get deployed Vault contracts

@@ -244,6 +244,7 @@ interface FieldEditorProps {
   onDelete: () => void;
   participantCount?: number;
   partyId?: string;
+  lockStructure?: boolean;
 }
 
 const FieldEditor = ({
@@ -252,6 +253,7 @@ const FieldEditor = ({
   onDelete,
   participantCount = 3,
   partyId,
+  lockStructure = false,
 }: FieldEditorProps) => {
   const defaultThreshold = Math.max(2, Math.ceil((participantCount * 2) / 3));
 
@@ -656,26 +658,37 @@ const FieldEditor = ({
         py: 1,
       }}
     >
-      <FormControl size="small" fullWidth>
-        <Select
-          value={field.type}
-          onChange={(e) =>
-            onChange(createDefaultField(e.target.value, participantCount))
-          }
+      {lockStructure ? (
+        <Typography
+          variant="body2"
+          sx={{ fontWeight: 500, pl: 1.5, py: 1 }}
         >
-          {FIELD_TYPES.map((t) => (
-            <MenuItem key={t.value} value={t.value}>
-              {t.label}
-            </MenuItem>
-          ))}
-        </Select>
-      </FormControl>
+          {FIELD_TYPES.find((t) => t.value === field.type)?.label ?? field.type}
+        </Typography>
+      ) : (
+        <FormControl size="small" fullWidth>
+          <Select
+            value={field.type}
+            onChange={(e) =>
+              onChange(createDefaultField(e.target.value, participantCount))
+            }
+          >
+            {FIELD_TYPES.map((t) => (
+              <MenuItem key={t.value} value={t.value}>
+                {t.label}
+              </MenuItem>
+            ))}
+          </Select>
+        </FormControl>
+      )}
       <Box sx={{ display: "flex", alignItems: "center", minWidth: 0 }}>
         {renderValueInput()}
       </Box>
-      <IconButton size="small" onClick={onDelete} color="error">
-        <DeleteIcon fontSize="small" />
-      </IconButton>
+      {!lockStructure && (
+        <IconButton size="small" onClick={onDelete} color="error">
+          <DeleteIcon fontSize="small" />
+        </IconButton>
+      )}
     </Box>
   );
 };
@@ -745,16 +758,18 @@ const ContractEditor = ({
           }}
         >
           <Typography>{contract.name || `Contract ${index + 1}`}</Typography>
-          <IconButton
-            size="small"
-            onClick={(e) => {
-              e.stopPropagation();
-              onDelete();
-            }}
-            color="error"
-          >
-            <DeleteIcon fontSize="small" />
-          </IconButton>
+          {!lockStructure && (
+            <IconButton
+              size="small"
+              onClick={(e) => {
+                e.stopPropagation();
+                onDelete();
+              }}
+              color="error"
+            >
+              <DeleteIcon fontSize="small" />
+            </IconButton>
+          )}
         </Box>
       </AccordionSummary>
       <AccordionDetails sx={{ p: 3 }}>
@@ -812,6 +827,7 @@ const ContractEditor = ({
               onDelete={() => handleDeleteField(fieldIndex)}
               participantCount={participantCount}
               partyId={partyId}
+              lockStructure={lockStructure}
             />
           ))}
           {!lockStructure && (
@@ -1117,6 +1133,43 @@ export const ContractsDialog = ({
     }
   }, [contractType, participantIds.length, packages]);
 
+  // Pre-fill the Member Set for gov-core from each peer's configured member_party_id.
+  useEffect(() => {
+    if (contractType !== "governance-core") return;
+    let cancelled = false;
+    const fetchKnownMembers = async () => {
+      try {
+        const res = await authenticatedFetch(
+          `${API_BASE}/governance/known-members?party_id=${encodeURIComponent(
+            partyId,
+          )}`,
+        );
+        if (!res.ok || cancelled) return;
+        const data: {
+          members: Array<{ participant_uid: string; member_party_id: string }>;
+        } = await res.json();
+        const memberIds = data.members
+          .map((m) => m.member_party_id)
+          .filter((id) => id.length > 0);
+        if (cancelled || memberIds.length === 0) return;
+        setContracts((prev) =>
+          prev.map((c) => ({
+            ...c,
+            fields: c.fields.map((f) =>
+              f.type === "party_set" ? { ...f, parties: memberIds } : f,
+            ),
+          })),
+        );
+      } catch {
+        // If discovery fails, the operator can still type values manually.
+      }
+    };
+    fetchKnownMembers();
+    return () => {
+      cancelled = true;
+    };
+  }, [contractType, partyId, packages]);
+
   const pollStatus = useCallback(async () => {
     try {
       const res = await authenticatedFetch(`${API_BASE}/contracts/status`);
@@ -1178,6 +1231,7 @@ export const ContractsDialog = ({
 
     if (
       contractType !== "vault" &&
+      contractType !== "governance-core" &&
       participantParties.length !== participantIds.length
     ) {
       setError(
@@ -1187,11 +1241,19 @@ export const ContractsDialog = ({
       return;
     }
 
+    // For gov core the user doesn't fill the top section; derive participant_parties from the contract's Member Set field.
+    const submittedParticipantParties =
+      contractType === "governance-core"
+        ? (contracts
+            .flatMap((c) => c.fields)
+            .find((f) => f.type === "party_set")?.parties ?? [])
+        : participantParties;
+
     try {
       const request: ContractsRequest = {
         decentralized_party_id: partyId,
         participant_ids: participantIds,
-        participant_parties: participantParties,
+        participant_parties: submittedParticipantParties,
         operator_party: operatorParty,
         contracts: contracts,
       };
@@ -1309,6 +1371,7 @@ export const ContractsDialog = ({
                 />
               )}
 
+              {contractType !== "governance-core" && (
               <>
                 <Typography variant="subtitle2" sx={{ mt: 1 }}>
                   Participant Party IDs ({participantParties.length}/
@@ -1400,6 +1463,7 @@ export const ContractsDialog = ({
                   )}
                 </Box>
               </>
+              )}
 
               <Divider />
               <Box

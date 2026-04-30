@@ -415,6 +415,19 @@ pub struct AuthTestResponse {
     pub results: Vec<AuthTestResult>,
 }
 
+/// One participant's member party for a given dec party. Empty `member_party_id` = peer not configured / unreachable.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct KnownMember {
+    pub participant_uid: String,
+    pub member_party_id: String,
+}
+
+/// Response for `GET /governance/known-members`.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct KnownMembersResponse {
+    pub members: Vec<KnownMember>,
+}
+
 /// Request to grant the configured user the rights they need to act on a dec party
 #[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
 pub struct GrantRightsRequest {
@@ -987,8 +1000,10 @@ pub struct PartyConfigRequest {
 pub struct PartyConfigResponse {
     /// The decentralized party ID
     pub dec_party_id: CantonId,
-    /// The member party ID (local to this node)
-    pub member_party_id: CantonId,
+    /// The member party ID (local to this node). `None` if no credentials
+    /// have been saved yet — the operator must provide one via PUT.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub member_party_id: Option<CantonId>,
     /// Canton/Ledger API user ID
     pub user_id: String,
     /// Keycloak server URL

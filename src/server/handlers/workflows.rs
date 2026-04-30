@@ -5,7 +5,6 @@ use std::{
 };
 
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
-use tokio::sync::RwLock;
 
 use sqlx::SqlitePool;
 
@@ -13,9 +12,8 @@ use super::parties::{
     fetch_decentralized_parties, resolve_owner_keys_from_peers, store_parties_to_db,
 };
 use crate::{
-    auth::{AuthRegistry, WorkflowAuth},
-    config::{KeycloakConfig, NetworkConfig, NodeConfig, PartyCredentials, default_package_config},
-    db::schema::{Commitable, SchemaRead, SchemaWrite},
+    config::{NetworkConfig, NodeConfig},
+    db::schema::SchemaRead,
     error::Result,
     noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
     participant_id::CantonId,
@@ -428,7 +426,6 @@ pub async fn start_onboarding(
     let peer_ids = body.peer_ids.clone();
     let party_credentials = data.party_credentials.clone();
     let auth_lock = data.auth.clone();
-    let is_test_mode = data.test_mode;
 
     tokio::spawn(async move {
         let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
@@ -470,23 +467,10 @@ pub async fn start_onboarding(
         let mut error = onboarding_state_clone.error.write().await;
 
         match result {
-            Ok(coordinator_result) => {
+            Ok(_) => {
                 *status = OnboardingStatus::Completed;
                 tracing::info!("Onboarding workflow completed successfully");
-
-                if !is_test_mode
-                    && let Some(dec_party_id) = coordinator_result.created_party_id
-                    && let Err(e) = save_default_party_config(
-                        &config,
-                        &db,
-                        &dec_party_id,
-                        &party_credentials,
-                        &auth_lock,
-                    )
-                    .await
-                {
-                    tracing::warn!("Failed to auto-save party config: {e}");
-                }
+                // Operator configures party credentials via the Party Configuration dialog; auto-saving placeholders pollutes the auth registry.
 
                 // Refresh dec_party cache in background
                 let bg_config = config.clone();
@@ -1182,66 +1166,6 @@ async fn send_dars_invites(config: &NodeConfig, db: &SqlitePool, peer_ids: &[Can
         }
     }
 
-    Ok(())
-}
-
-/// Auto-save default party config after successful onboarding
-async fn save_default_party_config(
-    config: &NodeConfig,
-    db: &SqlitePool,
-    dec_party_id: &CantonId,
-    party_credentials: &Arc<RwLock<Vec<PartyCredentials>>>,
-    auth_lock: &Arc<RwLock<Option<WorkflowAuth>>>,
-) -> Result {
-    tracing::info!("Saving default config for new dec party: {dec_party_id}");
-
-    let kc_defaults = config.canton.network.keycloak_defaults();
-    let creds = PartyCredentials {
-        dec_party_id: dec_party_id.clone(),
-        // Placeholder — user must set the real member party ID via the config dialog
-        member_party_id: dec_party_id.clone(),
-        user_id: "CoordinatorUser".to_string(),
-        keycloak: KeycloakConfig {
-            url: kc_defaults.url,
-            realm: kc_defaults.realm,
-            client_id: String::new(),
-            client_secret: None,
-            username: None,
-            password: None,
-        },
-        packages: default_package_config(),
-    };
-
-    // Primary write: save to database
-    let mut tx = db.begin_transaction().await?;
-    tx.upsert_party_credentials(&creds).await?;
-    Commitable::commit(tx).await?;
-
-    // Update in-memory state
-    {
-        let mut pc = party_credentials.write().await;
-        if let Some(existing) = pc.iter_mut().find(|p| p.dec_party_id == *dec_party_id) {
-            *existing = creds;
-        } else {
-            pc.push(creds);
-        }
-    }
-
-    let creds_snapshot = party_credentials.read().await.clone();
-    if !creds_snapshot.is_empty() {
-        match AuthRegistry::new(&creds_snapshot).await {
-            Ok(registry) => {
-                let mut auth = auth_lock.write().await;
-                *auth = Some(WorkflowAuth::Keycloak(Arc::new(registry)));
-                tracing::info!("Auth registry reinitialized after onboarding");
-            }
-            Err(e) => {
-                tracing::warn!("Failed to reinitialize auth registry: {e}");
-            }
-        }
-    }
-
-    tracing::info!("Default party config saved for {dec_party_id}");
     Ok(())
 }
 

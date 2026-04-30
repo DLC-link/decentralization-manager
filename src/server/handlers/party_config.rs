@@ -47,7 +47,7 @@ pub async fn get_party_config(
     match creds {
         Some(c) => HttpResponse::Ok().json(PartyConfigResponse {
             dec_party_id: c.dec_party_id.clone(),
-            member_party_id: c.member_party_id.clone(),
+            member_party_id: Some(c.member_party_id.clone()),
             user_id: c.user_id.clone(),
             keycloak_url: c.keycloak.url.clone(),
             keycloak_realm: c.keycloak.realm.clone(),
@@ -61,8 +61,8 @@ pub async fn get_party_config(
             let kc_defaults = data.config.canton.network.keycloak_defaults();
             let packages = default_package_config();
             HttpResponse::Ok().json(PartyConfigResponse {
-                dec_party_id: dec_party_id.clone(),
-                member_party_id: dec_party_id,
+                dec_party_id,
+                member_party_id: None,
                 user_id: "CoordinatorUser".to_string(),
                 keycloak_url: kc_defaults.url,
                 keycloak_realm: kc_defaults.realm,
