@@ -258,6 +258,9 @@ pub struct ContractsRequest {
 pub struct DarsRequest {
     /// DAR files to upload (base64-encoded)
     pub dar_files: Vec<DarFile>,
+    /// Peer IDs to distribute to (required non-empty for /dars/distribute, ignored by /dars/upload)
+    #[serde(default)]
+    pub peer_ids: Vec<CantonId>,
 }
 
 /// Progress status of a workflow (kick, onboarding, etc.)

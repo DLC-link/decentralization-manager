@@ -11,12 +11,16 @@ import {
   Box,
   IconButton,
   Tooltip,
+  Divider,
+  FormGroup,
+  FormControlLabel,
+  Checkbox,
 } from "@mui/material";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import DeleteIcon from "@mui/icons-material/Delete";
 import { API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
-import type { DarsStatusResponse, DarFile } from "../types";
+import type { DarsStatusResponse, DarFile, Peer, NodeConfig } from "../types";
 
 interface DarsDialogProps {
   open: boolean;
@@ -36,6 +40,43 @@ export const DarsDialog = ({
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<DarsStatusResponse | null>(null);
   const [darFiles, setDarFiles] = useState<DarFile[]>([]);
+  const [peers, setPeers] = useState<Peer[]>([]);
+  const [selfNodeId, setSelfNodeId] = useState<string | null>(null);
+  const [selectedPeerIds, setSelectedPeerIds] = useState<Set<string>>(new Set());
+  const [loadingPeers, setLoadingPeers] = useState(false);
+
+  // Fetch peers when dialog opens (distribute mode only)
+  useEffect(() => {
+    if (!open || mode !== "distribute") return;
+
+    const fetchPeers = async () => {
+      setLoadingPeers(true);
+      try {
+        const [networkRes, nodeRes] = await Promise.all([
+          authenticatedFetch(`${API_BASE}/network-config`),
+          authenticatedFetch(`${API_BASE}/node-config`),
+        ]);
+        if (networkRes.ok) {
+          const data = await networkRes.json();
+          setPeers(data.peers || []);
+          // Default to all peers selected
+          const allPeerIds = new Set<string>(
+            (data.peers || []).map((p: Peer) => p.participant_id),
+          );
+          setSelectedPeerIds(allPeerIds);
+        }
+        if (nodeRes.ok) {
+          const nodeData: NodeConfig = await nodeRes.json();
+          setSelfNodeId(nodeData.node.participant_id);
+        }
+      } catch {
+        // Ignore fetch errors
+      } finally {
+        setLoadingPeers(false);
+      }
+    };
+    fetchPeers();
+  }, [open, mode]);
 
   // Reset state when dialog opens/closes
   useEffect(() => {
@@ -44,8 +85,27 @@ export const DarsDialog = ({
       setStatus(null);
       setLoading(false);
       setDarFiles([]);
+      setPeers([]);
+      setSelectedPeerIds(new Set());
     }
   }, [open]);
+
+  const togglePeer = (peerId: string) => {
+    setSelectedPeerIds((prev) => {
+      const newSet = new Set(prev);
+      if (newSet.has(peerId)) {
+        newSet.delete(peerId);
+      } else {
+        newSet.add(peerId);
+      }
+      return newSet;
+    });
+  };
+
+  // Filter out self from peer list
+  const selectablePeers = peers.filter(
+    (p) => p.participant_id.split("::")[0] !== selfNodeId,
+  );
 
   const pollStatus = useCallback(async () => {
     try {
@@ -121,15 +181,25 @@ export const DarsDialog = ({
       return;
     }
 
+    if (mode === "distribute" && selectedPeerIds.size === 0) {
+      setError("At least one peer must be selected");
+      setLoading(false);
+      return;
+    }
+
     try {
       const endpoint =
         mode === "upload"
           ? `${API_BASE}/dars/upload`
           : `${API_BASE}/dars/distribute`;
+      const body =
+        mode === "upload"
+          ? { dar_files: darFiles }
+          : { dar_files: darFiles, peer_ids: Array.from(selectedPeerIds) };
       const res = await authenticatedFetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ dar_files: darFiles }),
+        body: JSON.stringify(body),
       });
 
       if (!res.ok) {
@@ -174,7 +244,7 @@ export const DarsDialog = ({
             <Alert severity="info" icon={<CircularProgress size={20} />}>
               {mode === "upload"
                 ? "Uploading DARs to this node..."
-                : "Distributing DARs to all participants..."}
+                : "Distributing DARs to selected peers..."}
             </Alert>
           )}
 
@@ -182,7 +252,7 @@ export const DarsDialog = ({
             <Alert severity="success">
               {mode === "upload"
                 ? "DARs uploaded to this node successfully!"
-                : "DARs distributed to all participants successfully!"}
+                : "DARs distributed to selected peers successfully!"}
             </Alert>
           )}
 
@@ -198,7 +268,7 @@ export const DarsDialog = ({
               <Typography variant="body2" color="text.secondary">
                 {mode === "upload"
                   ? "Upload Daml Archive (DAR) files to this node only."
-                  : "Distribute Daml Archive (DAR) files to all participants. This will coordinate with other nodes via Noise protocol."}
+                  : "Distribute Daml Archive (DAR) files to selected peers. This will coordinate with the chosen nodes via Noise protocol."}
               </Typography>
 
               <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
@@ -260,6 +330,52 @@ export const DarsDialog = ({
                   ))}
                 </Box>
               )}
+
+              {mode === "distribute" && (
+                <>
+                  <Divider />
+                  <Box>
+                    <Typography variant="subtitle2" sx={{ mb: 1 }}>
+                      Select Peers to Distribute To
+                    </Typography>
+                    {loadingPeers ? (
+                      <Box sx={{ display: "flex", justifyContent: "center", py: 2 }}>
+                        <CircularProgress size={24} />
+                      </Box>
+                    ) : selectablePeers.length === 0 ? (
+                      <Typography variant="body2" color="text.secondary">
+                        No peers configured. Add peers in the Network
+                        Configuration first.
+                      </Typography>
+                    ) : (
+                      <FormGroup>
+                        {selectablePeers.map((peer) => (
+                          <FormControlLabel
+                            key={peer.participant_id}
+                            control={
+                              <Checkbox
+                                checked={selectedPeerIds.has(peer.participant_id)}
+                                onChange={() => togglePeer(peer.participant_id)}
+                                disabled={loading}
+                              />
+                            }
+                            label={
+                              <Box>
+                                <Typography variant="body2">
+                                  {peer.name || peer.participant_id}
+                                </Typography>
+                                <Typography variant="caption" color="text.secondary">
+                                  {peer.address}:{peer.port}
+                                </Typography>
+                              </Box>
+                            }
+                          />
+                        ))}
+                      </FormGroup>
+                    )}
+                  </Box>
+                </>
+              )}
             </>
           )}
         </Box>
@@ -273,7 +389,11 @@ export const DarsDialog = ({
             onClick={handleStart}
             variant="contained"
             color="primary"
-            disabled={loading || darFiles.length === 0}
+            disabled={
+              loading ||
+              darFiles.length === 0 ||
+              (mode === "distribute" && selectedPeerIds.size === 0)
+            }
           >
             {loading ? (
               <CircularProgress size={20} />

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::workflow::contracts::DarFile;
+use crate::{participant_id::CantonId, workflow::contracts::DarFile};
 
 /// Configuration for DARs upload workflow
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -9,4 +9,6 @@ pub struct DarsConfig {
     pub dar_files: Vec<DarFile>,
     /// Workflow instance name for directory organization
     pub instance_name: String,
+    /// Selected peers — the only nodes the coordinator expects as attestors
+    pub peer_ids: Vec<CantonId>,
 }

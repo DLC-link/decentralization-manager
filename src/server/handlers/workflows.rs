@@ -832,6 +832,12 @@ pub async fn start_dars(
     dars_state: web::Data<Arc<DarsWorkflowState>>,
     body: web::Json<DarsRequest>,
 ) -> impl Responder {
+    if body.peer_ids.is_empty() {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: "peer_ids must contain at least one peer".to_string(),
+        });
+    }
+
     // Check if a DARs workflow is already in progress
     {
         let status = dars_state.status.read().await;
@@ -859,6 +865,7 @@ pub async fn start_dars(
     let dars_config = workflow::DarsConfig {
         dar_files: body.dar_files.clone(),
         instance_name,
+        peer_ids: body.peer_ids.clone(),
     };
 
     // Spawn the DARs workflow in the background
@@ -867,12 +874,13 @@ pub async fn start_dars(
     let dars_state_clone = dars_state.get_ref().clone();
     let listener_control = data.noise_listener_control.clone();
     let listener_notify = data.noise_listener_notify.clone();
+    let peer_ids = body.peer_ids.clone();
 
     tokio::spawn(async move {
         let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
 
-        // Send invites to all peers before starting coordinator workflow
-        let invite_result = send_dars_invites(&config, &db).await;
+        // Send invites to selected peers before starting coordinator workflow
+        let invite_result = send_dars_invites(&config, &db, &peer_ids).await;
         if let Err(e) = invite_result {
             tracing::error!("Failed to send DARs invites: {e}");
             guard.resume().await;
@@ -940,34 +948,35 @@ pub async fn get_dars_status(dars_state: web::Data<Arc<DarsWorkflowState>>) -> i
     })
 }
 
-/// Send DARs invites to all peers using Noise protocol
-async fn send_dars_invites(config: &NodeConfig, db: &SqlitePool) -> Result {
+/// Send DARs invites to selected peers using Noise protocol
+async fn send_dars_invites(config: &NodeConfig, db: &SqlitePool, peer_ids: &[CantonId]) -> Result {
     let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
 
-    let current_participant_id = config.participant_id();
     let invite_message = Message::new_empty(MessageType::InviteDars);
 
-    for peer in &network_config.peers {
-        if peer.participant_id == *current_participant_id {
-            continue;
-        }
+    for peer_id in peer_ids {
+        let peer = match network_config
+            .peers
+            .iter()
+            .find(|p| &p.participant_id == peer_id)
+        {
+            Some(p) => p,
+            None => {
+                tracing::warn!("Skipping invite to {peer_id} - peer not found in network config");
+                continue;
+            }
+        };
 
         if peer.public_key.is_empty() {
-            tracing::warn!(
-                "Skipping invite to {} - no public key configured",
-                peer.participant_id
-            );
+            tracing::warn!("Skipping invite to {peer_id} - no public key configured");
             continue;
         }
 
         let peer_pub_key = match parse_public_key(&peer.public_key) {
             Ok(pk) => pk,
             Err(e) => {
-                tracing::warn!(
-                    "Skipping invite to {} - invalid public key: {e}",
-                    peer.participant_id
-                );
+                tracing::warn!("Skipping invite to {peer_id} - invalid public key: {e}");
                 continue;
             }
         };
@@ -976,10 +985,9 @@ async fn send_dars_invites(config: &NodeConfig, db: &SqlitePool) -> Result {
         let identity = config.participant_id().to_string();
 
         tracing::info!(
-            "Sending DARs invite to {} at {}:{}",
-            peer.participant_id,
-            peer.address,
-            peer.port
+            "Sending DARs invite to {peer_id} at {addr}:{port}",
+            addr = peer.address,
+            port = peer.port
         );
 
         match send_noise_message(
@@ -994,18 +1002,17 @@ async fn send_dars_invites(config: &NodeConfig, db: &SqlitePool) -> Result {
             Ok(response) => {
                 if let Ok(msg) = Message::from_bytes(&response) {
                     if msg.msg_type == MessageType::Ack {
-                        tracing::info!("Peer {} acknowledged DARs invite", peer.participant_id);
+                        tracing::info!("Peer {peer_id} acknowledged DARs invite");
                     } else {
                         tracing::warn!(
-                            "Peer {} responded with {msg_type:?} instead of Ack",
-                            peer.participant_id,
+                            "Peer {peer_id} responded with {msg_type:?} instead of Ack",
                             msg_type = msg.msg_type
                         );
                     }
                 }
             }
             Err(e) => {
-                tracing::error!("Failed to send DARs invite to {}: {e}", peer.participant_id);
+                tracing::error!("Failed to send DARs invite to {peer_id}: {e}");
             }
         }
     }
