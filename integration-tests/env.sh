@@ -455,6 +455,114 @@ poll_status() {
     done
 }
 
+# Poll the `workflow_runs` row's persisted status until it reaches a terminal
+# state (or timeout). This is the source of truth — preferred over
+# `/<kind>/status` for restart/retry tests because the in-memory
+# `<Kind>WorkflowState` is reset across a process restart and only catches
+# updates from spawned tasks running in that fresh process. The DB row is
+# durable across restarts.
+#
+# Args: db_file instance_name [max_attempts=120]
+# Exits 1 with a clear message on timeout, "failed", or "cancelled".
+poll_workflow_run_status() {
+    local db_file=$1
+    local instance_name=$2
+    local max_attempts=${3:-120}
+    local attempt=0
+
+    echo "Polling workflow_runs row for $instance_name..."
+    while true; do
+        attempt=$((attempt + 1))
+        if [ $attempt -ge $max_attempts ]; then
+            local actual
+            actual=$(sqlite3 "$db_file" \
+                "SELECT status FROM workflow_runs WHERE instance_name='$instance_name';" \
+                2>/dev/null || echo "?")
+            echo "ERROR: workflow_runs row $instance_name did not reach a terminal status (last: $actual)"
+            exit 1
+        fi
+        local status
+        status=$(sqlite3 "$db_file" \
+            "SELECT status FROM workflow_runs WHERE instance_name='$instance_name';" \
+            2>/dev/null || echo "")
+        case "$status" in
+            completed)
+                echo "workflow_runs $instance_name reached Completed"
+                return 0
+                ;;
+            failed|cancelled)
+                local err
+                err=$(sqlite3 "$db_file" \
+                    "SELECT error FROM workflow_runs WHERE instance_name='$instance_name';" \
+                    2>/dev/null || echo "")
+                echo "ERROR: workflow_runs $instance_name reached terminal $status: $err"
+                exit 1
+                ;;
+        esac
+        sleep 2
+    done
+}
+
+# Assert that a Completed workflow run of the given kind is visible in the
+# unified notification feed (`GET /workflows`) on every relevant node:
+# - exactly one Coordinator row on the coordinator's port
+# - exactly one Attestor row on each attestor's port
+#
+# Args: kind coord_port [attestor_port ...]
+# Example: assert_workflow_completed_visible "Onboarding" $P1_HTTP $P2_HTTP $P3_HTTP
+assert_workflow_completed_visible() {
+    local kind=$1
+    local coord_port=$2
+    shift 2
+
+    local coord_count
+    coord_count=$(curl -s "http://localhost:$coord_port/workflows" \
+        | jq -r --arg k "$kind" \
+            '[.runs[] | select(.kind == $k and .role == "Coordinator" and .status == "completed")] | length')
+    if [ "$coord_count" -lt 1 ]; then
+        echo "ERROR: $kind/Coordinator completed row missing from /workflows on port $coord_port"
+        exit 1
+    fi
+
+    local attestor_port
+    for attestor_port in "$@"; do
+        local attestor_count
+        attestor_count=$(curl -s "http://localhost:$attestor_port/workflows" \
+            | jq -r --arg k "$kind" \
+                '[.runs[] | select(.kind == $k and .role == "Attestor" and .status == "completed")] | length')
+        if [ "$attestor_count" -lt 1 ]; then
+            echo "ERROR: $kind/Attestor completed row missing from /workflows on port $attestor_port"
+            exit 1
+        fi
+    done
+
+    echo "$kind run visible in /workflows on coordinator + ${#} attestor(s)"
+}
+
+# Assert that a governance proposal_cid is visible in
+# `GET /governance/confirmations?party_id=...` on every listed node.
+#
+# Args: party_id proposal_cid port [port ...]
+assert_governance_action_visible_on_all_nodes() {
+    local party_id=$1
+    local proposal_cid=$2
+    shift 2
+
+    local port
+    for port in "$@"; do
+        local seen
+        seen=$(curl -s "http://localhost:$port/governance/confirmations?party_id=$party_id" \
+            | jq -r --arg cid "$proposal_cid" \
+                '[.domain_actions[] | select(.proposal_cid == $cid)] | length')
+        if [ "$seen" -lt 1 ]; then
+            echo "ERROR: proposal $proposal_cid not visible in /governance/confirmations on port $port"
+            exit 1
+        fi
+    done
+
+    echo "Proposal $proposal_cid visible on $# node(s)"
+}
+
 accept_invitation() {
     local port=$1
     local name=$2

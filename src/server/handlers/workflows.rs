@@ -313,16 +313,14 @@ pub async fn start_kick(
         if let Err(e) = invite_result {
             tracing::error!("Failed to send kick invites: {e}");
             guard.resume().await;
-            let mut status = kick_state_clone.status.write().await;
-            let mut error = kick_state_clone.error.write().await;
-            *status = KickStatus::Failed;
-            *error = Some(format!("Failed to send invites: {e}"));
-            mark_run_failed(
-                &db,
-                &instance_for_task,
-                &format!("Failed to send invites: {e}"),
-            )
-            .await;
+            let msg = format!("Failed to send invites: {e}");
+            {
+                let mut status = kick_state_clone.status.write().await;
+                let mut error = kick_state_clone.error.write().await;
+                *status = KickStatus::Failed;
+                *error = Some(msg.clone());
+            }
+            mark_run_failed(&db, &instance_for_task, &msg).await;
             return;
         }
 
@@ -343,19 +341,27 @@ pub async fn start_kick(
 
         guard.resume().await;
 
-        let mut status = kick_state_clone.status.write().await;
-        let mut error = kick_state_clone.error.write().await;
-
+        // Update in-memory state in tight scopes — never hold the RwLock
+        // across a DB await. /kick/status acquires a read lock to serve
+        // every poll; if a writer holds the lock during the DB write, every
+        // concurrent read blocks for that duration on a slow runner.
         match result {
             Ok(_) => {
-                *status = KickStatus::Completed;
+                {
+                    let mut status = kick_state_clone.status.write().await;
+                    *status = KickStatus::Completed;
+                }
                 tracing::info!("Kick workflow completed successfully");
                 mark_run_completed(&db, &instance_for_task).await;
             }
             Err(e) => {
                 let msg = format!("{e}");
-                *status = KickStatus::Failed;
-                *error = Some(msg.clone());
+                {
+                    let mut status = kick_state_clone.status.write().await;
+                    let mut error = kick_state_clone.error.write().await;
+                    *status = KickStatus::Failed;
+                    *error = Some(msg.clone());
+                }
                 tracing::error!("Kick workflow failed: {e}");
                 mark_run_failed(&db, &instance_for_task, &msg).await;
             }
@@ -623,16 +629,14 @@ pub async fn start_onboarding(
         if let Err(e) = invite_result {
             tracing::error!("Failed to send onboarding invites: {e}");
             guard.resume().await;
-            let mut status = onboarding_state_clone.status.write().await;
-            let mut error = onboarding_state_clone.error.write().await;
-            *status = OnboardingStatus::Failed;
-            *error = Some(format!("Failed to send invites: {e}"));
-            mark_run_failed(
-                &db,
-                &instance_for_task,
-                &format!("Failed to send invites: {e}"),
-            )
-            .await;
+            let msg = format!("Failed to send invites: {e}");
+            {
+                let mut status = onboarding_state_clone.status.write().await;
+                let mut error = onboarding_state_clone.error.write().await;
+                *status = OnboardingStatus::Failed;
+                *error = Some(msg.clone());
+            }
+            mark_run_failed(&db, &instance_for_task, &msg).await;
             return;
         }
 
@@ -653,12 +657,16 @@ pub async fn start_onboarding(
 
         guard.resume().await;
 
-        let mut status = onboarding_state_clone.status.write().await;
-        let mut error = onboarding_state_clone.error.write().await;
-
+        // Update in-memory state in tight scopes — never hold the RwLock
+        // across a DB await. /onboarding/status acquires a read lock to
+        // serve every poll; if a writer holds the lock during the DB write,
+        // every concurrent read blocks for that duration on a slow runner.
         match result {
             Ok(_) => {
-                *status = OnboardingStatus::Completed;
+                {
+                    let mut status = onboarding_state_clone.status.write().await;
+                    *status = OnboardingStatus::Completed;
+                }
                 tracing::info!("Onboarding workflow completed successfully");
                 mark_run_completed(&db, &instance_for_task).await;
                 // Operator configures party credentials via the Party Configuration
@@ -714,8 +722,12 @@ pub async fn start_onboarding(
             }
             Err(e) => {
                 let msg = format!("{e}");
-                *status = OnboardingStatus::Failed;
-                *error = Some(msg.clone());
+                {
+                    let mut status = onboarding_state_clone.status.write().await;
+                    let mut error = onboarding_state_clone.error.write().await;
+                    *status = OnboardingStatus::Failed;
+                    *error = Some(msg.clone());
+                }
                 tracing::error!("Onboarding workflow failed: {e}");
                 mark_run_failed(&db, &instance_for_task, &msg).await;
             }
@@ -1088,16 +1100,14 @@ pub async fn start_contracts(
         if let Err(e) = invite_result {
             tracing::error!("Failed to send contracts invites: {e}");
             guard.resume().await;
-            let mut status = contracts_state_clone.status.write().await;
-            let mut error = contracts_state_clone.error.write().await;
-            *status = WorkflowProgress::Failed;
-            *error = Some(format!("Failed to send invites: {e}"));
-            mark_run_failed(
-                &db,
-                &instance_for_task,
-                &format!("Failed to send invites: {e}"),
-            )
-            .await;
+            let msg = format!("Failed to send invites: {e}");
+            {
+                let mut status = contracts_state_clone.status.write().await;
+                let mut error = contracts_state_clone.error.write().await;
+                *status = WorkflowProgress::Failed;
+                *error = Some(msg.clone());
+            }
+            mark_run_failed(&db, &instance_for_task, &msg).await;
             return;
         }
 
@@ -1118,12 +1128,16 @@ pub async fn start_contracts(
 
         guard.resume().await;
 
-        let mut status = contracts_state_clone.status.write().await;
-        let mut error = contracts_state_clone.error.write().await;
-
+        // Update in-memory state in tight scopes — never hold the RwLock
+        // across a DB await. /contracts/status acquires a read lock to
+        // serve every poll; if a writer holds the lock during the DB write,
+        // every concurrent read blocks for that duration on a slow runner.
         match result {
             Ok(_) => {
-                *status = WorkflowProgress::Completed;
+                {
+                    let mut status = contracts_state_clone.status.write().await;
+                    *status = WorkflowProgress::Completed;
+                }
                 tracing::info!("Contracts workflow completed successfully");
                 mark_run_completed(&db, &instance_for_task).await;
 
@@ -1156,8 +1170,12 @@ pub async fn start_contracts(
             }
             Err(e) => {
                 let msg = format!("{e}");
-                *status = WorkflowProgress::Failed;
-                *error = Some(msg.clone());
+                {
+                    let mut status = contracts_state_clone.status.write().await;
+                    let mut error = contracts_state_clone.error.write().await;
+                    *status = WorkflowProgress::Failed;
+                    *error = Some(msg.clone());
+                }
                 tracing::error!("Contracts workflow failed: {e}");
                 mark_run_failed(&db, &instance_for_task, &msg).await;
             }
@@ -1352,19 +1370,25 @@ pub async fn start_dars(
 
         guard.resume().await;
 
-        let mut status = dars_state_clone.status.write().await;
-        let mut error = dars_state_clone.error.write().await;
-
+        // Update in-memory state in tight scopes — never hold the RwLock
+        // across a DB await (see kick/onboarding/contracts handlers above).
         match result {
             Ok(_) => {
-                *status = WorkflowProgress::Completed;
+                {
+                    let mut status = dars_state_clone.status.write().await;
+                    *status = WorkflowProgress::Completed;
+                }
                 tracing::info!("DARs distribution workflow completed successfully");
                 mark_run_completed(&db, &instance_for_task).await;
             }
             Err(e) => {
                 let msg = format!("{e}");
-                *status = WorkflowProgress::Failed;
-                *error = Some(msg.clone());
+                {
+                    let mut status = dars_state_clone.status.write().await;
+                    let mut error = dars_state_clone.error.write().await;
+                    *status = WorkflowProgress::Failed;
+                    *error = Some(msg.clone());
+                }
                 tracing::error!("DARs distribution workflow failed: {e}");
                 mark_run_failed(&db, &instance_for_task, &msg).await;
             }

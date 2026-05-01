@@ -366,18 +366,27 @@ async fn spawn_onboarding_resume(
     .await;
     guard.resume().await;
 
-    let mut status = state.status.write().await;
-    let mut error = state.error.write().await;
+    // Update in-memory state in tight scopes — never hold the RwLock across
+    // a DB await. /onboarding/status acquires a read lock to serve every
+    // poll; if a writer holds the lock during the DB write, every concurrent
+    // read blocks for that duration on a slow runner.
     match result {
         Ok(_) => {
-            *status = OnboardingStatus::Completed;
+            {
+                let mut status = state.status.write().await;
+                *status = OnboardingStatus::Completed;
+            }
             tracing::info!("Resumed onboarding workflow {instance} completed");
             mark_completed_via_pool(&db, &instance).await;
         }
         Err(e) => {
             let msg = format!("{e}");
-            *status = OnboardingStatus::Failed;
-            *error = Some(msg.clone());
+            {
+                let mut status = state.status.write().await;
+                let mut error = state.error.write().await;
+                *status = OnboardingStatus::Failed;
+                *error = Some(msg.clone());
+            }
             tracing::error!("Resumed onboarding workflow {instance} failed: {e:#}");
             mark_failed_via_pool(&db, &instance, &msg).await;
         }
@@ -407,18 +416,23 @@ async fn spawn_kick_resume(
     .await;
     guard.resume().await;
 
-    let mut status = state.status.write().await;
-    let mut error = state.error.write().await;
     match result {
         Ok(_) => {
-            *status = KickStatus::Completed;
+            {
+                let mut status = state.status.write().await;
+                *status = KickStatus::Completed;
+            }
             tracing::info!("Resumed kick workflow {instance} completed");
             mark_completed_via_pool(&db, &instance).await;
         }
         Err(e) => {
             let msg = format!("{e}");
-            *status = KickStatus::Failed;
-            *error = Some(msg.clone());
+            {
+                let mut status = state.status.write().await;
+                let mut error = state.error.write().await;
+                *status = KickStatus::Failed;
+                *error = Some(msg.clone());
+            }
             tracing::error!("Resumed kick workflow {instance} failed: {e:#}");
             mark_failed_via_pool(&db, &instance, &msg).await;
         }
@@ -450,18 +464,23 @@ async fn spawn_contracts_resume(
     .await;
     guard.resume().await;
 
-    let mut status = state.status.write().await;
-    let mut error = state.error.write().await;
     match result {
         Ok(_) => {
-            *status = WorkflowProgress::Completed;
+            {
+                let mut status = state.status.write().await;
+                *status = WorkflowProgress::Completed;
+            }
             tracing::info!("Resumed contracts workflow {instance} completed");
             mark_completed_via_pool(&db, &instance).await;
         }
         Err(e) => {
             let msg = format!("{e}");
-            *status = WorkflowProgress::Failed;
-            *error = Some(msg.clone());
+            {
+                let mut status = state.status.write().await;
+                let mut error = state.error.write().await;
+                *status = WorkflowProgress::Failed;
+                *error = Some(msg.clone());
+            }
             tracing::error!("Resumed contracts workflow {instance} failed: {e:#}");
             mark_failed_via_pool(&db, &instance, &msg).await;
         }
@@ -491,18 +510,23 @@ async fn spawn_dars_resume(
     .await;
     guard.resume().await;
 
-    let mut status = state.status.write().await;
-    let mut error = state.error.write().await;
     match result {
         Ok(_) => {
-            *status = WorkflowProgress::Completed;
+            {
+                let mut status = state.status.write().await;
+                *status = WorkflowProgress::Completed;
+            }
             tracing::info!("Resumed dars workflow {instance} completed");
             mark_completed_via_pool(&db, &instance).await;
         }
         Err(e) => {
             let msg = format!("{e}");
-            *status = WorkflowProgress::Failed;
-            *error = Some(msg.clone());
+            {
+                let mut status = state.status.write().await;
+                let mut error = state.error.write().await;
+                *status = WorkflowProgress::Failed;
+                *error = Some(msg.clone());
+            }
             tracing::error!("Resumed dars workflow {instance} failed: {e:#}");
             mark_failed_via_pool(&db, &instance, &msg).await;
         }
