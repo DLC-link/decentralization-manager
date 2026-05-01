@@ -1146,11 +1146,11 @@ export const ContractsDialog = ({
         );
         if (!res.ok || cancelled) return;
         const data: {
-          members: Array<{ participant_uid: string; member_party_id: string }>;
+          members: Array<{ participant_uid: string; member_party_id?: string }>;
         } = await res.json();
         const memberIds = data.members
           .map((m) => m.member_party_id)
-          .filter((id) => id.length > 0);
+          .filter((id): id is string => !!id && id.length > 0);
         if (cancelled || memberIds.length === 0) return;
         setContracts((prev) =>
           prev.map((c) => ({

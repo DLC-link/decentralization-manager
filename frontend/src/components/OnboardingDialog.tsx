@@ -54,18 +54,23 @@ export const OnboardingDialog = ({
             authenticatedFetch(`${API_BASE}/network-config`),
             authenticatedFetch(`${API_BASE}/node-config`),
           ]);
-          if (networkRes.ok) {
-            const data = await networkRes.json();
-            setPeers(data.peers || []);
-            // Select all peers by default
-            const allPeerIds = new Set<string>(
-              (data.peers || []).map((p: Peer) => p.participant_id),
-            );
-            setSelectedPeerIds(allPeerIds);
-          }
+          let self: string | null = null;
           if (nodeRes.ok) {
             const nodeData: NodeConfig = await nodeRes.json();
-            setSelfNodeId(nodeData.node.participant_id);
+            self = nodeData.node.participant_id;
+            setSelfNodeId(self);
+          }
+          if (networkRes.ok) {
+            const data = await networkRes.json();
+            const allPeers: Peer[] = data.peers || [];
+            setPeers(allPeers);
+            // Select all peers by default, excluding self
+            const allPeerIds = new Set<string>(
+              allPeers
+                .filter((p) => p.participant_id !== self)
+                .map((p) => p.participant_id),
+            );
+            setSelectedPeerIds(allPeerIds);
           }
         } catch {
           // Ignore fetch errors
@@ -100,9 +105,9 @@ export const OnboardingDialog = ({
     });
   };
 
-  // Filter out self from peer list (compare prefix of participant_id with selfNodeId)
+  // Filter out self from peer list (compare full canton ids).
   const selectablePeers = peers.filter(
-    (p) => p.participant_id.split("::")[0] !== selfNodeId,
+    (p) => p.participant_id !== selfNodeId,
   );
 
   const pollStatus = useCallback(async () => {

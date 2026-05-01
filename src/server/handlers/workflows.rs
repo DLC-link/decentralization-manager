@@ -394,7 +394,10 @@ pub async fn start_onboarding(
             );
             return HttpResponse::UnprocessableEntity().json(OnboardingMeshErrorResponse {
                 error: format!(
-                    "Selected peers are not mutually connected. Missing peer-to-peer config: {edge_summary}"
+                    "Could not verify a full peer mesh. \
+                     Each edge below points to a peer that is unreachable from the listed source \
+                     (missing from network config, missing/invalid public key, unreachable, or \
+                     responded with an unparsable peer list). Edges: {edge_summary}"
                 ),
                 missing_edges: missing,
             });
@@ -716,6 +719,10 @@ async fn verify_peer_mesh(
             Ok(m) => m,
             Err(e) => {
                 tracing::warn!("Malformed response from {peer_id}: {e}");
+                missing_edges.push(MissingPeerEdge {
+                    from: identity.clone(),
+                    to: peer_id.clone(),
+                });
                 continue;
             }
         };
@@ -725,6 +732,10 @@ async fn verify_peer_mesh(
                 "Peer {peer_id} responded with {msg_type:?} instead of PeerList",
                 msg_type = msg.msg_type
             );
+            missing_edges.push(MissingPeerEdge {
+                from: identity.clone(),
+                to: peer_id.clone(),
+            });
             continue;
         }
 
@@ -732,6 +743,10 @@ async fn verify_peer_mesh(
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!("Could not parse peer list from {peer_id}: {e}");
+                missing_edges.push(MissingPeerEdge {
+                    from: identity.clone(),
+                    to: peer_id.clone(),
+                });
                 continue;
             }
         };
@@ -972,6 +987,7 @@ pub async fn upload_dars_local(
     request_body = DarsRequest,
     responses(
         (status = 202, description = "DARs distribution workflow started", body = WorkflowResponse),
+        (status = 400, description = "Bad request (e.g. empty peer_ids)", body = ErrorResponse),
         (status = 409, description = "Workflow already in progress", body = ErrorResponse)
     )
 )]
