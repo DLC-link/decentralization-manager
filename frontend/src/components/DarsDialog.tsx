@@ -20,6 +20,7 @@ import UploadFileIcon from "@mui/icons-material/UploadFile";
 import DeleteIcon from "@mui/icons-material/Delete";
 import { API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
+import { useSnackbar } from "../contexts";
 import type { DarsStatusResponse, DarFile, Peer, NodeConfig } from "../types";
 
 interface DarsDialogProps {
@@ -44,6 +45,8 @@ export const DarsDialog = ({
   const [selfNodeId, setSelfNodeId] = useState<string | null>(null);
   const [selectedPeerIds, setSelectedPeerIds] = useState<Set<string>>(new Set());
   const [loadingPeers, setLoadingPeers] = useState(false);
+  const { showSnackbar } = useSnackbar();
+  const workflowLabel = mode === "upload" ? "Upload" : "Distribution";
 
   // Fetch peers when dialog opens (distribute mode only)
   useEffect(() => {
@@ -117,6 +120,11 @@ export const DarsDialog = ({
       const res = await authenticatedFetch(`${API_BASE}/dars/distribute/status`);
       if (res.ok) {
         const data: DarsStatusResponse = await res.json();
+        if (data.status === "cancelled") {
+          showSnackbar(`${workflowLabel} workflow cancelled`);
+          onClose();
+          return;
+        }
         setStatus(data);
         if (data.status !== "inprogress") {
           setLoading(false);
@@ -128,7 +136,7 @@ export const DarsDialog = ({
     } catch {
       // Ignore polling errors
     }
-  }, [onComplete]);
+  }, [onComplete, onClose, showSnackbar, workflowLabel]);
 
   useEffect(() => {
     let interval: number | undefined;
@@ -223,6 +231,27 @@ export const DarsDialog = ({
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error");
       setLoading(false);
+    }
+  };
+
+  const [cancelling, setCancelling] = useState(false);
+  const handleCancelWorkflow = async () => {
+    setCancelling(true);
+    try {
+      const res = await authenticatedFetch(`${API_BASE}/dars/cancel`, {
+        method: "POST",
+      });
+      if (res.ok) {
+        showSnackbar(`${workflowLabel} workflow cancelled`);
+        onClose();
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setError(data.error || "Failed to cancel workflow");
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to cancel workflow");
+    } finally {
+      setCancelling(false);
     }
   };
 
@@ -387,8 +416,19 @@ export const DarsDialog = ({
       </DialogContent>
       <DialogActions>
         <Button onClick={handleClose} disabled={loading}>
-          {isCompleted || isFailed ? "Close" : "Cancel"}
+          {isCompleted || isFailed || isInProgress ? "Close" : "Cancel"}
         </Button>
+        {isInProgress && mode === "distribute" && (
+          <Button
+            onClick={handleCancelWorkflow}
+            variant="outlined"
+            color="error"
+            disabled={cancelling}
+            startIcon={cancelling ? <CircularProgress size={16} /> : undefined}
+          >
+            {cancelling ? "Cancelling…" : "Cancel Workflow"}
+          </Button>
+        )}
         {(!status?.status || status.status === "idle" || isFailed) ? (
           <Button
             onClick={handleStart}

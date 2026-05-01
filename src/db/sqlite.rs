@@ -9,7 +9,7 @@ use sqlx::{
 use super::{
     rows::{
         ChainAuditCacheRow, DecPartyContractRow, DecPartyParticipantRow, DecPartyRow,
-        GovernanceAuditRow, PartyCredentialsRow, PeerRow,
+        GovernanceAuditRow, PartyCredentialsRow, PeerRow, PendingInvitationRow,
     },
     schema::{Commitable, SchemaRead, SchemaWrite},
 };
@@ -17,6 +17,7 @@ use crate::{
     config::{PartyCredentials, Peer},
     error::Result,
     participant_id::CantonId,
+    server::PendingInvitation,
 };
 
 pub static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
@@ -299,6 +300,16 @@ impl SchemaRead for SqlitePool {
         .await?;
 
         Ok(rows)
+    }
+
+    async fn get_all_pending_invitations(&self) -> Result<Vec<PendingInvitation>> {
+        let rows = sqlx::query_as::<_, PendingInvitationRow>(
+            "SELECT * FROM pending_invitations ORDER BY received_at ASC",
+        )
+        .fetch_all(self)
+        .await?;
+
+        rows.into_iter().map(|r| r.into_domain()).collect()
     }
 }
 
@@ -594,6 +605,56 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         .bind(participant_uid)
         .execute(&mut **self)
         .await?;
+
+        Ok(())
+    }
+
+    async fn upsert_pending_invitation(&mut self, inv: &PendingInvitation) -> Result {
+        let row = PendingInvitationRow::from_domain(inv)?;
+
+        sqlx::query(
+            r"
+            INSERT OR REPLACE INTO pending_invitations (
+                id,
+                invitation_type,
+                coordinator_pubkey,
+                received_at,
+                prefix,
+                participants,
+                dar_filenames
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ",
+        )
+        .bind(&row.id)
+        .bind(&row.invitation_type)
+        .bind(&row.coordinator_pubkey)
+        .bind(row.received_at)
+        .bind(&row.prefix)
+        .bind(&row.participants)
+        .bind(&row.dar_filenames)
+        .execute(&mut **self)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn delete_pending_invitation(&mut self, id: &str) -> Result {
+        sqlx::query("DELETE FROM pending_invitations WHERE id = ?")
+            .bind(id)
+            .execute(&mut **self)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn delete_pending_invitations_by_coordinator(
+        &mut self,
+        coordinator_pubkey: &str,
+    ) -> Result {
+        sqlx::query("DELETE FROM pending_invitations WHERE coordinator_pubkey = ?")
+            .bind(coordinator_pubkey)
+            .execute(&mut **self)
+            .await?;
 
         Ok(())
     }
@@ -1268,6 +1329,87 @@ mod tests {
         // Beyond end
         let entries = pool.get_governance_audit(&party_id, 50, 5).await?;
         assert!(entries.is_empty());
+
+        Ok(())
+    }
+
+    // ====================================================================
+    // Pending invitations
+    // ====================================================================
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_pending_invitations_roundtrip(pool: SqlitePool) -> Result {
+        use crate::server::{InvitationType, PendingInvitation};
+
+        assert!(pool.get_all_pending_invitations().await?.is_empty());
+
+        let inv_a = PendingInvitation {
+            id: "onboarding-aaaaaaaaaaaaaaaa".to_string(),
+            invitation_type: InvitationType::Onboarding,
+            coordinator_pubkey: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            coordinator_name: None,
+            received_at: 1000,
+            prefix: Some("my-party".to_string()),
+            participants: vec!["node1::1220aa".to_string(), "node2::1220bb".to_string()],
+            dar_filenames: Vec::new(),
+        };
+        let inv_b = PendingInvitation {
+            id: "kick-bbbbbbbbbbbbbbbb".to_string(),
+            invitation_type: InvitationType::Kick,
+            coordinator_pubkey: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+            coordinator_name: None,
+            received_at: 2000,
+            prefix: None,
+            participants: Vec::new(),
+            dar_filenames: Vec::new(),
+        };
+
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_pending_invitation(&inv_a).await?;
+        tx.upsert_pending_invitation(&inv_b).await?;
+        Commitable::commit(tx).await?;
+
+        let inv_c = PendingInvitation {
+            id: "dars-cccccccccccccccc".to_string(),
+            invitation_type: InvitationType::Dars,
+            coordinator_pubkey: "cccccccccccccccccccccccccccccccc".to_string(),
+            coordinator_name: None,
+            received_at: 3000,
+            prefix: None,
+            participants: Vec::new(),
+            dar_filenames: vec!["app.dar".to_string(), "lib.dar".to_string()],
+        };
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_pending_invitation(&inv_c).await?;
+        Commitable::commit(tx).await?;
+
+        let loaded = pool.get_all_pending_invitations().await?;
+        assert_eq!(loaded.len(), 3);
+        assert_eq!(loaded[0].id, inv_a.id);
+        assert_eq!(loaded[0].prefix.as_deref(), Some("my-party"));
+        assert_eq!(loaded[0].participants.len(), 2);
+        assert_eq!(loaded[1].invitation_type, InvitationType::Kick);
+        assert!(loaded[1].prefix.is_none());
+        assert!(loaded[1].participants.is_empty());
+        assert_eq!(loaded[2].invitation_type, InvitationType::Dars);
+        assert_eq!(loaded[2].dar_filenames, vec!["app.dar", "lib.dar"]);
+
+        let mut tx = pool.begin_transaction().await?;
+        tx.delete_pending_invitation(&inv_a.id).await?;
+        Commitable::commit(tx).await?;
+        assert_eq!(pool.get_all_pending_invitations().await?.len(), 2);
+
+        let mut tx = pool.begin_transaction().await?;
+        tx.delete_pending_invitations_by_coordinator(&inv_b.coordinator_pubkey)
+            .await?;
+        Commitable::commit(tx).await?;
+        assert_eq!(pool.get_all_pending_invitations().await?.len(), 1);
+
+        let mut tx = pool.begin_transaction().await?;
+        tx.delete_pending_invitations_by_coordinator(&inv_c.coordinator_pubkey)
+            .await?;
+        Commitable::commit(tx).await?;
+        assert!(pool.get_all_pending_invitations().await?.is_empty());
 
         Ok(())
     }

@@ -147,7 +147,12 @@ export interface KickRequest {
   new_threshold: number;
 }
 
-export type WorkflowProgress = "idle" | "inprogress" | "completed" | "failed";
+export type WorkflowProgress =
+  | "idle"
+  | "inprogress"
+  | "completed"
+  | "failed"
+  | "cancelled";
 
 // Type aliases for backwards compatibility
 export type KickStatus = WorkflowProgress;
@@ -222,6 +227,12 @@ export interface PendingInvitation {
   coordinator_pubkey: string;
   coordinator_name?: string;
   received_at: number;
+  /** Onboarding-only: party ID prefix the coordinator chose. */
+  prefix?: string;
+  /** Onboarding-only: participant canton IDs the coordinator selected. */
+  participants?: string[];
+  /** Dars-only: filenames the coordinator is distributing. */
+  dar_filenames?: string[];
 }
 
 export interface PendingInvitationsResponse {
@@ -275,6 +286,8 @@ export interface GovernanceConfirmation {
   contract_id: string;
   action: ActionType;
   confirming_party: string;
+  /** Unix seconds when this confirmation contract was created on the ledger. */
+  created_at?: number;
 }
 
 export interface GovernanceAction {
@@ -283,6 +296,8 @@ export interface GovernanceAction {
   confirmations: GovernanceConfirmation[];
   confirmation_count: number;
   can_execute: boolean;
+  /** Unix seconds of the most recent confirmation. 0 if unresolved. */
+  last_confirmation_at?: number;
 }
 
 export interface DomainGovernanceAction {

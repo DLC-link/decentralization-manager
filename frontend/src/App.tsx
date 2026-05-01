@@ -29,7 +29,8 @@ import { PackagesPanel } from "./components/PackagesPanel";
 import { LoadingSkeleton, ConfigTabSkeleton } from "./components/LoadingSkeleton";
 import { DarsDialog } from "./components/DarsDialog";
 import { OnboardingDialog } from "./components/OnboardingDialog";
-import { InvitationModal } from "./components/InvitationModal";
+import { NotificationsView } from "./components/NotificationsView";
+import type { PartyActions } from "./components/NotificationsView";
 import { useSnackbar } from "./contexts";
 import { API_BASE, ADMIN_ACCESS, OPERATOR_API_URLS } from "./constants";
 import { authenticatedFetch } from "./api";
@@ -46,7 +47,7 @@ import type {
   AuthStatusResponse,
 } from "./types";
 
-const TAB_HASHES = ["parties", "packages", "config"] as const;
+const TAB_HASHES = ["parties", "packages", "config", "notifications"] as const;
 
 // Saved in index.html <script> before any modules load.
 // Strip Keycloak OAuth params that get appended to the hash during check-sso.
@@ -92,9 +93,12 @@ const App = () => {
   const [onboardingDialogOpen, setOnboardingDialogOpen] = useState(false);
   const [darsDialogOpen, setDarsDialogOpen] = useState(false);
   const [uploadDarsDialogOpen, setUploadDarsDialogOpen] = useState(false);
-  const [, setPendingInvitations] = useState<PendingInvitation[]>([]);
-  const [currentInvitation, setCurrentInvitation] =
-    useState<PendingInvitation | null>(null);
+  const [pendingInvitations, setPendingInvitations] = useState<
+    PendingInvitation[]
+  >([]);
+  const [invitationsLoaded, setInvitationsLoaded] = useState(false);
+  const [partyActions, setPartyActions] = useState<PartyActions[]>([]);
+  const [partyActionsLoaded, setPartyActionsLoaded] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [partyFilter, setPartyFilter] = useState(
@@ -278,8 +282,10 @@ const App = () => {
           authenticatedFetch(`${API_BASE}/packages/vetted`),
         ];
 
-        // Only fetch parties eagerly when the parties tab is active
-        if (hashTab === 0) {
+        // Eagerly fetch parties on the parties tab (we need to render the
+        // list) and on the notifications tab (governance actions are derived
+        // per-party, so without parties the notifications feed is incomplete).
+        if (hashTab === 0 || hashTab === 3) {
           const partiesParams = hashSlug
             ? `?prefix=${encodeURIComponent(hashSlug)}`
             : "";
@@ -366,44 +372,100 @@ const App = () => {
     return () => clearInterval(interval);
   }, []);
 
-  // Poll pending invitations every 2 seconds
-  useEffect(() => {
-    const fetchInvitations = async () => {
-      try {
-        const res = await authenticatedFetch(`${API_BASE}/invitations`);
-        if (res.ok) {
-          const data = await res.json();
-          setPendingInvitations(data.invitations);
-          // Show modal for first invitation if not already showing one
-          setCurrentInvitation((prev) => {
-            if (!prev && data.invitations.length > 0) {
-              return data.invitations[0];
-            }
-            return prev;
-          });
-        }
-      } catch {
-        // Ignore polling errors
+  const refreshInvitations = useCallback(async () => {
+    try {
+      const res = await authenticatedFetch(`${API_BASE}/invitations`);
+      if (res.ok) {
+        const data = await res.json();
+        setPendingInvitations(data.invitations);
       }
-    };
-
-    fetchInvitations();
-    const interval = window.setInterval(fetchInvitations, 2000);
-
-    return () => clearInterval(interval);
+    } catch {
+      // Ignore polling errors
+    } finally {
+      setInvitationsLoaded(true);
+    }
   }, []);
 
-  const handleInvitationAction = useCallback(() => {
-    setCurrentInvitation(null);
-    // Show next invitation if there are more
-    setPendingInvitations((prev) => {
-      const remaining = prev.filter((i) => i.id !== currentInvitation?.id);
-      if (remaining.length > 0) {
-        setTimeout(() => setCurrentInvitation(remaining[0]), 500);
-      }
-      return remaining;
-    });
-  }, [currentInvitation]);
+  // Poll pending invitations every 2 seconds
+  useEffect(() => {
+    refreshInvitations();
+    const interval = window.setInterval(refreshInvitations, 2000);
+    return () => clearInterval(interval);
+  }, [refreshInvitations]);
+
+  const isGovRulesTemplate = (templateId: string) =>
+    templateId.includes("VaultGovernanceRules") ||
+    templateId.includes("VaultGovernance") ||
+    templateId === "Governance.Rules:GovernanceRules";
+
+  const refreshPartyActions = useCallback(async () => {
+    const candidates = parties
+      .map((p) => {
+        const authStatus = authStatuses.find(
+          (a) => a.dec_party_id === p.party_id,
+        );
+        const rulesContract = p.contracts?.find((c) =>
+          isGovRulesTemplate(c.template_id),
+        );
+        if (
+          !authStatus ||
+          authStatus.status.status !== "authenticated" ||
+          !authStatus.rights?.dec_party_act_as ||
+          !rulesContract
+        ) {
+          return null;
+        }
+        const governanceType =
+          rulesContract.template_id === "Governance.Rules:GovernanceRules"
+            ? ("core_self" as const)
+            : ("vault" as const);
+        return { party: p, authStatus, rulesContract, governanceType };
+      })
+      .filter((c): c is NonNullable<typeof c> => c !== null);
+
+    const results = await Promise.all(
+      candidates.map(
+        async ({
+          party,
+          authStatus,
+          rulesContract,
+          governanceType,
+        }): Promise<PartyActions | null> => {
+          try {
+            const res = await authenticatedFetch(
+              `${API_BASE}/governance/confirmations?party_id=${encodeURIComponent(party.party_id)}`,
+            );
+            if (!res.ok) return null;
+            const data = await res.json();
+            return {
+              partyId: party.party_id,
+              rulesContractId: rulesContract.contract_id,
+              memberPartyId: data.member_party_id ?? authStatus.member_party_id,
+              governanceType,
+              threshold: data.threshold,
+              actions: data.actions ?? [],
+            };
+          } catch {
+            return null;
+          }
+        },
+      ),
+    );
+    setPartyActions(results.filter((r): r is PartyActions => r !== null));
+    setPartyActionsLoaded(true);
+  }, [parties, authStatuses]);
+
+  // Poll governance actions across configured parties (only after parties load)
+  useEffect(() => {
+    if (loading) return;
+    refreshPartyActions();
+    const interval = window.setInterval(refreshPartyActions, 10_000);
+    return () => clearInterval(interval);
+  }, [refreshPartyActions, loading]);
+
+  const notificationCount =
+    pendingInvitations.length +
+    partyActions.reduce((sum, p) => sum + p.actions.length, 0);
 
   return (
     <Box
@@ -418,6 +480,7 @@ const App = () => {
           onTabChange={(tab) => navigate(tab)}
           partyCount={parties.length}
           packageCount={packageCount}
+          notificationCount={notificationCount}
         />
       ) : (
         <Header />
@@ -621,11 +684,6 @@ const App = () => {
               onComplete={() => refreshParties(true)}
             />
 
-            <InvitationModal
-              invitation={currentInvitation}
-              onClose={() => setCurrentInvitation(null)}
-              onAction={handleInvitationAction}
-            />
           </>
         )}
       </Container>
@@ -776,6 +834,23 @@ const App = () => {
               <ConfigTabSkeleton />
             </Box>
           )}
+        </Box>
+      )}
+
+      {/* Tab 3: Notifications */}
+      {activeTab === 3 && !loading && !error && (
+        <Box sx={{ pt: isLargeScreen ? 4 : 0 }}>
+          <NotificationsView
+            pendingInvitations={pendingInvitations}
+            partyActions={partyActions}
+            loading={!invitationsLoaded || !partyActionsLoaded}
+            onInvitationsChanged={refreshInvitations}
+            onActionsChanged={refreshPartyActions}
+            onSelectParty={(partyId) => {
+              setSelectedPartyId(partyId);
+              navigate(0, partyId);
+            }}
+          />
         </Box>
       )}
       </Box>

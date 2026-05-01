@@ -11,6 +11,7 @@ import {
 } from "@mui/material";
 import GroupsIcon from "@mui/icons-material/Groups";
 import Inventory2Icon from "@mui/icons-material/Inventory2";
+import NotificationsIcon from "@mui/icons-material/Notifications";
 import SettingsIcon from "@mui/icons-material/Settings";
 import LogoutIcon from "@mui/icons-material/Logout";
 
@@ -25,15 +26,23 @@ interface SidebarProps {
   onTabChange: (tab: number) => void;
   partyCount: number;
   packageCount: number;
+  notificationCount: number;
 }
 
 const navItems = [
   { label: "Parties", icon: <GroupsIcon />, index: 0 },
   { label: "Packages", icon: <Inventory2Icon />, index: 1 },
   { label: "Configuration", icon: <SettingsIcon />, index: 2 },
+  { label: "Notifications", icon: <NotificationsIcon />, index: 3 },
 ];
 
-export const Sidebar = ({ activeTab, onTabChange, partyCount, packageCount }: SidebarProps) => {
+export const Sidebar = ({
+  activeTab,
+  onTabChange,
+  partyCount,
+  packageCount,
+  notificationCount,
+}: SidebarProps) => {
   const theme = useTheme();
   const { token, logout } = useAuth();
 
@@ -94,6 +103,13 @@ export const Sidebar = ({ activeTab, onTabChange, partyCount, packageCount }: Si
               <Badge
                 badgeContent={packageCount}
                 color={activeTab === 1 ? "secondary" : "primary"}
+                sx={{ mr: 1 }}
+              />
+            )}
+            {item.index === 3 && notificationCount > 0 && (
+              <Badge
+                badgeContent={notificationCount}
+                color={activeTab === 3 ? "secondary" : "error"}
                 sx={{ mr: 1 }}
               />
             )}

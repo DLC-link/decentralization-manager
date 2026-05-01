@@ -2,7 +2,7 @@ use actix_web::{HttpResponse, Responder, get, post, web};
 
 use std::collections::HashMap;
 
-use crate::db::schema::SchemaRead;
+use crate::db::schema::{Commitable, SchemaRead, SchemaWrite};
 use crate::server::{
     AppState,
     types::{
@@ -10,6 +10,19 @@ use crate::server::{
         PendingInvitationsResponse,
     },
 };
+
+async fn delete_persisted_invitation(data: &web::Data<AppState>, id: &str) {
+    match data.db.begin_transaction().await {
+        Ok(mut tx) => {
+            if let Err(e) = tx.delete_pending_invitation(id).await {
+                tracing::warn!("Failed to delete persisted invitation {id}: {e}");
+            } else if let Err(e) = Commitable::commit(tx).await {
+                tracing::warn!("Failed to commit invitation deletion {id}: {e}");
+            }
+        }
+        Err(e) => tracing::warn!("Failed to begin tx to delete invitation {id}: {e}"),
+    }
+}
 
 /// Get all pending invitations
 #[utoipa::path(
@@ -72,6 +85,8 @@ pub async fn accept_invitation(
         }
     };
 
+    delete_persisted_invitation(&data, &invitation.id).await;
+
     // Store coordinator's public key and trigger the appropriate workflow
     {
         let mut coordinator_pubkey = data.coordinator_pubkey.write().await;
@@ -116,19 +131,27 @@ pub async fn decline_invitation(
     data: web::Data<AppState>,
     body: web::Json<InvitationActionRequest>,
 ) -> impl Responder {
-    let mut invitations = data.pending_invitations.write().await;
-    let idx = invitations.iter().position(|i| i.id == body.id);
-
-    match idx {
-        Some(i) => {
-            invitations.remove(i);
-            tracing::info!("Declined invitation {}", body.id);
-            HttpResponse::Ok().json(serde_json::json!({
-                "message": "Invitation declined"
-            }))
+    let removed = {
+        let mut invitations = data.pending_invitations.write().await;
+        let idx = invitations.iter().position(|i| i.id == body.id);
+        match idx {
+            Some(i) => {
+                invitations.remove(i);
+                true
+            }
+            None => false,
         }
-        None => HttpResponse::NotFound().json(serde_json::json!({
+    };
+
+    if !removed {
+        return HttpResponse::NotFound().json(serde_json::json!({
             "error": "Invitation not found"
-        })),
+        }));
     }
+
+    delete_persisted_invitation(&data, &body.id).await;
+    tracing::info!("Declined invitation {}", body.id);
+    HttpResponse::Ok().json(serde_json::json!({
+        "message": "Invitation declined"
+    }))
 }

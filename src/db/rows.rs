@@ -1,8 +1,13 @@
+use std::str::FromStr;
+
+use anyhow::Context;
+
 use crate::{
     config::{KeycloakConfig, PackageConfig, PartyCredentials, Peer},
     db::crypto,
     error::Result,
     participant_id::CantonId,
+    server::{InvitationType, PendingInvitation},
 };
 
 #[derive(Debug, sqlx::FromRow)]
@@ -129,6 +134,69 @@ pub struct GovernanceAuditRow {
     pub status: String,
     pub error_message: Option<String>,
     pub created_at: i64,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct PendingInvitationRow {
+    pub id: String,
+    pub invitation_type: String,
+    pub coordinator_pubkey: String,
+    pub received_at: i64,
+    pub prefix: Option<String>,
+    pub participants: Option<String>,
+    pub dar_filenames: Option<String>,
+}
+
+fn encode_string_list(items: &[String], context_label: &str) -> Result<Option<String>> {
+    if items.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(serde_json::to_string(items).with_context(|| {
+            format!("failed to encode {context_label}")
+        })?))
+    }
+}
+
+fn decode_string_list(raw: Option<String>, id: &str, context_label: &str) -> Result<Vec<String>> {
+    match raw {
+        Some(s) if !s.is_empty() => serde_json::from_str(&s)
+            .with_context(|| format!("invalid {context_label} JSON for id {id}")),
+        _ => Ok(Vec::new()),
+    }
+}
+
+impl PendingInvitationRow {
+    pub fn from_domain(inv: &PendingInvitation) -> Result<Self> {
+        Ok(Self {
+            id: inv.id.clone(),
+            invitation_type: inv.invitation_type.to_string(),
+            coordinator_pubkey: inv.coordinator_pubkey.clone(),
+            received_at: inv.received_at,
+            prefix: inv.prefix.clone(),
+            participants: encode_string_list(&inv.participants, "pending invitation participants")?,
+            dar_filenames: encode_string_list(
+                &inv.dar_filenames,
+                "pending invitation dar_filenames",
+            )?,
+        })
+    }
+
+    pub fn into_domain(self) -> Result<PendingInvitation> {
+        let invitation_type = InvitationType::from_str(&self.invitation_type)
+            .with_context(|| format!("invalid invitation_type for id {}", self.id))?;
+        let participants = decode_string_list(self.participants, &self.id, "participants")?;
+        let dar_filenames = decode_string_list(self.dar_filenames, &self.id, "dar_filenames")?;
+        Ok(PendingInvitation {
+            id: self.id,
+            invitation_type,
+            coordinator_pubkey: self.coordinator_pubkey,
+            coordinator_name: None,
+            received_at: self.received_at,
+            prefix: self.prefix,
+            participants,
+            dar_filenames,
+        })
+    }
 }
 
 #[derive(Debug, sqlx::FromRow)]

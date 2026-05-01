@@ -35,6 +35,7 @@ import LockIcon from "@mui/icons-material/Lock";
 import StorageIcon from "@mui/icons-material/Storage";
 import { API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
+import { useSnackbar } from "../contexts";
 import type {
   ContractsStatusResponse,
   ContractsRequest,
@@ -1065,6 +1066,7 @@ export const ContractsDialog = ({
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<ContractsStatusResponse | null>(null);
   const [contractType, setContractType] = useState<ContractType>(null);
+  const { showSnackbar } = useSnackbar();
 
   // Package config from API
   const [packages, setPackages] = useState<PackageConfig>({});
@@ -1175,6 +1177,11 @@ export const ContractsDialog = ({
       const res = await authenticatedFetch(`${API_BASE}/contracts/status`);
       if (res.ok) {
         const data: ContractsStatusResponse = await res.json();
+        if (data.status === "cancelled") {
+          showSnackbar("Contracts workflow cancelled");
+          onClose();
+          return;
+        }
         setStatus(data);
         if (data.status !== "inprogress") {
           setLoading(false);
@@ -1186,7 +1193,7 @@ export const ContractsDialog = ({
     } catch {
       // Ignore polling errors
     }
-  }, [onComplete]);
+  }, [onComplete, onClose, showSnackbar]);
 
   useEffect(() => {
     let interval: number | undefined;
@@ -1273,6 +1280,27 @@ export const ContractsDialog = ({
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error");
       setLoading(false);
+    }
+  };
+
+  const [cancelling, setCancelling] = useState(false);
+  const handleCancelWorkflow = async () => {
+    setCancelling(true);
+    try {
+      const res = await authenticatedFetch(`${API_BASE}/contracts/cancel`, {
+        method: "POST",
+      });
+      if (res.ok) {
+        showSnackbar("Contracts workflow cancelled");
+        onClose();
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setError(data.error || "Failed to cancel workflow");
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to cancel workflow");
+    } finally {
+      setCancelling(false);
     }
   };
 
@@ -1515,8 +1543,19 @@ export const ContractsDialog = ({
       </DialogContent>
       <DialogActions>
         <Button onClick={handleClose} disabled={loading}>
-          {isCompleted || isFailed ? "Close" : "Cancel"}
+          {isCompleted || isFailed || isInProgress ? "Close" : "Cancel"}
         </Button>
+        {isInProgress && (
+          <Button
+            onClick={handleCancelWorkflow}
+            variant="outlined"
+            color="error"
+            disabled={cancelling}
+            startIcon={cancelling ? <CircularProgress size={16} /> : undefined}
+          >
+            {cancelling ? "Cancelling…" : "Cancel Workflow"}
+          </Button>
+        )}
         {contractType &&
         (!status?.status || status.status === "idle" || isFailed) ? (
           <Button

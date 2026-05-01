@@ -538,12 +538,18 @@ pub async fn get_governance_confirmations(
                 .collect();
 
             let confirmation_count = unique_confirmations.len();
+            let last_confirmation_at = unique_confirmations
+                .iter()
+                .map(|c| c.created_at)
+                .max()
+                .unwrap_or(0);
             GovernanceAction {
                 action_hash,
                 action,
                 confirmations: unique_confirmations,
                 confirmation_count,
                 can_execute: confirmation_count >= threshold,
+                last_confirmation_at,
             }
         })
         .collect();
@@ -756,6 +762,7 @@ fn extract_and_add_confirmation(
         contract_id: created.contract_id.clone(),
         action: action.clone(),
         confirming_party,
+        created_at: created.created_at.as_ref().map(|t| t.seconds).unwrap_or(0),
     };
 
     confirmations_by_hash
@@ -817,6 +824,7 @@ fn extract_and_add_domain_confirmation(
         contract_id: created.contract_id.clone(),
         action: ActionType::GovernanceSetThreshold { new_threshold: 0 }, // placeholder
         confirming_party,
+        created_at: created.created_at.as_ref().map(|t| t.seconds).unwrap_or(0),
     };
 
     domain_confirmations

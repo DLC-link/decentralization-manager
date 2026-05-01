@@ -21,8 +21,9 @@ use crate::{
         AppState,
         middleware::require_admin,
         types::{
-            ContractsRequest, DarsRequest, ErrorResponse, HttpWorkflowState, KickRequest,
-            KickResponse, KickStatus, ListenerPauseGuard, MissingEdgeKind, MissingPeerEdge,
+            ContractsRequest, DarsInvitePayload, DarsRequest, ErrorResponse, HttpWorkflowState,
+            KickRequest, KickResponse, KickStatus, ListenerPauseGuard, MessageResponse,
+            MissingEdgeKind, MissingPeerEdge, OnboardingInvitePayload,
             OnboardingMeshErrorResponse, OnboardingRequest, OnboardingResponse, OnboardingStatus,
             SuccessResponse, WorkflowProgress, WorkflowResponse, WorkflowStatusResponse,
         },
@@ -145,13 +146,33 @@ pub async fn start_kick(
         }
     }
 
-    // Update status to in progress
+    // Compute peers we're going to invite — every peer except self + the kicked participant.
+    // Done before the InProgress flip so a concurrent /kick/cancel cannot observe
+    // InProgress while we're still preparing.
+    let invitees: Vec<CantonId> = match data.db.get_all_peers().await {
+        Ok(peers) => peers
+            .into_iter()
+            .map(|p| p.participant_id)
+            .filter(|p| p != data.config.participant_id() && p != &participant_id)
+            .collect(),
+        Err(e) => {
+            tracing::warn!("Failed to load peers for cancel-invite tracking: {e}");
+            Vec::new()
+        }
+    };
+
+    // Flip status, write invited_peers, spawn, and stash the abort handle in one
+    // go. cancel_workflow_state only acts when abort_handle is Some, so as long as
+    // these run without intervening cancel-visible state, the race is closed.
     {
         let mut status = kick_state.status.write().await;
         *status = KickStatus::InProgress;
+    }
+    {
         let mut error = kick_state.error.write().await;
         *error = None;
     }
+    *kick_state.invited_peers.write().await = invitees;
 
     // Spawn the kick workflow in the background
     let config = data.config.clone();
@@ -161,7 +182,7 @@ pub async fn start_kick(
     let listener_control = data.noise_listener_control.clone();
     let listener_notify = data.noise_listener_notify.clone();
 
-    tokio::spawn(async move {
+    let join_handle = tokio::spawn(async move {
         let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
 
         // Send kick invites to all peers before starting coordinator workflow
@@ -221,6 +242,7 @@ pub async fn start_kick(
             }
         }
     });
+    *kick_state.abort_handle.lock().await = Some(join_handle.abort_handle());
 
     HttpResponse::Accepted().json(KickResponse {
         status: KickStatus::InProgress,
@@ -426,15 +448,9 @@ pub async fn start_onboarding(
         }
     }
 
-    // Update status to in progress
-    {
-        let mut status = onboarding_state.status.write().await;
-        *status = OnboardingStatus::InProgress;
-        let mut error = onboarding_state.error.write().await;
-        *error = None;
-    }
-
-    // Spawn the onboarding workflow in the background
+    // Pre-spawn handles + record invitees BEFORE we flip status to InProgress, so a
+    // concurrent /onboarding/cancel cannot observe InProgress while abort_handle is
+    // still None (cancel_workflow_state requires Some(abort_handle) to proceed).
     let config = data.config.clone();
     let db = data.db.clone();
     let onboarding_state_clone = onboarding_state.get_ref().clone();
@@ -442,14 +458,25 @@ pub async fn start_onboarding(
     let listener_notify = data.noise_listener_notify.clone();
     let party_id_prefix = body.party_id_prefix.clone();
     let peer_ids = body.peer_ids.clone();
+    *onboarding_state.invited_peers.write().await = peer_ids.clone();
     let party_credentials = data.party_credentials.clone();
     let auth_lock = data.auth.clone();
 
-    tokio::spawn(async move {
+    {
+        let mut status = onboarding_state.status.write().await;
+        *status = OnboardingStatus::InProgress;
+    }
+    {
+        let mut error = onboarding_state.error.write().await;
+        *error = None;
+    }
+
+    let join_handle = tokio::spawn(async move {
         let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
 
         // Send invites to selected peers before starting coordinator workflow
-        let invite_result = send_onboarding_invites(&config, &db, &peer_ids).await;
+        let invite_result =
+            send_onboarding_invites(&config, &db, &peer_ids, &party_id_prefix).await;
         if let Err(e) = invite_result {
             tracing::error!("Failed to send onboarding invites: {e}");
             guard.resume().await;
@@ -545,6 +572,7 @@ pub async fn start_onboarding(
             }
         }
     });
+    *onboarding_state.abort_handle.lock().await = Some(join_handle.abort_handle());
 
     HttpResponse::Accepted().json(OnboardingResponse {
         status: OnboardingStatus::InProgress,
@@ -576,18 +604,24 @@ pub async fn get_onboarding_status(
 async fn send_onboarding_invites(
     config: &NodeConfig,
     db: &SqlitePool,
-    peer_ids: &[String],
+    peer_ids: &[CantonId],
+    party_id_prefix: &str,
 ) -> Result {
     let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
 
-    let invite_message = Message::new_empty(MessageType::InviteOnboarding);
+    let payload = OnboardingInvitePayload {
+        prefix: party_id_prefix.to_string(),
+        participants: peer_ids.iter().map(|id| id.to_string()).collect(),
+    };
+    let payload_bytes = serde_json::to_vec(&payload)?;
+    let invite_message = Message::new(MessageType::InviteOnboarding, payload_bytes);
 
     for peer_id in peer_ids {
         let peer = match network_config
             .peers
             .iter()
-            .find(|p| p.participant_id.to_string() == *peer_id)
+            .find(|p| &p.participant_id == peer_id)
         {
             Some(p) => p,
             None => {
@@ -660,7 +694,7 @@ async fn send_onboarding_invites(
 async fn verify_peer_mesh(
     config: &NodeConfig,
     db: &SqlitePool,
-    peer_ids: &[String],
+    peer_ids: &[CantonId],
 ) -> Result<Vec<MissingPeerEdge>> {
     let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
@@ -674,14 +708,14 @@ async fn verify_peer_mesh(
         let peer = match network_config
             .peers
             .iter()
-            .find(|p| p.participant_id.to_string() == *peer_id)
+            .find(|p| &p.participant_id == peer_id)
         {
             Some(p) => p,
             None => {
                 // Coordinator doesn't know this peer — won't be able to invite them.
                 missing_edges.push(MissingPeerEdge {
                     from: identity.clone(),
-                    to: peer_id.clone(),
+                    to: peer_id.to_string(),
                     kind: MissingEdgeKind::UnreachableFromCoordinator,
                 });
                 continue;
@@ -692,7 +726,7 @@ async fn verify_peer_mesh(
             tracing::warn!("Peer {peer_id} has no public key configured — cannot mesh-check");
             missing_edges.push(MissingPeerEdge {
                 from: identity.clone(),
-                to: peer_id.clone(),
+                to: peer_id.to_string(),
                 kind: MissingEdgeKind::UnreachableFromCoordinator,
             });
             continue;
@@ -704,7 +738,7 @@ async fn verify_peer_mesh(
                 tracing::warn!("Peer {peer_id} has invalid public key: {e}");
                 missing_edges.push(MissingPeerEdge {
                     from: identity.clone(),
-                    to: peer_id.clone(),
+                    to: peer_id.to_string(),
                     kind: MissingEdgeKind::UnreachableFromCoordinator,
                 });
                 continue;
@@ -727,7 +761,7 @@ async fn verify_peer_mesh(
                 tracing::warn!("Failed to query peers from {peer_id}: {e}");
                 missing_edges.push(MissingPeerEdge {
                     from: identity.clone(),
-                    to: peer_id.clone(),
+                    to: peer_id.to_string(),
                     kind: MissingEdgeKind::UnreachableFromCoordinator,
                 });
                 continue;
@@ -740,7 +774,7 @@ async fn verify_peer_mesh(
                 tracing::warn!("Malformed response from {peer_id}: {e}");
                 missing_edges.push(MissingPeerEdge {
                     from: identity.clone(),
-                    to: peer_id.clone(),
+                    to: peer_id.to_string(),
                     kind: MissingEdgeKind::UnreachableFromCoordinator,
                 });
                 continue;
@@ -754,7 +788,7 @@ async fn verify_peer_mesh(
             );
             missing_edges.push(MissingPeerEdge {
                 from: identity.clone(),
-                to: peer_id.clone(),
+                to: peer_id.to_string(),
                 kind: MissingEdgeKind::UnreachableFromCoordinator,
             });
             continue;
@@ -766,19 +800,19 @@ async fn verify_peer_mesh(
                 tracing::warn!("Could not parse peer list from {peer_id}: {e}");
                 missing_edges.push(MissingPeerEdge {
                     from: identity.clone(),
-                    to: peer_id.clone(),
+                    to: peer_id.to_string(),
                     kind: MissingEdgeKind::UnreachableFromCoordinator,
                 });
                 continue;
             }
         };
-        peer_views.insert(peer_id.clone(), view);
+        peer_views.insert(peer_id.to_string(), view);
     }
 
     // For every directed pair within selected peers, check that A's peer view
     // includes B. Missing means A and B aren't mutually connected.
     for a in peer_ids {
-        let Some(a_view) = peer_views.get(a) else {
+        let Some(a_view) = peer_views.get(&a.to_string()) else {
             // Already recorded a coordinator→A reachability problem above.
             continue;
         };
@@ -786,10 +820,10 @@ async fn verify_peer_mesh(
             if a == b {
                 continue;
             }
-            if !a_view.contains(b) {
+            if !a_view.contains(&b.to_string()) {
                 missing_edges.push(MissingPeerEdge {
-                    from: a.clone(),
-                    to: b.clone(),
+                    from: a.to_string(),
+                    to: b.to_string(),
                     kind: MissingEdgeKind::MeshHole,
                 });
             }
@@ -828,14 +862,6 @@ pub async fn start_contracts(
         }
     }
 
-    // Update status to in progress
-    {
-        let mut status = contracts_state.status.write().await;
-        *status = WorkflowProgress::InProgress;
-        let mut error = contracts_state.error.write().await;
-        *error = None;
-    }
-
     // Create contracts config from request
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -854,7 +880,22 @@ pub async fn start_contracts(
         instance_name,
     );
 
-    // Spawn the contracts workflow in the background
+    // Track invitees for /cancel: every peer except self.
+    let contracts_invitees: Vec<CantonId> = match data.db.get_all_peers().await {
+        Ok(peers) => peers
+            .into_iter()
+            .map(|p| p.participant_id)
+            .filter(|p| p != data.config.participant_id())
+            .collect(),
+        Err(e) => {
+            tracing::warn!("Failed to load peers for cancel-invite tracking: {e}");
+            Vec::new()
+        }
+    };
+
+    // Pre-spawn handles BEFORE we flip status to InProgress, so a concurrent
+    // /contracts/cancel cannot observe InProgress while abort_handle is still
+    // None (cancel_workflow_state requires Some(abort_handle) to proceed).
     let config = data.config.clone();
     let db = data.db.clone();
     let workflow_auth = data.auth.read().await.clone();
@@ -863,8 +904,18 @@ pub async fn start_contracts(
     let listener_control = data.noise_listener_control.clone();
     let listener_notify = data.noise_listener_notify.clone();
     let party_credentials = data.party_credentials.clone();
+    *contracts_state.invited_peers.write().await = contracts_invitees;
 
-    tokio::spawn(async move {
+    {
+        let mut status = contracts_state.status.write().await;
+        *status = WorkflowProgress::InProgress;
+    }
+    {
+        let mut error = contracts_state.error.write().await;
+        *error = None;
+    }
+
+    let join_handle = tokio::spawn(async move {
         let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
 
         // Send invites to all peers before starting coordinator workflow
@@ -938,6 +989,7 @@ pub async fn start_contracts(
             }
         }
     });
+    *contracts_state.abort_handle.lock().await = Some(join_handle.abort_handle());
 
     HttpResponse::Accepted().json(WorkflowResponse {
         status: WorkflowProgress::InProgress,
@@ -1036,14 +1088,6 @@ pub async fn start_dars(
         }
     }
 
-    // Update status to in progress
-    {
-        let mut status = dars_state.status.write().await;
-        *status = WorkflowProgress::InProgress;
-        let mut error = dars_state.error.write().await;
-        *error = None;
-    }
-
     // Create DARs config from request
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1056,19 +1100,36 @@ pub async fn start_dars(
         peer_ids: body.peer_ids.clone(),
     };
 
-    // Spawn the DARs workflow in the background
+    // Pre-spawn handles + record invitees BEFORE we flip status to InProgress, so a
+    // concurrent /dars/cancel cannot observe InProgress while abort_handle is still
+    // None (cancel_workflow_state requires Some(abort_handle) to proceed).
     let config = data.config.clone();
     let db = data.db.clone();
     let dars_state_clone = dars_state.get_ref().clone();
     let listener_control = data.noise_listener_control.clone();
     let listener_notify = data.noise_listener_notify.clone();
     let peer_ids = body.peer_ids.clone();
+    *dars_state.invited_peers.write().await = peer_ids.clone();
 
-    tokio::spawn(async move {
+    {
+        let mut status = dars_state.status.write().await;
+        *status = WorkflowProgress::InProgress;
+    }
+    {
+        let mut error = dars_state.error.write().await;
+        *error = None;
+    }
+
+    let join_handle = tokio::spawn(async move {
         let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
 
         // Send invites to selected peers before starting coordinator workflow
-        let invite_result = send_dars_invites(&config, &db, &peer_ids).await;
+        let dar_filenames: Vec<String> = dars_config
+            .dar_files
+            .iter()
+            .map(|f| f.filename.clone())
+            .collect();
+        let invite_result = send_dars_invites(&config, &db, &peer_ids, &dar_filenames).await;
         if let Err(e) = invite_result {
             tracing::error!("Failed to send DARs invites: {e}");
             guard.resume().await;
@@ -1111,6 +1172,7 @@ pub async fn start_dars(
             }
         }
     });
+    *dars_state.abort_handle.lock().await = Some(join_handle.abort_handle());
 
     HttpResponse::Accepted().json(WorkflowResponse {
         status: WorkflowProgress::InProgress,
@@ -1137,11 +1199,20 @@ pub async fn get_dars_status(dars_state: web::Data<Arc<DarsWorkflowState>>) -> i
 }
 
 /// Send DARs invites to selected peers using Noise protocol
-async fn send_dars_invites(config: &NodeConfig, db: &SqlitePool, peer_ids: &[CantonId]) -> Result {
+async fn send_dars_invites(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    peer_ids: &[CantonId],
+    dar_filenames: &[String],
+) -> Result {
     let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
 
-    let invite_message = Message::new_empty(MessageType::InviteDars);
+    let payload = DarsInvitePayload {
+        dar_filenames: dar_filenames.to_vec(),
+    };
+    let payload_bytes = serde_json::to_vec(&payload)?;
+    let invite_message = Message::new(MessageType::InviteDars, payload_bytes);
 
     for peer_id in peer_ids {
         let peer = match network_config
@@ -1205,6 +1276,182 @@ async fn send_dars_invites(config: &NodeConfig, db: &SqlitePool, peer_ids: &[Can
         }
     }
 
+    Ok(())
+}
+
+/// Shared cancel logic. All four workflow types use HttpWorkflowState<WorkflowProgress>.
+async fn cancel_workflow_state(
+    state: &Arc<HttpWorkflowState<WorkflowProgress>>,
+    data: &web::Data<AppState>,
+    label: &str,
+) -> HttpResponse {
+    {
+        let status = state.status.read().await;
+        if *status != WorkflowProgress::InProgress {
+            return HttpResponse::Conflict().json(ErrorResponse {
+                error: format!("No {label} workflow in progress"),
+            });
+        }
+    }
+
+    // Take the abort handle FIRST. If it's None we're racing with a start path that
+    // hasn't finished setting itself up yet; refuse the cancel rather than mark the
+    // workflow Cancelled while the spawned task is still alive. Start paths always
+    // populate abort_handle before they let any await reach this point.
+    let Some(handle) = state.abort_handle.lock().await.take() else {
+        tracing::warn!(
+            "{label} cancel arrived before the workflow finished initializing — refusing"
+        );
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!("{label} workflow is still initializing — try again in a moment"),
+        });
+    };
+    handle.abort();
+
+    {
+        let mut control = data.noise_listener_control.write().await;
+        control.should_pause = false;
+    }
+    data.noise_listener_notify.notify_one();
+
+    let invitees = state.invited_peers.read().await.clone();
+    if !invitees.is_empty()
+        && let Err(e) = send_cancel_invites(&data.config, &data.db, &invitees).await
+    {
+        tracing::warn!("send_cancel_invites failed during {label} cancel: {e}");
+    }
+
+    {
+        let mut status = state.status.write().await;
+        *status = WorkflowProgress::Cancelled;
+    }
+    {
+        let mut error = state.error.write().await;
+        *error = None;
+    }
+
+    tracing::info!("{label} workflow cancelled");
+    HttpResponse::Ok().json(MessageResponse {
+        message: format!("{label} workflow cancelled"),
+    })
+}
+
+#[utoipa::path(
+    tag = "Workflows",
+    responses(
+        (status = 200, description = "Workflow cancelled", body = MessageResponse),
+        (status = 409, description = "No workflow in progress", body = ErrorResponse)
+    )
+)]
+#[post("/onboarding/cancel")]
+pub async fn cancel_onboarding(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    state: web::Data<Arc<OnboardingWorkflowState>>,
+) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
+    cancel_workflow_state(state.get_ref(), &data, "Onboarding").await
+}
+
+#[utoipa::path(
+    tag = "Workflows",
+    responses(
+        (status = 200, description = "Workflow cancelled", body = MessageResponse),
+        (status = 409, description = "No workflow in progress", body = ErrorResponse)
+    )
+)]
+#[post("/kick/cancel")]
+pub async fn cancel_kick(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    state: web::Data<Arc<KickWorkflowState>>,
+) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
+    cancel_workflow_state(state.get_ref(), &data, "Kick").await
+}
+
+#[utoipa::path(
+    tag = "Workflows",
+    responses(
+        (status = 200, description = "Workflow cancelled", body = MessageResponse),
+        (status = 409, description = "No workflow in progress", body = ErrorResponse)
+    )
+)]
+#[post("/contracts/cancel")]
+pub async fn cancel_contracts(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    state: web::Data<Arc<ContractsWorkflowState>>,
+) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
+    cancel_workflow_state(state.get_ref(), &data, "Contracts").await
+}
+
+#[utoipa::path(
+    tag = "Workflows",
+    responses(
+        (status = 200, description = "Workflow cancelled", body = MessageResponse),
+        (status = 409, description = "No workflow in progress", body = ErrorResponse)
+    )
+)]
+#[post("/dars/cancel")]
+pub async fn cancel_dars(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    state: web::Data<Arc<DarsWorkflowState>>,
+) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
+    cancel_workflow_state(state.get_ref(), &data, "DARs").await
+}
+
+/// Best-effort: notify previously-invited peers that the workflow is cancelled
+/// so they can drop the matching pending invitation.
+async fn send_cancel_invites(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    peer_ids: &[CantonId],
+) -> Result {
+    let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
+    let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
+    let cancel_message = Message::new_empty(MessageType::CancelInvite);
+    let identity = config.participant_id().to_string();
+
+    for peer_id in peer_ids {
+        let Some(peer) = network_config
+            .peers
+            .iter()
+            .find(|p| &p.participant_id == peer_id)
+        else {
+            continue;
+        };
+        if peer.public_key.is_empty() {
+            continue;
+        }
+        let Ok(peer_pub_key) = parse_public_key(&peer.public_key) else {
+            continue;
+        };
+        let psk = keypair.derive_psk(&peer_pub_key);
+
+        if let Err(e) = send_noise_message(
+            &peer.address,
+            peer.port,
+            &psk,
+            identity.as_bytes(),
+            &cancel_message,
+        )
+        .await
+        {
+            tracing::warn!("Failed to send CancelInvite to {peer_id}: {e}");
+        }
+    }
     Ok(())
 }
 

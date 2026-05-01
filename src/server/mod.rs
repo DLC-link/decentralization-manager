@@ -41,7 +41,7 @@ use crate::auth::{MockAuthRegistry, MockValidator};
 use crate::{
     auth::{TokenValidator, WorkflowAuth},
     config::{NodeConfig, PartyCredentials},
-    db::schema::SchemaRead,
+    db::schema::{Commitable, SchemaRead, SchemaWrite},
     error::Result,
     noise::{Message, MessageType, NoiseKeypair, load_or_generate_keypair, parse_public_key},
     server::middleware::AuthMiddleware,
@@ -99,6 +99,86 @@ struct WorkflowTriggers {
     db: SqlitePool,
     /// Read by the `RequestMemberParty` listener arm.
     party_credentials: Arc<RwLock<Vec<PartyCredentials>>>,
+}
+
+enum InvitationMeta {
+    None,
+    Onboarding(OnboardingInvitePayload),
+    Dars(DarsInvitePayload),
+}
+
+impl WorkflowTriggers {
+    async fn record_invitation(
+        &self,
+        invitation_type: InvitationType,
+        coordinator_pubkey: &str,
+        meta: InvitationMeta,
+    ) {
+        let mut prefix = None;
+        let mut participants = Vec::new();
+        let mut dar_filenames = Vec::new();
+        match meta {
+            InvitationMeta::None => {}
+            InvitationMeta::Onboarding(p) => {
+                prefix = Some(p.prefix);
+                participants = p.participants;
+            }
+            InvitationMeta::Dars(p) => {
+                dar_filenames = p.dar_filenames;
+            }
+        }
+        let invitation = PendingInvitation {
+            id: format!(
+                "{}-{}",
+                invitation_type.as_str().to_lowercase(),
+                &coordinator_pubkey[..16]
+            ),
+            invitation_type,
+            coordinator_pubkey: coordinator_pubkey.to_string(),
+            coordinator_name: None,
+            received_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0),
+            prefix,
+            participants,
+            dar_filenames,
+        };
+
+        match self.db.begin_transaction().await {
+            Ok(mut tx) => {
+                if let Err(e) = tx.upsert_pending_invitation(&invitation).await {
+                    tracing::warn!("Failed to persist pending invitation: {e}");
+                } else if let Err(e) = Commitable::commit(tx).await {
+                    tracing::warn!("Failed to commit pending invitation: {e}");
+                }
+            }
+            Err(e) => tracing::warn!("Failed to begin tx for pending invitation: {e}"),
+        }
+
+        let mut invitations = self.pending_invitations.write().await;
+        invitations.retain(|i| i.id != invitation.id);
+        invitations.push(invitation);
+    }
+
+    async fn drop_invitations_from(&self, coordinator_pubkey: &str) {
+        match self.db.begin_transaction().await {
+            Ok(mut tx) => {
+                if let Err(e) = tx
+                    .delete_pending_invitations_by_coordinator(coordinator_pubkey)
+                    .await
+                {
+                    tracing::warn!("Failed to delete persisted invitations: {e}");
+                } else if let Err(e) = Commitable::commit(tx).await {
+                    tracing::warn!("Failed to commit invitation deletion: {e}");
+                }
+            }
+            Err(e) => tracing::warn!("Failed to begin tx for invitation deletion: {e}"),
+        }
+
+        let mut invitations = self.pending_invitations.write().await;
+        invitations.retain(|i| i.coordinator_pubkey != coordinator_pubkey);
+    }
 }
 
 /// Start the HTTP server and a heartbeat system for peer status tracking
@@ -214,7 +294,17 @@ pub async fn start_server(
     let contracts_trigger = Arc::new(Notify::new());
     let dars_trigger = Arc::new(Notify::new());
     let coordinator_pubkey = Arc::new(RwLock::new(None));
-    let pending_invitations = Arc::new(RwLock::new(Vec::new()));
+    let persisted_invitations = db.get_all_pending_invitations().await.unwrap_or_else(|e| {
+        tracing::warn!("Failed to load persisted pending invitations: {e}");
+        Vec::new()
+    });
+    if !persisted_invitations.is_empty() {
+        tracing::info!(
+            "Loaded {} persisted pending invitation(s) from DB",
+            persisted_invitations.len()
+        );
+    }
+    let pending_invitations = Arc::new(RwLock::new(persisted_invitations));
 
     let app_state = web::Data::new(AppState {
         db: db.clone(),
@@ -435,13 +525,17 @@ pub async fn start_server(
             .service(handlers::get_vetted_packages)
             .service(handlers::start_kick)
             .service(handlers::get_kick_status)
+            .service(handlers::cancel_kick)
             .service(handlers::start_onboarding)
             .service(handlers::get_onboarding_status)
+            .service(handlers::cancel_onboarding)
             .service(handlers::start_contracts)
             .service(handlers::get_contracts_status)
+            .service(handlers::cancel_contracts)
             .service(handlers::upload_dars_local)
             .service(handlers::start_dars)
             .service(handlers::get_dars_status)
+            .service(handlers::cancel_dars)
             .service(handlers::get_key_status)
             .service(handlers::get_invitations)
             .service(handlers::accept_invitation)
@@ -744,101 +838,72 @@ async fn handle_incoming_connection(
                                 .body(Body::from(response_msg.to_bytes()))
                                 .unwrap());
                         }
-                        MessageType::InviteOnboarding => {
+                        MessageType::InviteOnboarding
+                        | MessageType::InviteKick
+                        | MessageType::InviteContracts
+                        | MessageType::InviteDars => {
+                            let invitation_type = match msg.msg_type {
+                                MessageType::InviteOnboarding => InvitationType::Onboarding,
+                                MessageType::InviteKick => InvitationType::Kick,
+                                MessageType::InviteContracts => InvitationType::Contracts,
+                                MessageType::InviteDars => InvitationType::Dars,
+                                _ => unreachable!(),
+                            };
                             tracing::info!(
-                                "Received onboarding invite, storing as pending invitation"
+                                "Received {invitation_type} invite, storing as pending invitation"
+                            );
+                            let meta = if msg.payload.is_empty() {
+                                InvitationMeta::None
+                            } else {
+                                match invitation_type {
+                                    InvitationType::Onboarding => {
+                                        match serde_json::from_slice::<OnboardingInvitePayload>(
+                                            &msg.payload,
+                                        ) {
+                                            Ok(p) => InvitationMeta::Onboarding(p),
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    "Onboarding invite payload was unparseable: {e}"
+                                                );
+                                                InvitationMeta::None
+                                            }
+                                        }
+                                    }
+                                    InvitationType::Dars => {
+                                        match serde_json::from_slice::<DarsInvitePayload>(
+                                            &msg.payload,
+                                        ) {
+                                            Ok(p) => InvitationMeta::Dars(p),
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    "Dars invite payload was unparseable: {e}"
+                                                );
+                                                InvitationMeta::None
+                                            }
+                                        }
+                                    }
+                                    _ => InvitationMeta::None,
+                                }
+                            };
+                            if let Some(ref pubkey) = peer_pubkey_hex {
+                                triggers
+                                    .record_invitation(invitation_type, pubkey, meta)
+                                    .await;
+                            }
+
+                            let ack = Message::new_empty(MessageType::Ack);
+                            return Ok(Response::builder()
+                                .status(StatusCode::OK)
+                                .body(Body::from(ack.to_bytes()))
+                                .unwrap());
+                        }
+                        MessageType::CancelInvite => {
+                            tracing::info!(
+                                "Received CancelInvite, removing pending invitations from sender"
                             );
                             if let Some(ref pubkey) = peer_pubkey_hex {
-                                let invitation = PendingInvitation {
-                                    id: format!("onboarding-{}", &pubkey[..16]),
-                                    invitation_type: InvitationType::Onboarding,
-                                    coordinator_pubkey: pubkey.clone(),
-                                    coordinator_name: None,
-                                    received_at: std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .map(|d| d.as_secs() as i64)
-                                        .unwrap_or(0),
-                                };
-                                let mut invitations = triggers.pending_invitations.write().await;
-                                // Remove any existing invitation of the same type from the same coordinator
-                                invitations.retain(|i| i.id != invitation.id);
-                                invitations.push(invitation);
+                                triggers.drop_invitations_from(pubkey).await;
                             }
-
-                            let ack = Message::new_empty(MessageType::Ack);
-                            return Ok(Response::builder()
-                                .status(StatusCode::OK)
-                                .body(Body::from(ack.to_bytes()))
-                                .unwrap());
-                        }
-                        MessageType::InviteKick => {
-                            tracing::info!("Received kick invite, storing as pending invitation");
-                            if let Some(ref pubkey) = peer_pubkey_hex {
-                                let invitation = PendingInvitation {
-                                    id: format!("kick-{}", &pubkey[..16]),
-                                    invitation_type: InvitationType::Kick,
-                                    coordinator_pubkey: pubkey.clone(),
-                                    coordinator_name: None,
-                                    received_at: std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .map(|d| d.as_secs() as i64)
-                                        .unwrap_or(0),
-                                };
-                                let mut invitations = triggers.pending_invitations.write().await;
-                                invitations.retain(|i| i.id != invitation.id);
-                                invitations.push(invitation);
-                            }
-
-                            let ack = Message::new_empty(MessageType::Ack);
-                            return Ok(Response::builder()
-                                .status(StatusCode::OK)
-                                .body(Body::from(ack.to_bytes()))
-                                .unwrap());
-                        }
-                        MessageType::InviteContracts => {
-                            tracing::info!(
-                                "Received contracts invite, storing as pending invitation"
-                            );
-                            if let Some(ref pubkey) = peer_pubkey_hex {
-                                let invitation = PendingInvitation {
-                                    id: format!("contracts-{}", &pubkey[..16]),
-                                    invitation_type: InvitationType::Contracts,
-                                    coordinator_pubkey: pubkey.clone(),
-                                    coordinator_name: None,
-                                    received_at: std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .map(|d| d.as_secs() as i64)
-                                        .unwrap_or(0),
-                                };
-                                let mut invitations = triggers.pending_invitations.write().await;
-                                invitations.retain(|i| i.id != invitation.id);
-                                invitations.push(invitation);
-                            }
-
-                            let ack = Message::new_empty(MessageType::Ack);
-                            return Ok(Response::builder()
-                                .status(StatusCode::OK)
-                                .body(Body::from(ack.to_bytes()))
-                                .unwrap());
-                        }
-                        MessageType::InviteDars => {
-                            tracing::info!("Received DARs invite, storing as pending invitation");
-                            if let Some(ref pubkey) = peer_pubkey_hex {
-                                let invitation = PendingInvitation {
-                                    id: format!("dars-{}", &pubkey[..16]),
-                                    invitation_type: InvitationType::Dars,
-                                    coordinator_pubkey: pubkey.clone(),
-                                    coordinator_name: None,
-                                    received_at: std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .map(|d| d.as_secs() as i64)
-                                        .unwrap_or(0),
-                                };
-                                let mut invitations = triggers.pending_invitations.write().await;
-                                invitations.retain(|i| i.id != invitation.id);
-                                invitations.push(invitation);
-                            }
-
                             let ack = Message::new_empty(MessageType::Ack);
                             return Ok(Response::builder()
                                 .status(StatusCode::OK)

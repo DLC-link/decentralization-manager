@@ -6,6 +6,7 @@ use crate::{
     config::{PartyCredentials, Peer},
     error::Result,
     participant_id::CantonId,
+    server::PendingInvitation,
 };
 
 /// Read operations on the database
@@ -78,6 +79,9 @@ pub trait SchemaRead {
         party_id: &str,
         limit: i64,
     ) -> Result<Vec<ChainAuditCacheRow>>;
+
+    /// Get all persisted pending invitations
+    async fn get_all_pending_invitations(&self) -> Result<Vec<PendingInvitation>>;
 }
 
 /// Write operations on the database
@@ -136,5 +140,17 @@ pub trait Commitable {
         party_id: &str,
         participant_uid: &str,
         owner_key: &str,
+    ) -> Result;
+
+    /// Insert or replace a pending invitation
+    async fn upsert_pending_invitation(&mut self, inv: &PendingInvitation) -> Result;
+
+    /// Delete a pending invitation by its id (no-op if absent)
+    async fn delete_pending_invitation(&mut self, id: &str) -> Result;
+
+    /// Delete every pending invitation matching a coordinator's Noise pubkey
+    async fn delete_pending_invitations_by_coordinator(
+        &mut self,
+        coordinator_pubkey: &str,
     ) -> Result;
 }

@@ -16,10 +16,14 @@ use super::ListenerControl;
 /// Trait for workflow status types that can be used with HttpWorkflowState
 pub trait WorkflowStatus: Default + Copy + Send + Sync {}
 
-/// Generic state for tracking HTTP-triggered workflows
+/// Generic state for tracking HTTP-triggered workflows. Holds enough context
+/// for the matching `/cancel` endpoint to abort the spawn and notify the
+/// peers that received an invite.
 pub struct HttpWorkflowState<S: WorkflowStatus> {
     pub status: RwLock<S>,
     pub error: RwLock<Option<String>>,
+    pub abort_handle: tokio::sync::Mutex<Option<tokio::task::AbortHandle>>,
+    pub invited_peers: RwLock<Vec<CantonId>>,
 }
 
 impl<S: WorkflowStatus> Default for HttpWorkflowState<S> {
@@ -27,6 +31,8 @@ impl<S: WorkflowStatus> Default for HttpWorkflowState<S> {
         Self {
             status: RwLock::new(S::default()),
             error: RwLock::new(None),
+            abort_handle: tokio::sync::Mutex::new(None),
+            invited_peers: RwLock::new(Vec::new()),
         }
     }
 }
@@ -234,7 +240,7 @@ pub struct OnboardingRequest {
     /// Party ID prefix for the decentralized party (e.g., "xyz-network")
     pub party_id_prefix: String,
     /// List of peer IDs to invite to the decentralized party
-    pub peer_ids: Vec<String>,
+    pub peer_ids: Vec<CantonId>,
 }
 
 /// Why a directed edge was reported missing. The frontend renders different
@@ -303,6 +309,7 @@ pub enum WorkflowProgress {
     InProgress,
     Completed,
     Failed,
+    Cancelled,
 }
 
 impl WorkflowStatus for WorkflowProgress {}
@@ -339,6 +346,51 @@ pub enum InvitationType {
     Dars,
 }
 
+impl InvitationType {
+    /// Stable string label used for DB storage. Matches the PascalCase serde repr.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Onboarding => "Onboarding",
+            Self::Kick => "Kick",
+            Self::Contracts => "Contracts",
+            Self::Dars => "Dars",
+        }
+    }
+}
+
+impl std::fmt::Display for InvitationType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for InvitationType {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "Onboarding" => Ok(Self::Onboarding),
+            "Kick" => Ok(Self::Kick),
+            "Contracts" => Ok(Self::Contracts),
+            "Dars" => Ok(Self::Dars),
+            other => Err(anyhow::anyhow!("unknown invitation type: {other}")),
+        }
+    }
+}
+
+/// Payload sent inside an `InviteOnboarding` Noise message.
+#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct OnboardingInvitePayload {
+    pub prefix: String,
+    pub participants: Vec<String>,
+}
+
+/// Payload sent inside an `InviteDars` Noise message.
+#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct DarsInvitePayload {
+    pub dar_filenames: Vec<String>,
+}
+
 /// A pending invitation from a coordinator
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct PendingInvitation {
@@ -347,6 +399,16 @@ pub struct PendingInvitation {
     pub coordinator_pubkey: String,
     pub coordinator_name: Option<String>,
     pub received_at: i64,
+    /// Onboarding-only: party ID prefix the coordinator chose.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+    /// Onboarding-only: full participant list the coordinator selected
+    /// (canton IDs in `prefix::namespace` form).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub participants: Vec<String>,
+    /// Dars-only: filenames the coordinator is distributing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dar_filenames: Vec<String>,
 }
 
 /// Response for pending invitations endpoint
@@ -870,6 +932,10 @@ pub struct GovernanceConfirmation {
     pub contract_id: String,
     pub action: ActionType,
     pub confirming_party: String,
+    /// Unix seconds when the confirmation contract was created on the ledger.
+    /// 0 if the timestamp could not be resolved.
+    #[serde(default)]
+    pub created_at: i64,
 }
 
 /// A governance action with its confirmations, grouped by action hash
@@ -885,6 +951,9 @@ pub struct GovernanceAction {
     pub confirmation_count: usize,
     /// Whether threshold is met for execution
     pub can_execute: bool,
+    /// Unix seconds of the most recent confirmation (used for sorting in UI).
+    #[serde(default)]
+    pub last_confirmation_at: i64,
 }
 
 /// Response for governance confirmations endpoint

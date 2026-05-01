@@ -13,6 +13,7 @@ import {
 } from "@mui/material";
 import { API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
+import { useSnackbar } from "../contexts";
 import type {
   DecentralizedPartiesResponse,
   KickRequest,
@@ -44,6 +45,7 @@ export const KickDialog = ({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<KickStatusResponse | null>(null);
+  const { showSnackbar } = useSnackbar();
   // Local owner-key state. Initialized from the prop, but kept fresh by
   // polling /decentralized-parties while the dialog is open and the key is
   // still unknown — covers the cold-cache case where server-side resolution
@@ -108,6 +110,11 @@ export const KickDialog = ({
       const res = await authenticatedFetch(`${API_BASE}/kick/status`);
       if (res.ok) {
         const data: KickStatusResponse = await res.json();
+        if (data.status === "cancelled") {
+          showSnackbar("Kick workflow cancelled");
+          onClose();
+          return;
+        }
         setStatus(data);
         if (data.status !== "inprogress") {
           setLoading(false);
@@ -119,7 +126,7 @@ export const KickDialog = ({
     } catch {
       // Ignore polling errors
     }
-  }, [onKickComplete]);
+  }, [onKickComplete, onClose, showSnackbar]);
 
   useEffect(() => {
     let interval: number | undefined;
@@ -161,6 +168,27 @@ export const KickDialog = ({
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error");
       setLoading(false);
+    }
+  };
+
+  const [cancelling, setCancelling] = useState(false);
+  const handleCancelWorkflow = async () => {
+    setCancelling(true);
+    try {
+      const res = await authenticatedFetch(`${API_BASE}/kick/cancel`, {
+        method: "POST",
+      });
+      if (res.ok) {
+        showSnackbar("Kick workflow cancelled");
+        onClose();
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setError(data.error || "Failed to cancel workflow");
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to cancel workflow");
+    } finally {
+      setCancelling(false);
     }
   };
 
@@ -244,10 +272,23 @@ export const KickDialog = ({
       </DialogContent>
       <DialogActions>
         <Button onClick={handleClose} disabled={loading}>
-          {status?.status === "completed" || status?.status === "failed"
+          {status?.status === "completed" ||
+          status?.status === "failed" ||
+          status?.status === "inprogress"
             ? "Close"
             : "Cancel"}
         </Button>
+        {status?.status === "inprogress" && (
+          <Button
+            onClick={handleCancelWorkflow}
+            variant="outlined"
+            color="error"
+            disabled={cancelling}
+            startIcon={cancelling ? <CircularProgress size={16} /> : undefined}
+          >
+            {cancelling ? "Cancelling…" : "Cancel Workflow"}
+          </Button>
+        )}
         {!status?.status ||
         status.status === "idle" ||
         status.status === "failed" ? (
