@@ -26,6 +26,7 @@ import type {
   GovernanceAction,
   GovernanceType,
   PendingInvitation,
+  WorkflowRun,
 } from "../types";
 
 export interface PartyActions {
@@ -43,10 +44,13 @@ export interface PartyActions {
 interface NotificationsViewProps {
   pendingInvitations: PendingInvitation[];
   partyActions: PartyActions[];
-  /** True while either feed source is still loading its initial response. */
+  /** Live + recently-terminal workflow runs (coordinator-side for now). */
+  workflowRuns: WorkflowRun[];
+  /** True while any feed source is still loading its initial response. */
   loading: boolean;
   onInvitationsChanged: () => void;
   onActionsChanged: () => void;
+  onWorkflowsChanged: () => void;
   onSelectParty: (partyId: string) => void;
 }
 
@@ -297,7 +301,8 @@ const InvitationCard = ({
           Deny
         </Button>
         <Button
-          variant="contained"
+          variant="outlined"
+          color="primary"
           size="small"
           onClick={() => respond("accept")}
           disabled={busy}
@@ -653,7 +658,7 @@ const ActionCard = ({
         {action.can_execute && (
           <Button
             size="small"
-            variant="contained"
+            variant="outlined"
             color="success"
             onClick={() => {
               setExecuteError(null);
@@ -685,14 +690,303 @@ type FeedEntry =
       ts: number;
       party: PartyActions;
       action: GovernanceAction;
-    };
+    }
+  | { kind: "workflow"; ts: number; run: WorkflowRun };
+
+const WorkflowRunCard = ({
+  run,
+  onAfter,
+  onSelectParty,
+}: {
+  run: WorkflowRun;
+  onAfter: () => void;
+  onSelectParty: (partyId: string) => void;
+}) => {
+  const [busy, setBusy] = useState(false);
+  const { showSnackbar } = useSnackbar();
+  const isInProgress = run.status === "inprogress";
+  const isTerminal =
+    run.status === "completed" ||
+    run.status === "failed" ||
+    run.status === "cancelled";
+
+  const cancelEndpointForKind = () => {
+    switch (run.kind) {
+      case "Onboarding":
+        return `${API_BASE}/onboarding/cancel`;
+      case "Kick":
+        return `${API_BASE}/kick/cancel`;
+      case "Contracts":
+        return `${API_BASE}/contracts/cancel`;
+      case "Dars":
+        return `${API_BASE}/dars/cancel`;
+    }
+  };
+
+  const cancel = async () => {
+    setBusy(true);
+    try {
+      const res = await authenticatedFetch(cancelEndpointForKind(), {
+        method: "POST",
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || "Failed to cancel");
+      }
+      showSnackbar(`${run.kind} workflow cancelled`);
+      onAfter();
+    } catch (err) {
+      showSnackbar(err instanceof Error ? err.message : "Failed to cancel");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const dismiss = async () => {
+    setBusy(true);
+    try {
+      const res = await authenticatedFetch(
+        `${API_BASE}/workflows/${encodeURIComponent(run.instance_name)}/dismiss`,
+        { method: "POST" },
+      );
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || "Failed to dismiss");
+      }
+      onAfter();
+    } catch (err) {
+      showSnackbar(err instanceof Error ? err.message : "Failed to dismiss");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const retry = async () => {
+    setBusy(true);
+    try {
+      const res = await authenticatedFetch(
+        `${API_BASE}/workflows/${encodeURIComponent(run.instance_name)}/retry`,
+        { method: "POST" },
+      );
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || "Failed to retry");
+      }
+      showSnackbar(`Retrying ${run.kind} workflow`);
+      onAfter();
+    } catch (err) {
+      showSnackbar(err instanceof Error ? err.message : "Failed to retry");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const statusLabel =
+    run.status === "inprogress"
+      ? "in progress"
+      : run.status === "completed"
+        ? "completed"
+        : run.status === "failed"
+          ? "failed"
+          : run.status === "cancelled"
+            ? "cancelled"
+            : run.status;
+
+  const statusColor: "default" | "success" | "error" | "warning" | "info" =
+    run.status === "completed"
+      ? "success"
+      : run.status === "failed"
+        ? "error"
+        : run.status === "cancelled"
+          ? "warning"
+          : "info";
+
+  const fromLine = run.role === "Coordinator"
+    ? "started by you"
+    : run.coordinator_name
+      ? `from ${run.coordinator_name}`
+      : run.coordinator_pubkey
+        ? `from ${run.coordinator_pubkey.slice(0, 12)}…${run.coordinator_pubkey.slice(-6)}`
+        : null;
+
+  const completedCount = run.completed_attestors.length;
+  const totalCount = run.expected_attestors.length;
+
+  return (
+    <Box
+      sx={{
+        p: 2,
+        border: 1,
+        borderColor: "divider",
+        borderRadius: 2,
+        display: "flex",
+        flexDirection: "column",
+        gap: 1.25,
+      }}
+    >
+      <Box
+        sx={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "flex-start",
+          gap: 1,
+        }}
+      >
+        <Box>
+          <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
+            {run.kind} workflow
+          </Typography>
+          {fromLine && (
+            <Typography variant="caption" color="text.secondary">
+              {fromLine}
+            </Typography>
+          )}
+        </Box>
+        <Box
+          sx={{
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "flex-end",
+            gap: 0.5,
+          }}
+        >
+          <Chip label={statusLabel} size="small" color={statusColor} />
+          <Typography variant="caption" color="text.secondary">
+            {formatRelativeTime(run.updated_at)}
+          </Typography>
+        </Box>
+      </Box>
+
+      {(isInProgress || run.error) && (
+        <Box
+          sx={{
+            display: "flex",
+            flexDirection: "column",
+            gap: 0.75,
+            px: 1.25,
+            py: 1,
+            bgcolor: "action.hover",
+            borderRadius: 1,
+          }}
+        >
+          {isInProgress && (
+            <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ minWidth: 96 }}
+              >
+                Step
+              </Typography>
+              <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                {run.current_step} ({run.step_index + 1}/{run.step_total})
+              </Typography>
+            </Box>
+          )}
+          {isInProgress && totalCount > 0 && (
+            <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ minWidth: 96 }}
+              >
+                Attestors
+              </Typography>
+              <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                {completedCount} / {totalCount} signed
+              </Typography>
+            </Box>
+          )}
+          {run.dec_party_id && (
+            <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ minWidth: 96 }}
+              >
+                Dec party
+              </Typography>
+              <Typography
+                component="span"
+                variant="caption"
+                onClick={() => onSelectParty(run.dec_party_id!)}
+                sx={{
+                  fontFamily: "monospace",
+                  color: "primary.main",
+                  cursor: "pointer",
+                  "&:hover": { textDecoration: "underline" },
+                }}
+              >
+                {truncatePartyId(run.dec_party_id)}
+              </Typography>
+            </Box>
+          )}
+          {run.error && (
+            <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ minWidth: 96 }}
+              >
+                Error
+              </Typography>
+              <Typography variant="body2" color="error">
+                {run.error}
+              </Typography>
+            </Box>
+          )}
+        </Box>
+      )}
+
+      <Box sx={{ display: "flex", gap: 1, justifyContent: "flex-end" }}>
+        {isInProgress && run.role === "Coordinator" && (
+          <Button
+            variant="outlined"
+            color="error"
+            size="small"
+            onClick={cancel}
+            disabled={busy}
+            startIcon={busy ? <CircularProgress size={14} /> : undefined}
+          >
+            Cancel Workflow
+          </Button>
+        )}
+        {run.status === "failed" && run.role === "Coordinator" && (
+          <Button
+            variant="outlined"
+            color="primary"
+            size="small"
+            onClick={retry}
+            disabled={busy}
+            startIcon={busy ? <CircularProgress size={14} /> : undefined}
+          >
+            Retry
+          </Button>
+        )}
+        {isTerminal && (
+          <Button
+            variant="text"
+            color="inherit"
+            size="small"
+            onClick={dismiss}
+            disabled={busy}
+          >
+            Dismiss
+          </Button>
+        )}
+      </Box>
+    </Box>
+  );
+};
 
 export const NotificationsView = ({
   pendingInvitations,
   partyActions,
+  workflowRuns,
   loading,
   onInvitationsChanged,
   onActionsChanged,
+  onWorkflowsChanged,
   onSelectParty,
 }: NotificationsViewProps) => {
   if (loading) {
@@ -719,6 +1013,11 @@ export const NotificationsView = ({
         action,
       })),
     ),
+    ...workflowRuns.map<FeedEntry>((run) => ({
+      kind: "workflow",
+      ts: run.updated_at,
+      run,
+    })),
   ];
   feed.sort((a, b) => b.ts - a.ts);
 
@@ -741,6 +1040,16 @@ export const NotificationsView = ({
               key={`inv-${entry.invitation.id}`}
               invitation={entry.invitation}
               onAfter={onInvitationsChanged}
+            />
+          );
+        }
+        if (entry.kind === "workflow") {
+          return (
+            <WorkflowRunCard
+              key={`wf-${entry.run.instance_name}`}
+              run={entry.run}
+              onAfter={onWorkflowsChanged}
+              onSelectParty={onSelectParty}
             />
           );
         }

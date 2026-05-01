@@ -164,7 +164,8 @@ export const KickDialog = ({
         throw new Error(data.error || "Failed to start kick workflow");
       }
 
-      setStatus({ status: "inprogress" });
+      showSnackbar("Kick workflow started — follow progress in the feed");
+      onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error");
       setLoading(false);

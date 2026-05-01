@@ -195,7 +195,8 @@ export const OnboardingDialog = ({
         throw new Error(data.error || "Failed to start onboarding workflow");
       }
 
-      setStatus({ status: "inprogress" });
+      showSnackbar("Onboarding workflow started — follow progress in the feed");
+      onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error");
       setLoading(false);

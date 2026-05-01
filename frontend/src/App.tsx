@@ -45,6 +45,7 @@ import type {
   PendingInvitation,
   PartyAuthStatus,
   AuthStatusResponse,
+  WorkflowRun,
 } from "./types";
 
 const TAB_HASHES = ["parties", "packages", "config", "notifications"] as const;
@@ -99,6 +100,8 @@ const App = () => {
   const [invitationsLoaded, setInvitationsLoaded] = useState(false);
   const [partyActions, setPartyActions] = useState<PartyActions[]>([]);
   const [partyActionsLoaded, setPartyActionsLoaded] = useState(false);
+  const [workflowRuns, setWorkflowRuns] = useState<WorkflowRun[]>([]);
+  const [workflowRunsLoaded, setWorkflowRunsLoaded] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [partyFilter, setPartyFilter] = useState(
@@ -393,6 +396,52 @@ const App = () => {
     return () => clearInterval(interval);
   }, [refreshInvitations]);
 
+  const refreshWorkflowRuns = useCallback(async () => {
+    try {
+      const res = await authenticatedFetch(`${API_BASE}/workflows`);
+      if (res.ok) {
+        const data = await res.json();
+        setWorkflowRuns(data.runs ?? []);
+      }
+    } catch {
+      // Ignore polling errors
+    } finally {
+      setWorkflowRunsLoaded(true);
+    }
+  }, []);
+
+  // Poll workflow_runs every 2 seconds, same cadence as invitations.
+  useEffect(() => {
+    refreshWorkflowRuns();
+    const interval = window.setInterval(refreshWorkflowRuns, 2000);
+    return () => clearInterval(interval);
+  }, [refreshWorkflowRuns]);
+
+  // Watch for workflow runs transitioning out of `inprogress` and surface a
+  // snackbar — the run card in the feed updates too, but a transient toast
+  // gives the user a top-level signal without making them go look. First
+  // observation of a run is silent so we don't fire on initial page load.
+  const prevRunStatusRef = useRef<Map<string, WorkflowRun["status"]>>(new Map());
+  useEffect(() => {
+    const prev = prevRunStatusRef.current;
+    const next = new Map<string, WorkflowRun["status"]>();
+    for (const run of workflowRuns) {
+      next.set(run.instance_name, run.status);
+      const prior = prev.get(run.instance_name);
+      if (prior === "inprogress" && run.status !== "inprogress") {
+        const label = `${run.kind} workflow`;
+        if (run.status === "failed") {
+          showSnackbar(`${label} failed: ${run.error || "Unknown error"}`);
+        } else if (run.status === "completed") {
+          showSnackbar(`${label} completed`);
+        } else if (run.status === "cancelled") {
+          showSnackbar(`${label} cancelled`);
+        }
+      }
+    }
+    prevRunStatusRef.current = next;
+  }, [workflowRuns, showSnackbar]);
+
   const isGovRulesTemplate = (templateId: string) =>
     templateId.includes("VaultGovernanceRules") ||
     templateId.includes("VaultGovernance") ||
@@ -465,7 +514,8 @@ const App = () => {
 
   const notificationCount =
     pendingInvitations.length +
-    partyActions.reduce((sum, p) => sum + p.actions.length, 0);
+    partyActions.reduce((sum, p) => sum + p.actions.length, 0) +
+    workflowRuns.length;
 
   return (
     <Box
@@ -843,9 +893,13 @@ const App = () => {
           <NotificationsView
             pendingInvitations={pendingInvitations}
             partyActions={partyActions}
-            loading={!invitationsLoaded || !partyActionsLoaded}
+            workflowRuns={workflowRuns}
+            loading={
+              !invitationsLoaded || !partyActionsLoaded || !workflowRunsLoaded
+            }
             onInvitationsChanged={refreshInvitations}
             onActionsChanged={refreshPartyActions}
+            onWorkflowsChanged={refreshWorkflowRuns}
             onSelectParty={(partyId) => {
               setSelectedPartyId(partyId);
               navigate(0, partyId);

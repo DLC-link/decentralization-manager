@@ -10,12 +10,13 @@ use crate::{
     workflow::contracts,
 };
 
-use super::{DarsConfig, DarsDirs, DarsStep};
+use super::{DarsConfig, DarsStep};
 
 pub async fn start_coordinator(
     node_config: NodeConfig,
     network_config: NetworkConfig,
     config: DarsConfig,
+    db: sqlx::SqlitePool,
 ) -> Result {
     tracing::info!("Initializing Noise server for DARs upload...");
 
@@ -30,14 +31,13 @@ pub async fn start_coordinator(
     let server = NoiseServer::new(
         node_config.clone(),
         network_config,
+        db,
+        config.instance_name.clone(),
         DarsStep::WaitingForAttestors,
         Some(excluded),
     )
     .await?;
     let server = Arc::new(server);
-
-    let dirs = DarsDirs::with_base(node_config.workflow_data_dir(), &config.instance_name);
-    dirs.create_dirs().await?;
 
     tracing::info!("Noise server initialized, listening for connections");
 

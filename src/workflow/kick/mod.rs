@@ -1,11 +1,9 @@
 pub mod attestor;
 pub mod config;
 pub mod coordinator;
-pub mod dirs;
 pub mod steps;
 
 pub use config::KickConfig;
-pub use dirs::KickDirs;
 pub use steps::{create_proposals, export_state, sign_proposals, submit_kick};
 
 use crate::{noise::MessageType, workflow::state::WorkflowStep};
@@ -56,5 +54,43 @@ impl WorkflowStep for KickStep {
 
     fn is_waiting_for_attestors(&self) -> bool {
         *self == Self::WaitingForAttestors
+    }
+
+    fn step_index(&self) -> i64 {
+        match self {
+            Self::WaitingForAttestors => 0,
+            Self::ExportState => 1,
+            Self::CreateProposals => 2,
+            Self::SignProposals => 3,
+            Self::SubmitKick => 4,
+            Self::Complete => 5,
+        }
+    }
+
+    fn step_total() -> i64 {
+        6
+    }
+
+    fn step_name(&self) -> &'static str {
+        match self {
+            Self::WaitingForAttestors => "WaitingForAttestors",
+            Self::ExportState => "ExportState",
+            Self::CreateProposals => "CreateProposals",
+            Self::SignProposals => "SignProposals",
+            Self::SubmitKick => "SubmitKick",
+            Self::Complete => "Complete",
+        }
+    }
+
+    fn try_from_step_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "WaitingForAttestors" => Self::WaitingForAttestors,
+            "ExportState" => Self::ExportState,
+            "CreateProposals" => Self::CreateProposals,
+            "SignProposals" => Self::SignProposals,
+            "SubmitKick" => Self::SubmitKick,
+            "Complete" => Self::Complete,
+            _ => return None,
+        })
     }
 }

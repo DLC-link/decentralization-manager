@@ -400,7 +400,8 @@ async fn grant_user_rights(
         extract_user_id_from_jwt(party_token).unwrap_or_else(|| user_id.to_string());
 
     tracing::info!(
-        "Granting rights for user_id={effective_user_id}, member_party={member_party_id}, dec_party={dec_party_id}"
+        "Granting rights for user_id={effective_user_id}, \
+         member_party={member_party_id}, dec_party={dec_party_id}"
     );
 
     let rights = vec![

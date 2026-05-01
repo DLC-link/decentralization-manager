@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
@@ -13,22 +13,24 @@ use super::parties::{
 };
 use crate::{
     config::{NetworkConfig, NodeConfig},
-    db::schema::SchemaRead,
+    db::schema::{Commitable, SchemaRead, SchemaWrite},
     error::Result,
     noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
     participant_id::CantonId,
     server::{
         AppState,
         middleware::require_admin,
+        respawn_coordinator,
         types::{
             ContractsRequest, DarsInvitePayload, DarsRequest, ErrorResponse, HttpWorkflowState,
             KickRequest, KickResponse, KickStatus, ListenerPauseGuard, MessageResponse,
             MissingEdgeKind, MissingPeerEdge, OnboardingInvitePayload,
             OnboardingMeshErrorResponse, OnboardingRequest, OnboardingResponse, OnboardingStatus,
-            SuccessResponse, WorkflowProgress, WorkflowResponse, WorkflowStatusResponse,
+            SuccessResponse, WorkflowKind, WorkflowProgress, WorkflowResponse, WorkflowRole,
+            WorkflowRun, WorkflowRunsResponse, WorkflowStatusResponse,
         },
     },
-    workflow,
+    workflow::{self, ContractsStep, DarsStep, KickStep, OnboardingStep, state::WorkflowStep},
 };
 
 // ============================================================================
@@ -46,6 +48,94 @@ pub type ContractsWorkflowState = HttpWorkflowState<WorkflowProgress>;
 
 /// State for tracking DARs distribution workflow
 pub type DarsWorkflowState = HttpWorkflowState<WorkflowProgress>;
+
+// ============================================================================
+// Workflow run persistence helpers
+// ============================================================================
+
+fn now_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Insert the coordinator-side `workflow_runs` row for a freshly-started run.
+/// The partial unique index enforces "one InProgress run per (kind, role)" so a
+/// duplicate insert here surfaces as the right error to bubble back as 409.
+async fn insert_coordinator_run<S, C>(
+    db: &SqlitePool,
+    instance_name: &str,
+    kind: WorkflowKind,
+    initial_step: S,
+    config: &C,
+    invitees: &[CantonId],
+    dec_party_id: Option<CantonId>,
+) -> Result
+where
+    S: WorkflowStep,
+    C: serde::Serialize,
+{
+    let now = now_secs();
+    let run = WorkflowRun {
+        instance_name: instance_name.to_string(),
+        kind,
+        role: WorkflowRole::Coordinator,
+        status: WorkflowProgress::InProgress,
+        current_step: initial_step.step_name().to_string(),
+        step_index: initial_step.step_index(),
+        step_total: S::step_total(),
+        config_json: serde_json::to_string(config)
+            .map_err(|e| anyhow::anyhow!("encode workflow config: {e}"))?,
+        coordinator_pubkey: None,
+        coordinator_name: None,
+        expected_attestors: invitees.to_vec(),
+        completed_attestors: Vec::new(),
+        dec_party_id,
+        error: None,
+        dismissed: false,
+        created_at: now,
+        updated_at: now,
+    };
+
+    let mut tx = db.begin_transaction().await?;
+    tx.upsert_workflow_run(&run).await?;
+    Commitable::commit(tx).await
+}
+
+/// Flip the persisted run's status to Completed. Errors are logged and
+/// swallowed — the spawned task can't usefully react to a DB error here.
+async fn mark_run_completed(db: &SqlitePool, instance_name: &str) {
+    if let Err(e) = mark_run_status(db, instance_name, WorkflowProgress::Completed, None).await {
+        tracing::warn!("Failed to mark run {instance_name} completed: {e:#}");
+    }
+}
+
+/// Flip the persisted run's status to Failed with a message.
+async fn mark_run_failed(db: &SqlitePool, instance_name: &str, error: &str) {
+    if let Err(e) = mark_run_status(
+        db,
+        instance_name,
+        WorkflowProgress::Failed,
+        Some(error.to_string()),
+    )
+    .await
+    {
+        tracing::warn!("Failed to mark run {instance_name} failed: {e:#}");
+    }
+}
+
+async fn mark_run_status(
+    db: &SqlitePool,
+    instance_name: &str,
+    status: WorkflowProgress,
+    error: Option<String>,
+) -> Result {
+    let mut tx = db.begin_transaction().await?;
+    tx.set_workflow_run_status(instance_name, status, error.as_deref(), now_secs())
+        .await?;
+    Commitable::commit(tx).await
+}
 
 // ============================================================================
 // Kick Workflow
@@ -161,6 +251,39 @@ pub async fn start_kick(
         }
     };
 
+    // Compute instance name + config up-front so the persisted workflow_runs row
+    // can carry the same identifier the coordinator task will use.
+    let timestamp = now_secs();
+    let instance_name = format!("{}-kick-{timestamp}", decentralized_party_id.prefix);
+    let kick_config = workflow::KickConfig::new(
+        decentralized_party_id.clone(),
+        participant_id.clone(),
+        namespace_fingerprint,
+        body.new_threshold,
+        instance_name.clone(),
+    );
+
+    // Insert the workflow_runs row BEFORE flipping in-memory status. If the
+    // insert fails (e.g. partial-unique-index says another kick is already in
+    // flight), bubble that out as a 409 — same semantics as the existing
+    // in-memory check just upgraded to durable storage.
+    if let Err(e) = insert_coordinator_run(
+        &data.db,
+        &instance_name,
+        WorkflowKind::Kick,
+        KickStep::WaitingForAttestors,
+        &kick_config,
+        &invitees,
+        Some(decentralized_party_id.clone()),
+    )
+    .await
+    {
+        tracing::warn!("Failed to persist kick workflow run: {e:#}");
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!("Failed to start kick workflow: {e}"),
+        });
+    }
+
     // Flip status, write invited_peers, spawn, and stash the abort handle in one
     // go. cancel_workflow_state only acts when abort_handle is Some, so as long as
     // these run without intervening cancel-visible state, the race is closed.
@@ -178,9 +301,9 @@ pub async fn start_kick(
     let config = data.config.clone();
     let db = data.db.clone();
     let kick_state_clone = kick_state.get_ref().clone();
-    let new_threshold = body.new_threshold;
     let listener_control = data.noise_listener_control.clone();
     let listener_notify = data.noise_listener_notify.clone();
+    let instance_for_task = instance_name.clone();
 
     let join_handle = tokio::spawn(async move {
         let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
@@ -194,28 +317,21 @@ pub async fn start_kick(
             let mut error = kick_state_clone.error.write().await;
             *status = KickStatus::Failed;
             *error = Some(format!("Failed to send invites: {e}"));
+            mark_run_failed(
+                &db,
+                &instance_for_task,
+                &format!("Failed to send invites: {e}"),
+            )
+            .await;
             return;
         }
 
         // Give peers time to start their attestor workflows
         tokio::time::sleep(Duration::from_secs(2)).await;
 
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let instance_name = format!("{}-kick-{timestamp}", decentralized_party_id.prefix);
-        let kick_config = workflow::KickConfig::new(
-            decentralized_party_id,
-            participant_id,
-            namespace_fingerprint,
-            new_threshold,
-            instance_name,
-        );
-
         let result = workflow::start_coordinator(
             config,
-            db,
+            db.clone(),
             workflow::WorkflowType::Kick,
             None, // No onboarding config
             Some(kick_config),
@@ -234,11 +350,14 @@ pub async fn start_kick(
             Ok(_) => {
                 *status = KickStatus::Completed;
                 tracing::info!("Kick workflow completed successfully");
+                mark_run_completed(&db, &instance_for_task).await;
             }
             Err(e) => {
+                let msg = format!("{e}");
                 *status = KickStatus::Failed;
-                *error = Some(format!("{e}"));
+                *error = Some(msg.clone());
                 tracing::error!("Kick workflow failed: {e}");
+                mark_run_failed(&db, &instance_for_task, &msg).await;
             }
         }
     });
@@ -448,6 +567,31 @@ pub async fn start_onboarding(
         }
     }
 
+    // Build instance + config up-front so the persisted workflow_runs row
+    // can carry the same identifier as the spawned coordinator task.
+    let party_id_prefix = body.party_id_prefix.clone();
+    let peer_ids = body.peer_ids.clone();
+    let instance_name = format!("{party_id_prefix}-creation");
+    let onboarding_config =
+        workflow::OnboardingConfig::new(party_id_prefix.clone(), instance_name.clone());
+
+    if let Err(e) = insert_coordinator_run(
+        &data.db,
+        &instance_name,
+        WorkflowKind::Onboarding,
+        OnboardingStep::WaitingForAttestors,
+        &onboarding_config,
+        &peer_ids,
+        None,
+    )
+    .await
+    {
+        tracing::warn!("Failed to persist onboarding workflow run: {e:#}");
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!("Failed to start onboarding workflow: {e}"),
+        });
+    }
+
     // Pre-spawn handles + record invitees BEFORE we flip status to InProgress, so a
     // concurrent /onboarding/cancel cannot observe InProgress while abort_handle is
     // still None (cancel_workflow_state requires Some(abort_handle) to proceed).
@@ -456,11 +600,10 @@ pub async fn start_onboarding(
     let onboarding_state_clone = onboarding_state.get_ref().clone();
     let listener_control = data.noise_listener_control.clone();
     let listener_notify = data.noise_listener_notify.clone();
-    let party_id_prefix = body.party_id_prefix.clone();
-    let peer_ids = body.peer_ids.clone();
     *onboarding_state.invited_peers.write().await = peer_ids.clone();
     let party_credentials = data.party_credentials.clone();
     let auth_lock = data.auth.clone();
+    let instance_for_task = instance_name.clone();
 
     {
         let mut status = onboarding_state.status.write().await;
@@ -484,15 +627,17 @@ pub async fn start_onboarding(
             let mut error = onboarding_state_clone.error.write().await;
             *status = OnboardingStatus::Failed;
             *error = Some(format!("Failed to send invites: {e}"));
+            mark_run_failed(
+                &db,
+                &instance_for_task,
+                &format!("Failed to send invites: {e}"),
+            )
+            .await;
             return;
         }
 
         // Give peers time to start their attestor workflows
         tokio::time::sleep(Duration::from_secs(2)).await;
-
-        let instance_name = format!("{party_id_prefix}-creation");
-        let onboarding_config =
-            workflow::OnboardingConfig::new(party_id_prefix.clone(), instance_name);
 
         let result = workflow::start_coordinator(
             config.clone(),
@@ -515,7 +660,9 @@ pub async fn start_onboarding(
             Ok(_) => {
                 *status = OnboardingStatus::Completed;
                 tracing::info!("Onboarding workflow completed successfully");
-                // Operator configures party credentials via the Party Configuration dialog; auto-saving placeholders pollutes the auth registry.
+                mark_run_completed(&db, &instance_for_task).await;
+                // Operator configures party credentials via the Party Configuration
+                // dialog; auto-saving placeholders pollutes the auth registry.
 
                 // Refresh dec_party cache in background
                 let bg_config = config.clone();
@@ -566,9 +713,11 @@ pub async fn start_onboarding(
                 });
             }
             Err(e) => {
+                let msg = format!("{e}");
                 *status = OnboardingStatus::Failed;
-                *error = Some(format!("{e}"));
+                *error = Some(msg.clone());
                 tracing::error!("Onboarding workflow failed: {e}");
+                mark_run_failed(&db, &instance_for_task, &msg).await;
             }
         }
     });
@@ -612,7 +761,7 @@ async fn send_onboarding_invites(
 
     let payload = OnboardingInvitePayload {
         prefix: party_id_prefix.to_string(),
-        participants: peer_ids.iter().map(|id| id.to_string()).collect(),
+        participants: peer_ids.to_vec(),
     };
     let payload_bytes = serde_json::to_vec(&payload)?;
     let invite_message = Message::new(MessageType::InviteOnboarding, payload_bytes);
@@ -863,10 +1012,7 @@ pub async fn start_contracts(
     }
 
     // Create contracts config from request
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let timestamp = now_secs();
     let instance_name = format!(
         "{}-contracts-{timestamp}",
         body.decentralized_party_id.prefix
@@ -893,6 +1039,24 @@ pub async fn start_contracts(
         }
     };
 
+    let instance_name_for_run = contracts_config.instance_name.clone();
+    if let Err(e) = insert_coordinator_run(
+        &data.db,
+        &instance_name_for_run,
+        WorkflowKind::Contracts,
+        ContractsStep::WaitingForAttestors,
+        &contracts_config,
+        &contracts_invitees,
+        Some(body.decentralized_party_id.clone()),
+    )
+    .await
+    {
+        tracing::warn!("Failed to persist contracts workflow run: {e:#}");
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!("Failed to start contracts workflow: {e}"),
+        });
+    }
+
     // Pre-spawn handles BEFORE we flip status to InProgress, so a concurrent
     // /contracts/cancel cannot observe InProgress while abort_handle is still
     // None (cancel_workflow_state requires Some(abort_handle) to proceed).
@@ -905,6 +1069,7 @@ pub async fn start_contracts(
     let listener_notify = data.noise_listener_notify.clone();
     let party_credentials = data.party_credentials.clone();
     *contracts_state.invited_peers.write().await = contracts_invitees;
+    let instance_for_task = instance_name_for_run.clone();
 
     {
         let mut status = contracts_state.status.write().await;
@@ -927,6 +1092,12 @@ pub async fn start_contracts(
             let mut error = contracts_state_clone.error.write().await;
             *status = WorkflowProgress::Failed;
             *error = Some(format!("Failed to send invites: {e}"));
+            mark_run_failed(
+                &db,
+                &instance_for_task,
+                &format!("Failed to send invites: {e}"),
+            )
+            .await;
             return;
         }
 
@@ -954,6 +1125,7 @@ pub async fn start_contracts(
             Ok(_) => {
                 *status = WorkflowProgress::Completed;
                 tracing::info!("Contracts workflow completed successfully");
+                mark_run_completed(&db, &instance_for_task).await;
 
                 // Refresh dec_party cache to pick up new contracts
                 let bg_config = config.clone();
@@ -983,9 +1155,11 @@ pub async fn start_contracts(
                 });
             }
             Err(e) => {
+                let msg = format!("{e}");
                 *status = WorkflowProgress::Failed;
-                *error = Some(format!("{e}"));
+                *error = Some(msg.clone());
                 tracing::error!("Contracts workflow failed: {e}");
+                mark_run_failed(&db, &instance_for_task, &msg).await;
             }
         }
     });
@@ -1089,16 +1263,30 @@ pub async fn start_dars(
     }
 
     // Create DARs config from request
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let timestamp = now_secs();
     let instance_name = format!("dars-distribute-{timestamp}");
     let dars_config = workflow::DarsConfig {
         dar_files: body.dar_files.clone(),
-        instance_name,
+        instance_name: instance_name.clone(),
         peer_ids: body.peer_ids.clone(),
     };
+
+    if let Err(e) = insert_coordinator_run(
+        &data.db,
+        &instance_name,
+        WorkflowKind::Dars,
+        DarsStep::WaitingForAttestors,
+        &dars_config,
+        &body.peer_ids,
+        None,
+    )
+    .await
+    {
+        tracing::warn!("Failed to persist dars workflow run: {e:#}");
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!("Failed to start DARs workflow: {e}"),
+        });
+    }
 
     // Pre-spawn handles + record invitees BEFORE we flip status to InProgress, so a
     // concurrent /dars/cancel cannot observe InProgress while abort_handle is still
@@ -1110,6 +1298,7 @@ pub async fn start_dars(
     let listener_notify = data.noise_listener_notify.clone();
     let peer_ids = body.peer_ids.clone();
     *dars_state.invited_peers.write().await = peer_ids.clone();
+    let instance_for_task = instance_name.clone();
 
     {
         let mut status = dars_state.status.write().await;
@@ -1137,6 +1326,12 @@ pub async fn start_dars(
             let mut error = dars_state_clone.error.write().await;
             *status = WorkflowProgress::Failed;
             *error = Some(format!("Failed to send invites: {e}"));
+            mark_run_failed(
+                &db,
+                &instance_for_task,
+                &format!("Failed to send invites: {e}"),
+            )
+            .await;
             return;
         }
 
@@ -1145,7 +1340,7 @@ pub async fn start_dars(
 
         let result = workflow::start_coordinator(
             config,
-            db,
+            db.clone(),
             workflow::WorkflowType::Dars,
             None, // No onboarding config
             None, // No kick config
@@ -1164,11 +1359,14 @@ pub async fn start_dars(
             Ok(_) => {
                 *status = WorkflowProgress::Completed;
                 tracing::info!("DARs distribution workflow completed successfully");
+                mark_run_completed(&db, &instance_for_task).await;
             }
             Err(e) => {
+                let msg = format!("{e}");
                 *status = WorkflowProgress::Failed;
-                *error = Some(format!("{e}"));
+                *error = Some(msg.clone());
                 tracing::error!("DARs distribution workflow failed: {e}");
+                mark_run_failed(&db, &instance_for_task, &msg).await;
             }
         }
     });
@@ -1284,6 +1482,7 @@ async fn cancel_workflow_state(
     state: &Arc<HttpWorkflowState<WorkflowProgress>>,
     data: &web::Data<AppState>,
     label: &str,
+    kind: WorkflowKind,
 ) -> HttpResponse {
     {
         let status = state.status.read().await;
@@ -1330,6 +1529,25 @@ async fn cancel_workflow_state(
         *error = None;
     }
 
+    // Mirror the cancel into the persisted workflow_runs row so the feed picks it up.
+    if let Ok(Some(run)) = data
+        .db
+        .get_active_workflow_run(kind, WorkflowRole::Coordinator)
+        .await
+        && let Err(e) = mark_run_status(
+            &data.db,
+            &run.instance_name,
+            WorkflowProgress::Cancelled,
+            None,
+        )
+        .await
+    {
+        tracing::warn!(
+            "Failed to flip workflow_runs row {} to cancelled: {e:#}",
+            run.instance_name
+        );
+    }
+
     tracing::info!("{label} workflow cancelled");
     HttpResponse::Ok().json(MessageResponse {
         message: format!("{label} workflow cancelled"),
@@ -1352,7 +1570,13 @@ pub async fn cancel_onboarding(
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
     }
-    cancel_workflow_state(state.get_ref(), &data, "Onboarding").await
+    cancel_workflow_state(
+        state.get_ref(),
+        &data,
+        "Onboarding",
+        WorkflowKind::Onboarding,
+    )
+    .await
 }
 
 #[utoipa::path(
@@ -1371,7 +1595,7 @@ pub async fn cancel_kick(
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
     }
-    cancel_workflow_state(state.get_ref(), &data, "Kick").await
+    cancel_workflow_state(state.get_ref(), &data, "Kick", WorkflowKind::Kick).await
 }
 
 #[utoipa::path(
@@ -1390,7 +1614,7 @@ pub async fn cancel_contracts(
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
     }
-    cancel_workflow_state(state.get_ref(), &data, "Contracts").await
+    cancel_workflow_state(state.get_ref(), &data, "Contracts", WorkflowKind::Contracts).await
 }
 
 #[utoipa::path(
@@ -1409,7 +1633,258 @@ pub async fn cancel_dars(
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
     }
-    cancel_workflow_state(state.get_ref(), &data, "DARs").await
+    cancel_workflow_state(state.get_ref(), &data, "DARs", WorkflowKind::Dars).await
+}
+
+// ============================================================================
+// Generic workflow_runs endpoints (used by the unified notifications feed)
+// ============================================================================
+
+/// List every workflow run that should appear in the notifications feed:
+/// every InProgress run on this node + any terminal run the operator hasn't
+/// dismissed yet. `coordinator_name` is joined from the peers table.
+#[utoipa::path(
+    tag = "Workflows",
+    responses((status = 200, description = "Visible workflow runs", body = WorkflowRunsResponse))
+)]
+#[get("/workflows")]
+pub async fn list_workflows(data: web::Data<AppState>) -> impl Responder {
+    let runs = match data.db.get_visible_workflow_runs().await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("Failed to list workflow runs: {e:#}");
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to list workflow runs: {e}"),
+            });
+        }
+    };
+
+    // Resolve coordinator names from the peers table — same pattern get_invitations uses.
+    let pubkey_to_name: HashMap<String, String> = data
+        .db
+        .get_all_peers()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| (p.public_key, p.name))
+        .collect();
+
+    let resolved: Vec<WorkflowRun> = runs
+        .into_iter()
+        .map(|mut r| {
+            if let Some(pk) = r.coordinator_pubkey.as_deref() {
+                r.coordinator_name = pubkey_to_name.get(pk).cloned();
+            }
+            r
+        })
+        .collect();
+
+    HttpResponse::Ok().json(WorkflowRunsResponse { runs: resolved })
+}
+
+/// Mark a terminal-state workflow run as dismissed so it disappears from the
+/// notifications feed. Returns 409 if the run is still InProgress.
+#[utoipa::path(
+    tag = "Workflows",
+    responses(
+        (status = 200, description = "Run dismissed", body = MessageResponse),
+        (status = 404, description = "Run not found", body = ErrorResponse),
+        (status = 409, description = "Run is still in progress", body = ErrorResponse)
+    )
+)]
+#[post("/workflows/{instance_name}/dismiss")]
+pub async fn dismiss_workflow(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    path: web::Path<String>,
+) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
+    let instance_name = path.into_inner();
+
+    let run = match data.db.get_workflow_run(&instance_name).await {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return HttpResponse::NotFound().json(ErrorResponse {
+                error: format!("workflow run {instance_name} not found"),
+            });
+        }
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to load workflow run: {e}"),
+            });
+        }
+    };
+
+    if run.status == WorkflowProgress::InProgress {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!(
+                "{} workflow {instance_name} is still in progress — cancel it first",
+                run.kind
+            ),
+        });
+    }
+
+    let mut tx = match data.db.begin_transaction().await {
+        Ok(t) => t,
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to begin tx: {e}"),
+            });
+        }
+    };
+    if let Err(e) = tx.dismiss_workflow_run(&instance_name).await {
+        return HttpResponse::InternalServerError().json(ErrorResponse {
+            error: format!("Failed to dismiss workflow run: {e}"),
+        });
+    }
+    if let Err(e) = Commitable::commit(tx).await {
+        return HttpResponse::InternalServerError().json(ErrorResponse {
+            error: format!("Failed to commit dismiss: {e}"),
+        });
+    }
+
+    HttpResponse::Ok().json(MessageResponse {
+        message: format!("workflow {instance_name} dismissed"),
+    })
+}
+
+/// Retry a Failed coordinator-side workflow run from where it left off.
+///
+/// Flips `status` back to `inprogress`, clears `error`, and re-spawns the
+/// coordinator task. `NoiseServer::new` re-hydrates `WorkflowState` from the
+/// persisted `current_step`, so the run picks up at the same step that
+/// failed. Only valid on Failed coordinator-side rows; attestor retry is not
+/// supported (the coordinator may already be past the config-bearing
+/// command — operator should dismiss the attestor row and re-accept the
+/// invite instead).
+#[utoipa::path(
+    tag = "Workflows",
+    params(
+        ("instance_name" = String, Path, description = "Workflow run identifier")
+    ),
+    responses(
+        (status = 200, description = "Retry started", body = MessageResponse),
+        (status = 404, description = "Run not found", body = ErrorResponse),
+        (status = 409, description = "Run is not in a retryable state", body = ErrorResponse)
+    )
+)]
+#[post("/workflows/{instance_name}/retry")]
+pub async fn retry_workflow(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    kick_state: web::Data<Arc<KickWorkflowState>>,
+    onboarding_state: web::Data<Arc<OnboardingWorkflowState>>,
+    contracts_state: web::Data<Arc<ContractsWorkflowState>>,
+    dars_state: web::Data<Arc<DarsWorkflowState>>,
+    path: web::Path<String>,
+) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
+    let instance_name = path.into_inner();
+
+    let run = match data.db.get_workflow_run(&instance_name).await {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return HttpResponse::NotFound().json(ErrorResponse {
+                error: format!("workflow run {instance_name} not found"),
+            });
+        }
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to load workflow run: {e}"),
+            });
+        }
+    };
+
+    if run.role != WorkflowRole::Coordinator {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: "Retry must be initiated from the coordinator side. Attestor rows flip back \
+                    to InProgress automatically when the coordinator retries — wait for that or \
+                    dismiss the row."
+                .to_string(),
+        });
+    }
+    if run.status != WorkflowProgress::Failed {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!(
+                "Cannot retry a workflow in status {:?}; only Failed runs can be retried",
+                run.status
+            ),
+        });
+    }
+
+    // Flip the row back to InProgress so the partial unique index reserves
+    // (kind, role) again before we spawn the resumed task. If a fresh run of
+    // the same kind+role has been started since this one failed, that index
+    // will reject this update and we surface a 409.
+    let mut tx = match data.db.begin_transaction().await {
+        Ok(t) => t,
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to begin tx: {e}"),
+            });
+        }
+    };
+    if let Err(e) = tx
+        .set_workflow_run_status(
+            &instance_name,
+            WorkflowProgress::InProgress,
+            None,
+            now_secs(),
+        )
+        .await
+    {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!("Failed to flip status to InProgress: {e}"),
+        });
+    }
+    if let Err(e) = Commitable::commit(tx).await {
+        return HttpResponse::InternalServerError().json(ErrorResponse {
+            error: format!("Failed to commit retry status: {e}"),
+        });
+    }
+
+    // Re-load the row (now InProgress), broadcast RetryWorkflow to the
+    // attestor cohort, and re-spawn the coordinator task. respawn_coordinator
+    // updates the matching HttpWorkflowState, stashes a new abort handle,
+    // and finalizes the row to Completed/Failed when the task ends.
+    let run = match data.db.get_workflow_run(&instance_name).await {
+        Ok(Some(r)) => r,
+        _ => {
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: "Workflow run vanished mid-retry".to_string(),
+            });
+        }
+    };
+    // Tell every previously-invited peer to flip their Failed row back to
+    // InProgress and re-spin start_attestor. Best-effort — peers that are
+    // unreachable now will stay Failed; operator can dismiss + re-accept.
+    if let Err(e) = send_retry_workflow(&data.config, &data.db, &run.expected_attestors).await {
+        tracing::warn!("Failed to broadcast RetryWorkflow: {e:#}");
+    }
+    respawn_coordinator(
+        data.db.clone(),
+        data.config.clone(),
+        &run,
+        kick_state,
+        onboarding_state,
+        contracts_state,
+        dars_state,
+        data.noise_listener_control.clone(),
+        data.noise_listener_notify.clone(),
+        data.auth.clone(),
+    )
+    .await;
+
+    HttpResponse::Ok().json(MessageResponse {
+        message: format!(
+            "Retrying workflow {instance_name} from step {}",
+            run.current_step
+        ),
+    })
 }
 
 /// Best-effort: notify previously-invited peers that the workflow is cancelled
@@ -1419,9 +1894,43 @@ async fn send_cancel_invites(
     db: &SqlitePool,
     peer_ids: &[CantonId],
 ) -> Result {
+    broadcast_simple_message(
+        config,
+        db,
+        peer_ids,
+        Message::new_empty(MessageType::CancelInvite),
+        "CancelInvite",
+    )
+    .await
+}
+
+/// Best-effort: notify previously-invited peers that the coordinator is
+/// retrying the workflow so they flip their Failed row back to InProgress
+/// and re-spin `start_attestor`.
+async fn send_retry_workflow(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    peer_ids: &[CantonId],
+) -> Result {
+    broadcast_simple_message(
+        config,
+        db,
+        peer_ids,
+        Message::new_empty(MessageType::RetryWorkflow),
+        "RetryWorkflow",
+    )
+    .await
+}
+
+async fn broadcast_simple_message(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    peer_ids: &[CantonId],
+    message: Message,
+    label: &str,
+) -> Result {
     let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
-    let cancel_message = Message::new_empty(MessageType::CancelInvite);
     let identity = config.participant_id().to_string();
 
     for peer_id in peer_ids {
@@ -1445,11 +1954,11 @@ async fn send_cancel_invites(
             peer.port,
             &psk,
             identity.as_bytes(),
-            &cancel_message,
+            &message,
         )
         .await
         {
-            tracing::warn!("Failed to send CancelInvite to {peer_id}: {e}");
+            tracing::warn!("Failed to send {label} to {peer_id}: {e}");
         }
     }
     Ok(())

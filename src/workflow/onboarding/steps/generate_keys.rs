@@ -1,9 +1,11 @@
-use std::path::Path;
-
+use bytes::{BufMut, BytesMut};
 use canton_proto_rs::com::digitalasset::canton::{
     crypto::{
-        admin::v30::{GenerateSigningKeyRequest, vault_service_client::VaultServiceClient},
-        v30::{SigningKeySpec, SigningKeyUsage, SigningPublicKey},
+        admin::v30::{
+            GenerateSigningKeyRequest, ListKeysFilters, ListMyKeysRequest,
+            vault_service_client::VaultServiceClient,
+        },
+        v30::{SigningKeySpec, SigningKeyUsage, SigningPublicKey, public_key},
     },
     protocol::v30::{
         NamespaceDelegation, TopologyMapping, enums::TopologyChangeOp, namespace_delegation,
@@ -14,14 +16,17 @@ use canton_proto_rs::com::digitalasset::canton::{
         topology_manager_write_service_client::TopologyManagerWriteServiceClient,
     },
 };
+use prost::Message;
+use sqlx::SqlitePool;
 
 use crate::{
     config::NodeConfig,
-    consts::{ATTESTOR_KEYS_PREFIX, PARTICIPANT_ID_PREFIX},
     error::Result,
-    participant_id::CantonId,
-    utils::{compute_fingerprint, get_participant_id, write_messages_to_file},
-    workflow::onboarding::{OnboardingConfig, OnboardingDirs},
+    utils::{compute_fingerprint, get_participant_id},
+    workflow::{
+        onboarding::OnboardingConfig,
+        storage::{WorkflowStorage, artifact_kinds},
+    },
 };
 
 /// Generate cryptographic keys and export them
@@ -29,13 +34,16 @@ use crate::{
 /// Generates:
 /// 1. Namespace signing key (for namespace delegation)
 /// 2. DAML transaction key (for signing transactions)
-/// 3. Exports both keys to attestor-public-keys.bin
+/// 3. Persists both keys + the participant id into `workflow_artifacts`
+///    keyed by this node's own canton id, so the coordinator can later
+///    aggregate all attestors' keys via `list_artifacts`.
 ///
 /// This function generates signing keys and exports them,
 /// and proposes a namespace delegation for the generated namespace key.
 pub async fn generate_keys(
     config: &NodeConfig,
-    dirs: &OnboardingDirs,
+    storage: &SqlitePool,
+    instance_name: &str,
     onboarding_config: &OnboardingConfig,
 ) -> Result {
     tracing::info!("Generating cryptographic keys...");
@@ -46,95 +54,129 @@ pub async fn generate_keys(
     let namespace_key_name = onboarding_config.namespace_key_name();
     let daml_key_name = onboarding_config.daml_key_name();
 
-    // Generate namespace signing key
-    tracing::debug!("Generating namespace signing key with name '{namespace_key_name}'");
-    let namespace_key = generate_signing_key(
+    // Idempotency: re-use existing keys (matched by name) if a previous run
+    // already created them. Re-generating would mint new fingerprints, leaving
+    // the previously-proposed namespace delegation pointing at a stale key
+    // and breaking topology signing on retry.
+    let (namespace_key, namespace_was_existing) = get_or_create_signing_key(
         &mut vault_client,
         &namespace_key_name,
-        vec![SigningKeyUsage::Namespace as i32],
+        SigningKeyUsage::Namespace,
     )
     .await?;
 
     let namespace_fingerprint = compute_fingerprint(&namespace_key);
     tracing::debug!("Namespace key fingerprint: {namespace_fingerprint}");
 
-    // Propose namespace delegation
-    propose_namespace_delegation(config, &namespace_key, &namespace_fingerprint).await?;
+    // Only propose the namespace delegation when we just created the key — if
+    // the key already existed, its delegation was authorized by the prior run
+    // and re-proposing at the same serial would error.
+    if !namespace_was_existing {
+        propose_namespace_delegation(config, &namespace_key, &namespace_fingerprint).await?;
+    } else {
+        tracing::info!(
+            "Reusing existing namespace key {namespace_fingerprint}; \
+             skipping namespace delegation proposal (already authorized)"
+        );
+    }
 
-    // Generate DAML signing key for transactions
-    tracing::debug!("Generating DAML signing key with name '{daml_key_name}'");
-    let daml_key = generate_signing_key(
-        &mut vault_client,
-        &daml_key_name,
-        vec![SigningKeyUsage::Protocol as i32],
-    )
-    .await?;
+    let (daml_key, _) =
+        get_or_create_signing_key(&mut vault_client, &daml_key_name, SigningKeyUsage::Protocol)
+            .await?;
 
-    // Export keys with participant ID
-    let participant_id_str = config.participant_id().to_string();
-    export_keys(
-        &dirs.keys_dir,
-        &namespace_key,
-        &daml_key,
-        &participant_id_str,
-    )
-    .await?;
-    tracing::info!("Keys exported successfully");
+    // Persist keys + participant id under this node's own canton id so the
+    // coordinator can later list every attestor's keys/ids.
+    let self_id = config.participant_id().to_string();
+
+    let keys_payload = encode_keys_payload(&namespace_key, &daml_key);
+    storage
+        .write_artifact(
+            instance_name,
+            artifact_kinds::ATTESTOR_PUBLIC_KEYS,
+            Some(&self_id),
+            &keys_payload,
+        )
+        .await?;
+    tracing::info!("Keys persisted to workflow_artifacts");
 
     // Get and export participant ID from Canton
     let participant_id = get_participant_id(config).await?;
     tracing::info!("Participant ID: {participant_id}");
-    export_participant_id(&dirs.ids_dir, &participant_id, &participant_id_str).await?;
-    tracing::info!("Participant ID exported successfully");
+    storage
+        .write_artifact(
+            instance_name,
+            artifact_kinds::PARTICIPANT_ID,
+            Some(&self_id),
+            participant_id.to_file_format().as_bytes(),
+        )
+        .await?;
+    tracing::info!("Participant ID persisted to workflow_artifacts");
 
     Ok(())
 }
 
-/// Helper: Generate a signing key via VaultService
-async fn generate_signing_key(
+/// Look up an existing signing key by name, or create a new one if none
+/// exists. Returns the public key and a flag indicating whether the key was
+/// pre-existing (`true`) or freshly created (`false`).
+///
+/// This is what makes onboarding's GenerateKeys step idempotent across
+/// retries — without it, every retry mints a new fingerprint and breaks the
+/// topology delegation chain.
+async fn get_or_create_signing_key(
     vault_client: &mut VaultServiceClient<tonic::transport::Channel>,
     name: &str,
-    usage: Vec<i32>,
-) -> Result<SigningPublicKey> {
-    let request = tonic::Request::new(GenerateSigningKeyRequest {
-        key_spec: SigningKeySpec::EcCurve25519 as i32,
-        name: name.to_string(),
-        usage,
-    });
-
-    let response = vault_client
-        .generate_signing_key(request)
+    usage: SigningKeyUsage,
+) -> Result<(SigningPublicKey, bool)> {
+    let existing = vault_client
+        .list_my_keys(tonic::Request::new(ListMyKeysRequest {
+            filters: Some(ListKeysFilters {
+                fingerprint: String::new(),
+                name: name.to_string(),
+                purpose: vec![],
+                usage: vec![usage as i32],
+            }),
+        }))
         .await?
         .into_inner();
-    response
+
+    for meta in existing.private_keys_metadata {
+        if let Some(pkn) = meta.public_key_with_name
+            && let Some(pk) = pkn.public_key
+            && let Some(public_key::Key::SigningPublicKey(spk)) = pk.key
+        {
+            tracing::info!("Reusing existing signing key with name '{name}'");
+            return Ok((spk, true));
+        }
+    }
+
+    tracing::debug!("Generating new signing key with name '{name}'");
+    let response = vault_client
+        .generate_signing_key(tonic::Request::new(GenerateSigningKeyRequest {
+            key_spec: SigningKeySpec::EcCurve25519 as i32,
+            name: name.to_string(),
+            usage: vec![usage as i32],
+        }))
+        .await?
+        .into_inner();
+    let spk = response
         .public_key
-        .ok_or_else(|| anyhow::anyhow!("No public key returned from VaultService"))
+        .ok_or_else(|| anyhow::anyhow!("No public key returned from VaultService"))?;
+    Ok((spk, false))
 }
 
-/// Helper: Export keys to file
-async fn export_keys(
-    keys_dir: &Path,
-    namespace_key: &SigningPublicKey,
-    daml_key: &SigningPublicKey,
-    node_id: &str,
-) -> Result {
-    let filename = format!("{ATTESTOR_KEYS_PREFIX}-{node_id}.bin");
-    let output_path = keys_dir.join(&filename);
-    tracing::debug!("Exporting keys to {path}", path = output_path.display());
-    write_messages_to_file(&[namespace_key.clone(), daml_key.clone()], &output_path).await
-}
-
-/// Helper: Export participant ID to file
-async fn export_participant_id(ids_dir: &Path, participant_id: &CantonId, node_id: &str) -> Result {
-    tokio::fs::create_dir_all(ids_dir).await?;
-    let filename = format!("{PARTICIPANT_ID_PREFIX}-{node_id}.bin");
-    let output_path = ids_dir.join(&filename);
-    tracing::debug!(
-        "Exporting participant ID to {path}",
-        path = output_path.display()
-    );
-    tokio::fs::write(&output_path, participant_id.to_file_format()).await?;
-    Ok(())
+/// Encode the namespace + DAML signing keys as two consecutive
+/// `varint(len)||proto` messages — matches the on-disk format
+/// `utils::write_messages_to_file(&[ns, daml], path)` produced, so the
+/// coordinator's `read_all_messages_from_file` (now `read_all_messages` over
+/// bytes) reads them back identically.
+fn encode_keys_payload(namespace_key: &SigningPublicKey, daml_key: &SigningPublicKey) -> Vec<u8> {
+    let mut buffer = BytesMut::new();
+    for key in [namespace_key, daml_key] {
+        let encoded = key.encode_to_vec();
+        prost::encoding::encode_varint(encoded.len() as u64, &mut buffer);
+        buffer.put_slice(&encoded);
+    }
+    buffer.to_vec()
 }
 
 /// Propose namespace delegation for the generated namespace key

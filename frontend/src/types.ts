@@ -239,6 +239,42 @@ export interface PendingInvitationsResponse {
   invitations: PendingInvitation[];
 }
 
+// Workflow runs (live in-progress + recently-completed runs displayed in the
+// notifications feed alongside pending invitations).
+export type WorkflowKind = "Onboarding" | "Kick" | "Contracts" | "Dars";
+export type WorkflowRole = "Coordinator" | "Attestor";
+
+export interface WorkflowRun {
+  instance_name: string;
+  kind: WorkflowKind;
+  role: WorkflowRole;
+  status: WorkflowProgress;
+  current_step: string;
+  step_index: number;
+  step_total: number;
+  /** Original config struct serialized to JSON — used for resume on the
+   * backend; the frontend just treats this as opaque. */
+  config_json: string;
+  /** Hex-encoded coordinator Noise pubkey. None on coordinator-side rows. */
+  coordinator_pubkey?: string;
+  /** Resolved from the peers table when set. */
+  coordinator_name?: string;
+  expected_attestors: string[];
+  completed_attestors: string[];
+  dec_party_id?: string;
+  prefix?: string;
+  participants?: string[];
+  dar_filenames?: string[];
+  error?: string;
+  dismissed: boolean;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface WorkflowRunsResponse {
+  runs: WorkflowRun[];
+}
+
 // Authentication types
 export type AuthStatus =
   | { status: "authenticated" }

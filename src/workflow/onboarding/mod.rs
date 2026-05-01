@@ -1,11 +1,9 @@
 pub mod attestor;
 pub mod config;
 pub mod coordinator;
-pub mod dirs;
 pub mod steps;
 
 pub use config::OnboardingConfig;
-pub use dirs::OnboardingDirs;
 pub use steps::{
     create_proposals, generate_keys, sign_dns_proposals, sign_p2p_proposals, submit_dns_proposals,
     submit_final_proposals,
@@ -67,5 +65,49 @@ impl WorkflowStep for OnboardingStep {
 
     fn is_waiting_for_attestors(&self) -> bool {
         *self == Self::WaitingForAttestors
+    }
+
+    fn step_index(&self) -> i64 {
+        match self {
+            Self::WaitingForAttestors => 0,
+            Self::GenerateKeys => 1,
+            Self::CreateProposals => 2,
+            Self::SignDns => 3,
+            Self::SubmitDns => 4,
+            Self::SignP2p => 5,
+            Self::SubmitFinal => 6,
+            Self::Complete => 7,
+        }
+    }
+
+    fn step_total() -> i64 {
+        8
+    }
+
+    fn step_name(&self) -> &'static str {
+        match self {
+            Self::WaitingForAttestors => "WaitingForAttestors",
+            Self::GenerateKeys => "GenerateKeys",
+            Self::CreateProposals => "CreateProposals",
+            Self::SignDns => "SignDns",
+            Self::SubmitDns => "SubmitDns",
+            Self::SignP2p => "SignP2p",
+            Self::SubmitFinal => "SubmitFinal",
+            Self::Complete => "Complete",
+        }
+    }
+
+    fn try_from_step_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "WaitingForAttestors" => Self::WaitingForAttestors,
+            "GenerateKeys" => Self::GenerateKeys,
+            "CreateProposals" => Self::CreateProposals,
+            "SignDns" => Self::SignDns,
+            "SubmitDns" => Self::SubmitDns,
+            "SignP2p" => Self::SignP2p,
+            "SubmitFinal" => Self::SubmitFinal,
+            "Complete" => Self::Complete,
+            _ => return None,
+        })
     }
 }

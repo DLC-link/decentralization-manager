@@ -1,14 +1,18 @@
-use actix_web::{HttpResponse, Responder, get, post, web};
-
 use std::collections::HashMap;
 
-use crate::db::schema::{Commitable, SchemaRead, SchemaWrite};
-use crate::server::{
-    AppState,
-    types::{
-        ErrorResponse, InvitationActionRequest, InvitationType, MessageResponse, PendingInvitation,
-        PendingInvitationsResponse,
+use actix_web::{HttpResponse, Responder, get, post, web};
+
+use crate::{
+    db::schema::{Commitable, SchemaRead, SchemaWrite},
+    server::{
+        AppState,
+        types::{
+            ErrorResponse, InvitationActionRequest, InvitationType, MessageResponse,
+            PendingInvitation, PendingInvitationsResponse, WorkflowKind, WorkflowProgress,
+            WorkflowRole, WorkflowRun,
+        },
     },
+    workflow::{ContractsStep, DarsStep, KickStep, OnboardingStep, state::WorkflowStep},
 };
 
 async fn delete_persisted_invitation(data: &web::Data<AppState>, id: &str) {
@@ -22,6 +26,86 @@ async fn delete_persisted_invitation(data: &web::Data<AppState>, id: &str) {
         }
         Err(e) => tracing::warn!("Failed to begin tx to delete invitation {id}: {e}"),
     }
+}
+
+fn step_total_for(kind: WorkflowKind) -> i64 {
+    match kind {
+        WorkflowKind::Onboarding => OnboardingStep::step_total(),
+        WorkflowKind::Kick => KickStep::step_total(),
+        WorkflowKind::Contracts => ContractsStep::step_total(),
+        WorkflowKind::Dars => DarsStep::step_total(),
+    }
+}
+
+/// Insert the attestor-side `workflow_runs` row for a freshly-accepted invite.
+/// The synthetic instance_name is `attestor-<kind>-<coord_pubkey[..16]>-<ts>`
+/// — only one accepted invite can be active per node at a time so the
+/// timestamp suffix is enough to keep older completed rows distinct.
+async fn insert_attestor_run(
+    data: &web::Data<AppState>,
+    invitation: &PendingInvitation,
+) -> Option<String> {
+    let kind: WorkflowKind = invitation.invitation_type.into();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let pubkey_short =
+        &invitation.coordinator_pubkey[..invitation.coordinator_pubkey.len().min(16)];
+    let instance_name = format!(
+        "attestor-{}-{}-{}",
+        kind.as_str().to_lowercase(),
+        pubkey_short,
+        now
+    );
+    let run = WorkflowRun {
+        instance_name: instance_name.clone(),
+        kind,
+        role: WorkflowRole::Attestor,
+        status: WorkflowProgress::InProgress,
+        // No per-step granularity on the attestor side yet — coordinator drives
+        // the protocol; we just track "I'm participating".
+        current_step: "Active".to_string(),
+        step_index: 0,
+        step_total: step_total_for(kind),
+        // We don't have the coordinator's full config; we have what they sent
+        // in the invite payload. Persist that for forensic purposes / future
+        // resume.
+        config_json: serde_json::json!({
+            "prefix": invitation.prefix,
+            "participants": invitation.participants,
+            "dar_filenames": invitation.dar_filenames,
+        })
+        .to_string(),
+        coordinator_pubkey: Some(invitation.coordinator_pubkey.clone()),
+        coordinator_name: None,
+        // For onboarding the participants list is the authoritative attestor
+        // set. For other kinds we don't get a list from the invite.
+        expected_attestors: invitation.participants.clone(),
+        completed_attestors: Vec::new(),
+        dec_party_id: None,
+        error: None,
+        dismissed: false,
+        created_at: now,
+        updated_at: now,
+    };
+
+    let mut tx = match data.db.begin_transaction().await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!("attestor run: begin_transaction failed: {e}");
+            return None;
+        }
+    };
+    if let Err(e) = tx.upsert_workflow_run(&run).await {
+        tracing::warn!("attestor run: upsert failed: {e}");
+        return None;
+    }
+    if let Err(e) = Commitable::commit(tx).await {
+        tracing::warn!("attestor run: commit failed: {e}");
+        return None;
+    }
+    Some(instance_name)
 }
 
 /// Get all pending invitations
@@ -86,6 +170,15 @@ pub async fn accept_invitation(
     };
 
     delete_persisted_invitation(&data, &invitation.id).await;
+
+    // Persist an attestor-side workflow_runs row so the operator's feed shows
+    // "I'm participating in <kind>" until completion. The trigger listener
+    // reads `attestor_run_instance` to know which row to flip on terminal status.
+    let attestor_instance = insert_attestor_run(&data, &invitation).await;
+    {
+        let mut slot = data.attestor_run_instance.write().await;
+        *slot = attestor_instance;
+    }
 
     // Store coordinator's public key and trigger the appropriate workflow
     {

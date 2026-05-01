@@ -1,4 +1,4 @@
-use tokio::time;
+use std::collections::HashMap;
 
 use canton_proto_rs::com::digitalasset::canton::{
     protocol::v30::{DecentralizedNamespaceDefinition, SignedTopologyTransaction},
@@ -9,79 +9,83 @@ use canton_proto_rs::com::digitalasset::canton::{
         topology_manager_write_service_client::TopologyManagerWriteServiceClient,
     },
 };
+use sqlx::SqlitePool;
+use tokio::time;
 
 use crate::{
     config::NodeConfig,
     consts::{
-        DNS_KICK_PROTO_FILENAME, NEW_NAMESPACE_DEF_FILENAME, P2P_KICK_PROTO_FILENAME,
-        PARTY_ID_FILENAME, SIGNED_KICK_PROPOSALS_PREFIX, TOPOLOGY_PROPAGATION_DELAY_SECS,
-        TOPOLOGY_RETRY_DELAY_SECS, TOPOLOGY_RETRY_MAX_ATTEMPTS,
+        TOPOLOGY_PROPAGATION_DELAY_SECS, TOPOLOGY_RETRY_DELAY_SECS, TOPOLOGY_RETRY_MAX_ATTEMPTS,
     },
     error::Result,
     utils,
-    workflow::kick::KickDirs,
+    workflow::storage::{WorkflowStorage, artifact_kinds},
 };
 
 /// Submit kick to synchronizer
 ///
-/// Coordinator aggregates signatures and submits the kick
-pub async fn submit_kick(config: &NodeConfig, dirs: &KickDirs) -> Result {
+/// Coordinator aggregates signatures and submits the kick.
+pub async fn submit_kick(config: &NodeConfig, storage: &SqlitePool, instance_name: &str) -> Result {
     tracing::info!("Submitting kick to synchronizer...");
 
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
     tracing::debug!("Using synchronizer ID: {synchronizer_id}");
 
     // Read original DNS proposal
-    let dns_file = dirs.kick_proposals_dir.join(DNS_KICK_PROTO_FILENAME);
-    tracing::info!(
-        "Reading original DNS proposal from {path}",
-        path = dns_file.display()
-    );
+    let dns_bytes = storage
+        .read_artifact(instance_name, artifact_kinds::KICK_DNS_PROPOSAL, None)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("KICK_DNS_PROPOSAL artifact missing"))?;
     let mut dns_transaction: SignedTopologyTransaction =
-        utils::read_first_message_from_file(&dns_file).await?;
+        utils::read_first_message_from_bytes(&dns_bytes)?;
 
     // Read original P2P proposal
-    let p2p_file = dirs.kick_proposals_dir.join(P2P_KICK_PROTO_FILENAME);
-    tracing::info!(
-        "Reading original P2P proposal from {path}",
-        path = p2p_file.display()
-    );
+    let p2p_bytes = storage
+        .read_artifact(instance_name, artifact_kinds::KICK_P2P_PROPOSAL, None)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("KICK_P2P_PROPOSAL artifact missing"))?;
     let mut p2p_transaction: SignedTopologyTransaction =
-        utils::read_first_message_from_file(&p2p_file).await?;
+        utils::read_first_message_from_bytes(&p2p_bytes)?;
 
-    // Find all signed proposal files
-    let signed_files =
-        utils::find_files_by_pattern(&dirs.kick_signed_dir, SIGNED_KICK_PROPOSALS_PREFIX, ".bin")
-            .await?;
+    // Gather per-attestor signed proposals from storage. We list both kinds
+    // and join by attestor id so DNS and P2P signatures stay paired the way
+    // the original combined-file format guaranteed.
+    let signed_dns = storage
+        .list_artifacts(instance_name, artifact_kinds::SIGNED_KICK_DNS)
+        .await?;
+    let signed_p2p: HashMap<String, Vec<u8>> = storage
+        .list_artifacts(instance_name, artifact_kinds::SIGNED_KICK_P2P)
+        .await?
+        .into_iter()
+        .collect();
+
     tracing::info!(
-        "Found {count} signed proposal file(s)",
-        count = signed_files.len()
+        "Found signed proposals from {count} attestor(s)",
+        count = signed_dns.len()
     );
 
-    // Aggregate signatures from all files
-    for signed_file in &signed_files {
-        tracing::info!(
-            "Reading signatures from {path}",
-            path = signed_file.display()
+    if signed_dns.len() != signed_p2p.len() {
+        anyhow::bail!(
+            "Mismatched signed proposal counts: {dns} DNS vs {p2p} P2P",
+            dns = signed_dns.len(),
+            p2p = signed_p2p.len()
         );
-        let signed_transactions: Vec<SignedTopologyTransaction> =
-            utils::read_all_messages_from_file(signed_file).await?;
+    }
 
-        if signed_transactions.len() != 2 {
-            anyhow::bail!(
-                "Expected 2 transactions in {path}, got {count}",
-                path = signed_file.display(),
-                count = signed_transactions.len()
-            );
-        }
+    // Aggregate signatures from each attestor
+    for (attestor_id, dns_signed_bytes) in &signed_dns {
+        tracing::info!("Reading signatures from attestor {attestor_id}");
 
-        // First is DNS, second is P2P
-        dns_transaction
-            .signatures
-            .extend(signed_transactions[0].signatures.clone());
-        p2p_transaction
-            .signatures
-            .extend(signed_transactions[1].signatures.clone());
+        let dns_signed: SignedTopologyTransaction =
+            utils::read_first_message_from_bytes(dns_signed_bytes)?;
+        let p2p_signed_bytes = signed_p2p
+            .get(attestor_id)
+            .ok_or_else(|| anyhow::anyhow!("Attestor {attestor_id} signed DNS but not P2P"))?;
+        let p2p_signed: SignedTopologyTransaction =
+            utils::read_first_message_from_bytes(p2p_signed_bytes)?;
+
+        dns_transaction.signatures.extend(dns_signed.signatures);
+        p2p_transaction.signatures.extend(p2p_signed.signatures);
     }
 
     tracing::info!(
@@ -94,20 +98,19 @@ pub async fn submit_kick(config: &NodeConfig, dirs: &KickDirs) -> Result {
     );
 
     // Read new namespace definition for validation
-    let new_namespace_file = dirs.kick_proposals_dir.join(NEW_NAMESPACE_DEF_FILENAME);
-    tracing::info!(
-        "Reading new namespace definition from {path}",
-        path = new_namespace_file.display()
-    );
+    let new_namespace_bytes = storage
+        .read_artifact(instance_name, artifact_kinds::KICK_NEW_NAMESPACE_DEF, None)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("KICK_NEW_NAMESPACE_DEF artifact missing"))?;
     let new_namespace_def: DecentralizedNamespaceDefinition =
-        utils::read_first_message_from_file(&new_namespace_file).await?;
+        utils::read_first_message_from_bytes(&new_namespace_bytes)?;
 
     // Read party ID
-    let party_id_file = dirs.kick_proposals_dir.join(PARTY_ID_FILENAME);
-    let party_id = tokio::fs::read_to_string(&party_id_file)
+    let party_id_bytes = storage
+        .read_artifact(instance_name, artifact_kinds::KICK_PARTY_ID, None)
         .await?
-        .trim()
-        .to_string();
+        .ok_or_else(|| anyhow::anyhow!("KICK_PARTY_ID artifact missing"))?;
+    let party_id = String::from_utf8(party_id_bytes)?.trim().to_string();
     tracing::info!("Party ID: {party_id}");
 
     // Submit DNS proposal first

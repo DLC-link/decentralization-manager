@@ -83,51 +83,5 @@ pub const NOISE_KEY_FILENAME: &str = "noise.key";
 /// SQLite database filename (inside data/)
 pub const DB_FILENAME: &str = "decpm.db";
 
-/// Workflow data directory name (inside data/)
-pub const WORKFLOW_DATA_DIR: &str = "workflow-data";
-
 /// DARs directory name (inside data/)
 pub const DARS_DIR: &str = "dars";
-
-// Workflow subdirectory names
-/// Participant keys subdirectory name
-pub const PARTICIPANT_KEYS_DIR: &str = "participant-keys";
-
-/// Participant IDs subdirectory name
-pub const PARTICIPANT_IDS_DIR: &str = "participant-ids";
-
-/// DNS proposals directory name
-pub const DNS_PROPOSALS_DIR: &str = "dns-proposals";
-
-/// DNS submission directory name
-pub const DNS_SUBMISSION_DIR: &str = "dns-submission";
-
-/// P2P proposals directory name
-pub const P2P_PROPOSALS_DIR: &str = "p2p-proposals";
-
-/// Final proposals submission directory name
-pub const FINAL_PROPOSALS_SUBMISSION_DIR: &str = "final-proposals-submission";
-
-/// Signed proposals subdirectory name
-pub const SIGNED_PROPOSALS_DIR: &str = "signed-proposals";
-
-/// Current config directory name (for kick workflow)
-pub const CURRENT_CONFIG_DIR: &str = "current-config";
-
-/// Kick proposals directory name
-pub const KICK_PROPOSALS_DIR: &str = "kick-proposals";
-
-/// Kick signed directory name
-pub const KICK_SIGNED_DIR: &str = "kick-signed";
-
-/// Ledger submissions directory name
-pub const LEDGER_SUBMISSIONS_DIR: &str = "ledger-submissions";
-
-/// Prepared submissions subdirectory name
-pub const PREPARED_DIR: &str = "prepared";
-
-/// Execution directory name
-pub const EXECUTION_DIR: &str = "execution";
-
-/// Signatures subdirectory name
-pub const SIGNATURES_DIR: &str = "signatures";

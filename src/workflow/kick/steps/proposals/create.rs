@@ -1,5 +1,4 @@
-use tokio::fs;
-
+use bytes::{BufMut, BytesMut};
 use canton_proto_rs::com::digitalasset::canton::{
     protocol::v30::{
         DecentralizedNamespaceDefinition, PartyToParticipant, TopologyMapping, enums,
@@ -12,39 +11,44 @@ use canton_proto_rs::com::digitalasset::canton::{
         topology_manager_write_service_client::TopologyManagerWriteServiceClient,
     },
 };
+use prost::Message;
+use sqlx::SqlitePool;
 
 use crate::{
     config::NodeConfig,
-    consts::{
-        DNS_KICK_PROTO_FILENAME, KICK_TARGET_FILENAME, NAMESPACE_DEF_FILENAME,
-        NEW_NAMESPACE_DEF_FILENAME, NEW_THRESHOLD_FILENAME, P2P_KICK_PROTO_FILENAME,
-        PARTY_ID_FILENAME,
-    },
     error::Result,
     utils,
-    workflow::kick::{KickConfig, KickDirs},
+    workflow::{
+        kick::KickConfig,
+        storage::{WorkflowStorage, artifact_kinds},
+    },
 };
 
 /// Create kick proposals
 ///
 /// This step creates:
-/// - DNS proposal to update namespace (remove kicked owner)
-/// - P2P proposal to remove participant from mapping
+/// - DNS proposal to update namespace (remove kicked owner) — `KICK_DNS_PROPOSAL`
+/// - P2P proposal to remove participant from mapping — `KICK_P2P_PROPOSAL`
+/// - New namespace definition — `KICK_NEW_NAMESPACE_DEF` (used by submit)
+/// - Full party id — `KICK_PARTY_ID` (used by submit)
 pub async fn create_proposals(
     config: &NodeConfig,
-    dirs: &KickDirs,
+    storage: &SqlitePool,
+    instance_name: &str,
     kick_config: &KickConfig,
 ) -> Result {
     tracing::info!("Creating kick proposals...");
 
-    // Read current namespace definition
-    let namespace_file = dirs.kick_config_dir.join(NAMESPACE_DEF_FILENAME);
-    tracing::info!(
-        "Reading current namespace definition from {path}",
-        path = namespace_file.display()
-    );
+    // Read current namespace definition (length-prefixed protobuf, written by
+    // export_state).
+    let namespace_bytes = storage
+        .read_artifact(instance_name, artifact_kinds::KICK_NAMESPACE_DEF, None)
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!("KICK_NAMESPACE_DEF artifact missing — did ExportState run?")
+        })?;
     let current_namespace_def: DecentralizedNamespaceDefinition =
-        utils::read_first_message_from_file(&namespace_file).await?;
+        utils::read_first_message_from_bytes(&namespace_bytes)?;
 
     tracing::info!(
         "Current namespace: {namespace}, threshold: {threshold}, owners: {owners_count}",
@@ -53,18 +57,20 @@ pub async fn create_proposals(
         owners_count = current_namespace_def.owners.len()
     );
 
-    // Read kick target
-    let kick_target_file = dirs.kick_config_dir.join(KICK_TARGET_FILENAME);
-    let kick_target = fs::read_to_string(&kick_target_file)
+    // Read kick target (plaintext fingerprint).
+    let kick_target_bytes = storage
+        .read_artifact(instance_name, artifact_kinds::KICK_TARGET_NAMESPACE, None)
         .await?
-        .trim()
-        .to_string();
+        .ok_or_else(|| anyhow::anyhow!("KICK_TARGET_NAMESPACE artifact missing"))?;
+    let kick_target = String::from_utf8(kick_target_bytes)?.trim().to_string();
     tracing::info!("Kick target: {kick_target}");
 
-    // Read new threshold
-    let threshold_file = dirs.kick_config_dir.join(NEW_THRESHOLD_FILENAME);
-    let new_threshold: i32 = fs::read_to_string(&threshold_file)
+    // Read new threshold (plaintext integer).
+    let threshold_bytes = storage
+        .read_artifact(instance_name, artifact_kinds::KICK_NEW_THRESHOLD, None)
         .await?
+        .ok_or_else(|| anyhow::anyhow!("KICK_NEW_THRESHOLD artifact missing"))?;
+    let new_threshold: i32 = String::from_utf8(threshold_bytes)?
         .trim()
         .parse()
         .map_err(|e| anyhow::anyhow!("Failed to parse new threshold: {e}"))?;
@@ -197,34 +203,52 @@ pub async fn create_proposals(
         .transaction
         .ok_or_else(|| anyhow::anyhow!("No P2P transaction returned"))?;
 
-    // Save proposals to files
-    fs::create_dir_all(&dirs.kick_proposals_dir).await?;
+    // Persist proposals + supporting data to workflow storage. Each protobuf
+    // is written with the same `varint(len)||proto` framing the original file
+    // path used (so `read_first_message_from_bytes` works unchanged).
+    let dns_bytes = encode_length_prefixed_message(&dns_transaction);
+    storage
+        .write_artifact(
+            instance_name,
+            artifact_kinds::KICK_DNS_PROPOSAL,
+            None,
+            &dns_bytes,
+        )
+        .await?;
+    tracing::info!("Saved DNS kick proposal to storage");
 
-    let dns_file = dirs.kick_proposals_dir.join(DNS_KICK_PROTO_FILENAME);
-    tracing::info!(
-        "Saving DNS kick proposal to {path}",
-        path = dns_file.display()
-    );
-    utils::write_message_to_file(&dns_transaction, &dns_file).await?;
+    let p2p_bytes = encode_length_prefixed_message(&p2p_transaction);
+    storage
+        .write_artifact(
+            instance_name,
+            artifact_kinds::KICK_P2P_PROPOSAL,
+            None,
+            &p2p_bytes,
+        )
+        .await?;
+    tracing::info!("Saved P2P kick proposal to storage");
 
-    let p2p_file = dirs.kick_proposals_dir.join(P2P_KICK_PROTO_FILENAME);
-    tracing::info!(
-        "Saving P2P kick proposal to {path}",
-        path = p2p_file.display()
-    );
-    utils::write_message_to_file(&p2p_transaction, &p2p_file).await?;
+    let new_namespace_bytes = encode_length_prefixed_message(&new_namespace_def);
+    storage
+        .write_artifact(
+            instance_name,
+            artifact_kinds::KICK_NEW_NAMESPACE_DEF,
+            None,
+            &new_namespace_bytes,
+        )
+        .await?;
+    tracing::info!("Saved new namespace definition to storage");
 
-    // Save new namespace definition
-    let new_namespace_file = dirs.kick_proposals_dir.join(NEW_NAMESPACE_DEF_FILENAME);
-    tracing::info!(
-        "Saving new namespace definition to {path}",
-        path = new_namespace_file.display()
-    );
-    utils::write_message_to_file(&new_namespace_def, &new_namespace_file).await?;
-
-    // Save party ID
-    let party_id_file = dirs.kick_proposals_dir.join(PARTY_ID_FILENAME);
-    fs::write(&party_id_file, format!("{party_id}\n")).await?;
+    // Save party ID — plaintext, mirrors the previous file write that
+    // included a trailing newline (submit trims it).
+    storage
+        .write_artifact(
+            instance_name,
+            artifact_kinds::KICK_PARTY_ID,
+            None,
+            format!("{party_id}\n").as_bytes(),
+        )
+        .await?;
 
     tracing::info!("Kick proposals created and saved successfully");
     Ok(())
@@ -268,4 +292,14 @@ async fn get_current_p2p_mapping(
         .ok_or_else(|| anyhow::anyhow!("No P2P mapping found for party {party_id}"))?;
 
     Ok(p2p.clone())
+}
+
+/// Encode a protobuf message as `varint(len)||proto`, matching the on-disk
+/// format `utils::write_message_to_file` produces.
+fn encode_length_prefixed_message<M: Message>(message: &M) -> Vec<u8> {
+    let encoded = message.encode_to_vec();
+    let mut buffer = BytesMut::new();
+    prost::encoding::encode_varint(encoded.len() as u64, &mut buffer);
+    buffer.put_slice(&encoded);
+    buffer.to_vec()
 }

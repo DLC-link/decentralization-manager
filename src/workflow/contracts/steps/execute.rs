@@ -1,3 +1,5 @@
+use bytes::Buf;
+use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use canton_proto_rs::com::{
@@ -14,14 +16,13 @@ use canton_proto_rs::com::{
 
 use crate::{
     config::NodeConfig,
-    consts::{
-        EXECUTION_DIR, LEDGER_SUBMISSIONS_DIR, PREPARED_DIR, PREPARED_SUBMISSION_PREFIX,
-        SIGNATURES_DIR, SUBMISSION_SIGNATURES_PREFIX, TOPOLOGY_RETRY_DELAY_SECS,
-        TOPOLOGY_RETRY_MAX_ATTEMPTS,
-    },
+    consts::{TOPOLOGY_RETRY_DELAY_SECS, TOPOLOGY_RETRY_MAX_ATTEMPTS},
     error::Result,
     utils,
-    workflow::contracts::{ContractsConfig, ContractsDirs},
+    workflow::{
+        contracts::ContractsConfig,
+        storage::{WorkflowStorage, artifact_kinds},
+    },
 };
 
 /// Execute signed ledger submissions
@@ -31,13 +32,15 @@ use crate::{
 ///
 /// # Arguments
 /// * `config` - Configuration with Ledger API connection details
-/// * `dirs` - WorkflowDirs containing all directory paths
+/// * `db` - Workflow storage backend
+/// * `instance_name` - Workflow run instance name (key for `workflow_artifacts`)
 /// * `contracts_config` - Contracts workflow configuration with party ID
 /// * `token` - Authentication token for Ledger API
 /// * `user_id` - User ID for Ledger API operations
 pub async fn execute_submissions(
     config: &NodeConfig,
-    dirs: &ContractsDirs,
+    db: &SqlitePool,
+    instance_name: &str,
     contracts_config: &ContractsConfig,
     token: &str,
     user_id: &str,
@@ -48,74 +51,67 @@ pub async fn execute_submissions(
     let decentralized_party = contracts_config.decentralized_party_id.to_string();
     tracing::debug!("Decentralized party: {decentralized_party}");
 
-    // Step 2: Dynamically load all prepared submissions
+    // Step 2: Load all prepared submissions from storage. They were keyed by
+    // zero-padded ordinal so `list_artifacts` returns them in their original
+    // creation order (matching the previous filename-sorted file scan).
     tracing::info!("Loading prepared submissions...");
-    let ledger_submissions_dir = dirs.workflow_dir.join(LEDGER_SUBMISSIONS_DIR);
-    let prepared_dir = ledger_submissions_dir.join(PREPARED_DIR);
+    let submission_rows = db
+        .list_artifacts(instance_name, artifact_kinds::PREPARED_SUBMISSION)
+        .await?;
 
-    // Discover all prepared-submission-*.bin files
-    let submission_files =
-        utils::find_files_by_pattern(&prepared_dir, PREPARED_SUBMISSION_PREFIX, ".bin").await?;
-
-    if submission_files.is_empty() {
+    if submission_rows.is_empty() {
         anyhow::bail!(
-            "No prepared submission files found in {path}",
-            path = prepared_dir.display()
+            "No PREPARED_SUBMISSION artifacts found for instance {instance_name} — \
+             did PrepareSubmissions run?"
         );
     }
 
-    // Load all prepared submissions
-    let mut prepared_submissions: Vec<PrepareSubmissionResponse> = Vec::new();
-    for submission_file in &submission_files {
+    let mut prepared_submissions: Vec<PrepareSubmissionResponse> =
+        Vec::with_capacity(submission_rows.len());
+    for (ordinal, payload) in &submission_rows {
         let prepared_sub: PrepareSubmissionResponse =
-            utils::read_first_message_from_file(submission_file).await?;
+            utils::read_first_message_from_bytes(payload)?;
+        tracing::debug!("Loaded prepared submission ordinal {ordinal}");
         prepared_submissions.push(prepared_sub);
     }
 
     let num_submissions = prepared_submissions.len();
     tracing::debug!("Loaded {num_submissions} prepared submissions");
 
-    // Step 3: Discover and load all signature files
+    // Step 3: Load all per-attestor signature bundles from storage.
     tracing::info!("Loading attestor signatures...");
-    let execution_dir = dirs.workflow_dir.join(EXECUTION_DIR);
-    let signatures_dir = execution_dir.join(SIGNATURES_DIR);
-
-    // Discover all submission-signatures-*.bin files
-    let signature_files =
-        utils::find_files_by_pattern(&signatures_dir, SUBMISSION_SIGNATURES_PREFIX, ".bin").await?;
+    let signature_rows = db
+        .list_artifacts(instance_name, artifact_kinds::SUBMISSION_SIGNATURES)
+        .await?;
     tracing::debug!(
-        "Found {count} signature files",
-        count = signature_files.len()
+        "Found signatures from {count} attestor(s)",
+        count = signature_rows.len()
     );
 
-    if signature_files.is_empty() {
+    if signature_rows.is_empty() {
         anyhow::bail!(
-            "No signature files found in {path}",
-            path = signatures_dir.display()
+            "No SUBMISSION_SIGNATURES artifacts found for instance {instance_name} — \
+             did SignSubmissions complete?"
         );
     }
 
-    // Load all signatures (one per submission per attestor)
+    // Each row is `varint(len)||proto` × N messages produced by
+    // `sign_submissions`. Decode them per-attestor.
     let mut all_signatures: Vec<Vec<CantonSignature>> = Vec::new();
+    for (attestor_id, payload) in &signature_rows {
+        tracing::debug!("Loading signatures from attestor {attestor_id}");
 
-    for sig_file in &signature_files {
-        tracing::debug!("Loading signatures from {path}", path = sig_file.display());
-
-        let sigs: Vec<CantonSignature> = utils::read_all_messages_from_file(sig_file).await?;
+        let sigs: Vec<CantonSignature> = read_all_messages_from_bytes(payload)?;
 
         if sigs.len() != num_submissions {
             anyhow::bail!(
-                "Expected {num_submissions} signatures in {path}, but found {count}",
-                path = sig_file.display(),
+                "Expected {num_submissions} signatures from attestor {attestor_id}, \
+                 but found {count}",
                 count = sigs.len()
             );
         }
 
         all_signatures.push(sigs);
-        tracing::debug!(
-            "Loaded {num_submissions} signatures from {path}",
-            path = sig_file.file_name().unwrap().to_string_lossy()
-        );
     }
 
     tracing::info!(
@@ -270,4 +266,25 @@ pub async fn execute_submissions(
 
     tracing::info!("Submissions executed successfully");
     Ok(())
+}
+
+/// Decode a sequence of `varint(len)||proto` messages from a byte slice. Mirrors
+/// `utils::read_all_messages_from_file` but operates on in-memory data — used
+/// to round-trip blobs we used to read from disk.
+fn read_all_messages_from_bytes<M: prost::Message + Default>(data: &[u8]) -> Result<Vec<M>> {
+    let mut cursor = data;
+    let mut messages = Vec::new();
+    while cursor.has_remaining() {
+        let len = prost::encoding::decode_varint(&mut cursor)? as usize;
+        if cursor.remaining() < len {
+            anyhow::bail!(
+                "Incomplete message: expected {len} bytes, but only {remaining} remaining",
+                remaining = cursor.remaining()
+            );
+        }
+        let message_bytes = &cursor[..len];
+        cursor.advance(len);
+        messages.push(M::decode(message_bytes)?);
+    }
+    Ok(messages)
 }

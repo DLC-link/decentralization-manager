@@ -183,7 +183,8 @@ async fn collect_known_members(
     let dec_party_str = dec_party_id.to_string();
     let network_config = NetworkConfig::from_peers(data.db.get_all_peers().await?);
     let keypair = NoiseKeypair::from_file(&data.config.key_file_path()).await?;
-    let identity = data.config.participant_id().to_string();
+    let self_id = data.config.participant_id();
+    let identity_bytes = self_id.to_string();
     let request = Message::new(
         MessageType::RequestMemberParty,
         dec_party_str.as_bytes().to_vec(),
@@ -198,19 +199,18 @@ async fn collect_known_members(
             .find(|c| c.dec_party_id == *dec_party_id)
             .map(|c| c.member_party_id.clone());
         out.push(KnownMember {
-            participant_uid: identity.clone(),
+            participant_uid: self_id.clone(),
             member_party_id: self_member,
         });
     }
 
-    let self_id = data.config.participant_id();
     for peer in &network_config.peers {
         if peer.participant_id == *self_id {
             continue;
         }
         if peer.public_key.is_empty() {
             out.push(KnownMember {
-                participant_uid: peer.participant_id.to_string(),
+                participant_uid: peer.participant_id.clone(),
                 member_party_id: None,
             });
             continue;
@@ -223,7 +223,7 @@ async fn collect_known_members(
                     pid = peer.participant_id,
                 );
                 out.push(KnownMember {
-                    participant_uid: peer.participant_id.to_string(),
+                    participant_uid: peer.participant_id.clone(),
                     member_party_id: None,
                 });
                 continue;
@@ -235,7 +235,7 @@ async fn collect_known_members(
             &peer.address,
             peer.port,
             &psk,
-            identity.as_bytes(),
+            identity_bytes.as_bytes(),
             &request,
         )
         .await
@@ -247,7 +247,7 @@ async fn collect_known_members(
                     pid = peer.participant_id,
                 );
                 out.push(KnownMember {
-                    participant_uid: peer.participant_id.to_string(),
+                    participant_uid: peer.participant_id.clone(),
                     member_party_id: None,
                 });
                 continue;
@@ -264,7 +264,7 @@ async fn collect_known_members(
             _ => None,
         };
         out.push(KnownMember {
-            participant_uid: peer.participant_id.to_string(),
+            participant_uid: peer.participant_id.clone(),
             member_party_id: member_party,
         });
     }

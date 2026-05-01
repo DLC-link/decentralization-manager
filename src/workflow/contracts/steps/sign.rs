@@ -1,6 +1,4 @@
-use anyhow::Context;
-use ed25519_dalek::{Signer, SigningKey};
-
+use bytes::{Buf, BufMut, BytesMut};
 use canton_proto_rs::com::{
     daml::ledger::api::v2::interactive::PrepareSubmissionResponse,
     digitalasset::canton::crypto::{
@@ -11,16 +9,15 @@ use canton_proto_rs::com::{
         v30::{Signature, SignatureFormat, SigningAlgorithmSpec, SigningPublicKey},
     },
 };
+use ed25519_dalek::{Signature as DalekSignature, Signer, SigningKey, Verifier};
+use sqlx::SqlitePool;
 
 use crate::{
     config::NodeConfig,
-    consts::{
-        ATTESTOR_KEYS_PREFIX, CANTON_PROTOCOL_VERSION, EXECUTION_DIR, LEDGER_SUBMISSIONS_DIR,
-        PREPARED_DIR, PREPARED_SUBMISSION_PREFIX, SIGNATURES_DIR, SUBMISSION_SIGNATURES_PREFIX,
-    },
+    consts::CANTON_PROTOCOL_VERSION,
     error::Result,
     utils,
-    workflow::contracts::ContractsDirs,
+    workflow::storage::{WorkflowStorage, artifact_kinds, identity_kinds},
 };
 
 /// DER OCTET STRING tag
@@ -34,35 +31,57 @@ const ED25519_PRIVATE_KEY_LENGTH: u8 = 0x20;
 /// This step must be run by each attestor participant to sign the prepared submissions.
 /// Each attestor signs with their DAML signing key.
 ///
+/// The signed bundle is persisted as a `SUBMISSION_SIGNATURES` artefact keyed
+/// by this node's participant id, byte-identical to the previous on-disk file
+/// `submission-signatures-{node_id}.bin`.
+///
 /// # Arguments
 /// * `config` - Configuration with Admin API connection details
-/// * `dirs` - WorkflowDirs containing all directory paths
-pub async fn sign_submissions(config: &NodeConfig, dirs: &ContractsDirs) -> Result {
+/// * `db` - Workflow storage backend (SqlitePool implementing `WorkflowStorage`)
+/// * `instance_name` - Workflow run instance name (key for `workflow_artifacts`)
+/// * `dec_party_id` - Decentralized party id used to look up `attestor_public_keys`
+///   in the `dec_party_identity` table (this run's local DAML signing key bundle)
+pub async fn sign_submissions(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    instance_name: &str,
+    dec_party_id: &str,
+) -> Result {
     tracing::info!("Signing submissions...");
 
     let node_id = config.participant_id().to_string();
 
-    // Step 1: Load the DAML public key that was exported during onboarding
-    // This ensures we use the newly generated key, not an old key from a previous run
-    tracing::info!("Loading DAML public key from exported file...");
-    let keys_file = dirs
-        .keys_dir
-        .join(format!("{ATTESTOR_KEYS_PREFIX}-{node_id}.bin"));
+    // Step 1: Load the DAML public key bundle that was exported during onboarding.
+    // It MUST come from `dec_party_identity` (long-lived, survives the
+    // originating onboarding run's dismissal) — not from `workflow_artifacts`,
+    // because by the time contracts runs the onboarding run may have been
+    // dismissed/aged out.
+    //
+    // TODO(onboarding-migration): until onboarding is migrated to write
+    // `attestor_public_keys` rows into `dec_party_identity` at completion,
+    // this read will return None. The error text below points at that
+    // dependency so it's obvious in the logs.
+    tracing::info!(
+        "Loading DAML public key bundle for {node_id} on {dec_party_id} from identity table..."
+    );
+    let keys_bytes = db
+        .read_identity(dec_party_id, identity_kinds::ATTESTOR_PUBLIC_KEYS, &node_id)
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "ATTESTOR_PUBLIC_KEYS not found in identity table for {node_id} on {dec_party_id} — \
+                 onboarding may not have completed yet"
+            )
+        })?;
 
-    if !keys_file.exists() {
-        anyhow::bail!(
-            "Keys file not found: {path}. Run step 1 (generate keys) first.",
-            path = keys_file.display()
-        );
-    }
-
-    let exported_keys: Vec<SigningPublicKey> =
-        utils::read_all_messages_from_file(&keys_file).await?;
+    // The blob is two `varint(len)||SigningPublicKey` messages, written by
+    // onboarding. Decode unchanged so the bytes-on-the-wire shape stays
+    // identical to the previous file-based format.
+    let exported_keys: Vec<SigningPublicKey> = read_all_messages_from_bytes(&keys_bytes)?;
 
     if exported_keys.len() != 2 {
         anyhow::bail!(
-            "Expected 2 keys in {path}, but found {count}",
-            path = keys_file.display(),
+            "Expected 2 keys in ATTESTOR_PUBLIC_KEYS for {node_id}, but found {count}",
             count = exported_keys.len()
         );
     }
@@ -103,27 +122,28 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &ContractsDirs) -> Resu
         count = keys_response.private_keys_metadata.len()
     );
 
-    // Step 3: Dynamically load all prepared submissions
+    // Step 3: Dynamically load all prepared submissions from storage. They were
+    // written by `prepare_submissions` keyed by zero-padded ordinal so
+    // `list_artifacts` returns them sorted by their original creation order.
     tracing::info!("Loading prepared submissions...");
-    let ledger_submissions_dir = dirs.workflow_dir.join(LEDGER_SUBMISSIONS_DIR);
-    let prepared_dir = ledger_submissions_dir.join(PREPARED_DIR);
+    let submission_rows = db
+        .list_artifacts(instance_name, artifact_kinds::PREPARED_SUBMISSION)
+        .await?;
 
-    // Discover all prepared-submission-*.bin files
-    let submission_files =
-        utils::find_files_by_pattern(&prepared_dir, PREPARED_SUBMISSION_PREFIX, ".bin").await?;
-
-    if submission_files.is_empty() {
+    if submission_rows.is_empty() {
         anyhow::bail!(
-            "No prepared submission files found in {path}",
-            path = prepared_dir.display()
+            "No PREPARED_SUBMISSION artifacts found for instance {instance_name} — \
+             did PrepareSubmissions run?"
         );
     }
 
-    // Load all prepared submissions
-    let mut prepared_submissions: Vec<PrepareSubmissionResponse> = Vec::new();
-    for submission_file in &submission_files {
+    // Decode the per-submission `varint(len)||proto` blobs.
+    let mut prepared_submissions: Vec<PrepareSubmissionResponse> =
+        Vec::with_capacity(submission_rows.len());
+    for (ordinal, payload) in &submission_rows {
         let prepared_sub: PrepareSubmissionResponse =
-            utils::read_first_message_from_file(submission_file).await?;
+            utils::read_first_message_from_bytes(payload)?;
+        tracing::debug!("Loaded prepared submission ordinal {ordinal}");
         prepared_submissions.push(prepared_sub);
     }
 
@@ -264,7 +284,7 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &ContractsDirs) -> Resu
 
         // Compare raw Ed25519 public keys (32 bytes)
         if derived_public_bytes.as_slice() == expected_raw_public_key {
-            tracing::info!("✅ Found matching private key at offset {offset} ({source})");
+            tracing::info!("Found matching private key at offset {offset} ({source})");
             tracing::debug!("Private key (first 16 bytes): {:02x?}", &key_bytes[..16]);
             verified_key_bytes = Some(*key_bytes);
             break;
@@ -290,7 +310,6 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &ContractsDirs) -> Resu
     let signing_key = SigningKey::from_bytes(&key_bytes);
 
     // Verify the signatures locally before sending to Canton
-    use ed25519_dalek::{Signature as DalekSignature, Verifier};
     let verifying_key = signing_key.verifying_key();
     let verifying_key_bytes = verifying_key.to_bytes();
 
@@ -330,10 +349,10 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &ContractsDirs) -> Resu
             .verify(&prepared_sub.prepared_transaction_hash, &sig)
             .is_ok()
         {
-            tracing::info!("✅ Signature {index} verified locally", index = idx + 1);
+            tracing::info!("Signature {index} verified locally", index = idx + 1);
         } else {
             tracing::error!(
-                "❌ Signature {index} failed local verification!",
+                "Signature {index} failed local verification!",
                 index = idx + 1
             );
         }
@@ -351,22 +370,57 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &ContractsDirs) -> Resu
 
     tracing::debug!("Generated {count} signatures", count = signatures.len());
 
-    // Step 8: Save signatures to file
-    let execution_dir = dirs.workflow_dir.join(EXECUTION_DIR);
-    let signatures_dir = execution_dir.join(SIGNATURES_DIR);
-    tokio::fs::create_dir_all(&signatures_dir)
-        .await
-        .with_context(|| format!("Failed to create dir '{}'", signatures_dir.display()))?;
-
-    let signatures_file =
-        signatures_dir.join(format!("{SUBMISSION_SIGNATURES_PREFIX}-{node_id}.bin"));
+    // Step 8: Persist signatures bundle as `SUBMISSION_SIGNATURES` artefact.
+    // The blob is the same multi-message `varint(len)||proto` framing the
+    // previous on-disk `submission-signatures-{node_id}.bin` used; the
+    // execute step will read it back via `read_all_messages_from_bytes`.
+    let payload = encode_messages_length_prefixed(&signatures);
     tracing::info!(
-        "Saving signatures to {path}",
-        path = signatures_file.display()
+        "Saving signatures to artifact key {node_id} ({len} bytes)",
+        len = payload.len()
     );
-
-    utils::write_messages_to_file(&signatures, &signatures_file).await?;
+    db.write_artifact(
+        instance_name,
+        artifact_kinds::SUBMISSION_SIGNATURES,
+        Some(&node_id),
+        &payload,
+    )
+    .await?;
 
     tracing::info!("Signatures saved successfully");
     Ok(())
+}
+
+/// Decode a sequence of `varint(len)||proto` messages from a byte slice. Mirrors
+/// `utils::read_all_messages_from_file` but operates on in-memory data — used
+/// to round-trip blobs we used to read from disk.
+fn read_all_messages_from_bytes<M: prost::Message + Default>(data: &[u8]) -> Result<Vec<M>> {
+    let mut cursor = data;
+    let mut messages = Vec::new();
+    while cursor.has_remaining() {
+        let len = prost::encoding::decode_varint(&mut cursor)? as usize;
+        if cursor.remaining() < len {
+            anyhow::bail!(
+                "Incomplete message: expected {len} bytes, but only {remaining} remaining",
+                remaining = cursor.remaining()
+            );
+        }
+        let message_bytes = &cursor[..len];
+        cursor.advance(len);
+        messages.push(M::decode(message_bytes)?);
+    }
+    Ok(messages)
+}
+
+/// Encode a slice of protobuf messages as `varint(len)||proto` × N, matching the
+/// byte layout produced by `utils::write_messages_to_file`. Round-trips with
+/// `utils::read_all_messages_from_file` / `read_all_messages_from_bytes`.
+fn encode_messages_length_prefixed<M: prost::Message>(messages: &[M]) -> Vec<u8> {
+    let mut buffer = BytesMut::new();
+    for message in messages {
+        let encoded = message.encode_to_vec();
+        prost::encoding::encode_varint(encoded.len() as u64, &mut buffer);
+        buffer.put_slice(&encoded);
+    }
+    buffer.to_vec()
 }

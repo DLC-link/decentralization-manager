@@ -46,7 +46,7 @@ use crate::{
     noise::{Message, MessageType, NoiseKeypair, load_or_generate_keypair, parse_public_key},
     server::middleware::AuthMiddleware,
     utils::{compute_fingerprint, get_synchronizer_id_from_url},
-    workflow,
+    workflow::{self, WorkflowType},
 };
 
 pub use types::*;
@@ -64,6 +64,10 @@ pub struct AppState {
     pub dars_trigger: Arc<Notify>,
     /// Coordinator's public key (set when invite is received)
     pub coordinator_pubkey: Arc<RwLock<Option<String>>>,
+    /// `instance_name` of the attestor-side `workflow_runs` row that the
+    /// trigger listener should mark Completed/Failed when the workflow ends.
+    /// Populated by `accept_invitation` right before it fires the trigger.
+    pub attestor_run_instance: Arc<RwLock<Option<String>>>,
     /// Pending invitations awaiting user acceptance
     pub pending_invitations: Arc<RwLock<Vec<PendingInvitation>>>,
     /// Authentication registry (real Keycloak or mock for test mode)
@@ -99,12 +103,478 @@ struct WorkflowTriggers {
     db: SqlitePool,
     /// Read by the `RequestMemberParty` listener arm.
     party_credentials: Arc<RwLock<Vec<PartyCredentials>>>,
+    /// Per-kind triggers + AppState slots, used by the `RetryWorkflow`
+    /// listener arm to flip a Failed attestor row back to InProgress and
+    /// re-spin its workflow loop.
+    onboarding_trigger: Arc<Notify>,
+    kick_trigger: Arc<Notify>,
+    contracts_trigger: Arc<Notify>,
+    dars_trigger: Arc<Notify>,
+    coordinator_pubkey: Arc<RwLock<Option<String>>>,
+    attestor_run_instance: Arc<RwLock<Option<String>>>,
 }
 
 enum InvitationMeta {
     None,
     Onboarding(OnboardingInvitePayload),
     Dars(DarsInvitePayload),
+}
+
+/// On boot, re-spawn any InProgress workflow runs that were interrupted by the
+/// last shutdown. The previous task handle died with the process, but the
+/// state machine + artefacts survived in SQLite, so we can pick the run back
+/// up at its persisted `current_step`.
+///
+/// Coordinator-side (this node started the workflow): we deserialize the
+/// `config_json` we stored at start and call `workflow::start_coordinator`
+/// again. `NoiseServer::new` detects the existing `workflow_runs` row and
+/// re-hydrates `WorkflowState` via `from_persisted`, so the coordinator's
+/// step-driven loop resumes at `current_step`. The HTTP `<kind>WorkflowState`
+/// is set to InProgress and the new abort handle is stashed so
+/// `/{kind}/cancel` can stop the resumed task.
+///
+/// Attestor-side (we accepted an invite): we re-fire the per-kind trigger so
+/// the existing listener calls `start_attestor`, which establishes a fresh
+/// Noise client back to the persisted `coordinator_pubkey`. Limitation: the
+/// attestor pulls its instance_name out of the GenerateKeys / SignSubmissions
+/// / SignKick command payload — if the coordinator is past those steps, the
+/// attestor cannot rebind its instance_name and will fail. Those runs surface
+/// as Failed in the feed, with the operator left to dismiss. Lifting this
+/// limitation requires coordinator-side protocol changes (sending the config
+/// alongside every command) and is tracked separately.
+#[allow(clippy::too_many_arguments)]
+async fn recover_in_progress_workflows(
+    db: SqlitePool,
+    config: NodeConfig,
+    kick_state: web::Data<Arc<handlers::KickWorkflowState>>,
+    onboarding_state: web::Data<Arc<handlers::OnboardingWorkflowState>>,
+    contracts_state: web::Data<Arc<handlers::ContractsWorkflowState>>,
+    dars_state: web::Data<Arc<handlers::DarsWorkflowState>>,
+    listener_control: Arc<RwLock<ListenerControl>>,
+    listener_notify: Arc<Notify>,
+    auth: Arc<RwLock<Option<WorkflowAuth>>>,
+    onboarding_trigger: Arc<Notify>,
+    kick_trigger: Arc<Notify>,
+    contracts_trigger: Arc<Notify>,
+    dars_trigger: Arc<Notify>,
+    coordinator_pubkey: Arc<RwLock<Option<String>>>,
+    attestor_run_instance: Arc<RwLock<Option<String>>>,
+) {
+    let runs = match SchemaRead::get_in_progress_workflow_runs(&db).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("recover_in_progress_workflows: load failed: {e}");
+            return;
+        }
+    };
+    if runs.is_empty() {
+        return;
+    }
+    tracing::info!(
+        "Recovering {} in-progress workflow run(s) interrupted by last shutdown",
+        runs.len()
+    );
+
+    for run in runs {
+        match run.role {
+            WorkflowRole::Coordinator => {
+                respawn_coordinator(
+                    db.clone(),
+                    config.clone(),
+                    &run,
+                    kick_state.clone(),
+                    onboarding_state.clone(),
+                    contracts_state.clone(),
+                    dars_state.clone(),
+                    listener_control.clone(),
+                    listener_notify.clone(),
+                    auth.clone(),
+                )
+                .await;
+            }
+            WorkflowRole::Attestor => {
+                refire_attestor(
+                    &run,
+                    &onboarding_trigger,
+                    &kick_trigger,
+                    &contracts_trigger,
+                    &dars_trigger,
+                    &coordinator_pubkey,
+                    &attestor_run_instance,
+                )
+                .await;
+            }
+        }
+    }
+}
+
+/// Re-spawn a coordinator-side workflow that was running when the node
+/// stopped. The original `workflow_runs` row stays in place; the spawned task
+/// uses `WorkflowState::from_persisted` (via `NoiseServer::new`) to resume at
+/// `current_step` instead of restarting from `WaitingForAttestors`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn respawn_coordinator(
+    db: SqlitePool,
+    config: NodeConfig,
+    run: &WorkflowRun,
+    kick_state: web::Data<Arc<handlers::KickWorkflowState>>,
+    onboarding_state: web::Data<Arc<handlers::OnboardingWorkflowState>>,
+    contracts_state: web::Data<Arc<handlers::ContractsWorkflowState>>,
+    dars_state: web::Data<Arc<handlers::DarsWorkflowState>>,
+    listener_control: Arc<RwLock<ListenerControl>>,
+    listener_notify: Arc<Notify>,
+    auth: Arc<RwLock<Option<WorkflowAuth>>>,
+) {
+    let instance = run.instance_name.clone();
+    let kind = run.kind;
+    let current_step = run.current_step.clone();
+    tracing::info!(
+        "Resuming {kind:?} coordinator run {instance} at step {current_step} \
+         ({completed} of {total} attestors completed)",
+        completed = run.completed_attestors.len(),
+        total = run.expected_attestors.len()
+    );
+
+    match kind {
+        WorkflowKind::Onboarding => {
+            let onboarding_config: workflow::OnboardingConfig =
+                match serde_json::from_str(&run.config_json) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!(
+                            "respawn_coordinator: bad onboarding config_json for {instance}: {e}"
+                        );
+                        mark_failed_via_pool(&db, &instance, "Resume failed: invalid config").await;
+                        return;
+                    }
+                };
+            *onboarding_state.invited_peers.write().await = run.expected_attestors.clone();
+            *onboarding_state.status.write().await = OnboardingStatus::InProgress;
+            *onboarding_state.error.write().await = None;
+            let state_ref = onboarding_state.get_ref().clone();
+            let join_handle = tokio::spawn(spawn_onboarding_resume(
+                config,
+                db.clone(),
+                onboarding_config,
+                instance.clone(),
+                state_ref,
+                listener_control,
+                listener_notify,
+            ));
+            *onboarding_state.abort_handle.lock().await = Some(join_handle.abort_handle());
+        }
+        WorkflowKind::Kick => {
+            let kick_config: workflow::KickConfig = match serde_json::from_str(&run.config_json) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!("respawn_coordinator: bad kick config_json for {instance}: {e}");
+                    mark_failed_via_pool(&db, &instance, "Resume failed: invalid config").await;
+                    return;
+                }
+            };
+            *kick_state.invited_peers.write().await = run.expected_attestors.clone();
+            *kick_state.status.write().await = KickStatus::InProgress;
+            *kick_state.error.write().await = None;
+            let state_ref = kick_state.get_ref().clone();
+            let join_handle = tokio::spawn(spawn_kick_resume(
+                config,
+                db.clone(),
+                kick_config,
+                instance.clone(),
+                state_ref,
+                listener_control,
+                listener_notify,
+            ));
+            *kick_state.abort_handle.lock().await = Some(join_handle.abort_handle());
+        }
+        WorkflowKind::Contracts => {
+            let contracts_config: workflow::ContractsConfig =
+                match serde_json::from_str(&run.config_json) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!(
+                            "respawn_coordinator: bad contracts config_json for {instance}: {e}"
+                        );
+                        mark_failed_via_pool(&db, &instance, "Resume failed: invalid config").await;
+                        return;
+                    }
+                };
+            *contracts_state.invited_peers.write().await = run.expected_attestors.clone();
+            *contracts_state.status.write().await = WorkflowProgress::InProgress;
+            *contracts_state.error.write().await = None;
+            let state_ref = contracts_state.get_ref().clone();
+            let auth_snapshot = auth.read().await.clone();
+            let join_handle = tokio::spawn(spawn_contracts_resume(
+                config,
+                db.clone(),
+                contracts_config,
+                instance.clone(),
+                state_ref,
+                listener_control,
+                listener_notify,
+                auth_snapshot,
+            ));
+            *contracts_state.abort_handle.lock().await = Some(join_handle.abort_handle());
+        }
+        WorkflowKind::Dars => {
+            let dars_config: workflow::DarsConfig = match serde_json::from_str(&run.config_json) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!("respawn_coordinator: bad dars config_json for {instance}: {e}");
+                    mark_failed_via_pool(&db, &instance, "Resume failed: invalid config").await;
+                    return;
+                }
+            };
+            *dars_state.invited_peers.write().await = run.expected_attestors.clone();
+            *dars_state.status.write().await = WorkflowProgress::InProgress;
+            *dars_state.error.write().await = None;
+            let state_ref = dars_state.get_ref().clone();
+            let join_handle = tokio::spawn(spawn_dars_resume(
+                config,
+                db.clone(),
+                dars_config,
+                instance.clone(),
+                state_ref,
+                listener_control,
+                listener_notify,
+            ));
+            *dars_state.abort_handle.lock().await = Some(join_handle.abort_handle());
+        }
+    }
+}
+
+async fn spawn_onboarding_resume(
+    config: NodeConfig,
+    db: SqlitePool,
+    onboarding_config: workflow::OnboardingConfig,
+    instance: String,
+    state: Arc<HttpWorkflowState<OnboardingStatus>>,
+    listener_control: Arc<RwLock<ListenerControl>>,
+    listener_notify: Arc<Notify>,
+) {
+    let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
+    let result = workflow::start_coordinator(
+        config,
+        db.clone(),
+        WorkflowType::Onboarding,
+        Some(onboarding_config),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+    guard.resume().await;
+
+    let mut status = state.status.write().await;
+    let mut error = state.error.write().await;
+    match result {
+        Ok(_) => {
+            *status = OnboardingStatus::Completed;
+            tracing::info!("Resumed onboarding workflow {instance} completed");
+            mark_completed_via_pool(&db, &instance).await;
+        }
+        Err(e) => {
+            let msg = format!("{e}");
+            *status = OnboardingStatus::Failed;
+            *error = Some(msg.clone());
+            tracing::error!("Resumed onboarding workflow {instance} failed: {e:#}");
+            mark_failed_via_pool(&db, &instance, &msg).await;
+        }
+    }
+}
+
+async fn spawn_kick_resume(
+    config: NodeConfig,
+    db: SqlitePool,
+    kick_config: workflow::KickConfig,
+    instance: String,
+    state: Arc<HttpWorkflowState<KickStatus>>,
+    listener_control: Arc<RwLock<ListenerControl>>,
+    listener_notify: Arc<Notify>,
+) {
+    let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
+    let result = workflow::start_coordinator(
+        config,
+        db.clone(),
+        WorkflowType::Kick,
+        None,
+        Some(kick_config),
+        None,
+        None,
+        None,
+    )
+    .await;
+    guard.resume().await;
+
+    let mut status = state.status.write().await;
+    let mut error = state.error.write().await;
+    match result {
+        Ok(_) => {
+            *status = KickStatus::Completed;
+            tracing::info!("Resumed kick workflow {instance} completed");
+            mark_completed_via_pool(&db, &instance).await;
+        }
+        Err(e) => {
+            let msg = format!("{e}");
+            *status = KickStatus::Failed;
+            *error = Some(msg.clone());
+            tracing::error!("Resumed kick workflow {instance} failed: {e:#}");
+            mark_failed_via_pool(&db, &instance, &msg).await;
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn spawn_contracts_resume(
+    config: NodeConfig,
+    db: SqlitePool,
+    contracts_config: workflow::ContractsConfig,
+    instance: String,
+    state: Arc<HttpWorkflowState<WorkflowProgress>>,
+    listener_control: Arc<RwLock<ListenerControl>>,
+    listener_notify: Arc<Notify>,
+    auth: Option<WorkflowAuth>,
+) {
+    let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
+    let result = workflow::start_coordinator(
+        config,
+        db.clone(),
+        WorkflowType::Contracts,
+        None,
+        None,
+        Some(contracts_config),
+        None,
+        auth,
+    )
+    .await;
+    guard.resume().await;
+
+    let mut status = state.status.write().await;
+    let mut error = state.error.write().await;
+    match result {
+        Ok(_) => {
+            *status = WorkflowProgress::Completed;
+            tracing::info!("Resumed contracts workflow {instance} completed");
+            mark_completed_via_pool(&db, &instance).await;
+        }
+        Err(e) => {
+            let msg = format!("{e}");
+            *status = WorkflowProgress::Failed;
+            *error = Some(msg.clone());
+            tracing::error!("Resumed contracts workflow {instance} failed: {e:#}");
+            mark_failed_via_pool(&db, &instance, &msg).await;
+        }
+    }
+}
+
+async fn spawn_dars_resume(
+    config: NodeConfig,
+    db: SqlitePool,
+    dars_config: workflow::DarsConfig,
+    instance: String,
+    state: Arc<HttpWorkflowState<WorkflowProgress>>,
+    listener_control: Arc<RwLock<ListenerControl>>,
+    listener_notify: Arc<Notify>,
+) {
+    let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
+    let result = workflow::start_coordinator(
+        config,
+        db.clone(),
+        WorkflowType::Dars,
+        None,
+        None,
+        None,
+        Some(dars_config),
+        None,
+    )
+    .await;
+    guard.resume().await;
+
+    let mut status = state.status.write().await;
+    let mut error = state.error.write().await;
+    match result {
+        Ok(_) => {
+            *status = WorkflowProgress::Completed;
+            tracing::info!("Resumed dars workflow {instance} completed");
+            mark_completed_via_pool(&db, &instance).await;
+        }
+        Err(e) => {
+            let msg = format!("{e}");
+            *status = WorkflowProgress::Failed;
+            *error = Some(msg.clone());
+            tracing::error!("Resumed dars workflow {instance} failed: {e:#}");
+            mark_failed_via_pool(&db, &instance, &msg).await;
+        }
+    }
+}
+
+pub(crate) async fn refire_attestor(
+    run: &WorkflowRun,
+    onboarding_trigger: &Arc<Notify>,
+    kick_trigger: &Arc<Notify>,
+    contracts_trigger: &Arc<Notify>,
+    dars_trigger: &Arc<Notify>,
+    coordinator_pubkey: &Arc<RwLock<Option<String>>>,
+    attestor_run_instance: &Arc<RwLock<Option<String>>>,
+) {
+    let Some(pk) = run.coordinator_pubkey.clone() else {
+        tracing::warn!(
+            "Skipping attestor recover for {}: no coordinator_pubkey persisted",
+            run.instance_name
+        );
+        return;
+    };
+    *coordinator_pubkey.write().await = Some(pk);
+    *attestor_run_instance.write().await = Some(run.instance_name.clone());
+    let trigger = match run.kind {
+        WorkflowKind::Onboarding => onboarding_trigger,
+        WorkflowKind::Kick => kick_trigger,
+        WorkflowKind::Contracts => contracts_trigger,
+        WorkflowKind::Dars => dars_trigger,
+    };
+    trigger.notify_one();
+    tracing::info!(
+        "Re-fired {:?} attestor trigger for resumed run {} (coordinator may be past the \
+         config-bearing command — run will fail if so; remediation: dismiss and re-accept)",
+        run.kind,
+        run.instance_name
+    );
+}
+
+async fn mark_completed_via_pool(db: &SqlitePool, instance_name: &str) {
+    if let Err(e) = set_run_status(db, instance_name, WorkflowProgress::Completed, None).await {
+        tracing::warn!("Failed to mark resumed run {instance_name} completed: {e:#}");
+    }
+}
+
+async fn mark_failed_via_pool(db: &SqlitePool, instance_name: &str, error: &str) {
+    if let Err(e) = set_run_status(
+        db,
+        instance_name,
+        WorkflowProgress::Failed,
+        Some(error.to_string()),
+    )
+    .await
+    {
+        tracing::warn!("Failed to mark resumed run {instance_name} failed: {e:#}");
+    }
+}
+
+async fn set_run_status(
+    db: &SqlitePool,
+    instance_name: &str,
+    status: WorkflowProgress,
+    error: Option<String>,
+) -> Result {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let mut tx = db.begin_transaction().await?;
+    tx.set_workflow_run_status(instance_name, status, error.as_deref(), now)
+        .await?;
+    Commitable::commit(tx).await
 }
 
 impl WorkflowTriggers {
@@ -178,6 +648,131 @@ impl WorkflowTriggers {
 
         let mut invitations = self.pending_invitations.write().await;
         invitations.retain(|i| i.coordinator_pubkey != coordinator_pubkey);
+    }
+
+    /// Cancel any attestor-side workflow_runs we have InProgress whose
+    /// coordinator matches the sender of a CancelInvite. Same authority — the
+    /// coordinator who started the workflow is also the one who's allowed to
+    /// abort it. Used by the CancelInvite listener arm so a single message
+    /// covers both un-accepted invites AND accepted-but-running runs.
+    async fn cancel_attestor_runs_from(&self, coordinator_pubkey: &str) {
+        let runs = match SchemaRead::get_in_progress_workflow_runs(&self.db).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("cancel_attestor_runs_from: load failed: {e}");
+                return;
+            }
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        for run in runs.into_iter().filter(|r| {
+            r.role == WorkflowRole::Attestor
+                && r.coordinator_pubkey.as_deref() == Some(coordinator_pubkey)
+        }) {
+            let mut tx = match self.db.begin_transaction().await {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::warn!("cancel_attestor_runs_from: begin_transaction: {e}");
+                    continue;
+                }
+            };
+            if let Err(e) = tx
+                .set_workflow_run_status(
+                    &run.instance_name,
+                    WorkflowProgress::Cancelled,
+                    Some("Coordinator cancelled the workflow"),
+                    now,
+                )
+                .await
+            {
+                tracing::warn!(
+                    "cancel_attestor_runs_from: update failed for {}: {e}",
+                    run.instance_name
+                );
+                continue;
+            }
+            if let Err(e) = Commitable::commit(tx).await {
+                tracing::warn!(
+                    "cancel_attestor_runs_from: commit failed for {}: {e}",
+                    run.instance_name
+                );
+            } else {
+                tracing::info!(
+                    "Cancelled attestor workflow run {} (coordinator cancelled)",
+                    run.instance_name
+                );
+            }
+        }
+    }
+
+    /// Coordinator-initiated retry: find any Failed attestor rows whose
+    /// `coordinator_pubkey` matches the sender, flip them back to InProgress,
+    /// and fire the per-kind trigger so `start_attestor` re-spins. Same
+    /// authority model as `cancel_attestor_runs_from` — the coordinator who
+    /// started the run is also the one allowed to retry it.
+    async fn retry_attestor_runs_from(&self, coordinator_pubkey: &str) {
+        let runs = match SchemaRead::get_visible_workflow_runs(&self.db).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("retry_attestor_runs_from: load failed: {e}");
+                return;
+            }
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        for run in runs.into_iter().filter(|r| {
+            r.role == WorkflowRole::Attestor
+                && r.status == WorkflowProgress::Failed
+                && r.coordinator_pubkey.as_deref() == Some(coordinator_pubkey)
+        }) {
+            let mut tx = match self.db.begin_transaction().await {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::warn!("retry_attestor_runs_from: begin_transaction: {e}");
+                    continue;
+                }
+            };
+            if let Err(e) = tx
+                .set_workflow_run_status(
+                    &run.instance_name,
+                    WorkflowProgress::InProgress,
+                    None,
+                    now,
+                )
+                .await
+            {
+                tracing::warn!(
+                    "retry_attestor_runs_from: status flip failed for {}: {e}",
+                    run.instance_name
+                );
+                continue;
+            }
+            if let Err(e) = Commitable::commit(tx).await {
+                tracing::warn!(
+                    "retry_attestor_runs_from: commit failed for {}: {e}",
+                    run.instance_name
+                );
+                continue;
+            }
+            refire_attestor(
+                &run,
+                &self.onboarding_trigger,
+                &self.kick_trigger,
+                &self.contracts_trigger,
+                &self.dars_trigger,
+                &self.coordinator_pubkey,
+                &self.attestor_run_instance,
+            )
+            .await;
+            tracing::info!(
+                "Re-fired attestor workflow run {} (coordinator retried)",
+                run.instance_name
+            );
+        }
     }
 }
 
@@ -294,6 +889,7 @@ pub async fn start_server(
     let contracts_trigger = Arc::new(Notify::new());
     let dars_trigger = Arc::new(Notify::new());
     let coordinator_pubkey = Arc::new(RwLock::new(None));
+    let attestor_run_instance = Arc::new(RwLock::new(None));
     let persisted_invitations = db.get_all_pending_invitations().await.unwrap_or_else(|e| {
         tracing::warn!("Failed to load persisted pending invitations: {e}");
         Vec::new()
@@ -317,6 +913,7 @@ pub async fn start_server(
         contracts_trigger: contracts_trigger.clone(),
         dars_trigger: dars_trigger.clone(),
         coordinator_pubkey: coordinator_pubkey.clone(),
+        attestor_run_instance: attestor_run_instance.clone(),
         pending_invitations: pending_invitations.clone(),
         auth,
         token_validator,
@@ -331,6 +928,29 @@ pub async fn start_server(
     let contracts_state = web::Data::new(Arc::new(handlers::ContractsWorkflowState::new()));
     let dars_state = web::Data::new(Arc::new(handlers::DarsWorkflowState::new()));
 
+    // Boot-time workflow recovery. For any `workflow_runs` row that was
+    // InProgress when we shut down, re-spawn the coordinator task (which
+    // resumes at the persisted `current_step` via `WorkflowState::from_persisted`)
+    // or re-fire the attestor trigger so its listener picks the run back up.
+    recover_in_progress_workflows(
+        db.clone(),
+        config.clone(),
+        kick_state.clone(),
+        onboarding_state.clone(),
+        contracts_state.clone(),
+        dars_state.clone(),
+        listener_control.clone(),
+        listener_notify.clone(),
+        app_state.auth.clone(),
+        onboarding_trigger.clone(),
+        kick_trigger.clone(),
+        contracts_trigger.clone(),
+        dars_trigger.clone(),
+        coordinator_pubkey.clone(),
+        attestor_run_instance.clone(),
+    )
+    .await;
+
     // Start heartbeat background task (pings peers and listens for invites)
     let heartbeat_config = config.clone();
     let heartbeat_db = db.clone();
@@ -343,6 +963,12 @@ pub async fn start_server(
         synchronizer: config.synchronizer().to_string(),
         db: db.clone(),
         party_credentials: party_credentials.clone(),
+        onboarding_trigger: onboarding_trigger.clone(),
+        kick_trigger: kick_trigger.clone(),
+        contracts_trigger: contracts_trigger.clone(),
+        dars_trigger: dars_trigger.clone(),
+        coordinator_pubkey: coordinator_pubkey.clone(),
+        attestor_run_instance: attestor_run_instance.clone(),
     };
     tokio::spawn(async move {
         run_heartbeat(
@@ -363,6 +989,7 @@ pub async fn start_server(
     let onboarding_attestor_notify = listener_notify.clone();
     let onboarding_attestor_state = onboarding_state.clone();
     let onboarding_coordinator_pubkey = coordinator_pubkey.clone();
+    let onboarding_attestor_run_instance = attestor_run_instance.clone();
     tokio::spawn(async move {
         run_onboarding_attestor_listener(
             onboarding_attestor_config,
@@ -372,6 +999,7 @@ pub async fn start_server(
             onboarding_attestor_state,
             onboarding_trigger,
             onboarding_coordinator_pubkey,
+            onboarding_attestor_run_instance,
         )
         .await;
     });
@@ -383,6 +1011,7 @@ pub async fn start_server(
     let kick_attestor_notify = listener_notify.clone();
     let kick_attestor_state = kick_state.clone();
     let kick_coordinator_pubkey = coordinator_pubkey.clone();
+    let kick_attestor_run_instance = attestor_run_instance.clone();
     tokio::spawn(async move {
         run_kick_attestor_listener(
             kick_attestor_config,
@@ -392,6 +1021,7 @@ pub async fn start_server(
             kick_attestor_state,
             kick_trigger,
             kick_coordinator_pubkey,
+            kick_attestor_run_instance,
         )
         .await;
     });
@@ -403,6 +1033,7 @@ pub async fn start_server(
     let contracts_attestor_notify = listener_notify.clone();
     let contracts_attestor_state = contracts_state.clone();
     let contracts_coordinator_pubkey = coordinator_pubkey.clone();
+    let contracts_attestor_run_instance = attestor_run_instance.clone();
     tokio::spawn(async move {
         run_contracts_attestor_listener(
             contracts_attestor_config,
@@ -412,6 +1043,7 @@ pub async fn start_server(
             contracts_attestor_state,
             contracts_trigger,
             contracts_coordinator_pubkey,
+            contracts_attestor_run_instance,
         )
         .await;
     });
@@ -423,6 +1055,7 @@ pub async fn start_server(
     let dars_attestor_notify = listener_notify.clone();
     let dars_attestor_state = dars_state.clone();
     let dars_coordinator_pubkey = coordinator_pubkey.clone();
+    let dars_attestor_run_instance = attestor_run_instance.clone();
     tokio::spawn(async move {
         run_dars_attestor_listener(
             dars_attestor_config,
@@ -432,6 +1065,7 @@ pub async fn start_server(
             dars_attestor_state,
             dars_trigger,
             dars_coordinator_pubkey,
+            dars_attestor_run_instance,
         )
         .await;
     });
@@ -536,6 +1170,9 @@ pub async fn start_server(
             .service(handlers::start_dars)
             .service(handlers::get_dars_status)
             .service(handlers::cancel_dars)
+            .service(handlers::list_workflows)
+            .service(handlers::dismiss_workflow)
+            .service(handlers::retry_workflow)
             .service(handlers::get_key_status)
             .service(handlers::get_invitations)
             .service(handlers::accept_invitation)
@@ -899,10 +1536,26 @@ async fn handle_incoming_connection(
                         }
                         MessageType::CancelInvite => {
                             tracing::info!(
-                                "Received CancelInvite, removing pending invitations from sender"
+                                "Received CancelInvite, dropping pending invites + cancelling \
+                                 any in-flight attestor runs from sender"
                             );
                             if let Some(ref pubkey) = peer_pubkey_hex {
                                 triggers.drop_invitations_from(pubkey).await;
+                                triggers.cancel_attestor_runs_from(pubkey).await;
+                            }
+                            let ack = Message::new_empty(MessageType::Ack);
+                            return Ok(Response::builder()
+                                .status(StatusCode::OK)
+                                .body(Body::from(ack.to_bytes()))
+                                .unwrap());
+                        }
+                        MessageType::RetryWorkflow => {
+                            tracing::info!(
+                                "Received RetryWorkflow, retrying any Failed attestor runs from \
+                                 sender"
+                            );
+                            if let Some(ref pubkey) = peer_pubkey_hex {
+                                triggers.retry_attestor_runs_from(pubkey).await;
                             }
                             let ack = Message::new_empty(MessageType::Ack);
                             return Ok(Response::builder()
@@ -986,7 +1639,51 @@ async fn run_peer_ping_loop(
     }
 }
 
+/// Take the attestor-side `instance_name` slot and flip the matching
+/// `workflow_runs` row to a terminal status. No-op if no slot was set (the
+/// attestor row creation may have failed; we don't want to over-write
+/// unrelated state).
+async fn finalize_attestor_run(
+    db: &SqlitePool,
+    instance_slot: &Arc<RwLock<Option<String>>>,
+    success: bool,
+    error_msg: Option<String>,
+) {
+    let instance = {
+        let mut slot = instance_slot.write().await;
+        slot.take()
+    };
+    let Some(instance) = instance else { return };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let mut tx = match db.begin_transaction().await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!("finalize_attestor_run: begin_transaction failed: {e}");
+            return;
+        }
+    };
+    let status = if success {
+        WorkflowProgress::Completed
+    } else {
+        WorkflowProgress::Failed
+    };
+    if let Err(e) = tx
+        .set_workflow_run_status(&instance, status, error_msg.as_deref(), now)
+        .await
+    {
+        tracing::warn!("finalize_attestor_run: update failed: {e}");
+        return;
+    }
+    if let Err(e) = Commitable::commit(tx).await {
+        tracing::warn!("finalize_attestor_run: commit failed: {e}");
+    }
+}
+
 /// Background task that starts onboarding attestor workflow when triggered by an invite
+#[allow(clippy::too_many_arguments)]
 async fn run_onboarding_attestor_listener(
     config: NodeConfig,
     db: SqlitePool,
@@ -995,6 +1692,7 @@ async fn run_onboarding_attestor_listener(
     onboarding_state: web::Data<Arc<handlers::OnboardingWorkflowState>>,
     onboarding_trigger: Arc<Notify>,
     coordinator_pubkey: Arc<RwLock<Option<String>>>,
+    attestor_run_instance: Arc<RwLock<Option<String>>>,
 ) {
     loop {
         // Wait for trigger
@@ -1051,9 +1749,20 @@ async fn run_onboarding_attestor_listener(
             types::ListenerPauseGuard::pause(listener_control.clone(), listener_notify.clone())
                 .await;
 
-        // Start attestor workflow
+        // Start attestor workflow. Read the attestor-side workflow_runs row's
+        // primary key so workflow_artifacts writes satisfy the FK back to it.
+        let local_instance = attestor_run_instance.read().await.clone();
+        let Some(local_instance) = local_instance else {
+            tracing::error!(
+                "Attestor trigger fired without an attestor_run_instance; skipping run"
+            );
+            guard.resume().await;
+            continue;
+        };
         let workflow_config = config.clone();
-        let result = workflow::start_attestor(workflow_config, coordinator).await;
+        let result =
+            workflow::start_attestor(workflow_config, coordinator, db.clone(), local_instance)
+                .await;
 
         guard.resume().await;
 
@@ -1061,6 +1770,8 @@ async fn run_onboarding_attestor_listener(
         let mut status = onboarding_state.status.write().await;
         let mut error = onboarding_state.error.write().await;
 
+        let success = result.is_ok();
+        let err_msg = result.as_ref().err().map(|e| format!("{e}"));
         match result {
             Ok(()) => {
                 *status = types::OnboardingStatus::Completed;
@@ -1072,10 +1783,14 @@ async fn run_onboarding_attestor_listener(
                 tracing::error!("Onboarding attestor workflow failed: {e}");
             }
         }
+        drop(status);
+        drop(error);
+        finalize_attestor_run(&db, &attestor_run_instance, success, err_msg).await;
     }
 }
 
 /// Background task that starts kick attestor workflow when triggered by an invite
+#[allow(clippy::too_many_arguments)]
 async fn run_kick_attestor_listener(
     config: NodeConfig,
     db: SqlitePool,
@@ -1084,6 +1799,7 @@ async fn run_kick_attestor_listener(
     kick_state: web::Data<Arc<handlers::KickWorkflowState>>,
     kick_trigger: Arc<Notify>,
     coordinator_pubkey: Arc<RwLock<Option<String>>>,
+    attestor_run_instance: Arc<RwLock<Option<String>>>,
 ) {
     loop {
         // Wait for trigger
@@ -1139,9 +1855,19 @@ async fn run_kick_attestor_listener(
             types::ListenerPauseGuard::pause(listener_control.clone(), listener_notify.clone())
                 .await;
 
-        // Start kick attestor workflow
+        // Start kick attestor workflow.
+        let local_instance = attestor_run_instance.read().await.clone();
+        let Some(local_instance) = local_instance else {
+            tracing::error!(
+                "Kick attestor trigger fired without an attestor_run_instance; skipping run"
+            );
+            guard.resume().await;
+            continue;
+        };
         let workflow_config = config.clone();
-        let result = workflow::start_attestor(workflow_config, coordinator).await;
+        let result =
+            workflow::start_attestor(workflow_config, coordinator, db.clone(), local_instance)
+                .await;
 
         guard.resume().await;
 
@@ -1149,6 +1875,8 @@ async fn run_kick_attestor_listener(
         let mut status = kick_state.status.write().await;
         let mut error = kick_state.error.write().await;
 
+        let success = result.is_ok();
+        let err_msg = result.as_ref().err().map(|e| format!("{e}"));
         match result {
             Ok(()) => {
                 *status = types::KickStatus::Completed;
@@ -1160,10 +1888,14 @@ async fn run_kick_attestor_listener(
                 tracing::error!("Kick attestor workflow failed: {e}");
             }
         }
+        drop(status);
+        drop(error);
+        finalize_attestor_run(&db, &attestor_run_instance, success, err_msg).await;
     }
 }
 
 /// Background task that starts contracts attestor workflow when triggered by an invite
+#[allow(clippy::too_many_arguments)]
 async fn run_contracts_attestor_listener(
     config: NodeConfig,
     db: SqlitePool,
@@ -1172,6 +1904,7 @@ async fn run_contracts_attestor_listener(
     contracts_state: web::Data<Arc<handlers::ContractsWorkflowState>>,
     contracts_trigger: Arc<Notify>,
     coordinator_pubkey: Arc<RwLock<Option<String>>>,
+    attestor_run_instance: Arc<RwLock<Option<String>>>,
 ) {
     loop {
         // Wait for trigger
@@ -1227,9 +1960,19 @@ async fn run_contracts_attestor_listener(
             types::ListenerPauseGuard::pause(listener_control.clone(), listener_notify.clone())
                 .await;
 
-        // Start contracts attestor workflow
+        // Start contracts attestor workflow.
+        let local_instance = attestor_run_instance.read().await.clone();
+        let Some(local_instance) = local_instance else {
+            tracing::error!(
+                "Contracts attestor trigger fired without an attestor_run_instance; skipping run"
+            );
+            guard.resume().await;
+            continue;
+        };
         let workflow_config = config.clone();
-        let result = workflow::start_attestor(workflow_config, coordinator).await;
+        let result =
+            workflow::start_attestor(workflow_config, coordinator, db.clone(), local_instance)
+                .await;
 
         guard.resume().await;
 
@@ -1237,6 +1980,8 @@ async fn run_contracts_attestor_listener(
         let mut status = contracts_state.status.write().await;
         let mut error = contracts_state.error.write().await;
 
+        let success = result.is_ok();
+        let err_msg = result.as_ref().err().map(|e| format!("{e}"));
         match result {
             Ok(()) => {
                 *status = types::WorkflowProgress::Completed;
@@ -1248,10 +1993,14 @@ async fn run_contracts_attestor_listener(
                 tracing::error!("Contracts attestor workflow failed: {e}");
             }
         }
+        drop(status);
+        drop(error);
+        finalize_attestor_run(&db, &attestor_run_instance, success, err_msg).await;
     }
 }
 
 /// Background task that starts DARs attestor workflow when triggered by an invite
+#[allow(clippy::too_many_arguments)]
 async fn run_dars_attestor_listener(
     config: NodeConfig,
     db: SqlitePool,
@@ -1260,6 +2009,7 @@ async fn run_dars_attestor_listener(
     dars_state: web::Data<Arc<handlers::DarsWorkflowState>>,
     dars_trigger: Arc<Notify>,
     coordinator_pubkey: Arc<RwLock<Option<String>>>,
+    attestor_run_instance: Arc<RwLock<Option<String>>>,
 ) {
     loop {
         // Wait for trigger
@@ -1315,9 +2065,19 @@ async fn run_dars_attestor_listener(
             types::ListenerPauseGuard::pause(listener_control.clone(), listener_notify.clone())
                 .await;
 
-        // Start DARs attestor workflow
+        // Start DARs attestor workflow.
+        let local_instance = attestor_run_instance.read().await.clone();
+        let Some(local_instance) = local_instance else {
+            tracing::error!(
+                "DARs attestor trigger fired without an attestor_run_instance; skipping run"
+            );
+            guard.resume().await;
+            continue;
+        };
         let workflow_config = config.clone();
-        let result = workflow::start_attestor(workflow_config, coordinator).await;
+        let result =
+            workflow::start_attestor(workflow_config, coordinator, db.clone(), local_instance)
+                .await;
 
         guard.resume().await;
 
@@ -1325,6 +2085,8 @@ async fn run_dars_attestor_listener(
         let mut status = dars_state.status.write().await;
         let mut error = dars_state.error.write().await;
 
+        let success = result.is_ok();
+        let err_msg = result.as_ref().err().map(|e| format!("{e}"));
         match result {
             Ok(()) => {
                 *status = types::WorkflowProgress::Completed;
@@ -1336,6 +2098,9 @@ async fn run_dars_attestor_listener(
                 tracing::error!("DARs attestor workflow failed: {e}");
             }
         }
+        drop(status);
+        drop(error);
+        finalize_attestor_run(&db, &attestor_run_instance, success, err_msg).await;
     }
 }
 

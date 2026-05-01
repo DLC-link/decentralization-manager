@@ -1,5 +1,6 @@
 use std::{path::Path, str::FromStr, time::Duration};
 
+use anyhow::Context;
 use sqlx::{
     SqlitePool,
     migrate::Migrator,
@@ -7,9 +8,11 @@ use sqlx::{
 };
 
 use super::{
+    crypto,
     rows::{
-        ChainAuditCacheRow, DecPartyContractRow, DecPartyParticipantRow, DecPartyRow,
-        GovernanceAuditRow, PartyCredentialsRow, PeerRow, PendingInvitationRow,
+        ChainAuditCacheRow, DecPartyContractRow, DecPartyIdentityRow, DecPartyParticipantRow,
+        DecPartyRow, GovernanceAuditRow, PartyCredentialsRow, PeerRow, PendingInvitationRow,
+        WorkflowArtifactRow, WorkflowRunRow,
     },
     schema::{Commitable, SchemaRead, SchemaWrite},
 };
@@ -17,7 +20,7 @@ use crate::{
     config::{PartyCredentials, Peer},
     error::Result,
     participant_id::CantonId,
-    server::PendingInvitation,
+    server::{PendingInvitation, WorkflowKind, WorkflowProgress, WorkflowRole, WorkflowRun},
 };
 
 pub static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
@@ -310,6 +313,135 @@ impl SchemaRead for SqlitePool {
         .await?;
 
         rows.into_iter().map(|r| r.into_domain()).collect()
+    }
+
+    async fn get_in_progress_workflow_runs(&self) -> Result<Vec<WorkflowRun>> {
+        let rows = sqlx::query_as::<_, WorkflowRunRow>(
+            "SELECT * FROM workflow_runs WHERE status = 'inprogress' ORDER BY created_at ASC",
+        )
+        .fetch_all(self)
+        .await?;
+
+        rows.into_iter().map(|r| r.into_domain()).collect()
+    }
+
+    async fn get_workflow_run(&self, instance_name: &str) -> Result<Option<WorkflowRun>> {
+        let row = sqlx::query_as::<_, WorkflowRunRow>(
+            "SELECT * FROM workflow_runs WHERE instance_name = ?",
+        )
+        .bind(instance_name)
+        .fetch_optional(self)
+        .await?;
+
+        row.map(|r| r.into_domain()).transpose()
+    }
+
+    async fn get_active_workflow_run(
+        &self,
+        kind: WorkflowKind,
+        role: WorkflowRole,
+    ) -> Result<Option<WorkflowRun>> {
+        let row = sqlx::query_as::<_, WorkflowRunRow>(
+            "SELECT * FROM workflow_runs \
+             WHERE kind = ? AND role = ? AND status = 'inprogress' \
+             LIMIT 1",
+        )
+        .bind(kind.as_str())
+        .bind(role.as_str())
+        .fetch_optional(self)
+        .await?;
+
+        row.map(|r| r.into_domain()).transpose()
+    }
+
+    async fn get_visible_workflow_runs(&self) -> Result<Vec<WorkflowRun>> {
+        let rows = sqlx::query_as::<_, WorkflowRunRow>(
+            "SELECT * FROM workflow_runs \
+             WHERE status = 'inprogress' OR dismissed = 0 \
+             ORDER BY updated_at DESC",
+        )
+        .fetch_all(self)
+        .await?;
+
+        rows.into_iter().map(|r| r.into_domain()).collect()
+    }
+
+    async fn read_workflow_artifact(
+        &self,
+        instance_name: &str,
+        artifact_kind: &str,
+        attestor: Option<&str>,
+    ) -> Result<Option<Vec<u8>>> {
+        let row = sqlx::query_as::<_, WorkflowArtifactRow>(
+            "SELECT * FROM workflow_artifacts \
+             WHERE instance_name = ? AND artifact_kind = ? AND attestor_id = ?",
+        )
+        .bind(instance_name)
+        .bind(artifact_kind)
+        .bind(attestor.unwrap_or(""))
+        .fetch_optional(self)
+        .await?;
+
+        row.map(|r| crypto::decrypt_bytes(&r.payload)).transpose()
+    }
+
+    async fn list_workflow_artifacts(
+        &self,
+        instance_name: &str,
+        artifact_kind: &str,
+    ) -> Result<Vec<(String, Vec<u8>)>> {
+        let rows = sqlx::query_as::<_, WorkflowArtifactRow>(
+            "SELECT * FROM workflow_artifacts \
+             WHERE instance_name = ? AND artifact_kind = ? \
+             ORDER BY attestor_id ASC",
+        )
+        .bind(instance_name)
+        .bind(artifact_kind)
+        .fetch_all(self)
+        .await?;
+
+        rows.into_iter()
+            .map(|r| Ok((r.attestor_id, crypto::decrypt_bytes(&r.payload)?)))
+            .collect()
+    }
+
+    async fn read_dec_party_identity(
+        &self,
+        dec_party_id: &str,
+        artifact_kind: &str,
+        attestor_id: &str,
+    ) -> Result<Option<Vec<u8>>> {
+        let row = sqlx::query_as::<_, DecPartyIdentityRow>(
+            "SELECT * FROM dec_party_identity \
+             WHERE dec_party_id = ? AND artifact_kind = ? AND attestor_id = ?",
+        )
+        .bind(dec_party_id)
+        .bind(artifact_kind)
+        .bind(attestor_id)
+        .fetch_optional(self)
+        .await?;
+
+        row.map(|r| crypto::decrypt_bytes(&r.payload)).transpose()
+    }
+
+    async fn list_dec_party_identity(
+        &self,
+        dec_party_id: &str,
+        artifact_kind: &str,
+    ) -> Result<Vec<(String, Vec<u8>)>> {
+        let rows = sqlx::query_as::<_, DecPartyIdentityRow>(
+            "SELECT * FROM dec_party_identity \
+             WHERE dec_party_id = ? AND artifact_kind = ? \
+             ORDER BY attestor_id ASC",
+        )
+        .bind(dec_party_id)
+        .bind(artifact_kind)
+        .fetch_all(self)
+        .await?;
+
+        rows.into_iter()
+            .map(|r| Ok((r.attestor_id, crypto::decrypt_bytes(&r.payload)?)))
+            .collect()
     }
 }
 
@@ -658,6 +790,237 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
 
         Ok(())
     }
+
+    async fn upsert_workflow_run(&mut self, run: &WorkflowRun) -> Result {
+        let row = WorkflowRunRow::from_domain(run)?;
+
+        // ON CONFLICT(instance_name) so re-saving the same run (resume,
+        // step advance, etc.) replaces in place. Conflicts on the partial
+        // unique index `idx_workflow_runs_inprogress_per_kind` propagate as
+        // an error — that's what enforces "one InProgress run per (kind, role)".
+        sqlx::query(
+            r"
+            INSERT INTO workflow_runs (
+                instance_name,
+                kind,
+                role,
+                status,
+                current_step,
+                step_index,
+                step_total,
+                config_json,
+                coordinator_pubkey,
+                expected_attestors_json,
+                completed_attestors_json,
+                dec_party_id,
+                error,
+                dismissed,
+                created_at,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(instance_name) DO UPDATE SET
+                kind                     = excluded.kind,
+                role                     = excluded.role,
+                status                   = excluded.status,
+                current_step             = excluded.current_step,
+                step_index               = excluded.step_index,
+                step_total               = excluded.step_total,
+                config_json              = excluded.config_json,
+                coordinator_pubkey       = excluded.coordinator_pubkey,
+                expected_attestors_json  = excluded.expected_attestors_json,
+                completed_attestors_json = excluded.completed_attestors_json,
+                dec_party_id             = excluded.dec_party_id,
+                error                    = excluded.error,
+                dismissed                = excluded.dismissed,
+                updated_at               = excluded.updated_at
+            ",
+        )
+        .bind(&row.instance_name)
+        .bind(&row.kind)
+        .bind(&row.role)
+        .bind(&row.status)
+        .bind(&row.current_step)
+        .bind(row.step_index)
+        .bind(row.step_total)
+        .bind(&row.config_json)
+        .bind(&row.coordinator_pubkey)
+        .bind(&row.expected_attestors_json)
+        .bind(&row.completed_attestors_json)
+        .bind(&row.dec_party_id)
+        .bind(&row.error)
+        .bind(row.dismissed)
+        .bind(row.created_at)
+        .bind(row.updated_at)
+        .execute(&mut **self)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn update_workflow_run_step(
+        &mut self,
+        instance_name: &str,
+        current_step: &str,
+        step_index: i64,
+        completed_attestors: &[CantonId],
+        updated_at: i64,
+    ) -> Result {
+        let completed_json =
+            serde_json::to_string(completed_attestors).context("encode completed_attestors")?;
+
+        sqlx::query(
+            r"
+            UPDATE workflow_runs
+            SET current_step = ?,
+                step_index = ?,
+                completed_attestors_json = ?,
+                updated_at = ?
+            WHERE instance_name = ?
+            ",
+        )
+        .bind(current_step)
+        .bind(step_index)
+        .bind(&completed_json)
+        .bind(updated_at)
+        .bind(instance_name)
+        .execute(&mut **self)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn set_workflow_run_status(
+        &mut self,
+        instance_name: &str,
+        status: WorkflowProgress,
+        error: Option<&str>,
+        updated_at: i64,
+    ) -> Result {
+        let status_str = match status {
+            WorkflowProgress::Idle => "idle",
+            WorkflowProgress::InProgress => "inprogress",
+            WorkflowProgress::Completed => "completed",
+            WorkflowProgress::Failed => "failed",
+            WorkflowProgress::Cancelled => "cancelled",
+        };
+
+        sqlx::query(
+            r"
+            UPDATE workflow_runs
+            SET status = ?,
+                error = ?,
+                updated_at = ?
+            WHERE instance_name = ?
+            ",
+        )
+        .bind(status_str)
+        .bind(error)
+        .bind(updated_at)
+        .bind(instance_name)
+        .execute(&mut **self)
+        .await?;
+
+        // Clean up `workflow_artifacts` rows when the run reaches a clean
+        // terminal state — they're transient working data, the long-lived
+        // identity material lives in `dec_party_identity`. Failed runs keep
+        // their artefacts so the operator can post-mortem before dismissing.
+        if matches!(
+            status,
+            WorkflowProgress::Completed | WorkflowProgress::Cancelled
+        ) {
+            sqlx::query("DELETE FROM workflow_artifacts WHERE instance_name = ?")
+                .bind(instance_name)
+                .execute(&mut **self)
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn dismiss_workflow_run(&mut self, instance_name: &str) -> Result {
+        sqlx::query(
+            r"
+            UPDATE workflow_runs
+            SET dismissed = 1
+            WHERE instance_name = ? AND status != 'inprogress'
+            ",
+        )
+        .bind(instance_name)
+        .execute(&mut **self)
+        .await?;
+
+        // Drop any leftover artefacts. Completed/Cancelled runs already had
+        // their artefacts cleared at terminal time; Failed runs kept theirs
+        // for post-mortem and now release them on dismiss.
+        sqlx::query("DELETE FROM workflow_artifacts WHERE instance_name = ?")
+            .bind(instance_name)
+            .execute(&mut **self)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn write_workflow_artifact(
+        &mut self,
+        instance_name: &str,
+        artifact_kind: &str,
+        attestor: Option<&str>,
+        payload: &[u8],
+    ) -> Result {
+        let encrypted = crypto::encrypt_bytes(payload)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        sqlx::query(
+            r"
+            INSERT OR REPLACE INTO workflow_artifacts
+                (instance_name, artifact_kind, attestor_id, payload, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            ",
+        )
+        .bind(instance_name)
+        .bind(artifact_kind)
+        .bind(attestor.unwrap_or(""))
+        .bind(&encrypted)
+        .bind(now)
+        .execute(&mut **self)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn write_dec_party_identity(
+        &mut self,
+        dec_party_id: &str,
+        artifact_kind: &str,
+        attestor_id: &str,
+        payload: &[u8],
+    ) -> Result {
+        let encrypted = crypto::encrypt_bytes(payload)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        sqlx::query(
+            r"
+            INSERT OR REPLACE INTO dec_party_identity
+                (dec_party_id, artifact_kind, attestor_id, payload, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            ",
+        )
+        .bind(dec_party_id)
+        .bind(artifact_kind)
+        .bind(attestor_id)
+        .bind(&encrypted)
+        .bind(now)
+        .execute(&mut **self)
+        .await?;
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -672,6 +1035,10 @@ mod tests {
         },
         error::Result,
         participant_id::CantonId,
+        server::{
+            InvitationType, PendingInvitation, WorkflowKind, WorkflowProgress, WorkflowRole,
+            WorkflowRun,
+        },
     };
 
     use super::MIGRATOR;
@@ -1339,8 +1706,6 @@ mod tests {
 
     #[sqlx::test(migrator = "MIGRATOR")]
     async fn test_pending_invitations_roundtrip(pool: SqlitePool) -> Result {
-        use crate::server::{InvitationType, PendingInvitation};
-
         assert!(pool.get_all_pending_invitations().await?.is_empty());
 
         let inv_a = PendingInvitation {
@@ -1350,7 +1715,10 @@ mod tests {
             coordinator_name: None,
             received_at: 1000,
             prefix: Some("my-party".to_string()),
-            participants: vec!["node1::1220aa".to_string(), "node2::1220bb".to_string()],
+            participants: vec![
+                CantonId::parse(&format!("node1::{TEST_NS}")).unwrap(),
+                CantonId::parse(&format!("node2::{TEST_NS}")).unwrap(),
+            ],
             dar_filenames: Vec::new(),
         };
         let inv_b = PendingInvitation {
@@ -1429,6 +1797,177 @@ mod tests {
         let entries = pool.get_governance_audit(&party_b, 50, 0).await?;
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].event_type, "confirm");
+
+        Ok(())
+    }
+
+    // ====================================================================
+    // Workflow runs + artefacts
+    // ====================================================================
+
+    fn test_run(instance: &str, kind: &str, role: &str) -> WorkflowRun {
+        WorkflowRun {
+            instance_name: instance.to_string(),
+            kind: kind.parse().unwrap(),
+            role: role.parse().unwrap(),
+            status: WorkflowProgress::InProgress,
+            current_step: "WaitingForAttestors".to_string(),
+            step_index: 0,
+            step_total: 7,
+            config_json: r#"{"foo":"bar"}"#.to_string(),
+            coordinator_pubkey: Some("aaaa".to_string()),
+            coordinator_name: None,
+            expected_attestors: vec![
+                CantonId::parse(&format!("a::{TEST_NS}")).unwrap(),
+                CantonId::parse(&format!("b::{TEST_NS}")).unwrap(),
+            ],
+            completed_attestors: Vec::new(),
+            dec_party_id: None,
+            error: None,
+            dismissed: false,
+            created_at: 1000,
+            updated_at: 1000,
+        }
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_workflow_runs_lifecycle(pool: SqlitePool) -> Result {
+        let run = test_run("party-a-creation", "Onboarding", "Coordinator");
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_workflow_run(&run).await?;
+        Commitable::commit(tx).await?;
+
+        let active = pool
+            .get_active_workflow_run(WorkflowKind::Onboarding, WorkflowRole::Coordinator)
+            .await?;
+        assert!(active.is_some());
+
+        // Advance step
+        let mut tx = pool.begin_transaction().await?;
+        let completed = vec![CantonId::parse(&format!("a::{TEST_NS}")).unwrap()];
+        tx.update_workflow_run_step(&run.instance_name, "SignDns", 3, &completed, 2000)
+            .await?;
+        Commitable::commit(tx).await?;
+
+        let loaded = pool.get_workflow_run(&run.instance_name).await?.unwrap();
+        assert_eq!(loaded.current_step, "SignDns");
+        assert_eq!(loaded.step_index, 3);
+        assert_eq!(loaded.completed_attestors, completed);
+
+        // Seed an artefact so we can verify the terminal-state cleanup wipes it.
+        let mut tx = pool.begin_transaction().await?;
+        tx.write_workflow_artifact(&run.instance_name, "dns_proto", None, b"some-bytes")
+            .await?;
+        Commitable::commit(tx).await?;
+
+        // Mark completed → workflow_artifacts for this instance should drop.
+        let mut tx = pool.begin_transaction().await?;
+        tx.set_workflow_run_status(&run.instance_name, WorkflowProgress::Completed, None, 3000)
+            .await?;
+        Commitable::commit(tx).await?;
+
+        let leftover = pool
+            .read_workflow_artifact(&run.instance_name, "dns_proto", None)
+            .await?;
+        assert!(
+            leftover.is_none(),
+            "workflow_artifacts should be cleaned up on terminal status"
+        );
+
+        // Visible feed: still here because not dismissed.
+        let visible = pool.get_visible_workflow_runs().await?;
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].status, WorkflowProgress::Completed);
+
+        // Dismiss → vanishes from feed.
+        let mut tx = pool.begin_transaction().await?;
+        tx.dismiss_workflow_run(&run.instance_name).await?;
+        Commitable::commit(tx).await?;
+
+        let visible = pool.get_visible_workflow_runs().await?;
+        assert!(visible.is_empty());
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_workflow_runs_unique_inprogress_per_kind(pool: SqlitePool) -> Result {
+        let mut a = test_run("alpha", "Onboarding", "Coordinator");
+        let mut b = test_run("beta", "Onboarding", "Coordinator");
+
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_workflow_run(&a).await?;
+        Commitable::commit(tx).await?;
+
+        // A second InProgress run of the same (kind, role) must fail.
+        let mut tx = pool.begin_transaction().await?;
+        let err = tx.upsert_workflow_run(&b).await;
+        assert!(err.is_err(), "expected unique-partial-index violation");
+        // tx is poisoned — drop it
+        drop(tx);
+
+        // Once A is terminal, B can start.
+        let mut tx = pool.begin_transaction().await?;
+        tx.set_workflow_run_status(&a.instance_name, WorkflowProgress::Completed, None, 2000)
+            .await?;
+        Commitable::commit(tx).await?;
+
+        a.status = WorkflowProgress::Completed;
+        b.status = WorkflowProgress::InProgress;
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_workflow_run(&b).await?;
+        Commitable::commit(tx).await?;
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_workflow_artifacts_roundtrip_and_cascade(pool: SqlitePool) -> Result {
+        let run = test_run("art-test", "Onboarding", "Coordinator");
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_workflow_run(&run).await?;
+        // Shared artefact (no attestor).
+        tx.write_workflow_artifact(&run.instance_name, "dns_proto", None, b"shared-proto-bytes")
+            .await?;
+        // Per-attestor artefacts.
+        tx.write_workflow_artifact(
+            &run.instance_name,
+            "signed_dns_proposal",
+            Some("a::1220aa"),
+            b"sig-from-a",
+        )
+        .await?;
+        tx.write_workflow_artifact(
+            &run.instance_name,
+            "signed_dns_proposal",
+            Some("b::1220bb"),
+            b"sig-from-b",
+        )
+        .await?;
+        Commitable::commit(tx).await?;
+
+        let proto = pool
+            .read_workflow_artifact(&run.instance_name, "dns_proto", None)
+            .await?
+            .unwrap();
+        assert_eq!(proto, b"shared-proto-bytes");
+
+        let listed = pool
+            .list_workflow_artifacts(&run.instance_name, "signed_dns_proposal")
+            .await?;
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].0, "a::1220aa");
+        assert_eq!(listed[0].1, b"sig-from-a");
+
+        // CASCADE: deleting the run drops the artefacts.
+        sqlx::query("DELETE FROM workflow_runs WHERE instance_name = ?")
+            .bind(&run.instance_name)
+            .execute(&pool)
+            .await?;
+        let listed = pool
+            .list_workflow_artifacts(&run.instance_name, "signed_dns_proposal")
+            .await?;
+        assert!(listed.is_empty());
 
         Ok(())
     }

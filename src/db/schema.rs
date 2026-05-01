@@ -6,7 +6,7 @@ use crate::{
     config::{PartyCredentials, Peer},
     error::Result,
     participant_id::CantonId,
-    server::PendingInvitation,
+    server::{PendingInvitation, WorkflowKind, WorkflowProgress, WorkflowRole, WorkflowRun},
 };
 
 /// Read operations on the database
@@ -82,6 +82,62 @@ pub trait SchemaRead {
 
     /// Get all persisted pending invitations
     async fn get_all_pending_invitations(&self) -> Result<Vec<PendingInvitation>>;
+
+    /// Get every workflow run that's currently in progress (any role).
+    /// Used at startup to drive recovery.
+    async fn get_in_progress_workflow_runs(&self) -> Result<Vec<WorkflowRun>>;
+
+    /// Get a single workflow run by its instance name.
+    async fn get_workflow_run(&self, instance_name: &str) -> Result<Option<WorkflowRun>>;
+
+    /// Look up the in-progress run for a given (kind, role) on this node.
+    /// Returns at most one row thanks to the partial unique index.
+    async fn get_active_workflow_run(
+        &self,
+        kind: WorkflowKind,
+        role: WorkflowRole,
+    ) -> Result<Option<WorkflowRun>>;
+
+    /// Get all workflow runs that should appear in the notification feed:
+    /// every InProgress run plus any terminal run the user hasn't dismissed
+    /// yet. Newest-updated first.
+    async fn get_visible_workflow_runs(&self) -> Result<Vec<WorkflowRun>>;
+
+    /// Read a single artefact for a workflow run. `attestor` may be None for
+    /// shared artefacts (proposals, namespace defs).
+    async fn read_workflow_artifact(
+        &self,
+        instance_name: &str,
+        artifact_kind: &str,
+        attestor: Option<&str>,
+    ) -> Result<Option<Vec<u8>>>;
+
+    /// List all artefacts of a given kind for a workflow run, returning
+    /// `(attestor_id, payload)` pairs. Used when the coordinator needs to
+    /// gather one-per-attestor artefacts (signatures, attestor pubkeys).
+    async fn list_workflow_artifacts(
+        &self,
+        instance_name: &str,
+        artifact_kind: &str,
+    ) -> Result<Vec<(String, Vec<u8>)>>;
+
+    /// Read an identity artefact for a dec party. Used by post-onboarding
+    /// workflows (contracts, kick) that need participant_id / signing-key
+    /// material that survives the originating onboarding run's dismissal.
+    async fn read_dec_party_identity(
+        &self,
+        dec_party_id: &str,
+        artifact_kind: &str,
+        attestor_id: &str,
+    ) -> Result<Option<Vec<u8>>>;
+
+    /// List every identity artefact of a given kind for a dec party,
+    /// returning `(attestor_id, payload)` pairs sorted by attestor_id.
+    async fn list_dec_party_identity(
+        &self,
+        dec_party_id: &str,
+        artifact_kind: &str,
+    ) -> Result<Vec<(String, Vec<u8>)>>;
 }
 
 /// Write operations on the database
@@ -152,5 +208,50 @@ pub trait Commitable {
     async fn delete_pending_invitations_by_coordinator(
         &mut self,
         coordinator_pubkey: &str,
+    ) -> Result;
+
+    /// Insert or replace a workflow run. Used on initial start, on every
+    /// state-machine advance, and on resume.
+    async fn upsert_workflow_run(&mut self, run: &WorkflowRun) -> Result;
+
+    /// Update the per-step progress fields without touching status.
+    async fn update_workflow_run_step(
+        &mut self,
+        instance_name: &str,
+        current_step: &str,
+        step_index: i64,
+        completed_attestors: &[CantonId],
+        updated_at: i64,
+    ) -> Result;
+
+    /// Flip the status (and optional error) of a workflow run.
+    async fn set_workflow_run_status(
+        &mut self,
+        instance_name: &str,
+        status: WorkflowProgress,
+        error: Option<&str>,
+        updated_at: i64,
+    ) -> Result;
+
+    /// Mark a terminal-state run as dismissed by the operator, hiding it
+    /// from the notification feed. No-op when the run is still InProgress.
+    async fn dismiss_workflow_run(&mut self, instance_name: &str) -> Result;
+
+    /// Write (insert or replace) a single artefact blob.
+    async fn write_workflow_artifact(
+        &mut self,
+        instance_name: &str,
+        artifact_kind: &str,
+        attestor: Option<&str>,
+        payload: &[u8],
+    ) -> Result;
+
+    /// Insert/replace a single identity artefact for a dec party.
+    async fn write_dec_party_identity(
+        &mut self,
+        dec_party_id: &str,
+        artifact_kind: &str,
+        attestor_id: &str,
+        payload: &[u8],
     ) -> Result;
 }

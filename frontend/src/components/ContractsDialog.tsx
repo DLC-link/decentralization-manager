@@ -1276,7 +1276,8 @@ export const ContractsDialog = ({
         throw new Error(data.error || "Failed to start contracts workflow");
       }
 
-      setStatus({ status: "inprogress" });
+      showSnackbar("Contracts workflow started — follow progress in the feed");
+      onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error");
       setLoading(false);

@@ -1,9 +1,7 @@
 pub mod config;
 pub mod coordinator;
-pub mod dirs;
 
 pub use config::DarsConfig;
-pub use dirs::DarsDirs;
 
 use crate::{noise::MessageType, workflow::state::WorkflowStep};
 
@@ -41,5 +39,34 @@ impl WorkflowStep for DarsStep {
 
     fn is_waiting_for_attestors(&self) -> bool {
         *self == Self::WaitingForAttestors
+    }
+
+    fn step_index(&self) -> i64 {
+        match self {
+            Self::WaitingForAttestors => 0,
+            Self::UploadDars => 1,
+            Self::Complete => 2,
+        }
+    }
+
+    fn step_total() -> i64 {
+        3
+    }
+
+    fn step_name(&self) -> &'static str {
+        match self {
+            Self::WaitingForAttestors => "WaitingForAttestors",
+            Self::UploadDars => "UploadDars",
+            Self::Complete => "Complete",
+        }
+    }
+
+    fn try_from_step_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "WaitingForAttestors" => Self::WaitingForAttestors,
+            "UploadDars" => Self::UploadDars,
+            "Complete" => Self::Complete,
+            _ => return None,
+        })
     }
 }

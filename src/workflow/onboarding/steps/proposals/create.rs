@@ -1,7 +1,6 @@
 use std::collections::HashSet;
 
-use tokio::fs;
-
+use bytes::{BufMut, BytesMut};
 use canton_proto_rs::com::digitalasset::canton::{
     crypto::v30::{SigningKeysWithThreshold, SigningPublicKey},
     protocol::v30::{
@@ -13,17 +12,18 @@ use canton_proto_rs::com::digitalasset::canton::{
         topology_manager_write_service_client::TopologyManagerWriteServiceClient,
     },
 };
+use prost::Message;
+use sqlx::SqlitePool;
 
 use crate::{
     config::NodeConfig,
-    consts::{
-        ATTESTOR_KEYS_PREFIX, DNS_PROTO_FILENAME, NAMESPACE_DEF_FILENAME, P2P_PROTO_FILENAME,
-        PARTICIPANT_ID_PREFIX,
-    },
     error::Result,
     participant_id::CantonId,
     utils::{self, MULTIHASH_SHA256_PREFIX},
-    workflow::onboarding::{OnboardingConfig, OnboardingDirs},
+    workflow::{
+        onboarding::OnboardingConfig,
+        storage::{WorkflowStorage, artifact_kinds, identity_kinds},
+    },
 };
 
 /// Create topology proposals for decentralized namespace
@@ -34,18 +34,23 @@ use crate::{
 /// 3. Has appropriate permissions to create topology proposals
 ///
 /// This step:
-/// 1. Loads all attestor key files from keys_dir
-/// 2. Loads all participant ID files from ids_dir
+/// 1. Loads all attestor key payloads from `workflow_artifacts`
+/// 2. Loads all participant ID payloads from `workflow_artifacts`
 /// 3. Creates two topology proposals:
 ///    - Decentralized Namespace Definition (DNS)
 ///    - Party-to-Participant mapping (P2P) with embedded signing keys (Canton 3.4+)
-/// 4. Saves proposals to output files
+/// 4. Saves proposals to `workflow_artifacts`
+/// 5. Once the dec_party_id is known, copies every attestor's
+///    `ATTESTOR_PUBLIC_KEYS` + `PARTICIPANT_ID` artefact into
+///    `dec_party_identity` so the rows survive the workflow run's dismissal
+///    (read by `contracts::sign_submissions`, future kicks, etc.).
 ///
 /// **Note**: If you encounter TOPOLOGY_NO_APPROPRIATE_SIGNING_KEY_IN_STORE errors,
 /// ensure the participant is properly connected to a synchronizer first.
 pub async fn create_proposals(
     config: &NodeConfig,
-    dirs: &OnboardingDirs,
+    storage: &SqlitePool,
+    instance_name: &str,
     onboarding_config: &OnboardingConfig,
 ) -> Result {
     tracing::info!("Creating topology proposals...");
@@ -53,36 +58,32 @@ pub async fn create_proposals(
     // Use party_id_prefix from onboarding config (provided via UI)
     let party_id_prefix = &onboarding_config.party_id_prefix;
 
-    // Step 1: Load all attestor key files
-    if !dirs.keys_dir.exists() {
-        anyhow::bail!("keys directory not found");
-    }
-
-    let key_file_paths =
-        utils::find_files_by_pattern(&dirs.keys_dir, ATTESTOR_KEYS_PREFIX, ".bin").await?;
+    // Step 1: Load all attestor key payloads from storage
+    let key_payloads = storage
+        .list_artifacts(instance_name, artifact_kinds::ATTESTOR_PUBLIC_KEYS)
+        .await?;
 
     tracing::info!(
-        "Found {count} attestor key files",
-        count = key_file_paths.len()
+        "Found {count} attestor key payloads",
+        count = key_payloads.len()
     );
 
-    if key_file_paths.is_empty() {
-        anyhow::bail!("No attestor key files found in ./keys/");
+    if key_payloads.is_empty() {
+        anyhow::bail!("No attestor key payloads found for instance {instance_name}");
     }
 
-    // Step 2: Load and parse all key pairs
+    // Step 2: Decode each (namespace_key, daml_key) pair from its payload
     let mut namespace_keys = Vec::new();
     let mut daml_keys = Vec::new();
 
-    for key_file in &key_file_paths {
-        tracing::info!("Loading keys from {path}", path = key_file.display());
+    for (attestor_id, payload) in &key_payloads {
+        tracing::info!("Loading keys from attestor {attestor_id}");
 
-        let keys: Vec<SigningPublicKey> = utils::read_all_messages_from_file(key_file).await?;
+        let keys: Vec<SigningPublicKey> = decode_keys_payload(payload)?;
 
         if keys.len() != 2 {
             anyhow::bail!(
-                "Expected exactly 2 keys in {path}, but found {count}",
-                path = key_file.display(),
+                "Expected exactly 2 keys from attestor {attestor_id}, but found {count}",
                 count = keys.len()
             );
         }
@@ -93,10 +94,7 @@ pub async fn create_proposals(
 
         // Debug: Log fingerprints of keys being added to P2P mapping
         let daml_key_fp = utils::compute_fingerprint(&keys[1]);
-        tracing::debug!(
-            "DAML key from {path} has fingerprint: {daml_key_fp}",
-            path = key_file.display()
-        );
+        tracing::debug!("DAML key from {attestor_id} has fingerprint: {daml_key_fp}");
     }
 
     // Step 3: Extract namespaces from namespace keys
@@ -112,27 +110,25 @@ pub async fn create_proposals(
         count = namespaces.len()
     );
 
-    // Step 4: Load all participant ID files
-    if !dirs.ids_dir.exists() {
-        anyhow::bail!("ids directory not found");
-    }
-
-    let id_file_paths =
-        utils::find_files_by_pattern(&dirs.ids_dir, PARTICIPANT_ID_PREFIX, ".bin").await?;
+    // Step 4: Load all participant ID payloads from storage
+    let id_payloads = storage
+        .list_artifacts(instance_name, artifact_kinds::PARTICIPANT_ID)
+        .await?;
 
     tracing::info!(
-        "Found {count} participant ID files",
-        count = id_file_paths.len()
+        "Found {count} participant ID payloads",
+        count = id_payloads.len()
     );
 
-    if id_file_paths.is_empty() {
-        anyhow::bail!("No participant ID files found in ./ids/");
+    if id_payloads.is_empty() {
+        anyhow::bail!("No participant ID payloads found for instance {instance_name}");
     }
 
     let mut participant_ids = Vec::new();
-    for id_file in &id_file_paths {
-        let file_content = fs::read_to_string(id_file).await?;
-        let participant_id = CantonId::parse_from_file(&file_content)?;
+    for (_attestor_id, payload) in &id_payloads {
+        let file_content = std::str::from_utf8(payload)
+            .map_err(|e| anyhow::anyhow!("Invalid UTF-8 in participant id payload: {e}"))?;
+        let participant_id = CantonId::parse_from_file(file_content)?;
         participant_ids.push(participant_id);
     }
 
@@ -170,9 +166,47 @@ pub async fn create_proposals(
     let party_id = format!("{party_id_prefix}::{decentralized_namespace}");
     tracing::info!("Party ID: {party_id}");
 
-    // Persist the created party ID so the HTTP handler can read it after workflow completion
-    let party_id_path = dirs.workflow_dir.join("party_id");
-    fs::write(&party_id_path, &party_id).await?;
+    // Persist the resolved party ID — the HTTP path reads this artefact after
+    // the coordinator workflow finishes so it can return the new party id to
+    // the UI.
+    storage
+        .write_artifact(
+            instance_name,
+            artifact_kinds::PARTY_ID,
+            None,
+            party_id.as_bytes(),
+        )
+        .await?;
+
+    // Identity hook (coordinator side): with the dec_party_id now known, copy
+    // each attestor's ATTESTOR_PUBLIC_KEYS + PARTICIPANT_ID workflow artefacts
+    // into dec_party_identity, keyed by `(party_id, attestor_id, kind)`. These
+    // rows survive the workflow_runs row's eventual dismissal and are read by
+    // post-onboarding workflows (e.g. contracts::sign_submissions).
+    for (attestor_id, payload) in &key_payloads {
+        storage
+            .write_identity(
+                &party_id,
+                identity_kinds::ATTESTOR_PUBLIC_KEYS,
+                attestor_id,
+                payload,
+            )
+            .await?;
+    }
+    for (attestor_id, payload) in &id_payloads {
+        storage
+            .write_identity(
+                &party_id,
+                identity_kinds::PARTICIPANT_ID,
+                attestor_id,
+                payload,
+            )
+            .await?;
+    }
+    tracing::info!(
+        "Persisted {count} attestor identity records for {party_id}",
+        count = key_payloads.len()
+    );
 
     // Step 9: Create PartyToParticipant mapping
     // Canton 3.4: PartyToParticipant now includes signing keys (PartyToKeyMapping is deprecated)
@@ -265,30 +299,65 @@ pub async fn create_proposals(
     // Note: Canton 3.4+ - Signing keys are now included directly in the PartyToParticipant mapping above
     // No separate PartyToKeyMapping transaction needed
 
-    // Step 13: Save proposals to files
-    fs::create_dir_all(&dirs.dns_proposals_dir).await?;
-    fs::create_dir_all(&dirs.p2p_proposals_dir).await?;
-    fs::create_dir_all(&dirs.dns_submission_dir).await?;
+    // Step 13: Persist proposals to storage. Each protobuf is written with the
+    // same `varint(len)||proto` framing the original on-disk format used.
+    let dns_bytes = encode_length_prefixed_message(&dns_transaction);
+    storage
+        .write_artifact(instance_name, artifact_kinds::DNS_PROTO, None, &dns_bytes)
+        .await?;
+    tracing::info!("Saved DNS proposal to storage");
 
-    let dns_file = dirs.dns_proposals_dir.join(DNS_PROTO_FILENAME);
-    tracing::info!("Saving DNS proposal to {path}", path = dns_file.display());
-    utils::write_message_to_file(&dns_transaction, &dns_file).await?;
+    let p2p_bytes = encode_length_prefixed_message(&p2p_transaction);
+    storage
+        .write_artifact(instance_name, artifact_kinds::P2P_PROTO, None, &p2p_bytes)
+        .await?;
+    tracing::info!("Saved P2P proposal to storage");
 
-    let p2p_file = dirs.p2p_proposals_dir.join(P2P_PROTO_FILENAME);
-    tracing::info!("Saving P2P proposal to {path}", path = p2p_file.display());
-    utils::write_message_to_file(&p2p_transaction, &p2p_file).await?;
-
-    // Canton 3.4+: Signing keys now embedded in P2P proposal above (no separate transaction)
-
-    let namespace_file = dirs.dns_submission_dir.join(NAMESPACE_DEF_FILENAME);
-    tracing::info!(
-        "Saving namespace definition to {path}",
-        path = namespace_file.display()
-    );
-    utils::write_message_to_file(&namespace_def, &namespace_file).await?;
+    let namespace_bytes = encode_length_prefixed_message(&namespace_def);
+    storage
+        .write_artifact(
+            instance_name,
+            artifact_kinds::NAMESPACE_DEF,
+            None,
+            &namespace_bytes,
+        )
+        .await?;
+    tracing::info!("Saved namespace definition to storage");
 
     tracing::info!("All proposals created and saved successfully");
     Ok(())
+}
+
+/// Decode a payload produced by `generate_keys::encode_keys_payload` —
+/// two consecutive `varint(len)||SigningPublicKey` messages.
+fn decode_keys_payload(payload: &[u8]) -> Result<Vec<SigningPublicKey>> {
+    let mut cursor: &[u8] = payload;
+    let mut keys = Vec::with_capacity(2);
+    while !cursor.is_empty() {
+        let len = prost::encoding::decode_varint(&mut cursor)? as usize;
+        if cursor.len() < len {
+            anyhow::bail!(
+                "Truncated key payload: expected {len} bytes, only {remaining} remain",
+                remaining = cursor.len()
+            );
+        }
+        let (msg_bytes, rest) = cursor.split_at(len);
+        let key = SigningPublicKey::decode(msg_bytes)?;
+        keys.push(key);
+        cursor = rest;
+    }
+    Ok(keys)
+}
+
+/// Encode a protobuf message as `varint(len)||proto` — same framing
+/// `utils::write_message_to_file` produced, so existing readers like
+/// `read_first_message_from_bytes` round-trip cleanly.
+fn encode_length_prefixed_message<M: Message>(message: &M) -> Vec<u8> {
+    let encoded = message.encode_to_vec();
+    let mut buffer = BytesMut::new();
+    prost::encoding::encode_varint(encoded.len() as u64, &mut buffer);
+    buffer.put_slice(&encoded);
+    buffer.to_vec()
 }
 
 /// Compute decentralized namespace from individual namespaces

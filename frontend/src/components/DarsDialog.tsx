@@ -226,7 +226,8 @@ export const DarsDialog = ({
         setLoading(false);
         onComplete();
       } else {
-        setStatus({ status: "inprogress" });
+        showSnackbar(`${workflowLabel} workflow started — follow progress in the feed`);
+        onClose();
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error");

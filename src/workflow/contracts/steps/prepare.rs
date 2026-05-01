@@ -1,18 +1,22 @@
+use bytes::{BufMut, BytesMut};
 use canton_proto_rs::com::daml::ledger::api::v2::{
     Command, CreateCommand, GenMap, Identifier, Optional, Record, RecordField, Value, command,
-    gen_map, interactive::PrepareSubmissionRequest, value,
+    gen_map,
+    interactive::{PrepareSubmissionRequest, PrepareSubmissionResponse},
+    value,
 };
-use tokio::fs;
+use prost::Message;
+use sqlx::SqlitePool;
 
 use crate::{
     config::{NetworkConfig, NodeConfig},
-    consts::{
-        LEDGER_SUBMISSIONS_DIR, MIN_PARTICIPANTS_CONTRACTS, PREPARED_DIR,
-        PREPARED_SUBMISSION_PREFIX,
-    },
+    consts::MIN_PARTICIPANTS_CONTRACTS,
     error::Result,
     utils,
-    workflow::contracts::{ContractsConfig, ContractsDirs, FieldDefinition},
+    workflow::{
+        contracts::{ContractsConfig, FieldDefinition},
+        storage::{WorkflowStorage, artifact_kinds},
+    },
 };
 
 /// Prepare ledger submissions for governance contracts
@@ -20,16 +24,25 @@ use crate::{
 /// This step must be run once by the coordinator with appropriate Ledger API credentials.
 /// It prepares interactive submissions for creating the governance contracts.
 ///
+/// Each prepared submission is persisted as a `PREPARED_SUBMISSION` artefact
+/// keyed by a zero-padded ordinal (`"0000"`, `"0001"`, …) so subsequent reads
+/// via `list_artifacts` return submissions sorted by their original creation
+/// order — this matches the previous filesystem-based discovery loop, which
+/// relied on lexicographic filename ordering.
+///
 /// # Arguments
 /// * `config` - Configuration with Ledger API connection details
-/// * `dirs` - WorkflowDirs containing all directory paths
+/// * `db` - Workflow storage backend (SqlitePool implementing `WorkflowStorage`)
+/// * `instance_name` - Workflow run instance name (key for `workflow_artifacts`)
 /// * `network_config` - Network configuration with peer settings
 /// * `contracts_config` - Contracts workflow configuration with party ID
 /// * `token` - Authentication token for Ledger API
 /// * `user_id` - User ID for Ledger API operations
+#[allow(clippy::too_many_arguments)]
 pub async fn prepare_submissions(
     config: &NodeConfig,
-    dirs: &ContractsDirs,
+    db: &SqlitePool,
+    instance_name: &str,
     network_config: &NetworkConfig,
     contracts_config: &ContractsConfig,
     token: &str,
@@ -80,11 +93,7 @@ pub async fn prepare_submissions(
         governance_threshold: network_config.governance_threshold() as i64,
     };
 
-    // Step 6: Prepare submissions for each contract defined in config
     let mut submission_client = utils::create_submission_client(config, token_opt.clone()).await?;
-    let ledger_submissions_dir = dirs.workflow_dir.join(LEDGER_SUBMISSIONS_DIR);
-    let prepared_dir = ledger_submissions_dir.join(PREPARED_DIR);
-    fs::create_dir_all(&prepared_dir).await?;
 
     if contracts_config.contracts.is_empty() {
         tracing::warn!(
@@ -142,16 +151,23 @@ pub async fn prepare_submissions(
             .await?
             .into_inner();
 
-        let submission_file = prepared_dir.join(format!(
-            "{PREPARED_SUBMISSION_PREFIX}-{index}.bin",
-            index = idx + 1
-        ));
+        // Persist as `varint(len)||proto` so reads via
+        // `utils::read_first_message_from_bytes` round-trip cleanly. This is
+        // the exact byte shape `utils::write_messages_to_file(&[m], path)`
+        // would have written for a single message.
+        let payload = encode_length_prefixed_message(&prepared_submission);
+        let ordinal = format!("{idx:04}");
         tracing::debug!(
-            "Saving prepared submission {index} to {path}",
+            "Saving prepared submission {index} to artifact attestor key {ordinal}",
             index = idx + 1,
-            path = submission_file.display()
         );
-        utils::write_messages_to_file(&[prepared_submission], &submission_file).await?;
+        db.write_artifact(
+            instance_name,
+            artifact_kinds::PREPARED_SUBMISSION,
+            Some(&ordinal),
+            &payload,
+        )
+        .await?;
     }
 
     tracing::info!(
@@ -159,6 +175,17 @@ pub async fn prepare_submissions(
         count = contracts_config.contracts.len()
     );
     Ok(())
+}
+
+/// Encode a single protobuf message as `varint(len)||proto`, matching the
+/// byte layout produced by `utils::write_message_to_file`. Keeps the
+/// downstream `utils::read_first_message_from_bytes` reader unchanged.
+fn encode_length_prefixed_message(message: &PrepareSubmissionResponse) -> Vec<u8> {
+    let encoded = message.encode_to_vec();
+    let mut buffer = BytesMut::new();
+    prost::encoding::encode_varint(encoded.len() as u64, &mut buffer);
+    buffer.put_slice(&encoded);
+    buffer.to_vec()
 }
 
 /// Context for building field values in contract submissions

@@ -1,11 +1,9 @@
 pub mod attestor;
 pub mod config;
 pub mod coordinator;
-pub mod dirs;
 pub mod steps;
 
 pub use config::{ContractDefinition, ContractsConfig, DarFile, FieldDefinition};
-pub use dirs::ContractsDirs;
 pub use steps::{
     execute_submissions, prepare_submissions, sign_submissions, upload_dars, upload_dars_from_bytes,
 };
@@ -52,5 +50,40 @@ impl WorkflowStep for ContractsStep {
 
     fn is_waiting_for_attestors(&self) -> bool {
         *self == Self::WaitingForAttestors
+    }
+
+    fn step_index(&self) -> i64 {
+        match self {
+            Self::WaitingForAttestors => 0,
+            Self::PrepareSubmissions => 1,
+            Self::SignSubmissions => 2,
+            Self::ExecuteSubmissions => 3,
+            Self::Complete => 4,
+        }
+    }
+
+    fn step_total() -> i64 {
+        5
+    }
+
+    fn step_name(&self) -> &'static str {
+        match self {
+            Self::WaitingForAttestors => "WaitingForAttestors",
+            Self::PrepareSubmissions => "PrepareSubmissions",
+            Self::SignSubmissions => "SignSubmissions",
+            Self::ExecuteSubmissions => "ExecuteSubmissions",
+            Self::Complete => "Complete",
+        }
+    }
+
+    fn try_from_step_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "WaitingForAttestors" => Self::WaitingForAttestors,
+            "PrepareSubmissions" => Self::PrepareSubmissions,
+            "SignSubmissions" => Self::SignSubmissions,
+            "ExecuteSubmissions" => Self::ExecuteSubmissions,
+            "Complete" => Self::Complete,
+            _ => return None,
+        })
     }
 }
