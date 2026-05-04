@@ -36,7 +36,6 @@ export const KickDialog = ({
   currentThreshold,
   currentOwnerCount,
 }: KickDialogProps) => {
-  const [namespaceFingerprint, setNamespaceFingerprint] = useState("");
   const [newThreshold, setNewThreshold] = useState(1);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -52,15 +51,12 @@ export const KickDialog = ({
   }, [currentThreshold, remainingOwners, suggestedThreshold]);
 
   useEffect(() => {
-    if (open) {
-      setNamespaceFingerprint(participantOwnerKey ?? "");
-    } else {
+    if (!open) {
       setError(null);
       setStatus(null);
       setLoading(false);
-      setNamespaceFingerprint("");
     }
-  }, [open, participantOwnerKey]);
+  }, [open]);
 
   const pollStatus = useCallback(async () => {
     try {
@@ -101,7 +97,6 @@ export const KickDialog = ({
     const request: KickRequest = {
       decentralized_party_id: partyId,
       participant_id: participantUid,
-      namespace_fingerprint: namespaceFingerprint,
       new_threshold: newThreshold,
     };
 
@@ -158,12 +153,15 @@ export const KickDialog = ({
 
           <TextField
             label="Namespace Fingerprint (Owner Key)"
-            value={namespaceFingerprint}
-            onChange={(e) => setNamespaceFingerprint(e.target.value)}
+            value={participantOwnerKey ?? ""}
+            disabled
             fullWidth
             size="small"
-            disabled={loading}
-            helperText="The namespace fingerprint (DNS owner key) to remove"
+            helperText={
+              participantOwnerKey
+                ? "The DNS owner key that will be removed"
+                : "Owner key not yet known — wait a moment for cache resolution, or refresh parties if it does not appear"
+            }
           />
 
           <TextField
@@ -212,7 +210,7 @@ export const KickDialog = ({
             onClick={handleKick}
             variant="contained"
             color="error"
-            disabled={loading || !namespaceFingerprint || newThreshold < 1 || newThreshold > remainingOwners}
+            disabled={loading || newThreshold < 1 || newThreshold > remainingOwners || !participantOwnerKey}
           >
             {loading ? <CircularProgress size={20} /> : "Kick Participant"}
           </Button>

@@ -221,7 +221,6 @@ pub struct ParticipantsStatusResponse {
 pub struct KickRequest {
     pub decentralized_party_id: String,
     pub participant_id: String,
-    pub namespace_fingerprint: String,
     pub new_threshold: i32,
 }
 

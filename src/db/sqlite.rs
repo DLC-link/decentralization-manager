@@ -141,6 +141,24 @@ impl SchemaRead for SqlitePool {
         Ok(rows)
     }
 
+    async fn get_dec_party_participant_owner_key(
+        &self,
+        party_id: &str,
+        participant_uid: &str,
+    ) -> Result<Option<String>> {
+        let row: Option<(Option<String>,)> = sqlx::query_as(
+            r"
+            SELECT owner_key FROM dec_party_participant
+            WHERE dec_party_id = ? AND participant_uid = ?
+            ",
+        )
+        .bind(party_id)
+        .bind(participant_uid)
+        .fetch_optional(self)
+        .await?;
+        Ok(row.and_then(|(k,)| k))
+    }
+
     async fn get_dec_party_contracts(&self, party_id: &str) -> Result<Vec<DecPartyContractRow>> {
         let rows = sqlx::query_as::<_, DecPartyContractRow>(
             "SELECT * FROM dec_party_contract WHERE dec_party_id = ?",
@@ -366,15 +384,26 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
     }
 
     async fn upsert_dec_party(&mut self, row: &DecPartyRow) -> Result {
+        // ON CONFLICT DO UPDATE preserves the dec_party row's identity, so the
+        // ON DELETE CASCADE on dec_party_participant.dec_party_id does NOT fire.
+        // Using INSERT OR REPLACE here would delete-and-reinsert the parent,
+        // cascading the delete and wiping participant rows — defeating the
+        // owner_key-preservation invariant established by
+        // replace_dec_party_participants.
         sqlx::query(
             r"
-            INSERT OR REPLACE INTO dec_party (
+            INSERT INTO dec_party (
                 party_id,
                 prefix,
                 threshold,
                 updated_at,
                 my_owner_key
             ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(party_id) DO UPDATE SET
+                prefix = excluded.prefix,
+                threshold = excluded.threshold,
+                updated_at = excluded.updated_at,
+                my_owner_key = excluded.my_owner_key
             ",
         )
         .bind(&row.party_id)
@@ -415,11 +444,10 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         party_id: &str,
         participants: &[DecPartyParticipantRow],
     ) -> Result {
-        sqlx::query("DELETE FROM dec_party_participant WHERE dec_party_id = ?")
-            .bind(party_id)
-            .execute(&mut **self)
-            .await?;
-
+        // UPSERT each fresh row. permission may change (e.g., submission ->
+        // confirmation); owner_key only ever transitions NULL -> Some, never
+        // back to NULL. COALESCE keeps a previously-known fingerprint when
+        // the live Canton fetch carries None for it.
         for p in participants {
             sqlx::query(
                 r"
@@ -429,6 +457,9 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                     permission,
                     owner_key
                 ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(dec_party_id, participant_uid) DO UPDATE SET
+                    permission = excluded.permission,
+                    owner_key = COALESCE(excluded.owner_key, dec_party_participant.owner_key)
                 ",
             )
             .bind(party_id)
@@ -437,6 +468,30 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
             .bind(&p.owner_key)
             .execute(&mut **self)
             .await?;
+        }
+
+        // Delete rows for this party that aren't in the fresh set (a
+        // participant left the party).
+        let fresh_uids: Vec<&str> = participants
+            .iter()
+            .map(|p| p.participant_uid.as_str())
+            .collect();
+        if fresh_uids.is_empty() {
+            sqlx::query("DELETE FROM dec_party_participant WHERE dec_party_id = ?")
+                .bind(party_id)
+                .execute(&mut **self)
+                .await?;
+        } else {
+            let placeholders = fresh_uids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let query = format!(
+                "DELETE FROM dec_party_participant WHERE dec_party_id = ? \
+                 AND participant_uid NOT IN ({placeholders})"
+            );
+            let mut q = sqlx::query(&query).bind(party_id);
+            for uid in fresh_uids {
+                q = q.bind(uid);
+            }
+            q.execute(&mut **self).await?;
         }
 
         Ok(())
@@ -814,6 +869,165 @@ mod tests {
         assert_eq!(result[0].permission, "submission");
         assert_eq!(result[0].owner_key, Some("fingerprint-1".to_string()));
         assert_eq!(result[1].owner_key, None);
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_replace_preserves_owner_key_when_incoming_is_null(pool: SqlitePool) -> Result {
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_dec_party(&test_dec_party("net-a")).await?;
+        let party_id = format!("net-a::{TEST_NS}");
+
+        // First write — owner_key is known.
+        tx.replace_dec_party_participants(
+            &party_id,
+            &[DecPartyParticipantRow {
+                dec_party_id: party_id.clone(),
+                participant_uid: "node1::1220aa".to_string(),
+                permission: "submission".to_string(),
+                owner_key: Some("fingerprint-1".to_string()),
+            }],
+        )
+        .await?;
+        Commitable::commit(tx).await?;
+
+        // Second write — same row, owner_key NULL (simulates a cache refresh
+        // that hasn't yet been followed by `resolve_owner_keys_from_peers`).
+        let mut tx = pool.begin_transaction().await?;
+        tx.replace_dec_party_participants(
+            &party_id,
+            &[DecPartyParticipantRow {
+                dec_party_id: party_id.clone(),
+                participant_uid: "node1::1220aa".to_string(),
+                permission: "submission".to_string(),
+                owner_key: None,
+            }],
+        )
+        .await?;
+        Commitable::commit(tx).await?;
+
+        let result = pool.get_dec_party_participants(&party_id).await?;
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0].owner_key,
+            Some("fingerprint-1".to_string()),
+            "owner_key should be preserved across a refresh that brings a NULL value"
+        );
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_upsert_dec_party_preserves_participant_rows(pool: SqlitePool) -> Result {
+        // Regression for the cascading-delete bug: INSERT OR REPLACE on the
+        // parent `dec_party` row would fire ON DELETE CASCADE on
+        // dec_party_participant, wiping owner_key rows before the participant
+        // UPSERT could COALESCE them back.
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_dec_party(&test_dec_party("net-a")).await?;
+        let party_id = format!("net-a::{TEST_NS}");
+        tx.replace_dec_party_participants(
+            &party_id,
+            &[DecPartyParticipantRow {
+                dec_party_id: party_id.clone(),
+                participant_uid: "node1::1220aa".to_string(),
+                permission: "submission".to_string(),
+                owner_key: Some("fingerprint-1".to_string()),
+            }],
+        )
+        .await?;
+        Commitable::commit(tx).await?;
+
+        // Re-upsert the parent dec_party row. With ON CONFLICT DO UPDATE
+        // (not INSERT OR REPLACE), this must NOT cascade-delete the
+        // participant row.
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_dec_party(&test_dec_party("net-a")).await?;
+        Commitable::commit(tx).await?;
+
+        let result = pool.get_dec_party_participants(&party_id).await?;
+        assert_eq!(
+            result.len(),
+            1,
+            "participant row was wiped by cascading delete on parent upsert — \
+             INSERT OR REPLACE regression"
+        );
+        assert_eq!(
+            result[0].owner_key,
+            Some("fingerprint-1".to_string()),
+            "owner_key was wiped despite participant row surviving"
+        );
+
+        // Now run the full sequence: upsert dec_party + replace participants
+        // with NULL owner_key. End-to-end this is what `store_parties_to_db`
+        // does on every cache refresh.
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_dec_party(&test_dec_party("net-a")).await?;
+        tx.replace_dec_party_participants(
+            &party_id,
+            &[DecPartyParticipantRow {
+                dec_party_id: party_id.clone(),
+                participant_uid: "node1::1220aa".to_string(),
+                permission: "submission".to_string(),
+                owner_key: None,
+            }],
+        )
+        .await?;
+        Commitable::commit(tx).await?;
+
+        let result = pool.get_dec_party_participants(&party_id).await?;
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0].owner_key,
+            Some("fingerprint-1".to_string()),
+            "owner_key not preserved through the full upsert-party + \
+             replace-participants sequence"
+        );
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_get_dec_party_participant_owner_key(pool: SqlitePool) -> Result {
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_dec_party(&test_dec_party("net-a")).await?;
+        let party_id = format!("net-a::{TEST_NS}");
+        tx.replace_dec_party_participants(
+            &party_id,
+            &[
+                DecPartyParticipantRow {
+                    dec_party_id: party_id.clone(),
+                    participant_uid: "node1::1220aa".to_string(),
+                    permission: "submission".to_string(),
+                    owner_key: Some("fingerprint-1".to_string()),
+                },
+                DecPartyParticipantRow {
+                    dec_party_id: party_id.clone(),
+                    participant_uid: "node2::1220bb".to_string(),
+                    permission: "confirmation".to_string(),
+                    owner_key: None,
+                },
+            ],
+        )
+        .await?;
+        Commitable::commit(tx).await?;
+
+        assert_eq!(
+            pool.get_dec_party_participant_owner_key(&party_id, "node1::1220aa")
+                .await?,
+            Some("fingerprint-1".to_string())
+        );
+        assert_eq!(
+            pool.get_dec_party_participant_owner_key(&party_id, "node2::1220bb")
+                .await?,
+            None
+        );
+        assert_eq!(
+            pool.get_dec_party_participant_owner_key(&party_id, "missing::1220cc")
+                .await?,
+            None
+        );
 
         Ok(())
     }

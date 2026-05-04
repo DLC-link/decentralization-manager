@@ -55,7 +55,8 @@ pub type DarsWorkflowState = HttpWorkflowState<WorkflowProgress>;
     responses(
         (status = 202, description = "Kick workflow started", body = WorkflowResponse),
         (status = 400, description = "Bad request", body = ErrorResponse),
-        (status = 409, description = "Workflow already in progress", body = ErrorResponse)
+        (status = 409, description = "Workflow already in progress, or owner key not yet resolved for the target participant", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
     )
 )]
 #[post("/kick")]
@@ -102,6 +103,36 @@ pub async fn start_kick(
         });
     }
 
+    // Derive the namespace fingerprint from the cache. Server-side
+    // derivation removes a redundant client field and turns empty-prefill
+    // into a clear server error rather than a silent invalid request.
+    let namespace_fingerprint = match data
+        .db
+        .get_dec_party_participant_owner_key(
+            &decentralized_party_id.to_string(),
+            &participant_id.to_string(),
+        )
+        .await
+    {
+        Ok(Some(key)) => key,
+        Ok(None) => {
+            return HttpResponse::Conflict().json(ErrorResponse {
+                error: format!(
+                    "Participant {participant_id} is not present in cached \
+                     decentralized party {decentralized_party_id}, or its \
+                     owner key has not yet been resolved. Try refreshing \
+                     /decentralized-parties first."
+                ),
+            });
+        }
+        Err(e) => {
+            tracing::error!("DB lookup for owner_key failed: {e}");
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: "Failed to look up owner key".to_string(),
+            });
+        }
+    };
+
     // Check if a kick is already in progress
     {
         let status = kick_state.status.read().await;
@@ -124,7 +155,6 @@ pub async fn start_kick(
     let config = data.config.clone();
     let db = data.db.clone();
     let kick_state_clone = kick_state.get_ref().clone();
-    let namespace_fingerprint = body.namespace_fingerprint.clone();
     let new_threshold = body.new_threshold;
     let listener_control = data.noise_listener_control.clone();
     let listener_notify = data.noise_listener_notify.clone();
@@ -435,9 +465,36 @@ pub async fn start_onboarding(
                         Ok(resp) => {
                             if let Err(e) = store_parties_to_db(&bg_db, "", &resp.parties).await {
                                 tracing::warn!("Failed to cache parties after onboarding: {e}");
-                            } else {
-                                resolve_owner_keys_from_peers(&bg_config, &bg_db, &resp.parties)
-                                    .await;
+                                return;
+                            }
+                            resolve_owner_keys_from_peers(&bg_config, &bg_db, &resp.parties).await;
+                            // Audit: report any participants whose owner_key
+                            // is still NULL after resolve. Not fatal — Noise
+                            // resolution may run again on the next stale
+                            // refresh — but unexpected for a freshly
+                            // onboarded party.
+                            for party in &resp.parties {
+                                let party_id = party.party_id.to_string();
+                                for p in &party.participants {
+                                    let uid = p.participant_uid.to_string();
+                                    match bg_db
+                                        .get_dec_party_participant_owner_key(&party_id, &uid)
+                                        .await
+                                    {
+                                        Ok(Some(_)) => {} // resolved
+                                        Ok(None) => tracing::warn!(
+                                            party_id = %party_id,
+                                            participant_uid = %uid,
+                                            "Participant owner_key unresolved after onboarding"
+                                        ),
+                                        Err(e) => tracing::warn!(
+                                            party_id = %party_id,
+                                            participant_uid = %uid,
+                                            error = %e,
+                                            "Failed to read owner_key from cache during post-onboarding audit"
+                                        ),
+                                    }
+                                }
                             }
                         }
                         Err(e) => tracing::warn!("Failed to refresh parties after onboarding: {e}"),
