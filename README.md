@@ -304,7 +304,9 @@ cargo build
 # Release build
 cargo build --release
 
-# Run tests
+# Run unit tests — includes the integration-test binary's helpers
+# (Fixture, Scenario DSL); the end-to-end test itself is gated by
+# `#[ignore]` and is invoked separately via run.sh below.
 cargo test
 
 # Run linter
@@ -313,6 +315,143 @@ cargo clippy --all-targets --all-features -- -D warnings
 # Format code
 cargo fmt
 ```
+
+### Integration tests
+
+The full integration test boots a Splice localnet (Docker), spawns 3
+`dec-party-manager` instances, configures peers, and runs an end-to-end
+governance workflow exercising onboarding, DAR distribution, governance
+contract deployment, the token-custody / utility-onboarding / generic-vote
+plugins, and the kick workflow.
+
+```bash
+# Quiet mode (default) — focused Given-When-Then trace
+./integration-tests/run.sh
+
+# Verbose mode — full INFO from dec-party-manager + Canton/Noise libs
+./integration-tests/run.sh --verbose
+
+# Custom RUST_LOG (overrides both presets)
+RUST_LOG=debug ./integration-tests/run.sh
+
+# Help
+./integration-tests/run.sh --help
+```
+
+#### Quiet mode (default)
+
+Quiet mode is the recommended way to run the suite — it surfaces only
+what a tester needs to verify a passing run, suppressing the
+dec-party-manager INFO chatter and Canton/Noise convergence warnings.
+
+The suite is organised into two layers:
+
+- **Phases** — top-level workflow chunks, one file in `tests/common/phases/`
+  per phase (`create_dec_party`, `distribute_dars`, `deploy_gov_core`,
+  `token_custody`, `utility_onboarding`, `generic_vote`, `kick`). Each
+  phase corresponds 1:1 to one of the original bash scripts and is logged
+  as `INFO Phase: <name>`.
+- **Scenarios** — Given-When-Then story arcs built with the
+  [`Scenario`](tests/common/scenario.rs) DSL. Each scenario has its own
+  header, indented step trace, and completion line. A phase runs **one or
+  more scenarios**: six of the seven phases run a single scenario;
+  `utility_onboarding` runs eight (four propose-confirm-execute cycles —
+  ProvisionProviderService, SetupUtility, Mint, Burn — plus four
+  side-effect assertion scenarios), for **14 scenarios total**.
+
+A scenario may omit `Given` and/or `When` and contain only `Then`s.
+That happens when the action has already been taken by an earlier
+scenario in the same phase, and this scenario only needs to observe its
+after-state — the four "side-effect assertion scenarios" in
+`utility_onboarding` (`ProviderService visible`, `SetupUtility side
+effects`, `Mint side effects`, `Burn side effects`) follow exactly this
+pattern. The runner does **not** carry steps between scenarios; cross-
+scenario state flows through the **`Fixture`**, which `Scenario::run`
+borrows as `&mut Fixture`. An action-side scenario mutates the SUT and
+records captured ids on the fixture (`f.provider_service_cid`,
+`f.allocation_factory_cid`, etc.); a follow-up observation-side
+scenario reads them back via `f.get_json(...)` and stores anything new
+it captures on the same fixture for later scenarios to use.
+
+Sample of a passing run:
+
+```
+==========================================
+Running governance workflow e2e (Rust)
+==========================================
+running 1 test
+
+INFO Phase: create_dec_party
+INFO Using prefix: test-network-1
+INFO   Scenario "create decentralized party test-network-1"
+INFO     GIVEN no party at this prefix yet
+INFO     WHEN  P1 posts /onboarding
+INFO     THEN  Onboarding invitation visible on P2
+INFO       ✓ (took 2.1s)
+INFO     THEN  Onboarding invitation visible on P3
+INFO       ✓ (took 0.0s)
+INFO     WHEN  P2 + P3 accept Onboarding invitations
+INFO     THEN  onboarding workflow reaches completed
+INFO       ✓ (took 8.4s)
+INFO     THEN  party visible in /decentralized-parties
+INFO       ✓ (took 1.9s)
+INFO   Scenario "create decentralized party test-network-1" complete (18.7s)
+
+INFO Phase: distribute_dars
+INFO   Scenario "distribute DARs"
+INFO     GIVEN 3 DAR files on disk
+INFO     WHEN  P1 uploads and distributes DARs
+INFO     THEN  Dars invitation visible on P2
+INFO       ✓ (took 1.4s)
+INFO     THEN  Dars invitation visible on P3
+INFO       ✓ (took 0.0s)
+INFO     WHEN  P2 + P3 accept Dars invitations
+INFO     THEN  dars/distribute workflow reaches completed
+INFO       ✓ (took 5.6s)
+INFO   Scenario "distribute DARs" complete (11.4s)
+
+... (14 scenarios total) ...
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured;
+==========================================
+Integration tests completed successfully!
+==========================================
+```
+
+Each scenario follows the Given-When-Then DSL: `Given` is a precondition,
+`When` is the test action, `Then` is the postcondition assertion (its
+probe is polled until it observes the expected state or the per-step
+deadline elapses). A failure renders as
+`ERROR Scenario "<name>" failed at <KIND> "<step>"` with a chained
+`anyhow` cause trail pinpointing the failing HTTP call.
+
+The exact `RUST_LOG` quiet preset is:
+```
+warn,hyper_noise::server=error,
+governance_workflows::common::scenario=info,
+governance_workflows::common::phases=info
+```
+
+The trace itself is rendered with a minimal format locally — just the message text, no timestamps, targets, levels, or structured fields. CI runs (auto-detected via the `CI` env var that GitHub Actions sets) get the full structured format with timestamps + structured fields for log archives and JSON parsing. To force the full format locally, set `INTEGRATION_TEST_FULL_LOG=1`.
+
+#### Verbose mode
+
+Use `--verbose` when diagnosing a stuck or failing run. Sets:
+```
+dec_party_manager=info,tokio_noise=error,hyper_noise=error,
+governance_workflows=info
+```
+
+Surfaces all dec-party-manager INFO output (peer connections, Noise
+handshakes, workflow internals). The cargo test runner is also INFO,
+so individual test cases narrate.
+
+#### Prerequisites
+
+`docker`, `docker compose v2`, `jq`, `curl`, `lsof`. The script
+verifies these up front and bails with a clear message if any are
+missing or if a previous run leaked a manager process holding one of
+the HTTP/Noise ports (8081–8083, 9001–9003).
 
 ### Frontend Development
 

@@ -174,7 +174,14 @@ pub async fn start_attestor(node_config: NodeConfig, coordinator: Peer) -> Resul
             }
             Err(e) => {
                 consecutive_errors += 1;
-                tracing::error!("Failed to get next command: {e}");
+
+                // Per-attempt failures are WARN, not ERROR — the loop's design
+                // is to tolerate transient blips (e.g. coordinator restarting
+                // briefly during peer-config reload). Only the final-strike
+                // bail is logged at ERROR. This keeps test logs readable when
+                // a known restart cycle produces one or two retries that
+                // succeed on the next attempt.
+                tracing::warn!("Attempt {consecutive_errors}/3: failed to get next command: {e}");
 
                 // If we get multiple connection refused errors in a row,
                 // the coordinator has likely shut down or there's a persistent error
