@@ -3,8 +3,8 @@
 # Integration test environment — shared variables and utility functions.
 # Sourced by run.sh and all workflow scripts.
 
-# Exit on error
-set -e
+# Exit on error; treat unset variables as failure
+set -eu
 
 # ============================================================================
 # Constants
@@ -86,8 +86,46 @@ check_prerequisites() {
         missing+=("curl")
     fi
 
+    if ! command -v lsof &>/dev/null; then
+        missing+=("lsof")
+    fi
+
     if [ ${#missing[@]} -gt 0 ]; then
         echo "ERROR: Missing required tools: ${missing[*]}"
+        exit 1
+    fi
+}
+
+# ============================================================================
+# Port availability
+# ============================================================================
+
+# Checks that the dec-party-manager HTTP and Noise ports are free.
+# A leftover process (e.g. a dpm started by a previous run that didn't clean up,
+# or a different worktree's dpm still running) would silently steal one of these
+# ports and the e2e would time out 60s into the first invitation accept.
+# Failing fast here turns that into an instant, actionable error.
+check_dpm_ports_free() {
+    local ports=("$P1_HTTP" "$P2_HTTP" "$P3_HTTP" "$P1_NOISE" "$P2_NOISE" "$P3_NOISE")
+    local busy=()
+
+    for p in "${ports[@]}"; do
+        if lsof -nP -i:"$p" -sTCP:LISTEN >/dev/null 2>&1; then
+            busy+=("$p")
+        fi
+    done
+
+    if [ ${#busy[@]} -gt 0 ]; then
+        echo "ERROR: required port(s) already in use: ${busy[*]}"
+        echo ""
+        echo "Process(es) holding the port(s):"
+        for p in "${busy[@]}"; do
+            echo "  port $p:"
+            lsof -nP -i:"$p" -sTCP:LISTEN 2>/dev/null | tail -n +2 | sed 's/^/    /'
+        done
+        echo ""
+        echo "Stop the offending process(es) (often a dpm leftover from a previous run"
+        echo "or another worktree), then re-run integration-tests/run.sh."
         exit 1
     fi
 }
@@ -100,10 +138,20 @@ cleanup() {
     echo ""
     echo "Cleaning up..."
 
-    # Kill dec-party-manager processes
+    # Kill dec-party-manager processes. The binary ignores SIGTERM today, so
+    # plain `kill` without escalation leaks orphaned processes that hold the
+    # Noise/HTTP ports until the host reboots. Send SIGTERM first (give the
+    # process a chance to shut down cleanly if it ever starts honoring it),
+    # wait briefly, then SIGKILL anything still alive.
     for pid in "${PIDS[@]}"; do
         if kill -0 "$pid" 2>/dev/null; then
             kill "$pid" 2>/dev/null || true
+        fi
+    done
+    sleep 2
+    for pid in "${PIDS[@]}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+            kill -9 "$pid" 2>/dev/null || true
         fi
     done
 
@@ -242,12 +290,33 @@ start_nodes() {
     wait_for_server $P1_HTTP "participant-1" $P1_NOISE
     wait_for_server $P2_HTTP "participant-2" $P2_NOISE
     wait_for_server $P3_HTTP "participant-3" $P3_NOISE
+
+    # Settle delay before returning. wait_for_server only checks "is the port
+    # bound", not "are all peers reachable from each other through the Noise
+    # mesh". Without this delay, configure_peers' restart cycle can leave the
+    # workflow client and the parties handler hammering each freshly-restarted
+    # peer for ~30-50s with Connection-refused / handshake-rejection log spam
+    # while the cross-node Noise sessions converge. 5s catches the common case;
+    # noisy networks will still produce some log lines but the storm is short.
+    sleep 5
 }
 
 stop_nodes() {
+    # Same SIGTERM-ignoring problem as in `cleanup`: plain `kill` leaves the
+    # processes alive, holding their HTTP/Noise ports. When `configure_peers`
+    # then calls `start_nodes` to reload peer config, the new processes can't
+    # bind, the test silently runs against the old (peer-config-stale)
+    # instances, and Noise calls fail later with "Connection refused".
+    # Send SIGTERM, give a 2s grace, then SIGKILL anything still alive.
     for pid in "${PIDS[@]}"; do
         if kill -0 "$pid" 2>/dev/null; then
             kill "$pid" 2>/dev/null || true
+        fi
+    done
+    sleep 2
+    for pid in "${PIDS[@]}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+            kill -9 "$pid" 2>/dev/null || true
         fi
     done
     wait 2>/dev/null || true
