@@ -50,7 +50,6 @@ MOCK_TOKEN="eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJodHRwczovL2NhbnRvbi5
 
 # Process tracking
 PIDS=()
-TEMP_FILES=()
 
 # ============================================================================
 # Logging
@@ -157,11 +156,6 @@ cleanup() {
 
     # Stop localnet
     stop_localnet
-
-    # Remove temp files
-    for f in "${TEMP_FILES[@]}"; do
-        rm -f "$f" 2>/dev/null || true
-    done
 
     # Remove temp directory
     if [ -n "$DEV_DIR" ] && [ -d "$DEV_DIR" ]; then
