@@ -20,6 +20,13 @@ pub struct ProposalCycleCtx {
 pub fn propose_confirm_execute(label: &str, proposal: Value) -> Scenario<ProposalCycleCtx> {
     let label = label.to_string();
     Scenario::with_ctx(label.clone(), ProposalCycleCtx::default())
+        .given("party and governance rules contract present", |f, _ctx| {
+            Box::pin(async move {
+                f.party_id()?;
+                f.rules_contract_id()?;
+                Ok(())
+            })
+        })
         .when(format!("P1 proposes {label}"), {
             let proposal = proposal.clone();
             move |f, _ctx| {
