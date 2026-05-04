@@ -349,7 +349,10 @@ export const PartyDetail = ({
               <Table size="small">
                 <TableHead>
                   <TableRow>
+                    <TableCell sx={{ py: 1 }}>Package</TableCell>
+                    <TableCell sx={{ py: 1 }}>Version</TableCell>
                     <TableCell sx={{ py: 1 }}>Template</TableCell>
+                    <TableCell sx={{ py: 1 }}>Created</TableCell>
                     <TableCell sx={{ py: 1 }}>Contract ID</TableCell>
                     <TableCell sx={{ py: 1, width: 40 }} />
                   </TableRow>
@@ -358,12 +361,29 @@ export const PartyDetail = ({
                   {party.contracts.map((c, idx) => (
                     <TableRow key={c.contract_id} sx={zebraRow(idx)}>
                       <TableCell sx={{ py: 1 }}>
+                        {c.package_name || "—"}
+                      </TableCell>
+                      <TableCell sx={{ py: 1 }}>
+                        {c.package_version || "—"}
+                      </TableCell>
+                      <TableCell sx={{ py: 1 }}>
                         {c.template_id}
+                      </TableCell>
+                      <TableCell sx={{ py: 1 }}>
+                        {c.created_at
+                          ? new Date(c.created_at).toLocaleString(undefined, {
+                              year: "numeric",
+                              month: "short",
+                              day: "2-digit",
+                              hour: "2-digit",
+                              minute: "2-digit",
+                            })
+                          : "—"}
                       </TableCell>
                       <TableCell sx={{ py: 1 }}>
                         <CopyableText
                           text={c.contract_id}
-                          truncate={{ start: 16, end: 16 }}
+                          truncate={{ start: 12, end: 12 }}
                           variant="caption"
                         />
                       </TableCell>

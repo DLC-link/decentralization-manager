@@ -111,12 +111,24 @@ pub struct ParticipantInfo {
     pub owner_key: Option<String>,
 }
 
-/// Contract information
+/// Contract information surfaced in the dec_party detail view.
+///
+/// `template_id` is the short `Module.Path:Entity` form (NOT the fully
+/// qualified package_id-prefixed form). `package_name` is the human-readable
+/// Daml package name (from verbose ACS); `package_version` is joined in from
+/// the participant Admin API's PackageService. `created_at` is the ISO 8601
+/// timestamp Canton stamps on the create event.
 #[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct ContractInfo {
     pub contract_id: String,
     pub template_id: String,
     pub package_id: String,
+    #[serde(default)]
+    pub package_name: String,
+    #[serde(default)]
+    pub package_version: String,
+    #[serde(default)]
+    pub created_at: String,
 }
 
 /// Vetted package information

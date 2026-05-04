@@ -15,6 +15,9 @@ export interface ContractInfo {
   contract_id: string;
   template_id: string;
   package_id: string;
+  package_name?: string;
+  package_version?: string;
+  created_at?: string;
 }
 
 export interface PackageConfig {

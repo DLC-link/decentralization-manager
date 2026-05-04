@@ -122,6 +122,9 @@ pub struct DecPartyContractRow {
     pub contract_id: String,
     pub template_id: String,
     pub package_id: String,
+    pub package_name: String,
+    pub package_version: String,
+    pub created_at: String,
 }
 
 #[derive(Debug, sqlx::FromRow)]

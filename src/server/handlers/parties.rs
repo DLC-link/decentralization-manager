@@ -31,7 +31,7 @@ use crate::{
     participant_id::CantonId,
     server::{
         AppState,
-        queries::{get_contracts, get_party_metadata},
+        queries::{get_contracts, get_party_metadata, sort_contracts},
         types::{
             ConnectionStatus, ContractInfo, DecentralizedPartiesResponse, DecentralizedParty,
             ErrorResponse, PackageInfo, ParticipantInfo, ParticipantStatus,
@@ -359,7 +359,13 @@ async fn load_cached_parties(
                 contract_id: c.contract_id,
                 template_id: c.template_id,
                 package_id: c.package_id,
+                package_name: c.package_name,
+                package_version: c.package_version,
+                created_at: c.created_at,
             });
+    }
+    for list in contracts_map.values_mut() {
+        sort_contracts(list);
     }
 
     let max_updated_at = rows.iter().map(|r| r.updated_at).max().unwrap_or(0);
@@ -448,6 +454,9 @@ pub async fn store_parties_to_db(
                 contract_id: c.contract_id.clone(),
                 template_id: c.template_id.clone(),
                 package_id: c.package_id.clone(),
+                package_name: c.package_name.clone(),
+                package_version: c.package_version.clone(),
+                created_at: c.created_at.clone(),
             })
             .collect();
         tx.replace_dec_party_contracts(&row.party_id, &contracts)

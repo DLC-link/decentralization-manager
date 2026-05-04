@@ -657,14 +657,20 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                     dec_party_id,
                     contract_id,
                     template_id,
-                    package_id
-                ) VALUES (?, ?, ?, ?)
+                    package_id,
+                    package_name,
+                    package_version,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 ",
             )
             .bind(party_id)
             .bind(&c.contract_id)
             .bind(&c.template_id)
             .bind(&c.package_id)
+            .bind(&c.package_name)
+            .bind(&c.package_version)
+            .bind(&c.created_at)
             .execute(&mut **self)
             .await?;
         }
@@ -1528,12 +1534,18 @@ mod tests {
                 contract_id: "contract-1".to_string(),
                 template_id: "Governance:GovernanceRules".to_string(),
                 package_id: "#gov-core".to_string(),
+                package_name: "governance-core-v0-rc3".to_string(),
+                package_version: "0.1.0".to_string(),
+                created_at: "2026-04-28T11:07:59.073177Z".to_string(),
             },
             DecPartyContractRow {
                 dec_party_id: party_id.clone(),
                 contract_id: "contract-2".to_string(),
                 template_id: "Vault:Vault".to_string(),
                 package_id: "#vault".to_string(),
+                package_name: "vault".to_string(),
+                package_version: "0.1.0".to_string(),
+                created_at: "2026-04-28T11:08:00.000000Z".to_string(),
             },
         ];
         tx.replace_dec_party_contracts(&party_id, &contracts)
@@ -1572,6 +1584,9 @@ mod tests {
                 contract_id: "c1".to_string(),
                 template_id: "t1".to_string(),
                 package_id: "p1".to_string(),
+                package_name: String::new(),
+                package_version: String::new(),
+                created_at: String::new(),
             }],
         )
         .await?;

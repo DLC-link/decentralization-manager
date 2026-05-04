@@ -1,10 +1,15 @@
 use std::collections::HashMap;
 
-use canton_proto_rs::com::daml::ledger::api::v2::{
-    CreatedEvent, CumulativeFilter, EventFormat, Filters, GetActiveContractsRequest,
-    GetLedgerEndRequest, Identifier, InterfaceFilter, TemplateFilter, Value, WildcardFilter,
-    admin::ListKnownPartiesRequest, cumulative_filter,
-    get_active_contracts_response::ContractEntry, value,
+use canton_proto_rs::com::{
+    daml::ledger::api::v2::{
+        CreatedEvent, CumulativeFilter, EventFormat, Filters, GetActiveContractsRequest,
+        GetLedgerEndRequest, Identifier, InterfaceFilter, TemplateFilter, Value, WildcardFilter,
+        admin::ListKnownPartiesRequest, cumulative_filter,
+        get_active_contracts_response::ContractEntry, value,
+    },
+    digitalasset::canton::admin::participant::v30::{
+        ListPackagesRequest, package_service_client::PackageServiceClient,
+    },
 };
 
 use crate::{
@@ -226,16 +231,37 @@ pub async fn get_contracts(
 ) -> Result<Vec<ContractInfo>> {
     let mut contracts = Vec::new();
 
+    // Build a {package_id → version} map once per request from the
+    // participant Admin API. The Ledger API itself only returns
+    // `package_name` on each created event — version metadata lives on the
+    // Admin PackageService. Failure to load is non-fatal: contracts simply
+    // ship with an empty version string.
+    let package_versions = match fetch_package_versions(config).await {
+        Ok(map) => map,
+        Err(e) => {
+            tracing::warn!("Failed to load package versions from Admin API: {e}");
+            HashMap::new()
+        }
+    };
+
     if test_mode {
         // Test mode: use WildcardFilter with in-memory filtering
         tracing::debug!("Using WildcardFilter for contracts query (test mode)");
-        fetch_contracts_with_wildcard(config, party_id, token, &mut contracts).await?;
+        fetch_contracts_with_wildcard(config, party_id, token, &package_versions, &mut contracts)
+            .await?;
     } else {
         // Production mode: query each template separately to handle missing packages
         tracing::debug!("Using TemplateFilter for contracts query (per-template)");
         for t in &contract_templates(packages) {
-            match fetch_contracts_for_template(config, party_id, token.clone(), t, &mut contracts)
-                .await
+            match fetch_contracts_for_template(
+                config,
+                party_id,
+                token.clone(),
+                t,
+                &package_versions,
+                &mut contracts,
+            )
+            .await
             {
                 Ok(()) => {
                     tracing::debug!("Successfully queried {}:{}", t.module_name, t.entity_name);
@@ -261,7 +287,141 @@ pub async fn get_contracts(
         }
     }
 
+    sort_contracts(&mut contracts);
     Ok(contracts)
+}
+
+/// Sort contracts for display and collapse duplicates.
+///
+/// Sort order:
+///   1. `package_name` ascending (case-insensitive)
+///   2. `package_version` descending (semver-aware: numeric segments compared
+///      numerically; non-numeric tail compared lexicographically so
+///      `0.1.18 > 0.1.7`)
+///   3. `template_id` ascending (groups duplicate template instances together)
+///   4. `created_at` descending (latest first within a duplicate group)
+///
+/// Then duplicates that share the same
+/// `(package_name, package_version, template_id)` triple are collapsed into
+/// the latest one — `dedup_by` after the sort keeps the first occurrence,
+/// which is the latest by `created_at`.
+///
+/// Used by both the live ACS path (`get_contracts`) and the cache-read path
+/// in `handlers::parties` so the frontend always receives the same ordering.
+#[allow(clippy::ptr_arg)] // need Vec for dedup_by truncation
+pub fn sort_contracts(contracts: &mut Vec<ContractInfo>) {
+    contracts.sort_by(|a, b| {
+        a.package_name
+            .to_lowercase()
+            .cmp(&b.package_name.to_lowercase())
+            .then_with(|| compare_versions(&b.package_version, &a.package_version))
+            .then_with(|| a.template_id.cmp(&b.template_id))
+            .then_with(|| b.created_at.cmp(&a.created_at))
+    });
+    contracts.dedup_by(|a, b| {
+        a.package_name == b.package_name
+            && a.package_version == b.package_version
+            && a.template_id == b.template_id
+    });
+}
+
+fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
+    let mut ai = a.split('.');
+    let mut bi = b.split('.');
+    loop {
+        match (ai.next(), bi.next()) {
+            (None, None) => return std::cmp::Ordering::Equal,
+            (None, Some(_)) => return std::cmp::Ordering::Less,
+            (Some(_), None) => return std::cmp::Ordering::Greater,
+            (Some(x), Some(y)) => {
+                let ord = match (x.parse::<u64>(), y.parse::<u64>()) {
+                    (Ok(xn), Ok(yn)) => xn.cmp(&yn),
+                    _ => x.cmp(y),
+                };
+                if ord != std::cmp::Ordering::Equal {
+                    return ord;
+                }
+            }
+        }
+    }
+}
+
+/// Load `(package_id → version)` from the participant's Admin PackageService.
+/// One call per request — small map (~hundreds of rows), no caching needed.
+async fn fetch_package_versions(config: &NodeConfig) -> Result<HashMap<String, String>> {
+    let mut client = PackageServiceClient::connect(config.admin_api_url()).await?;
+    let response = client
+        .list_packages(tonic::Request::new(ListPackagesRequest {
+            limit: 0,
+            filter_name: String::new(),
+        }))
+        .await?
+        .into_inner();
+    Ok(response
+        .package_descriptions
+        .into_iter()
+        .map(|p| (p.package_id, p.version))
+        .collect())
+}
+
+/// Format a `prost_types::Timestamp` as an ISO 8601 UTC string with
+/// nanosecond precision (`YYYY-MM-DDTHH:MM:SS.nnnnnnnnnZ`). Hand-rolled with
+/// Howard Hinnant's date algorithm to avoid pulling in chrono just for this.
+fn format_timestamp(ts: &::prost_types::Timestamp) -> String {
+    let secs = ts.seconds;
+    let day_secs = 86_400i64;
+    let days = secs.div_euclid(day_secs);
+    let sod = secs.rem_euclid(day_secs);
+    let hour = sod / 3600;
+    let minute = (sod % 3600) / 60;
+    let second = sod % 60;
+
+    // Civil-from-days: see https://howardhinnant.github.io/date_algorithms.html
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    if m <= 2 {
+        y += 1;
+    }
+
+    format!(
+        "{y:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}.{nanos:09}Z",
+        nanos = ts.nanos
+    )
+}
+
+fn render_contract_info(
+    created: &CreatedEvent,
+    package_versions: &HashMap<String, String>,
+) -> ContractInfo {
+    let template = created.template_id.as_ref();
+    let template_id = template
+        .map(|t| format!("{}:{}", t.module_name, t.entity_name))
+        .unwrap_or_default();
+    let package_id = template.map(|t| t.package_id.clone()).unwrap_or_default();
+    let package_version = package_versions
+        .get(&package_id)
+        .cloned()
+        .unwrap_or_default();
+    let created_at = created
+        .created_at
+        .as_ref()
+        .map(format_timestamp)
+        .unwrap_or_default();
+    ContractInfo {
+        contract_id: created.contract_id.clone(),
+        template_id,
+        package_id,
+        package_name: created.package_name.clone(),
+        package_version,
+        created_at,
+    }
 }
 
 /// Fetch contracts using WildcardFilter (for test mode)
@@ -269,6 +429,7 @@ async fn fetch_contracts_with_wildcard(
     config: &NodeConfig,
     party_id: &str,
     token: Option<String>,
+    package_versions: &HashMap<String, String>,
     contracts: &mut Vec<ContractInfo>,
 ) -> Result {
     let mut state_client = utils::create_state_client(config, token).await?;
@@ -312,8 +473,9 @@ async fn fetch_contracts_with_wildcard(
             && let Some(created) = active.created_event
         {
             // Filter in-memory for contract templates
-            let template = created.template_id.as_ref();
-            let is_wanted = template
+            let is_wanted = created
+                .template_id
+                .as_ref()
                 .map(|t| is_contract_template(&t.module_name, &t.entity_name))
                 .unwrap_or(false);
 
@@ -321,16 +483,7 @@ async fn fetch_contracts_with_wildcard(
                 continue;
             }
 
-            let template_id = template
-                .map(|t| format!("{}:{}", t.module_name, t.entity_name))
-                .unwrap_or_default();
-            let package_id = template.map(|t| t.package_id.clone()).unwrap_or_default();
-
-            contracts.push(ContractInfo {
-                contract_id: created.contract_id,
-                template_id,
-                package_id,
-            });
+            contracts.push(render_contract_info(&created, package_versions));
         }
     }
 
@@ -343,6 +496,7 @@ async fn fetch_contracts_for_template(
     party_id: &str,
     token: Option<String>,
     template: &TemplateId,
+    package_versions: &HashMap<String, String>,
     contracts: &mut Vec<ContractInfo>,
 ) -> Result {
     let mut state_client = utils::create_state_client(config, token).await?;
@@ -390,13 +544,7 @@ async fn fetch_contracts_for_template(
         if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
             && let Some(created) = active.created_event
         {
-            let template_id_str = format!("{}:{}", template.module_name, template.entity_name);
-
-            contracts.push(ContractInfo {
-                contract_id: created.contract_id,
-                template_id: template_id_str,
-                package_id: template.package_id.to_string(),
-            });
+            contracts.push(render_contract_info(&created, package_versions));
         }
     }
 
@@ -2083,4 +2231,76 @@ pub async fn query_contracts_by_template(
     }
 
     Ok(contracts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ci(name: &str, version: &str, created_at: &str, contract_id: &str) -> ContractInfo {
+        ContractInfo {
+            contract_id: contract_id.to_string(),
+            template_id: format!("Mod:{}", name),
+            package_id: format!("pkg-id-of-{name}-{version}"),
+            package_name: name.to_string(),
+            package_version: version.to_string(),
+            created_at: created_at.to_string(),
+        }
+    }
+
+    #[test]
+    fn sort_contracts_by_name_asc_version_desc_created_at_desc() {
+        // Arrange — deliberately scrambled order across all three keys, with
+        // `alpha 0.1.18` repeated twice (two different created_at) so the
+        // dedup keeps only the latest.
+        let mut contracts = vec![
+            ci("zeta", "1.0.0", "2026-04-30T00:00:00Z", "z-1"),
+            ci("alpha", "0.1.7", "2026-04-29T00:00:00Z", "a-1"),
+            ci("alpha", "0.1.18", "2026-04-28T00:00:00Z", "a-2"),
+            ci("alpha", "0.1.18", "2026-04-30T00:00:00Z", "a-3"),
+            ci("beta", "2.0.0", "2026-04-29T00:00:00Z", "b-1"),
+        ];
+
+        // Act
+        sort_contracts(&mut contracts);
+
+        // Assert — `a-3` (2026-04-30) wins over `a-2` (2026-04-28) within
+        // the (alpha, 0.1.18, Mod:alpha) duplicate group.
+        let order: Vec<&str> = contracts.iter().map(|c| c.contract_id.as_str()).collect();
+        assert_eq!(order, vec!["a-3", "a-1", "b-1", "z-1"]);
+    }
+
+    #[test]
+    fn sort_contracts_dedups_by_name_version_template_keeping_latest() {
+        // Same package+version but DIFFERENT templates → not deduplicated.
+        let mut contracts = vec![
+            ContractInfo {
+                contract_id: "x".to_string(),
+                template_id: "Mod:Foo".to_string(),
+                package_id: "p".to_string(),
+                package_name: "pkg".to_string(),
+                package_version: "1.0.0".to_string(),
+                created_at: "2026-04-29T00:00:00Z".to_string(),
+            },
+            ContractInfo {
+                contract_id: "y".to_string(),
+                template_id: "Mod:Bar".to_string(),
+                package_id: "p".to_string(),
+                package_name: "pkg".to_string(),
+                package_version: "1.0.0".to_string(),
+                created_at: "2026-04-28T00:00:00Z".to_string(),
+            },
+        ];
+        sort_contracts(&mut contracts);
+        assert_eq!(contracts.len(), 2);
+    }
+
+    #[test]
+    fn compare_versions_handles_numeric_segments() {
+        use std::cmp::Ordering;
+        assert_eq!(compare_versions("0.1.18", "0.1.7"), Ordering::Greater);
+        assert_eq!(compare_versions("1.0.0", "0.99.99"), Ordering::Greater);
+        assert_eq!(compare_versions("1.0.0", "1.0.0"), Ordering::Equal);
+        assert_eq!(compare_versions("1.0", "1.0.0"), Ordering::Less);
+    }
 }
