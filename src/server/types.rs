@@ -452,6 +452,12 @@ pub enum ActionType {
     GovernanceSetTimeout {
         new_timeout_microseconds: i64,
     },
+    GovernanceAddAdditionalProposer {
+        additional_proposer: CantonId,
+    },
+    GovernanceRemoveAdditionalProposer {
+        additional_proposer: CantonId,
+    },
 
     // Vault Deployment (2)
     VaultDeployment {

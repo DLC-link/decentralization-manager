@@ -530,6 +530,13 @@ pub fn serialize_action(action: &ActionType) -> Value {
                 make_contract_id(amulet_rules_cid),
             )]),
         ),
+
+        ActionType::GovernanceAddAdditionalProposer { .. }
+        | ActionType::GovernanceRemoveAdditionalProposer { .. } => {
+            panic!(
+                "ActionType {action:?} is a governance self-action, not an ActionRequiringConfirmation"
+            )
+        }
     }
 }
 
@@ -617,6 +624,24 @@ fn serialize_self_action(action: &ActionType) -> Value {
                 serialize_reltime(*new_timeout_microseconds),
             )]),
         ),
+        ActionType::GovernanceAddAdditionalProposer {
+            additional_proposer,
+        } => make_variant(
+            "SelfAction_AddAdditionalProposer",
+            make_record(vec![field(
+                "additionalProposer",
+                make_party(additional_proposer),
+            )]),
+        ),
+        ActionType::GovernanceRemoveAdditionalProposer {
+            additional_proposer,
+        } => make_variant(
+            "SelfAction_RemoveAdditionalProposer",
+            make_record(vec![field(
+                "additionalProposer",
+                make_party(additional_proposer),
+            )]),
+        ),
         _ => panic!("ActionType {action:?} is not a governance self-management action"),
     }
 }
@@ -662,6 +687,18 @@ pub fn deserialize_self_action(value: &Value) -> Result<ActionType> {
             let microseconds = deserialize_reltime(reltime)?;
             Ok(ActionType::GovernanceSetTimeout {
                 new_timeout_microseconds: microseconds,
+            })
+        }
+        "SelfAction_AddAdditionalProposer" => {
+            let additional_proposer = extract_party_id(get_field(record, "additionalProposer")?)?;
+            Ok(ActionType::GovernanceAddAdditionalProposer {
+                additional_proposer,
+            })
+        }
+        "SelfAction_RemoveAdditionalProposer" => {
+            let additional_proposer = extract_party_id(get_field(record, "additionalProposer")?)?;
+            Ok(ActionType::GovernanceRemoveAdditionalProposer {
+                additional_proposer,
             })
         }
         other => anyhow::bail!("Unknown GovernanceSelfAction constructor: {other}"),
