@@ -54,9 +54,9 @@ createTestGovernance parties =
   submit parties.governanceParty $ createCmd GovernanceRules with
     governanceParty = parties.governanceParty
     members = getMembers parties
-    additionalProposers = Set.empty
     threshold = 2
     actionConfirmationTimeout = minutes 30
+    additionalProposers = None
 
 submitConfirmations
   : Party -> ContractId GovernanceRules -> ContractId GovernableAction -> [Party]
