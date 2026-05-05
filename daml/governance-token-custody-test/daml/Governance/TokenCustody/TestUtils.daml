@@ -61,6 +61,7 @@ createTestGovernance parties =
   submit parties.governanceParty $ createCmd GovernanceRules with
     governanceParty = parties.governanceParty
     members = getMembers parties
+    additionalProposers = Set.empty
     threshold = 2
     actionConfirmationTimeout = minutes 30
 
