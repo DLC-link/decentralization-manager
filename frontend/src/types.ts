@@ -142,7 +142,6 @@ export interface ParticipantStatus {
 export interface KickRequest {
   decentralized_party_id: string;
   participant_id: string;
-  namespace_fingerprint: string;
   new_threshold: number;
 }
 

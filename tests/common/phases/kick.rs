@@ -48,27 +48,14 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         .when("P1 posts /kick", |f, _| {
             Box::pin(async move {
                 let party_id = f.party_id()?.to_string();
-                let prefix = f.party_prefix()?.to_string();
                 let p3_uid = f.p3.participant_id.clone();
 
-                let path = format!("/decentralized-parties?prefix={prefix}");
-                let r: DecentralizedPartiesResponse = f.get_json(f.p1.http, &path).await?;
-                let party = r
-                    .parties
-                    .into_iter()
-                    .find(|p| p.party_id == party_id)
-                    .context("party not found before kick")?;
-                let p3 = party
-                    .participants
-                    .into_iter()
-                    .find(|p| p.participant_uid == p3_uid)
-                    .context("P3 not in party")?;
-                let owner_key = p3.owner_key.context("P3 owner_key not resolved")?;
-
+                // The server derives `namespace_fingerprint` from its
+                // participant cache; the THEN above already proves it has
+                // resolved P3's owner_key, so /kick won't 409.
                 let req = json!({
                     "decentralized_party_id": party_id,
                     "participant_id": p3_uid,
-                    "namespace_fingerprint": owner_key,
                     "new_threshold": 2_i64,
                 });
                 let _: Value = f
