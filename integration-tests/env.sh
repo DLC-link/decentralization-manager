@@ -154,6 +154,17 @@ cleanup() {
         fi
     done
 
+    # Also kill any processes the Rust chaos phases respawned during the run.
+    # Each restart appends one PID per line to $DEV_DIR/restarted-pids so the
+    # cleanup() trap reaps them even if cargo test panics or aborts.
+    if [ -n "${DEV_DIR:-}" ] && [ -f "$DEV_DIR/restarted-pids" ]; then
+        while IFS= read -r pid; do
+            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+                kill -9 "$pid" 2>/dev/null || true
+            fi
+        done < "$DEV_DIR/restarted-pids"
+    fi
+
     # Stop localnet
     stop_localnet
 

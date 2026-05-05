@@ -7,7 +7,7 @@ use tracing::info;
 
 use crate::common::{
     Fixture,
-    http::probe_workflow_status,
+    http::{probe_workflow_run_visible, probe_workflow_status},
     invitations::{InvitationIds, post_accept_invitation, probe_pending_invitation},
     scenario::Scenario,
 };
@@ -113,6 +113,34 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         "dars/distribute",
                     )
                     .await
+                })
+            },
+        )
+        .then(
+            "Dars completed run visible in /workflows on P1 (Coordinator)",
+            Duration::from_secs(30),
+            |f, _| {
+                Box::pin(async move {
+                    probe_workflow_run_visible(f, f.p1.http, "Dars", "Coordinator", "completed")
+                        .await
+                })
+            },
+        )
+        .then(
+            "Dars completed run visible in /workflows on P2 (Attestor)",
+            Duration::from_secs(30),
+            |f, _| {
+                Box::pin(async move {
+                    probe_workflow_run_visible(f, f.p2.http, "Dars", "Attestor", "completed").await
+                })
+            },
+        )
+        .then(
+            "Dars completed run visible in /workflows on P3 (Attestor)",
+            Duration::from_secs(30),
+            |f, _| {
+                Box::pin(async move {
+                    probe_workflow_run_visible(f, f.p3.http, "Dars", "Attestor", "completed").await
                 })
             },
         )
