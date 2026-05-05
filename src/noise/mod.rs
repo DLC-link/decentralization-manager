@@ -17,6 +17,11 @@ use crate::error::Result;
 /// Timeout for Noise protocol operations
 pub const NOISE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Per-attempt timeout used by the retry wrapper (`send_noise_message_with_retry`).
+/// Set so that two attempts fit within the previous wall-clock budget for offline peers.
+#[allow(dead_code)]
+const NOISE_PER_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Message types for the Noise protocol communication
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[repr(u16)]
