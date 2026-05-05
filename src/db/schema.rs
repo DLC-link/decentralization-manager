@@ -41,6 +41,14 @@ pub trait SchemaRead {
         party_id: &str,
     ) -> Result<Vec<DecPartyParticipantRow>>;
 
+    /// Get the owner key for a specific participant in a decentralized party.
+    /// Returns `None` if the row is missing or the `owner_key` column is NULL.
+    async fn get_dec_party_participant_owner_key(
+        &self,
+        party_id: &str,
+        participant_uid: &str,
+    ) -> Result<Option<String>>;
+
     /// Get contracts for a decentralized party
     async fn get_dec_party_contracts(&self, party_id: &str) -> Result<Vec<DecPartyContractRow>>;
 
