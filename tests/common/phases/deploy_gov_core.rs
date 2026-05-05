@@ -142,6 +142,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                             "fields": [
                                 {"type": "decentralized_party"},
                                 {"type": "party_set", "parties": [&p1m, &p2m, &p3m]},
+                                {"type": "party_set", "parties": serde_json::Value::Array(vec![])},
                                 {"type": "int64", "value": 2},
                                 {"type": "rel_time", "microseconds": 1800000000_i64},
                             ],
