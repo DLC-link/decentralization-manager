@@ -237,12 +237,27 @@ pub struct OnboardingRequest {
     pub peer_ids: Vec<String>,
 }
 
+/// Why a directed edge was reported missing. The frontend renders different
+/// remediation hints depending on which kind it sees: `MeshHole` is a true
+/// peer↔peer config gap ("on `from`, add `to` to the network config"), while
+/// `UnreachableFromCoordinator` is a coordinator-side reachability problem
+/// (the peer is unknown, has no public key, didn't answer, or replied with
+/// a malformed payload — fix the coordinator's view of `to`, or `to` itself).
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MissingEdgeKind {
+    UnreachableFromCoordinator,
+    MeshHole,
+}
+
 /// One directed missing edge in the peer mesh: `from` does not have `to`
-/// configured as a peer.
+/// configured as a peer (`MeshHole`), or the coordinator could not query
+/// `to` at all (`UnreachableFromCoordinator`, `from` is the coordinator).
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct MissingPeerEdge {
     pub from: String,
     pub to: String,
+    pub kind: MissingEdgeKind,
 }
 
 /// Returned when onboarding pre-flight detects that selected peers are not

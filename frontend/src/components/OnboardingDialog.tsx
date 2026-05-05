@@ -33,7 +33,13 @@ export const OnboardingDialog = ({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [meshErrors, setMeshErrors] = useState<
-    Array<{ from: string; to: string }> | null
+    Array<{
+      from: string;
+      to: string;
+      // `kind` is optional for backwards compatibility with older backends
+      // that didn't tag the failure mode.
+      kind?: "unreachable_from_coordinator" | "mesh_hole";
+    }> | null
   >(null);
   const [status, setStatus] = useState<OnboardingStatusResponse | null>(null);
   const [partyIdPrefix, setPartyIdPrefix] = useState("");
@@ -198,12 +204,21 @@ export const OnboardingDialog = ({
   const peerName = (id: string) =>
     peers.find((p) => p.participant_id === id)?.name || id;
 
-  // Group missing directed edges by the node that needs to be edited.
-  // The user's task on `from` = add each `to` to its network config.
-  const groupedMissing = (() => {
+  // Split missing directed edges into the two distinct user-actions:
+  //
+  //  - `mesh_hole`  — peer `from` is reachable from the coordinator but does
+  //    not have peer `to` in its config. Hint: "On <from>, add <to>".
+  //  - `unreachable_from_coordinator` — coordinator can't query `to` at all
+  //    (unknown / no key / unreachable / unparsable response). Hint: fix the
+  //    coordinator's view of `to`, or `to` itself (it may be offline).
+  //
+  // Older backends won't set `kind`; treat that as `mesh_hole` so behavior
+  // is identical to the pre-fix UI.
+  const meshHoles = (() => {
     if (!meshErrors) return [] as Array<{ node: string; missing: string[] }>;
     const map = new Map<string, string[]>();
     for (const edge of meshErrors) {
+      if (edge.kind && edge.kind !== "mesh_hole") continue;
       const list = map.get(edge.from) ?? [];
       list.push(edge.to);
       map.set(edge.from, list);
@@ -212,6 +227,16 @@ export const OnboardingDialog = ({
       node,
       missing,
     }));
+  })();
+  const unreachablePeers = (() => {
+    if (!meshErrors) return [] as string[];
+    const set = new Set<string>();
+    for (const edge of meshErrors) {
+      if (edge.kind === "unreachable_from_coordinator") {
+        set.add(edge.to);
+      }
+    }
+    return Array.from(set);
   })();
 
   return (
@@ -282,30 +307,61 @@ export const OnboardingDialog = ({
 
           {meshErrors && (
             <Alert severity="error">
-              <Typography variant="body2" sx={{ fontWeight: 600, mb: 1 }}>
-                Update network configs:
-              </Typography>
-              <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
-                {groupedMissing.map(({ node, missing }, i) => (
-                  <Box key={i}>
-                    <Typography variant="body2">
-                      On <strong>{peerName(node)}</strong>, add:
-                    </Typography>
-                    <Box component="ul" sx={{ pl: 2.5, m: 0 }}>
-                      {missing.map((toId, j) => (
-                        <Typography
-                          component="li"
-                          variant="body2"
-                          key={j}
-                          color="text.secondary"
-                        >
-                          {peerName(toId)}
-                        </Typography>
-                      ))}
-                    </Box>
+              {unreachablePeers.length > 0 && (
+                <Box sx={{ mb: meshHoles.length > 0 ? 2 : 0 }}>
+                  <Typography variant="body2" sx={{ fontWeight: 600, mb: 1 }}>
+                    Coordinator can't reach these peers:
+                  </Typography>
+                  <Box component="ul" sx={{ pl: 2.5, m: 0 }}>
+                    {unreachablePeers.map((id) => (
+                      <Typography
+                        component="li"
+                        variant="body2"
+                        key={id}
+                        color="text.secondary"
+                      >
+                        {peerName(id)}
+                      </Typography>
+                    ))}
                   </Box>
-                ))}
-              </Box>
+                  <Typography
+                    variant="caption"
+                    color="text.secondary"
+                    sx={{ display: "block", mt: 0.5 }}
+                  >
+                    Fix the coordinator's network config for each, or check
+                    that the peer is online.
+                  </Typography>
+                </Box>
+              )}
+              {meshHoles.length > 0 && (
+                <>
+                  <Typography variant="body2" sx={{ fontWeight: 600, mb: 1 }}>
+                    Update network configs:
+                  </Typography>
+                  <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+                    {meshHoles.map(({ node, missing }, i) => (
+                      <Box key={i}>
+                        <Typography variant="body2">
+                          On <strong>{peerName(node)}</strong>, add:
+                        </Typography>
+                        <Box component="ul" sx={{ pl: 2.5, m: 0 }}>
+                          {missing.map((toId, j) => (
+                            <Typography
+                              component="li"
+                              variant="body2"
+                              key={j}
+                              color="text.secondary"
+                            >
+                              {peerName(toId)}
+                            </Typography>
+                          ))}
+                        </Box>
+                      </Box>
+                    ))}
+                  </Box>
+                </>
+              )}
               <Typography
                 variant="caption"
                 color="text.secondary"

@@ -123,6 +123,24 @@ pub async fn start_server(
         );
     }
 
+    // Make the admin-role policy explicit at boot so a single-user deployment
+    // doesn't quietly lose authorization on multi-user upgrade. With
+    // `admin_role = None` (the default since the gating became opt-in),
+    // every authenticated caller passes `require_admin`.
+    match admin_role.as_deref() {
+        Some(role) if !role.is_empty() => {
+            tracing::info!("Admin gate active: requests must carry role '{role}'");
+        }
+        _ => {
+            tracing::warn!(
+                "DECPM_ADMIN_ROLE not set: every authenticated caller is treated as admin. \
+                 Set DECPM_ADMIN_ROLE=<role> to require a specific Keycloak role on \
+                 PUT /party-config, POST /kick, POST /auth/grant-rights, and other \
+                 admin-gated endpoints."
+            );
+        }
+    }
+
     let db_party_creds = db.get_all_party_credentials().await.unwrap_or_else(|e| {
         tracing::warn!("Failed to load party credentials from DB: {e}");
         Vec::new()

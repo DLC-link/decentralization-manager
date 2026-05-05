@@ -277,8 +277,12 @@ pub async fn discover_member_party(
     let token = match token_result {
         Ok(resp) => resp.access_token,
         Err(e) => {
+            // Full chain to logs (keycloak Display can echo request URL or
+            // response body); generic message to clients so we don't surface
+            // reflected creds.
+            tracing::warn!("Keycloak auth failed during member-party discovery: {e:#}");
             return HttpResponse::Unauthorized().json(ErrorResponse {
-                error: format!("Keycloak auth failed: {e}"),
+                error: "Keycloak auth failed".into(),
             });
         }
     };
@@ -286,8 +290,9 @@ pub async fn discover_member_party(
     let mut client = match utils::create_user_client(&data.config, Some(token)).await {
         Ok(c) => c,
         Err(e) => {
+            tracing::error!("Failed to create user client: {e:#}");
             return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to create user client: {e}"),
+                error: "Failed to create user client".into(),
             });
         }
     };
@@ -301,8 +306,9 @@ pub async fn discover_member_party(
     {
         Ok(r) => r.into_inner(),
         Err(e) => {
+            tracing::error!("Canton GetUser failed: {e:#}");
             return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Canton GetUser failed: {e}"),
+                error: "Canton GetUser failed".into(),
             });
         }
     };
@@ -330,4 +336,82 @@ pub async fn discover_member_party(
         primary_party,
         description,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        collections::{HashMap, HashSet},
+        sync::Arc,
+    };
+
+    use actix_web::{
+        App,
+        http::StatusCode,
+        test::{self, TestRequest},
+        web::Data,
+    };
+    use serde_json::json;
+    use sqlx::SqlitePool;
+    use tokio::sync::{Mutex, Notify, RwLock};
+
+    use super::discover_member_party;
+    use crate::{
+        auth::{MockAuthRegistry, MockValidator, TokenValidator, WorkflowAuth},
+        config::NodeConfig,
+        server::{AppState, ListenerControl},
+    };
+
+    /// `discover_member_party` is admin-gated. Drive the handler without the
+    /// `AuthMiddleware` wrap so no `Principal` is attached to the request,
+    /// then assert `require_admin`'s 401 fires before any Keycloak/Canton
+    /// call is attempted. This is the production handler-as-last-line-of-
+    /// defense path: even if a request slips through (or middleware is
+    /// misconfigured), the credential-handling code stays gated.
+    #[actix_web::test]
+    async fn discover_member_party_rejects_request_without_principal() {
+        let db = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        let party_credentials = Arc::new(RwLock::new(Vec::new()));
+        let state = Data::new(AppState {
+            db,
+            config: NodeConfig::default(),
+            peer_status: Arc::new(RwLock::new(HashMap::new())),
+            noise_listener_control: Arc::new(RwLock::new(ListenerControl {
+                should_pause: false,
+            })),
+            noise_listener_notify: Arc::new(Notify::new()),
+            onboarding_trigger: Arc::new(Notify::new()),
+            kick_trigger: Arc::new(Notify::new()),
+            contracts_trigger: Arc::new(Notify::new()),
+            dars_trigger: Arc::new(Notify::new()),
+            coordinator_pubkey: Arc::new(RwLock::new(None)),
+            pending_invitations: Arc::new(RwLock::new(Vec::new())),
+            auth: Arc::new(RwLock::new(Some(WorkflowAuth::Mock(Arc::new(
+                MockAuthRegistry::new(party_credentials.clone()),
+            ))))),
+            token_validator: TokenValidator::Mock(Arc::new(MockValidator::new(
+                "decman-admin".to_string(),
+            ))),
+            admin_role: Some("decman-admin".to_string()),
+            party_credentials,
+            bootstrap_mu: Arc::new(Mutex::new(())),
+            test_mode: true,
+            refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
+        });
+        let app =
+            test::init_service(App::new().app_data(state).service(discover_member_party)).await;
+        let req = TestRequest::post()
+            .uri("/party-config/discover-member-party")
+            .set_json(json!({
+                "keycloak_url": "https://example.invalid",
+                "keycloak_realm": "test",
+                "keycloak_client_id": "validator-admin",
+                "keycloak_client_secret": "secret",
+            }))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
 }

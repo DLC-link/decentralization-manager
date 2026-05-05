@@ -354,9 +354,12 @@ pub async fn grant_rights(
     {
         Ok(resp) => resp.access_token,
         Err(e) => {
-            tracing::warn!("Failed to mint admin token for grant-rights: {e}");
+            // Full chain to logs (the keycloak crate's Display can include
+            // request URL / response body — keep it server-side); generic
+            // message in the response so we don't surface reflected secrets.
+            tracing::warn!("Failed to mint admin token for grant-rights: {e:#}");
             return HttpResponse::Unauthorized().json(ErrorResponse {
-                error: format!("Admin Keycloak auth failed: {e}"),
+                error: "Admin Keycloak auth failed".into(),
             });
         }
     };
@@ -375,7 +378,7 @@ pub async fn grant_rights(
         Err(e) => {
             tracing::error!("Failed to grant rights: {e:#}");
             HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to grant rights: {e}"),
+                error: "Failed to grant rights".into(),
             })
         }
     }
@@ -474,5 +477,140 @@ async fn test_keycloak_auth(
         .await
         .map(|_| ())
         .map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        collections::{HashMap, HashSet},
+        sync::Arc,
+    };
+
+    use actix_web::{
+        App,
+        http::{StatusCode, header::AUTHORIZATION},
+        test::{self, TestRequest},
+        web::Data,
+    };
+    use serde_json::{Value, json};
+    use sqlx::SqlitePool;
+    use tokio::sync::{Mutex, Notify, RwLock};
+
+    use super::grant_rights;
+    use crate::{
+        auth::{MockAuthRegistry, MockValidator, TokenValidator, WorkflowAuth},
+        config::NodeConfig,
+        server::{AppState, ListenerControl, middleware::AuthMiddleware},
+    };
+
+    /// Build an `AppState` configured for handler-level tests:
+    /// - in-memory sqlite (no migrations needed for grant_rights paths)
+    /// - `MockValidator` accepts any token, mints an "admin"-roled principal
+    /// - `WorkflowAuth::Mock` so `grant_rights` hits its test-mode short-circuit
+    /// - `admin_role` is configurable so the require-admin gate can be exercised
+    async fn build_state(admin_role: Option<&str>) -> Data<AppState> {
+        let db = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        let party_credentials = Arc::new(RwLock::new(Vec::new()));
+        Data::new(AppState {
+            db,
+            config: NodeConfig::default(),
+            peer_status: Arc::new(RwLock::new(HashMap::new())),
+            noise_listener_control: Arc::new(RwLock::new(ListenerControl {
+                should_pause: false,
+            })),
+            noise_listener_notify: Arc::new(Notify::new()),
+            onboarding_trigger: Arc::new(Notify::new()),
+            kick_trigger: Arc::new(Notify::new()),
+            contracts_trigger: Arc::new(Notify::new()),
+            dars_trigger: Arc::new(Notify::new()),
+            coordinator_pubkey: Arc::new(RwLock::new(None)),
+            pending_invitations: Arc::new(RwLock::new(Vec::new())),
+            auth: Arc::new(RwLock::new(Some(WorkflowAuth::Mock(Arc::new(
+                MockAuthRegistry::new(party_credentials.clone()),
+            ))))),
+            token_validator: TokenValidator::Mock(Arc::new(MockValidator::new(
+                "decman-admin".to_string(),
+            ))),
+            admin_role: admin_role.map(str::to_string),
+            party_credentials,
+            bootstrap_mu: Arc::new(Mutex::new(())),
+            test_mode: true,
+            refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
+        })
+    }
+
+    /// `dec_party_id` deserializes via `CantonId::parse`, which requires a
+    /// `prefix::<68-hex-char namespace>` shape (34 bytes). Pin a fixed valid
+    /// value so the JSON extractor doesn't 400 before the handler runs.
+    const VALID_CANTON_ID: &str =
+        "test-network::12200000000000000000000000000000000000000000000000000000000000000000";
+
+    /// In mock mode, `grant_rights` short-circuits and returns canned
+    /// `RightsStatus` with all four rights `true`. This proves the handler
+    /// is reachable and the security-sensitive Keycloak path is bypassed
+    /// when we tell it to be — operators running with `--features test-mode`
+    /// rely on this for swagger and CI smoke tests.
+    #[actix_web::test]
+    async fn grant_rights_mock_mode_returns_canned_rights() {
+        let state = build_state(None).await;
+        let app = test::init_service(
+            App::new()
+                .app_data(state)
+                .wrap(AuthMiddleware)
+                .service(grant_rights),
+        )
+        .await;
+        let req = TestRequest::post()
+            .uri("/auth/grant-rights")
+            .insert_header((AUTHORIZATION, "Bearer any-token"))
+            .set_json(json!({
+                "dec_party_id": VALID_CANTON_ID,
+                "admin_client_id": "validator-admin",
+                "admin_client_secret": "secret",
+            }))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value = test::read_body_json(resp).await;
+        let rights = body
+            .get("rights")
+            .expect("response carries `rights` object");
+        for field in [
+            "member_party_act_as",
+            "member_party_read_as",
+            "dec_party_act_as",
+            "dec_party_read_as",
+        ] {
+            assert_eq!(
+                rights.get(field),
+                Some(&Value::Bool(true)),
+                "expected canned `{field}: true` in mock-mode RightsStatus, got {body}"
+            );
+        }
+    }
+
+    /// `require_admin` rejects requests that arrive without a `Principal`
+    /// attached. We skip the `AuthMiddleware` wrap here so no principal is
+    /// injected — that's the production path when a request slips past auth
+    /// (e.g. middleware misconfigured) and the handler is the last line of
+    /// defense. With `admin_role = Some(...)`, the response is 401 from
+    /// `require_admin`'s own guard, before any body validation runs.
+    #[actix_web::test]
+    async fn grant_rights_rejects_request_without_principal() {
+        let state = build_state(Some("decman-admin")).await;
+        let app = test::init_service(App::new().app_data(state).service(grant_rights)).await;
+        let req = TestRequest::post()
+            .uri("/auth/grant-rights")
+            .set_json(json!({
+                "dec_party_id": VALID_CANTON_ID,
+                "admin_client_id": "validator-admin",
+                "admin_client_secret": "secret",
+            }))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 }

@@ -22,7 +22,7 @@ use crate::{
         middleware::require_admin,
         types::{
             ContractsRequest, DarsRequest, ErrorResponse, HttpWorkflowState, KickRequest,
-            KickResponse, KickStatus, ListenerPauseGuard, MissingPeerEdge,
+            KickResponse, KickStatus, ListenerPauseGuard, MissingEdgeKind, MissingPeerEdge,
             OnboardingMeshErrorResponse, OnboardingRequest, OnboardingResponse, OnboardingStatus,
             SuccessResponse, WorkflowProgress, WorkflowResponse, WorkflowStatusResponse,
         },
@@ -383,9 +383,21 @@ pub async fn start_onboarding(
     // for attestor connections that can never be established.
     match verify_peer_mesh(&data.config, &data.db, &body.peer_ids).await {
         Ok(missing) if !missing.is_empty() => {
+            // Tag each edge with its failure mode in the human-readable
+            // summary; the structured `missing_edges` array carries the same
+            // info via `kind` for the frontend to render targeted hints.
             let edge_summary = missing
                 .iter()
-                .map(|e| format!("{from} → {to}", from = e.from, to = e.to))
+                .map(|e| match e.kind {
+                    MissingEdgeKind::UnreachableFromCoordinator => format!(
+                        "[unreachable from coordinator] {from} → {to}",
+                        from = e.from,
+                        to = e.to
+                    ),
+                    MissingEdgeKind::MeshHole => {
+                        format!("[mesh hole] {from} → {to}", from = e.from, to = e.to)
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join("; ");
             tracing::warn!(
@@ -394,10 +406,13 @@ pub async fn start_onboarding(
             );
             return HttpResponse::UnprocessableEntity().json(OnboardingMeshErrorResponse {
                 error: format!(
-                    "Could not verify a full peer mesh. \
-                     Each edge below points to a peer that is unreachable from the listed source \
-                     (missing from network config, missing/invalid public key, unreachable, or \
-                     responded with an unparsable peer list). Edges: {edge_summary}"
+                    "Could not verify a full peer mesh. Two failure modes are folded together: \
+                     `unreachable from coordinator` (the coordinator cannot query that peer — \
+                     it's missing from network config, has no/invalid public key, didn't \
+                     answer, or replied with an unparsable peer list — fix the coordinator's \
+                     view of `to`, or `to` itself), and `mesh hole` (peer `from` is reachable \
+                     but does not have peer `to` in its peer list — add `to` to `from`'s \
+                     network config). Edges: {edge_summary}"
                 ),
                 missing_edges: missing,
             });
@@ -406,7 +421,7 @@ pub async fn start_onboarding(
         Err(e) => {
             tracing::error!("Failed to run mesh pre-flight: {e:#}");
             return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to verify peer mesh: {e}"),
+                error: "Failed to verify peer mesh".into(),
             });
         }
     }
@@ -667,6 +682,7 @@ async fn verify_peer_mesh(
                 missing_edges.push(MissingPeerEdge {
                     from: identity.clone(),
                     to: peer_id.clone(),
+                    kind: MissingEdgeKind::UnreachableFromCoordinator,
                 });
                 continue;
             }
@@ -677,6 +693,7 @@ async fn verify_peer_mesh(
             missing_edges.push(MissingPeerEdge {
                 from: identity.clone(),
                 to: peer_id.clone(),
+                kind: MissingEdgeKind::UnreachableFromCoordinator,
             });
             continue;
         }
@@ -688,6 +705,7 @@ async fn verify_peer_mesh(
                 missing_edges.push(MissingPeerEdge {
                     from: identity.clone(),
                     to: peer_id.clone(),
+                    kind: MissingEdgeKind::UnreachableFromCoordinator,
                 });
                 continue;
             }
@@ -710,6 +728,7 @@ async fn verify_peer_mesh(
                 missing_edges.push(MissingPeerEdge {
                     from: identity.clone(),
                     to: peer_id.clone(),
+                    kind: MissingEdgeKind::UnreachableFromCoordinator,
                 });
                 continue;
             }
@@ -722,6 +741,7 @@ async fn verify_peer_mesh(
                 missing_edges.push(MissingPeerEdge {
                     from: identity.clone(),
                     to: peer_id.clone(),
+                    kind: MissingEdgeKind::UnreachableFromCoordinator,
                 });
                 continue;
             }
@@ -735,6 +755,7 @@ async fn verify_peer_mesh(
             missing_edges.push(MissingPeerEdge {
                 from: identity.clone(),
                 to: peer_id.clone(),
+                kind: MissingEdgeKind::UnreachableFromCoordinator,
             });
             continue;
         }
@@ -746,6 +767,7 @@ async fn verify_peer_mesh(
                 missing_edges.push(MissingPeerEdge {
                     from: identity.clone(),
                     to: peer_id.clone(),
+                    kind: MissingEdgeKind::UnreachableFromCoordinator,
                 });
                 continue;
             }
@@ -768,6 +790,7 @@ async fn verify_peer_mesh(
                 missing_edges.push(MissingPeerEdge {
                     from: a.clone(),
                     to: b.clone(),
+                    kind: MissingEdgeKind::MeshHole,
                 });
             }
         }
