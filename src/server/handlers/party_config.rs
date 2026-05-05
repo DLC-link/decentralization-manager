@@ -387,6 +387,7 @@ mod tests {
             contracts_trigger: Arc::new(Notify::new()),
             dars_trigger: Arc::new(Notify::new()),
             coordinator_pubkey: Arc::new(RwLock::new(None)),
+            attestor_run_instance: Arc::new(RwLock::new(None)),
             pending_invitations: Arc::new(RwLock::new(Vec::new())),
             auth: Arc::new(RwLock::new(Some(WorkflowAuth::Mock(Arc::new(
                 MockAuthRegistry::new(party_credentials.clone()),
