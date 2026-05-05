@@ -639,4 +639,71 @@ mod tests {
         assert!(matches!(result, Err(NoiseError::TcpConnectionTimeout(_))));
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
+
+    #[tokio::test]
+    async fn retry_loop_does_not_retry_on_bad_status() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_clone = calls.clone();
+        let result = retry_loop(move || {
+            let calls = calls_clone.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err::<Bytes, _>(NoiseError::BadStatusCode(StatusCode::INTERNAL_SERVER_ERROR))
+            }
+        })
+        .await;
+        assert!(matches!(result, Err(NoiseError::BadStatusCode(_))));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn retry_loop_does_not_retry_on_invalid_message() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_clone = calls.clone();
+        let result = retry_loop(move || {
+            let calls = calls_clone.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err::<Bytes, _>(NoiseError::InvalidMessage)
+            }
+        })
+        .await;
+        assert!(matches!(result, Err(NoiseError::InvalidMessage)));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn retry_loop_does_not_retry_on_handshake_failed() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_clone = calls.clone();
+        let result = retry_loop(move || {
+            let calls = calls_clone.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err::<Bytes, _>(NoiseError::HandshakeFailed)
+            }
+        })
+        .await;
+        assert!(matches!(result, Err(NoiseError::HandshakeFailed)));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn retry_loop_does_not_retry_on_anyhow() {
+        // Anyhow is the catch-all for unknown wrapped errors; it must fail
+        // closed (no retry) so a stray classification mistake doesn't turn it
+        // into a retry-storm vector.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_clone = calls.clone();
+        let result = retry_loop(move || {
+            let calls = calls_clone.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err::<Bytes, _>(NoiseError::Anyhow(anyhow::anyhow!("unknown")))
+            }
+        })
+        .await;
+        assert!(matches!(result, Err(NoiseError::Anyhow(_))));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
 }
