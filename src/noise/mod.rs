@@ -281,7 +281,12 @@ pub fn parse_public_key(hex_str: &str) -> Result<PublicKey, NoiseError> {
     Ok(pub_key)
 }
 
-/// Send a message to a peer using Noise protocol
+/// Send a message to a peer using Noise protocol.
+///
+/// Public entry point preserved for backward compatibility — applies the
+/// default `NOISE_REQUEST_TIMEOUT` to both the TCP connect and the
+/// Noise/HTTP request budget. New callers wanting per-attempt control should
+/// use `send_noise_message_with_retry`.
 pub async fn send_noise_message(
     peer_address: &str,
     peer_port: u16,
@@ -289,9 +294,30 @@ pub async fn send_noise_message(
     identity: &[u8],
     message: &Message,
 ) -> Result<Bytes, NoiseError> {
+    send_noise_message_with_timeout(
+        peer_address,
+        peer_port,
+        psk,
+        identity,
+        message,
+        NOISE_REQUEST_TIMEOUT,
+    )
+    .await
+}
+
+/// Inner implementation of `send_noise_message`, with per-step timeout
+/// threaded through. Used both by the public single-shot entry point above
+/// and by the retry wrapper.
+async fn send_noise_message_with_timeout(
+    peer_address: &str,
+    peer_port: u16,
+    psk: &[u8; 32],
+    identity: &[u8],
+    message: &Message,
+    timeout: Duration,
+) -> Result<Bytes, NoiseError> {
     let socket_addr = format!("{peer_address}:{peer_port}");
 
-    // Create HTTP request with message payload
     let uri = parse_flexible_uri(&format!("http://{socket_addr}/message"))?;
     let request_body = message.to_bytes();
 
@@ -300,36 +326,25 @@ pub async fn send_noise_message(
         .method("POST")
         .body(Body::from(request_body))?;
 
-    // Connect with timeout
-    let tcp_stream =
-        match tokio::time::timeout(NOISE_REQUEST_TIMEOUT, TcpStream::connect(&socket_addr)).await {
-            Ok(Ok(stream)) => stream,
-            Ok(Err(e)) => {
-                return Err(NoiseError::TcpConnectionFailed(format!(
-                    "Failed to connect to {socket_addr}: {e}"
-                )));
-            }
-            Err(_) => return Err(NoiseError::TcpConnectionTimeout(socket_addr.to_string())),
-        };
+    let tcp_stream = match tokio::time::timeout(timeout, TcpStream::connect(&socket_addr)).await {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(e)) => {
+            return Err(NoiseError::TcpConnectionFailed(format!(
+                "Failed to connect to {socket_addr}: {e}"
+            )));
+        }
+        Err(_) => return Err(NoiseError::TcpConnectionTimeout(socket_addr.to_string())),
+    };
 
-    // Create Noise initiator
     let initiator = Initiator { psk, identity };
 
-    // Send request over Noise-encrypted channel
-    let mut response = hyper_noise::client::send_request(
-        tcp_stream,
-        initiator,
-        request,
-        Some(NOISE_REQUEST_TIMEOUT),
-    )
-    .await?;
+    let mut response =
+        hyper_noise::client::send_request(tcp_stream, initiator, request, Some(timeout)).await?;
 
-    // Check response status
     if response.status() != StatusCode::OK {
         return Err(NoiseError::BadStatusCode(response.status()));
     }
 
-    // Read response body
     let resp_body_bytes = hyper::body::to_bytes(response.body_mut()).await?;
     Ok(resp_body_bytes)
 }
