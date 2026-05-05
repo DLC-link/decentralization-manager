@@ -13,7 +13,11 @@ import {
 } from "@mui/material";
 import { API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
-import type { KickRequest, KickStatusResponse } from "../types";
+import type {
+  DecentralizedPartiesResponse,
+  KickRequest,
+  KickStatusResponse,
+} from "../types";
 
 interface KickDialogProps {
   open: boolean;
@@ -40,6 +44,47 @@ export const KickDialog = ({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<KickStatusResponse | null>(null);
+  // Local owner-key state. Initialized from the prop, but kept fresh by
+  // polling /decentralized-parties while the dialog is open and the key is
+  // still unknown — covers the cold-cache case where server-side resolution
+  // finishes after App.tsx fetched its initial parties snapshot.
+  const [resolvedOwnerKey, setResolvedOwnerKey] = useState<string | undefined>(
+    participantOwnerKey,
+  );
+
+  useEffect(() => {
+    setResolvedOwnerKey(participantOwnerKey);
+  }, [participantOwnerKey]);
+
+  useEffect(() => {
+    if (!open || resolvedOwnerKey) return;
+    const partyPrefix = partyId.split("::")[0];
+    if (!partyPrefix) return;
+    let cancelled = false;
+    const fetchOwnerKey = async () => {
+      try {
+        const res = await authenticatedFetch(
+          `${API_BASE}/decentralized-parties?prefix=${encodeURIComponent(partyPrefix)}`,
+        );
+        if (!res.ok) return;
+        const data: DecentralizedPartiesResponse = await res.json();
+        if (cancelled) return;
+        const found = data.parties
+          .find((p) => p.party_id === partyId)
+          ?.participants.find((p) => p.participant_uid === participantUid)
+          ?.owner_key;
+        if (found) setResolvedOwnerKey(found);
+      } catch {
+        // Ignore polling errors
+      }
+    };
+    fetchOwnerKey();
+    const interval = window.setInterval(fetchOwnerKey, 2000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [open, resolvedOwnerKey, partyId, participantUid]);
 
   // Calculate suggested threshold when owner count changes
   const remainingOwners = currentOwnerCount - 1;
@@ -153,14 +198,14 @@ export const KickDialog = ({
 
           <TextField
             label="Namespace Fingerprint (Owner Key)"
-            value={participantOwnerKey ?? ""}
+            value={resolvedOwnerKey ?? ""}
             disabled
             fullWidth
             size="small"
             helperText={
-              participantOwnerKey
+              resolvedOwnerKey
                 ? "The DNS owner key that will be removed"
-                : "Owner key not yet known — wait a moment for cache resolution, or refresh parties if it does not appear"
+                : "Owner key not yet known — waiting for cache resolution"
             }
           />
 
@@ -210,7 +255,7 @@ export const KickDialog = ({
             onClick={handleKick}
             variant="contained"
             color="error"
-            disabled={loading || newThreshold < 1 || newThreshold > remainingOwners || !participantOwnerKey}
+            disabled={loading || newThreshold < 1 || newThreshold > remainingOwners || !resolvedOwnerKey}
           >
             {loading ? <CircularProgress size={20} /> : "Kick Participant"}
           </Button>

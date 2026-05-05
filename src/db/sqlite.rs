@@ -989,6 +989,63 @@ mod tests {
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_replace_dec_party_participants_removes_stale(pool: SqlitePool) -> Result {
+        // Covers the `NOT IN` delete branch and the empty-list branch of
+        // `replace_dec_party_participants` — i.e. participants that have left
+        // the party must be removed from the cache.
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_dec_party(&test_dec_party("net-a")).await?;
+        let party_id = format!("net-a::{TEST_NS}");
+        let p1 = "node1::1220aa";
+        let p2 = "node2::1220bb";
+        tx.replace_dec_party_participants(
+            &party_id,
+            &[
+                DecPartyParticipantRow {
+                    dec_party_id: party_id.clone(),
+                    participant_uid: p1.to_string(),
+                    permission: "submission".to_string(),
+                    owner_key: Some("fp-1".to_string()),
+                },
+                DecPartyParticipantRow {
+                    dec_party_id: party_id.clone(),
+                    participant_uid: p2.to_string(),
+                    permission: "submission".to_string(),
+                    owner_key: Some("fp-2".to_string()),
+                },
+            ],
+        )
+        .await?;
+        Commitable::commit(tx).await?;
+        assert_eq!(pool.get_dec_party_participants(&party_id).await?.len(), 2);
+
+        // Replace with only p1 — p2 must be removed by the NOT IN branch.
+        let mut tx = pool.begin_transaction().await?;
+        tx.replace_dec_party_participants(
+            &party_id,
+            &[DecPartyParticipantRow {
+                dec_party_id: party_id.clone(),
+                participant_uid: p1.to_string(),
+                permission: "submission".to_string(),
+                owner_key: Some("fp-1".to_string()),
+            }],
+        )
+        .await?;
+        Commitable::commit(tx).await?;
+        let remaining = pool.get_dec_party_participants(&party_id).await?;
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].participant_uid, p1);
+
+        // Replace with empty list — p1 must be removed by the empty-list branch.
+        let mut tx = pool.begin_transaction().await?;
+        tx.replace_dec_party_participants(&party_id, &[]).await?;
+        Commitable::commit(tx).await?;
+        assert!(pool.get_dec_party_participants(&party_id).await?.is_empty());
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
     async fn test_get_dec_party_participant_owner_key(pool: SqlitePool) -> Result {
         let mut tx = pool.begin_transaction().await?;
         tx.upsert_dec_party(&test_dec_party("net-a")).await?;

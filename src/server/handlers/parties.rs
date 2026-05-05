@@ -129,17 +129,26 @@ pub async fn get_decentralized_parties(
         Ok(response) => {
             // Cache + resolve owner keys in background. Mirrors
             // `refresh_and_cache_parties` so a cold cache reaches the same
-            // post-resolved state on the next request.
-            let db = data.db.clone();
-            let config = data.config.clone();
-            let parties = response.parties.clone();
-            tokio::spawn(async move {
-                if let Err(e) = store_parties_to_db(&db, &prefix, &parties).await {
-                    tracing::warn!("Failed to cache parties: {e}");
-                    return;
-                }
-                resolve_owner_keys_from_peers(&config, &db, &parties).await;
-            });
+            // post-resolved state on the next request. Dedup against
+            // `refreshing_prefixes` so concurrent cold-cache requests don't
+            // each fan out their own Noise resolution pass.
+            let spawned = data
+                .refreshing_prefixes
+                .write()
+                .await
+                .insert(prefix.clone());
+            if spawned {
+                let data = data.clone();
+                let parties = response.parties.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = store_parties_to_db(&data.db, &prefix, &parties).await {
+                        tracing::warn!("Failed to cache parties: {e}");
+                    } else {
+                        resolve_owner_keys_from_peers(&data.config, &data.db, &parties).await;
+                    }
+                    data.refreshing_prefixes.write().await.remove(&prefix);
+                });
+            }
             HttpResponse::Ok().json(response)
         }
         Err(e) => {
