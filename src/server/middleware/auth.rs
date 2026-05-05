@@ -135,13 +135,18 @@ where
 }
 
 /// Handler helper: pull the `Principal` the middleware attached, then
-/// check it carries the admin role.
+/// check it carries the admin role. `None` disables the role check —
+/// any authenticated caller passes.
 ///
 /// # Errors
 ///
 /// Returns an `HttpResponse` ready to return: 401 if no principal was
-/// attached to the request, 403 if the principal lacks `admin_role`.
-pub fn require_admin(req: &HttpRequest, admin_role: &str) -> Result<Principal, HttpResponse> {
+/// attached to the request, 403 if `admin_role` is `Some` and the
+/// principal does not carry it.
+pub fn require_admin(
+    req: &HttpRequest,
+    admin_role: Option<&str>,
+) -> Result<Principal, HttpResponse> {
     let principal = {
         let extensions = req.extensions();
         extensions.get::<Principal>().cloned()
@@ -149,9 +154,11 @@ pub fn require_admin(req: &HttpRequest, admin_role: &str) -> Result<Principal, H
     let Some(principal) = principal else {
         return Err(HttpResponse::Unauthorized().json(json!({"error": "authentication required"})));
     };
-    principal
-        .require_admin(admin_role)
-        .map_err(|e| HttpResponse::Forbidden().json(json!({"error": e.to_string()})))?;
+    if let Some(role) = admin_role {
+        principal
+            .require_admin(role)
+            .map_err(|e| HttpResponse::Forbidden().json(json!({"error": e.to_string()})))?;
+    }
     Ok(principal)
 }
 
@@ -330,7 +337,7 @@ mod tests {
             pending_invitations: Arc::new(RwLock::new(Vec::new())),
             auth: Arc::new(RwLock::new(None)),
             token_validator: validator,
-            admin_role: "dpm-admin".to_string(),
+            admin_role: Some("decman-admin".to_string()),
             party_credentials,
             bootstrap_mu: Arc::new(Mutex::new(())),
             test_mode: true,
@@ -341,7 +348,7 @@ mod tests {
     async fn build_app_state(parties: Vec<PartyCredentials>) -> Data<AppState> {
         build_app_state_with(
             parties,
-            TokenValidator::Mock(Arc::new(MockValidator::new("dpm-admin".to_string()))),
+            TokenValidator::Mock(Arc::new(MockValidator::new("decman-admin".to_string()))),
         )
         .await
     }

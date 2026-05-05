@@ -9,6 +9,7 @@ import {
   Chip,
   CircularProgress,
   Alert,
+  Tooltip,
 } from "@mui/material";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import RefreshIcon from "@mui/icons-material/Refresh";
@@ -105,13 +106,29 @@ export const AuthCheckAccordion = () => {
   const getStatusIcon = (status: PartyAuthStatus["status"]) => {
     switch (status.status) {
       case "authenticated":
-        return <CheckCircleIcon color="success" fontSize="small" />;
+        return (
+          <Tooltip title="Authenticated">
+            <CheckCircleIcon color="success" fontSize="small" />
+          </Tooltip>
+        );
       case "mock":
-        return <ScienceIcon color="warning" fontSize="small" />;
+        return (
+          <Tooltip title="Test mode (mock authentication)">
+            <ScienceIcon color="warning" fontSize="small" />
+          </Tooltip>
+        );
       case "failed":
-        return <ErrorIcon color="error" fontSize="small" />;
+        return (
+          <Tooltip title="Authentication failed">
+            <ErrorIcon color="error" fontSize="small" />
+          </Tooltip>
+        );
       case "notconfigured":
-        return <HelpOutlineIcon color="disabled" fontSize="small" />;
+        return (
+          <Tooltip title="Not configured">
+            <HelpOutlineIcon color="disabled" fontSize="small" />
+          </Tooltip>
+        );
     }
   };
 
@@ -236,9 +253,13 @@ export const AuthCheckAccordion = () => {
                     <Typography variant="subtitle2" sx={{ mb: 1 }}>
                       User Rights
                       {isRightsValid(party.rights) ? (
-                        <CheckCircleIcon color="success" fontSize="small" sx={{ ml: 1, verticalAlign: "middle" }} />
+                        <Tooltip title="All required rights granted">
+                          <CheckCircleIcon color="success" fontSize="small" sx={{ ml: 1, verticalAlign: "middle" }} />
+                        </Tooltip>
                       ) : (
-                        <WarningIcon color="warning" fontSize="small" sx={{ ml: 1, verticalAlign: "middle" }} />
+                        <Tooltip title="Missing required rights">
+                          <WarningIcon color="warning" fontSize="small" sx={{ ml: 1, verticalAlign: "middle" }} />
+                        </Tooltip>
                       )}
                     </Typography>
                     <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>

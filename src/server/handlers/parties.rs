@@ -48,6 +48,11 @@ pub struct PartiesQuery {
     /// Filter parties by prefix (e.g., "cbtc-network")
     #[serde(default)]
     pub prefix: Option<String>,
+    /// Force a synchronous Canton fetch, bypassing the cache. Used right after
+    /// mutating workflows (kick / contracts / dars) so the UI sees fresh data
+    /// instead of the up-to-60s-stale cached snapshot.
+    #[serde(default)]
+    pub refresh: Option<bool>,
 }
 
 /// Get decentralized parties the current participant is a member of
@@ -65,9 +70,14 @@ pub async fn get_decentralized_parties(
     query: web::Query<PartiesQuery>,
 ) -> impl Responder {
     let prefix = query.prefix.clone().unwrap_or_default();
+    let force_refresh = query.refresh.unwrap_or(false);
 
-    // Try to load from DB cache first
-    let cached = load_cached_parties(&data.db, &prefix).await;
+    // Try to load from DB cache first (unless caller explicitly demanded fresh)
+    let cached = if force_refresh {
+        Ok(None)
+    } else {
+        load_cached_parties(&data.db, &prefix).await
+    };
     if let Ok(Some((mut response, updated_at))) = cached {
         response.source = ResponseSource::Cache;
 

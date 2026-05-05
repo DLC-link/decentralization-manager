@@ -1,19 +1,6 @@
-import { createContext, useContext, useState, useCallback, type ReactNode } from "react";
+import { useState, useCallback, type ReactNode } from "react";
 import { Snackbar } from "@mui/material";
-
-interface SnackbarContextType {
-  showSnackbar: (message: string) => void;
-}
-
-const SnackbarContext = createContext<SnackbarContextType | undefined>(undefined);
-
-export const useSnackbar = () => {
-  const context = useContext(SnackbarContext);
-  if (!context) {
-    throw new Error("useSnackbar must be used within SnackbarProvider");
-  }
-  return context;
-};
+import { SnackbarContext } from "./SnackbarContextValue";
 
 interface SnackbarProviderProps {
   children: ReactNode;

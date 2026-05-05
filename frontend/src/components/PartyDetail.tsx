@@ -11,12 +11,11 @@ import {
   TableCell,
   TableHead,
   TableRow,
-  Tabs,
-  Tab,
   Tooltip,
   Typography,
 } from "@mui/material";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
+import EditIcon from "@mui/icons-material/Edit";
 import PersonRemoveIcon from "@mui/icons-material/PersonRemove";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
@@ -25,7 +24,7 @@ import { CopyableText } from "./CopyableText";
 import { KickDialog } from "./KickDialog";
 import { ContractsDialog } from "./ContractsDialog";
 import { PartyConfigDialog } from "./PartyConfigDialog";
-import { GovernanceSection } from "./GovernanceSection";
+import { GovernanceActionsDialog } from "./GovernanceActionsDialog";
 import { GovernanceAuditTrail } from "./GovernanceAuditTrail";
 import { AuthSection } from "./AuthSection";
 import { zebraRow } from "../styles";
@@ -105,23 +104,34 @@ export const PartyDetail = ({
   const [contractsExpanded, setContractsExpanded] = useState(true);
   const [authExpanded, setAuthExpanded] = useState(true);
   const [governanceExpanded, setGovernanceExpanded] = useState(true);
-  const [governanceTab, setGovernanceTab] = useState(0);
+  const [editGovContractId, setEditGovContractId] = useState<string | null>(
+    null,
+  );
+  const [governanceRefreshNonce, setGovernanceRefreshNonce] = useState(0);
   const [canScrollUp, setCanScrollUp] = useState(false);
   const [canScrollDown, setCanScrollDown] = useState(false);
   const contractsScrollRef = useRef<HTMLDivElement>(null);
 
+  const isGovRulesContract = (template_id: string) =>
+    template_id.includes("VaultGovernanceRules") ||
+    template_id.includes("VaultGovernance") ||
+    template_id === "Governance.Rules:GovernanceRules";
+
   const governanceContracts =
-    party.contracts?.filter(
-      (c) =>
-        c.template_id.includes("VaultGovernanceRules") ||
-        c.template_id.includes("VaultGovernance") ||
-        c.template_id === "Governance.Rules:GovernanceRules",
-    ) ?? [];
+    party.contracts?.filter((c) => isGovRulesContract(c.template_id)) ?? [];
   const rulesContract = governanceContracts[0];
-  const governanceType =
-    rulesContract?.template_id === "Governance.Rules:GovernanceRules"
+  const governanceTypeFor = (template_id: string) =>
+    template_id === "Governance.Rules:GovernanceRules"
       ? ("core_self" as const)
       : ("vault" as const);
+  const governanceType = rulesContract
+    ? governanceTypeFor(rulesContract.template_id)
+    : ("vault" as const);
+
+  const editingContract =
+    editGovContractId != null
+      ? party.contracts?.find((c) => c.contract_id === editGovContractId)
+      : undefined;
 
   const isOwner = Boolean(party.my_owner_key);
 
@@ -159,9 +169,11 @@ export const PartyDetail = ({
           px: 3,
         }}
       >
-        <IconButton onClick={onBack}>
-          <ArrowBackIcon />
-        </IconButton>
+        <Tooltip title="Back to parties">
+          <IconButton onClick={onBack}>
+            <ArrowBackIcon />
+          </IconButton>
+        </Tooltip>
         <CopyableText
           text={party.party_id}
           truncate={{ start: party.party_id.indexOf("::") + 18, end: 16 }}
@@ -339,6 +351,7 @@ export const PartyDetail = ({
                   <TableRow>
                     <TableCell sx={{ py: 1 }}>Template</TableCell>
                     <TableCell sx={{ py: 1 }}>Contract ID</TableCell>
+                    <TableCell sx={{ py: 1, width: 40 }} />
                   </TableRow>
                 </TableHead>
                 <TableBody>
@@ -353,6 +366,19 @@ export const PartyDetail = ({
                           truncate={{ start: 16, end: 16 }}
                           variant="caption"
                         />
+                      </TableCell>
+                      <TableCell sx={{ py: 1 }} align="right">
+                        {isGovRulesContract(c.template_id) && (
+                          <Tooltip title="Edit governance actions">
+                            <IconButton
+                              size="small"
+                              onClick={() => setEditGovContractId(c.contract_id)}
+                              disabled={!authStatus?.rights?.dec_party_act_as}
+                            >
+                              <EditIcon fontSize="small" />
+                            </IconButton>
+                          </Tooltip>
+                        )}
                       </TableCell>
                     </TableRow>
                   ))}
@@ -395,43 +421,19 @@ export const PartyDetail = ({
         </CollapsibleSection>
       )}
 
-      {/* Governance */}
+      {/* Audit Trail */}
       {authStatus?.rights?.dec_party_act_as && (
         <CollapsibleSection
-          title="Governance"
+          title="Audit Trail"
           expanded={governanceExpanded}
           onToggle={() => setGovernanceExpanded(!governanceExpanded)}
         >
-          <Box sx={{ px: 3 }}>
-            <Tabs
-              value={governanceTab}
-              onChange={(_e, v) => setGovernanceTab(v)}
-              sx={{ borderBottom: 1, borderColor: "divider" }}
-            >
-              <Tab label="Governance" />
-              <Tab label="Audit Trail" />
-            </Tabs>
+          <Box sx={{ pl: 3 }}>
+            <GovernanceAuditTrail
+              partyId={party.party_id}
+              refreshNonce={governanceRefreshNonce}
+            />
           </Box>
-          {governanceTab === 0 && (
-            <Box sx={{ pl: 3 }}>
-              <GovernanceSection
-                partyId={party.party_id}
-                rulesContractId={rulesContract?.contract_id}
-                governanceContractIds={governanceContracts.map(
-                  (c) => c.contract_id,
-                )}
-                memberPartyId={authStatus!.member_party_id}
-                defaultOperatorParty={operatorParty}
-                network={network}
-                governanceType={governanceType}
-              />
-            </Box>
-          )}
-          {governanceTab === 1 && (
-            <Box sx={{ pl: 3 }}>
-              <GovernanceAuditTrail partyId={party.party_id} />
-            </Box>
-          )}
         </CollapsibleSection>
       )}
 
@@ -473,6 +475,20 @@ export const PartyDetail = ({
         }}
         partyId={party.party_id}
       />
+
+      {editingContract && authStatus && (
+        <GovernanceActionsDialog
+          open={editGovContractId != null}
+          onClose={() => setEditGovContractId(null)}
+          partyId={party.party_id}
+          rulesContractId={editingContract.contract_id}
+          memberPartyId={authStatus.member_party_id}
+          defaultOperatorParty={operatorParty}
+          network={network}
+          governanceType={governanceTypeFor(editingContract.template_id)}
+          onAfterAction={() => setGovernanceRefreshNonce((n) => n + 1)}
+        />
+      )}
     </Box>
   );
 };

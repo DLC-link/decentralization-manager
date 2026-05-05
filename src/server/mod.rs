@@ -71,7 +71,7 @@ pub struct AppState {
     /// Inbound token validator — authenticates API callers.
     pub token_validator: TokenValidator,
     /// Role name that grants admin access to sensitive endpoints.
-    pub admin_role: String,
+    pub admin_role: Option<String>,
     /// Party credentials (mutable, hot-reloadable)
     pub party_credentials: Arc<RwLock<Vec<PartyCredentials>>>,
     /// Serializes unauthenticated `PUT /party-config` bootstrap calls so two
@@ -96,6 +96,9 @@ struct WorkflowTriggers {
     pending_invitations: Arc<RwLock<Vec<PendingInvitation>>>,
     admin_api_url: String,
     synchronizer: String,
+    db: SqlitePool,
+    /// Read by the `RequestMemberParty` listener arm.
+    party_credentials: Arc<RwLock<Vec<PartyCredentials>>>,
 }
 
 /// Start the HTTP server and a heartbeat system for peer status tracking
@@ -104,7 +107,7 @@ pub async fn start_server(
     port: u16,
     config: NodeConfig,
     db: SqlitePool,
-    admin_role: String,
+    admin_role: Option<String>,
     allowed_origin: Option<String>,
 ) -> Result {
     // Test-mode is a compile-time decision: it's `true` iff the binary was
@@ -118,6 +121,24 @@ pub async fn start_server(
             "Running production build (no `test-mode` feature). Swagger UI disabled, \
              real JWT validation in effect."
         );
+    }
+
+    // Make the admin-role policy explicit at boot so a single-user deployment
+    // doesn't quietly lose authorization on multi-user upgrade. With
+    // `admin_role = None` (the default since the gating became opt-in),
+    // every authenticated caller passes `require_admin`.
+    match admin_role.as_deref() {
+        Some(role) if !role.is_empty() => {
+            tracing::info!("Admin gate active: requests must carry role '{role}'");
+        }
+        _ => {
+            tracing::warn!(
+                "DECPM_ADMIN_ROLE not set: every authenticated caller is treated as admin. \
+                 Set DECPM_ADMIN_ROLE=<role> to require a specific Keycloak role on \
+                 PUT /party-config, POST /kick, POST /auth/grant-rights, and other \
+                 admin-gated endpoints."
+            );
+        }
     }
 
     let db_party_creds = db.get_all_party_credentials().await.unwrap_or_else(|e| {
@@ -156,7 +177,9 @@ pub async fn start_server(
     // `MockValidator` is compiled in only behind `cfg(any(test, feature =
     // "test-mode"))`, so a release binary cannot select it.
     #[cfg(any(test, feature = "test-mode"))]
-    let token_validator = TokenValidator::Mock(Arc::new(MockValidator::new(admin_role.clone())));
+    let token_validator = TokenValidator::Mock(Arc::new(MockValidator::new(
+        admin_role.clone().unwrap_or_default(),
+    )));
     #[cfg(not(any(test, feature = "test-mode")))]
     let token_validator = {
         let no_top_level_config = config.keycloak.is_none();
@@ -208,7 +231,7 @@ pub async fn start_server(
         auth,
         token_validator,
         admin_role,
-        party_credentials,
+        party_credentials: party_credentials.clone(),
         bootstrap_mu: Arc::new(Mutex::new(())),
         test_mode,
         refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
@@ -228,6 +251,8 @@ pub async fn start_server(
         pending_invitations: pending_invitations.clone(),
         admin_api_url: config.admin_api_url(),
         synchronizer: config.synchronizer().to_string(),
+        db: db.clone(),
+        party_credentials: party_credentials.clone(),
     };
     tokio::spawn(async move {
         run_heartbeat(
@@ -424,8 +449,10 @@ pub async fn start_server(
             .service(handlers::get_auth_config)
             .service(handlers::get_auth_status)
             .service(handlers::test_auth)
+            .service(handlers::grant_rights)
             .service(handlers::get_governance)
             .service(handlers::get_governance_state)
+            .service(handlers::get_known_members)
             .service(handlers::get_vaults_handler)
             .service(handlers::get_provider_services_handler)
             .service(handlers::get_user_services_handler)
@@ -443,6 +470,7 @@ pub async fn start_server(
             .service(handlers::get_network_info)
             .service(handlers::get_party_config)
             .service(handlers::save_party_config)
+            .service(handlers::discover_member_party)
             .split_for_parts();
 
         let mut app = app.wrap(AuthMiddleware).wrap(cors);
@@ -671,6 +699,46 @@ async fn handle_incoming_connection(
                                 }
                             };
                             let response_msg = Message::new(MessageType::OwnerKeys, payload);
+                            return Ok(Response::builder()
+                                .status(StatusCode::OK)
+                                .body(Body::from(response_msg.to_bytes()))
+                                .unwrap());
+                        }
+                        MessageType::ListPeers => {
+                            tracing::debug!("Received ListPeers request");
+                            let payload = match triggers.db.get_all_peers().await {
+                                Ok(peers) => {
+                                    let ids: Vec<String> = peers
+                                        .into_iter()
+                                        .map(|p| p.participant_id.to_string())
+                                        .collect();
+                                    serde_json::to_vec(&ids).unwrap_or_else(|_| b"[]".to_vec())
+                                }
+                                Err(e) => {
+                                    tracing::error!("Failed to list peers: {e}");
+                                    b"[]".to_vec()
+                                }
+                            };
+                            let response_msg = Message::new(MessageType::PeerList, payload);
+                            return Ok(Response::builder()
+                                .status(StatusCode::OK)
+                                .body(Body::from(response_msg.to_bytes()))
+                                .unwrap());
+                        }
+                        MessageType::RequestMemberParty => {
+                            let dec_party_id =
+                                std::str::from_utf8(&msg.payload).unwrap_or("").to_string();
+                            tracing::debug!("Received RequestMemberParty for {dec_party_id}",);
+                            let payload = {
+                                let creds = triggers.party_credentials.read().await;
+                                creds
+                                    .iter()
+                                    .find(|c| c.dec_party_id.to_string() == dec_party_id)
+                                    .map(|c| c.member_party_id.to_string().into_bytes())
+                                    .unwrap_or_default()
+                            };
+                            let response_msg =
+                                Message::new(MessageType::MemberPartyResponse, payload);
                             return Ok(Response::builder()
                                 .status(StatusCode::OK)
                                 .body(Body::from(response_msg.to_bytes()))

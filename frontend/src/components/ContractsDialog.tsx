@@ -63,10 +63,10 @@ const FIELD_TYPES = [
   { value: "decentralized_party", label: "Dec. Party" },
   { value: "operator_party", label: "Operator" },
   { value: "participant_party", label: "Party" },
-  { value: "party_set", label: "Party Set" },
+  { value: "party_set", label: "Member Set" },
   { value: "attestors_set", label: "Attestors Set" },
   { value: "governance_threshold", label: "Threshold" },
-  { value: "rel_time", label: "RelTime" },
+  { value: "rel_time", label: "Proposal Timeout" },
   { value: "optional", label: "Optional" },
   { value: "instrument", label: "Instrument" },
   { value: "text", label: "Text" },
@@ -244,6 +244,7 @@ interface FieldEditorProps {
   onDelete: () => void;
   participantCount?: number;
   partyId?: string;
+  lockStructure?: boolean;
 }
 
 const FieldEditor = ({
@@ -252,6 +253,7 @@ const FieldEditor = ({
   onDelete,
   participantCount = 3,
   partyId,
+  lockStructure = false,
 }: FieldEditorProps) => {
   const defaultThreshold = Math.max(2, Math.ceil((participantCount * 2) / 3));
 
@@ -656,26 +658,37 @@ const FieldEditor = ({
         py: 1,
       }}
     >
-      <FormControl size="small" fullWidth>
-        <Select
-          value={field.type}
-          onChange={(e) =>
-            onChange(createDefaultField(e.target.value, participantCount))
-          }
+      {lockStructure ? (
+        <Typography
+          variant="body2"
+          sx={{ fontWeight: 500, pl: 1.5, py: 1 }}
         >
-          {FIELD_TYPES.map((t) => (
-            <MenuItem key={t.value} value={t.value}>
-              {t.label}
-            </MenuItem>
-          ))}
-        </Select>
-      </FormControl>
+          {FIELD_TYPES.find((t) => t.value === field.type)?.label ?? field.type}
+        </Typography>
+      ) : (
+        <FormControl size="small" fullWidth>
+          <Select
+            value={field.type}
+            onChange={(e) =>
+              onChange(createDefaultField(e.target.value, participantCount))
+            }
+          >
+            {FIELD_TYPES.map((t) => (
+              <MenuItem key={t.value} value={t.value}>
+                {t.label}
+              </MenuItem>
+            ))}
+          </Select>
+        </FormControl>
+      )}
       <Box sx={{ display: "flex", alignItems: "center", minWidth: 0 }}>
         {renderValueInput()}
       </Box>
-      <IconButton size="small" onClick={onDelete} color="error">
-        <DeleteIcon fontSize="small" />
-      </IconButton>
+      {!lockStructure && (
+        <IconButton size="small" onClick={onDelete} color="error">
+          <DeleteIcon fontSize="small" />
+        </IconButton>
+      )}
     </Box>
   );
 };
@@ -688,6 +701,7 @@ interface ContractEditorProps {
   participantCount: number;
   partyId: string;
   knownPackageIds: string[];
+  lockStructure?: boolean;
 }
 
 const ContractEditor = ({
@@ -698,6 +712,7 @@ const ContractEditor = ({
   participantCount,
   partyId,
   knownPackageIds,
+  lockStructure = false,
 }: ContractEditorProps) => {
   const handleFieldChange = (fieldIndex: number, newField: FieldDefinition) => {
     const newFields = [...contract.fields];
@@ -743,16 +758,18 @@ const ContractEditor = ({
           }}
         >
           <Typography>{contract.name || `Contract ${index + 1}`}</Typography>
-          <IconButton
-            size="small"
-            onClick={(e) => {
-              e.stopPropagation();
-              onDelete();
-            }}
-            color="error"
-          >
-            <DeleteIcon fontSize="small" />
-          </IconButton>
+          {!lockStructure && (
+            <IconButton
+              size="small"
+              onClick={(e) => {
+                e.stopPropagation();
+                onDelete();
+              }}
+              color="error"
+            >
+              <DeleteIcon fontSize="small" />
+            </IconButton>
+          )}
         </Box>
       </AccordionSummary>
       <AccordionDetails sx={{ p: 3 }}>
@@ -771,7 +788,7 @@ const ContractEditor = ({
             renderInput={(params) => (
               <TextField
                 {...params}
-                label="Package ID"
+                label="Package Name / ID"
                 placeholder="Enter or select package ID"
               />
             )}
@@ -810,16 +827,19 @@ const ContractEditor = ({
               onDelete={() => handleDeleteField(fieldIndex)}
               participantCount={participantCount}
               partyId={partyId}
+              lockStructure={lockStructure}
             />
           ))}
-          <Button
-            startIcon={<AddIcon />}
-            onClick={handleAddField}
-            variant="outlined"
-            size="small"
-          >
-            Add Field
-          </Button>
+          {!lockStructure && (
+            <Button
+              startIcon={<AddIcon />}
+              onClick={handleAddField}
+              variant="outlined"
+              size="small"
+            >
+              Add Field
+            </Button>
+          )}
         </Box>
       </AccordionDetails>
     </Accordion>
@@ -1102,7 +1122,7 @@ export const ContractsDialog = ({
       setParticipantParties([]);
       setPackages({});
     }
-  }, [open]);
+  }, [open, defaultOperatorParty]);
 
   // Initialize contracts when type is selected
   useEffect(() => {
@@ -1112,6 +1132,43 @@ export const ContractsDialog = ({
       );
     }
   }, [contractType, participantIds.length, packages]);
+
+  // Pre-fill the Member Set for gov-core from each peer's configured member_party_id.
+  useEffect(() => {
+    if (contractType !== "governance-core") return;
+    let cancelled = false;
+    const fetchKnownMembers = async () => {
+      try {
+        const res = await authenticatedFetch(
+          `${API_BASE}/governance/known-members?party_id=${encodeURIComponent(
+            partyId,
+          )}`,
+        );
+        if (!res.ok || cancelled) return;
+        const data: {
+          members: Array<{ participant_uid: string; member_party_id?: string }>;
+        } = await res.json();
+        const memberIds = data.members
+          .map((m) => m.member_party_id)
+          .filter((id): id is string => !!id && id.length > 0);
+        if (cancelled || memberIds.length === 0) return;
+        setContracts((prev) =>
+          prev.map((c) => ({
+            ...c,
+            fields: c.fields.map((f) =>
+              f.type === "party_set" ? { ...f, parties: memberIds } : f,
+            ),
+          })),
+        );
+      } catch {
+        // If discovery fails, the operator can still type values manually.
+      }
+    };
+    fetchKnownMembers();
+    return () => {
+      cancelled = true;
+    };
+  }, [contractType, partyId, packages]);
 
   const pollStatus = useCallback(async () => {
     try {
@@ -1174,6 +1231,7 @@ export const ContractsDialog = ({
 
     if (
       contractType !== "vault" &&
+      contractType !== "governance-core" &&
       participantParties.length !== participantIds.length
     ) {
       setError(
@@ -1183,11 +1241,19 @@ export const ContractsDialog = ({
       return;
     }
 
+    // For gov core the user doesn't fill the top section; derive participant_parties from the contract's Member Set field.
+    const submittedParticipantParties =
+      contractType === "governance-core"
+        ? (contracts
+            .flatMap((c) => c.fields)
+            .find((f) => f.type === "party_set")?.parties ?? [])
+        : participantParties;
+
     try {
       const request: ContractsRequest = {
         decentralized_party_id: partyId,
         participant_ids: participantIds,
-        participant_parties: participantParties,
+        participant_parties: submittedParticipantParties,
         operator_party: operatorParty,
         contracts: contracts,
       };
@@ -1305,6 +1371,7 @@ export const ContractsDialog = ({
                 />
               )}
 
+              {contractType !== "governance-core" && (
               <>
                 <Typography variant="subtitle2" sx={{ mt: 1 }}>
                   Participant Party IDs ({participantParties.length}/
@@ -1396,6 +1463,7 @@ export const ContractsDialog = ({
                   )}
                 </Box>
               </>
+              )}
 
               <Divider />
               <Box
@@ -1408,20 +1476,23 @@ export const ContractsDialog = ({
                 <Typography variant="subtitle1">
                   Contract Definitions
                 </Typography>
-                <Button
-                  startIcon={<AddIcon />}
-                  onClick={handleAddContract}
-                  variant="outlined"
-                  size="small"
-                >
-                  Add Contract
-                </Button>
+                {contractType !== "governance-core" && (
+                  <Button
+                    startIcon={<AddIcon />}
+                    onClick={handleAddContract}
+                    variant="outlined"
+                    size="small"
+                  >
+                    Add Contract
+                  </Button>
+                )}
               </Box>
 
               {contracts.length === 0 ? (
                 <Typography variant="body2" color="text.secondary">
-                  No contracts defined. Click "Add Contract" to define contracts
-                  to deploy, or leave empty to skip contract creation.
+                  {contractType === "governance-core"
+                    ? "No contracts to deploy."
+                    : 'No contracts defined. Click "Add Contract" to define contracts to deploy, or leave empty to skip contract creation.'}
                 </Typography>
               ) : (
                 contracts.map((contract, index) => (
@@ -1434,6 +1505,7 @@ export const ContractsDialog = ({
                     participantCount={participantIds.length}
                     partyId={partyId}
                     knownPackageIds={allPackageIds}
+                    lockStructure={contractType === "governance-core"}
                   />
                 ))
               )}

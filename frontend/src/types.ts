@@ -40,8 +40,10 @@ export interface PartyConfigRequest {
 
 export interface PartyConfigResponse {
   dec_party_id: string;
-  member_party_id: string;
-  user_id: string;
+  /** Optional: backend returns null when no config has been saved yet. */
+  member_party_id?: string;
+  /** Optional: backend returns null when no config has been saved yet. */
+  user_id?: string;
   keycloak_url: string;
   keycloak_realm: string;
   keycloak_client_id: string;
@@ -262,6 +264,10 @@ export interface AuthTestResult {
 
 export interface AuthTestResponse {
   results: AuthTestResult[];
+}
+
+export interface GrantRightsResponse {
+  rights: RightsStatus;
 }
 
 // Governance types
