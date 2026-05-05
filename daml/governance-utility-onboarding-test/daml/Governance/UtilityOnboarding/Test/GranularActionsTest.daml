@@ -66,9 +66,9 @@ given_governance_with_operator_as_additional_proposer = do
   rulesCid <- submit parties.governanceParty $ createCmd GovernanceRules with
     governanceParty = parties.governanceParty
     members = getMembers parties
-    additionalProposers = Set.singleton parties.operator
     threshold = 2
     actionConfirmationTimeout = minutes 30
+    additionalProposers = Some (Set.singleton parties.operator)
   pure GovFixture with ..
 
 when_provision_provider_service : GovFixture -> Script ()

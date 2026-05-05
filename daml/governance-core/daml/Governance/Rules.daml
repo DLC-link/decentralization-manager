@@ -8,6 +8,7 @@
 module Governance.Rules where
 
 import DA.List (unique)
+import DA.Optional (fromOptional)
 import DA.Set as Set hiding (filter)
 import DA.Time (RelTime, addRelTime, seconds)
 import Splice.Util (require)
@@ -143,14 +144,16 @@ template GovernanceRules
       -- participants with readAs rights for visibility.
     members : Set Party
       -- ^ Set of governance members who can confirm and execute actions.
-    additionalProposers : Set Party
-      -- ^ Parties that may propose GovernableActions but cannot confirm or
-      -- execute. The authoritative on-chain proposer set is
-      -- @members ∪ additionalProposers@. Default: empty.
     threshold : Int
       -- ^ Number of confirmations required to execute any action.
     actionConfirmationTimeout : RelTime
       -- ^ How long a confirmation remains valid before expiring.
+    additionalProposers : Optional (Set Party)
+      -- ^ Optional allowlist of parties that may propose GovernableActions
+      -- but cannot confirm or execute. The authoritative on-chain proposer
+      -- set is @members ∪ fromOptional Set.empty additionalProposers@.
+      -- @None@ is the canonical form for "no allowlist"; the Add/Remove
+      -- self-actions normalize the set back to @None@ when it becomes empty.
   where
     signatory governanceParty
     -- Note: members are NOT observers. In Canton, each member hosts the
@@ -227,12 +230,13 @@ template GovernanceRules
         additionalProposer : Party
       controller governanceParty
       do
+        let currentSet = fromOptional Set.empty additionalProposers
         require "Already an additional proposer"
-          (additionalProposer `Set.notMember` additionalProposers)
+          (additionalProposer `Set.notMember` currentSet)
         require "Additional proposer must not also be a member"
           (additionalProposer `Set.notMember` members)
-        let newAdditionalProposers = Set.insert additionalProposer additionalProposers
-        governanceRulesCid <- create this with additionalProposers = newAdditionalProposers
+        let newSet = Set.insert additionalProposer currentSet
+        governanceRulesCid <- create this with additionalProposers = Some newSet
         pure GovernanceRules_AddAdditionalProposerResult with governanceRulesCid
 
     -- | Remove a party from the additional-proposers allowlist.
@@ -242,10 +246,12 @@ template GovernanceRules
         additionalProposer : Party
       controller governanceParty
       do
+        let currentSet = fromOptional Set.empty additionalProposers
         require "Not an additional proposer"
-          (additionalProposer `Set.member` additionalProposers)
-        let newAdditionalProposers = Set.delete additionalProposer additionalProposers
-        governanceRulesCid <- create this with additionalProposers = newAdditionalProposers
+          (additionalProposer `Set.member` currentSet)
+        let newSet = Set.delete additionalProposer currentSet
+        let normalized = if Set.null newSet then None else Some newSet
+        governanceRulesCid <- create this with additionalProposers = normalized
         pure GovernanceRules_RemoveAdditionalProposerResult with governanceRulesCid
 
     -- ════════════════════════════════════════════════════════════════════════
@@ -365,7 +371,7 @@ template GovernanceRules
         -- enforces the trust boundary on top of that authenticity guarantee.
         require "Proposer is authorized (member or additional proposer)"
           (actionView.proposer `Set.member` members
-            || actionView.proposer `Set.member` additionalProposers)
+            || optional False (Set.member actionView.proposer) additionalProposers)
         -- TODO: governanceParty match alone doesn't distinguish between multiple
         -- GovernanceRules instances for the same party. A static governance ID
         -- field should be added to provide strict matching.
