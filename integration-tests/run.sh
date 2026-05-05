@@ -21,7 +21,7 @@ for arg in "$@"; do
 Usage: $(basename "$0") [-v|--verbose] [-h|--help]
 
 Boots a Splice localnet, spawns 3 dec-party-manager instances, and runs
-the governance workflow e2e (cargo test --release).
+the governance workflow e2e (cargo test --profile release-ci).
 
 Output is filtered by default so the Given-When-Then scenario trace stays
 readable. The dec-party-manager processes and Canton/Noise libraries log
@@ -87,8 +87,11 @@ fi
 # binary needs to be compiled with the `test-mode` Cargo feature. Production
 # builds intentionally omit this feature so a release binary cannot select
 # mock auth at runtime.
-log_phase "Building release binary (with test-mode feature)"
-cargo build --release --features test-mode
+#
+# Uses the release-ci profile (release without LTO, codegen-units=16) so CI
+# build time stays low. The shipped release profile is unchanged.
+log_phase "Building release-ci binary (with test-mode feature)"
+cargo build --profile release-ci --features test-mode
 
 if [ ! -f "$BINARY" ]; then
     echo "ERROR: Binary not found at $BINARY"
@@ -129,13 +132,13 @@ export P1_CANTON_LEDGER P2_CANTON_LEDGER P3_CANTON_LEDGER
 export P1_CANTON_ADMIN P2_CANTON_ADMIN P3_CANTON_ADMIN
 export BINARY
 
-# Pass the test-mode feature here too. Without it, `cargo test --release`
-# may rebuild the bin under a different feature unification, overwriting the
-# test-mode binary at target/release/dec-party-manager. Chaos phases that
-# respawn the bin (G1/G2/G7/G9/G3/G4/P1/P2) would then spawn a non-test-mode
-# binary that uses the real JwtValidator and 401s on every API call with
+# Pass the test-mode feature here too. Without it, `cargo test` may rebuild
+# the bin under a different feature unification, overwriting the test-mode
+# binary at target/release-ci/dec-party-manager. Chaos phases that respawn
+# the bin (G1/G2/G7/G9/G3/G4/P1/P2) would then spawn a non-test-mode binary
+# that uses the real JwtValidator and 401s on every API call with
 # "missing bearer token".
-cargo test --release --features test-mode --test governance_workflows -- --ignored --nocapture
+cargo test --profile release-ci --features test-mode --test governance_workflows -- --ignored --nocapture
 
 echo ""
 echo "=========================================="
