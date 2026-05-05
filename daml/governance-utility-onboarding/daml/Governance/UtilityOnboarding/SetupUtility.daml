@@ -33,6 +33,7 @@ template SetupUtility
     interface instance GovernableAction for SetupUtility where
       view = GovernableActionView with
         governanceParty
+        proposer
         actionLabel = "SetupUtility"
         description = "Composite onboarding: register instrument " <> instrumentIdText
 

@@ -22,6 +22,7 @@ template CreateUserServiceRequest
     interface instance GovernableAction for CreateUserServiceRequest where
       view = GovernableActionView with
         governanceParty
+        proposer
         actionLabel = "CreateUserServiceRequest"
         description = "Create a UserServiceRequest for onboarding."
 

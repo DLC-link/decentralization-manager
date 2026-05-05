@@ -37,6 +37,7 @@ template ProvisionProviderService
     interface instance GovernableAction for ProvisionProviderService where
       view = GovernableActionView with
         governanceParty
+        proposer
         actionLabel = "ProvisionProviderService"
         description = "Provision a ProviderService with operator = proposer and provider = governanceParty."
 

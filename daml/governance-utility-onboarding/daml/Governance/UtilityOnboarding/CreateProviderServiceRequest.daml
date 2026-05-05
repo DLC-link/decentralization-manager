@@ -22,6 +22,7 @@ template CreateProviderServiceRequest
     interface instance GovernableAction for CreateProviderServiceRequest where
       view = GovernableActionView with
         governanceParty
+        proposer
         actionLabel = "CreateProviderServiceRequest"
         description = "Create a ProviderServiceRequest for onboarding."
 
