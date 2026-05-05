@@ -129,6 +129,10 @@ template GovernanceRules
       -- participants with readAs rights for visibility.
     members : Set Party
       -- ^ Set of governance members who can confirm and execute actions.
+    additionalProposers : Set Party
+      -- ^ Parties that may propose GovernableActions but cannot confirm or
+      -- execute. The authoritative on-chain proposer set is
+      -- @members ∪ additionalProposers@. Default: empty.
     threshold : Int
       -- ^ Number of confirmations required to execute any action.
     actionConfirmationTimeout : RelTime
