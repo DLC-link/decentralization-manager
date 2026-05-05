@@ -33,6 +33,7 @@ template MockProposal
     interface instance GovernableAction for MockProposal where
       view = GovernableActionView with
         governanceParty
+        proposer
         actionLabel = label
         description = payload
 
@@ -56,6 +57,7 @@ template MockFailingProposal
     interface instance GovernableAction for MockFailingProposal where
       view = GovernableActionView with
         governanceParty
+        proposer
         actionLabel = "MockFailing"
         description = "Mock action that always fails"
 
@@ -92,6 +94,7 @@ template MockAuthorityProposal
     interface instance GovernableAction for MockAuthorityProposal where
       view = GovernableActionView with
         governanceParty
+        proposer
         actionLabel = "MockAuthorityTest"
         description = "Mock authority flow test"
 

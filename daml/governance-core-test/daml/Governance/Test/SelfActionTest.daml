@@ -5,6 +5,7 @@
 module Governance.Test.SelfActionTest where
 
 import DA.Assert
+import DA.Optional (fromOptional)
 import DA.Set as Set hiding (filter)
 import DA.Time (minutes, seconds)
 import Daml.Script
@@ -187,3 +188,46 @@ testMismatchedSelfAction = script do
       executor = parties.member1
       action = actionA
       confirmations = [confResultA.confirmationCid, confResultB.confirmationCid]
+
+-- | Add an additional proposer via self-action confirm → execute flow.
+testAddAdditionalProposer = script do
+  parties <- allocateTestParties
+  rulesCid <- createTestGovernance parties
+
+  let action = SelfAction_AddAdditionalProposer with
+        additionalProposer = parties.outsider
+
+  _newRulesCid <- confirmAndExecuteSelf parties rulesCid action
+    [parties.member1, parties.member2] parties.member1
+
+  [(_, rules)] <- query @GovernanceRules parties.governanceParty
+  let aps = fromOptional Set.empty rules.additionalProposers
+  assertMsg "outsider should be in additionalProposers"
+    (parties.outsider `Set.member` aps)
+  Set.size aps === 1
+
+-- | Remove an additional proposer via self-action confirm → execute flow.
+testRemoveAdditionalProposer = script do
+  parties <- allocateTestParties
+
+  -- Start with `outsider` already in additionalProposers.
+  rulesCid <- submit parties.governanceParty $ createCmd GovernanceRules with
+    governanceParty = parties.governanceParty
+    members = getMembers parties
+    threshold = 2
+    actionConfirmationTimeout = minutes 30
+    additionalProposers = Some (Set.singleton parties.outsider)
+
+  let action = SelfAction_RemoveAdditionalProposer with
+        additionalProposer = parties.outsider
+
+  _newRulesCid <- confirmAndExecuteSelf parties rulesCid action
+    [parties.member1, parties.member2] parties.member1
+
+  [(_, rules)] <- query @GovernanceRules parties.governanceParty
+  let aps = fromOptional Set.empty rules.additionalProposers
+  assertMsg "outsider should be removed"
+    (parties.outsider `Set.notMember` aps)
+  Set.size aps === 0
+  assertMsg "additionalProposers should normalize to None when empty"
+    (rules.additionalProposers == None)

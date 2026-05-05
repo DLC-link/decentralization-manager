@@ -34,6 +34,7 @@ template AcceptTransferProposal
     interface instance GovernableAction for AcceptTransferProposal where
       view = GovernableActionView with
         governanceParty
+        proposer
         actionLabel = "AcceptTransfer"
         description = "Accept incoming token transfer"
 

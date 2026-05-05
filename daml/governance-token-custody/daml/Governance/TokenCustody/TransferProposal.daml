@@ -58,6 +58,7 @@ template TransferProposal
     interface instance GovernableAction for TransferProposal where
       view = GovernableActionView with
         governanceParty
+        proposer
         actionLabel = "Transfer"
         description = "Transfer tokens from governance party"
 

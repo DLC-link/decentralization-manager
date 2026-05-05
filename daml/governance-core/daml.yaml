@@ -1,5 +1,5 @@
 sdk-version: 3.4.11
-name: governance-core-v0-rc3
+name: governance-core-v0-rc4
 version: 0.1.0
 source: daml
 dependencies:

@@ -273,6 +273,7 @@ fn build_field_value(field_def: &FieldDefinition, context: &SubmissionContext) -
                 value: Some(Box::new(inner_value)),
             }))
         }
+        FieldDefinition::None => value::Sum::Optional(Box::new(Optional { value: None })),
         FieldDefinition::Record { fields } => {
             let record_fields = fields
                 .iter()

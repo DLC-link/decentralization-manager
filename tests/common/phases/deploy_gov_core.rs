@@ -57,9 +57,9 @@ async fn update_party_config(
         "keycloak_realm": "",
         "keycloak_client_id": "",
         "packages": {
-            "governance_core": "#governance-core-v0-rc3",
-            "governance_token_custody": "#governance-token-custody-v0-rc3",
-            "governance_utility_onboarding": "#governance-utility-onboarding-v0-rc3",
+            "governance_core": "#governance-core-v0-rc4",
+            "governance_token_custody": "#governance-token-custody-v0-rc4",
+            "governance_utility_onboarding": "#governance-utility-onboarding-v0-rc4",
             "utility_registry": "#utility-registry-app-v0",
         },
     });
@@ -136,7 +136,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         "contracts": [{
                             "id": "governance-rules",
                             "name": "GovernanceRules",
-                            "package_id": "#governance-core-v0-rc3",
+                            "package_id": "#governance-core-v0-rc4",
                             "module_name": "Governance.Rules",
                             "entity_name": "GovernanceRules",
                             "fields": [
@@ -144,6 +144,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                                 {"type": "party_set", "parties": [&p1m, &p2m, &p3m]},
                                 {"type": "int64", "value": 2},
                                 {"type": "rel_time", "microseconds": 1800000000_i64},
+                                {"type": "none"},
                             ],
                         }],
                     });

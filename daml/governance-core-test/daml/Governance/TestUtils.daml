@@ -52,6 +52,7 @@ createTestGovernance parties =
     members = getMembers parties
     threshold = 2
     actionConfirmationTimeout = minutes 30
+    additionalProposers = None
 
 -- | Collect confirmations from a list of members for an interface action.
 submitConfirmations : Party -> ContractId GovernanceRules -> ContractId GovernableAction -> [Party] -> Script [ContractId GovernanceConfirmation]

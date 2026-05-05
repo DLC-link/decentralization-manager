@@ -665,9 +665,9 @@ The system depends on the following Daml packages:
 
 | Package ID | Purpose |
 |------------|---------|
-| `#governance-core-v0-rc3` | GovernanceRules, GovernableAction interface, GenericVoteProposal |
-| `#governance-token-custody-v0-rc3` | TransferProposal, AcceptTransferProposal, preapproval proposals |
-| `#governance-utility-onboarding-v0-rc3` | SetupUtility, six granular onboarding proposals, MintProposal, BurnProposal |
+| `#governance-core-v0-rc4` | GovernanceRules, GovernableAction interface, GenericVoteProposal |
+| `#governance-token-custody-v0-rc4` | TransferProposal, AcceptTransferProposal, preapproval proposals |
+| `#governance-utility-onboarding-v0-rc4` | SetupUtility, six granular onboarding proposals, MintProposal, BurnProposal |
 | `#bitsafe-vault-governance-v0-rc8` | Legacy VaultGovernanceRules contract templates |
 | `#bitsafe-vault-v0-rc8` | VaultRules and Vault contract templates |
 | `#utility-registry-app-v0` | ProviderService, UserService, AllocationFactory |
