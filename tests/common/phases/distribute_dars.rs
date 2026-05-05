@@ -21,7 +21,7 @@ const DAR_FILES: &[&str] = &[
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     info!("Phase: distribute_dars");
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let dars_dir = Path::new(manifest_dir).join("releases/v0/rc3");
+    let dars_dir = Path::new(manifest_dir).join("releases/v0/rc4");
 
     let mut entries = Vec::with_capacity(DAR_FILES.len());
     for filename in DAR_FILES {
