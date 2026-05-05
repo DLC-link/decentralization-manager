@@ -15,6 +15,7 @@ import {
   Collapse,
   IconButton,
   TextField,
+  Tooltip,
   Select,
   MenuItem,
   FormControl,
@@ -178,6 +179,10 @@ interface GovernanceSectionProps {
   defaultOperatorParty?: string;
   network?: Network;
   governanceType?: "vault" | "core_self" | "core_domain";
+  /// Called after every successful mutating action (propose / confirm /
+  /// execute / revoke / expire / domain confirm / domain execute) so the
+  /// parent can refresh sibling views (e.g. the audit trail tab).
+  onAfterAction?: () => void;
 }
 
 // Default values for action form
@@ -207,6 +212,7 @@ export const GovernanceSection = ({
   defaultOperatorParty,
   network,
   governanceType = "vault",
+  onAfterAction,
 }: GovernanceSectionProps) => {
   const [expanded, setExpanded] = useState(true);
   const [loading, setLoading] = useState(true);
@@ -623,6 +629,7 @@ export const GovernanceSection = ({
 
       // Refresh data
       await fetchGovernance();
+      onAfterAction?.();
     } catch (e) {
       setError(
         e instanceof Error ? e.message : "Failed to submit confirmation",
@@ -668,6 +675,7 @@ export const GovernanceSection = ({
       // Close dialog and refresh data
       setExecuteDialogAction(null);
       await fetchGovernance();
+      onAfterAction?.();
     } catch (e) {
       setExecuteError(
         e instanceof Error ? e.message : "Failed to execute action",
@@ -704,6 +712,7 @@ export const GovernanceSection = ({
 
       // Refresh data
       await fetchGovernance();
+      onAfterAction?.();
     } catch (e) {
       setError(
         e instanceof Error ? e.message : "Failed to revoke confirmation",
@@ -745,6 +754,7 @@ export const GovernanceSection = ({
       }
 
       await fetchGovernance();
+      onAfterAction?.();
     } catch (e) {
       setError(
         e instanceof Error ? e.message : "Failed to expire confirmation",
@@ -974,6 +984,7 @@ export const GovernanceSection = ({
       // Reset form and refresh data
       setShowNewActionForm(false);
       await fetchGovernance();
+      onAfterAction?.();
     } catch (e) {
       setError(
         e instanceof Error ? e.message : "Failed to submit confirmation",
@@ -1139,6 +1150,7 @@ export const GovernanceSection = ({
 
       setShowProposalForm(false);
       await fetchGovernance();
+      onAfterAction?.();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to create proposal");
     } finally {
@@ -1170,6 +1182,7 @@ export const GovernanceSection = ({
       }
 
       await fetchGovernance();
+      onAfterAction?.();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to confirm proposal");
     } finally {
@@ -1203,6 +1216,7 @@ export const GovernanceSection = ({
       }
 
       await fetchGovernance();
+      onAfterAction?.();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to execute proposal");
     } finally {
@@ -1416,13 +1430,17 @@ export const GovernanceSection = ({
                   )}
                 </Select>
               </FormControl>
-              <IconButton
-                size="small"
-                onClick={fetchDeployContracts}
-                disabled={deployContractsLoading}
-              >
-                {deployContractsLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
-              </IconButton>
+              <Tooltip title="Refresh">
+                <span>
+                  <IconButton
+                    size="small"
+                    onClick={fetchDeployContracts}
+                    disabled={deployContractsLoading}
+                  >
+                    {deployContractsLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
+                  </IconButton>
+                </span>
+              </Tooltip>
             </Box>
             <TextField
               label="Vault Name"
@@ -1552,13 +1570,17 @@ export const GovernanceSection = ({
                   )}
                 </Select>
               </FormControl>
-              <IconButton
-                size="small"
-                onClick={fetchDeployContracts}
-                disabled={deployContractsLoading}
-              >
-                {deployContractsLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
-              </IconButton>
+              <Tooltip title="Refresh">
+                <span>
+                  <IconButton
+                    size="small"
+                    onClick={fetchDeployContracts}
+                    disabled={deployContractsLoading}
+                  >
+                    {deployContractsLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
+                  </IconButton>
+                </span>
+              </Tooltip>
             </Box>
             <Box sx={{ mb: 2 }}>
               <Typography variant="caption" display="block" color="text.secondary" sx={{ mb: 1 }}>
@@ -1663,13 +1685,17 @@ export const GovernanceSection = ({
                   )}
                 </Select>
               </FormControl>
-              <IconButton
-                size="small"
-                onClick={fetchDeployContracts}
-                disabled={deployContractsLoading}
-              >
-                {deployContractsLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
-              </IconButton>
+              <Tooltip title="Refresh">
+                <span>
+                  <IconButton
+                    size="small"
+                    onClick={fetchDeployContracts}
+                    disabled={deployContractsLoading}
+                  >
+                    {deployContractsLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
+                  </IconButton>
+                </span>
+              </Tooltip>
             </Box>
             <Box sx={{ display: "flex", gap: 1, alignItems: "center" }}>
               <FormControl fullWidth size="small" required>
@@ -1693,13 +1719,17 @@ export const GovernanceSection = ({
                   )}
                 </Select>
               </FormControl>
-              <IconButton
-                size="small"
-                onClick={fetchDeployContracts}
-                disabled={deployContractsLoading}
-              >
-                {deployContractsLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
-              </IconButton>
+              <Tooltip title="Refresh">
+                <span>
+                  <IconButton
+                    size="small"
+                    onClick={fetchDeployContracts}
+                    disabled={deployContractsLoading}
+                  >
+                    {deployContractsLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
+                  </IconButton>
+                </span>
+              </Tooltip>
             </Box>
           </>
         );
@@ -1728,13 +1758,17 @@ export const GovernanceSection = ({
                   )}
                 </Select>
               </FormControl>
-              <IconButton
-                size="small"
-                onClick={fetchDeployContracts}
-                disabled={deployContractsLoading}
-              >
-                {deployContractsLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
-              </IconButton>
+              <Tooltip title="Refresh">
+                <span>
+                  <IconButton
+                    size="small"
+                    onClick={fetchDeployContracts}
+                    disabled={deployContractsLoading}
+                  >
+                    {deployContractsLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
+                  </IconButton>
+                </span>
+              </Tooltip>
             </Box>
             <FormControl fullWidth size="small" sx={{ mb: 2 }}>
               <InputLabel>Vault</InputLabel>
@@ -1932,13 +1966,17 @@ export const GovernanceSection = ({
                       : undefined
                 }
               />
-              <IconButton
-                size="small"
-                onClick={fetchBurnMintFactory}
-                disabled={burnMintFactoryLoading}
-              >
-                {burnMintFactoryLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
-              </IconButton>
+              <Tooltip title="Refresh">
+                <span>
+                  <IconButton
+                    size="small"
+                    onClick={fetchBurnMintFactory}
+                    disabled={burnMintFactoryLoading}
+                  >
+                    {burnMintFactoryLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
+                  </IconButton>
+                </span>
+              </Tooltip>
             </Box>
             <Typography variant="caption" display="block" color="text.secondary">
               FAR Config (Optional)
@@ -1970,13 +2008,17 @@ export const GovernanceSection = ({
                   )}
                 </Select>
               </FormControl>
-              <IconButton
-                size="small"
-                onClick={fetchDeployContracts}
-                disabled={deployContractsLoading}
-              >
-                {deployContractsLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
-              </IconButton>
+              <Tooltip title="Refresh">
+                <span>
+                  <IconButton
+                    size="small"
+                    onClick={fetchDeployContracts}
+                    disabled={deployContractsLoading}
+                  >
+                    {deployContractsLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
+                  </IconButton>
+                </span>
+              </Tooltip>
             </Box>
             <Box sx={{ mb: 2 }}>
               <Typography variant="caption" display="block" color="text.secondary" sx={{ mb: 1 }}>
@@ -2175,13 +2217,17 @@ export const GovernanceSection = ({
                   )}
                 </Select>
               </FormControl>
-              <IconButton
-                size="small"
-                onClick={fetchServices}
-                disabled={servicesLoading}
-              >
-                {servicesLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
-              </IconButton>
+              <Tooltip title="Refresh">
+                <span>
+                  <IconButton
+                    size="small"
+                    onClick={fetchServices}
+                    disabled={servicesLoading}
+                  >
+                    {servicesLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
+                  </IconButton>
+                </span>
+              </Tooltip>
             </Box>
             <Box sx={{ display: "flex", gap: 1, alignItems: "center" }}>
               <FormControl fullWidth size="small">
@@ -2205,13 +2251,17 @@ export const GovernanceSection = ({
                   )}
                 </Select>
               </FormControl>
-              <IconButton
-                size="small"
-                onClick={fetchServices}
-                disabled={servicesLoading}
-              >
-                {servicesLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
-              </IconButton>
+              <Tooltip title="Refresh">
+                <span>
+                  <IconButton
+                    size="small"
+                    onClick={fetchServices}
+                    disabled={servicesLoading}
+                  >
+                    {servicesLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
+                  </IconButton>
+                </span>
+              </Tooltip>
             </Box>
           </>
         );
@@ -2248,13 +2298,17 @@ export const GovernanceSection = ({
                   )}
                 </Select>
               </FormControl>
-              <IconButton
-                size="small"
-                onClick={fetchServices}
-                disabled={servicesLoading}
-              >
-                {servicesLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
-              </IconButton>
+              <Tooltip title="Refresh">
+                <span>
+                  <IconButton
+                    size="small"
+                    onClick={fetchServices}
+                    disabled={servicesLoading}
+                  >
+                    {servicesLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
+                  </IconButton>
+                </span>
+              </Tooltip>
             </Box>
             <TextField
               label="Holder Service Request Contract ID"
@@ -2306,13 +2360,17 @@ export const GovernanceSection = ({
                   )}
                 </Select>
               </FormControl>
-              <IconButton
-                size="small"
-                onClick={fetchServices}
-                disabled={servicesLoading}
-              >
-                {servicesLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
-              </IconButton>
+              <Tooltip title="Refresh">
+                <span>
+                  <IconButton
+                    size="small"
+                    onClick={fetchServices}
+                    disabled={servicesLoading}
+                  >
+                    {servicesLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
+                  </IconButton>
+                </span>
+              </Tooltip>
             </Box>
             <TextField
               label="Holder Party"
@@ -2428,13 +2486,17 @@ export const GovernanceSection = ({
                   )}
                 </Select>
               </FormControl>
-              <IconButton
-                size="small"
-                onClick={fetchServices}
-                disabled={servicesLoading}
-              >
-                {servicesLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
-              </IconButton>
+              <Tooltip title="Refresh">
+                <span>
+                  <IconButton
+                    size="small"
+                    onClick={fetchServices}
+                    disabled={servicesLoading}
+                  >
+                    {servicesLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
+                  </IconButton>
+                </span>
+              </Tooltip>
             </Box>
             <TextField
               label="Credential Offer Contract ID"
@@ -2456,13 +2518,17 @@ export const GovernanceSection = ({
               size="small"
               required
             />
-            <IconButton
-              size="small"
-              onClick={fetchNetworkInfo}
-              disabled={amuletRulesLoading}
-            >
-              {amuletRulesLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
-            </IconButton>
+            <Tooltip title="Refresh">
+              <span>
+                <IconButton
+                  size="small"
+                  onClick={fetchNetworkInfo}
+                  disabled={amuletRulesLoading}
+                >
+                  {amuletRulesLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
+                </IconButton>
+              </span>
+            </Tooltip>
           </Box>
         );
       default:
@@ -2670,15 +2736,18 @@ export const GovernanceSection = ({
                               {isOwn ? " (you)" : ""}
                             </Typography>
                             {!isOwn && ADMIN_ACCESS && rulesContractId && (
-                              <IconButton
-                                size="small"
-                                title="Expire confirmation"
-                                onClick={() => handleExpire(action, conf.contract_id)}
-                                disabled={actionLoading === action.action_hash}
-                                sx={{ p: 0.25 }}
-                              >
-                                <TimerOffIcon sx={{ fontSize: 14 }} />
-                              </IconButton>
+                              <Tooltip title="Expire confirmation">
+                                <span>
+                                  <IconButton
+                                    size="small"
+                                    onClick={() => handleExpire(action, conf.contract_id)}
+                                    disabled={actionLoading === action.action_hash}
+                                    sx={{ p: 0.25 }}
+                                  >
+                                    <TimerOffIcon sx={{ fontSize: 14 }} />
+                                  </IconButton>
+                                </span>
+                              </Tooltip>
                             )}
                           </Box>
                         );
@@ -2777,12 +2846,12 @@ export const GovernanceSection = ({
         )}
       </Collapse>
 
-      {/* Domain Proposals — only for governance-core */}
+      {/* Proposals — only for governance-core */}
       {governanceType === "core_self" && data && (
         <Box sx={{ mt: 2, mx: -2 }}>
           <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 1, px: 2 }}>
             <Typography variant="subtitle2">
-              Domain Proposals
+              Proposals
               {(data.domain_actions?.length ?? 0) > 0 && (
                 <Chip label={data.domain_actions!.length} size="small" sx={{ ml: 1 }} color="secondary" />
               )}

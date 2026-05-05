@@ -19,11 +19,19 @@ pub async fn start_coordinator(
 ) -> Result {
     tracing::info!("Initializing Noise server for DARs upload...");
 
+    let self_id = node_config.participant_id();
+    let excluded: Vec<String> = network_config
+        .peers
+        .iter()
+        .filter(|p| &p.participant_id != self_id && !config.peer_ids.contains(&p.participant_id))
+        .map(|p| p.participant_id.to_string())
+        .collect();
+
     let server = NoiseServer::new(
         node_config.clone(),
         network_config,
         DarsStep::WaitingForAttestors,
-        None, // No excluded participants
+        Some(excluded),
     )
     .await?;
     let server = Arc::new(server);

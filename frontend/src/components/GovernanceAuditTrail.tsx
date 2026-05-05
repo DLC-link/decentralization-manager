@@ -28,6 +28,9 @@ import type { ChainAuditEntry, ChainAuditResponse } from "../types";
 
 interface GovernanceAuditTrailProps {
   partyId: string;
+  /// Bumped by the parent after a sibling governance action mutates state, to
+  /// trigger a fresh fetch without the operator clicking Refresh.
+  refreshNonce?: number;
 }
 
 const CHAIN_LIMIT = 200;
@@ -114,11 +117,18 @@ const CopyButton = ({
   );
 };
 
-export const GovernanceAuditTrail = ({ partyId }: GovernanceAuditTrailProps) => {
+export const GovernanceAuditTrail = ({
+  partyId,
+  refreshNonce,
+}: GovernanceAuditTrailProps) => {
   const jsonTreeTheme = useJsonTreeTheme();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [entries, setEntries] = useState<ChainAuditEntry[]>([]);
+  const sortedEntries = useMemo(
+    () => [...entries].sort((a, b) => b.timestamp - a.timestamp),
+    [entries],
+  );
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
   const [cacheLoaded, setCacheLoaded] = useState(false);
   const [canScrollUp, setCanScrollUp] = useState(false);
@@ -186,6 +196,13 @@ export const GovernanceAuditTrail = ({ partyId }: GovernanceAuditTrailProps) => 
       fetchAudit(false);
     }
   }, [cacheLoaded, fetchAudit]);
+
+  // Re-fetch (force fresh) whenever the parent bumps the nonce after a
+  // sibling governance mutation.
+  useEffect(() => {
+    if (refreshNonce === undefined || refreshNonce === 0) return;
+    fetchAudit(true);
+  }, [refreshNonce, fetchAudit]);
 
   if (error) {
     return (
@@ -278,25 +295,27 @@ export const GovernanceAuditTrail = ({ partyId }: GovernanceAuditTrailProps) => 
               </TableRow>
             </TableHead>
             <TableBody>
-              {entries.map((entry, idx) => {
+              {sortedEntries.map((entry, idx) => {
                 const rowKey = `${entry.offset}-${entry.contract_id}`;
                 const isExpanded = expandedRow === rowKey;
                 return (
                   <Fragment key={rowKey}>
                     <TableRow sx={zebraRow(idx)}>
                       <TableCell sx={{ py: 0.5 }}>
-                        <IconButton
-                          size="small"
-                          onClick={() =>
-                            setExpandedRow(isExpanded ? null : rowKey)
-                          }
-                        >
-                          {isExpanded ? (
-                            <ExpandLessIcon fontSize="small" />
-                          ) : (
-                            <ExpandMoreIcon fontSize="small" />
-                          )}
-                        </IconButton>
+                        <Tooltip title={isExpanded ? "Hide details" : "Show details"}>
+                          <IconButton
+                            size="small"
+                            onClick={() =>
+                              setExpandedRow(isExpanded ? null : rowKey)
+                            }
+                          >
+                            {isExpanded ? (
+                              <ExpandLessIcon fontSize="small" />
+                            ) : (
+                              <ExpandMoreIcon fontSize="small" />
+                            )}
+                          </IconButton>
+                        </Tooltip>
                       </TableCell>
                       <TableCell sx={{ py: 1, fontSize: "0.8rem" }}>
                         {entry.timestamp > 0

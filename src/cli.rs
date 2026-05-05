@@ -89,10 +89,12 @@ pub enum Commands {
         #[arg(long, env = "DECPM_KEYCLOAK_CLIENT_ID")]
         keycloak_client_id: Option<String>,
 
-        /// Role name that grants admin access to sensitive endpoints
-        /// (PUT /party-config, POST /kick). Defaults to "dpm-admin".
-        #[arg(long, env = "DECPM_ADMIN_ROLE", default_value = "dpm-admin")]
-        admin_role: String,
+        /// Role name that gates sensitive endpoints (PUT /party-config,
+        /// POST /kick, etc.). Unset (default) skips the role check —
+        /// every authenticated caller is treated as admin. Set this to
+        /// require a specific role for shared/multi-user nodes.
+        #[arg(long, env = "DECPM_ADMIN_ROLE")]
+        admin_role: Option<String>,
 
         /// Origin permitted by CORS (e.g. `https://dpm.example.com`).
         /// Defaults to same-origin only — set this when the SPA is served

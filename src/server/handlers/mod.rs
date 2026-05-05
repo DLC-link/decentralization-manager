@@ -7,12 +7,12 @@ mod parties;
 mod party_config;
 mod workflows;
 
-pub use auth::{get_auth_config, get_auth_status, test_auth};
+pub use auth::{get_auth_config, get_auth_status, grant_rights, test_auth};
 pub use config::{get_network_config, get_node_config, save_network_config};
 pub use governance::{
     cancel_confirmation, confirm_action, execute_action, expire_confirmation, get_governance,
-    get_governance_audit, get_governance_chain_audit, get_governance_state, get_network_info,
-    get_packages, get_provider_services_handler, get_registrar_services_handler,
+    get_governance_audit, get_governance_chain_audit, get_governance_state, get_known_members,
+    get_network_info, get_packages, get_provider_services_handler, get_registrar_services_handler,
     get_token_standard_contracts, get_user_services_handler, get_vaults_handler, propose_action,
     query_contracts_handler,
 };
@@ -23,7 +23,7 @@ pub use parties::{
     get_participants_status, get_vetted_packages, resolve_owner_keys_from_peers,
     store_parties_to_db,
 };
-pub use party_config::{get_party_config, save_party_config};
+pub use party_config::{discover_member_party, get_party_config, save_party_config};
 pub use workflows::{
     ContractsWorkflowState, DarsWorkflowState, KickWorkflowState, OnboardingWorkflowState,
     get_contracts_status, get_dars_status, get_kick_status, get_onboarding_status, start_contracts,

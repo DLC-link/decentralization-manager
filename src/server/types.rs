@@ -237,6 +237,37 @@ pub struct OnboardingRequest {
     pub peer_ids: Vec<String>,
 }
 
+/// Why a directed edge was reported missing. The frontend renders different
+/// remediation hints depending on which kind it sees: `MeshHole` is a true
+/// peer↔peer config gap ("on `from`, add `to` to the network config"), while
+/// `UnreachableFromCoordinator` is a coordinator-side reachability problem
+/// (the peer is unknown, has no public key, didn't answer, or replied with
+/// a malformed payload — fix the coordinator's view of `to`, or `to` itself).
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MissingEdgeKind {
+    UnreachableFromCoordinator,
+    MeshHole,
+}
+
+/// One directed missing edge in the peer mesh: `from` does not have `to`
+/// configured as a peer (`MeshHole`), or the coordinator could not query
+/// `to` at all (`UnreachableFromCoordinator`, `from` is the coordinator).
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct MissingPeerEdge {
+    pub from: String,
+    pub to: String,
+    pub kind: MissingEdgeKind,
+}
+
+/// Returned when onboarding pre-flight detects that selected peers are not
+/// fully meshed. The workflow is not started.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct OnboardingMeshErrorResponse {
+    pub error: String,
+    pub missing_edges: Vec<MissingPeerEdge>,
+}
+
 /// Request to deploy contracts for a decentralized party
 #[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
 pub struct ContractsRequest {
@@ -258,6 +289,9 @@ pub struct ContractsRequest {
 pub struct DarsRequest {
     /// DAR files to upload (base64-encoded)
     pub dar_files: Vec<DarFile>,
+    /// Peer IDs to distribute to (required non-empty for /dars/distribute, ignored by /dars/upload)
+    #[serde(default)]
+    pub peer_ids: Vec<CantonId>,
 }
 
 /// Progress status of a workflow (kick, onboarding, etc.)
@@ -394,6 +428,68 @@ pub struct AuthTestResult {
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct AuthTestResponse {
     pub results: Vec<AuthTestResult>,
+}
+
+/// One participant's member party for a given dec party. `None` member_party_id = peer not configured / unreachable.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct KnownMember {
+    pub participant_uid: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub member_party_id: Option<CantonId>,
+}
+
+/// Response for `GET /governance/known-members`.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct KnownMembersResponse {
+    pub members: Vec<KnownMember>,
+}
+
+/// Request body for `POST /party-config/discover-member-party`. Same Keycloak
+/// shape as `PartyConfigRequest`, used to mint a one-shot token and look up
+/// the authenticated user's primary party from Canton's UserManagementService.
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct DiscoverMemberPartyRequest {
+    pub keycloak_url: String,
+    pub keycloak_realm: String,
+    pub keycloak_client_id: String,
+    #[serde(default)]
+    pub keycloak_client_secret: Option<String>,
+    #[serde(default)]
+    pub keycloak_username: Option<String>,
+    #[serde(default)]
+    pub keycloak_password: Option<String>,
+}
+
+/// Response for `POST /party-config/discover-member-party`. `primary_party`
+/// is `None` when Canton's user has no primary party assigned.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct DiscoverMemberPartyResponse {
+    pub user_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_party: Option<CantonId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// Request to grant the configured user the rights they need to act on a dec party
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
+pub struct GrantRightsRequest {
+    /// Decentralized party whose coordinator user should receive rights
+    pub dec_party_id: CantonId,
+    /// Keycloak client_id of the admin (validator) client whose service-account
+    /// user has ParticipantAdmin on Canton. Provided per-call by the operator;
+    /// never stored.
+    pub admin_client_id: String,
+    /// Keycloak client_secret matching admin_client_id. Provided per-call by
+    /// the operator; never stored.
+    pub admin_client_secret: String,
+}
+
+/// Response for the grant-rights endpoint
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct GrantRightsResponse {
+    /// Refreshed rights status after the grant call
+    pub rights: RightsStatus,
 }
 
 // ============================================================================
@@ -947,10 +1043,12 @@ pub struct PartyConfigRequest {
 pub struct PartyConfigResponse {
     /// The decentralized party ID
     pub dec_party_id: CantonId,
-    /// The member party ID (local to this node)
-    pub member_party_id: CantonId,
-    /// Canton/Ledger API user ID
-    pub user_id: String,
+    /// `None` when no credentials are saved yet — operator must provide one via PUT.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub member_party_id: Option<CantonId>,
+    /// `None` when no credentials are saved yet — operator picks via Discover or types.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
     /// Keycloak server URL
     pub keycloak_url: String,
     /// Keycloak realm name
