@@ -187,3 +187,42 @@ testMismatchedSelfAction = script do
       executor = parties.member1
       action = actionA
       confirmations = [confResultA.confirmationCid, confResultB.confirmationCid]
+
+-- | Add an additional proposer via self-action confirm → execute flow.
+testAddAdditionalProposer = script do
+  parties <- allocateTestParties
+  rulesCid <- createTestGovernance parties
+
+  let action = SelfAction_AddAdditionalProposer with
+        additionalProposer = parties.outsider
+
+  _newRulesCid <- confirmAndExecuteSelf parties rulesCid action
+    [parties.member1, parties.member2] parties.member1
+
+  [(_, rules)] <- query @GovernanceRules parties.governanceParty
+  assertMsg "outsider should be in additionalProposers"
+    (parties.outsider `Set.member` rules.additionalProposers)
+  Set.size rules.additionalProposers === 1
+
+-- | Remove an additional proposer via self-action confirm → execute flow.
+testRemoveAdditionalProposer = script do
+  parties <- allocateTestParties
+
+  -- Start with `outsider` already in additionalProposers.
+  rulesCid <- submit parties.governanceParty $ createCmd GovernanceRules with
+    governanceParty = parties.governanceParty
+    members = getMembers parties
+    additionalProposers = Set.singleton parties.outsider
+    threshold = 2
+    actionConfirmationTimeout = minutes 30
+
+  let action = SelfAction_RemoveAdditionalProposer with
+        additionalProposer = parties.outsider
+
+  _newRulesCid <- confirmAndExecuteSelf parties rulesCid action
+    [parties.member1, parties.member2] parties.member1
+
+  [(_, rules)] <- query @GovernanceRules parties.governanceParty
+  assertMsg "outsider should be removed"
+    (parties.outsider `Set.notMember` rules.additionalProposers)
+  Set.size rules.additionalProposers === 0

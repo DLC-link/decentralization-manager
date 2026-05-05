@@ -38,6 +38,12 @@ data GovernanceSelfAction
   | SelfAction_SetTimeout
       { updatedTimeout : RelTime
       }
+  | SelfAction_AddAdditionalProposer
+      { additionalProposer : Party
+      }
+  | SelfAction_RemoveAdditionalProposer
+      { additionalProposer : Party
+      }
   deriving (Show, Eq)
 
 -- | A confirmation for a governance self-management action.
@@ -90,6 +96,14 @@ data GovernanceRules_SetThresholdResult = GovernanceRules_SetThresholdResult
   deriving (Show, Eq)
 
 data GovernanceRules_SetActionConfirmationTimeoutResult = GovernanceRules_SetActionConfirmationTimeoutResult
+  with governanceRulesCid : ContractId GovernanceRules
+  deriving (Show, Eq)
+
+data GovernanceRules_AddAdditionalProposerResult = GovernanceRules_AddAdditionalProposerResult
+  with governanceRulesCid : ContractId GovernanceRules
+  deriving (Show, Eq)
+
+data GovernanceRules_RemoveAdditionalProposerResult = GovernanceRules_RemoveAdditionalProposerResult
   with governanceRulesCid : ContractId GovernanceRules
   deriving (Show, Eq)
 
@@ -206,6 +220,34 @@ template GovernanceRules
         governanceRulesCid <- create this with actionConfirmationTimeout = newTimeout
         pure GovernanceRules_SetActionConfirmationTimeoutResult with governanceRulesCid
 
+    -- | Add a party to the additional-proposers allowlist.
+    choice GovernanceRules_AddAdditionalProposer
+        : GovernanceRules_AddAdditionalProposerResult
+      with
+        additionalProposer : Party
+      controller governanceParty
+      do
+        require "Already an additional proposer"
+          (additionalProposer `Set.notMember` additionalProposers)
+        require "Additional proposer must not also be a member"
+          (additionalProposer `Set.notMember` members)
+        let newAdditionalProposers = Set.insert additionalProposer additionalProposers
+        governanceRulesCid <- create this with additionalProposers = newAdditionalProposers
+        pure GovernanceRules_AddAdditionalProposerResult with governanceRulesCid
+
+    -- | Remove a party from the additional-proposers allowlist.
+    choice GovernanceRules_RemoveAdditionalProposer
+        : GovernanceRules_RemoveAdditionalProposerResult
+      with
+        additionalProposer : Party
+      controller governanceParty
+      do
+        require "Not an additional proposer"
+          (additionalProposer `Set.member` additionalProposers)
+        let newAdditionalProposers = Set.delete additionalProposer additionalProposers
+        governanceRulesCid <- create this with additionalProposers = newAdditionalProposers
+        pure GovernanceRules_RemoveAdditionalProposerResult with governanceRulesCid
+
     -- ════════════════════════════════════════════════════════════════════════
     -- BUILT-IN: Self-management confirm & execute
     -- Uses GovernanceSelfAction (closed enum) for value-based matching.
@@ -276,6 +318,16 @@ template GovernanceRules
           SelfAction_SetTimeout updatedTimeout -> do
             result <- exercise self GovernanceRules_SetActionConfirmationTimeout with
               newTimeout = updatedTimeout
+            pure result.governanceRulesCid
+
+          SelfAction_AddAdditionalProposer additionalProposer -> do
+            result <- exercise self GovernanceRules_AddAdditionalProposer with
+              additionalProposer
+            pure result.governanceRulesCid
+
+          SelfAction_RemoveAdditionalProposer additionalProposer -> do
+            result <- exercise self GovernanceRules_RemoveAdditionalProposer with
+              additionalProposer
             pure result.governanceRulesCid
         pure GovernanceRules_ExecuteGovernanceActionResult with ..
 
