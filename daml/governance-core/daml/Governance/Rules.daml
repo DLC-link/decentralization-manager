@@ -307,6 +307,13 @@ template GovernanceRules
         actionView <- view <$> fetch actionProposalCid
         require "Proposal targets this governance"
           (actionView.governanceParty == governanceParty)
+        -- Proposer must be a member or an additional proposer. Canton has
+        -- already enforced that the on-chain `proposer` field is authentic
+        -- (the submitting participant must `actAs` that party); this check
+        -- enforces the trust boundary on top of that authenticity guarantee.
+        require "Proposer is authorized (member or additional proposer)"
+          (actionView.proposer `Set.member` members
+            || actionView.proposer `Set.member` additionalProposers)
         -- TODO: governanceParty match alone doesn't distinguish between multiple
         -- GovernanceRules instances for the same party. A static governance ID
         -- field should be added to provide strict matching.

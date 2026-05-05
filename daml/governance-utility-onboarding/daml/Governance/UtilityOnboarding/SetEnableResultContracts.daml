@@ -23,6 +23,7 @@ template SetEnableResultContracts
     interface instance GovernableAction for SetEnableResultContracts where
       view = GovernableActionView with
         governanceParty
+        proposer
         actionLabel = "SetEnableResultContracts"
         description = "Toggle result-contract emission on RegistrarService."
 

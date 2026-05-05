@@ -4,6 +4,8 @@
 -- | Tests for granular onboarding actions.
 module Governance.UtilityOnboarding.Test.GranularActionsTest where
 
+import DA.Set as Set hiding (filter)
+import DA.Time (minutes)
 import Daml.Script
 
 import Utility.Commercials.V0.Model.DelegatedBatchedMarkersProxy (DelegatedBatchedMarkersProxy)
@@ -13,7 +15,7 @@ import Utility.Registry.App.V0.Service.Registrar (RegistrarService(..))
 import Utility.Registry.V0.Configuration.Instrument (InstrumentConfiguration(..))
 
 import Governance.Action (GovernableAction)
-import Governance.Rules (GovernanceRules)
+import Governance.Rules
 
 import Governance.UtilityOnboarding.CreateDelegatedBatchedMarkersProxy
 import Governance.UtilityOnboarding.CreateProviderServiceRequest
@@ -56,6 +58,18 @@ given_setup_done = do
 -- The operator party is the proposer, so the operator's authority flows via
 -- `signatory proposer` into executeImpl where the ProviderService is created
 -- with `operator = proposer, provider = governanceParty`.
+-- The operator must be listed as an additional proposer since it is not a member.
+
+given_governance_with_operator_as_additional_proposer : Script GovFixture
+given_governance_with_operator_as_additional_proposer = do
+  parties <- allocateOnboardingTestParties
+  rulesCid <- submit parties.governanceParty $ createCmd GovernanceRules with
+    governanceParty = parties.governanceParty
+    members = getMembers parties
+    additionalProposers = Set.singleton parties.operator
+    threshold = 2
+    actionConfirmationTimeout = minutes 30
+  pure GovFixture with ..
 
 when_provision_provider_service : GovFixture -> Script ()
 when_provision_provider_service f = do
@@ -74,7 +88,7 @@ then_provider_service_exists f _ = do
 
 test_provision_provider_service = script do
   run Test with
-    given = given_governance
+    given = given_governance_with_operator_as_additional_proposer
     when = when_provision_provider_service
     then_ = then_provider_service_exists
 

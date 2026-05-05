@@ -25,6 +25,7 @@ template SetProviderAppRewardBeneficiaries
     interface instance GovernableAction for SetProviderAppRewardBeneficiaries where
       view = GovernableActionView with
         governanceParty
+        proposer
         actionLabel = "SetProviderAppRewardBeneficiaries"
         description = "Set provider app reward beneficiaries on InstrumentConfiguration."
 

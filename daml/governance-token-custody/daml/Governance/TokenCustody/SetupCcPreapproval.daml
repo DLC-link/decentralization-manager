@@ -34,6 +34,7 @@ template SetupCcPreapprovalProposal
     interface instance GovernableAction for SetupCcPreapprovalProposal where
       view = GovernableActionView with
         governanceParty
+        proposer
         actionLabel = "SetupCcPreapproval"
         description = "Set up Canton Coin transfer preapproval"
 
