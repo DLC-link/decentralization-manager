@@ -100,4 +100,6 @@ pub enum FieldDefinition {
     Record { fields: Vec<FieldDefinition> },
     /// Governance threshold value
     GovernanceThreshold { value: Option<i64> },
+    /// `None` value for any `Optional<T>` field — emits a typed-empty Optional.
+    None,
 }

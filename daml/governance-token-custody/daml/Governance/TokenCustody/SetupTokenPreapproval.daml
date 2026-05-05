@@ -35,6 +35,7 @@ template SetupTokenPreapprovalProposal
     interface instance GovernableAction for SetupTokenPreapprovalProposal where
       view = GovernableActionView with
         governanceParty
+        proposer
         actionLabel = "SetupTokenPreapproval"
         description = "Set up utility token transfer preapproval"
 

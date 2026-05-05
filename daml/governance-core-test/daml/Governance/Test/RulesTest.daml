@@ -33,6 +33,7 @@ testRejectEmptyMembers = script do
     members = Set.empty
     threshold = 2
     actionConfirmationTimeout = minutes 30
+    additionalProposers = None
 
 -- | Governance with different timeout and threshold values.
 testCustomConfiguration = script do
@@ -43,6 +44,7 @@ testCustomConfiguration = script do
     members = getMembers parties
     threshold = 3
     actionConfirmationTimeout = minutes 60
+    additionalProposers = None
 
   [(_, rules)] <- query @GovernanceRules parties.governanceParty
   rules.threshold === 3

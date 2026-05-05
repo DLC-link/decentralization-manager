@@ -5,6 +5,8 @@
 module Governance.Test.AuthorizationTest where
 
 import DA.Assert
+import DA.Set as Set hiding (filter)
+import DA.Time (minutes)
 import Daml.Script
 
 import Governance.Action (GovernableAction)
@@ -52,10 +54,17 @@ testNonMemberCanCreateProposal = script do
   [(_, proposal)] <- query @MockProposal parties.outsider
   proposal.label === "OutsiderProposal"
 
--- | Non-member proposal can still be confirmed and executed by members.
-testNonMemberProposalCanBeExecutedByMembers = script do
+-- | A non-member can propose if they're in additionalProposers,
+-- and members can confirm + execute the proposal.
+testAdditionalProposerProposalCanBeExecutedByMembers = script do
   parties <- allocateTestParties
-  rulesCid <- createTestGovernance parties
+
+  rulesCid <- submit parties.governanceParty $ createCmd GovernanceRules with
+    governanceParty = parties.governanceParty
+    members = getMembers parties
+    threshold = 2
+    actionConfirmationTimeout = minutes 30
+    additionalProposers = Some (Set.singleton parties.outsider)
 
   proposalCid <- submit parties.outsider $ createCmd MockProposal with
     governanceParty = parties.governanceParty
@@ -127,3 +136,71 @@ testDuplicateConfirmationsRejected = script do
       executor = parties.member1
       actionProposalCid = proposalIfaceCid
       confirmations = [confResult1.confirmationCid, confResult2.confirmationCid]
+
+-- | Member proposer is accepted at confirm time.
+-- Sanity check: the existing baseline behavior must keep working with the new check.
+testMemberProposerAcceptedAtConfirm = script do
+  parties <- allocateTestParties
+  rulesCid <- createTestGovernance parties
+
+  proposalCid <- submit parties.member1 $ createCmd MockProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    label = "MemberProposed"
+    payload = "ok"
+
+  let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
+
+  _ <- submit (memberContext parties.member2 parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ConfirmAction with
+      confirmer = parties.member2
+      actionProposalCid = proposalIfaceCid
+
+  pure ()
+
+-- | Additional proposer (non-member) is accepted at confirm time.
+testAdditionalProposerAcceptedAtConfirm = script do
+  parties <- allocateTestParties
+
+  -- Build governance rules where `outsider` is an additional proposer.
+  rulesCid <- submit parties.governanceParty $ createCmd GovernanceRules with
+    governanceParty = parties.governanceParty
+    members = getMembers parties
+    threshold = 2
+    actionConfirmationTimeout = minutes 30
+    additionalProposers = Some (Set.singleton parties.outsider)
+
+  proposalCid <- submit parties.outsider $ createCmd MockProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.outsider
+    label = "AdditionalProposerProposed"
+    payload = "ok"
+
+  let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
+
+  _ <- submit (memberContext parties.member1 parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ConfirmAction with
+      confirmer = parties.member1
+      actionProposalCid = proposalIfaceCid
+
+  pure ()
+
+-- | Outsider (neither member nor additional proposer) is rejected at confirm time.
+-- This is the new authorization boundary that issue #55 establishes.
+testUnauthorizedProposerRejectedAtConfirm = script do
+  parties <- allocateTestParties
+  rulesCid <- createTestGovernance parties
+
+  -- `outsider` is neither a member nor an additional proposer.
+  proposalCid <- submit parties.outsider $ createCmd MockProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.outsider
+    label = "UnauthorizedProposed"
+    payload = "should reject"
+
+  let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
+
+  submitMustFail (memberContext parties.member1 parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ConfirmAction with
+      confirmer = parties.member1
+      actionProposalCid = proposalIfaceCid

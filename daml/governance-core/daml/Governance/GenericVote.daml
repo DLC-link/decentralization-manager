@@ -28,6 +28,7 @@ template GenericVoteProposal
     interface instance GovernableAction for GenericVoteProposal where
       view = GovernableActionView with
         governanceParty
+        proposer
         actionLabel = "GenericVote"
         description
 
