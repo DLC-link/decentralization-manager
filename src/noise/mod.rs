@@ -439,8 +439,77 @@ pub async fn load_or_generate_keypair<P: AsRef<Path>>(path: P) -> Result<NoiseKe
     }
 }
 
+/// Number of attempts (initial + retries) made by `retry_loop`.
+#[allow(dead_code)]
+const RETRY_MAX_ATTEMPTS: usize = 2;
+
+/// Fixed backoff between attempts. No jitter — retries are scoped to a
+/// single caller's flow against a single peer; there is no cross-caller
+/// synchronisation that jitter would smooth out.
+#[allow(dead_code)]
+const RETRY_BACKOFF: Duration = Duration::from_millis(250);
+
+/// Returns `true` if a `NoiseError` represents a transient condition that
+/// is worth retrying. Deterministic errors (handshake failures, bad status,
+/// decode errors, configuration mistakes) are not retried.
+///
+/// Exhaustive match (no wildcard) — adding a new `NoiseError` variant will
+/// fail to compile here until it's explicitly classified as retryable or not.
+#[allow(dead_code)]
+fn is_transient(err: &NoiseError) -> bool {
+    match err {
+        NoiseError::TcpConnectionTimeout(_)
+        | NoiseError::TcpConnectionFailed(_)
+        | NoiseError::RequestTimeout
+        | NoiseError::Io(_)
+        | NoiseError::Hyper(_) => true,
+        NoiseError::Noise(_)
+        | NoiseError::HandshakeFailed
+        | NoiseError::DecryptionError
+        | NoiseError::BadStatusCode(_)
+        | NoiseError::InvalidMessage
+        | NoiseError::JsonSerialization(_)
+        | NoiseError::Http(_)
+        | NoiseError::InvalidUri(_)
+        | NoiseError::UriParsingError(_)
+        | NoiseError::UnknownPeer(_)
+        | NoiseError::Anyhow(_) => false,
+    }
+}
+
+/// Run `op` up to `RETRY_MAX_ATTEMPTS` times, retrying only when the returned
+/// `NoiseError` is classified as transient by `is_transient`. Sleeps
+/// `RETRY_BACKOFF` between attempts. The final error (or the first success)
+/// is returned to the caller.
+#[allow(dead_code)]
+async fn retry_loop<F, Fut>(mut op: F) -> Result<Bytes, NoiseError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<Bytes, NoiseError>>,
+{
+    let mut last_err: Option<NoiseError> = None;
+    for _ in 0..RETRY_MAX_ATTEMPTS {
+        match op().await {
+            Ok(bytes) => return Ok(bytes),
+            Err(e) if is_transient(&e) => {
+                last_err = Some(e);
+                tokio::time::sleep(RETRY_BACKOFF).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last_err.expect("retry_loop ran zero attempts"))
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use bytes::Bytes;
+
     use super::*;
 
     #[test]
@@ -517,5 +586,57 @@ mod tests {
         assert_eq!(uri2.host(), Some("example.com"));
         assert_eq!(uri2.port_u16(), Some(8080));
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn retry_loop_succeeds_on_first_attempt() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_clone = calls.clone();
+        let result = retry_loop(move || {
+            let calls = calls_clone.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok::<Bytes, NoiseError>(Bytes::from_static(b"ok"))
+            }
+        })
+        .await;
+        assert!(matches!(result, Ok(b) if b.as_ref() == b"ok"));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn retry_loop_retries_on_transient_then_succeeds() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_clone = calls.clone();
+        let result = retry_loop(move || {
+            let calls = calls_clone.clone();
+            async move {
+                let n = calls.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    Err(NoiseError::TcpConnectionTimeout("test".into()))
+                } else {
+                    Ok(Bytes::from_static(b"ok"))
+                }
+            }
+        })
+        .await;
+        assert!(matches!(result, Ok(b) if b.as_ref() == b"ok"));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn retry_loop_returns_terminal_error_after_two_transient_failures() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_clone = calls.clone();
+        let result = retry_loop(move || {
+            let calls = calls_clone.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err::<Bytes, _>(NoiseError::TcpConnectionTimeout("test".into()))
+            }
+        })
+        .await;
+        assert!(matches!(result, Err(NoiseError::TcpConnectionTimeout(_))));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 }
