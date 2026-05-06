@@ -737,49 +737,40 @@ async fn check_participants_status(
         let ping_msg = ping_message.clone();
 
         status_futures.push(tokio::spawn(async move {
-            // First check if node is reachable via TCP
-            let socket_addr = format!("{address}:{port}");
-            let tcp_check = tokio::time::timeout(
-                Duration::from_secs(3),
-                tokio::net::TcpStream::connect(&socket_addr),
-            )
-            .await;
+            let (Some(psk), Some(_)) = (psk, peer_pub_key) else {
+                // Public key parse failed — no PSK available; classify as handshake-side.
+                return ParticipantStatus {
+                    id: peer_id,
+                    status: ConnectionStatus::HandshakeFailed,
+                };
+            };
 
-            match tcp_check {
-                Ok(Ok(_)) => {
-                    // TCP connection succeeded, now check Noise handshake
-                    let (Some(psk), Some(_)) = (psk, peer_pub_key) else {
-                        // Invalid public key but node is reachable
-                        return ParticipantStatus {
-                            id: peer_id,
-                            status: ConnectionStatus::HandshakeFailed,
-                        };
+            match send_noise_message_with_retry(&address, port, &psk, &identity, &ping_msg).await {
+                Ok(response) => {
+                    let status = match Message::from_bytes(&response) {
+                        Ok(msg) if msg.msg_type == MessageType::Pong => ConnectionStatus::Connected,
+                        _ => ConnectionStatus::HandshakeFailed,
                     };
-
-                    match send_noise_message(&address, port, &psk, &identity, &ping_msg).await {
-                        Ok(response) => {
-                            let status = match Message::from_bytes(&response) {
-                                Ok(msg) if msg.msg_type == MessageType::Pong => {
-                                    ConnectionStatus::Connected
-                                }
-                                _ => ConnectionStatus::HandshakeFailed,
-                            };
-                            ParticipantStatus {
-                                id: peer_id,
-                                status,
-                            }
-                        }
-                        Err(_) => ParticipantStatus {
-                            id: peer_id,
-                            status: ConnectionStatus::HandshakeFailed,
-                        },
-                    }
-                }
-                _ => {
-                    // TCP connection failed - node is unreachable
                     ParticipantStatus {
                         id: peer_id,
-                        status: ConnectionStatus::Unreachable,
+                        status,
+                    }
+                }
+                Err(e) => {
+                    // Map NoiseError -> ConnectionStatus (binary semantics — Unreachable
+                    // covers transport-side failures; HandshakeFailed covers everything
+                    // else, matching prior behavior of this endpoint).
+                    let status = match &e {
+                        NoiseError::TcpConnectionTimeout(_)
+                        | NoiseError::TcpConnectionFailed(_)
+                        | NoiseError::Io(_)
+                        | NoiseError::Hyper(_)
+                        | NoiseError::RequestTimeout => ConnectionStatus::Unreachable,
+                        _ => ConnectionStatus::HandshakeFailed,
+                    };
+                    ParticipantStatus {
+                        id: peer_id,
+                        status,
                     }
                 }
             }
