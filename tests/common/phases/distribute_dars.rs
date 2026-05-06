@@ -13,15 +13,15 @@ use crate::common::{
 };
 
 const DAR_FILES: &[&str] = &[
-    "governance-core-v0-rc3-0.1.0.dar",
-    "governance-token-custody-v0-rc3-0.1.0.dar",
-    "governance-utility-onboarding-v0-rc3-0.1.0.dar",
+    "governance-core-v0-rc4-0.1.0.dar",
+    "governance-token-custody-v0-rc4-0.1.0.dar",
+    "governance-utility-onboarding-v0-rc4-0.1.0.dar",
 ];
 
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     info!("Phase: distribute_dars");
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let dars_dir = Path::new(manifest_dir).join("releases/v0/rc3");
+    let dars_dir = Path::new(manifest_dir).join("releases/v0/rc4");
 
     let mut entries = Vec::with_capacity(DAR_FILES.len());
     for filename in DAR_FILES {
@@ -31,23 +31,28 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             .with_context(|| format!("reading DAR {}", path.display()))?;
         entries.push(json!({ "filename": filename, "data": B64.encode(&bytes) }));
     }
-    let req = json!({ "dar_files": entries });
+    let upload_req = json!({ "dar_files": entries });
 
     Scenario::with_ctx("distribute DARs", InvitationIds::default())
         .given("3 DAR files on disk", |_f, _| {
             Box::pin(async move { Ok(()) })
         })
         .when("P1 uploads and distributes DARs", {
-            let req = req.clone();
+            let upload_req = upload_req.clone();
+            let entries = entries.clone();
             move |f, _| {
-                let req = req.clone();
+                let upload_req = upload_req.clone();
+                let distribute_req = json!({
+                    "dar_files": entries,
+                    "peer_ids": [&f.p2.participant_id, &f.p3.participant_id],
+                });
                 Box::pin(async move {
                     let _: Value = f
-                        .post_json(f.p1.http, "/dars/upload", &req)
+                        .post_json(f.p1.http, "/dars/upload", &upload_req)
                         .await
                         .context("POST /dars/upload")?;
                     let _: Value = f
-                        .post_json(f.p1.http, "/dars/distribute", &req)
+                        .post_json(f.p1.http, "/dars/distribute", &distribute_req)
                         .await
                         .context("POST /dars/distribute")?;
                     Ok(())

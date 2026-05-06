@@ -371,6 +371,7 @@ interface GovernableAction where
 
 data GovernableActionView = GovernableActionView with
     governanceParty : Party    -- The party whose authority is required
+    proposer        : Party    -- The party that proposed this action (required for proposer authorization)
     actionLabel     : Text     -- Human-readable label (e.g., "Transfer", "GenericVote")
     description     : Text     -- Description recorded in the execution result
 ```
@@ -386,12 +387,15 @@ The `GovernanceRules` contract (from `Governance.Rules`) is the core governance 
 
 ```
 GovernanceRules {
-    governanceParty          : Party      -- The decentralized governance party
-    members                  : Set Party  -- Committee members authorized to vote
-    threshold                : Int        -- Minimum confirmations required (1 <= threshold <= |members|)
-    actionConfirmationTimeout : RelTime   -- Confirmation validity period (minimum 10 seconds)
+    governanceParty          : Party                  -- The decentralized governance party
+    members                  : Set Party              -- Committee members authorized to vote
+    threshold                : Int                    -- Minimum confirmations required (1 <= threshold <= |members|)
+    actionConfirmationTimeout : RelTime               -- Confirmation validity period (minimum 10 seconds)
+    additionalProposers      : Optional (Set Party)   -- Allowlist of non-member proposers; None means "no allowlist"
 }
 ```
+
+The `additionalProposers` field (added in `v0-rc4`) lets a committee grant propose-only rights to parties that are not full voting members — for example, an admin console, a monitoring script, or a regulatory officer. The authoritative on-chain proposer set is `members ∪ fromOptional Set.empty additionalProposers`. `GovernanceRules_ConfirmAction` enforces that every proposal's `proposer` is in this set; outsider proposals are rejected at confirm time even if a member tries to confirm them. The two `SelfAction_*AdditionalProposer` variants below mutate this allowlist under the same threshold consensus as committee changes.
 
 The contract provides two distinct paths for governance actions:
 
@@ -405,6 +409,8 @@ Self-management actions modify the `GovernanceRules` contract itself. They use a
 | `SelfAction_RemoveMemberAndSetThreshold` | removedMember, newThresholdAfterRemove | Remove a governance member |
 | `SelfAction_SetThreshold` | updatedThreshold | Change the approval threshold |
 | `SelfAction_SetTimeout` | updatedTimeout | Change the confirmation expiry timeout |
+| `SelfAction_AddAdditionalProposer` | additionalProposer | Grant propose-only rights to a non-member party |
+| `SelfAction_RemoveAdditionalProposer` | additionalProposer | Revoke propose-only rights from a party (normalizes the allowlist back to `None` when it becomes empty) |
 
 Choices on `GovernanceRules` for self-management:
 - `GovernanceRules_ConfirmGovernanceAction` -- Submit a self-action confirmation
@@ -665,9 +671,9 @@ The system depends on the following Daml packages:
 
 | Package ID | Purpose |
 |------------|---------|
-| `#governance-core-v0-rc3` | GovernanceRules, GovernableAction interface, GenericVoteProposal |
-| `#governance-token-custody-v0-rc3` | TransferProposal, AcceptTransferProposal, preapproval proposals |
-| `#governance-utility-onboarding-v0-rc3` | SetupUtility, six granular onboarding proposals, MintProposal, BurnProposal |
+| `#governance-core-v0-rc4` | GovernanceRules, GovernableAction interface, GenericVoteProposal |
+| `#governance-token-custody-v0-rc4` | TransferProposal, AcceptTransferProposal, preapproval proposals |
+| `#governance-utility-onboarding-v0-rc4` | SetupUtility, six granular onboarding proposals, MintProposal, BurnProposal |
 | `#bitsafe-vault-governance-v0-rc8` | Legacy VaultGovernanceRules contract templates |
 | `#bitsafe-vault-v0-rc8` | VaultRules and Vault contract templates |
 | `#utility-registry-app-v0` | ProviderService, UserService, AllocationFactory |

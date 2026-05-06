@@ -86,6 +86,7 @@ testExpireStaleConfirmation = script do
     members = getMembers parties
     threshold = 2
     actionConfirmationTimeout = minutes 3
+    additionalProposers = None
 
   proposalCid <- submit parties.member1 $ createCmd MockProposal with
     governanceParty = parties.governanceParty

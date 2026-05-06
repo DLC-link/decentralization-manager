@@ -53,6 +53,11 @@ pub struct PartiesQuery {
     /// Filter parties by prefix (e.g., "cbtc-network")
     #[serde(default)]
     pub prefix: Option<String>,
+    /// Force a synchronous Canton fetch, bypassing the cache. Used right after
+    /// mutating workflows (kick / contracts / dars) so the UI sees fresh data
+    /// instead of the up-to-60s-stale cached snapshot.
+    #[serde(default)]
+    pub refresh: Option<bool>,
 }
 
 /// Get decentralized parties the current participant is a member of
@@ -70,9 +75,14 @@ pub async fn get_decentralized_parties(
     query: web::Query<PartiesQuery>,
 ) -> impl Responder {
     let prefix = query.prefix.clone().unwrap_or_default();
+    let force_refresh = query.refresh.unwrap_or(false);
 
-    // Try to load from DB cache first
-    let cached = load_cached_parties(&data.db, &prefix).await;
+    // Try to load from DB cache first (unless caller explicitly demanded fresh)
+    let cached = if force_refresh {
+        Ok(None)
+    } else {
+        load_cached_parties(&data.db, &prefix).await
+    };
     if let Ok(Some((mut response, updated_at))) = cached {
         response.source = ResponseSource::Cache;
 
@@ -132,15 +142,28 @@ pub async fn get_decentralized_parties(
     .await
     {
         Ok(response) => {
-            // Cache in background
-            let db = data.db.clone();
-            let parties = response.parties.clone();
-            let prefix = prefix.clone();
-            tokio::spawn(async move {
-                if let Err(e) = store_parties_to_db(&db, &prefix, &parties).await {
-                    tracing::warn!("Failed to cache parties: {e}");
-                }
-            });
+            // Cache + resolve owner keys in background. Mirrors
+            // `refresh_and_cache_parties` so a cold cache reaches the same
+            // post-resolved state on the next request. Dedup against
+            // `refreshing_prefixes` so concurrent cold-cache requests don't
+            // each fan out their own Noise resolution pass.
+            let spawned = data
+                .refreshing_prefixes
+                .write()
+                .await
+                .insert(prefix.clone());
+            if spawned {
+                let data = data.clone();
+                let parties = response.parties.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = store_parties_to_db(&data.db, &prefix, &parties).await {
+                        tracing::warn!("Failed to cache parties: {e}");
+                    } else {
+                        resolve_owner_keys_from_peers(&data.config, &data.db, &parties).await;
+                    }
+                    data.refreshing_prefixes.write().await.remove(&prefix);
+                });
+            }
             HttpResponse::Ok().json(response)
         }
         Err(e) => {
@@ -601,15 +624,21 @@ pub async fn fetch_decentralized_parties(
                 };
 
                 let party_id = CantonId::parse(&p2p.party)?;
+                let self_uid = config.participant_id().to_string();
                 let participants = p2p
                     .participants
                     .iter()
                     .filter_map(|p| {
                         let participant_uid = CantonId::parse(&p.participant_uid).ok()?;
+                        let owner_key = if participant_uid.to_string() == self_uid {
+                            Some(my_owner_key.clone())
+                        } else {
+                            None // resolved later via Noise polling of peers
+                        };
                         Some(ParticipantInfo {
                             participant_uid,
                             permission: Permission::from(p.permission),
-                            owner_key: None, // Populated during onboarding
+                            owner_key,
                         })
                     })
                     .collect();

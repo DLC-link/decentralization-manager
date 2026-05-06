@@ -64,7 +64,7 @@ curl -X POST http://custodian-a:8080/contracts \
 
 This deploys a `VaultGovernanceRules` contract with all 3 members, threshold 2, and a 24-hour confirmation timeout.
 
-> **Note:** New deployments should use `GovernanceRules` (from `#governance-core-v0-rc3`) instead. See the [Integration Guide](INTEGRATION_GUIDE.md#deploying-governance-contracts) for the recommended contract deployment payload.
+> **Note:** New deployments should use `GovernanceRules` (from `#governance-core-v0-rc4`) instead. See the [Integration Guide](INTEGRATION_GUIDE.md#deploying-governance-contracts) for the recommended contract deployment payload.
 
 ### Full Deployment Flow
 
@@ -76,7 +76,7 @@ The complete end-to-end deployment of a vault system follows these steps. Each g
 | 2 | Configure party credentials | DPM (`PUT /party-config` API) | Configure Keycloak credentials and package IDs for each party |
 | 3 | Grant Ledger API rights | External (Canton admin) | Grant `actAs`/`readAs` rights for member parties on the decentralized party |
 | 4 | Upload DARs | DPM (DARs workflow) | Upload DAR packages to all participant nodes |
-| 5a | Deploy GovernanceRules | DPM (contracts workflow) | Deploy `GovernanceRules` contract with package `#governance-core-v0-rc3` (recommended) |
+| 5a | Deploy GovernanceRules | DPM (contracts workflow) | Deploy `GovernanceRules` contract with package `#governance-core-v0-rc4` (recommended) |
 | 5b | Deploy VaultGovernance | DPM (contracts workflow) | Deploy `VaultGovernanceRules` contract with package `#bitsafe-vault-governance-v0-rc8` (legacy) |
 | 6 | Create ProviderService | Governance action | `utility_create_provider_request` |
 | 7 | Create UserService | Governance action | `utility_create_user_request` |
@@ -702,8 +702,8 @@ The `governance-token-custody` package enables governance-controlled token opera
 
 ### Prerequisites
 
-- `GovernanceRules` contract deployed (from `#governance-core-v0-rc3`)
-- `governance-token-custody` DAR uploaded to all participants (from `#governance-token-custody-v0-rc3`)
+- `GovernanceRules` contract deployed (from `#governance-core-v0-rc4`)
+- `governance-token-custody` DAR uploaded to all participants (from `#governance-token-custody-v0-rc4`)
 - Token infrastructure deployed (transfer factories, instruments, etc.)
 
 ### Set Up Canton Coin Preapproval
@@ -790,7 +790,7 @@ curl -X POST http://custodian-a:8080/governance/propose \
 
 ### Governance Self-Management
 
-The `GovernanceRules` contract supports self-management actions (add/remove members, change threshold, change timeout) through the `core_self` governance type. These do not require proposals -- they use value-based matching like `VaultGovernanceRules`.
+The `GovernanceRules` contract supports self-management actions (add/remove members, change threshold, change timeout, manage the additional-proposers allowlist) through the `core_self` governance type. These do not require proposals -- they use value-based matching like `VaultGovernanceRules`.
 
 **Add a new member:**
 
@@ -840,6 +840,24 @@ curl -X POST http://custodian-a:8080/governance/confirm \
     "governance_type": "core_self"
   }'
 ```
+
+**Grant propose-only rights to a non-member (`v0-rc4`+):**
+
+```bash
+curl -X POST http://custodian-a:8080/governance/confirm \
+  -H "Content-Type: application/json" \
+  -d '{
+    "party_id": "joint-vault::1220...",
+    "rules_contract_id": "<governance-rules-cid>",
+    "action": {
+      "type": "governance_add_additional_proposer",
+      "additional_proposer": "ops-console::1220..."
+    },
+    "governance_type": "core_self"
+  }'
+```
+
+`governance_remove_additional_proposer` (with the same `additional_proposer` field) revokes the right and normalizes the `additionalProposers` allowlist back to `None` once it becomes empty. After execution the named party can call `POST /governance/propose` against this `GovernanceRules` without holding a member seat -- the on-chain proposer-authorization rule (member ∪ allowlist) accepts them at confirm time.
 
 After threshold confirmations are collected, execute with:
 

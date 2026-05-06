@@ -6,13 +6,16 @@ import {
   Button,
   CircularProgress,
   Alert,
+  Tooltip,
 } from "@mui/material";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import ErrorIcon from "@mui/icons-material/Error";
 import ScienceIcon from "@mui/icons-material/Science";
 import WarningIcon from "@mui/icons-material/Warning";
 import RefreshIcon from "@mui/icons-material/Refresh";
+import VpnKeyIcon from "@mui/icons-material/VpnKey";
 import { CopyableText } from "./CopyableText";
+import { GrantRightsDialog } from "./GrantRightsDialog";
 import { API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
 import type { PartyAuthStatus, RightsStatus, AuthTestResponse } from "../types";
@@ -33,7 +36,7 @@ const isRightsValid = (rights: RightsStatus | undefined): boolean => {
   );
 };
 
-export const getAuthStatusIcon = (authStatus: PartyAuthStatus) => {
+const getAuthStatusIcon = (authStatus: PartyAuthStatus) => {
   switch (authStatus.status.status) {
     case "authenticated":
       return <CheckCircleIcon color="success" fontSize="small" />;
@@ -46,7 +49,7 @@ export const getAuthStatusIcon = (authStatus: PartyAuthStatus) => {
   }
 };
 
-export const getAuthStatusChip = (authStatus: PartyAuthStatus) => {
+const getAuthStatusChip = (authStatus: PartyAuthStatus) => {
   switch (authStatus.status.status) {
     case "authenticated":
       return <Chip label="Authenticated" color="success" size="small" />;
@@ -62,10 +65,16 @@ export const getAuthStatusChip = (authStatus: PartyAuthStatus) => {
 export const AuthSection = ({ partyId, authStatus, onRefresh }: AuthSectionProps) => {
   const [testing, setTesting] = useState(false);
   const [testError, setTestError] = useState<string | null>(null);
+  const [grantDialogOpen, setGrantDialogOpen] = useState(false);
 
   if (!authStatus) {
     return null;
   }
+
+  const canGrant =
+    authStatus.status.status === "authenticated" &&
+    authStatus.rights !== undefined &&
+    !isRightsValid(authStatus.rights);
 
   const handleTestAuth = async () => {
     try {
@@ -121,9 +130,13 @@ export const AuthSection = ({ partyId, authStatus, onRefresh }: AuthSectionProps
           <Typography variant="subtitle2" sx={{ mb: 1 }}>
             User Rights
             {isRightsValid(authStatus.rights) ? (
-              <CheckCircleIcon color="success" fontSize="small" sx={{ ml: 1, verticalAlign: "middle" }} />
+              <Tooltip title="All required rights granted">
+                <CheckCircleIcon color="success" fontSize="small" sx={{ ml: 1, verticalAlign: "middle" }} />
+              </Tooltip>
             ) : (
-              <WarningIcon color="warning" fontSize="small" sx={{ ml: 1, verticalAlign: "middle" }} />
+              <Tooltip title="Missing required rights">
+                <WarningIcon color="warning" fontSize="small" sx={{ ml: 1, verticalAlign: "middle" }} />
+              </Tooltip>
             )}
           </Typography>
           <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
@@ -198,7 +211,7 @@ export const AuthSection = ({ partyId, authStatus, onRefresh }: AuthSectionProps
         </Alert>
       )}
 
-      <Box sx={{ mt: 2 }}>
+      <Box sx={{ mt: 2, display: "flex", gap: 1, flexWrap: "wrap" }}>
         <Button
           variant="outlined"
           size="small"
@@ -208,7 +221,25 @@ export const AuthSection = ({ partyId, authStatus, onRefresh }: AuthSectionProps
         >
           {testing ? "Testing..." : "Test Auth"}
         </Button>
+        {canGrant && (
+          <Button
+            variant="contained"
+            color="primary"
+            size="small"
+            startIcon={<VpnKeyIcon />}
+            onClick={() => setGrantDialogOpen(true)}
+          >
+            Grant Rights
+          </Button>
+        )}
       </Box>
+
+      <GrantRightsDialog
+        open={grantDialogOpen}
+        onClose={() => setGrantDialogOpen(false)}
+        onGranted={() => onRefresh?.()}
+        partyId={partyId}
+      />
     </Box>
   );
 };

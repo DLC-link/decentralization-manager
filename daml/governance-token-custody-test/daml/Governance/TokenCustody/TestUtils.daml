@@ -63,6 +63,7 @@ createTestGovernance parties =
     members = getMembers parties
     threshold = 2
     actionConfirmationTimeout = minutes 30
+    additionalProposers = None
 
 -- | Standard instrument ID for tests.
 testInstrumentId : Party -> InstrumentId

@@ -27,6 +27,8 @@ pub struct DecentralizedParty {
 #[derive(Debug, Deserialize)]
 pub struct DecentralizedPartiesResponse {
     pub parties: Vec<DecentralizedParty>,
+    #[serde(default)]
+    pub refreshing: bool,
 }
 
 #[derive(Debug, Deserialize, Clone)]

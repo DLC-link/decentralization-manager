@@ -40,7 +40,7 @@ P3_NOISE=9003
 
 # Paths
 DEV_DIR=$(mktemp -d "${TMPDIR:-/tmp}/dpm-it-XXXXXX")
-DARS_DIR="$SCRIPT_DIR/releases/v0/rc3"
+DARS_DIR="$SCRIPT_DIR/releases/v0/rc4"
 BINARY="$SCRIPT_DIR/target/release/dec-party-manager"
 
 # JWT token for Canton ledger access (HS256, secret "unsafe",
@@ -50,7 +50,6 @@ MOCK_TOKEN="eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJodHRwczovL2NhbnRvbi5
 
 # Process tracking
 PIDS=()
-TEMP_FILES=()
 
 # ============================================================================
 # Logging
@@ -157,11 +156,6 @@ cleanup() {
 
     # Stop localnet
     stop_localnet
-
-    # Remove temp files
-    for f in "${TEMP_FILES[@]}"; do
-        rm -f "$f" 2>/dev/null || true
-    done
 
     # Remove temp directory
     if [ -n "$DEV_DIR" ] && [ -d "$DEV_DIR" ]; then

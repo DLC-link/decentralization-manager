@@ -6,6 +6,7 @@ import {
   TableCell,
   TableHead,
   TableRow,
+  Tooltip,
   Typography,
 } from "@mui/material";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
@@ -25,11 +26,23 @@ const AuthStatusIcon = ({ status }: { status?: PartyAuthStatus }) => {
   if (!status) return null;
   switch (status.status.status) {
     case "authenticated":
-      return <CheckCircleIcon color="success" sx={{ fontSize: 18 }} />;
+      return (
+        <Tooltip title="Authenticated">
+          <CheckCircleIcon color="success" sx={{ fontSize: 18 }} />
+        </Tooltip>
+      );
     case "mock":
-      return <ScienceIcon color="warning" sx={{ fontSize: 18 }} />;
+      return (
+        <Tooltip title="Test mode (mock authentication)">
+          <ScienceIcon color="warning" sx={{ fontSize: 18 }} />
+        </Tooltip>
+      );
     case "failed":
-      return <ErrorIcon color="error" sx={{ fontSize: 18 }} />;
+      return (
+        <Tooltip title="Authentication failed">
+          <ErrorIcon color="error" sx={{ fontSize: 18 }} />
+        </Tooltip>
+      );
     default:
       return null;
   }

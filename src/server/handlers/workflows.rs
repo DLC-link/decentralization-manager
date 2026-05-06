@@ -1,7 +1,10 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
-use tokio::sync::RwLock;
 
 use sqlx::SqlitePool;
 
@@ -9,9 +12,8 @@ use super::parties::{
     fetch_decentralized_parties, resolve_owner_keys_from_peers, store_parties_to_db,
 };
 use crate::{
-    auth::{AuthRegistry, WorkflowAuth},
-    config::{KeycloakConfig, NetworkConfig, NodeConfig, PartyCredentials, default_package_config},
-    db::schema::{Commitable, SchemaRead, SchemaWrite},
+    config::{NetworkConfig, NodeConfig},
+    db::schema::SchemaRead,
     error::Result,
     noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
     participant_id::CantonId,
@@ -20,9 +22,9 @@ use crate::{
         middleware::require_admin,
         types::{
             ContractsRequest, DarsRequest, ErrorResponse, HttpWorkflowState, KickRequest,
-            KickResponse, KickStatus, ListenerPauseGuard, OnboardingRequest, OnboardingResponse,
-            OnboardingStatus, SuccessResponse, WorkflowProgress, WorkflowResponse,
-            WorkflowStatusResponse,
+            KickResponse, KickStatus, ListenerPauseGuard, MissingEdgeKind, MissingPeerEdge,
+            OnboardingMeshErrorResponse, OnboardingRequest, OnboardingResponse, OnboardingStatus,
+            SuccessResponse, WorkflowProgress, WorkflowResponse, WorkflowStatusResponse,
         },
     },
     workflow,
@@ -55,7 +57,8 @@ pub type DarsWorkflowState = HttpWorkflowState<WorkflowProgress>;
     responses(
         (status = 202, description = "Kick workflow started", body = WorkflowResponse),
         (status = 400, description = "Bad request", body = ErrorResponse),
-        (status = 409, description = "Workflow already in progress", body = ErrorResponse)
+        (status = 409, description = "Workflow already in progress, or owner key not yet resolved for the target participant", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
     )
 )]
 #[post("/kick")]
@@ -65,7 +68,7 @@ pub async fn start_kick(
     kick_state: web::Data<Arc<KickWorkflowState>>,
     body: web::Json<KickRequest>,
 ) -> impl Responder {
-    if let Err(resp) = require_admin(&http_req, &data.admin_role) {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
     }
 
@@ -102,6 +105,36 @@ pub async fn start_kick(
         });
     }
 
+    // Derive the namespace fingerprint from the cache. Server-side
+    // derivation removes a redundant client field and turns empty-prefill
+    // into a clear server error rather than a silent invalid request.
+    let namespace_fingerprint = match data
+        .db
+        .get_dec_party_participant_owner_key(
+            &decentralized_party_id.to_string(),
+            &participant_id.to_string(),
+        )
+        .await
+    {
+        Ok(Some(key)) => key,
+        Ok(None) => {
+            return HttpResponse::Conflict().json(ErrorResponse {
+                error: format!(
+                    "Participant {participant_id} is not present in cached \
+                     decentralized party {decentralized_party_id}, or its \
+                     owner key has not yet been resolved. Try refreshing \
+                     /decentralized-parties first."
+                ),
+            });
+        }
+        Err(e) => {
+            tracing::error!("DB lookup for owner_key failed: {e}");
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: "Failed to look up owner key".to_string(),
+            });
+        }
+    };
+
     // Check if a kick is already in progress
     {
         let status = kick_state.status.read().await;
@@ -124,7 +157,6 @@ pub async fn start_kick(
     let config = data.config.clone();
     let db = data.db.clone();
     let kick_state_clone = kick_state.get_ref().clone();
-    let namespace_fingerprint = body.namespace_fingerprint.clone();
     let new_threshold = body.new_threshold;
     let listener_control = data.noise_listener_control.clone();
     let listener_notify = data.noise_listener_notify.clone();
@@ -326,7 +358,8 @@ async fn send_kick_invites(
     request_body = OnboardingRequest,
     responses(
         (status = 202, description = "Onboarding workflow started", body = WorkflowResponse),
-        (status = 409, description = "Workflow already in progress", body = ErrorResponse)
+        (status = 409, description = "Workflow already in progress", body = ErrorResponse),
+        (status = 422, description = "Selected peers are not mutually meshed", body = OnboardingMeshErrorResponse)
     )
 )]
 #[post("/onboarding")]
@@ -341,6 +374,54 @@ pub async fn start_onboarding(
         if *status == OnboardingStatus::InProgress {
             return HttpResponse::Conflict().json(ErrorResponse {
                 error: "An onboarding workflow is already in progress".to_string(),
+            });
+        }
+    }
+
+    // Pre-flight: every selected peer must have every other selected peer in
+    // its network config, otherwise the coordinator workflow will hang waiting
+    // for attestor connections that can never be established.
+    match verify_peer_mesh(&data.config, &data.db, &body.peer_ids).await {
+        Ok(missing) if !missing.is_empty() => {
+            // Tag each edge with its failure mode in the human-readable
+            // summary; the structured `missing_edges` array carries the same
+            // info via `kind` for the frontend to render targeted hints.
+            let edge_summary = missing
+                .iter()
+                .map(|e| match e.kind {
+                    MissingEdgeKind::UnreachableFromCoordinator => format!(
+                        "[unreachable from coordinator] {from} → {to}",
+                        from = e.from,
+                        to = e.to
+                    ),
+                    MissingEdgeKind::MeshHole => {
+                        format!("[mesh hole] {from} → {to}", from = e.from, to = e.to)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            tracing::warn!(
+                "Onboarding rejected: {n} missing peer mesh edge(s): {edge_summary}",
+                n = missing.len()
+            );
+            return HttpResponse::UnprocessableEntity().json(OnboardingMeshErrorResponse {
+                error: format!(
+                    "Could not verify a full peer mesh. Two failure modes are folded together: \
+                     `unreachable from coordinator` (the coordinator cannot query that peer — \
+                     it's missing from network config, has no/invalid public key, didn't \
+                     answer, or replied with an unparsable peer list — fix the coordinator's \
+                     view of `to`, or `to` itself), and `mesh hole` (peer `from` is reachable \
+                     but does not have peer `to` in its peer list — add `to` to `from`'s \
+                     network config). Edges: {edge_summary}"
+                ),
+                missing_edges: missing,
+            });
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::error!("Failed to run mesh pre-flight: {e:#}");
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: "Failed to verify peer mesh".into(),
             });
         }
     }
@@ -363,7 +444,6 @@ pub async fn start_onboarding(
     let peer_ids = body.peer_ids.clone();
     let party_credentials = data.party_credentials.clone();
     let auth_lock = data.auth.clone();
-    let is_test_mode = data.test_mode;
 
     tokio::spawn(async move {
         let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
@@ -405,23 +485,10 @@ pub async fn start_onboarding(
         let mut error = onboarding_state_clone.error.write().await;
 
         match result {
-            Ok(coordinator_result) => {
+            Ok(_) => {
                 *status = OnboardingStatus::Completed;
                 tracing::info!("Onboarding workflow completed successfully");
-
-                if !is_test_mode
-                    && let Some(dec_party_id) = coordinator_result.created_party_id
-                    && let Err(e) = save_default_party_config(
-                        &config,
-                        &db,
-                        &dec_party_id,
-                        &party_credentials,
-                        &auth_lock,
-                    )
-                    .await
-                {
-                    tracing::warn!("Failed to auto-save party config: {e}");
-                }
+                // Operator configures party credentials via the Party Configuration dialog; auto-saving placeholders pollutes the auth registry.
 
                 // Refresh dec_party cache in background
                 let bg_config = config.clone();
@@ -435,9 +502,36 @@ pub async fn start_onboarding(
                         Ok(resp) => {
                             if let Err(e) = store_parties_to_db(&bg_db, "", &resp.parties).await {
                                 tracing::warn!("Failed to cache parties after onboarding: {e}");
-                            } else {
-                                resolve_owner_keys_from_peers(&bg_config, &bg_db, &resp.parties)
-                                    .await;
+                                return;
+                            }
+                            resolve_owner_keys_from_peers(&bg_config, &bg_db, &resp.parties).await;
+                            // Audit: report any participants whose owner_key
+                            // is still NULL after resolve. Not fatal — Noise
+                            // resolution may run again on the next stale
+                            // refresh — but unexpected for a freshly
+                            // onboarded party.
+                            for party in &resp.parties {
+                                let party_id = party.party_id.to_string();
+                                for p in &party.participants {
+                                    let uid = p.participant_uid.to_string();
+                                    match bg_db
+                                        .get_dec_party_participant_owner_key(&party_id, &uid)
+                                        .await
+                                    {
+                                        Ok(Some(_)) => {} // resolved
+                                        Ok(None) => tracing::warn!(
+                                            party_id = %party_id,
+                                            participant_uid = %uid,
+                                            "Participant owner_key unresolved after onboarding"
+                                        ),
+                                        Err(e) => tracing::warn!(
+                                            party_id = %party_id,
+                                            participant_uid = %uid,
+                                            error = %e,
+                                            "Failed to read owner_key from cache during post-onboarding audit"
+                                        ),
+                                    }
+                                }
                             }
                         }
                         Err(e) => tracing::warn!("Failed to refresh parties after onboarding: {e}"),
@@ -553,6 +647,156 @@ async fn send_onboarding_invites(
     }
 
     Ok(())
+}
+
+/// Pre-flight check: query each selected peer for its known peer list and
+/// verify every pair within `peer_ids` knows each other. Returns the list of
+/// missing directed edges (`from` does not have `to` configured). Empty Vec
+/// on success.
+///
+/// Coordinator → peer reachability is implicitly verified: if a peer can
+/// answer our Noise call, it already has us in its peer list. We only check
+/// peer ↔ peer mesh — that's the case the user can't see otherwise.
+async fn verify_peer_mesh(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    peer_ids: &[String],
+) -> Result<Vec<MissingPeerEdge>> {
+    let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
+    let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
+    let request = Message::new_empty(MessageType::ListPeers);
+    let identity = config.participant_id().to_string();
+
+    let mut missing_edges = Vec::new();
+    let mut peer_views: HashMap<String, HashSet<String>> = HashMap::new();
+
+    for peer_id in peer_ids {
+        let peer = match network_config
+            .peers
+            .iter()
+            .find(|p| p.participant_id.to_string() == *peer_id)
+        {
+            Some(p) => p,
+            None => {
+                // Coordinator doesn't know this peer — won't be able to invite them.
+                missing_edges.push(MissingPeerEdge {
+                    from: identity.clone(),
+                    to: peer_id.clone(),
+                    kind: MissingEdgeKind::UnreachableFromCoordinator,
+                });
+                continue;
+            }
+        };
+
+        if peer.public_key.is_empty() {
+            tracing::warn!("Peer {peer_id} has no public key configured — cannot mesh-check");
+            missing_edges.push(MissingPeerEdge {
+                from: identity.clone(),
+                to: peer_id.clone(),
+                kind: MissingEdgeKind::UnreachableFromCoordinator,
+            });
+            continue;
+        }
+
+        let peer_pub_key = match parse_public_key(&peer.public_key) {
+            Ok(pk) => pk,
+            Err(e) => {
+                tracing::warn!("Peer {peer_id} has invalid public key: {e}");
+                missing_edges.push(MissingPeerEdge {
+                    from: identity.clone(),
+                    to: peer_id.clone(),
+                    kind: MissingEdgeKind::UnreachableFromCoordinator,
+                });
+                continue;
+            }
+        };
+
+        let psk = keypair.derive_psk(&peer_pub_key);
+
+        let response = match send_noise_message(
+            &peer.address,
+            peer.port,
+            &psk,
+            identity.as_bytes(),
+            &request,
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("Failed to query peers from {peer_id}: {e}");
+                missing_edges.push(MissingPeerEdge {
+                    from: identity.clone(),
+                    to: peer_id.clone(),
+                    kind: MissingEdgeKind::UnreachableFromCoordinator,
+                });
+                continue;
+            }
+        };
+
+        let msg = match Message::from_bytes(&response) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!("Malformed response from {peer_id}: {e}");
+                missing_edges.push(MissingPeerEdge {
+                    from: identity.clone(),
+                    to: peer_id.clone(),
+                    kind: MissingEdgeKind::UnreachableFromCoordinator,
+                });
+                continue;
+            }
+        };
+
+        if msg.msg_type != MessageType::PeerList {
+            tracing::warn!(
+                "Peer {peer_id} responded with {msg_type:?} instead of PeerList",
+                msg_type = msg.msg_type
+            );
+            missing_edges.push(MissingPeerEdge {
+                from: identity.clone(),
+                to: peer_id.clone(),
+                kind: MissingEdgeKind::UnreachableFromCoordinator,
+            });
+            continue;
+        }
+
+        let view: HashSet<String> = match serde_json::from_slice(&msg.payload) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("Could not parse peer list from {peer_id}: {e}");
+                missing_edges.push(MissingPeerEdge {
+                    from: identity.clone(),
+                    to: peer_id.clone(),
+                    kind: MissingEdgeKind::UnreachableFromCoordinator,
+                });
+                continue;
+            }
+        };
+        peer_views.insert(peer_id.clone(), view);
+    }
+
+    // For every directed pair within selected peers, check that A's peer view
+    // includes B. Missing means A and B aren't mutually connected.
+    for a in peer_ids {
+        let Some(a_view) = peer_views.get(a) else {
+            // Already recorded a coordinator→A reachability problem above.
+            continue;
+        };
+        for b in peer_ids {
+            if a == b {
+                continue;
+            }
+            if !a_view.contains(b) {
+                missing_edges.push(MissingPeerEdge {
+                    from: a.clone(),
+                    to: b.clone(),
+                    kind: MissingEdgeKind::MeshHole,
+                });
+            }
+        }
+    }
+
+    Ok(missing_edges)
 }
 
 // ============================================================================
@@ -766,6 +1010,7 @@ pub async fn upload_dars_local(
     request_body = DarsRequest,
     responses(
         (status = 202, description = "DARs distribution workflow started", body = WorkflowResponse),
+        (status = 400, description = "Bad request (e.g. empty peer_ids)", body = ErrorResponse),
         (status = 409, description = "Workflow already in progress", body = ErrorResponse)
     )
 )]
@@ -775,6 +1020,12 @@ pub async fn start_dars(
     dars_state: web::Data<Arc<DarsWorkflowState>>,
     body: web::Json<DarsRequest>,
 ) -> impl Responder {
+    if body.peer_ids.is_empty() {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: "peer_ids must contain at least one peer".to_string(),
+        });
+    }
+
     // Check if a DARs workflow is already in progress
     {
         let status = dars_state.status.read().await;
@@ -802,6 +1053,7 @@ pub async fn start_dars(
     let dars_config = workflow::DarsConfig {
         dar_files: body.dar_files.clone(),
         instance_name,
+        peer_ids: body.peer_ids.clone(),
     };
 
     // Spawn the DARs workflow in the background
@@ -810,12 +1062,13 @@ pub async fn start_dars(
     let dars_state_clone = dars_state.get_ref().clone();
     let listener_control = data.noise_listener_control.clone();
     let listener_notify = data.noise_listener_notify.clone();
+    let peer_ids = body.peer_ids.clone();
 
     tokio::spawn(async move {
         let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
 
-        // Send invites to all peers before starting coordinator workflow
-        let invite_result = send_dars_invites(&config, &db).await;
+        // Send invites to selected peers before starting coordinator workflow
+        let invite_result = send_dars_invites(&config, &db, &peer_ids).await;
         if let Err(e) = invite_result {
             tracing::error!("Failed to send DARs invites: {e}");
             guard.resume().await;
@@ -883,34 +1136,35 @@ pub async fn get_dars_status(dars_state: web::Data<Arc<DarsWorkflowState>>) -> i
     })
 }
 
-/// Send DARs invites to all peers using Noise protocol
-async fn send_dars_invites(config: &NodeConfig, db: &SqlitePool) -> Result {
+/// Send DARs invites to selected peers using Noise protocol
+async fn send_dars_invites(config: &NodeConfig, db: &SqlitePool, peer_ids: &[CantonId]) -> Result {
     let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
 
-    let current_participant_id = config.participant_id();
     let invite_message = Message::new_empty(MessageType::InviteDars);
 
-    for peer in &network_config.peers {
-        if peer.participant_id == *current_participant_id {
-            continue;
-        }
+    for peer_id in peer_ids {
+        let peer = match network_config
+            .peers
+            .iter()
+            .find(|p| &p.participant_id == peer_id)
+        {
+            Some(p) => p,
+            None => {
+                tracing::warn!("Skipping invite to {peer_id} - peer not found in network config");
+                continue;
+            }
+        };
 
         if peer.public_key.is_empty() {
-            tracing::warn!(
-                "Skipping invite to {} - no public key configured",
-                peer.participant_id
-            );
+            tracing::warn!("Skipping invite to {peer_id} - no public key configured");
             continue;
         }
 
         let peer_pub_key = match parse_public_key(&peer.public_key) {
             Ok(pk) => pk,
             Err(e) => {
-                tracing::warn!(
-                    "Skipping invite to {} - invalid public key: {e}",
-                    peer.participant_id
-                );
+                tracing::warn!("Skipping invite to {peer_id} - invalid public key: {e}");
                 continue;
             }
         };
@@ -919,10 +1173,9 @@ async fn send_dars_invites(config: &NodeConfig, db: &SqlitePool) -> Result {
         let identity = config.participant_id().to_string();
 
         tracing::info!(
-            "Sending DARs invite to {} at {}:{}",
-            peer.participant_id,
-            peer.address,
-            peer.port
+            "Sending DARs invite to {peer_id} at {addr}:{port}",
+            addr = peer.address,
+            port = peer.port
         );
 
         match send_noise_message(
@@ -937,82 +1190,21 @@ async fn send_dars_invites(config: &NodeConfig, db: &SqlitePool) -> Result {
             Ok(response) => {
                 if let Ok(msg) = Message::from_bytes(&response) {
                     if msg.msg_type == MessageType::Ack {
-                        tracing::info!("Peer {} acknowledged DARs invite", peer.participant_id);
+                        tracing::info!("Peer {peer_id} acknowledged DARs invite");
                     } else {
                         tracing::warn!(
-                            "Peer {} responded with {msg_type:?} instead of Ack",
-                            peer.participant_id,
+                            "Peer {peer_id} responded with {msg_type:?} instead of Ack",
                             msg_type = msg.msg_type
                         );
                     }
                 }
             }
             Err(e) => {
-                tracing::error!("Failed to send DARs invite to {}: {e}", peer.participant_id);
+                tracing::error!("Failed to send DARs invite to {peer_id}: {e}");
             }
         }
     }
 
-    Ok(())
-}
-
-/// Auto-save default party config after successful onboarding
-async fn save_default_party_config(
-    config: &NodeConfig,
-    db: &SqlitePool,
-    dec_party_id: &CantonId,
-    party_credentials: &Arc<RwLock<Vec<PartyCredentials>>>,
-    auth_lock: &Arc<RwLock<Option<WorkflowAuth>>>,
-) -> Result {
-    tracing::info!("Saving default config for new dec party: {dec_party_id}");
-
-    let kc_defaults = config.canton.network.keycloak_defaults();
-    let creds = PartyCredentials {
-        dec_party_id: dec_party_id.clone(),
-        // Placeholder — user must set the real member party ID via the config dialog
-        member_party_id: dec_party_id.clone(),
-        user_id: "CoordinatorUser".to_string(),
-        keycloak: KeycloakConfig {
-            url: kc_defaults.url,
-            realm: kc_defaults.realm,
-            client_id: String::new(),
-            client_secret: None,
-            username: None,
-            password: None,
-        },
-        packages: default_package_config(),
-    };
-
-    // Primary write: save to database
-    let mut tx = db.begin_transaction().await?;
-    tx.upsert_party_credentials(&creds).await?;
-    Commitable::commit(tx).await?;
-
-    // Update in-memory state
-    {
-        let mut pc = party_credentials.write().await;
-        if let Some(existing) = pc.iter_mut().find(|p| p.dec_party_id == *dec_party_id) {
-            *existing = creds;
-        } else {
-            pc.push(creds);
-        }
-    }
-
-    let creds_snapshot = party_credentials.read().await.clone();
-    if !creds_snapshot.is_empty() {
-        match AuthRegistry::new(&creds_snapshot).await {
-            Ok(registry) => {
-                let mut auth = auth_lock.write().await;
-                *auth = Some(WorkflowAuth::Keycloak(Arc::new(registry)));
-                tracing::info!("Auth registry reinitialized after onboarding");
-            }
-            Err(e) => {
-                tracing::warn!("Failed to reinitialize auth registry: {e}");
-            }
-        }
-    }
-
-    tracing::info!("Default party config saved for {dec_party_id}");
     Ok(())
 }
 

@@ -11,6 +11,10 @@ data GovernableActionView = GovernableActionView
   with
     governanceParty : Party
       -- ^ The governance party whose authority is required to execute this action.
+    proposer : Party
+      -- ^ The party that proposed this action. Used by GovernanceRules to enforce
+      -- the on-chain proposer authorization rule (must be a member or an
+      -- additional proposer of the targeting GovernanceRules contract).
     actionLabel : Text
       -- ^ Human-readable label for display and audit (e.g., "VaultPause", "DepositComplete").
     description : Text

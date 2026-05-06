@@ -414,8 +414,8 @@ Response:
   "has_username": false,
   "has_password": false,
   "packages": {
-    "governance_core": "#governance-core-v0-rc3",
-    "governance_token_custody": "#governance-token-custody-v0-rc3",
+    "governance_core": "#governance-core-v0-rc4",
+    "governance_token_custody": "#governance-token-custody-v0-rc4",
     "utility_credential": "#utility-credential-app-v0",
     "utility_registry": "#utility-registry-app-v0",
     "vault": "#bitsafe-vault-v0-rc8",
@@ -761,7 +761,7 @@ curl -X POST http://localhost:8080/contracts \
       {
         "id": "governance-rules",
         "name": "GovernanceRules",
-        "package_id": "#governance-core-v0-rc3",
+        "package_id": "#governance-core-v0-rc4",
         "module_name": "Governance.Rules",
         "entity_name": "GovernanceRules",
         "fields": [
@@ -871,6 +871,7 @@ Each participant's Ledger API user needs:
 | POST | `/network-config` | Save peer list to database | `[{ "participant_id": "...", "name": "...", "address": "...", "port": 9000, "public_key": "..." }]` | `{ "success": true }` |
 | GET | `/party-config/{dec_party_id}` | Get party config (secrets masked) | -- | Party config JSON |
 | PUT | `/party-config` | Save/update party credentials | Party config JSON | `{ "success": true }` |
+| POST | `/party-config/discover-member-party` | Discover a member party's Canton ID via Keycloak (admin-only) | `{ keycloak_url, keycloak_realm, keycloak_client_id, keycloak_client_secret? \| keycloak_username + keycloak_password }` | `DiscoverMemberPartyResponse` |
 
 ### Keys
 
@@ -884,6 +885,7 @@ Each participant's Ledger API user needs:
 |--------|----------|-------------|--------------|----------|
 | GET | `/decentralized-parties` | List decentralized parties | `prefix` (optional) | `{ "parties": [...] }` |
 | GET | `/participants-status` | Peer connectivity status | -- | `{ "statuses": [...] }` |
+| GET | `/packages/compare-peers` | Cross-check vetted-package IDs across peers (admin-only) | -- | `{ "missing_on": [...], "extra_on": [...] }` |
 
 ### Workflows
 
@@ -912,8 +914,10 @@ Each participant's Ledger API user needs:
 
 | Method | Endpoint | Description | Response |
 |--------|----------|-------------|----------|
+| GET | `/auth-config` | Get the configured auth provider (mock or keycloak) | `{ "provider": "..." }` |
 | GET | `/auth/status` | Get auth status for all parties | `{ "parties": [...] }` |
 | POST | `/auth/test` | Test authentication | `{ "results": [...] }` |
+| POST | `/auth/grant-rights` | Grant Canton actAs/readAs rights to a party (admin-only) | `{ "rights": { ... } }` |
 
 ### Governance
 
@@ -952,6 +956,8 @@ All governance mutation endpoints accept a `governance_type` field that selects 
 }
 ```
 
+The server populates the `proposer` field on the proposal contract automatically (using the calling party's identity). As of `v0-rc4`, that proposer must be a member of the targeted `GovernanceRules` or appear in its `additionalProposers` allowlist; otherwise the auto-confirmation step rejects the proposal at confirm time.
+
 Available proposal types:
 
 | Type | Fields | Description |
@@ -986,6 +992,19 @@ Available proposal types:
   "governance_type": "core_self"
 }
 ```
+
+Available `core_self` action types (DAML `GovernanceSelfAction` variants):
+
+| `type` | Required fields | DAML variant |
+|---|---|---|
+| `governance_add_member` | `member`, `new_threshold` | `SelfAction_AddMemberAndSetThreshold` |
+| `governance_remove_member` | `member`, `new_threshold` | `SelfAction_RemoveMemberAndSetThreshold` |
+| `governance_set_threshold` | `new_threshold` | `SelfAction_SetThreshold` |
+| `governance_set_timeout` | `new_timeout_microseconds` | `SelfAction_SetTimeout` |
+| `governance_add_additional_proposer` | `additional_proposer` (party id) | `SelfAction_AddAdditionalProposer` |
+| `governance_remove_additional_proposer` | `additional_proposer` (party id) | `SelfAction_RemoveAdditionalProposer` |
+
+The two `*_additional_proposer` variants (added in `v0-rc4`) mutate the `additionalProposers` allowlist on `GovernanceRules`. See ARCHITECTURE.md for the proposer-authorization model.
 
 **For domain actions (`governance_type: "core_domain"`):**
 

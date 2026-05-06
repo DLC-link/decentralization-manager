@@ -168,10 +168,7 @@ async fn probe_participants_status(
     self_id: &str,
     expected_peer_ids: &[String],
 ) -> Option<anyhow::Result<()>> {
-    let v: Value = f
-        .get_json(port, "/participants-status")
-        .await
-        .ok()?;
+    let v: Value = f.get_json(port, "/participants-status").await.ok()?;
     let statuses = v.get("statuses")?.as_array()?;
 
     if statuses.len() != expected_peer_ids.len() + 1 {
