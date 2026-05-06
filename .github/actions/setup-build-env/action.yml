@@ -33,8 +33,12 @@ runs:
       shell: bash
       run: |
         ${{ steps.env.outputs.sudo }} apt-get update
+        # libprotobuf-dev is the source of /usr/include/google/protobuf/*.proto;
+        # protobuf-compiler only Recommends it, so under --no-install-recommends
+        # we have to pull it in explicitly or canton-proto-rs's build.rs fails
+        # with "google/protobuf/descriptor.proto: File not found".
         ${{ steps.env.outputs.sudo }} apt-get install -y --no-install-recommends \
-          pkg-config libssl-dev protobuf-compiler \
+          pkg-config libssl-dev protobuf-compiler libprotobuf-dev \
           git openssh-client nodejs npm curl ca-certificates \
           ${{ inputs.extra-packages }}
 
