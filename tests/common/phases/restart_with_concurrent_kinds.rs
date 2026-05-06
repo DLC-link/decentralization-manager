@@ -18,6 +18,29 @@ use crate::common::{
 
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     chaos::ensure_nodes_healthy(f).await?;
+
+    // Defensive: a chaos phase that crashed/respawned P1 mid-flight can leave
+    // dars_state pinned to InProgress even though no task is actually running
+    // (recover_in_progress_workflows re-hydrates from the DB row). Cancel any
+    // such ghost before we start, otherwise our /dars/distribute below 409s.
+    // Same pattern start_handler_conflict_409 already uses.
+    #[derive(serde::Deserialize, Debug)]
+    struct DarsStatus {
+        #[serde(default)]
+        status: Option<String>,
+    }
+    if let Ok(s) = f
+        .get_json::<DarsStatus>(f.p1.http, "/dars/distribute/status")
+        .await
+        && matches!(s.status.as_deref(), Some("inprogress" | "InProgress"))
+    {
+        chaos::say("G9", "cancelling stale in-progress Dars before starting");
+        let _ = f
+            .post_expect_status(f.p1.http, "/dars/cancel", &json!({}))
+            .await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+
     let prefix = chaos::fresh_prefix("concurrent-kinds");
     let onboarding_instance = format!("{prefix}-creation");
     chaos::say("G9", &format!("starting onboarding with prefix {prefix}"));
