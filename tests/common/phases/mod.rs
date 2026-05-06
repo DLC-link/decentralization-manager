@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+pub mod check_peer_dars;
 pub mod create_dec_party;
 pub mod deploy_gov_core;
 pub mod distribute_dars;
