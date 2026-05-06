@@ -27,7 +27,7 @@ use crate::{
         schema::{Commitable, SchemaRead, SchemaWrite},
     },
     error::Result,
-    noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
+    noise::{Message, MessageType, NoiseError, NoiseKeypair, parse_public_key, send_noise_message},
     participant_id::CantonId,
     server::{
         AppState,
@@ -35,8 +35,8 @@ use crate::{
         types::{
             ConnectionStatus, ContractInfo, DecentralizedPartiesResponse, DecentralizedParty,
             ErrorResponse, PackageInfo, ParticipantInfo, ParticipantStatus,
-            ParticipantsStatusResponse, PeerPackageComparison, PeerPackageResult, Permission,
-            ResponseSource, VettedPackageInfo,
+            ParticipantsStatusResponse, PeerErrorKind, PeerPackageComparison, PeerPackageResult,
+            Permission, ResponseSource, VettedPackageInfo,
         },
     },
     utils,
@@ -810,6 +810,33 @@ pub async fn compare_peer_packages(data: web::Data<AppState>) -> impl Responder 
     }
 }
 
+/// Pure mapping from `NoiseError` to the wire-stable `PeerErrorKind`.
+///
+/// Exhaustive match (no wildcard) — adding a new `NoiseError` variant will
+/// fail to compile here until it's explicitly classified.
+fn peer_error_kind_from_noise_err(err: &NoiseError) -> PeerErrorKind {
+    match err {
+        NoiseError::TcpConnectionTimeout(_) | NoiseError::RequestTimeout => {
+            PeerErrorKind::TcpConnectTimeout
+        }
+        NoiseError::TcpConnectionFailed(_) | NoiseError::Io(_) | NoiseError::Hyper(_) => {
+            PeerErrorKind::TcpConnectFailed
+        }
+        NoiseError::Noise(_) | NoiseError::HandshakeFailed | NoiseError::DecryptionError => {
+            PeerErrorKind::HandshakeFailed
+        }
+        NoiseError::BadStatusCode(_) => PeerErrorKind::BadStatus,
+        NoiseError::InvalidMessage | NoiseError::JsonSerialization(_) => {
+            PeerErrorKind::DecodeFailed
+        }
+        NoiseError::Http(_)
+        | NoiseError::InvalidUri(_)
+        | NoiseError::UriParsingError(_)
+        | NoiseError::UnknownPeer(_)
+        | NoiseError::Anyhow(_) => PeerErrorKind::Other,
+    }
+}
+
 async fn fetch_peer_packages(
     config: &NodeConfig,
     db: &SqlitePool,
@@ -935,4 +962,65 @@ async fn get_local_namespace_fingerprints(config: &NodeConfig) -> Result<HashSet
     }
 
     Ok(fingerprints)
+}
+
+#[cfg(test)]
+mod tests {
+    use http::StatusCode;
+
+    use super::*;
+
+    #[test]
+    fn peer_error_kind_mapping_known_variants() {
+        // Construct one easily-instantiable example of each PeerErrorKind
+        // category and assert the mapping. Hard-to-construct NoiseError
+        // variants (Hyper, Noise, JsonSerialization, Http, InvalidUri) are
+        // not exercised here — the helper's exhaustive match is what
+        // guarantees they're classified. This test catches accidental
+        // arm-swap regressions in the easy variants.
+        let pairs: Vec<(NoiseError, PeerErrorKind)> = vec![
+            (
+                NoiseError::TcpConnectionTimeout("x".into()),
+                PeerErrorKind::TcpConnectTimeout,
+            ),
+            (NoiseError::RequestTimeout, PeerErrorKind::TcpConnectTimeout),
+            (
+                NoiseError::TcpConnectionFailed("x".into()),
+                PeerErrorKind::TcpConnectFailed,
+            ),
+            (
+                NoiseError::Io(std::io::Error::new(std::io::ErrorKind::Other, "x")),
+                PeerErrorKind::TcpConnectFailed,
+            ),
+            (NoiseError::HandshakeFailed, PeerErrorKind::HandshakeFailed),
+            (NoiseError::DecryptionError, PeerErrorKind::HandshakeFailed),
+            (
+                NoiseError::BadStatusCode(StatusCode::INTERNAL_SERVER_ERROR),
+                PeerErrorKind::BadStatus,
+            ),
+            (NoiseError::InvalidMessage, PeerErrorKind::DecodeFailed),
+            (
+                NoiseError::UriParsingError("x".into()),
+                PeerErrorKind::Other,
+            ),
+            (NoiseError::UnknownPeer("x".into()), PeerErrorKind::Other),
+        ];
+        for (err, expected) in &pairs {
+            let got = peer_error_kind_from_noise_err(err);
+            assert_eq!(
+                std::mem::discriminant(&got),
+                std::mem::discriminant(expected),
+                "for variant {err:?}: got {got:?}, expected {expected:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn anyhow_variant_falls_through_to_other() {
+        let err = NoiseError::Anyhow(anyhow::anyhow!("anything"));
+        assert!(matches!(
+            peer_error_kind_from_noise_err(&err),
+            PeerErrorKind::Other
+        ));
+    }
 }
