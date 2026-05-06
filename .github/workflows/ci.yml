@@ -76,6 +76,11 @@ jobs:
       # `release-ci` profile and `test-mode` feature, which produces
       # artifacts disjoint from the cargo job's debug+coverage tree. Keep
       # a separate cache key so neither job clobbers the other's save.
+      # save-always is critical here: actions/cache@v4 by default only
+      # saves on job success, but integration is failing on the chaos
+      # test bug (fixed elsewhere) — without save-always, the cache that
+      # does get warmed up by `cargo build` is thrown away and every run
+      # cold-builds the binary again.
       - name: Cache cargo target (release-ci)
         uses: actions/cache@v4
         with:
@@ -83,6 +88,7 @@ jobs:
           key: cargo-target-release-ci-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
           restore-keys: |
             cargo-target-release-ci-
+          save-always: true
       - name: Cache localnet bundle
         uses: actions/cache@v4
         with:
