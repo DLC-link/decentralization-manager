@@ -31,7 +31,7 @@ use crate::{
     error::Result,
     noise::{
         Message, MessageType, NoiseError, NoiseKeypair, parse_public_key, send_noise_message,
-        send_noise_message_with_retry,
+        send_noise_message_with_chunked_response, send_noise_message_with_retry,
     },
     participant_id::CantonId,
     server::{
@@ -899,7 +899,7 @@ async fn fetch_peer_packages(
                 let psk = keypair.derive_psk(&peer_pub_key);
                 let identity = current_participant_id.to_string();
 
-                match send_noise_message_with_retry(
+                match send_noise_message_with_chunked_response(
                     &peer.address,
                     peer.port,
                     &psk,

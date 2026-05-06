@@ -549,6 +549,106 @@ pub async fn send_noise_message_with_retry(
     .await
 }
 
+/// Send a message that may receive a chunked response.
+///
+/// First call goes through `send_noise_message_with_retry`. If the response
+/// is `MessageType::ChunkedCommand`, this function transparently fetches the
+/// referenced chunks (one Noise call per chunk, each with retry) and
+/// returns the **assembled** Message bytes — i.e. the final `Bytes` is the
+/// `Message::to_bytes()` form of `Message::new(original_command_type,
+/// reassembled_payload)`. Callers can decode it the same way they would a
+/// non-chunked response.
+///
+/// If the response isn't chunked, the original bytes are returned unchanged.
+///
+/// Each chunk fetch is a fresh Noise connection (TCP connect + handshake +
+/// 1 round-trip). Retry policy applies to each individual chunk fetch.
+pub async fn send_noise_message_with_chunked_response(
+    peer_address: &str,
+    peer_port: u16,
+    psk: &[u8; 32],
+    identity: &[u8],
+    message: &Message,
+    config: &NoiseRetryConfig,
+) -> Result<Bytes, NoiseError> {
+    let response =
+        send_noise_message_with_retry(peer_address, peer_port, psk, identity, message, config)
+            .await?;
+
+    let resp_msg = Message::from_bytes(&response).map_err(|_| NoiseError::InvalidMessage)?;
+
+    if resp_msg.msg_type != MessageType::ChunkedCommand {
+        // Not chunked — caller can decode `response` directly.
+        return Ok(response);
+    }
+
+    // Parse metadata: [command_type:2][total_size:4][chunk_count:4]
+    if resp_msg.payload.len() < 10 {
+        return Err(NoiseError::InvalidMessage);
+    }
+    let command_type_u16 = u16::from_be_bytes([resp_msg.payload[0], resp_msg.payload[1]]);
+    let total_size = u32::from_be_bytes([
+        resp_msg.payload[2],
+        resp_msg.payload[3],
+        resp_msg.payload[4],
+        resp_msg.payload[5],
+    ]) as usize;
+    let chunk_count = u32::from_be_bytes([
+        resp_msg.payload[6],
+        resp_msg.payload[7],
+        resp_msg.payload[8],
+        resp_msg.payload[9],
+    ]) as usize;
+    let command_type =
+        MessageType::try_from(command_type_u16).map_err(|_| NoiseError::InvalidMessage)?;
+
+    tracing::debug!(
+        peer = format!("{peer_address}:{peer_port}"),
+        total_size,
+        chunk_count,
+        command = ?command_type,
+        "noise: receiving chunked response"
+    );
+
+    let mut assembled = Vec::with_capacity(total_size);
+    for chunk_index in 0..chunk_count {
+        let chunk_request = Message::new(
+            MessageType::GetChunk,
+            (chunk_index as u32).to_be_bytes().to_vec(),
+        );
+        let chunk_response = send_noise_message_with_retry(
+            peer_address,
+            peer_port,
+            psk,
+            identity,
+            &chunk_request,
+            config,
+        )
+        .await?;
+        let chunk_msg =
+            Message::from_bytes(&chunk_response).map_err(|_| NoiseError::InvalidMessage)?;
+        if chunk_msg.msg_type != MessageType::Chunk || chunk_msg.payload.len() < 4 {
+            return Err(NoiseError::InvalidMessage);
+        }
+        // Chunk payload format: [chunk_index:4][chunk_data]
+        assembled.extend_from_slice(&chunk_msg.payload[4..]);
+    }
+
+    if assembled.len() != total_size {
+        tracing::warn!(
+            "noise: chunked-response assembly produced {} bytes but metadata declared {}",
+            assembled.len(),
+            total_size,
+        );
+        return Err(NoiseError::InvalidMessage);
+    }
+
+    // Re-encode as a complete Message of the original command type so the
+    // caller can decode it exactly as if the response had arrived unchunked.
+    let assembled_msg = Message::new(command_type, assembled);
+    Ok(Bytes::from(assembled_msg.to_bytes()))
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{
