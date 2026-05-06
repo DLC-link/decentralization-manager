@@ -116,5 +116,18 @@ pub enum Commands {
         /// Connection retry delay in seconds
         #[arg(long, env = "DECPM_TIMEOUT_RETRY_DELAY")]
         timeout_retry_delay: Option<u64>,
+
+        // Noise retry tuning (separate from the legacy Timeouts knobs above)
+        /// Per-attempt timeout for the bounded peer-Noise retry wrapper, in seconds
+        #[arg(long, env = "DECPM_NOISE_RETRY_TIMEOUT_SEC")]
+        noise_retry_timeout_sec: Option<u64>,
+
+        /// Total attempts (initial + retries) for the bounded peer-Noise retry wrapper
+        #[arg(long, env = "DECPM_NOISE_RETRY_MAX_ATTEMPTS")]
+        noise_retry_max_attempts: Option<usize>,
+
+        /// Backoff between attempts of the bounded peer-Noise retry wrapper, in milliseconds
+        #[arg(long, env = "DECPM_NOISE_RETRY_BACKOFF_MS")]
+        noise_retry_backoff_ms: Option<u64>,
     },
 }

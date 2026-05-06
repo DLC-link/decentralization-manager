@@ -117,12 +117,47 @@ impl Default for Timeouts {
     }
 }
 
+/// Configuration for the bounded retry wrapper around peer Noise calls
+/// (`send_noise_message_with_retry`). Defaults match the spec working
+/// hypothesis: 5s × 2 attempts, 250ms backoff between attempts.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct NoiseRetryConfig {
+    /// Per-attempt timeout in seconds (applied independently to TCP connect
+    /// and to the Noise/HTTP request budget).
+    pub per_attempt_timeout_secs: u64,
+    /// Total attempts (initial + retries). 2 means "1 retry."
+    pub max_attempts: usize,
+    /// Fixed backoff between attempts in milliseconds.
+    pub backoff_ms: u64,
+}
+
+impl Default for NoiseRetryConfig {
+    fn default() -> Self {
+        Self {
+            per_attempt_timeout_secs: 5,
+            max_attempts: 2,
+            backoff_ms: 250,
+        }
+    }
+}
+
+impl NoiseRetryConfig {
+    pub fn per_attempt_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.per_attempt_timeout_secs)
+    }
+
+    pub fn backoff(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.backoff_ms)
+    }
+}
+
 /// Individual node configuration
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct NodeConfig {
     pub node: NodeInfo,
     pub canton: CantonConfig,
     pub timeouts: Timeouts,
+    pub noise_retry: NoiseRetryConfig,
     /// Top-level Keycloak config for frontend website gating
     pub keycloak: Option<KeycloakConfig>,
     /// Root directory containing data/ subdirectory
@@ -136,6 +171,7 @@ impl Default for NodeConfig {
             node: NodeInfo::default(),
             canton: CantonConfig::default(),
             timeouts: Timeouts::default(),
+            noise_retry: NoiseRetryConfig::default(),
             keycloak: None,
             root_dir: PathBuf::new(),
         }
@@ -331,6 +367,11 @@ impl NodeConfig {
     /// Check if participant_id is already set
     pub fn has_participant_id(&self) -> bool {
         self.node.participant_id.is_some()
+    }
+
+    /// Get the Noise retry configuration
+    pub fn noise_retry(&self) -> &NoiseRetryConfig {
+        &self.noise_retry
     }
 }
 

@@ -21,7 +21,9 @@ use sqlx::SqlitePool;
 
 use crate::{
     auth::WorkflowAuth,
-    config::{NetworkConfig, NodeConfig, PartyCredentials, default_package_config},
+    config::{
+        NetworkConfig, NodeConfig, NoiseRetryConfig, PartyCredentials, default_package_config,
+    },
     db::{
         rows::{DecPartyContractRow, DecPartyParticipantRow, DecPartyRow},
         schema::{Commitable, SchemaRead, SchemaWrite},
@@ -735,6 +737,7 @@ async fn check_participants_status(
         let address = peer.address.clone();
         let port = peer.port;
         let ping_msg = ping_message.clone();
+        let noise_retry_cfg: NoiseRetryConfig = config.noise_retry().clone();
 
         status_futures.push(tokio::spawn(async move {
             let (Some(psk), Some(_)) = (psk, peer_pub_key) else {
@@ -745,7 +748,16 @@ async fn check_participants_status(
                 };
             };
 
-            match send_noise_message_with_retry(&address, port, &psk, &identity, &ping_msg).await {
+            match send_noise_message_with_retry(
+                &address,
+                port,
+                &psk,
+                &identity,
+                &ping_msg,
+                &noise_retry_cfg,
+            )
+            .await
+            {
                 Ok(response) => {
                     let status = match Message::from_bytes(&response) {
                         Ok(msg) if msg.msg_type == MessageType::Pong => ConnectionStatus::Connected,
@@ -859,6 +871,7 @@ async fn fetch_peer_packages(
     let current_participant_id = config.participant_id();
 
     let invite_message = Message::new_empty(MessageType::ListPackages);
+    let noise_retry_cfg = config.noise_retry().clone();
 
     let peer_futures: Vec<_> = network_config
         .peers
@@ -868,6 +881,7 @@ async fn fetch_peer_packages(
             let keypair = keypair.clone();
             let peer = peer.clone();
             let msg = invite_message.clone();
+            let noise_retry_cfg = noise_retry_cfg.clone();
             async move {
                 let peer_pub_key = match parse_public_key(&peer.public_key) {
                     Ok(pk) => pk,
@@ -891,6 +905,7 @@ async fn fetch_peer_packages(
                     &psk,
                     identity.as_bytes(),
                     &msg,
+                    &noise_retry_cfg,
                 )
                 .await
                 {

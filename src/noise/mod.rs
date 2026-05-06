@@ -12,14 +12,10 @@ use serde::{Deserialize, Serialize};
 use tokio::net::TcpStream;
 use tokio_noise::handshakes::nn_psk2::Initiator;
 
-use crate::error::Result;
+use crate::{config::NoiseRetryConfig, error::Result};
 
 /// Timeout for Noise protocol operations
 pub const NOISE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Per-attempt timeout used by the retry wrapper (`send_noise_message_with_retry`).
-/// Set so that two attempts fit within the previous wall-clock budget for offline peers.
-const NOISE_PER_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Message types for the Noise protocol communication
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -438,14 +434,6 @@ pub async fn load_or_generate_keypair<P: AsRef<Path>>(path: P) -> Result<NoiseKe
     }
 }
 
-/// Number of attempts (initial + retries) made by `retry_loop`.
-const RETRY_MAX_ATTEMPTS: usize = 2;
-
-/// Fixed backoff between attempts. No jitter — retries are scoped to a
-/// single caller's flow against a single peer; there is no cross-caller
-/// synchronisation that jitter would smooth out.
-const RETRY_BACKOFF: Duration = Duration::from_millis(250);
-
 /// Returns `true` if a `NoiseError` represents a transient condition that
 /// is worth retrying. Deterministic errors (handshake failures, bad status,
 /// decode errors, configuration mistakes) are not retried.
@@ -473,18 +461,26 @@ fn is_transient(err: &NoiseError) -> bool {
     }
 }
 
-/// Run `op` up to `RETRY_MAX_ATTEMPTS` times, retrying only when the returned
+/// Run `op` up to `config.max_attempts` times, retrying only when the returned
 /// `NoiseError` is classified as transient by `is_transient`. Sleeps
-/// `RETRY_BACKOFF` between attempts. Per-attempt failures are logged at
+/// `config.backoff()` between attempts. Per-attempt failures are logged at
 /// `warn`; terminal failures (after retry exhaustion) are logged at `error`.
 /// `peer_label` is used as a structured field in the log lines.
-async fn retry_loop<F, Fut>(peer_label: &str, mut op: F) -> Result<Bytes, NoiseError>
+async fn retry_loop<F, Fut>(
+    peer_label: &str,
+    config: &NoiseRetryConfig,
+    mut op: F,
+) -> Result<Bytes, NoiseError>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<Bytes, NoiseError>>,
 {
+    debug_assert!(
+        config.max_attempts > 0,
+        "NoiseRetryConfig.max_attempts must be > 0"
+    );
     let mut last_err: Option<NoiseError> = None;
-    for attempt in 1..=RETRY_MAX_ATTEMPTS {
+    for attempt in 1..=config.max_attempts {
         match op().await {
             Ok(bytes) => return Ok(bytes),
             Err(e) if is_transient(&e) => {
@@ -495,8 +491,8 @@ where
                     "noise retry: transient failure, will retry",
                 );
                 last_err = Some(e);
-                if attempt < RETRY_MAX_ATTEMPTS {
-                    tokio::time::sleep(RETRY_BACKOFF).await;
+                if attempt < config.max_attempts {
+                    tokio::time::sleep(config.backoff()).await;
                 }
             }
             Err(e) => {
@@ -513,7 +509,7 @@ where
     let final_err = last_err.expect("retry_loop ran zero attempts");
     tracing::error!(
         peer = peer_label,
-        attempts = RETRY_MAX_ATTEMPTS,
+        attempts = config.max_attempts,
         error = %final_err,
         "noise: peer unreachable after retry exhaustion",
     );
@@ -522,8 +518,8 @@ where
 
 /// Send a message to a peer with bounded retry on transient failures.
 ///
-/// Up to `RETRY_MAX_ATTEMPTS` attempts, each governed by
-/// `NOISE_PER_ATTEMPT_TIMEOUT`, with `RETRY_BACKOFF` between attempts.
+/// Up to `config.max_attempts` attempts, each governed by
+/// `config.per_attempt_timeout()`, with `config.backoff()` between attempts.
 /// Discriminating retry: only transient `NoiseError` variants (TCP connect
 /// timeouts, refused connections, request timeouts, IO/Hyper failures) are
 /// retried. Deterministic errors (handshake failure, bad status, decode
@@ -537,23 +533,18 @@ pub async fn send_noise_message_with_retry(
     psk: &[u8; 32],
     identity: &[u8],
     message: &Message,
+    config: &NoiseRetryConfig,
 ) -> Result<Bytes, NoiseError> {
     let peer_label = format!("{peer_address}:{peer_port}");
+    let timeout = config.per_attempt_timeout();
     // `move || async move` — every parameter is a `Copy` reference (`&str`,
     // `&[u8; 32]`, etc.), so each call to the FnMut closure freshly copies
     // the references into a new async block. Without `move`, the borrow
     // checker has trouble proving the returned future doesn't outlive the
     // closure's borrow.
-    retry_loop(&peer_label, move || async move {
-        send_noise_message_with_timeout(
-            peer_address,
-            peer_port,
-            psk,
-            identity,
-            message,
-            NOISE_PER_ATTEMPT_TIMEOUT,
-        )
-        .await
+    retry_loop(&peer_label, config, move || async move {
+        send_noise_message_with_timeout(peer_address, peer_port, psk, identity, message, timeout)
+            .await
     })
     .await
 }
@@ -568,6 +559,10 @@ mod tests {
     use bytes::Bytes;
 
     use super::*;
+
+    fn test_retry_config() -> NoiseRetryConfig {
+        NoiseRetryConfig::default()
+    }
 
     #[test]
     fn test_message_type_conversion() -> Result {
@@ -649,7 +644,7 @@ mod tests {
     async fn retry_loop_succeeds_on_first_attempt() {
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_clone = calls.clone();
-        let result = retry_loop("test-peer", move || {
+        let result = retry_loop("test-peer", &test_retry_config(), move || {
             let calls = calls_clone.clone();
             async move {
                 calls.fetch_add(1, Ordering::SeqCst);
@@ -665,7 +660,7 @@ mod tests {
     async fn retry_loop_retries_on_transient_then_succeeds() {
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_clone = calls.clone();
-        let result = retry_loop("test-peer", move || {
+        let result = retry_loop("test-peer", &test_retry_config(), move || {
             let calls = calls_clone.clone();
             async move {
                 let n = calls.fetch_add(1, Ordering::SeqCst);
@@ -685,7 +680,7 @@ mod tests {
     async fn retry_loop_returns_terminal_error_after_two_transient_failures() {
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_clone = calls.clone();
-        let result = retry_loop("test-peer", move || {
+        let result = retry_loop("test-peer", &test_retry_config(), move || {
             let calls = calls_clone.clone();
             async move {
                 calls.fetch_add(1, Ordering::SeqCst);
@@ -701,7 +696,7 @@ mod tests {
     async fn retry_loop_does_not_retry_on_bad_status() {
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_clone = calls.clone();
-        let result = retry_loop("test-peer", move || {
+        let result = retry_loop("test-peer", &test_retry_config(), move || {
             let calls = calls_clone.clone();
             async move {
                 calls.fetch_add(1, Ordering::SeqCst);
@@ -717,7 +712,7 @@ mod tests {
     async fn retry_loop_does_not_retry_on_invalid_message() {
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_clone = calls.clone();
-        let result = retry_loop("test-peer", move || {
+        let result = retry_loop("test-peer", &test_retry_config(), move || {
             let calls = calls_clone.clone();
             async move {
                 calls.fetch_add(1, Ordering::SeqCst);
@@ -733,7 +728,7 @@ mod tests {
     async fn retry_loop_does_not_retry_on_handshake_failed() {
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_clone = calls.clone();
-        let result = retry_loop("test-peer", move || {
+        let result = retry_loop("test-peer", &test_retry_config(), move || {
             let calls = calls_clone.clone();
             async move {
                 calls.fetch_add(1, Ordering::SeqCst);
@@ -752,7 +747,7 @@ mod tests {
         // into a retry-storm vector.
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_clone = calls.clone();
-        let result = retry_loop("test-peer", move || {
+        let result = retry_loop("test-peer", &test_retry_config(), move || {
             let calls = calls_clone.clone();
             async move {
                 calls.fetch_add(1, Ordering::SeqCst);
