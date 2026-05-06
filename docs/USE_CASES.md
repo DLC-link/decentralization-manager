@@ -790,7 +790,7 @@ curl -X POST http://custodian-a:8080/governance/propose \
 
 ### Governance Self-Management
 
-The `GovernanceRules` contract supports self-management actions (add/remove members, change threshold, change timeout) through the `core_self` governance type. These do not require proposals -- they use value-based matching like `VaultGovernanceRules`.
+The `GovernanceRules` contract supports self-management actions (add/remove members, change threshold, change timeout, manage the additional-proposers allowlist) through the `core_self` governance type. These do not require proposals -- they use value-based matching like `VaultGovernanceRules`.
 
 **Add a new member:**
 
@@ -840,6 +840,24 @@ curl -X POST http://custodian-a:8080/governance/confirm \
     "governance_type": "core_self"
   }'
 ```
+
+**Grant propose-only rights to a non-member (`v0-rc4`+):**
+
+```bash
+curl -X POST http://custodian-a:8080/governance/confirm \
+  -H "Content-Type: application/json" \
+  -d '{
+    "party_id": "joint-vault::1220...",
+    "rules_contract_id": "<governance-rules-cid>",
+    "action": {
+      "type": "governance_add_additional_proposer",
+      "additional_proposer": "ops-console::1220..."
+    },
+    "governance_type": "core_self"
+  }'
+```
+
+`governance_remove_additional_proposer` (with the same `additional_proposer` field) revokes the right and normalizes the `additionalProposers` allowlist back to `None` once it becomes empty. After execution the named party can call `POST /governance/propose` against this `GovernanceRules` without holding a member seat -- the on-chain proposer-authorization rule (member ∪ allowlist) accepts them at confirm time.
 
 After threshold confirmations are collected, execute with:
 
