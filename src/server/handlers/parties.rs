@@ -27,7 +27,10 @@ use crate::{
         schema::{Commitable, SchemaRead, SchemaWrite},
     },
     error::Result,
-    noise::{Message, MessageType, NoiseError, NoiseKeypair, parse_public_key, send_noise_message},
+    noise::{
+        Message, MessageType, NoiseError, NoiseKeypair, parse_public_key, send_noise_message,
+        send_noise_message_with_retry,
+    },
     participant_id::CantonId,
     server::{
         AppState,
@@ -841,7 +844,6 @@ async fn fetch_peer_packages(
     config: &NodeConfig,
     db: &SqlitePool,
 ) -> Result<PeerPackageComparison> {
-    // Get local packages
     let mut client = PackageServiceClient::connect(config.admin_api_url()).await?;
     let local_response = client
         .list_packages(tonic::Request::new(ListPackagesRequest {
@@ -861,14 +863,12 @@ async fn fetch_peer_packages(
         })
         .collect();
 
-    // Load network config and keypair for Noise communication
     let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
     let current_participant_id = config.participant_id();
 
     let invite_message = Message::new_empty(MessageType::ListPackages);
 
-    // Query each peer in parallel
     let peer_futures: Vec<_> = network_config
         .peers
         .iter()
@@ -885,6 +885,7 @@ async fn fetch_peer_packages(
                             participant_id: peer.participant_id.to_string(),
                             name: peer.name.clone(),
                             reachable: false,
+                            error_kind: Some(PeerErrorKind::InvalidPublicKey),
                             packages: vec![],
                         };
                     }
@@ -893,8 +894,14 @@ async fn fetch_peer_packages(
                 let psk = keypair.derive_psk(&peer_pub_key);
                 let identity = current_participant_id.to_string();
 
-                match send_noise_message(&peer.address, peer.port, &psk, identity.as_bytes(), &msg)
-                    .await
+                match send_noise_message_with_retry(
+                    &peer.address,
+                    peer.port,
+                    &psk,
+                    identity.as_bytes(),
+                    &msg,
+                )
+                .await
                 {
                     Ok(response) => {
                         if let Ok(response_msg) = Message::from_bytes(&response)
@@ -906,20 +913,26 @@ async fn fetch_peer_packages(
                                 participant_id: peer.participant_id.to_string(),
                                 name: peer.name.clone(),
                                 reachable: true,
+                                error_kind: None,
                                 packages,
                             };
                         }
+                        // 200 OK but unexpected message shape — `error_kind` stays
+                        // None per the documented invariant; widening this case is
+                        // tracked as Future work item 5 in the spec.
                         PeerPackageResult {
                             participant_id: peer.participant_id.to_string(),
                             name: peer.name.clone(),
                             reachable: true,
+                            error_kind: None,
                             packages: vec![],
                         }
                     }
-                    _ => PeerPackageResult {
+                    Err(e) => PeerPackageResult {
                         participant_id: peer.participant_id.to_string(),
                         name: peer.name.clone(),
                         reachable: false,
+                        error_kind: Some(peer_error_kind_from_noise_err(&e)),
                         packages: vec![],
                     },
                 }
@@ -989,7 +1002,7 @@ mod tests {
                 PeerErrorKind::TcpConnectFailed,
             ),
             (
-                NoiseError::Io(std::io::Error::new(std::io::ErrorKind::Other, "x")),
+                NoiseError::Io(std::io::Error::other("x")),
                 PeerErrorKind::TcpConnectFailed,
             ),
             (NoiseError::HandshakeFailed, PeerErrorKind::HandshakeFailed),
