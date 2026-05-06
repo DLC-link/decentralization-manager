@@ -76,6 +76,16 @@ pub const MAX_PAYLOAD_SIZE: usize = 1024;
 /// Chunk size for large payloads
 pub const CHUNK_SIZE: usize = 1024;
 
+/// Hard ceiling on the assembled size of a chunked response. Bounds peer-supplied
+/// `total_size` so a malicious or buggy peer can't ask the client to allocate
+/// arbitrary memory. 16 MiB is well above any plausible `ListPackages` payload
+/// (SV nodes observed at ~8 KiB) while keeping worst-case allocation bounded.
+pub const MAX_CHUNKED_TOTAL_SIZE: usize = 16 * 1024 * 1024;
+
+/// Hard ceiling on the chunk count for a chunked response. Equal to
+/// `MAX_CHUNKED_TOTAL_SIZE / CHUNK_SIZE` rounded up.
+pub const MAX_CHUNK_COUNT: usize = MAX_CHUNKED_TOTAL_SIZE.div_ceil(CHUNK_SIZE);
+
 impl TryFrom<u16> for MessageType {
     type Error = anyhow::Error;
 
@@ -484,23 +494,37 @@ where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<Bytes, NoiseError>>,
 {
-    debug_assert!(
-        config.max_attempts > 0,
-        "NoiseRetryConfig.max_attempts must be > 0"
-    );
+    // Defense-in-depth: the CLI rejects 0 at parse time, but a misbehaving
+    // direct construction of `NoiseRetryConfig` (e.g. in tests) shouldn't
+    // panic in release.
+    if config.max_attempts == 0 {
+        return Err(NoiseError::Anyhow(anyhow::anyhow!(
+            "NoiseRetryConfig.max_attempts must be >= 1"
+        )));
+    }
     let mut last_err: Option<NoiseError> = None;
     for attempt in 1..=config.max_attempts {
         match op().await {
             Ok(bytes) => return Ok(bytes),
             Err(e) if is_transient(&e) => {
-                tracing::warn!(
-                    peer = peer_label,
-                    attempt,
-                    error = %e,
-                    "noise retry: transient failure, will retry",
-                );
+                let will_retry = attempt < config.max_attempts;
+                if will_retry {
+                    tracing::warn!(
+                        peer = peer_label,
+                        attempt,
+                        error = %e,
+                        "noise: transient failure, retrying",
+                    );
+                } else {
+                    tracing::warn!(
+                        peer = peer_label,
+                        attempt,
+                        error = %e,
+                        "noise: transient failure on final attempt",
+                    );
+                }
                 last_err = Some(e);
-                if attempt < config.max_attempts {
+                if will_retry {
                     tokio::time::sleep(config.backoff()).await;
                 }
             }
@@ -515,6 +539,8 @@ where
             }
         }
     }
+    // Loop ran `max_attempts >= 1` iterations; the only way out without
+    // returning is the transient branch, which sets `last_err`.
     let final_err = last_err.expect("retry_loop ran zero attempts");
     tracing::error!(
         peer = peer_label,
@@ -612,6 +638,31 @@ pub async fn send_noise_message_with_chunked_response(
     let (command_type, total_size, chunk_count) =
         parse_chunked_command_metadata(&resp_msg.payload)?;
 
+    // Bound peer-supplied metadata before we allocate or loop. A malicious or
+    // buggy peer could otherwise advertise multi-GB sizes and trigger an OOM.
+    if total_size > MAX_CHUNKED_TOTAL_SIZE || chunk_count > MAX_CHUNK_COUNT {
+        tracing::warn!(
+            peer = format!("{peer_address}:{peer_port}"),
+            total_size,
+            chunk_count,
+            "noise: chunked-response metadata exceeds configured caps",
+        );
+        return Err(NoiseError::InvalidMessage);
+    }
+    // chunk_count must agree with total_size and CHUNK_SIZE; reject mismatch
+    // (e.g. total=10 but chunk_count=1000).
+    let expected_chunks = total_size.div_ceil(CHUNK_SIZE);
+    if chunk_count != expected_chunks {
+        tracing::warn!(
+            peer = format!("{peer_address}:{peer_port}"),
+            total_size,
+            chunk_count,
+            expected_chunks,
+            "noise: chunked-response chunk_count inconsistent with total_size",
+        );
+        return Err(NoiseError::InvalidMessage);
+    }
+
     tracing::debug!(
         peer = format!("{peer_address}:{peer_port}"),
         total_size,
@@ -641,6 +692,24 @@ pub async fn send_noise_message_with_chunked_response(
             return Err(NoiseError::InvalidMessage);
         }
         // Chunk payload format: [chunk_index:4][chunk_data]
+        // Verify the echoed index matches what we requested so a server bug
+        // (or cache mix-up between concurrent peers) can't silently corrupt
+        // the assembled payload.
+        let received_index = u32::from_be_bytes([
+            chunk_msg.payload[0],
+            chunk_msg.payload[1],
+            chunk_msg.payload[2],
+            chunk_msg.payload[3],
+        ]) as usize;
+        if received_index != chunk_index {
+            tracing::warn!(
+                peer = format!("{peer_address}:{peer_port}"),
+                requested = chunk_index,
+                received = received_index,
+                "noise: chunk response carried wrong chunk index",
+            );
+            return Err(NoiseError::InvalidMessage);
+        }
         assembled.extend_from_slice(&chunk_msg.payload[4..]);
     }
 
@@ -865,6 +934,29 @@ mod tests {
         .await;
         assert!(matches!(result, Err(NoiseError::HandshakeFailed)));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn retry_loop_returns_error_on_zero_max_attempts() {
+        // Defense-in-depth: a `NoiseRetryConfig` constructed with max_attempts=0
+        // must produce an error rather than panic in release builds.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_clone = calls.clone();
+        let bad_config = NoiseRetryConfig {
+            per_attempt_timeout_secs: 5,
+            max_attempts: 0,
+            backoff_ms: 0,
+        };
+        let result = retry_loop("test-peer", &bad_config, move || {
+            let calls = calls_clone.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok::<Bytes, NoiseError>(Bytes::from_static(b"unreachable"))
+            }
+        })
+        .await;
+        assert!(matches!(result, Err(NoiseError::Anyhow(_))));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

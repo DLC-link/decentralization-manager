@@ -788,26 +788,40 @@ async fn handle_incoming_connection(
 
                             let chunk_bytes = {
                                 let mut cache = triggers.list_packages_chunk_cache.lock().await;
-                                let Some((payload, t)) = cache.get_mut(pk) else {
-                                    tracing::warn!(
-                                        "GetChunk request from {pk} for chunk {chunk_index} \
-                                         but no cached payload"
-                                    );
-                                    return Ok(Response::builder()
-                                        .status(StatusCode::NOT_FOUND)
-                                        .body(Body::empty())
-                                        .unwrap());
-                                };
-                                if t.elapsed() >= LIST_PACKAGES_CHUNK_CACHE_TTL {
-                                    tracing::warn!(
-                                        "GetChunk for {pk} chunk {chunk_index}: cache entry \
-                                         expired"
-                                    );
-                                    return Ok(Response::builder()
-                                        .status(StatusCode::NOT_FOUND)
-                                        .body(Body::empty())
-                                        .unwrap());
+
+                                // Pre-check expiry without holding a borrow into the entry,
+                                // so we can `remove` the expired entry without borrowck pain.
+                                let entry_state = cache
+                                    .get(pk)
+                                    .map(|(_, t)| t.elapsed() >= LIST_PACKAGES_CHUNK_CACHE_TTL);
+                                match entry_state {
+                                    None => {
+                                        tracing::warn!(
+                                            "GetChunk request from {pk} for chunk {chunk_index} \
+                                             but no cached payload"
+                                        );
+                                        return Ok(Response::builder()
+                                            .status(StatusCode::NOT_FOUND)
+                                            .body(Body::empty())
+                                            .unwrap());
+                                    }
+                                    Some(true) => {
+                                        // Expired — drop the stale entry now so it doesn't
+                                        // linger until the next ListPackages-driven `retain`.
+                                        cache.remove(pk);
+                                        tracing::warn!(
+                                            "GetChunk for {pk} chunk {chunk_index}: cache entry \
+                                             expired (removed)"
+                                        );
+                                        return Ok(Response::builder()
+                                            .status(StatusCode::NOT_FOUND)
+                                            .body(Body::empty())
+                                            .unwrap());
+                                    }
+                                    Some(false) => {}
                                 }
+
+                                let (payload, t) = cache.get_mut(pk).expect("checked above");
                                 let start = chunk_index * CHUNK_SIZE;
                                 if start >= payload.len() {
                                     tracing::warn!(
