@@ -217,7 +217,14 @@ start_localnet() {
     localnet_compose down -v 2>/dev/null || true
 
     echo "Starting localnet..."
-    localnet_compose up -d
+    # Only start the services our tests actually use. The 3 active profiles
+    # (sv/app-provider/app-user) otherwise also bring up nginx + 7 web UI
+    # containers (wallet/ans/scan/sv UIs) which are pure browser-facing UIs
+    # — our tests hit Canton ledger/admin gRPC ports directly, never the
+    # nginx-fronted UI ports. canton -> postgres and splice -> canton are
+    # auto-started via depends_on; the UIs are not depended on by anything
+    # we use, so naming the three core services here drops the rest.
+    localnet_compose up -d canton splice postgres
 }
 
 stop_localnet() {
