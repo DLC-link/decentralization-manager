@@ -5,7 +5,10 @@ pub mod onboarding;
 pub mod state;
 pub mod storage;
 
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::Context;
 use canton_proto_rs::com::digitalasset::canton::{
@@ -108,6 +111,64 @@ pub async fn start_coordinator(
                 created_party_id: None,
             })
         }
+    }
+}
+
+/// Maximum time the coordinator's `run_workflow` loop is allowed to spend in
+/// the same step before treating the run as failed. Wait-states like
+/// `WaitingForAttestors`, `SignDns`, `SignP2p` only advance when attestors
+/// post messages over Noise; if every attestor goes away (process killed,
+/// network partition) the loop has no other way to give up. Without this
+/// budget the spawned coordinator task blocks forever and the persisted
+/// `workflow_runs` row stays `inprogress`, leaving operators no way to
+/// retry/dismiss.
+///
+/// Sized to be larger than any legitimate per-step wait we've observed in
+/// CI (attestor sign+round-trip is sub-30s) but well under the chaos
+/// suite's tightest deadline (P1 = 120s for the row to flip to `failed`).
+pub const COORDINATOR_STEP_STALENESS_THRESHOLD: Duration = Duration::from_secs(90);
+
+/// Per-iteration watchdog used by every coordinator's `run_workflow` loop.
+/// Tracks how long the workflow has been pinned on the same step; once the
+/// dwell time crosses [`COORDINATOR_STEP_STALENESS_THRESHOLD`], `check`
+/// returns an error so `start_coordinator` propagates it back to the
+/// spawning task, which calls `mark_run_failed` and surfaces the run as
+/// `failed` in the API/DB.
+///
+/// Step transitions reset the timer on the next `check`, so long active
+/// steps (e.g., `submit_dns_proposals`, which can block the loop on Canton
+/// topology propagation) don't trip it: the loop only re-enters `check`
+/// after the step returns and `advance_step` fires.
+pub struct StepStalenessWatchdog<S> {
+    last_step: Option<S>,
+    last_change: Instant,
+    threshold: Duration,
+}
+
+impl<S: PartialEq + Copy + std::fmt::Debug> StepStalenessWatchdog<S> {
+    pub fn new(threshold: Duration) -> Self {
+        Self {
+            last_step: None,
+            last_change: Instant::now(),
+            threshold,
+        }
+    }
+
+    pub fn check(&mut self, current: S) -> Result {
+        if self.last_step != Some(current) {
+            self.last_step = Some(current);
+            self.last_change = Instant::now();
+            return Ok(());
+        }
+        let elapsed = self.last_change.elapsed();
+        if elapsed >= self.threshold {
+            anyhow::bail!(
+                "Coordinator stalled in step {current:?} for {elapsed:?} \
+                 (threshold {threshold:?}); attestors likely unreachable",
+                threshold = self.threshold
+            );
+        }
+        Ok(())
     }
 }
 

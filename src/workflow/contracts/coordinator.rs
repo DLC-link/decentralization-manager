@@ -9,6 +9,7 @@ use crate::{
     noise::server::NoiseServer,
     utils,
     workflow::{
+        COORDINATOR_STEP_STALENESS_THRESHOLD, StepStalenessWatchdog,
         state::WorkflowState,
         storage::{WorkflowStorage, artifact_kinds},
     },
@@ -77,9 +78,11 @@ async fn run_workflow(
     let creds = auth.get_credentials(&config.decentralized_party_id).await?;
     let token = creds.token;
     let user_id = creds.user_id;
+    let mut watchdog = StepStalenessWatchdog::new(COORDINATOR_STEP_STALENESS_THRESHOLD);
 
     loop {
         let current_step = workflow_state.current_step().await;
+        watchdog.check(current_step)?;
 
         match current_step {
             ContractsStep::WaitingForAttestors => {
