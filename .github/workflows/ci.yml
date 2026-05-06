@@ -76,19 +76,22 @@ jobs:
       # `release-ci` profile and `test-mode` feature, which produces
       # artifacts disjoint from the cargo job's debug+coverage tree. Keep
       # a separate cache key so neither job clobbers the other's save.
-      # save-always is critical here: actions/cache@v4 by default only
-      # saves on job success, but integration is failing on the chaos
-      # test bug (fixed elsewhere) — without save-always, the cache that
-      # does get warmed up by `cargo build` is thrown away and every run
-      # cold-builds the binary again.
-      - name: Cache cargo target (release-ci)
-        uses: actions/cache@v4
+      #
+      # Split into restore + save steps because integration fails today
+      # on a known chaos-test bug (fixed elsewhere) and the combined
+      # `actions/cache@v4` only saves on job success — without the split,
+      # `cargo build` warmed `target/release-ci` for nothing and every
+      # run cold-built. `save-always: true` was deprecated. The save
+      # step's `if: always() && cache-hit != 'true'` mirrors the v4
+      # combined action's logic but lets us save on failure too.
+      - name: Restore cargo target (release-ci)
+        id: cargo-target-release-ci
+        uses: actions/cache/restore@v4
         with:
           path: target
           key: cargo-target-release-ci-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
           restore-keys: |
             cargo-target-release-ci-
-          save-always: true
       - name: Cache localnet bundle
         uses: actions/cache@v4
         with:
@@ -96,6 +99,12 @@ jobs:
           key: localnet-0.5.17
       - name: Run integration tests
         run: ./integration-tests/run.sh
+      - name: Save cargo target (release-ci)
+        if: always() && steps.cargo-target-release-ci.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: target
+          key: cargo-target-release-ci-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
 
   daml:
     name: DAML Build & Test
