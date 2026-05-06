@@ -21,9 +21,7 @@ use sqlx::SqlitePool;
 
 use crate::{
     auth::WorkflowAuth,
-    config::{
-        NetworkConfig, NodeConfig, NoiseRetryConfig, PartyCredentials, default_package_config,
-    },
+    config::{NetworkConfig, NodeConfig, PartyCredentials, default_package_config},
     db::{
         rows::{DecPartyContractRow, DecPartyParticipantRow, DecPartyRow},
         schema::{Commitable, SchemaRead, SchemaWrite},
@@ -766,7 +764,7 @@ async fn check_participants_status(
         let address = peer.address.clone();
         let port = peer.port;
         let ping_msg = ping_message.clone();
-        let noise_retry_cfg: NoiseRetryConfig = config.noise_retry().clone();
+        let noise_retry_cfg = config.noise_retry.clone();
 
         status_futures.push(tokio::spawn(async move {
             let (Some(psk), Some(_)) = (psk, peer_pub_key) else {
@@ -851,12 +849,10 @@ pub async fn compare_peer_packages(data: web::Data<AppState>) -> impl Responder 
 /// fail to compile here until it's explicitly classified.
 fn peer_error_kind_from_noise_err(err: &NoiseError) -> PeerErrorKind {
     match err {
-        NoiseError::TcpConnectionTimeout(_) | NoiseError::RequestTimeout => {
-            PeerErrorKind::TcpConnectTimeout
-        }
-        NoiseError::TcpConnectionFailed(_) | NoiseError::Io(_) | NoiseError::Hyper(_) => {
-            PeerErrorKind::TcpConnectFailed
-        }
+        NoiseError::TcpConnectionTimeout(_) => PeerErrorKind::TcpConnectTimeout,
+        NoiseError::TcpConnectionFailed(_) => PeerErrorKind::TcpConnectFailed,
+        NoiseError::RequestTimeout => PeerErrorKind::RequestTimeout,
+        NoiseError::Io(_) | NoiseError::Hyper(_) => PeerErrorKind::Transport,
         NoiseError::Noise(_) | NoiseError::HandshakeFailed | NoiseError::DecryptionError => {
             PeerErrorKind::HandshakeFailed
         }
@@ -900,7 +896,7 @@ async fn fetch_peer_packages(
     let current_participant_id = config.participant_id();
 
     let invite_message = Message::new_empty(MessageType::ListPackages);
-    let noise_retry_cfg = config.noise_retry().clone();
+    let noise_retry_cfg = config.noise_retry.clone();
 
     let peer_futures: Vec<_> = network_config
         .peers
@@ -1031,14 +1027,14 @@ mod tests {
                 NoiseError::TcpConnectionTimeout("x".into()),
                 PeerErrorKind::TcpConnectTimeout,
             ),
-            (NoiseError::RequestTimeout, PeerErrorKind::TcpConnectTimeout),
+            (NoiseError::RequestTimeout, PeerErrorKind::RequestTimeout),
             (
                 NoiseError::TcpConnectionFailed("x".into()),
                 PeerErrorKind::TcpConnectFailed,
             ),
             (
                 NoiseError::Io(std::io::Error::other("x")),
-                PeerErrorKind::TcpConnectFailed,
+                PeerErrorKind::Transport,
             ),
             (NoiseError::HandshakeFailed, PeerErrorKind::HandshakeFailed),
             (NoiseError::DecryptionError, PeerErrorKind::HandshakeFailed),
@@ -1055,11 +1051,7 @@ mod tests {
         ];
         for (err, expected) in &pairs {
             let got = peer_error_kind_from_noise_err(err);
-            assert_eq!(
-                std::mem::discriminant(&got),
-                std::mem::discriminant(expected),
-                "for variant {err:?}: got {got:?}, expected {expected:?}",
-            );
+            assert_eq!(got, *expected, "for variant {err:?}");
         }
     }
 

@@ -133,12 +133,16 @@ pub struct PackageInfo {
 ///
 /// Mirrors `NoiseError` variants at a coarser granularity that's stable on
 /// the wire — added so the UI / future tooling can distinguish failure
-/// modes without having to scan logs.
-#[derive(Clone, Copy, Debug, Serialize, utoipa::ToSchema)]
+/// modes without having to scan logs. Layered transport-side: TCP connect
+/// (timeout/failed), then post-connect request budget (`RequestTimeout`),
+/// then mid-stream IO/HTTP (`Transport`); then handshake/decode/status.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PeerErrorKind {
     TcpConnectTimeout,
     TcpConnectFailed,
+    RequestTimeout,
+    Transport,
     HandshakeFailed,
     BadStatus,
     DecodeFailed,

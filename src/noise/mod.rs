@@ -443,8 +443,9 @@ pub async fn load_or_generate_keypair<P: AsRef<Path>>(path: P) -> Result<NoiseKe
 }
 
 /// Returns `true` if a `NoiseError` represents a transient condition that
-/// is worth retrying. Deterministic errors (handshake failures, bad status,
-/// decode errors, configuration mistakes) are not retried.
+/// is worth retrying. Deterministic errors (handshake failures, 4xx status,
+/// decode errors, configuration mistakes) are not retried; 5xx responses
+/// are treated as transient (server-side hiccup).
 ///
 /// Exhaustive match (no wildcard) — adding a new `NoiseError` variant will
 /// fail to compile here until it's explicitly classified as retryable or not.
@@ -455,10 +456,10 @@ fn is_transient(err: &NoiseError) -> bool {
         | NoiseError::RequestTimeout
         | NoiseError::Io(_)
         | NoiseError::Hyper(_) => true,
+        NoiseError::BadStatusCode(code) => code.is_server_error(),
         NoiseError::Noise(_)
         | NoiseError::HandshakeFailed
         | NoiseError::DecryptionError
-        | NoiseError::BadStatusCode(_)
         | NoiseError::InvalidMessage
         | NoiseError::JsonSerialization(_)
         | NoiseError::Http(_)
@@ -545,11 +546,10 @@ pub async fn send_noise_message_with_retry(
 ) -> Result<Bytes, NoiseError> {
     let peer_label = format!("{peer_address}:{peer_port}");
     let timeout = config.per_attempt_timeout();
-    // `move || async move` — every parameter is a `Copy` reference (`&str`,
-    // `&[u8; 32]`, etc.), so each call to the FnMut closure freshly copies
-    // the references into a new async block. Without `move`, the borrow
-    // checker has trouble proving the returned future doesn't outlive the
-    // closure's borrow.
+    // `move || async move` — `&T` references are `Copy`, so each call to the
+    // FnMut closure freshly copies the references into a new async block.
+    // Without `move`, the borrow checker has trouble proving the returned
+    // future doesn't outlive the closure's borrow.
     retry_loop(&peer_label, config, move || async move {
         send_noise_message_with_timeout(peer_address, peer_port, psk, identity, message, timeout)
             .await
@@ -803,7 +803,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retry_loop_does_not_retry_on_bad_status() {
+    async fn retry_loop_does_not_retry_on_4xx_bad_status() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_clone = calls.clone();
+        let result = retry_loop("test-peer", &test_retry_config(), move || {
+            let calls = calls_clone.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err::<Bytes, _>(NoiseError::BadStatusCode(StatusCode::BAD_REQUEST))
+            }
+        })
+        .await;
+        assert!(matches!(result, Err(NoiseError::BadStatusCode(_))));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn retry_loop_retries_on_5xx_bad_status() {
+        // 5xx is a server-side hiccup — treat as transient.
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_clone = calls.clone();
         let result = retry_loop("test-peer", &test_retry_config(), move || {
@@ -815,7 +832,7 @@ mod tests {
         })
         .await;
         assert!(matches!(result, Err(NoiseError::BadStatusCode(_))));
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

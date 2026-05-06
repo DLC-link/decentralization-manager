@@ -368,11 +368,6 @@ impl NodeConfig {
     pub fn has_participant_id(&self) -> bool {
         self.node.participant_id.is_some()
     }
-
-    /// Get the Noise retry configuration
-    pub fn noise_retry(&self) -> &NoiseRetryConfig {
-        &self.noise_retry
-    }
 }
 
 #[cfg(test)]

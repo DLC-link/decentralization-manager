@@ -787,8 +787,8 @@ async fn handle_incoming_connection(
                             };
 
                             let chunk_bytes = {
-                                let cache = triggers.list_packages_chunk_cache.lock().await;
-                                let Some((payload, t)) = cache.get(pk) else {
+                                let mut cache = triggers.list_packages_chunk_cache.lock().await;
+                                let Some((payload, t)) = cache.get_mut(pk) else {
                                     tracing::warn!(
                                         "GetChunk request from {pk} for chunk {chunk_index} \
                                          but no cached payload"
@@ -821,7 +821,13 @@ async fn handle_incoming_connection(
                                         .unwrap());
                                 }
                                 let end = (start + CHUNK_SIZE).min(payload.len());
-                                payload[start..end].to_vec()
+                                let bytes = payload[start..end].to_vec();
+                                // Extend TTL on successful read so a slow peer
+                                // mid-reassembly can't have entries evicted out from
+                                // under it just because the original 30s window from
+                                // insertion ran out.
+                                *t = Instant::now();
+                                bytes
                             };
 
                             // Build Chunk response: [chunk_index:4][chunk_data]
