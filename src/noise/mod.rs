@@ -549,6 +549,25 @@ pub async fn send_noise_message_with_retry(
     .await
 }
 
+/// Parse the 10-byte metadata payload from a `MessageType::ChunkedCommand`
+/// response: `[command_type:u16][total_size:u32][chunk_count:u32]`, all
+/// big-endian.
+///
+/// Returns `(command_type, total_size, chunk_count)` on success.
+fn parse_chunked_command_metadata(
+    payload: &[u8],
+) -> Result<(MessageType, usize, usize), NoiseError> {
+    if payload.len() < 10 {
+        return Err(NoiseError::InvalidMessage);
+    }
+    let command_type_u16 = u16::from_be_bytes([payload[0], payload[1]]);
+    let total_size = u32::from_be_bytes([payload[2], payload[3], payload[4], payload[5]]) as usize;
+    let chunk_count = u32::from_be_bytes([payload[6], payload[7], payload[8], payload[9]]) as usize;
+    let command_type =
+        MessageType::try_from(command_type_u16).map_err(|_| NoiseError::InvalidMessage)?;
+    Ok((command_type, total_size, chunk_count))
+}
+
 /// Send a message that may receive a chunked response.
 ///
 /// First call goes through `send_noise_message_with_retry`. If the response
@@ -582,25 +601,8 @@ pub async fn send_noise_message_with_chunked_response(
         return Ok(response);
     }
 
-    // Parse metadata: [command_type:2][total_size:4][chunk_count:4]
-    if resp_msg.payload.len() < 10 {
-        return Err(NoiseError::InvalidMessage);
-    }
-    let command_type_u16 = u16::from_be_bytes([resp_msg.payload[0], resp_msg.payload[1]]);
-    let total_size = u32::from_be_bytes([
-        resp_msg.payload[2],
-        resp_msg.payload[3],
-        resp_msg.payload[4],
-        resp_msg.payload[5],
-    ]) as usize;
-    let chunk_count = u32::from_be_bytes([
-        resp_msg.payload[6],
-        resp_msg.payload[7],
-        resp_msg.payload[8],
-        resp_msg.payload[9],
-    ]) as usize;
-    let command_type =
-        MessageType::try_from(command_type_u16).map_err(|_| NoiseError::InvalidMessage)?;
+    let (command_type, total_size, chunk_count) =
+        parse_chunked_command_metadata(&resp_msg.payload)?;
 
     tracing::debug!(
         peer = format!("{peer_address}:{peer_port}"),
@@ -857,5 +859,41 @@ mod tests {
         .await;
         assert!(matches!(result, Err(NoiseError::Anyhow(_))));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn parse_chunked_command_metadata_happy_path() {
+        // Build a valid metadata payload: [Data:0x0102][total_size:1024][chunk_count:5]
+        let mut payload = Vec::with_capacity(10);
+        payload.extend_from_slice(&MessageType::Data.to_u16().to_be_bytes());
+        payload.extend_from_slice(&1024u32.to_be_bytes());
+        payload.extend_from_slice(&5u32.to_be_bytes());
+
+        let (command_type, total_size, chunk_count) =
+            parse_chunked_command_metadata(&payload).unwrap();
+        assert_eq!(command_type, MessageType::Data);
+        assert_eq!(total_size, 1024);
+        assert_eq!(chunk_count, 5);
+    }
+
+    #[test]
+    fn parse_chunked_command_metadata_too_short() {
+        let payload = vec![0u8; 9]; // 1 byte short
+        assert!(matches!(
+            parse_chunked_command_metadata(&payload),
+            Err(NoiseError::InvalidMessage)
+        ));
+    }
+
+    #[test]
+    fn parse_chunked_command_metadata_unknown_command_type() {
+        // Set command_type bytes to 0xFFFF — not a valid MessageType variant.
+        let mut payload = vec![0xFF, 0xFF];
+        payload.extend_from_slice(&100u32.to_be_bytes());
+        payload.extend_from_slice(&1u32.to_be_bytes());
+        assert!(matches!(
+            parse_chunked_command_metadata(&payload),
+            Err(NoiseError::InvalidMessage)
+        ));
     }
 }
