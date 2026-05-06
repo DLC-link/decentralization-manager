@@ -169,7 +169,7 @@ async fn probe_participants_status(
     expected_peer_ids: &[String],
 ) -> Option<anyhow::Result<()>> {
     let v: Value = f
-        .get_json(port, "/parties/participants-status")
+        .get_json(port, "/participants-status")
         .await
         .ok()?;
     let statuses = v.get("statuses")?.as_array()?;
