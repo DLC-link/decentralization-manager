@@ -19,7 +19,6 @@ pub const NOISE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Per-attempt timeout used by the retry wrapper (`send_noise_message_with_retry`).
 /// Set so that two attempts fit within the previous wall-clock budget for offline peers.
-#[allow(dead_code)]
 const NOISE_PER_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Message types for the Noise protocol communication
@@ -440,13 +439,11 @@ pub async fn load_or_generate_keypair<P: AsRef<Path>>(path: P) -> Result<NoiseKe
 }
 
 /// Number of attempts (initial + retries) made by `retry_loop`.
-#[allow(dead_code)]
 const RETRY_MAX_ATTEMPTS: usize = 2;
 
 /// Fixed backoff between attempts. No jitter — retries are scoped to a
 /// single caller's flow against a single peer; there is no cross-caller
 /// synchronisation that jitter would smooth out.
-#[allow(dead_code)]
 const RETRY_BACKOFF: Duration = Duration::from_millis(250);
 
 /// Returns `true` if a `NoiseError` represents a transient condition that
@@ -455,7 +452,6 @@ const RETRY_BACKOFF: Duration = Duration::from_millis(250);
 ///
 /// Exhaustive match (no wildcard) — adding a new `NoiseError` variant will
 /// fail to compile here until it's explicitly classified as retryable or not.
-#[allow(dead_code)]
 fn is_transient(err: &NoiseError) -> bool {
     match err {
         NoiseError::TcpConnectionTimeout(_)
@@ -482,7 +478,6 @@ fn is_transient(err: &NoiseError) -> bool {
 /// `RETRY_BACKOFF` between attempts. Per-attempt failures are logged at
 /// `warn`; terminal failures (after retry exhaustion) are logged at `error`.
 /// `peer_label` is used as a structured field in the log lines.
-#[allow(dead_code)]
 async fn retry_loop<F, Fut>(peer_label: &str, mut op: F) -> Result<Bytes, NoiseError>
 where
     F: FnMut() -> Fut,
@@ -523,6 +518,44 @@ where
         "noise: peer unreachable after retry exhaustion",
     );
     Err(final_err)
+}
+
+/// Send a message to a peer with bounded retry on transient failures.
+///
+/// Up to `RETRY_MAX_ATTEMPTS` attempts, each governed by
+/// `NOISE_PER_ATTEMPT_TIMEOUT`, with `RETRY_BACKOFF` between attempts.
+/// Discriminating retry: only transient `NoiseError` variants (TCP connect
+/// timeouts, refused connections, request timeouts, IO/Hyper failures) are
+/// retried. Deterministic errors (handshake failure, bad status, decode
+/// errors, configuration mistakes) return immediately.
+///
+/// Per-attempt failures log at `tracing::warn!`; terminal failures (after
+/// retry exhaustion) log an additional `tracing::error!`.
+pub async fn send_noise_message_with_retry(
+    peer_address: &str,
+    peer_port: u16,
+    psk: &[u8; 32],
+    identity: &[u8],
+    message: &Message,
+) -> Result<Bytes, NoiseError> {
+    let peer_label = format!("{peer_address}:{peer_port}");
+    // `move || async move` — every parameter is a `Copy` reference (`&str`,
+    // `&[u8; 32]`, etc.), so each call to the FnMut closure freshly copies
+    // the references into a new async block. Without `move`, the borrow
+    // checker has trouble proving the returned future doesn't outlive the
+    // closure's borrow.
+    retry_loop(&peer_label, move || async move {
+        send_noise_message_with_timeout(
+            peer_address,
+            peer_port,
+            psk,
+            identity,
+            message,
+            NOISE_PER_ATTEMPT_TIMEOUT,
+        )
+        .await
+    })
+    .await
 }
 
 #[cfg(test)]
