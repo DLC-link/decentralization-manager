@@ -50,14 +50,18 @@ runs:
         chmod 600 "$SSH_DIR/id_ed25519"
         git config --global core.sshCommand "ssh -i $SSH_DIR/id_ed25519 -o StrictHostKeyChecking=no"
 
-    - name: Cache cargo
+    # Registry + git deps are profile-independent so a single shared cache
+    # is safe. The build artifacts live in `target/<profile>/` and are owned
+    # by individual jobs (each profile has its own cache step) — caching
+    # `target/` here would let the first job to finish overwrite the cache
+    # without the other profiles' artifacts, so it stays per-job.
+    - name: Cache cargo deps
       uses: actions/cache@v4
       with:
         path: |
           ${{ steps.env.outputs.cargo-registry }}
           ${{ steps.env.outputs.cargo-git }}
-          target
-        key: cargo-${{ hashFiles('Cargo.lock') }}
+        key: cargo-deps-${{ hashFiles('Cargo.lock') }}
 
     - name: Cache npm
       uses: actions/cache@v4

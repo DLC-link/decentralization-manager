@@ -23,6 +23,18 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.BOT_SSH_PRIVATE_KEY }}
           extra-packages: jq bc
+      # Per-profile target cache. The coverage step compiles with
+      # `-C instrument-coverage` so its artifacts diverge from a normal
+      # debug build; key it on `Cargo.lock + Cargo.toml` (profile/feature
+      # changes invalidate) so a feature flip doesn't silently reuse stale
+      # debug artifacts.
+      - name: Cache cargo target (debug+coverage)
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: cargo-target-debug-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+          restore-keys: |
+            cargo-target-debug-
       - name: Install rustup components
         run: rustup component add rustfmt clippy llvm-tools-preview
       - name: cargo fmt
@@ -46,6 +58,17 @@ jobs:
           extra-packages: jq
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+      # Per-profile target cache: integration-test compiles with the
+      # `release-ci` profile and `test-mode` feature, which produces
+      # artifacts disjoint from the cargo job's debug+coverage tree. Keep
+      # a separate cache key so neither job clobbers the other's save.
+      - name: Cache cargo target (release-ci)
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: cargo-target-release-ci-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+          restore-keys: |
+            cargo-target-release-ci-
       - name: Cache localnet bundle
         uses: actions/cache@v4
         with:
@@ -62,9 +85,21 @@ jobs:
         working-directory: daml
     steps:
       - uses: actions/checkout@v4
+      # ~/.dpm holds the dpm CLI and the installed SDK toolchain. Cache
+      # both so the install steps below short-circuit on a hit. Key on the
+      # SDK version so a bump invalidates the cache automatically; keep
+      # the install-script-driven steps so a cache miss still self-heals.
+      - name: Cache dpm + DAML SDK
+        id: cache-dpm
+        uses: actions/cache@v4
+        with:
+          path: ~/.dpm
+          key: dpm-3.4.11
       - name: Install dpm
+        if: steps.cache-dpm.outputs.cache-hit != 'true'
         run: curl -sSL https://get.digitalasset.com/install/install.sh | sh
       - name: Install DAML SDK
+        if: steps.cache-dpm.outputs.cache-hit != 'true'
         run: ~/.dpm/bin/dpm install 3.4.11
       - name: Build
         run: ~/.dpm/bin/dpm build --all
