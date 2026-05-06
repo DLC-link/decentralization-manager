@@ -17,17 +17,22 @@ jobs:
     name: Format, Clippy & Unit Tests
     runs-on: ubuntu-8-core
     container: rust:slim-bookworm
+    # Pin coverage instrumentation at the job level so clippy and the
+    # coverage test run share a fingerprint. Without this, the test step
+    # had `RUSTFLAGS=-C instrument-coverage` while clippy had only
+    # `-D warnings`, so cargo invalidated the entire dep graph between
+    # them and re-did ~3 min of work that clippy had just done.
+    env:
+      RUSTFLAGS: "-C instrument-coverage -D warnings"
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-build-env
         with:
           ssh-private-key: ${{ secrets.BOT_SSH_PRIVATE_KEY }}
           extra-packages: jq bc
-      # Per-profile target cache. The coverage step compiles with
-      # `-C instrument-coverage` so its artifacts diverge from a normal
-      # debug build; key it on `Cargo.lock + Cargo.toml` (profile/feature
-      # changes invalidate) so a feature flip doesn't silently reuse stale
-      # debug artifacts.
+      # The coverage step compiles with `-C instrument-coverage` (now job
+      # env), so artifacts diverge from a plain debug build; key on
+      # `Cargo.lock + Cargo.toml` so profile/feature changes invalidate.
       - name: Cache cargo target (debug+coverage)
         uses: actions/cache@v4
         with:
@@ -35,13 +40,22 @@ jobs:
           key: cargo-target-debug-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
           restore-keys: |
             cargo-target-debug-
+      # grcov is a fixed third-party tool. Build it once and cache the
+      # binary so `cargo install grcov` (~30s) is skipped on every run.
+      - name: Cache grcov binary
+        id: cache-grcov
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/cargo/bin/grcov
+          key: grcov-bin-v1
       - name: Install rustup components
         run: rustup component add rustfmt clippy llvm-tools-preview
       - name: cargo fmt
         run: cargo fmt -- --check
-      - name: cargo clippy
+      - name: cargo clippy (also primes target/ for the coverage step)
         run: cargo clippy --all-targets --all-features
       - name: Install coverage tooling
+        if: steps.cache-grcov.outputs.cache-hit != 'true'
         run: cargo install grcov
       - name: Run tests with coverage
         run: ./code-coverage.sh

@@ -33,9 +33,9 @@ runs:
       shell: bash
       run: |
         ${{ steps.env.outputs.sudo }} apt-get update
-        ${{ steps.env.outputs.sudo }} apt-get install -y \
+        ${{ steps.env.outputs.sudo }} apt-get install -y --no-install-recommends \
           pkg-config libssl-dev protobuf-compiler \
-          git openssh-client nodejs npm curl \
+          git openssh-client nodejs npm curl ca-certificates \
           ${{ inputs.extra-packages }}
 
     - name: Setup SSH
