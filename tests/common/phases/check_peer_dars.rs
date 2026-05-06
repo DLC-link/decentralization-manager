@@ -141,11 +141,12 @@ async fn probe_compare_peers(
                  — likely decode failure (see spec Future work item 5)"
             )));
         }
-        if packages.len() != local_count {
-            // Counts differ but both non-zero — packages still propagating;
-            // keep polling.
-            return None;
-        }
+        // (We deliberately do NOT assert packages.len() == local_count: in
+        // any real Canton localnet, peers have different sets of
+        // Canton-internal packages installed beyond the DARs we explicitly
+        // distribute. SV nodes in particular bootstrap many more packages.
+        // The decode-failure check above (empty packages on a reachable
+        // peer with non-empty local) is the meaningful invariant.)
 
         if id == expected_peer_a {
             seen_a = true;
