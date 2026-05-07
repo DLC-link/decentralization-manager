@@ -19,26 +19,48 @@ use crate::common::{
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     chaos::ensure_nodes_healthy(f).await?;
 
-    // Defensive: a chaos phase that crashed/respawned P1 mid-flight can leave
-    // dars_state pinned to InProgress even though no task is actually running
-    // (recover_in_progress_workflows re-hydrates from the DB row). Cancel any
-    // such ghost before we start, otherwise our /dars/distribute below 409s.
-    // Same pattern start_handler_conflict_409 already uses.
+    // Defensive: an earlier chaos phase that crashed/respawned P1 mid-flight
+    // can leave dars_state pinned to InProgress with no task driving it
+    // forward yet (recover_in_progress_workflows re-hydrates from the DB row,
+    // and there is a brief window after respawn where status=InProgress but
+    // abort_handle=None — /dars/cancel returns 409 "still initializing" in
+    // that window, and the staleness watchdog hasn't yet flipped the row to
+    // Failed). Poll until the API reports any non-InProgress status, retrying
+    // the cancel each iteration. Bails after the deadline so the test fails
+    // here with a clear message rather than later with a confusing 409.
     #[derive(serde::Deserialize, Debug)]
     struct DarsStatus {
         #[serde(default)]
         status: Option<String>,
     }
-    if let Ok(s) = f
-        .get_json::<DarsStatus>(f.p1.http, "/dars/distribute/status")
-        .await
-        && matches!(s.status.as_deref(), Some("inprogress" | "InProgress"))
-    {
-        chaos::say("G9", "cancelling stale in-progress Dars before starting");
+    let cancel_deadline = Duration::from_secs(120);
+    let cancel_started = std::time::Instant::now();
+    loop {
+        let in_progress = match f
+            .get_json::<DarsStatus>(f.p1.http, "/dars/distribute/status")
+            .await
+        {
+            Ok(s) => matches!(s.status.as_deref(), Some("inprogress" | "InProgress")),
+            // Transient HTTP failure (e.g., respawn settle) — retry until deadline.
+            Err(_) => true,
+        };
+        if !in_progress {
+            break;
+        }
+        if cancel_started.elapsed() >= cancel_deadline {
+            anyhow::bail!(
+                "G9 pre-test cleanup: dars_state stuck at InProgress on P1 after {cancel_deadline:?}; \
+                 stale recovery never settled and cancel never landed"
+            );
+        }
+        chaos::say(
+            "G9",
+            "cancelling stale in-progress Dars (will retry until cleared)",
+        );
         let _ = f
             .post_expect_status(f.p1.http, "/dars/cancel", &json!({}))
             .await;
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 
     let prefix = chaos::fresh_prefix("concurrent-kinds");
