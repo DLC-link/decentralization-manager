@@ -3,9 +3,8 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use canton_proto_rs::com::daml::ledger::api::v2::{
     CumulativeFilter, EventFormat, Filters, GetLatestPrunedOffsetsRequest, GetLedgerEndRequest,
-    GetUpdatesRequest, Identifier, InterfaceFilter, Record, TemplateFilter, TransactionFormat,
-    TransactionShape, UpdateFormat, Value, cumulative_filter, event::Event,
-    get_updates_response::Update, value,
+    GetUpdatesRequest, Identifier, Record, TransactionFormat, TransactionShape, UpdateFormat,
+    Value, WildcardFilter, cumulative_filter, event::Event, get_updates_response::Update, value,
 };
 use serde_json::{Value as JsonValue, json};
 
@@ -19,14 +18,12 @@ use crate::{
 use super::types::ChainAuditEntry;
 
 struct ChainTemplate {
-    package_id: String,
     module_name: &'static str,
     entity_name: &'static str,
     governance_type: &'static str,
 }
 
 struct ChainInterface {
-    package_id: String,
     module_name: &'static str,
     entity_name: &'static str,
     governance_type: &'static str,
@@ -37,52 +34,51 @@ struct ChainFilters {
     interfaces: Vec<ChainInterface>,
 }
 
+/// The list of governance Daml types we care about. We no longer pin
+/// `package_id` on each entry — events are matched purely by
+/// `(module_name, entity_name)` after the wildcard ledger query, so the
+/// audit trail covers events from any package version (rc3, rc4, future).
+/// `packages` is kept as an argument so a build that omits some governance
+/// kinds (vault / core / cbtc) still skips them at the index level.
 fn chain_filters(packages: &PackageConfig) -> ChainFilters {
     let mut templates = Vec::new();
     let mut interfaces = Vec::new();
 
-    if let Some(pkg) = &packages.vault_governance {
+    if packages.vault_governance.is_some() {
         templates.push(ChainTemplate {
-            package_id: pkg.clone(),
             module_name: "BitsafeVault.VaultGovernance",
             entity_name: "VaultGovernanceRules",
             governance_type: "vault",
         });
         templates.push(ChainTemplate {
-            package_id: pkg.clone(),
             module_name: "BitsafeVault.VaultGovernance",
             entity_name: "VaultGovernanceConfirmation",
             governance_type: "vault",
         });
     }
 
-    if let Some(pkg) = &packages.governance_core {
+    if packages.governance_core.is_some() {
         templates.push(ChainTemplate {
-            package_id: pkg.clone(),
             module_name: "Governance.Rules",
             entity_name: "GovernanceRules",
             governance_type: "core_self",
         });
         templates.push(ChainTemplate {
-            package_id: pkg.clone(),
             module_name: "Governance.Rules",
             entity_name: "GovernanceSelfConfirmation",
             governance_type: "core_self",
         });
         templates.push(ChainTemplate {
-            package_id: pkg.clone(),
             module_name: "Governance.Confirmation",
             entity_name: "GovernanceConfirmation",
             governance_type: "core_domain",
         });
         templates.push(ChainTemplate {
-            package_id: pkg.clone(),
             module_name: "Governance.ExecutionResult",
             entity_name: "GovernanceExecutionResult",
             governance_type: "core_domain",
         });
         interfaces.push(ChainInterface {
-            package_id: pkg.clone(),
             module_name: "Governance.Action",
             entity_name: "GovernableAction",
             governance_type: "core_domain",
@@ -90,13 +86,11 @@ fn chain_filters(packages: &PackageConfig) -> ChainFilters {
     }
 
     templates.push(ChainTemplate {
-        package_id: "#cbtc-governance".to_string(),
         module_name: "CBTC.Governance",
         entity_name: "CBTCGovernanceRules",
         governance_type: "cbtc",
     });
     templates.push(ChainTemplate {
-        package_id: "#cbtc-governance".to_string(),
         module_name: "CBTC.Governance",
         entity_name: "Confirmation",
         governance_type: "cbtc",
@@ -239,42 +233,31 @@ pub async fn get_chain_audit(
 
     let begin_offset = pruned_offset.max(0);
 
+    // Build the (module, entity) → governance_type index used to classify
+    // events client-side. We keep this pinned to the static `PackageConfig`
+    // because it's purely about *which Daml types we care about*, not which
+    // package version they came from.
     let filters = chain_filters(packages);
     if filters.templates.is_empty() && filters.interfaces.is_empty() {
         tracing::warn!("No governance templates configured; returning empty chain audit");
         return Ok(Vec::new());
     }
 
-    let mut cumulative: Vec<CumulativeFilter> = filters
-        .templates
-        .iter()
-        .map(|t| CumulativeFilter {
-            identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
-                TemplateFilter {
-                    template_id: Some(Identifier {
-                        package_id: t.package_id.clone(),
-                        module_name: t.module_name.to_string(),
-                        entity_name: t.entity_name.to_string(),
-                    }),
-                    include_created_event_blob: false,
-                },
-            )),
-        })
-        .collect();
-
-    cumulative.extend(filters.interfaces.iter().map(|i| CumulativeFilter {
-        identifier_filter: Some(cumulative_filter::IdentifierFilter::InterfaceFilter(
-            InterfaceFilter {
-                interface_id: Some(Identifier {
-                    package_id: i.package_id.clone(),
-                    module_name: i.module_name.to_string(),
-                    entity_name: i.entity_name.to_string(),
-                }),
+    // Wildcard at the ledger level — pick up all events for the party
+    // regardless of which package version produced them. Filtering happens
+    // client-side via `template_index` below. Without this, an old run that
+    // emitted events under (say) `#governance-core-v0-rc3` becomes
+    // unqueryable on a participant that has only `#governance-core-v0-rc4`
+    // vetted: the package-name reference in a `TemplateFilter` fails to
+    // resolve and `GetUpdates` errors out with "Packages not found on
+    // participant". The audit trail isn't sensitive to package version.
+    let cumulative = vec![CumulativeFilter {
+        identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
+            WildcardFilter {
                 include_created_event_blob: false,
-                include_interface_view: true,
             },
         )),
-    }));
+    }];
 
     let mut filters_by_party = HashMap::new();
     filters_by_party.insert(party_id.to_string(), Filters { cumulative });
@@ -301,19 +284,11 @@ pub async fn get_chain_audit(
         update_format: Some(update_format),
     };
 
-    let mut stream = match update_client.get_updates(tonic::Request::new(req)).await {
-        Ok(resp) => resp.into_inner(),
-        Err(e) => {
-            let full = format!("{e}");
-            if let Some(start) = full.find('[')
-                && let Some(end) = full[start..].find(']')
-            {
-                let names = &full[start + 1..start + end];
-                anyhow::bail!("Packages not found on participant: [{names}]");
-            }
-            return Err(e).context("Failed to call GetUpdates");
-        }
-    };
+    let mut stream = update_client
+        .get_updates(tonic::Request::new(req))
+        .await
+        .context("Failed to call GetUpdates")?
+        .into_inner();
 
     let template_index: HashMap<(String, String), &'static str> = filters
         .templates

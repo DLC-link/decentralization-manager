@@ -19,13 +19,14 @@ import EditIcon from "@mui/icons-material/Edit";
 import PersonRemoveIcon from "@mui/icons-material/PersonRemove";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
+import RefreshIcon from "@mui/icons-material/Refresh";
 import SettingsIcon from "@mui/icons-material/Settings";
 import { CopyableText } from "./CopyableText";
 import { KickDialog } from "./KickDialog";
 import { ContractsDialog } from "./ContractsDialog";
 import { PartyConfigDialog } from "./PartyConfigDialog";
 import { GovernanceActionsDialog } from "./GovernanceActionsDialog";
-import { GovernanceAuditTrail } from "./GovernanceAuditTrail";
+import { GovernanceAuditTrail, CHAIN_LIMIT } from "./GovernanceAuditTrail";
 import { AuthSection } from "./AuthSection";
 import { zebraRow } from "../styles";
 import { ADMIN_ACCESS } from "../constants";
@@ -108,6 +109,8 @@ export const PartyDetail = ({
     null,
   );
   const [governanceRefreshNonce, setGovernanceRefreshNonce] = useState(0);
+  const [auditTrailCount, setAuditTrailCount] = useState(0);
+  const [auditTrailLoading, setAuditTrailLoading] = useState(false);
   const [canScrollUp, setCanScrollUp] = useState(false);
   const [canScrollDown, setCanScrollDown] = useState(false);
   const contractsScrollRef = useRef<HTMLDivElement>(null);
@@ -447,11 +450,41 @@ export const PartyDetail = ({
           title="Audit Trail"
           expanded={governanceExpanded}
           onToggle={() => setGovernanceExpanded(!governanceExpanded)}
+          badge={
+            <>
+              {auditTrailCount > 0 && (
+                <Chip
+                  label={`${auditTrailCount}${auditTrailCount === CHAIN_LIMIT ? "+" : ""}`}
+                  size="small"
+                  sx={{ ml: 1 }}
+                  color="primary"
+                />
+              )}
+              <Tooltip title="Refresh audit trail">
+                <span>
+                  <IconButton
+                    size="small"
+                    sx={{ ml: 0.5 }}
+                    onClick={(e) => {
+                      // Don't toggle the collapsible section.
+                      e.stopPropagation();
+                      setGovernanceRefreshNonce((n) => n + 1);
+                    }}
+                    disabled={auditTrailLoading}
+                  >
+                    <RefreshIcon fontSize="small" />
+                  </IconButton>
+                </span>
+              </Tooltip>
+            </>
+          }
         >
           <Box sx={{ pl: 3 }}>
             <GovernanceAuditTrail
               partyId={party.party_id}
               refreshNonce={governanceRefreshNonce}
+              onCountChange={setAuditTrailCount}
+              onLoadingChange={setAuditTrailLoading}
             />
           </Box>
         </CollapsibleSection>
