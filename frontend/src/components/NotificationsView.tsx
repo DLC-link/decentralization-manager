@@ -1122,6 +1122,16 @@ const WorkflowRunCard = ({
 
   const completedCount = run.completed_attestors.length;
   const totalCount = run.expected_attestors.length;
+  // Per-kind label for the attestor progress counter. DARs distribution
+  // doesn't sign anything — attestors just upload the dar locally and
+  // signal completion. Other kinds collect DAML signatures.
+  const attestorVerb = run.kind === "Dars" ? "uploaded" : "signed";
+  // Step counters are only meaningful on the coordinator side — the
+  // attestor's `current_step` is always "Active" with step_index=0,
+  // step_total=N (see invitations.rs `upsert_attestor_run`), so rendering
+  // it as "Active (1/N)" is misleading. Hide step + attestor count rows
+  // entirely for attestor-side cards.
+  const isCoordinator = run.role === "Coordinator";
 
   return (
     <Box
@@ -1194,7 +1204,7 @@ const WorkflowRunCard = ({
               </Typography>
             </Box>
           )}
-          {isInProgress && totalCount > 0 && (
+          {isInProgress && isCoordinator && totalCount > 0 && (
             <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
               <Typography
                 variant="caption"
@@ -1204,7 +1214,7 @@ const WorkflowRunCard = ({
                 Attestors
               </Typography>
               <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                {completedCount} / {totalCount} signed
+                {completedCount} / {totalCount} {attestorVerb}
               </Typography>
             </Box>
           )}

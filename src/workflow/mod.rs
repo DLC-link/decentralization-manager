@@ -21,12 +21,16 @@ use sqlx::SqlitePool;
 use crate::{
     auth::WorkflowAuth,
     config::{NetworkConfig, NodeConfig, Peer},
-    db::schema::SchemaRead,
+    db::schema::{Commitable, SchemaRead, SchemaWrite},
     error::Result,
     noise::{MessageType, client::NoiseClient, server::NoiseServer},
     participant_id::CantonId,
+    server::WorkflowKind,
     utils,
-    workflow::storage::{WorkflowStorage, artifact_kinds},
+    workflow::{
+        state::WorkflowStep,
+        storage::{WorkflowStorage, artifact_kinds},
+    },
 };
 
 pub use contracts::{ContractsConfig, ContractsStep};
@@ -224,6 +228,23 @@ pub async fn start_attestor(
 
     tracing::info!("Noise client initialized, entering command polling loop");
 
+    // Cache the workflow kind so each polled command can be mapped to a
+    // human-readable step (current_step / step_index) on this attestor's
+    // workflow_runs row. Falling back to None just means the notification
+    // feed UI keeps showing the row's initial "Active" placeholder for this
+    // run, which is harmless.
+    let attestor_kind: Option<WorkflowKind> = match db.get_workflow_run(&instance_name).await {
+        Ok(Some(run)) => Some(run.kind),
+        Ok(None) => {
+            tracing::warn!("attestor step persist: no workflow_runs row for {instance_name}");
+            None
+        }
+        Err(e) => {
+            tracing::warn!("attestor step persist: lookup failed for {instance_name}: {e}");
+            None
+        }
+    };
+
     // Command polling loop
     let mut consecutive_errors = 0;
     let mut consecutive_step_failures = 0;
@@ -263,6 +284,10 @@ pub async fn start_attestor(
 
         let command = message.msg_type;
         let payload = message.payload;
+
+        if let Some(kind) = attestor_kind {
+            persist_attestor_step(&db, &instance_name, kind, command).await;
+        }
 
         match command {
             MessageType::Wait => {
@@ -576,6 +601,97 @@ fn extract_party_id_from_p2p_payload(payload: &[u8]) -> Result<CantonId> {
     match mapping {
         topology_mapping::Mapping::PartyToParticipant(p2p) => CantonId::parse(&p2p.party),
         other => anyhow::bail!("Expected PartyToParticipant mapping, got {other:?}"),
+    }
+}
+
+/// Map an inbound coordinator command to the attestor's view of step
+/// progress for the given workflow kind. Returns `(step_name, step_index,
+/// step_total)` for commands that correspond to a real step on the attestor
+/// side; returns `None` for `Wait` (no transition) and any unrelated
+/// command.
+fn attestor_step_for_command(
+    kind: WorkflowKind,
+    command: MessageType,
+) -> Option<(&'static str, i64, i64)> {
+    match kind {
+        WorkflowKind::Onboarding => {
+            let step = match command {
+                MessageType::GenerateKeys => OnboardingStep::GenerateKeys,
+                MessageType::SignDns => OnboardingStep::SignDns,
+                MessageType::SignP2p => OnboardingStep::SignP2p,
+                MessageType::Disconnect => OnboardingStep::Complete,
+                _ => return None,
+            };
+            Some((
+                step.step_name(),
+                step.step_index(),
+                OnboardingStep::step_total(),
+            ))
+        }
+        WorkflowKind::Kick => {
+            let step = match command {
+                MessageType::SignKick => KickStep::SignProposals,
+                MessageType::Disconnect => KickStep::Complete,
+                _ => return None,
+            };
+            Some((step.step_name(), step.step_index(), KickStep::step_total()))
+        }
+        WorkflowKind::Contracts => {
+            let step = match command {
+                MessageType::SignSubmissions => ContractsStep::SignSubmissions,
+                MessageType::Disconnect => ContractsStep::Complete,
+                _ => return None,
+            };
+            Some((
+                step.step_name(),
+                step.step_index(),
+                ContractsStep::step_total(),
+            ))
+        }
+        WorkflowKind::Dars => {
+            let step = match command {
+                MessageType::UploadDars => DarsStep::UploadDars,
+                MessageType::Disconnect => DarsStep::Complete,
+                _ => return None,
+            };
+            Some((step.step_name(), step.step_index(), DarsStep::step_total()))
+        }
+    }
+}
+
+/// Persist attestor-side step progress for a command. Best-effort: any
+/// failure is logged at WARN — the workflow itself doesn't depend on this
+/// row staying in sync, only the notification feed UI does.
+async fn persist_attestor_step(
+    db: &SqlitePool,
+    instance_name: &str,
+    kind: WorkflowKind,
+    command: MessageType,
+) {
+    let Some((step_name, step_index, _step_total)) = attestor_step_for_command(kind, command)
+    else {
+        return;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let mut tx = match db.begin_transaction().await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!("attestor step persist: begin_transaction failed: {e}");
+            return;
+        }
+    };
+    if let Err(e) = tx
+        .update_workflow_run_step(instance_name, step_name, step_index, &[], now)
+        .await
+    {
+        tracing::warn!("attestor step persist: update failed: {e}");
+        return;
+    }
+    if let Err(e) = Commitable::commit(tx).await {
+        tracing::warn!("attestor step persist: commit failed: {e}");
     }
 }
 
