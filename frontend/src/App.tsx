@@ -493,6 +493,7 @@ const App = () => {
               governanceType,
               threshold: data.threshold,
               actions: data.actions ?? [],
+              domainActions: data.domain_actions ?? [],
             };
           } catch {
             return null;
@@ -514,7 +515,10 @@ const App = () => {
 
   const notificationCount =
     pendingInvitations.length +
-    partyActions.reduce((sum, p) => sum + p.actions.length, 0) +
+    partyActions.reduce(
+      (sum, p) => sum + p.actions.length + p.domainActions.length,
+      0,
+    ) +
     workflowRuns.length;
 
   return (

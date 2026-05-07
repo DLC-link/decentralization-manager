@@ -21,6 +21,7 @@ import type {
   CancelConfirmationRequest,
   ConfirmActionRequest,
   DisclosedContractInput,
+  DomainGovernanceAction,
   ExecuteActionRequest,
   ExpireConfirmationRequest,
   GovernanceAction,
@@ -39,6 +40,9 @@ export interface PartyActions {
   governanceType: GovernanceType;
   threshold: number;
   actions: GovernanceAction[];
+  /** On-chain DSO governance proposals (governance_type = "core_domain"). Surfaced
+   *  as cards in the notification feed alongside off-chain actions. */
+  domainActions: DomainGovernanceAction[];
 }
 
 interface NotificationsViewProps {
@@ -683,6 +687,307 @@ const ActionCard = ({
   );
 };
 
+const DomainActionCard = ({
+  party,
+  domainAction,
+  onAfter,
+  onSelectParty,
+}: {
+  party: PartyActions;
+  domainAction: DomainGovernanceAction;
+  onAfter: () => void;
+  onSelectParty: (partyId: string) => void;
+}) => {
+  const [busy, setBusy] = useState(false);
+  const { showSnackbar } = useSnackbar();
+
+  const ownConfirmation = domainAction.confirmations.find(
+    (c) => c.confirming_party === party.memberPartyId,
+  );
+
+  // The on-chain proposal already encodes the action — server only needs the
+  // proposal_cid and governance_type to confirm/execute. action is a
+  // placeholder kept for payload symmetry with the off-chain path.
+  const placeholderAction = {
+    type: "governance_set_threshold" as const,
+    new_threshold: 0,
+  };
+
+  const post = async <T,>(
+    endpoint: string,
+    body: T,
+    successMsg: string,
+  ): Promise<void> => {
+    if (!party.rulesContractId) {
+      showSnackbar("Governance rules contract is not set");
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await authenticatedFetch(`${API_BASE}/governance/${endpoint}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || `Failed: ${endpoint}`);
+      }
+      showSnackbar(successMsg);
+      onAfter();
+    } catch (err) {
+      showSnackbar(err instanceof Error ? err.message : `Failed: ${endpoint}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleConfirm = () =>
+    post(
+      "confirm",
+      {
+        party_id: party.partyId,
+        rules_contract_id: party.rulesContractId,
+        action: placeholderAction,
+        governance_type: "core_domain" as const,
+        proposal_cid: domainAction.proposal_cid,
+      },
+      "Confirmation submitted",
+    );
+
+  const handleRevoke = () => {
+    if (!ownConfirmation) return;
+    return post(
+      "cancel",
+      {
+        party_id: party.partyId,
+        confirmation_cid: ownConfirmation.contract_id,
+        governance_type: "core_domain" as const,
+      },
+      "Confirmation revoked",
+    );
+  };
+
+  const handleExpire = (confirmationCid: string) =>
+    post(
+      "expire",
+      {
+        party_id: party.partyId,
+        rules_contract_id: party.rulesContractId,
+        confirmation_cid: confirmationCid,
+        governance_type: "core_domain" as const,
+      },
+      "Confirmation expired",
+    );
+
+  const handleExecute = () =>
+    post(
+      "execute",
+      {
+        party_id: party.partyId,
+        rules_contract_id: party.rulesContractId,
+        action: placeholderAction,
+        confirmation_cids: domainAction.confirmations.map((c) => c.contract_id),
+        disclosed_contracts: [],
+        governance_type: "core_domain" as const,
+        proposal_cid: domainAction.proposal_cid,
+      },
+      "Proposal executed",
+    );
+
+  return (
+    <Box
+      sx={{
+        p: 2,
+        border: 1,
+        borderColor: "divider",
+        borderRadius: 2,
+        display: "flex",
+        flexDirection: "column",
+        gap: 1,
+      }}
+    >
+      <Box
+        sx={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "flex-start",
+          gap: 1,
+        }}
+      >
+        <Box sx={{ display: "flex", flexDirection: "column", gap: 0.25 }}>
+          <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
+            {domainAction.action_label}
+          </Typography>
+          <Box sx={{ display: "flex", alignItems: "baseline", gap: 0.5 }}>
+            <Typography variant="caption" color="text.secondary">
+              on
+            </Typography>
+            <Typography
+              component="span"
+              variant="caption"
+              onClick={() => onSelectParty(party.partyId)}
+              sx={{
+                fontFamily: "monospace",
+                color: "primary.main",
+                cursor: "pointer",
+                "&:hover": { textDecoration: "underline" },
+              }}
+            >
+              {truncatePartyId(party.partyId)}
+            </Typography>
+          </Box>
+        </Box>
+        <Chip label="proposal" size="small" variant="outlined" />
+      </Box>
+
+      {domainAction.description && (
+        <Typography
+          variant="body2"
+          sx={{ px: 1.25, py: 1, bgcolor: "action.hover", borderRadius: 1 }}
+        >
+          {domainAction.description}
+        </Typography>
+      )}
+
+      <Typography
+        variant="caption"
+        color="text.secondary"
+        sx={{ fontFamily: "monospace" }}
+      >
+        {domainAction.proposal_cid.slice(0, 16)}…
+      </Typography>
+
+      {domainAction.confirmations.length > 0 && (() => {
+        const sorted = [...domainAction.confirmations].sort(
+          (a, b) => (a.created_at ?? 0) - (b.created_at ?? 0),
+        );
+        const proposerCid = sorted[0]?.contract_id;
+        return (
+          <Box
+            sx={{
+              display: "flex",
+              alignItems: "baseline",
+              gap: 1,
+              px: 1.25,
+              py: 1,
+              bgcolor: "action.hover",
+              borderRadius: 1,
+            }}
+          >
+            <Typography
+              variant="caption"
+              color="text.secondary"
+              sx={{ minWidth: 96 }}
+            >
+              Confirmed by
+            </Typography>
+            <Box sx={{ display: "flex", flexDirection: "column", gap: 0.25 }}>
+              {sorted.map((c) => {
+                const isOwn = c.confirming_party === party.memberPartyId;
+                const isProposer = c.contract_id === proposerCid;
+                return (
+                  <Box
+                    key={c.contract_id}
+                    sx={{ display: "flex", alignItems: "center", gap: 0.5 }}
+                  >
+                    <Typography
+                      variant="caption"
+                      sx={{
+                        fontFamily: "monospace",
+                        color: isOwn ? "primary.main" : "text.primary",
+                      }}
+                    >
+                      {truncatePartyId(c.confirming_party)}
+                      {isOwn ? " (you)" : ""}
+                    </Typography>
+                    {isProposer && (
+                      <Chip
+                        label="proposer"
+                        size="small"
+                        variant="outlined"
+                        sx={{
+                          height: 18,
+                          "& .MuiChip-label": {
+                            px: 0.75,
+                            fontSize: 10,
+                            lineHeight: 1,
+                          },
+                        }}
+                      />
+                    )}
+                    {!isOwn && (
+                      <Tooltip title="Expire confirmation">
+                        <span>
+                          <IconButton
+                            size="small"
+                            onClick={() => handleExpire(c.contract_id)}
+                            disabled={busy || !party.rulesContractId}
+                            sx={{ p: 0.25 }}
+                          >
+                            <TimerOffIcon sx={{ fontSize: 14 }} />
+                          </IconButton>
+                        </span>
+                      </Tooltip>
+                    )}
+                  </Box>
+                );
+              })}
+            </Box>
+          </Box>
+        );
+      })()}
+
+      <Box
+        sx={{
+          display: "flex",
+          gap: 1,
+          alignItems: "center",
+          justifyContent: "flex-end",
+        }}
+      >
+        <Chip
+          label={`${domainAction.confirmation_count} / ${party.threshold} confirmed`}
+          size="small"
+          color={domainAction.can_execute ? "success" : "default"}
+          variant={domainAction.can_execute ? "filled" : "outlined"}
+        />
+        {ownConfirmation ? (
+          <Button
+            size="small"
+            variant="outlined"
+            color="warning"
+            onClick={handleRevoke}
+            disabled={busy}
+          >
+            Revoke
+          </Button>
+        ) : (
+          <Button
+            size="small"
+            variant="outlined"
+            onClick={handleConfirm}
+            disabled={busy || !party.rulesContractId}
+          >
+            Confirm
+          </Button>
+        )}
+        {domainAction.can_execute && (
+          <Button
+            size="small"
+            variant="outlined"
+            color="success"
+            onClick={handleExecute}
+            disabled={busy || !party.rulesContractId}
+          >
+            Execute
+          </Button>
+        )}
+      </Box>
+    </Box>
+  );
+};
+
 type FeedEntry =
   | { kind: "invitation"; ts: number; invitation: PendingInvitation }
   | {
@@ -690,6 +995,12 @@ type FeedEntry =
       ts: number;
       party: PartyActions;
       action: GovernanceAction;
+    }
+  | {
+      kind: "domain_action";
+      ts: number;
+      party: PartyActions;
+      domainAction: DomainGovernanceAction;
     }
   | { kind: "workflow"; ts: number; run: WorkflowRun };
 
@@ -1013,6 +1324,20 @@ export const NotificationsView = ({
         action,
       })),
     ),
+    ...partyActions.flatMap<FeedEntry>((party) =>
+      party.domainActions.map((domainAction) => ({
+        kind: "domain_action",
+        // Domain proposals don't carry a server-side timestamp; fall back to
+        // the latest confirmation we know about, then 0 for unconfirmed
+        // proposals (they sort to the bottom of the feed).
+        ts: domainAction.confirmations.reduce(
+          (max, c) => Math.max(max, c.created_at ?? 0),
+          0,
+        ),
+        party,
+        domainAction,
+      })),
+    ),
     ...workflowRuns.map<FeedEntry>((run) => ({
       kind: "workflow",
       ts: run.updated_at,
@@ -1049,6 +1374,17 @@ export const NotificationsView = ({
               key={`wf-${entry.run.instance_name}`}
               run={entry.run}
               onAfter={onWorkflowsChanged}
+              onSelectParty={onSelectParty}
+            />
+          );
+        }
+        if (entry.kind === "domain_action") {
+          return (
+            <DomainActionCard
+              key={`dom-${entry.party.partyId}-${entry.domainAction.proposal_cid}`}
+              party={entry.party}
+              domainAction={entry.domainAction}
+              onAfter={onActionsChanged}
               onSelectParty={onSelectParty}
             />
           );

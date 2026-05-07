@@ -502,7 +502,6 @@ export const PartyDetail = ({
           onClose={() => setEditGovContractId(null)}
           partyId={party.party_id}
           rulesContractId={editingContract.contract_id}
-          memberPartyId={authStatus.member_party_id}
           defaultOperatorParty={operatorParty}
           network={network}
           governanceType={governanceTypeFor(editingContract.template_id)}

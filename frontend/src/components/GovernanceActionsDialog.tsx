@@ -14,7 +14,6 @@ interface GovernanceActionsDialogProps {
   onClose: () => void;
   partyId: string;
   rulesContractId: string;
-  memberPartyId: string;
   defaultOperatorParty?: string;
   network?: Network;
   governanceType: "vault" | "core_self" | "core_domain";
@@ -26,7 +25,6 @@ export const GovernanceActionsDialog = ({
   onClose,
   partyId,
   rulesContractId,
-  memberPartyId,
   defaultOperatorParty,
   network,
   governanceType,
@@ -41,7 +39,6 @@ export const GovernanceActionsDialog = ({
             partyId={partyId}
             rulesContractId={rulesContractId}
             governanceContractIds={[rulesContractId]}
-            memberPartyId={memberPartyId}
             defaultOperatorParty={defaultOperatorParty}
             network={network}
             governanceType={governanceType}

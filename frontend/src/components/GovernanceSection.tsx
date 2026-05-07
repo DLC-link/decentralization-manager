@@ -3,11 +3,6 @@ import {
   Autocomplete,
   Box,
   Typography,
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableRow,
   Button,
   Chip,
   CircularProgress,
@@ -46,7 +41,6 @@ import {
   TEMPLATE_REGISTRAR_SERVICE,
 } from "../constants";
 import { authenticatedFetch } from "../api";
-import { zebraRow } from "../styles";
 import { getActionTypeOptions } from "../governanceFormat";
 import type {
   GovernanceResponse,
@@ -65,7 +59,6 @@ import type {
   UserServicesResponse,
   ContractWithBlob,
   ContractQueryResponse,
-  DomainGovernanceAction,
   Network,
   NetworkInfo,
   ProposeActionRequest,
@@ -78,7 +71,6 @@ interface GovernanceSectionProps {
   partyId: string;
   rulesContractId?: string;
   governanceContractIds?: string[];
-  memberPartyId?: string;
   defaultOperatorParty?: string;
   network?: Network;
   governanceType?: "vault" | "core_self" | "core_domain";
@@ -111,7 +103,6 @@ export const GovernanceSection = ({
   partyId,
   rulesContractId: initialRulesContractId,
   governanceContractIds = [],
-  memberPartyId,
   defaultOperatorParty,
   network,
   governanceType = "vault",
@@ -121,7 +112,6 @@ export const GovernanceSection = ({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<GovernanceResponse | null>(null);
-  const [actionLoading, setActionLoading] = useState<string | null>(null);
   // Domain proposal state
   const [showProposalForm, setShowProposalForm] = useState(false);
   const [proposalType, setProposalType] = useState<ProposalType["type"]>("setup_cc_preapproval");
@@ -855,72 +845,6 @@ export const GovernanceSection = ({
       setError(e instanceof Error ? e.message : "Failed to create proposal");
     } finally {
       setProposalLoading(false);
-    }
-  };
-
-  const handleConfirmDomain = async (domainAction: DomainGovernanceAction) => {
-    if (!rulesContractId) return;
-    setActionLoading(domainAction.proposal_cid);
-    setError(null);
-
-    try {
-      const res = await authenticatedFetch(`${API_BASE}/governance/confirm`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          party_id: partyId,
-          rules_contract_id: rulesContractId,
-          action: { type: "governance_set_threshold", new_threshold: 0 }, // placeholder
-          governance_type: "core_domain",
-          proposal_cid: domainAction.proposal_cid,
-        }),
-      });
-
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.error || "Failed to confirm proposal");
-      }
-
-      await fetchGovernance();
-      onAfterAction?.();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to confirm proposal");
-    } finally {
-      setActionLoading(null);
-    }
-  };
-
-  const handleExecuteDomain = async (domainAction: DomainGovernanceAction) => {
-    if (!rulesContractId) return;
-    setActionLoading(domainAction.proposal_cid);
-    setError(null);
-
-    try {
-      const res = await authenticatedFetch(`${API_BASE}/governance/execute`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          party_id: partyId,
-          rules_contract_id: rulesContractId,
-          action: { type: "governance_set_threshold", new_threshold: 0 }, // placeholder
-          governance_type: "core_domain",
-          proposal_cid: domainAction.proposal_cid,
-          confirmation_cids: domainAction.confirmations.map((c) => c.contract_id),
-          disclosed_contracts: [],
-        }),
-      });
-
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.error || "Failed to execute proposal");
-      }
-
-      await fetchGovernance();
-      onAfterAction?.();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to execute proposal");
-    } finally {
-      setActionLoading(null);
     }
   };
 
@@ -2568,66 +2492,10 @@ export const GovernanceSection = ({
             </Box>
           </Collapse>
 
-          {(data.domain_actions?.length ?? 0) > 0 ? (
-            <Table size="small">
-              <TableHead>
-                <TableRow>
-                  <TableCell>Proposal</TableCell>
-                  <TableCell>Confirmations</TableCell>
-                  <TableCell align="right">Actions</TableCell>
-                </TableRow>
-              </TableHead>
-              <TableBody>
-                {data.domain_actions!.map((da, idx) => (
-                  <TableRow key={da.proposal_cid} sx={zebraRow(idx)}>
-                    <TableCell>
-                      <Typography variant="body2">{da.action_label}</Typography>
-                      {da.description && (
-                        <Typography variant="caption" color="text.primary" sx={{ display: "block" }}>
-                          {da.description}
-                        </Typography>
-                      )}
-                      <Typography variant="caption" color="text.secondary" sx={{ fontFamily: "monospace" }}>
-                        {da.proposal_cid.slice(0, 16)}...
-                      </Typography>
-                    </TableCell>
-                    <TableCell>
-                      {da.confirmation_count} / {data.threshold}
-                    </TableCell>
-                    <TableCell align="right">
-                      <Box sx={{ display: "flex", gap: 0.5, justifyContent: "flex-end" }}>
-                        {!da.confirmations.some((c) => c.confirming_party === (data.member_party_id || memberPartyId)) && (
-                          <Button
-                            size="small"
-                            variant="outlined"
-                            onClick={() => handleConfirmDomain(da)}
-                            disabled={actionLoading === da.proposal_cid}
-                          >
-                            Confirm
-                          </Button>
-                        )}
-                        {da.can_execute && (
-                          <Button
-                            size="small"
-                            variant="contained"
-                            onClick={() => handleExecuteDomain(da)}
-                            disabled={actionLoading === da.proposal_cid}
-                          >
-                            Execute
-                          </Button>
-                        )}
-                      </Box>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          ) : (
-            !showProposalForm && (
-              <Typography variant="body2" color="text.secondary" sx={{ px: 2, pb: 2 }}>
-                No domain proposals pending.
-              </Typography>
-            )
+          {(data.domain_actions?.length ?? 0) > 0 && !showProposalForm && (
+            <Typography variant="caption" color="text.secondary" sx={{ display: "block", px: 2, pb: 2 }}>
+              {data.domain_actions!.length} pending proposal{data.domain_actions!.length === 1 ? "" : "s"} — open the Notifications tab to confirm, revoke, or execute.
+            </Typography>
           )}
         </Box>
       )}
