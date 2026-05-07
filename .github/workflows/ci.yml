@@ -129,18 +129,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # cargo-deny invokes `cargo metadata` to resolve the dep tree, which
-      # has to clone the private canton-lib git deps — reuse the shared
-      # setup so it gets the bot SSH key and registry cache.
-      - uses: ./.github/actions/setup-build-env
-        with:
-          ssh-private-key: ${{ secrets.BOT_SSH_PRIVATE_KEY }}
-      - uses: dtolnay/rust-toolchain@stable
+      # The action runs cargo-deny in its own Docker container, so host-side
+      # SSH setup is invisible to it — pass the bot key via the action's
+      # ssh-key input instead, and force git-cli so cargo doesn't fall back
+      # to libgit2's ssh-agent path (which has no key inside the container).
       # Only `advisories` until a deny.toml is checked in; bans, licenses,
       # and sources need policy decisions to be useful.
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check advisories
+          ssh-key: ${{ secrets.BOT_SSH_PRIVATE_KEY }}
+          use-git-cli: true
 
   daml:
     name: DAML Build & Test
