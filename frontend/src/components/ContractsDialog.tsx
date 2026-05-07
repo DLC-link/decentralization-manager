@@ -143,6 +143,18 @@ const getGovernanceCoreContracts = (
         { type: "party_set", parties: [] }, // members : Set Party
         { type: "governance_threshold", value: defaultThreshold }, // threshold : Int
         { type: "rel_time", microseconds: 86400000000 }, // actionConfirmationTimeout : RelTime (24 hours)
+        // additionalProposers : Optional (Set Party). Defaults to Some(empty
+        // set) — functionally equivalent to None ("no allowlist") at the
+        // contract level. Operators can add proposer parties up front, or
+        // grow the set later via the Add/Remove governance self-actions.
+        { type: "optional", inner: { type: "party_set", parties: [] } },
+      ],
+      fieldLabels: [
+        "Dec. Party",
+        "Member Set",
+        "Threshold",
+        "Proposal Timeout",
+        "Additional Proposers",
       ],
     },
   ];
@@ -246,6 +258,10 @@ interface FieldEditorProps {
   participantCount?: number;
   partyId?: string;
   lockStructure?: boolean;
+  /** Override the type-derived label (e.g. show "Additional Proposers"
+   *  instead of the generic "Optional"). Only honored when `lockStructure`
+   *  is true. */
+  label?: string;
 }
 
 const FieldEditor = ({
@@ -255,6 +271,7 @@ const FieldEditor = ({
   participantCount = 3,
   partyId,
   lockStructure = false,
+  label,
 }: FieldEditorProps) => {
   const defaultThreshold = Math.max(2, Math.ceil((participantCount * 2) / 3));
 
@@ -411,23 +428,28 @@ const FieldEditor = ({
         );
         return (
           <Box sx={{ display: "flex", gap: 1, alignItems: "center", flex: 1 }}>
-            <FormControl size="small" sx={{ width: 140 }}>
-              <Select
-                value={field.inner?.type || "rel_time"}
-                onChange={(e) =>
-                  onChange({
-                    ...field,
-                    inner: createDefaultField(e.target.value, participantCount),
-                  })
-                }
-              >
-                {innerTypes.map((t) => (
-                  <MenuItem key={t.value} value={t.value}>
-                    {t.label}
-                  </MenuItem>
-                ))}
-              </Select>
-            </FormControl>
+            {!lockStructure && (
+              <FormControl size="small" sx={{ width: 140 }}>
+                <Select
+                  value={field.inner?.type || "rel_time"}
+                  onChange={(e) =>
+                    onChange({
+                      ...field,
+                      inner: createDefaultField(
+                        e.target.value,
+                        participantCount,
+                      ),
+                    })
+                  }
+                >
+                  {innerTypes.map((t) => (
+                    <MenuItem key={t.value} value={t.value}>
+                      {t.label}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+            )}
             {field.inner?.type === "rel_time" && (
               <FormControl size="small" sx={{ width: 130 }}>
                 <Select
@@ -505,6 +527,88 @@ const FieldEditor = ({
                 }
                 sx={{ width: 100 }}
               />
+            )}
+            {field.inner?.type === "party_set" && (
+              <Box
+                sx={{
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 1,
+                  flex: 1,
+                }}
+              >
+                <TextField
+                  size="small"
+                  placeholder="Paste party ID, press Enter (leave empty for no extra proposers)"
+                  fullWidth
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      const input = e.target as HTMLInputElement;
+                      const value = input.value.trim();
+                      const inner = field.inner as { parties: string[] };
+                      if (value && !inner.parties.includes(value)) {
+                        onChange({
+                          ...field,
+                          inner: {
+                            type: "party_set",
+                            parties: [...inner.parties, value],
+                          },
+                        });
+                        input.value = "";
+                      }
+                      e.preventDefault();
+                    }
+                  }}
+                />
+                {(field.inner as { parties: string[] }).parties.length > 0 && (
+                  <Box
+                    sx={{ display: "flex", flexDirection: "column", gap: 0.5 }}
+                  >
+                    {(field.inner as { parties: string[] }).parties.map(
+                      (party, idx) => (
+                        <Box
+                          key={idx}
+                          sx={{
+                            display: "flex",
+                            alignItems: "center",
+                            bgcolor: "action.hover",
+                            borderRadius: 1,
+                            px: 1,
+                            py: 0.25,
+                          }}
+                        >
+                          <Typography
+                            variant="caption"
+                            sx={{ flex: 1, fontFamily: "monospace" }}
+                          >
+                            {party}
+                          </Typography>
+                          <IconButton
+                            size="small"
+                            onClick={() => {
+                              const inner = field.inner as {
+                                parties: string[];
+                              };
+                              onChange({
+                                ...field,
+                                inner: {
+                                  type: "party_set",
+                                  parties: inner.parties.filter(
+                                    (_, i) => i !== idx,
+                                  ),
+                                },
+                              });
+                            }}
+                            sx={{ p: 0.25 }}
+                          >
+                            <DeleteIcon sx={{ fontSize: 14 }} />
+                          </IconButton>
+                        </Box>
+                      ),
+                    )}
+                  </Box>
+                )}
+              </Box>
             )}
           </Box>
         );
@@ -664,7 +768,9 @@ const FieldEditor = ({
           variant="body2"
           sx={{ fontWeight: 500, pl: 1.5, py: 1 }}
         >
-          {FIELD_TYPES.find((t) => t.value === field.type)?.label ?? field.type}
+          {label ??
+            FIELD_TYPES.find((t) => t.value === field.type)?.label ??
+            field.type}
         </Typography>
       ) : (
         <FormControl size="small" fullWidth>
@@ -829,6 +935,7 @@ const ContractEditor = ({
               participantCount={participantCount}
               partyId={partyId}
               lockStructure={lockStructure}
+              label={contract.fieldLabels?.[fieldIndex]}
             />
           ))}
           {!lockStructure && (

@@ -1,12 +1,18 @@
 use bytes::{Buf, BufMut, BytesMut};
 use canton_proto_rs::com::{
     daml::ledger::api::v2::interactive::PrepareSubmissionResponse,
-    digitalasset::canton::crypto::{
-        admin::v30::{
-            ExportKeyPairRequest, ListKeysFilters, ListMyKeysRequest,
-            vault_service_client::VaultServiceClient,
+    digitalasset::canton::{
+        crypto::{
+            admin::v30::{
+                ExportKeyPairRequest, ListKeysFilters, ListMyKeysRequest,
+                vault_service_client::VaultServiceClient,
+            },
+            v30::{Signature, SignatureFormat, SigningAlgorithmSpec, SigningPublicKey},
         },
-        v30::{Signature, SignatureFormat, SigningAlgorithmSpec, SigningPublicKey},
+        topology::admin::v30::{
+            BaseQuery, ListPartyToParticipantRequest, StoreId, Synchronizer, base_query, store_id,
+            synchronizer, topology_manager_read_service_client::TopologyManagerReadServiceClient,
+        },
     },
 };
 use ed25519_dalek::{Signature as DalekSignature, Signer, SigningKey, Verifier};
@@ -57,22 +63,63 @@ pub async fn sign_submissions(
     // because by the time contracts runs the onboarding run may have been
     // dismissed/aged out.
     //
-    // TODO(onboarding-migration): until onboarding is migrated to write
-    // `attestor_public_keys` rows into `dec_party_identity` at completion,
-    // this read will return None. The error text below points at that
-    // dependency so it's obvious in the logs.
+    // Backfill path: onboardings that completed before the
+    // `dec_party_identity` write hook was added didn't populate that table.
+    // For those parties we fall back to the original onboarding run's
+    // `workflow_artifacts` row, then mirror it into `dec_party_identity` so
+    // subsequent contracts runs hit the fast path.
     tracing::info!(
         "Loading DAML public key bundle for {node_id} on {dec_party_id} from identity table..."
     );
-    let keys_bytes = db
+    let keys_bytes = match db
         .read_identity(dec_party_id, identity_kinds::ATTESTOR_PUBLIC_KEYS, &node_id)
         .await?
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "ATTESTOR_PUBLIC_KEYS not found in identity table for {node_id} on {dec_party_id} — \
-                 onboarding may not have completed yet"
-            )
-        })?;
+    {
+        Some(bytes) => bytes,
+        None => {
+            tracing::warn!(
+                "ATTESTOR_PUBLIC_KEYS missing in identity table for {node_id} on {dec_party_id}; \
+                 attempting backfill from completed onboarding artifacts"
+            );
+            let from_local = backfill_attestor_keys(db, dec_party_id, &node_id).await?;
+            let bytes = match from_local {
+                Some(b) => b,
+                None => {
+                    tracing::warn!(
+                        "Local artifacts backfill failed; querying Canton's \
+                         PartyToParticipant on-chain to recover this node's DAML signing \
+                         key for {dec_party_id}"
+                    );
+                    backfill_attestor_keys_from_chain(config, dec_party_id)
+                        .await?
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "ATTESTOR_PUBLIC_KEYS not found in identity table, completed \
+                                 onboarding artifacts, OR PartyToParticipant on-chain for \
+                                 {node_id} on {dec_party_id} — onboarding may not have \
+                                 completed yet"
+                            )
+                        })?
+                }
+            };
+            // Best-effort populate identity table for future calls; a failure
+            // here is non-fatal — we still have the keys we need to sign now.
+            if let Err(e) = db
+                .write_identity(
+                    dec_party_id,
+                    identity_kinds::ATTESTOR_PUBLIC_KEYS,
+                    &node_id,
+                    &bytes,
+                )
+                .await
+            {
+                tracing::warn!(
+                    "Failed to write backfilled ATTESTOR_PUBLIC_KEYS to identity table: {e:#}"
+                );
+            }
+            bytes
+        }
+    };
 
     // The blob is two `varint(len)||SigningPublicKey` messages, written by
     // onboarding. Decode unchanged so the bytes-on-the-wire shape stays
@@ -423,4 +470,124 @@ fn encode_messages_length_prefixed<M: prost::Message>(messages: &[M]) -> Vec<u8>
         buffer.put_slice(&encoded);
     }
     buffer.to_vec()
+}
+
+/// On-chain backfill: query Canton's `PartyToParticipant` topology mapping for
+/// the dec_party, then cross-reference its `party_signing_keys` against this
+/// node's vault. The vault key whose fingerprint matches one of the on-chain
+/// signing keys is the DAML key this node contributes to the party.
+///
+/// Returns the same `varint(len)||SigningPublicKey` × 2 byte layout that
+/// `read_all_messages_from_bytes` expects. Index `[0]` is unused downstream
+/// (originally the namespace key), so we duplicate the DAML key to keep the
+/// shape valid; the caller only reads `[1]`.
+async fn backfill_attestor_keys_from_chain(
+    config: &NodeConfig,
+    dec_party_id: &str,
+) -> Result<Option<Vec<u8>>> {
+    let synchronizer_id = utils::get_synchronizer_id(config).await?;
+
+    // 1. Pull this party's PartyToParticipant from Canton's topology store.
+    let mut topology_client =
+        TopologyManagerReadServiceClient::connect(config.admin_api_url()).await?;
+    let p2p_response = topology_client
+        .list_party_to_participant(tonic::Request::new(ListPartyToParticipantRequest {
+            base_query: Some(BaseQuery {
+                store: Some(StoreId {
+                    store: Some(store_id::Store::Synchronizer(Synchronizer {
+                        kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id)),
+                    })),
+                }),
+                proposals: false,
+                operation: 0,
+                time_query: Some(base_query::TimeQuery::HeadState(())),
+                filter_signed_key: String::new(),
+                protocol_version: None,
+            }),
+            filter_party: dec_party_id.to_string(),
+            filter_participant: String::new(),
+        }))
+        .await?
+        .into_inner();
+
+    let Some(item) = p2p_response.results.into_iter().find_map(|r| r.item) else {
+        tracing::warn!("No PartyToParticipant mapping found on-chain for {dec_party_id}");
+        return Ok(None);
+    };
+    let Some(party_signing_keys) = item.party_signing_keys else {
+        tracing::warn!("PartyToParticipant for {dec_party_id} has no party_signing_keys field");
+        return Ok(None);
+    };
+    if party_signing_keys.keys.is_empty() {
+        tracing::warn!("PartyToParticipant for {dec_party_id} has empty party_signing_keys");
+        return Ok(None);
+    }
+
+    // 2. Walk the on-chain keys and pick the one our vault recognizes — that's
+    //    this node's contribution. Other entries belong to peer participants
+    //    and their private halves are not in our vault.
+    let mut vault_client = VaultServiceClient::connect(config.admin_api_url()).await?;
+    for key in &party_signing_keys.keys {
+        let fingerprint = utils::compute_fingerprint(key);
+        let resp = vault_client
+            .list_my_keys(tonic::Request::new(ListMyKeysRequest {
+                filters: Some(ListKeysFilters {
+                    fingerprint: fingerprint.clone(),
+                    name: String::new(),
+                    purpose: vec![],
+                    usage: vec![],
+                }),
+            }))
+            .await?
+            .into_inner();
+        if !resp.private_keys_metadata.is_empty() {
+            tracing::info!(
+                "Recovered DAML signing key {fingerprint} for {dec_party_id} from on-chain \
+                 PartyToParticipant"
+            );
+            // Encode as [namespace_placeholder, daml_key]. Downstream only
+            // reads index [1], so the placeholder content is irrelevant
+            // beyond the length-prefix shape — we duplicate the daml key.
+            return Ok(Some(encode_messages_length_prefixed(&[
+                key.clone(),
+                key.clone(),
+            ])));
+        }
+    }
+
+    tracing::warn!(
+        "None of the {count} on-chain signing keys for {dec_party_id} are present in this \
+         node's vault — this node may not be a hosting participant of {dec_party_id}",
+        count = party_signing_keys.keys.len()
+    );
+    Ok(None)
+}
+
+/// Find this node's `ATTESTOR_PUBLIC_KEYS` blob from the most recent completed
+/// Onboarding (or Kick — same kind of identity payload) coordinator run for
+/// the given dec_party_id, by joining `workflow_artifacts` to `workflow_runs`.
+/// Used as a one-shot backfill for parties whose onboarding ran before the
+/// `dec_party_identity` write hook was added.
+async fn backfill_attestor_keys(
+    db: &SqlitePool,
+    dec_party_id: &str,
+    node_id: &str,
+) -> Result<Option<Vec<u8>>> {
+    let row: Option<(Vec<u8>,)> = sqlx::query_as(
+        "SELECT a.payload \
+         FROM workflow_artifacts a \
+         JOIN workflow_runs r ON a.instance_name = r.instance_name \
+         WHERE r.dec_party_id = ?1 \
+           AND r.kind = 'Onboarding' \
+           AND r.status = 'completed' \
+           AND a.artifact_kind = 'attestor_public_keys' \
+           AND a.attestor_id = ?2 \
+         ORDER BY r.updated_at DESC \
+         LIMIT 1",
+    )
+    .bind(dec_party_id)
+    .bind(node_id)
+    .fetch_optional(db)
+    .await?;
+    Ok(row.map(|(bytes,)| bytes))
 }

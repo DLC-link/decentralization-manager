@@ -2,7 +2,9 @@
 
 set -e
 
-TAG="0.0.30"
+aws sso login
+
+TAG="0.0.31"
 IMAGE="public.ecr.aws/dlc-link/canton-decparty-manager"
 DEPLOY_DIR="zarf/deployments/devnet"
 

@@ -205,6 +205,8 @@ export interface ContractDefinition {
   module_name: string;
   entity_name: string;
   fields: FieldDefinition[];
+  /** Optional UI-only labels for each field, by index. Backend ignores. */
+  fieldLabels?: string[];
 }
 
 export interface ContractsRequest {
