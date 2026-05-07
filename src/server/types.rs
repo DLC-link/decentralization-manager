@@ -241,8 +241,8 @@ pub struct ParticipantsStatusResponse {
 #[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct KickRequest {
-    pub decentralized_party_id: String,
-    pub participant_id: String,
+    pub decentralized_party_id: CantonId,
+    pub participant_id: CantonId,
     pub new_threshold: i32,
 }
 
@@ -603,8 +603,8 @@ impl RightsStatus {
 /// Authentication status for a single party
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct PartyAuthStatus {
-    pub dec_party_id: String,
-    pub member_party_id: String,
+    pub dec_party_id: CantonId,
+    pub member_party_id: CantonId,
     pub user_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keycloak_url: Option<String>,
@@ -624,7 +624,7 @@ pub struct AuthStatusResponse {
 /// Result of an authentication test
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct AuthTestResult {
-    pub party_id: String,
+    pub party_id: CantonId,
     pub success: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -1076,7 +1076,7 @@ pub struct ExecuteActionRequest {
 pub struct GovernanceConfirmation {
     pub contract_id: String,
     pub action: ActionType,
-    pub confirming_party: String,
+    pub confirming_party: CantonId,
     /// Unix seconds when the confirmation contract was created on the ledger.
     /// 0 if the timestamp could not be resolved.
     #[serde(default)]
@@ -1111,7 +1111,7 @@ pub struct GovernanceResponse {
     pub threshold: usize,
     /// The member party ID for the requesting party (used to identify own confirmations)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub member_party_id: Option<String>,
+    pub member_party_id: Option<CantonId>,
 }
 
 /// Request to expire a stale confirmation
@@ -1350,8 +1350,8 @@ pub struct AuditLogEntry {
     pub id: i64,
     pub timestamp: i64,
     pub event_type: String,
-    pub party_id: String,
-    pub member_party_id: String,
+    pub party_id: CantonId,
+    pub member_party_id: CantonId,
     pub governance_type: String,
     pub action_summary: String,
     pub details: serde_json::Value,

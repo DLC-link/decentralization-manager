@@ -452,7 +452,7 @@ pub async fn start_attestor(
                         }
                     };
 
-                let dec_party_id = contracts_config.decentralized_party_id.to_string();
+                let dec_party_id = contracts_config.decentralized_party_id.clone();
 
                 // Persist the prepared submissions sent by the coordinator into
                 // this attestor's workflow_artifacts so sign_submissions can
@@ -555,7 +555,7 @@ pub async fn start_attestor(
 /// `transaction.mapping` is a `PartyToParticipant` mapping carrying `party`
 /// (i.e. `{prefix}::{namespace_fingerprint}`). We pull that out so the
 /// attestor's identity hook can key its `dec_party_identity` rows.
-fn extract_party_id_from_p2p_payload(payload: &[u8]) -> Result<String> {
+fn extract_party_id_from_p2p_payload(payload: &[u8]) -> Result<CantonId> {
     let signed: SignedTopologyTransaction = utils::read_first_message_from_bytes(payload)?;
 
     // `signed.transaction` is an UntypedVersionedMessage envelope (not raw
@@ -574,7 +574,7 @@ fn extract_party_id_from_p2p_payload(payload: &[u8]) -> Result<String> {
         .and_then(|m| m.mapping)
         .ok_or_else(|| anyhow::anyhow!("TopologyTransaction has no mapping"))?;
     match mapping {
-        topology_mapping::Mapping::PartyToParticipant(p2p) => Ok(p2p.party),
+        topology_mapping::Mapping::PartyToParticipant(p2p) => CantonId::parse(&p2p.party),
         other => anyhow::bail!("Expected PartyToParticipant mapping, got {other:?}"),
     }
 }

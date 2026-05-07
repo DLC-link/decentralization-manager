@@ -16,6 +16,7 @@ use crate::{
         TOPOLOGY_PROPAGATION_DELAY_SECS, TOPOLOGY_RETRY_DELAY_SECS, TOPOLOGY_RETRY_MAX_ATTEMPTS,
     },
     error::Result,
+    participant_id::CantonId,
     utils,
     workflow::{
         onboarding::OnboardingConfig,
@@ -224,10 +225,11 @@ pub async fn submit_final_proposals(
     let namespace_def: DecentralizedNamespaceDefinition =
         utils::read_first_message_from_bytes(&namespace_bytes)?;
 
-    let party_id = format!(
+    let party_id_str = format!(
         "{party_id_prefix}::{namespace}",
         namespace = namespace_def.decentralized_namespace
     );
+    let party_id = CantonId::parse(&party_id_str)?;
     tracing::info!("Constructed party ID: {party_id}");
 
     tracing::info!("Submitting aggregated P2P proposal...");
@@ -303,8 +305,9 @@ fn decode_messages_from_bytes<M: prost::Message + Default>(payload: &[u8]) -> Re
 async fn wait_for_p2p_in_topology(
     config: &NodeConfig,
     synchronizer_id: &str,
-    party_id: &str,
+    party_id: &CantonId,
 ) -> Result<prost_types::Timestamp> {
+    let party_id_str = party_id.to_string();
     let mut topology_read_client =
         TopologyManagerReadServiceClient::connect(config.admin_api_url()).await?;
 
@@ -325,7 +328,7 @@ async fn wait_for_p2p_in_topology(
                 filter_signed_key: String::new(),
                 protocol_version: None,
             }),
-            filter_party: party_id.to_string(),
+            filter_party: party_id_str.clone(),
             filter_participant: String::new(),
         });
 

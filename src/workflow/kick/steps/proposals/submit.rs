@@ -18,6 +18,7 @@ use crate::{
         TOPOLOGY_PROPAGATION_DELAY_SECS, TOPOLOGY_RETRY_DELAY_SECS, TOPOLOGY_RETRY_MAX_ATTEMPTS,
     },
     error::Result,
+    participant_id::CantonId,
     utils,
     workflow::storage::{WorkflowStorage, artifact_kinds},
 };
@@ -110,7 +111,8 @@ pub async fn submit_kick(config: &NodeConfig, storage: &SqlitePool, instance_nam
         .read_artifact(instance_name, artifact_kinds::KICK_PARTY_ID, None)
         .await?
         .ok_or_else(|| anyhow::anyhow!("KICK_PARTY_ID artifact missing"))?;
-    let party_id = String::from_utf8(party_id_bytes)?.trim().to_string();
+    let party_id_raw = String::from_utf8(party_id_bytes)?.trim().to_string();
+    let party_id = CantonId::parse(&party_id_raw)?;
     tracing::info!("Party ID: {party_id}");
 
     // Submit DNS proposal first
@@ -226,8 +228,9 @@ async fn wait_for_dns_in_topology(
 async fn wait_for_p2p_in_topology(
     config: &NodeConfig,
     synchronizer_id: &str,
-    party_id: &str,
+    party_id: &CantonId,
 ) -> Result {
+    let party_id_str = party_id.to_string();
     let mut topology_read_client =
         TopologyManagerReadServiceClient::connect(config.admin_api_url()).await?;
 
@@ -248,7 +251,7 @@ async fn wait_for_p2p_in_topology(
                 filter_signed_key: String::new(),
                 protocol_version: None,
             }),
-            filter_party: party_id.to_string(),
+            filter_party: party_id_str.clone(),
             filter_participant: String::new(),
         });
 

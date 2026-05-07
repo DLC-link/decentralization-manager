@@ -94,11 +94,14 @@ impl SchemaRead for SqlitePool {
         rows.into_iter().map(|r| r.into_domain()).collect()
     }
 
-    async fn get_party_credentials(&self, dec_party_id: &str) -> Result<Option<PartyCredentials>> {
+    async fn get_party_credentials(
+        &self,
+        dec_party_id: &CantonId,
+    ) -> Result<Option<PartyCredentials>> {
         let row = sqlx::query_as::<_, PartyCredentialsRow>(
             "SELECT * FROM party_credentials WHERE dec_party_id = ?",
         )
-        .bind(dec_party_id)
+        .bind(dec_party_id.to_string())
         .fetch_optional(self)
         .await?;
 
@@ -120,11 +123,11 @@ impl SchemaRead for SqlitePool {
         Ok(rows)
     }
 
-    async fn get_dec_party_owners(&self, party_id: &str) -> Result<Vec<String>> {
+    async fn get_dec_party_owners(&self, party_id: &CantonId) -> Result<Vec<String>> {
         let rows = sqlx::query_as::<_, (String,)>(
             "SELECT owner_key FROM dec_party_owner WHERE dec_party_id = ?",
         )
-        .bind(party_id)
+        .bind(party_id.to_string())
         .fetch_all(self)
         .await?;
 
@@ -133,12 +136,12 @@ impl SchemaRead for SqlitePool {
 
     async fn get_dec_party_participants(
         &self,
-        party_id: &str,
+        party_id: &CantonId,
     ) -> Result<Vec<DecPartyParticipantRow>> {
         let rows = sqlx::query_as::<_, DecPartyParticipantRow>(
             "SELECT * FROM dec_party_participant WHERE dec_party_id = ?",
         )
-        .bind(party_id)
+        .bind(party_id.to_string())
         .fetch_all(self)
         .await?;
 
@@ -147,7 +150,7 @@ impl SchemaRead for SqlitePool {
 
     async fn get_dec_party_participant_owner_key(
         &self,
-        party_id: &str,
+        party_id: &CantonId,
         participant_uid: &str,
     ) -> Result<Option<String>> {
         let row: Option<(Option<String>,)> = sqlx::query_as(
@@ -156,18 +159,21 @@ impl SchemaRead for SqlitePool {
             WHERE dec_party_id = ? AND participant_uid = ?
             ",
         )
-        .bind(party_id)
+        .bind(party_id.to_string())
         .bind(participant_uid)
         .fetch_optional(self)
         .await?;
         Ok(row.and_then(|(k,)| k))
     }
 
-    async fn get_dec_party_contracts(&self, party_id: &str) -> Result<Vec<DecPartyContractRow>> {
+    async fn get_dec_party_contracts(
+        &self,
+        party_id: &CantonId,
+    ) -> Result<Vec<DecPartyContractRow>> {
         let rows = sqlx::query_as::<_, DecPartyContractRow>(
             "SELECT * FROM dec_party_contract WHERE dec_party_id = ?",
         )
-        .bind(party_id)
+        .bind(party_id.to_string())
         .fetch_all(self)
         .await?;
 
@@ -286,7 +292,7 @@ impl SchemaRead for SqlitePool {
 
     async fn get_chain_audit_cache(
         &self,
-        party_id: &str,
+        party_id: &CantonId,
         limit: i64,
     ) -> Result<Vec<ChainAuditCacheRow>> {
         let rows = sqlx::query_as::<_, ChainAuditCacheRow>(
@@ -297,7 +303,7 @@ impl SchemaRead for SqlitePool {
             LIMIT ?
             ",
         )
-        .bind(party_id)
+        .bind(party_id.to_string())
         .bind(limit)
         .fetch_all(self)
         .await?;
@@ -407,7 +413,7 @@ impl SchemaRead for SqlitePool {
 
     async fn read_dec_party_identity(
         &self,
-        dec_party_id: &str,
+        dec_party_id: &CantonId,
         artifact_kind: &str,
         attestor_id: &str,
     ) -> Result<Option<Vec<u8>>> {
@@ -415,7 +421,7 @@ impl SchemaRead for SqlitePool {
             "SELECT * FROM dec_party_identity \
              WHERE dec_party_id = ? AND artifact_kind = ? AND attestor_id = ?",
         )
-        .bind(dec_party_id)
+        .bind(dec_party_id.to_string())
         .bind(artifact_kind)
         .bind(attestor_id)
         .fetch_optional(self)
@@ -426,7 +432,7 @@ impl SchemaRead for SqlitePool {
 
     async fn list_dec_party_identity(
         &self,
-        dec_party_id: &str,
+        dec_party_id: &CantonId,
         artifact_kind: &str,
     ) -> Result<Vec<(String, Vec<u8>)>> {
         let rows = sqlx::query_as::<_, DecPartyIdentityRow>(
@@ -434,7 +440,7 @@ impl SchemaRead for SqlitePool {
              WHERE dec_party_id = ? AND artifact_kind = ? \
              ORDER BY attestor_id ASC",
         )
-        .bind(dec_party_id)
+        .bind(dec_party_id.to_string())
         .bind(artifact_kind)
         .fetch_all(self)
         .await?;
@@ -560,9 +566,10 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         Ok(())
     }
 
-    async fn replace_dec_party_owners(&mut self, party_id: &str, owners: &[String]) -> Result {
+    async fn replace_dec_party_owners(&mut self, party_id: &CantonId, owners: &[String]) -> Result {
+        let party_id_str = party_id.to_string();
         sqlx::query("DELETE FROM dec_party_owner WHERE dec_party_id = ?")
-            .bind(party_id)
+            .bind(&party_id_str)
             .execute(&mut **self)
             .await?;
 
@@ -573,7 +580,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                 VALUES (?, ?)
                 ",
             )
-            .bind(party_id)
+            .bind(&party_id_str)
             .bind(owner)
             .execute(&mut **self)
             .await?;
@@ -584,9 +591,10 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
 
     async fn replace_dec_party_participants(
         &mut self,
-        party_id: &str,
+        party_id: &CantonId,
         participants: &[DecPartyParticipantRow],
     ) -> Result {
+        let party_id_str = party_id.to_string();
         // UPSERT each fresh row. permission may change (e.g., submission ->
         // confirmation); owner_key only ever transitions NULL -> Some, never
         // back to NULL. COALESCE keeps a previously-known fingerprint when
@@ -605,7 +613,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                     owner_key = COALESCE(excluded.owner_key, dec_party_participant.owner_key)
                 ",
             )
-            .bind(party_id)
+            .bind(&party_id_str)
             .bind(&p.participant_uid)
             .bind(&p.permission)
             .bind(&p.owner_key)
@@ -621,7 +629,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
             .collect();
         if fresh_uids.is_empty() {
             sqlx::query("DELETE FROM dec_party_participant WHERE dec_party_id = ?")
-                .bind(party_id)
+                .bind(&party_id_str)
                 .execute(&mut **self)
                 .await?;
         } else {
@@ -630,7 +638,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                 "DELETE FROM dec_party_participant WHERE dec_party_id = ? \
                  AND participant_uid NOT IN ({placeholders})"
             );
-            let mut q = sqlx::query(&query).bind(party_id);
+            let mut q = sqlx::query(&query).bind(&party_id_str);
             for uid in fresh_uids {
                 q = q.bind(uid);
             }
@@ -642,11 +650,12 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
 
     async fn replace_dec_party_contracts(
         &mut self,
-        party_id: &str,
+        party_id: &CantonId,
         contracts: &[DecPartyContractRow],
     ) -> Result {
+        let party_id_str = party_id.to_string();
         sqlx::query("DELETE FROM dec_party_contract WHERE dec_party_id = ?")
-            .bind(party_id)
+            .bind(&party_id_str)
             .execute(&mut **self)
             .await?;
 
@@ -664,7 +673,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 ",
             )
-            .bind(party_id)
+            .bind(&party_id_str)
             .bind(&c.contract_id)
             .bind(&c.template_id)
             .bind(&c.package_id)
@@ -727,7 +736,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
 
     async fn update_participant_owner_key(
         &mut self,
-        party_id: &str,
+        party_id: &CantonId,
         participant_uid: &str,
         owner_key: &str,
     ) -> Result {
@@ -739,7 +748,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
             ",
         )
         .bind(owner_key)
-        .bind(party_id)
+        .bind(party_id.to_string())
         .bind(participant_uid)
         .execute(&mut **self)
         .await?;
@@ -999,7 +1008,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
 
     async fn write_dec_party_identity(
         &mut self,
-        dec_party_id: &str,
+        dec_party_id: &CantonId,
         artifact_kind: &str,
         attestor_id: &str,
         payload: &[u8],
@@ -1017,7 +1026,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
             VALUES (?, ?, ?, ?, ?)
             ",
         )
-        .bind(dec_party_id)
+        .bind(dec_party_id.to_string())
         .bind(artifact_kind)
         .bind(attestor_id)
         .bind(&encrypted)
@@ -1216,9 +1225,10 @@ mod tests {
         tx.upsert_party_credentials(&test_creds("party-b")).await?;
         Commitable::commit(tx).await?;
 
-        let dec_id = format!("party-a::{TEST_NS}");
+        let dec_id = CantonId::parse(&format!("party-a::{TEST_NS}")).unwrap();
         assert!(pool.get_party_credentials(&dec_id).await?.is_some());
-        assert!(pool.get_party_credentials("nonexistent").await?.is_none());
+        let nonexistent = CantonId::parse(&format!("nonexistent::{TEST_NS}")).unwrap();
+        assert!(pool.get_party_credentials(&nonexistent).await?.is_none());
 
         Ok(())
     }
@@ -1254,7 +1264,8 @@ mod tests {
     async fn test_dec_party_owners(pool: SqlitePool) -> Result {
         let mut tx = pool.begin_transaction().await?;
         tx.upsert_dec_party(&test_dec_party("net-a")).await?;
-        let party_id = format!("net-a::{TEST_NS}");
+        let party_id_str = format!("net-a::{TEST_NS}");
+        let party_id = CantonId::parse(&party_id_str).unwrap();
         let owners = vec!["owner-key-1".to_string(), "owner-key-2".to_string()];
         tx.replace_dec_party_owners(&party_id, &owners).await?;
         Commitable::commit(tx).await?;
@@ -1279,16 +1290,17 @@ mod tests {
     async fn test_dec_party_participants(pool: SqlitePool) -> Result {
         let mut tx = pool.begin_transaction().await?;
         tx.upsert_dec_party(&test_dec_party("net-a")).await?;
-        let party_id = format!("net-a::{TEST_NS}");
+        let party_id_str = format!("net-a::{TEST_NS}");
+        let party_id = CantonId::parse(&party_id_str).unwrap();
         let participants = vec![
             DecPartyParticipantRow {
-                dec_party_id: party_id.clone(),
+                dec_party_id: party_id_str.clone(),
                 participant_uid: "node1::1220aa".to_string(),
                 permission: "submission".to_string(),
                 owner_key: Some("fingerprint-1".to_string()),
             },
             DecPartyParticipantRow {
-                dec_party_id: party_id.clone(),
+                dec_party_id: party_id_str.clone(),
                 participant_uid: "node2::1220bb".to_string(),
                 permission: "confirmation".to_string(),
                 owner_key: None,
@@ -1311,13 +1323,14 @@ mod tests {
     async fn test_replace_preserves_owner_key_when_incoming_is_null(pool: SqlitePool) -> Result {
         let mut tx = pool.begin_transaction().await?;
         tx.upsert_dec_party(&test_dec_party("net-a")).await?;
-        let party_id = format!("net-a::{TEST_NS}");
+        let party_id_str = format!("net-a::{TEST_NS}");
+        let party_id = CantonId::parse(&party_id_str).unwrap();
 
         // First write — owner_key is known.
         tx.replace_dec_party_participants(
             &party_id,
             &[DecPartyParticipantRow {
-                dec_party_id: party_id.clone(),
+                dec_party_id: party_id_str.clone(),
                 participant_uid: "node1::1220aa".to_string(),
                 permission: "submission".to_string(),
                 owner_key: Some("fingerprint-1".to_string()),
@@ -1332,7 +1345,7 @@ mod tests {
         tx.replace_dec_party_participants(
             &party_id,
             &[DecPartyParticipantRow {
-                dec_party_id: party_id.clone(),
+                dec_party_id: party_id_str.clone(),
                 participant_uid: "node1::1220aa".to_string(),
                 permission: "submission".to_string(),
                 owner_key: None,
@@ -1360,11 +1373,12 @@ mod tests {
         // UPSERT could COALESCE them back.
         let mut tx = pool.begin_transaction().await?;
         tx.upsert_dec_party(&test_dec_party("net-a")).await?;
-        let party_id = format!("net-a::{TEST_NS}");
+        let party_id_str = format!("net-a::{TEST_NS}");
+        let party_id = CantonId::parse(&party_id_str).unwrap();
         tx.replace_dec_party_participants(
             &party_id,
             &[DecPartyParticipantRow {
-                dec_party_id: party_id.clone(),
+                dec_party_id: party_id_str.clone(),
                 participant_uid: "node1::1220aa".to_string(),
                 permission: "submission".to_string(),
                 owner_key: Some("fingerprint-1".to_string()),
@@ -1401,7 +1415,7 @@ mod tests {
         tx.replace_dec_party_participants(
             &party_id,
             &[DecPartyParticipantRow {
-                dec_party_id: party_id.clone(),
+                dec_party_id: party_id_str.clone(),
                 participant_uid: "node1::1220aa".to_string(),
                 permission: "submission".to_string(),
                 owner_key: None,
@@ -1429,20 +1443,21 @@ mod tests {
         // the party must be removed from the cache.
         let mut tx = pool.begin_transaction().await?;
         tx.upsert_dec_party(&test_dec_party("net-a")).await?;
-        let party_id = format!("net-a::{TEST_NS}");
+        let party_id_str = format!("net-a::{TEST_NS}");
+        let party_id = CantonId::parse(&party_id_str).unwrap();
         let p1 = "node1::1220aa";
         let p2 = "node2::1220bb";
         tx.replace_dec_party_participants(
             &party_id,
             &[
                 DecPartyParticipantRow {
-                    dec_party_id: party_id.clone(),
+                    dec_party_id: party_id_str.clone(),
                     participant_uid: p1.to_string(),
                     permission: "submission".to_string(),
                     owner_key: Some("fp-1".to_string()),
                 },
                 DecPartyParticipantRow {
-                    dec_party_id: party_id.clone(),
+                    dec_party_id: party_id_str.clone(),
                     participant_uid: p2.to_string(),
                     permission: "submission".to_string(),
                     owner_key: Some("fp-2".to_string()),
@@ -1458,7 +1473,7 @@ mod tests {
         tx.replace_dec_party_participants(
             &party_id,
             &[DecPartyParticipantRow {
-                dec_party_id: party_id.clone(),
+                dec_party_id: party_id_str.clone(),
                 participant_uid: p1.to_string(),
                 permission: "submission".to_string(),
                 owner_key: Some("fp-1".to_string()),
@@ -1483,18 +1498,19 @@ mod tests {
     async fn test_get_dec_party_participant_owner_key(pool: SqlitePool) -> Result {
         let mut tx = pool.begin_transaction().await?;
         tx.upsert_dec_party(&test_dec_party("net-a")).await?;
-        let party_id = format!("net-a::{TEST_NS}");
+        let party_id_str = format!("net-a::{TEST_NS}");
+        let party_id = CantonId::parse(&party_id_str).unwrap();
         tx.replace_dec_party_participants(
             &party_id,
             &[
                 DecPartyParticipantRow {
-                    dec_party_id: party_id.clone(),
+                    dec_party_id: party_id_str.clone(),
                     participant_uid: "node1::1220aa".to_string(),
                     permission: "submission".to_string(),
                     owner_key: Some("fingerprint-1".to_string()),
                 },
                 DecPartyParticipantRow {
-                    dec_party_id: party_id.clone(),
+                    dec_party_id: party_id_str.clone(),
                     participant_uid: "node2::1220bb".to_string(),
                     permission: "confirmation".to_string(),
                     owner_key: None,
@@ -1527,10 +1543,11 @@ mod tests {
     async fn test_dec_party_contracts(pool: SqlitePool) -> Result {
         let mut tx = pool.begin_transaction().await?;
         tx.upsert_dec_party(&test_dec_party("net-a")).await?;
-        let party_id = format!("net-a::{TEST_NS}");
+        let party_id_str = format!("net-a::{TEST_NS}");
+        let party_id = CantonId::parse(&party_id_str).unwrap();
         let contracts = vec![
             DecPartyContractRow {
-                dec_party_id: party_id.clone(),
+                dec_party_id: party_id_str.clone(),
                 contract_id: "contract-1".to_string(),
                 template_id: "Governance:GovernanceRules".to_string(),
                 package_id: "#gov-core".to_string(),
@@ -1539,7 +1556,7 @@ mod tests {
                 created_at: "2026-04-28T11:07:59.073177Z".to_string(),
             },
             DecPartyContractRow {
-                dec_party_id: party_id.clone(),
+                dec_party_id: party_id_str.clone(),
                 contract_id: "contract-2".to_string(),
                 template_id: "Vault:Vault".to_string(),
                 package_id: "#vault".to_string(),
@@ -1561,7 +1578,8 @@ mod tests {
 
     #[sqlx::test(migrator = "MIGRATOR")]
     async fn test_delete_dec_parties_cascades(pool: SqlitePool) -> Result {
-        let party_id = format!("net-a::{TEST_NS}");
+        let party_id_str = format!("net-a::{TEST_NS}");
+        let party_id = CantonId::parse(&party_id_str).unwrap();
 
         let mut tx = pool.begin_transaction().await?;
         tx.upsert_dec_party(&test_dec_party("net-a")).await?;
@@ -1570,7 +1588,7 @@ mod tests {
         tx.replace_dec_party_participants(
             &party_id,
             &[DecPartyParticipantRow {
-                dec_party_id: party_id.clone(),
+                dec_party_id: party_id_str.clone(),
                 participant_uid: "node1".to_string(),
                 permission: "submission".to_string(),
                 owner_key: None,
@@ -1580,7 +1598,7 @@ mod tests {
         tx.replace_dec_party_contracts(
             &party_id,
             &[DecPartyContractRow {
-                dec_party_id: party_id.clone(),
+                dec_party_id: party_id_str.clone(),
                 contract_id: "c1".to_string(),
                 template_id: "t1".to_string(),
                 package_id: "p1".to_string(),

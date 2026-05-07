@@ -70,7 +70,7 @@ async fn run_workflow(
     workflow_auth: Option<WorkflowAuth>,
 ) -> Result {
     let instance_name = config.instance_name.clone();
-    let dec_party_id = config.decentralized_party_id.to_string();
+    let dec_party_id = config.decentralized_party_id.clone();
 
     // Get credentials for the decentralized party
     let auth = workflow_auth

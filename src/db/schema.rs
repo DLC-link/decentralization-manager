@@ -28,30 +28,36 @@ pub trait SchemaRead {
     async fn get_peer_by_public_key(&self, public_key: &str) -> Result<Option<Peer>>;
 
     /// Get party credentials by decentralized party ID
-    async fn get_party_credentials(&self, dec_party_id: &str) -> Result<Option<PartyCredentials>>;
+    async fn get_party_credentials(
+        &self,
+        dec_party_id: &CantonId,
+    ) -> Result<Option<PartyCredentials>>;
 
     /// Get cached decentralized parties by prefix
     async fn get_dec_parties_by_prefix(&self, prefix: &str) -> Result<Vec<DecPartyRow>>;
 
     /// Get owner keys for a decentralized party
-    async fn get_dec_party_owners(&self, party_id: &str) -> Result<Vec<String>>;
+    async fn get_dec_party_owners(&self, party_id: &CantonId) -> Result<Vec<String>>;
 
     /// Get participants for a decentralized party
     async fn get_dec_party_participants(
         &self,
-        party_id: &str,
+        party_id: &CantonId,
     ) -> Result<Vec<DecPartyParticipantRow>>;
 
     /// Get the owner key for a specific participant in a decentralized party.
     /// Returns `None` if the row is missing or the `owner_key` column is NULL.
     async fn get_dec_party_participant_owner_key(
         &self,
-        party_id: &str,
+        party_id: &CantonId,
         participant_uid: &str,
     ) -> Result<Option<String>>;
 
     /// Get contracts for a decentralized party
-    async fn get_dec_party_contracts(&self, party_id: &str) -> Result<Vec<DecPartyContractRow>>;
+    async fn get_dec_party_contracts(
+        &self,
+        party_id: &CantonId,
+    ) -> Result<Vec<DecPartyContractRow>>;
 
     /// Get all owners for parties matching a prefix (bulk query)
     async fn get_all_dec_party_owners(&self, prefix: &str) -> Result<Vec<(String, String)>>;
@@ -76,7 +82,7 @@ pub trait SchemaRead {
     /// Get cached chain audit entries for a party, newest first
     async fn get_chain_audit_cache(
         &self,
-        party_id: &str,
+        party_id: &CantonId,
         limit: i64,
     ) -> Result<Vec<ChainAuditCacheRow>>;
 
@@ -126,7 +132,7 @@ pub trait SchemaRead {
     /// material that survives the originating onboarding run's dismissal.
     async fn read_dec_party_identity(
         &self,
-        dec_party_id: &str,
+        dec_party_id: &CantonId,
         artifact_kind: &str,
         attestor_id: &str,
     ) -> Result<Option<Vec<u8>>>;
@@ -135,7 +141,7 @@ pub trait SchemaRead {
     /// returning `(attestor_id, payload)` pairs sorted by attestor_id.
     async fn list_dec_party_identity(
         &self,
-        dec_party_id: &str,
+        dec_party_id: &CantonId,
         artifact_kind: &str,
     ) -> Result<Vec<(String, Vec<u8>)>>;
 }
@@ -168,19 +174,19 @@ pub trait Commitable {
     async fn upsert_dec_party(&mut self, row: &DecPartyRow) -> Result;
 
     /// Replace all owners for a decentralized party
-    async fn replace_dec_party_owners(&mut self, party_id: &str, owners: &[String]) -> Result;
+    async fn replace_dec_party_owners(&mut self, party_id: &CantonId, owners: &[String]) -> Result;
 
     /// Replace all participants for a decentralized party
     async fn replace_dec_party_participants(
         &mut self,
-        party_id: &str,
+        party_id: &CantonId,
         participants: &[DecPartyParticipantRow],
     ) -> Result;
 
     /// Replace all contracts for a decentralized party
     async fn replace_dec_party_contracts(
         &mut self,
-        party_id: &str,
+        party_id: &CantonId,
         contracts: &[DecPartyContractRow],
     ) -> Result;
 
@@ -193,7 +199,7 @@ pub trait Commitable {
     /// Update the owner key for a specific participant in a decentralized party
     async fn update_participant_owner_key(
         &mut self,
-        party_id: &str,
+        party_id: &CantonId,
         participant_uid: &str,
         owner_key: &str,
     ) -> Result;
@@ -249,7 +255,7 @@ pub trait Commitable {
     /// Insert/replace a single identity artefact for a dec party.
     async fn write_dec_party_identity(
         &mut self,
-        dec_party_id: &str,
+        dec_party_id: &CantonId,
         artifact_kind: &str,
         attestor_id: &str,
         payload: &[u8],

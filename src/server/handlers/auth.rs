@@ -10,6 +10,7 @@ use crate::{
     auth::WorkflowAuth,
     config::NodeConfig,
     error::Result,
+    participant_id::CantonId,
     server::{
         AppState,
         middleware::require_admin,
@@ -62,9 +63,13 @@ pub async fn get_auth_status(data: web::Data<AppState>) -> impl Responder {
     // Handle test mode - return mock status
     if let Some(WorkflowAuth::Mock(ref mock_registry)) = *auth {
         let manager = mock_registry.get_by_str("").await;
+        // In test mode we don't have a real dec_party / member_party pair,
+        // so we surface the mock's member_party_id for both. Real auth flows
+        // overwrite this with the configured creds below.
+        let mock_member = manager.member_party_id().clone();
         party_statuses.push(PartyAuthStatus {
-            dec_party_id: "(test mode)".to_string(),
-            member_party_id: "(test mode)".to_string(),
+            dec_party_id: mock_member.clone(),
+            member_party_id: mock_member,
             user_id: manager.user_id().to_string(),
             keycloak_url: None,
             keycloak_realm: None,
@@ -80,8 +85,8 @@ pub async fn get_auth_status(data: web::Data<AppState>) -> impl Responder {
 
     // Check each configured party
     for party_creds in party_creds_list.iter() {
-        let dec_party_id = party_creds.dec_party_id.to_string();
-        let member_party_id = party_creds.member_party_id.to_string();
+        let dec_party_id = party_creds.dec_party_id.clone();
+        let member_party_id = party_creds.member_party_id.clone();
         let user_id = party_creds.user_id.clone();
 
         // Try to get a token from the auth registry
@@ -157,13 +162,16 @@ async fn check_user_rights(
     config: &NodeConfig,
     token: &str,
     user_id: &str,
-    member_party_id: &str,
-    dec_party_id: &str,
+    member_party_id: &CantonId,
+    dec_party_id: &CantonId,
 ) -> Result<RightsStatus> {
     let mut client = utils::create_user_client(config, Some(token.to_string())).await?;
 
     // For M2M auth, the actual user_id in Canton is from JWT's 'sub' claim
     let effective_user_id = extract_user_id_from_jwt(token).unwrap_or_else(|| user_id.to_string());
+
+    let member_party_id_str = member_party_id.to_string();
+    let dec_party_id_str = dec_party_id.to_string();
 
     tracing::debug!(
         "Checking rights for user_id={effective_user_id} (configured: {user_id}), member_party={member_party_id}, dec_party={dec_party_id}"
@@ -191,19 +199,19 @@ async fn check_user_rights(
         match right.kind {
             Some(Kind::CanActAs(CanActAs { ref party })) => {
                 tracing::debug!("  CanActAs: {party}");
-                if party == member_party_id {
+                if party == &member_party_id_str {
                     member_party_act_as = true;
                 }
-                if party == dec_party_id {
+                if party == &dec_party_id_str {
                     dec_party_act_as = true;
                 }
             }
             Some(Kind::CanReadAs(CanReadAs { ref party })) => {
                 tracing::debug!("  CanReadAs: {party}");
-                if party == member_party_id {
+                if party == &member_party_id_str {
                     member_party_read_as = true;
                 }
-                if party == dec_party_id {
+                if party == &dec_party_id_str {
                     dec_party_read_as = true;
                 }
             }
@@ -232,9 +240,12 @@ pub async fn test_auth(data: web::Data<AppState>) -> impl Responder {
 
     // Handle test mode - mock auth always succeeds
     let auth = data.auth.read().await;
-    if matches!(*auth, Some(WorkflowAuth::Mock(_))) {
+    if let Some(WorkflowAuth::Mock(ref mock_registry)) = *auth {
+        // No real dec_party in mock — surface the mock's member party so the
+        // wire format stays a valid CantonId.
+        let manager = mock_registry.get_by_str("").await;
         results.push(AuthTestResult {
-            party_id: "(test mode)".to_string(),
+            party_id: manager.member_party_id().clone(),
             success: true,
             error: None,
         });
@@ -244,7 +255,7 @@ pub async fn test_auth(data: web::Data<AppState>) -> impl Responder {
 
     let party_creds_list = data.party_credentials.read().await;
     for party_creds in party_creds_list.iter() {
-        let dec_party_id = party_creds.dec_party_id.to_string();
+        let dec_party_id = party_creds.dec_party_id.clone();
 
         // Attempt fresh authentication
         let result = test_keycloak_auth(&party_creds.keycloak).await;
@@ -337,8 +348,8 @@ pub async fn grant_rights(
         }
     };
 
-    let member_party_id = party_creds.member_party_id.to_string();
-    let dec_party_id = party_creds.dec_party_id.to_string();
+    let member_party_id = party_creds.member_party_id.clone();
+    let dec_party_id = party_creds.dec_party_id.clone();
     let user_id = party_creds.user_id.clone();
     let token_url = password_url(&party_creds.keycloak.url, &party_creds.keycloak.realm);
 
@@ -391,8 +402,8 @@ async fn grant_user_rights(
     admin_token: &str,
     party_token: &str,
     user_id: &str,
-    member_party_id: &str,
-    dec_party_id: &str,
+    member_party_id: &CantonId,
+    dec_party_id: &CantonId,
 ) -> Result<RightsStatus> {
     let mut client = utils::create_user_client(config, Some(admin_token.to_string())).await?;
 
@@ -404,11 +415,13 @@ async fn grant_user_rights(
          member_party={member_party_id}, dec_party={dec_party_id}"
     );
 
+    let member_party_id_str = member_party_id.to_string();
+    let dec_party_id_str = dec_party_id.to_string();
     let rights = vec![
-        right_act_as(member_party_id),
-        right_read_as(member_party_id),
-        right_act_as(dec_party_id),
-        right_read_as(dec_party_id),
+        right_act_as(&member_party_id_str),
+        right_read_as(&member_party_id_str),
+        right_act_as(&dec_party_id_str),
+        right_read_as(&dec_party_id_str),
     ];
 
     let response = client

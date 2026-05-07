@@ -16,6 +16,7 @@ use sqlx::SqlitePool;
 use crate::{
     db::schema::{Commitable, SchemaRead, SchemaWrite},
     error::Result,
+    participant_id::CantonId,
 };
 
 /// Stable string identifiers for every artefact kind we persist. Step code
@@ -125,7 +126,7 @@ pub trait WorkflowStorage: Send + Sync {
     /// no row exists for that combination.
     async fn read_identity(
         &self,
-        dec_party_id: &str,
+        dec_party_id: &CantonId,
         artifact_kind: &str,
         attestor_id: &str,
     ) -> Result<Option<Vec<u8>>>;
@@ -134,7 +135,7 @@ pub trait WorkflowStorage: Send + Sync {
     /// returning `(attestor_id, payload)` pairs sorted by attestor id.
     async fn list_identity(
         &self,
-        dec_party_id: &str,
+        dec_party_id: &CantonId,
         artifact_kind: &str,
     ) -> Result<Vec<(String, Vec<u8>)>>;
 
@@ -144,7 +145,7 @@ pub trait WorkflowStorage: Send + Sync {
     /// dec_party_id.
     async fn write_identity(
         &self,
-        dec_party_id: &str,
+        dec_party_id: &CantonId,
         artifact_kind: &str,
         attestor_id: &str,
         payload: &[u8],
@@ -184,7 +185,7 @@ impl WorkflowStorage for SqlitePool {
 
     async fn read_identity(
         &self,
-        dec_party_id: &str,
+        dec_party_id: &CantonId,
         artifact_kind: &str,
         attestor_id: &str,
     ) -> Result<Option<Vec<u8>>> {
@@ -193,7 +194,7 @@ impl WorkflowStorage for SqlitePool {
 
     async fn list_identity(
         &self,
-        dec_party_id: &str,
+        dec_party_id: &CantonId,
         artifact_kind: &str,
     ) -> Result<Vec<(String, Vec<u8>)>> {
         SchemaRead::list_dec_party_identity(self, dec_party_id, artifact_kind).await
@@ -201,7 +202,7 @@ impl WorkflowStorage for SqlitePool {
 
     async fn write_identity(
         &self,
-        dec_party_id: &str,
+        dec_party_id: &CantonId,
         artifact_kind: &str,
         attestor_id: &str,
         payload: &[u8],

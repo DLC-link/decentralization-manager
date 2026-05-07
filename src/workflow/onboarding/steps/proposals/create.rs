@@ -163,7 +163,8 @@ pub async fn create_proposals(
         owners: owners_vec,
     };
 
-    let party_id = format!("{party_id_prefix}::{decentralized_namespace}");
+    let party_id_str = format!("{party_id_prefix}::{decentralized_namespace}");
+    let party_id = CantonId::parse(&party_id_str)?;
     tracing::info!("Party ID: {party_id}");
 
     // Persist the resolved party ID — the HTTP path reads this artefact after
@@ -174,7 +175,7 @@ pub async fn create_proposals(
             instance_name,
             artifact_kinds::PARTY_ID,
             None,
-            party_id.as_bytes(),
+            party_id_str.as_bytes(),
         )
         .await?;
 
@@ -211,7 +212,7 @@ pub async fn create_proposals(
     // Step 9: Create PartyToParticipant mapping
     // Canton 3.4: PartyToParticipant now includes signing keys (PartyToKeyMapping is deprecated)
     let p2p_mapping = PartyToParticipant {
-        party: party_id.clone(),
+        party: party_id_str.clone(),
         threshold,
         participants: participant_ids
             .iter()

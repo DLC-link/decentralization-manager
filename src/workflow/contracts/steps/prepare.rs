@@ -12,6 +12,7 @@ use crate::{
     config::{NetworkConfig, NodeConfig},
     consts::MIN_PARTICIPANTS_CONTRACTS,
     error::Result,
+    participant_id::CantonId,
     utils,
     workflow::{
         contracts::{ContractsConfig, FieldDefinition},
@@ -51,17 +52,13 @@ pub async fn prepare_submissions(
     tracing::info!("Preparing submissions...");
 
     // Use the decentralized party ID from config
-    let decentralized_registrar = contracts_config.decentralized_party_id.to_string();
+    let decentralized_registrar = contracts_config.decentralized_party_id.clone();
     tracing::debug!("Using decentralized party: {decentralized_registrar}");
 
     let token_opt = Some(token.to_string());
 
     // Get participant parties from config (provided by API caller)
-    let participant_parties: Vec<String> = contracts_config
-        .participant_parties
-        .iter()
-        .map(|p| p.to_string())
-        .collect();
+    let participant_parties: Vec<CantonId> = contracts_config.participant_parties.clone();
 
     // Validate participant count
     if participant_parties.is_empty() {
@@ -78,11 +75,15 @@ pub async fn prepare_submissions(
     tracing::info!(
         "Parties for {count} participants: {parties}",
         count = participant_parties.len(),
-        parties = participant_parties.join(", ")
+        parties = participant_parties
+            .iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
     );
 
     // Get operator party from config
-    let operator = contracts_config.operator_party.to_string();
+    let operator = contracts_config.operator_party.clone();
     tracing::info!("Operator party: {operator}");
 
     // Build context for field value building
@@ -139,7 +140,7 @@ pub async fn prepare_submissions(
                 commands: vec![create_command],
                 min_ledger_time: None,
                 max_record_time: None,
-                act_as: vec![decentralized_registrar.clone()],
+                act_as: vec![decentralized_registrar.to_string()],
                 read_as: vec![],
                 disclosed_contracts: vec![],
                 synchronizer_id: String::new(),
@@ -190,9 +191,9 @@ fn encode_length_prefixed_message(message: &PrepareSubmissionResponse) -> Vec<u8
 
 /// Context for building field values in contract submissions
 struct SubmissionContext {
-    decentralized_party: String,
-    operator_party: String,
-    participant_parties: Vec<String>,
+    decentralized_party: CantonId,
+    operator_party: CantonId,
+    participant_parties: Vec<CantonId>,
     governance_threshold: i64,
 }
 
@@ -211,9 +212,9 @@ fn build_record_field(
 fn build_field_value(field_def: &FieldDefinition, context: &SubmissionContext) -> Result<Value> {
     let sum = match field_def {
         FieldDefinition::DecentralizedParty => {
-            value::Sum::Party(context.decentralized_party.clone())
+            value::Sum::Party(context.decentralized_party.to_string())
         }
-        FieldDefinition::OperatorParty => value::Sum::Party(context.operator_party.clone()),
+        FieldDefinition::OperatorParty => value::Sum::Party(context.operator_party.to_string()),
         FieldDefinition::ParticipantParty { id } => value::Sum::Party(id.to_string()),
         FieldDefinition::Text { value: text } => value::Sum::Text(text.clone()),
         FieldDefinition::Int64 { value: num } => value::Sum::Int64(*num),
@@ -226,7 +227,7 @@ fn build_field_value(field_def: &FieldDefinition, context: &SubmissionContext) -
                     RecordField {
                         label: String::new(),
                         value: Some(Value {
-                            sum: Some(value::Sum::Party(context.decentralized_party.clone())),
+                            sum: Some(value::Sum::Party(context.decentralized_party.to_string())),
                         }),
                     },
                     RecordField {
@@ -249,7 +250,7 @@ fn build_field_value(field_def: &FieldDefinition, context: &SubmissionContext) -
                     .iter()
                     .map(|party| gen_map::Entry {
                         key: Some(Value {
-                            sum: Some(value::Sum::Party(party.clone())),
+                            sum: Some(value::Sum::Party(party.to_string())),
                         }),
                         value: Some(unit.clone()),
                     })

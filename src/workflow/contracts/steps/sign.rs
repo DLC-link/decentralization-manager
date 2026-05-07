@@ -22,6 +22,7 @@ use crate::{
     config::NodeConfig,
     consts::CANTON_PROTOCOL_VERSION,
     error::Result,
+    participant_id::CantonId,
     utils,
     workflow::storage::{WorkflowStorage, artifact_kinds, identity_kinds},
 };
@@ -51,7 +52,7 @@ pub async fn sign_submissions(
     config: &NodeConfig,
     db: &SqlitePool,
     instance_name: &str,
-    dec_party_id: &str,
+    dec_party_id: &CantonId,
 ) -> Result {
     tracing::info!("Signing submissions...");
 
@@ -483,8 +484,9 @@ fn encode_messages_length_prefixed<M: prost::Message>(messages: &[M]) -> Vec<u8>
 /// shape valid; the caller only reads `[1]`.
 async fn backfill_attestor_keys_from_chain(
     config: &NodeConfig,
-    dec_party_id: &str,
+    dec_party_id: &CantonId,
 ) -> Result<Option<Vec<u8>>> {
+    let dec_party_id_str = dec_party_id.to_string();
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
 
     // 1. Pull this party's PartyToParticipant from Canton's topology store.
@@ -504,7 +506,7 @@ async fn backfill_attestor_keys_from_chain(
                 filter_signed_key: String::new(),
                 protocol_version: None,
             }),
-            filter_party: dec_party_id.to_string(),
+            filter_party: dec_party_id_str.clone(),
             filter_participant: String::new(),
         }))
         .await?
@@ -570,9 +572,10 @@ async fn backfill_attestor_keys_from_chain(
 /// `dec_party_identity` write hook was added.
 async fn backfill_attestor_keys(
     db: &SqlitePool,
-    dec_party_id: &str,
+    dec_party_id: &CantonId,
     node_id: &str,
 ) -> Result<Option<Vec<u8>>> {
+    let dec_party_id_str = dec_party_id.to_string();
     let row: Option<(Vec<u8>,)> = sqlx::query_as(
         "SELECT a.payload \
          FROM workflow_artifacts a \
@@ -585,7 +588,7 @@ async fn backfill_attestor_keys(
          ORDER BY r.updated_at DESC \
          LIMIT 1",
     )
-    .bind(dec_party_id)
+    .bind(&dec_party_id_str)
     .bind(node_id)
     .fetch_optional(db)
     .await?;

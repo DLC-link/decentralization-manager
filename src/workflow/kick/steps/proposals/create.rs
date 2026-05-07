@@ -17,6 +17,7 @@ use sqlx::SqlitePool;
 use crate::{
     config::NodeConfig,
     error::Result,
+    participant_id::CantonId,
     utils,
     workflow::{
         kick::KickConfig,
@@ -98,11 +99,12 @@ pub async fn create_proposals(
     };
 
     // Get party ID using prefix from decentralized party ID (provided via UI)
-    let party_id = format!(
+    let party_id_str = format!(
         "{party_id_prefix}::{namespace}",
         party_id_prefix = kick_config.decentralized_party_id.prefix,
         namespace = current_namespace_def.decentralized_namespace
     );
+    let party_id = CantonId::parse(&party_id_str)?;
     tracing::info!("Party ID: {party_id}");
 
     // Read current P2P mapping to get the current state
@@ -135,7 +137,7 @@ pub async fn create_proposals(
     }
 
     let new_p2p = PartyToParticipant {
-        party: party_id.clone(),
+        party: party_id_str.clone(),
         threshold: new_threshold.try_into()?,
         participants: new_participants,
         party_signing_keys: current_p2p.party_signing_keys,
@@ -258,8 +260,9 @@ pub async fn create_proposals(
 async fn get_current_p2p_mapping(
     config: &NodeConfig,
     synchronizer_id: &str,
-    party_id: &str,
+    party_id: &CantonId,
 ) -> Result<PartyToParticipant> {
+    let party_id_str = party_id.to_string();
     let mut topology_read_client =
         TopologyManagerReadServiceClient::connect(config.admin_api_url()).await?;
 
@@ -276,7 +279,7 @@ async fn get_current_p2p_mapping(
             filter_signed_key: String::new(),
             protocol_version: None,
         }),
-        filter_party: party_id.to_string(),
+        filter_party: party_id_str,
         filter_participant: String::new(),
     });
 

@@ -12,6 +12,7 @@ use sqlx::SqlitePool;
 
 use crate::{
     config::{NodeConfig, PackageConfig},
+    participant_id::CantonId,
     utils,
 };
 
@@ -207,11 +208,13 @@ fn optional_value_to_json(v: &Option<Value>) -> JsonValue {
 /// Returns an error if the ledger connection fails or the stream errors out.
 pub async fn get_chain_audit(
     config: &NodeConfig,
-    party_id: &str,
+    party_id: &CantonId,
     token: Option<String>,
     packages: &PackageConfig,
     limit: usize,
 ) -> Result<Vec<ChainAuditEntry>> {
+    let party_id_str = party_id.to_string();
+    let party_id = party_id_str.as_str();
     let mut state_client = utils::create_state_client(config, token.clone()).await?;
     let ledger_end = state_client
         .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
@@ -412,9 +415,10 @@ pub async fn get_chain_audit(
 /// Uses INSERT OR IGNORE to skip duplicates based on (party_id, offset, contract_id, event_type).
 pub async fn save_chain_audit_cache(
     pool: &SqlitePool,
-    party_id: &str,
+    party_id: &CantonId,
     entries: &[ChainAuditEntry],
 ) {
+    let party_id_str = party_id.to_string();
     for entry in entries {
         let acting_parties = serde_json::to_string(&entry.acting_parties).unwrap_or_default();
         let details = entry.details.to_string();
@@ -428,7 +432,7 @@ pub async fn save_chain_audit_cache(
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ",
         )
-        .bind(party_id)
+        .bind(&party_id_str)
         .bind(entry.offset)
         .bind(entry.timestamp)
         .bind(&entry.event_type)

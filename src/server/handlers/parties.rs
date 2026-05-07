@@ -294,10 +294,18 @@ pub async fn resolve_owner_keys_from_peers(
                     continue;
                 };
 
-                if known_party_ids.contains(party_id)
-                    && let Err(e) = tx
-                        .update_participant_owner_key(party_id, &peer_uid, owner_key)
-                        .await
+                if !known_party_ids.contains(party_id) {
+                    continue;
+                }
+                let Ok(party_id_canton) = CantonId::parse(party_id) else {
+                    tracing::debug!(
+                        "Skipping owner-key update from {peer_uid}: bad party_id {party_id}"
+                    );
+                    continue;
+                };
+                if let Err(e) = tx
+                    .update_participant_owner_key(&party_id_canton, &peer_uid, owner_key)
+                    .await
                 {
                     tracing::debug!("Failed to update owner key for {peer_uid}: {e}");
                 }
@@ -424,7 +432,7 @@ pub async fn store_parties_to_db(
         };
         tx.upsert_dec_party(&row).await?;
 
-        tx.replace_dec_party_owners(&row.party_id, &party.owners)
+        tx.replace_dec_party_owners(&party.party_id, &party.owners)
             .await?;
 
         let participants: Vec<DecPartyParticipantRow> = party
@@ -443,7 +451,7 @@ pub async fn store_parties_to_db(
                 owner_key: p.owner_key.clone(),
             })
             .collect();
-        tx.replace_dec_party_participants(&row.party_id, &participants)
+        tx.replace_dec_party_participants(&party.party_id, &participants)
             .await?;
 
         let contracts: Vec<DecPartyContractRow> = party
@@ -459,7 +467,7 @@ pub async fn store_parties_to_db(
                 created_at: c.created_at.clone(),
             })
             .collect();
-        tx.replace_dec_party_contracts(&row.party_id, &contracts)
+        tx.replace_dec_party_contracts(&party.party_id, &contracts)
             .await?;
     }
 
@@ -588,7 +596,10 @@ pub async fn fetch_decentralized_parties(
             let auth = auth.clone();
             let party_id_str = p2p.party.clone();
             async move {
-                // Get token for this party from auth (real or mock)
+                let party_id = CantonId::parse(&p2p.party)?;
+                // Get token for this party from auth (real or mock).
+                // Registry uses raw string keys (`_by_str`) so we still
+                // need party_id_str for lookup.
                 let token = match &auth {
                     Some(WorkflowAuth::Keycloak(registry)) => {
                         match registry.get_by_str(&party_id_str) {
@@ -607,7 +618,7 @@ pub async fn fetch_decentralized_parties(
                 let (contracts, local_metadata) = if token.is_some() || test_mode {
                     tokio::join!(
                         async {
-                            get_contracts(&config, &party_id_str, token, test_mode, &packages)
+                            get_contracts(&config, &party_id, token, test_mode, &packages)
                                 .await
                                 .unwrap_or_else(|e| {
                                     tracing::warn!(
@@ -617,7 +628,7 @@ pub async fn fetch_decentralized_parties(
                                 })
                         },
                         async {
-                            get_party_metadata(&config, &party_id_str, token_clone)
+                            get_party_metadata(&config, &party_id, token_clone)
                                 .await
                                 .ok()
                                 .flatten()
@@ -627,7 +638,6 @@ pub async fn fetch_decentralized_parties(
                     (Vec::new(), None)
                 };
 
-                let party_id = CantonId::parse(&p2p.party)?;
                 let self_uid = config.participant_id().to_string();
                 let participants = p2p
                     .participants

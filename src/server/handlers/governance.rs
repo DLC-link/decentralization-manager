@@ -85,19 +85,18 @@ pub async fn get_governance(
     query: web::Query<GovernanceQuery>,
 ) -> impl Responder {
     let party_id = &query.party_id;
-    let party_id_str = party_id.to_string();
 
     let token = get_party_token(&data, party_id).await;
     let test_mode = data.test_mode;
 
-    let threshold = get_party_threshold(&data, &party_id_str).await.unwrap_or(2);
+    let threshold = get_party_threshold(&data, party_id).await.unwrap_or(2);
 
     let member_party_id = get_member_party_id(&data, party_id).await;
     let packages = packages();
 
     match get_governance_confirmations(
         &data.config,
-        &party_id_str,
+        party_id,
         threshold,
         token,
         test_mode,
@@ -135,13 +134,12 @@ pub async fn get_governance_state(
     query: web::Query<GovernanceQuery>,
 ) -> impl Responder {
     let party_id = &query.party_id;
-    let party_id_str = party_id.to_string();
 
     let token = get_party_token(&data, party_id).await;
     let test_mode = data.test_mode;
     let packages = packages();
 
-    match query_governance_state(&data.config, &party_id_str, token, test_mode, &packages).await {
+    match query_governance_state(&data.config, party_id, token, test_mode, &packages).await {
         Ok(state) => HttpResponse::Ok().json(GovernanceStateResponse { state }),
         Err(e) => {
             tracing::error!("Failed to fetch governance state: {e}");
@@ -287,13 +285,12 @@ pub async fn get_vaults_handler(
     query: web::Query<GovernanceQuery>,
 ) -> impl Responder {
     let party_id = &query.party_id;
-    let party_id_str = party_id.to_string();
 
     let token = get_party_token(&data, party_id).await;
     let test_mode = data.test_mode;
     let packages = packages();
 
-    match get_vaults(&data.config, &party_id_str, token, test_mode, &packages).await {
+    match get_vaults(&data.config, party_id, token, test_mode, &packages).await {
         Ok(vaults) => HttpResponse::Ok().json(VaultsResponse { vaults }),
         Err(e) => {
             tracing::error!("Failed to fetch vaults: {e}");
@@ -319,13 +316,12 @@ pub async fn get_provider_services_handler(
     query: web::Query<GovernanceQuery>,
 ) -> impl Responder {
     let party_id = &query.party_id;
-    let party_id_str = party_id.to_string();
 
     let token = get_party_token(&data, party_id).await;
     let test_mode = data.test_mode;
     let packages = packages();
 
-    match get_provider_services(&data.config, &party_id_str, token, test_mode, &packages).await {
+    match get_provider_services(&data.config, party_id, token, test_mode, &packages).await {
         Ok(services) => HttpResponse::Ok().json(ProviderServicesResponse { services }),
         Err(e) => {
             tracing::error!("Failed to fetch provider services: {e}");
@@ -351,13 +347,12 @@ pub async fn get_user_services_handler(
     query: web::Query<GovernanceQuery>,
 ) -> impl Responder {
     let party_id = &query.party_id;
-    let party_id_str = party_id.to_string();
 
     let token = get_party_token(&data, party_id).await;
     let test_mode = data.test_mode;
     let packages = packages();
 
-    match get_user_services(&data.config, &party_id_str, token, test_mode, &packages).await {
+    match get_user_services(&data.config, party_id, token, test_mode, &packages).await {
         Ok(services) => HttpResponse::Ok().json(UserServicesResponse { services }),
         Err(e) => {
             tracing::error!("Failed to fetch user services: {e}");
@@ -383,13 +378,12 @@ pub async fn get_registrar_services_handler(
     query: web::Query<GovernanceQuery>,
 ) -> impl Responder {
     let party_id = &query.party_id;
-    let party_id_str = party_id.to_string();
 
     let token = get_party_token(&data, party_id).await;
     let test_mode = data.test_mode;
     let packages = packages();
 
-    match get_registrar_services(&data.config, &party_id_str, token, test_mode, &packages).await {
+    match get_registrar_services(&data.config, party_id, token, test_mode, &packages).await {
         Ok(services) => HttpResponse::Ok().json(RegistrarServicesResponse { services }),
         Err(e) => {
             tracing::error!("Failed to fetch registrar services: {e}");
@@ -415,7 +409,6 @@ pub async fn query_contracts_handler(
     query: web::Query<ContractQueryParams>,
 ) -> impl Responder {
     let party_id = &query.party_id;
-    let party_id_str = party_id.to_string();
 
     let token = get_party_token(&data, party_id).await;
     let test_mode = data.test_mode;
@@ -427,14 +420,8 @@ pub async fn query_contracts_handler(
         use_interface_filter: query.interface,
     };
 
-    match query_contracts_by_template(
-        &data.config,
-        &party_id_str,
-        token,
-        test_mode,
-        &contract_params,
-    )
-    .await
+    match query_contracts_by_template(&data.config, party_id, token, test_mode, &contract_params)
+        .await
     {
         Ok(contracts) => HttpResponse::Ok().json(ContractQueryResponse { contracts }),
         Err(e) => {
@@ -468,19 +455,41 @@ pub async fn get_governance_audit(
         Ok(rows) => {
             let entries: Vec<AuditLogEntry> = rows
                 .into_iter()
-                .map(|row| AuditLogEntry {
-                    id: row.id,
-                    timestamp: row.timestamp,
-                    event_type: row.event_type,
-                    party_id: row.party_id,
-                    member_party_id: row.member_party_id,
-                    governance_type: row.governance_type,
-                    action_summary: row.action_summary,
-                    details: serde_json::from_str(&row.details)
-                        .unwrap_or(serde_json::Value::String(row.details)),
-                    status: row.status,
-                    error_message: row.error_message,
-                    created_at: row.created_at,
+                .filter_map(|row| {
+                    // Skip entries with malformed party ids — they're DB-level
+                    // corruption, not something the API should propagate.
+                    let party_id = CantonId::parse(&row.party_id)
+                        .map_err(|e| {
+                            tracing::warn!(
+                                "Skipping audit row {id}: bad party_id '{p}': {e}",
+                                id = row.id,
+                                p = row.party_id
+                            );
+                        })
+                        .ok()?;
+                    let member_party_id = CantonId::parse(&row.member_party_id)
+                        .map_err(|e| {
+                            tracing::warn!(
+                                "Skipping audit row {id}: bad member_party_id '{m}': {e}",
+                                id = row.id,
+                                m = row.member_party_id
+                            );
+                        })
+                        .ok()?;
+                    Some(AuditLogEntry {
+                        id: row.id,
+                        timestamp: row.timestamp,
+                        event_type: row.event_type,
+                        party_id,
+                        member_party_id,
+                        governance_type: row.governance_type,
+                        action_summary: row.action_summary,
+                        details: serde_json::from_str(&row.details)
+                            .unwrap_or(serde_json::Value::String(row.details)),
+                        status: row.status,
+                        error_message: row.error_message,
+                        created_at: row.created_at,
+                    })
                 })
                 .collect();
             let total_returned = entries.len();
@@ -514,13 +523,12 @@ pub async fn get_governance_chain_audit(
     query: web::Query<ChainAuditQuery>,
 ) -> impl Responder {
     let party_id = &query.party_id;
-    let party_id_str = party_id.to_string();
 
     if !query.refresh {
         // Return from cache
         match data
             .db
-            .get_chain_audit_cache(&party_id_str, query.limit as i64)
+            .get_chain_audit_cache(party_id, query.limit as i64)
             .await
         {
             Ok(rows) => {
@@ -542,12 +550,11 @@ pub async fn get_governance_chain_audit(
     let token = get_party_token(&data, party_id).await;
     let pkgs = packages();
 
-    match chain_audit::get_chain_audit(&data.config, &party_id_str, token, &pkgs, query.limit).await
-    {
+    match chain_audit::get_chain_audit(&data.config, party_id, token, &pkgs, query.limit).await {
         Ok(entries) => {
             // Save to cache in background
             let pool = data.db.clone();
-            let pid = party_id_str.clone();
+            let pid = party_id.clone();
             let cached = entries.clone();
             tokio::spawn(async move {
                 chain_audit::save_chain_audit_cache(&pool, &pid, &cached).await;
@@ -560,7 +567,7 @@ pub async fn get_governance_chain_audit(
             })
         }
         Err(e) => {
-            tracing::error!("Failed to fetch chain audit for {party_id_str}: {e:#}");
+            tracing::error!("Failed to fetch chain audit for {party_id}: {e:#}");
             HttpResponse::InternalServerError().json(ErrorResponse {
                 error: format!("Failed to query chain audit: {e}"),
             })
@@ -600,7 +607,7 @@ pub async fn propose_action(
     let audit_pool = data.db.clone();
     let audit_summary = crate::server::audit::proposal_summary(&body.proposal);
     let audit_details = serde_json::to_string(&*body).unwrap_or_default();
-    let audit_party_id = party_id.to_string();
+    let audit_party_id = party_id.clone();
     let audit_member = member_party_id.clone();
 
     let packages = packages();
@@ -608,7 +615,7 @@ pub async fn propose_action(
     let (package_source, module_name, entity_name, create_args) =
         action_serializer::build_proposal_create_args(
             &party_id.to_string(),
-            &member_party_id,
+            &member_party_id.to_string(),
             &body.proposal,
         );
 
@@ -666,7 +673,7 @@ pub async fn propose_action(
         deduplication_period: None,
         min_ledger_time_abs: None,
         min_ledger_time_rel: None,
-        act_as: vec![member_party_id.clone()],
+        act_as: vec![member_party_id.to_string()],
         read_as: vec![party_id.to_string()],
         submission_id: String::new(),
         disclosed_contracts: vec![],
@@ -763,8 +770,10 @@ pub async fn propose_action(
         entity_name: "GovernanceRules".to_string(),
     };
 
-    let confirm_arg =
-        action_serializer::build_confirm_domain_action_arg(&member_party_id, &proposal_cid);
+    let confirm_arg = action_serializer::build_confirm_domain_action_arg(
+        &member_party_id.to_string(),
+        &proposal_cid,
+    );
 
     let confirm_cmd = Command {
         command: Some(command::Command::Exercise(ExerciseCommand {
@@ -783,7 +792,7 @@ pub async fn propose_action(
         deduplication_period: None,
         min_ledger_time_abs: None,
         min_ledger_time_rel: None,
-        act_as: vec![member_party_id.clone()],
+        act_as: vec![member_party_id.to_string()],
         read_as: vec![party_id.to_string()],
         submission_id: String::new(),
         disclosed_contracts: vec![],
@@ -880,7 +889,7 @@ pub async fn confirm_action(
     let audit_pool = data.db.clone();
     let audit_summary = crate::server::audit::action_summary(&body.action);
     let audit_details = serde_json::to_string(&*body).unwrap_or_default();
-    let audit_party_id = party_id.to_string();
+    let audit_party_id = party_id.clone();
     let audit_member = member_party_id.clone();
     let audit_gov_type = body.governance_type;
 
@@ -969,7 +978,7 @@ pub async fn execute_action(
         dc.blob = format!("<{} bytes>", dc.blob.len());
     }
     let audit_details = serde_json::to_string(&redacted).unwrap_or_default();
-    let audit_party_id = party_id.to_string();
+    let audit_party_id = party_id.clone();
     let audit_member = member_party_id.clone();
     let audit_gov_type = body.governance_type;
 
@@ -1045,7 +1054,7 @@ pub async fn expire_confirmation(
 
     let audit_pool = data.db.clone();
     let audit_details = serde_json::to_string(&*body).unwrap_or_default();
-    let audit_party_id = party_id.to_string();
+    let audit_party_id = party_id.clone();
     let audit_member = member_party_id.clone();
     let audit_gov_type = body.governance_type;
 
@@ -1122,7 +1131,7 @@ pub async fn cancel_confirmation(
 
     let audit_pool = data.db.clone();
     let audit_details = serde_json::to_string(&*body).unwrap_or_default();
-    let audit_party_id = party_id.to_string();
+    let audit_party_id = party_id.clone();
     let audit_member = member_party_id.clone();
     let audit_gov_type = body.governance_type;
 
@@ -1289,9 +1298,8 @@ async fn get_party_token(data: &web::Data<AppState>, party_id: &CantonId) -> Opt
 }
 
 /// Get threshold for a decentralized party
-async fn get_party_threshold(data: &web::Data<AppState>, party_id: &str) -> Option<usize> {
-    // Extract namespace from party_id
-    let namespace = party_id.rsplit_once("::")?.1;
+async fn get_party_threshold(data: &web::Data<AppState>, party_id: &CantonId) -> Option<usize> {
+    let namespace = party_id.namespace.to_hex();
 
     let channel = tonic::transport::Channel::from_shared(data.config.admin_api_url())
         .ok()?
@@ -1319,7 +1327,7 @@ async fn get_party_threshold(data: &web::Data<AppState>, party_id: &str) -> Opti
                     filter_signed_key: String::new(),
                     protocol_version: None,
                 }),
-                filter_namespace: namespace.to_string(),
+                filter_namespace: namespace,
             },
         ))
         .await
@@ -1334,29 +1342,29 @@ async fn get_party_threshold(data: &web::Data<AppState>, party_id: &str) -> Opti
 }
 
 /// Get member_party_id for a decentralized party from config
-async fn get_member_party_id(data: &web::Data<AppState>, party_id: &CantonId) -> Option<String> {
+async fn get_member_party_id(data: &web::Data<AppState>, party_id: &CantonId) -> Option<CantonId> {
     let party_creds = data.party_credentials.read().await;
     party_creds
         .iter()
         .find(|p| &p.dec_party_id == party_id)
-        .map(|p| p.member_party_id.to_string())
+        .map(|p| p.member_party_id.clone())
 }
 
 /// Get token and member_party_id for a party
 async fn get_party_credentials(
     data: &web::Data<AppState>,
     party_id: &CantonId,
-) -> Option<(String, String)> {
+) -> Option<(String, CantonId)> {
     let auth = data.auth.read().await;
     match &*auth {
         Some(WorkflowAuth::Keycloak(registry)) => {
             let tm = registry.get(party_id)?;
             let token = tm.get_token().await.ok()?;
-            Some((token, tm.member_party_id().to_string()))
+            Some((token, tm.member_party_id().clone()))
         }
         Some(WorkflowAuth::Mock(mock_registry)) => {
             let mm = mock_registry.get(party_id).await;
-            Some((mm.get_token(), mm.member_party_id().to_string()))
+            Some((mm.get_token(), mm.member_party_id().clone()))
         }
         None => None,
     }
@@ -1376,9 +1384,11 @@ async fn execute_confirm_action(
     config: &NodeConfig,
     request: &ConfirmActionRequest,
     token: &str,
-    member_party_id: &str,
+    member_party_id: &CantonId,
     packages: &PackageConfig,
 ) -> Result {
+    let member_party_id_str = member_party_id.to_string();
+    let member_party_id = member_party_id_str.as_str();
     let (template_id, choice, choice_argument) = match request.governance_type {
         GovernanceType::Vault => {
             let pkg = packages
@@ -1483,9 +1493,11 @@ async fn execute_confirmed_action(
     config: &NodeConfig,
     request: &ExecuteActionRequest,
     token: &str,
-    member_party_id: &str,
+    member_party_id: &CantonId,
     packages: &PackageConfig,
 ) -> Result {
+    let member_party_id_str = member_party_id.to_string();
+    let member_party_id = member_party_id_str.as_str();
     let (template_id, choice, choice_argument) = match request.governance_type {
         GovernanceType::Vault => {
             let pkg = packages
@@ -1613,9 +1625,11 @@ async fn execute_expire_confirmation(
     config: &NodeConfig,
     request: &ExpireConfirmationRequest,
     token: &str,
-    member_party_id: &str,
+    member_party_id: &CantonId,
     packages: &PackageConfig,
 ) -> Result {
+    let member_party_id_str = member_party_id.to_string();
+    let member_party_id = member_party_id_str.as_str();
     // Both vault and core use the same argument shape: { member, staleConfirmationCid }
     let choice_argument = Value {
         sum: Some(value::Sum::Record(Record {
@@ -1720,9 +1734,11 @@ async fn execute_cancel_confirmation(
     config: &NodeConfig,
     request: &CancelConfirmationRequest,
     token: &str,
-    member_party_id: &str,
+    member_party_id: &CantonId,
     packages: &PackageConfig,
 ) -> Result {
+    let member_party_id_str = member_party_id.to_string();
+    let member_party_id = member_party_id_str.as_str();
     let (template_id, choice) = match request.governance_type {
         GovernanceType::Vault => {
             let pkg = packages

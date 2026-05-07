@@ -4,6 +4,7 @@ use crate::{
     config::NodeConfig,
     error::Result,
     noise::client::NoiseClient,
+    participant_id::CantonId,
     utils,
     workflow::storage::{WorkflowStorage, artifact_kinds, identity_kinds},
 };
@@ -107,7 +108,7 @@ pub async fn copy_self_identity_for_party(
     storage: &SqlitePool,
     instance_name: &str,
     node_config: &NodeConfig,
-    dec_party_id: &str,
+    dec_party_id: &CantonId,
 ) -> Result {
     let self_id = node_config.participant_id().to_string();
 

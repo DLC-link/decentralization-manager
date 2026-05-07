@@ -170,24 +170,10 @@ pub async fn start_kick(
         body.new_threshold
     );
 
-    // Parse IDs first for validation
-    let decentralized_party_id = match CantonId::parse(&body.decentralized_party_id) {
-        Ok(id) => id,
-        Err(e) => {
-            return HttpResponse::BadRequest().json(ErrorResponse {
-                error: format!("Invalid decentralized_party_id: {e}"),
-            });
-        }
-    };
-
-    let participant_id = match CantonId::parse(&body.participant_id) {
-        Ok(id) => id,
-        Err(e) => {
-            return HttpResponse::BadRequest().json(ErrorResponse {
-                error: format!("Invalid participant_id: {e}"),
-            });
-        }
-    };
+    // KickRequest's CantonId fields validate during deserialization, so by
+    // the time we get here both ids are well-formed.
+    let decentralized_party_id = body.decentralized_party_id.clone();
+    let participant_id = body.participant_id.clone();
 
     // Prevent kicking ourselves
     if participant_id == *data.config.participant_id() {
@@ -201,10 +187,7 @@ pub async fn start_kick(
     // into a clear server error rather than a silent invalid request.
     let namespace_fingerprint = match data
         .db
-        .get_dec_party_participant_owner_key(
-            &decentralized_party_id.to_string(),
-            &participant_id.to_string(),
-        )
+        .get_dec_party_participant_owner_key(&decentralized_party_id, &participant_id.to_string())
         .await
     {
         Ok(Some(key)) => key,
@@ -690,21 +673,20 @@ pub async fn start_onboarding(
                             // refresh — but unexpected for a freshly
                             // onboarded party.
                             for party in &resp.parties {
-                                let party_id = party.party_id.to_string();
                                 for p in &party.participants {
                                     let uid = p.participant_uid.to_string();
                                     match bg_db
-                                        .get_dec_party_participant_owner_key(&party_id, &uid)
+                                        .get_dec_party_participant_owner_key(&party.party_id, &uid)
                                         .await
                                     {
                                         Ok(Some(_)) => {} // resolved
                                         Ok(None) => tracing::warn!(
-                                            party_id = %party_id,
+                                            party_id = %party.party_id,
                                             participant_uid = %uid,
                                             "Participant owner_key unresolved after onboarding"
                                         ),
                                         Err(e) => tracing::warn!(
-                                            party_id = %party_id,
+                                            party_id = %party.party_id,
                                             participant_uid = %uid,
                                             error = %e,
                                             "Failed to read owner_key from cache during post-onboarding audit"

@@ -224,7 +224,7 @@ const GOVERNANCE_TEMPLATE_NAMES: &[(&str, &str)] = &[
 /// cases where some packages may not be deployed on the participant.
 pub async fn get_contracts(
     config: &NodeConfig,
-    party_id: &str,
+    party_id: &CantonId,
     token: Option<String>,
     test_mode: bool,
     packages: &PackageConfig,
@@ -427,7 +427,7 @@ fn render_contract_info(
 /// Fetch contracts using WildcardFilter (for test mode)
 async fn fetch_contracts_with_wildcard(
     config: &NodeConfig,
-    party_id: &str,
+    party_id: &CantonId,
     token: Option<String>,
     package_versions: &HashMap<String, String>,
     contracts: &mut Vec<ContractInfo>,
@@ -493,7 +493,7 @@ async fn fetch_contracts_with_wildcard(
 /// Fetch contracts for a specific template
 async fn fetch_contracts_for_template(
     config: &NodeConfig,
-    party_id: &str,
+    party_id: &CantonId,
     token: Option<String>,
     template: &TemplateId,
     package_versions: &HashMap<String, String>,
@@ -554,7 +554,7 @@ async fn fetch_contracts_for_template(
 /// Get party metadata from Ledger API
 pub async fn get_party_metadata(
     config: &NodeConfig,
-    party_id: &str,
+    party_id: &CantonId,
     token: Option<String>,
 ) -> Result<Option<PartyMetadata>> {
     let mut client = utils::create_party_client(config, token).await?;
@@ -568,7 +568,11 @@ pub async fn get_party_metadata(
         .await?
         .into_inner();
 
-    let party_details = response.party_details.iter().find(|p| p.party == party_id);
+    let party_id_str = party_id.to_string();
+    let party_details = response
+        .party_details
+        .iter()
+        .find(|p| p.party == party_id_str);
 
     let annotations = party_details
         .and_then(|d| d.local_metadata.as_ref())
@@ -599,7 +603,7 @@ fn is_governance_template(module_name: &str, entity_name: &str) -> bool {
 /// and groups by deterministic action hash.
 pub async fn get_governance_confirmations(
     config: &NodeConfig,
-    party_id: &str,
+    party_id: &CantonId,
     threshold: usize,
     token: Option<String>,
     test_mode: bool,
@@ -730,7 +734,7 @@ pub async fn get_governance_confirmations(
 /// Fetch governance confirmations using WildcardFilter (for test mode)
 async fn fetch_governance_with_wildcard(
     config: &NodeConfig,
-    party_id: &str,
+    party_id: &CantonId,
     token: Option<String>,
     confirmations_by_hash: &mut HashMap<String, (ActionType, Vec<GovernanceConfirmation>)>,
     domain_confirmations: &mut HashMap<String, (String, Vec<GovernanceConfirmation>)>,
@@ -798,7 +802,7 @@ async fn fetch_governance_with_wildcard(
 /// Fetch governance confirmations for a specific template
 async fn fetch_governance_for_template(
     config: &NodeConfig,
-    party_id: &str,
+    party_id: &CantonId,
     token: Option<String>,
     template: &TemplateId,
     confirmations_by_hash: &mut HashMap<String, (ActionType, Vec<GovernanceConfirmation>)>,
@@ -891,8 +895,11 @@ fn extract_and_add_confirmation(
         },
     };
 
-    // Extract confirming party
-    let confirming_party = record
+    // Extract confirming party. Skip the confirmation entirely if the field
+    // is missing or the party string isn't a valid CantonId — propagating
+    // garbage upstream (the old code used "unknown") makes the consumer
+    // fragile.
+    let Some(confirming_party_str) = record
         .fields
         .iter()
         .find(|f| f.label == "confirmingParty" || f.label == "confirmer")
@@ -901,7 +908,23 @@ fn extract_and_add_confirmation(
             Some(value::Sum::Party(p)) => Some(p.clone()),
             _ => None,
         })
-        .unwrap_or_else(|| "unknown".to_string());
+    else {
+        tracing::warn!(
+            "Skipping confirmation {cid}: missing confirmingParty/confirmer field",
+            cid = created.contract_id
+        );
+        return;
+    };
+    let confirming_party = match CantonId::parse(&confirming_party_str) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(
+                "Skipping confirmation {cid}: bad confirmingParty '{confirming_party_str}': {e}",
+                cid = created.contract_id
+            );
+            return;
+        }
+    };
 
     // Compute action hash for grouping (JSON serialization is deterministic enough)
     let action_hash = compute_action_hash(&action);
@@ -954,8 +977,9 @@ fn extract_and_add_domain_confirmation(
         })
         .unwrap_or_default();
 
-    // Extract confirmer (Party)
-    let confirming_party = record
+    // Extract confirmer (Party). Skip the confirmation if missing or
+    // malformed (see the off-chain extractor above for the same rationale).
+    let Some(confirmer_str) = record
         .fields
         .iter()
         .find(|f| f.label == "confirmer")
@@ -964,7 +988,23 @@ fn extract_and_add_domain_confirmation(
             Some(value::Sum::Party(p)) => Some(p.clone()),
             _ => None,
         })
-        .unwrap_or_else(|| "unknown".to_string());
+    else {
+        tracing::warn!(
+            "Skipping domain confirmation {cid}: missing confirmer field",
+            cid = created.contract_id
+        );
+        return;
+    };
+    let confirming_party = match CantonId::parse(&confirmer_str) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(
+                "Skipping domain confirmation {cid}: bad confirmer '{confirmer_str}': {e}",
+                cid = created.contract_id
+            );
+            return;
+        }
+    };
 
     // Use a dummy ActionType for the GovernanceConfirmation struct (domain confirmations
     // don't have inline actions — they reference a proposal CID instead)
@@ -1024,7 +1064,7 @@ fn extract_proposal_description(
 /// `description` field from their create_arguments.
 async fn fetch_proposal_descriptions(
     config: &NodeConfig,
-    party_id: &str,
+    party_id: &CantonId,
     token: Option<String>,
     packages: &PackageConfig,
     proposal_descriptions: &mut HashMap<String, String>,
@@ -1106,7 +1146,7 @@ fn compute_action_hash(action: &ActionType) -> String {
 /// Get the state of the VaultGovernanceRules contract for a party
 pub async fn get_governance_state(
     config: &NodeConfig,
-    party_id: &str,
+    party_id: &CantonId,
     token: Option<String>,
     test_mode: bool,
     packages: &PackageConfig,
@@ -1141,7 +1181,7 @@ pub async fn get_governance_state(
 /// Fetch governance state using WildcardFilter (for test mode)
 async fn fetch_governance_state_with_wildcard(
     config: &NodeConfig,
-    party_id: &str,
+    party_id: &CantonId,
     token: Option<String>,
 ) -> Result<Option<GovernanceState>> {
     let mut state_client = utils::create_state_client(config, token).await?;
@@ -1202,7 +1242,7 @@ async fn fetch_governance_state_with_wildcard(
 /// Fetch governance state for a specific template
 async fn fetch_governance_state_for_template(
     config: &NodeConfig,
-    party_id: &str,
+    party_id: &CantonId,
     token: Option<String>,
     template: &TemplateId,
 ) -> Result<Option<GovernanceState>> {
@@ -1399,7 +1439,7 @@ fn extract_reltime(value: &Value) -> Option<i64> {
 /// Get all Vault contracts for a party
 pub async fn get_vaults(
     config: &NodeConfig,
-    party_id: &str,
+    party_id: &CantonId,
     token: Option<String>,
     test_mode: bool,
     packages: &PackageConfig,
@@ -1417,7 +1457,7 @@ pub async fn get_vaults(
 /// Fetch vaults using WildcardFilter (for test mode)
 async fn fetch_vaults_with_wildcard(
     config: &NodeConfig,
-    party_id: &str,
+    party_id: &CantonId,
     token: Option<String>,
 ) -> Result<Vec<VaultInfo>> {
     let mut state_client = utils::create_state_client(config, token).await?;
@@ -1475,7 +1515,7 @@ async fn fetch_vaults_with_wildcard(
 /// Fetch vaults using TemplateFilter
 async fn fetch_vaults_for_template(
     config: &NodeConfig,
-    party_id: &str,
+    party_id: &CantonId,
     token: Option<String>,
     template: &TemplateId,
 ) -> Result<Vec<VaultInfo>> {
@@ -1615,7 +1655,7 @@ fn extract_vault_config(value: &Value) -> Option<(String, String)> {
 /// Get all ProviderService contracts for a party
 pub async fn get_provider_services(
     config: &NodeConfig,
-    party_id: &str,
+    party_id: &CantonId,
     token: Option<String>,
     test_mode: bool,
     packages: &PackageConfig,
@@ -1635,7 +1675,7 @@ pub async fn get_provider_services(
 /// Fetch provider services using WildcardFilter (for test mode)
 async fn fetch_provider_services_with_wildcard(
     config: &NodeConfig,
-    party_id: &str,
+    party_id: &CantonId,
     token: Option<String>,
 ) -> Result<Vec<ProviderServiceInfo>> {
     let mut state_client = utils::create_state_client(config, token).await?;
@@ -1693,7 +1733,7 @@ async fn fetch_provider_services_with_wildcard(
 /// Fetch provider services using TemplateFilter
 async fn fetch_provider_services_for_template(
     config: &NodeConfig,
-    party_id: &str,
+    party_id: &CantonId,
     token: Option<String>,
     template: &TemplateId,
 ) -> Result<Vec<ProviderServiceInfo>> {
@@ -1785,7 +1825,7 @@ fn extract_provider_service_info(created: &CreatedEvent) -> Option<ProviderServi
 /// Get all UserService contracts for a party
 pub async fn get_user_services(
     config: &NodeConfig,
-    party_id: &str,
+    party_id: &CantonId,
     token: Option<String>,
     test_mode: bool,
     packages: &PackageConfig,
@@ -1805,7 +1845,7 @@ pub async fn get_user_services(
 /// Fetch user services using WildcardFilter (for test mode)
 async fn fetch_user_services_with_wildcard(
     config: &NodeConfig,
-    party_id: &str,
+    party_id: &CantonId,
     token: Option<String>,
 ) -> Result<Vec<UserServiceInfo>> {
     let mut state_client = utils::create_state_client(config, token).await?;
@@ -1863,7 +1903,7 @@ async fn fetch_user_services_with_wildcard(
 /// Fetch user services using TemplateFilter
 async fn fetch_user_services_for_template(
     config: &NodeConfig,
-    party_id: &str,
+    party_id: &CantonId,
     token: Option<String>,
     template: &TemplateId,
 ) -> Result<Vec<UserServiceInfo>> {
@@ -1959,7 +1999,7 @@ fn extract_user_service_info(created: &CreatedEvent) -> Option<UserServiceInfo> 
 /// Get all RegistrarService contracts for a party
 pub async fn get_registrar_services(
     config: &NodeConfig,
-    party_id: &str,
+    party_id: &CantonId,
     token: Option<String>,
     test_mode: bool,
     packages: &PackageConfig,
@@ -1979,7 +2019,7 @@ pub async fn get_registrar_services(
 /// Fetch registrar services using WildcardFilter (for test mode)
 async fn fetch_registrar_services_with_wildcard(
     config: &NodeConfig,
-    party_id: &str,
+    party_id: &CantonId,
     token: Option<String>,
 ) -> Result<Vec<RegistrarServiceInfo>> {
     let mut state_client = utils::create_state_client(config, token).await?;
@@ -2037,7 +2077,7 @@ async fn fetch_registrar_services_with_wildcard(
 /// Fetch registrar services using TemplateFilter
 async fn fetch_registrar_services_for_template(
     config: &NodeConfig,
-    party_id: &str,
+    party_id: &CantonId,
     token: Option<String>,
     template: &TemplateId,
 ) -> Result<Vec<RegistrarServiceInfo>> {
@@ -2144,7 +2184,7 @@ pub struct ContractQueryParams {
 /// Uses WildcardFilter in test mode, TemplateFilter or InterfaceFilter in production.
 pub async fn query_contracts_by_template(
     config: &NodeConfig,
-    party_id: &str,
+    party_id: &CantonId,
     token: Option<String>,
     test_mode: bool,
     params: &ContractQueryParams,
