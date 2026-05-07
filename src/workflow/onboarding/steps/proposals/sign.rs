@@ -1,7 +1,4 @@
-use std::path::Path;
-
-use tokio::fs;
-
+use bytes::{BufMut, BytesMut};
 use canton_proto_rs::com::digitalasset::canton::{
     protocol::v30::SignedTopologyTransaction,
     topology::admin::v30::{
@@ -9,28 +6,30 @@ use canton_proto_rs::com::digitalasset::canton::{
         topology_manager_write_service_client::TopologyManagerWriteServiceClient,
     },
 };
+use prost::Message;
+use sqlx::SqlitePool;
 
 use crate::{
     config::NodeConfig,
-    consts::{
-        DNS_PROTO_FILENAME, P2P_PROTO_FILENAME, SIGNED_DNS_PROPOSAL_PREFIX,
-        SIGNED_P2P_PROPOSALS_PREFIX,
-    },
     error::Result,
     utils,
-    workflow::onboarding::OnboardingDirs,
+    workflow::storage::{WorkflowStorage, artifact_kinds},
 };
 
-/// Sign a topology proposal and save the signed transaction
+/// Sign a single topology proposal and persist the result.
 ///
-/// If `proposal_data` is provided, it's used directly. Otherwise reads from `input_file`.
+/// `proposal_data` is the `varint(len)||SignedTopologyTransaction` blob the
+/// coordinator sent (matches the original on-disk dns_proto.bin /
+/// p2p_proto.bin format). The signed result is persisted as a per-peer
+/// artefact under `(instance, kind, self_id)` using the same
+/// length-prefixed framing.
 async fn sign_proposal(
     config: &NodeConfig,
-    input_file: &Path,
-    output_dir: &Path,
-    output_prefix: &str,
+    storage: &SqlitePool,
+    instance_name: &str,
+    output_kind: &str,
     proposal_type: &str,
-    proposal_data: Option<&[u8]>,
+    proposal_data: &[u8],
 ) -> Result {
     tracing::info!("Signing {proposal_type} proposal...");
 
@@ -38,17 +37,9 @@ async fn sign_proposal(
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
     tracing::debug!("Using synchronizer ID: {synchronizer_id}");
 
-    // Use provided proposal data or read from file
-    let transaction: SignedTopologyTransaction = if let Some(data) = proposal_data {
-        tracing::info!("Using {proposal_type} proposal from coordinator payload");
-        utils::read_first_message_from_bytes(data)?
-    } else {
-        tracing::info!(
-            "Reading {proposal_type} proposal from {path}",
-            path = input_file.display()
-        );
-        utils::read_first_message_from_file(input_file).await?
-    };
+    tracing::info!("Using {proposal_type} proposal from coordinator payload");
+    let transaction: SignedTopologyTransaction =
+        utils::read_first_message_from_bytes(proposal_data)?;
 
     let mut topology_client =
         TopologyManagerWriteServiceClient::connect(config.admin_api_url()).await?;
@@ -74,68 +65,62 @@ async fn sign_proposal(
         anyhow::bail!("No signed transaction returned for {proposal_type}");
     }
 
-    fs::create_dir_all(output_dir).await?;
-    let output_file = output_dir.join(format!("{output_prefix}-{node_id}.bin"));
-    tracing::info!(
-        "Saving signed {proposal_type} proposal to {path}",
-        path = output_file.display()
-    );
+    // Persist as a single per-peer artefact. Each transaction is written
+    // as `varint(len)||proto`; concatenated, this matches the previous on-disk
+    // format produced by `write_messages_to_file`.
+    let mut buffer = BytesMut::new();
+    for tx in &response.transactions {
+        let encoded = tx.encode_to_vec();
+        prost::encoding::encode_varint(encoded.len() as u64, &mut buffer);
+        buffer.put_slice(&encoded);
+    }
 
-    utils::write_messages_to_file(&response.transactions, &output_file).await?;
+    storage
+        .write_artifact(instance_name, output_kind, Some(&node_id), &buffer)
+        .await?;
 
     tracing::info!("{proposal_type} proposal signed successfully");
     Ok(())
 }
 
-/// Sign DNS proposal with attestor's key
+/// Sign DNS proposal with peer's key
 ///
-/// This step must be run by each attestor participant (except the coordinator who created the proposal).
-/// Each attestor signs the DNS proposal with their namespace key.
-///
-/// # Arguments
-/// * `config` - Node configuration with Canton connection details
-/// * `dirs` - Directory paths for the onboarding workflow
-/// * `proposal_data` - Proposal data received from coordinator (for distributed mode)
+/// This step must be run by each peer participant (except the coordinator who created the proposal).
+/// Each peer signs the DNS proposal with their namespace key.
 pub async fn sign_dns_proposals(
     config: &NodeConfig,
-    dirs: &OnboardingDirs,
+    storage: &SqlitePool,
+    instance_name: &str,
     proposal_data: &[u8],
 ) -> Result {
     sign_proposal(
         config,
-        &dirs.dns_proposals_dir.join(DNS_PROTO_FILENAME),
-        &dirs.dns_signed_dir,
-        SIGNED_DNS_PROPOSAL_PREFIX,
+        storage,
+        instance_name,
+        artifact_kinds::SIGNED_DNS_PROPOSAL,
         "DNS",
-        Some(proposal_data),
+        proposal_data,
     )
     .await
 }
 
-/// Sign P2P proposals with attestor's key
+/// Sign P2P proposals with peer's key
 ///
 /// **Canton 3.4+**: Signing keys are now embedded in the P2P mapping.
 /// This function signs the P2P proposal which contains both participant and key information.
-///
-/// This step must be run by each attestor participant (except the coordinator who created the proposals).
-/// Each attestor signs the P2P proposal with their namespace key.
-///
-/// # Arguments
-/// * `config` - Node configuration with Canton connection details
-/// * `dirs` - Directory paths for the onboarding workflow
-/// * `proposal_data` - Proposal data received from coordinator (for distributed mode)
 pub async fn sign_p2p_proposals(
     config: &NodeConfig,
-    dirs: &OnboardingDirs,
+    storage: &SqlitePool,
+    instance_name: &str,
     proposal_data: &[u8],
 ) -> Result {
     sign_proposal(
         config,
-        &dirs.p2p_proposals_dir.join(P2P_PROTO_FILENAME),
-        &dirs.final_signed_dir,
-        SIGNED_P2P_PROPOSALS_PREFIX,
+        storage,
+        instance_name,
+        artifact_kinds::SIGNED_P2P_PROPOSAL,
         "P2P",
-        Some(proposal_data),
+        proposal_data,
     )
     .await
 }

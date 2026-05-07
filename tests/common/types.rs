@@ -108,3 +108,35 @@ pub struct GovernanceStateLookup {
     #[serde(default)]
     pub state: Option<GovernanceStateContract>,
 }
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct WorkflowRun {
+    pub instance_name: String,
+    pub kind: String,
+    pub role: String,
+    pub status: String,
+    #[serde(default)]
+    pub current_step: String,
+    #[serde(default)]
+    pub step_index: usize,
+    #[serde(default)]
+    pub step_total: usize,
+    #[serde(default)]
+    pub expected_peers: Vec<String>,
+    #[serde(default)]
+    pub completed_peers: Vec<String>,
+    #[serde(default)]
+    pub coordinator_pubkey: Option<String>,
+    #[serde(default)]
+    pub coordinator_name: Option<String>,
+    #[serde(default)]
+    pub dismissed: bool,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WorkflowRunsResponse {
+    #[serde(default)]
+    pub runs: Vec<WorkflowRun>,
+}

@@ -1,23 +1,22 @@
 use std::sync::Arc;
 
 use anyhow::Context;
-use tokio::fs;
 
 use crate::{
     auth::WorkflowAuth,
     config::{NetworkConfig, NodeConfig},
-    consts::{
-        EXECUTION_DIR, LEDGER_SUBMISSIONS_DIR, PREPARED_DIR, PREPARED_SUBMISSION_PREFIX,
-        SIGNATURES_DIR, SUBMISSION_SIGNATURES_PREFIX,
-    },
     error::Result,
     noise::server::NoiseServer,
     utils,
-    workflow::state::WorkflowState,
+    workflow::{
+        COORDINATOR_STEP_STALENESS_THRESHOLD, StepStalenessWatchdog,
+        state::WorkflowState,
+        storage::{WorkflowStorage, artifact_kinds},
+    },
 };
 
 use super::{
-    ContractsConfig, ContractsDirs, ContractsStep,
+    ContractsConfig, ContractsStep,
     steps::{execute_submissions, prepare_submissions, sign_submissions},
 };
 
@@ -26,38 +25,33 @@ pub async fn start_coordinator(
     network_config: NetworkConfig,
     config: ContractsConfig,
     workflow_auth: Option<WorkflowAuth>,
+    db: sqlx::SqlitePool,
 ) -> Result {
     tracing::info!("Initializing Noise server...");
 
     let server = NoiseServer::new(
         node_config.clone(),
         network_config.clone(),
-        ContractsStep::WaitingForAttestors,
+        db.clone(),
+        config.instance_name.clone(),
+        ContractsStep::WaitingForPeers,
         None, // No excluded participants
     )
     .await?;
     let server = Arc::new(server);
-
-    let dirs = ContractsDirs::with_base(
-        node_config.workflow_data_dir(),
-        &config.instance_name,
-        &config.decentralized_party_id.prefix,
-        node_config.dars_dir(),
-    );
-    dirs.create_dirs().await?;
 
     tracing::info!("Noise server initialized, listening for connections");
 
     let workflow_state = server.get_workflow_state();
     let node_config_clone = node_config.clone();
     let network_config_clone = network_config.clone();
-    let dirs_clone = dirs.clone();
+    let db_clone = db.clone();
     let workflow_handle = tokio::spawn(async move {
         run_workflow(
             workflow_state,
             node_config_clone,
             network_config_clone,
-            dirs_clone,
+            db_clone,
             config,
             workflow_auth,
         )
@@ -71,30 +65,35 @@ async fn run_workflow(
     workflow_state: Arc<WorkflowState<ContractsStep>>,
     node_config: NodeConfig,
     network_config: NetworkConfig,
-    dirs: ContractsDirs,
+    db: sqlx::SqlitePool,
     config: ContractsConfig,
     workflow_auth: Option<WorkflowAuth>,
 ) -> Result {
+    let instance_name = config.instance_name.clone();
+    let dec_party_id = config.decentralized_party_id.clone();
+
     // Get credentials for the decentralized party
-    let dec_party_id = &config.decentralized_party_id;
     let auth = workflow_auth
         .ok_or_else(|| anyhow::anyhow!("Auth not configured, cannot run contracts workflow"))?;
-    let creds = auth.get_credentials(dec_party_id).await?;
+    let creds = auth.get_credentials(&config.decentralized_party_id).await?;
     let token = creds.token;
     let user_id = creds.user_id;
+    let mut watchdog = StepStalenessWatchdog::new(COORDINATOR_STEP_STALENESS_THRESHOLD);
 
     loop {
         let current_step = workflow_state.current_step().await;
+        watchdog.check(current_step)?;
 
         match current_step {
-            ContractsStep::WaitingForAttestors => {
+            ContractsStep::WaitingForPeers => {
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             }
             ContractsStep::PrepareSubmissions => {
                 tracing::info!("Coordinator executing: Prepare submissions");
                 prepare_submissions(
                     &node_config,
-                    &dirs,
+                    &db,
+                    &instance_name,
                     &network_config,
                     &config,
                     &token,
@@ -102,9 +101,11 @@ async fn run_workflow(
                 )
                 .await?;
 
-                // Load prepared submissions to send to attestors with SignSubmissions command
-                // Prepend config so attestors know the instance_name for directory creation
-                let submissions_payload = load_prepared_submissions_payload(&dirs, &config).await?;
+                // Load prepared submissions from storage to ship to peers with the
+                // SignSubmissions command. Pair with the contracts config so the
+                // peer can recover the instance name + dec party id on its side.
+                let submissions_payload =
+                    load_prepared_submissions_payload(&db, &instance_name, &config).await?;
                 workflow_state
                     .set_command_payload(submissions_payload)
                     .await;
@@ -113,22 +114,33 @@ async fn run_workflow(
             }
             ContractsStep::SignSubmissions => {
                 tracing::info!("Coordinator executing: Sign submissions");
-                sign_submissions(&node_config, &dirs)
+                sign_submissions(&node_config, &db, &instance_name, &dec_party_id)
                     .await
                     .context("Failed to sign submissions")?;
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             }
             ContractsStep::ExecuteSubmissions => {
                 tracing::info!("Coordinator executing: Execute submissions");
-                let signatures_dir = dirs.workflow_dir.join(EXECUTION_DIR).join(SIGNATURES_DIR);
-                utils::create_directory(&signatures_dir).await?;
-                crate::workflow::save_attestor_data(
-                    &workflow_state,
-                    &signatures_dir,
-                    SUBMISSION_SIGNATURES_PREFIX,
-                )
-                .await?;
-                execute_submissions(&node_config, &dirs, &config, &token, &user_id).await?;
+
+                // Persist each peer's `SUBMISSION_SIGNATURES` blob into
+                // workflow storage keyed by peer id, so `execute_submissions`
+                // can read them via `list_artifacts`. The coordinator's own
+                // bundle was already written by `sign_submissions` above.
+                let peer_data = workflow_state.get_all_peer_data().await;
+                for (peer_id, payload) in &peer_data {
+                    let peer_key = peer_id.to_string();
+                    db.write_artifact(
+                        &instance_name,
+                        artifact_kinds::SUBMISSION_SIGNATURES,
+                        Some(&peer_key),
+                        payload,
+                    )
+                    .await?;
+                }
+                workflow_state.clear_peer_data().await;
+
+                execute_submissions(&node_config, &db, &instance_name, &config, &token, &user_id)
+                    .await?;
                 workflow_state.advance_step().await;
             }
             ContractsStep::Complete => {
@@ -142,53 +154,36 @@ async fn run_workflow(
     Ok(())
 }
 
-/// Load all prepared submission files and encode them for transmission
-/// Returns: [config_json_len][config_json][files_payload]
+/// Load all prepared submission artefacts from storage and encode them for
+/// transmission to peers. The blobs are keyed by zero-padded ordinal so
+/// `list_artifacts` returns them in their original creation order, which the
+/// receiving peer preserves when it re-keys them on its side.
+///
+/// Returns a payload of shape `[config_json][files_payload]` (length-prefixed),
+/// where each file is `(ordinal, blob)` — same wire shape the previous
+/// file-based implementation produced.
 async fn load_prepared_submissions_payload(
-    dirs: &ContractsDirs,
+    db: &sqlx::SqlitePool,
+    instance_name: &str,
     config: &ContractsConfig,
 ) -> Result<Vec<u8>> {
-    let prepared_dir = dirs
-        .workflow_dir
-        .join(LEDGER_SUBMISSIONS_DIR)
-        .join(PREPARED_DIR);
+    tracing::info!("Loading prepared submissions from storage for distribution");
 
-    tracing::info!(
-        "Loading prepared submissions from {path} for distribution",
-        path = prepared_dir.display()
-    );
+    let submission_rows = db
+        .list_artifacts(instance_name, artifact_kinds::PREPARED_SUBMISSION)
+        .await?;
 
-    let submission_files =
-        utils::find_files_by_pattern(&prepared_dir, PREPARED_SUBMISSION_PREFIX, ".bin").await?;
-
-    if submission_files.is_empty() {
-        anyhow::bail!(
-            "No prepared submission files found in {path}",
-            path = prepared_dir.display()
-        );
+    if submission_rows.is_empty() {
+        anyhow::bail!("No PREPARED_SUBMISSION artifacts found for instance {instance_name}");
     }
 
-    let mut files = Vec::new();
-    for path in submission_files {
-        let filename = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("unknown.bin")
-            .to_string();
-        let data = fs::read(&path).await?;
-        files.push((filename, data));
-    }
-
-    files.sort_by(|a, b| a.0.cmp(&b.0));
-
     tracing::info!(
-        "Loaded {count} prepared submission file(s) for distribution to attestors",
-        count = files.len()
+        "Loaded {count} prepared submission artefact(s) for distribution to peers",
+        count = submission_rows.len()
     );
 
-    // Encode config + files payload
     let config_data = serde_json::to_vec(config).context("Failed to serialize contracts config")?;
-    let files_payload = utils::encode_files(&files);
+    let files_payload = utils::encode_files(&submission_rows);
     Ok(utils::encode_length_prefixed(&[
         &config_data,
         &files_payload,

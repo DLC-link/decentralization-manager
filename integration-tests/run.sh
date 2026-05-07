@@ -116,8 +116,26 @@ export P1_HTTP P2_HTTP P3_HTTP
 export P1_NOISE P2_NOISE P3_NOISE
 export P1_PARTICIPANT_ID P2_PARTICIPANT_ID P3_PARTICIPANT_ID
 export MOCK_TOKEN
+export DEV_DIR
 
-cargo test --release --test governance_workflows -- --ignored --nocapture
+# Export per-node PIDs and canton ports so the chaos phases (G1-G9, P1-P2)
+# can kill and respawn dec-party-manager instances. Restart events append the
+# new PID to $DEV_DIR/restarted-pids so the cleanup() trap can SIGKILL them
+# even if cargo test panics.
+export P1_PID="${PIDS[0]}"
+export P2_PID="${PIDS[1]}"
+export P3_PID="${PIDS[2]}"
+export P1_CANTON_LEDGER P2_CANTON_LEDGER P3_CANTON_LEDGER
+export P1_CANTON_ADMIN P2_CANTON_ADMIN P3_CANTON_ADMIN
+export BINARY
+
+# Pass the test-mode feature here too. Without it, `cargo test --release`
+# may rebuild the bin under a different feature unification, overwriting the
+# test-mode binary at target/release/dec-party-manager. Chaos phases that
+# respawn the bin (G1/G2/G7/G9/G3/G4/P1/P2) would then spawn a non-test-mode
+# binary that uses the real JwtValidator and 401s on every API call with
+# "missing bearer token".
+cargo test --release --features test-mode --test governance_workflows -- --ignored --nocapture
 
 echo ""
 echo "=========================================="

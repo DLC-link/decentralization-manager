@@ -3,22 +3,34 @@ pub mod dars;
 pub mod kick;
 pub mod onboarding;
 pub mod state;
+pub mod storage;
 
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::Context;
-
+use canton_proto_rs::com::digitalasset::canton::{
+    protocol::v30::{SignedTopologyTransaction, TopologyTransaction, topology_mapping},
+    version::v1::{UntypedVersionedMessage, untyped_versioned_message},
+};
+use prost::Message;
 use sqlx::SqlitePool;
 
 use crate::{
     auth::WorkflowAuth,
     config::{NetworkConfig, NodeConfig, Peer},
-    consts::{LEDGER_SUBMISSIONS_DIR, PREPARED_DIR},
-    db::schema::SchemaRead,
+    db::schema::{Commitable, SchemaRead, SchemaWrite},
     error::Result,
     noise::{MessageType, client::NoiseClient, server::NoiseServer},
     participant_id::CantonId,
+    server::WorkflowKind,
     utils,
+    workflow::{
+        state::WorkflowStep,
+        storage::{WorkflowStorage, artifact_kinds},
+    },
 };
 
 pub use contracts::{ContractsConfig, ContractsStep};
@@ -65,7 +77,7 @@ pub async fn start_coordinator(
                 anyhow::anyhow!("OnboardingConfig is required for Onboarding workflow")
             })?;
             let party_id =
-                onboarding::coordinator::start_coordinator(node_config, network_config, config)
+                onboarding::coordinator::start_coordinator(node_config, network_config, config, db)
                     .await?;
             Ok(CoordinatorResult {
                 created_party_id: Some(party_id),
@@ -80,6 +92,7 @@ pub async fn start_coordinator(
                 network_config,
                 config,
                 workflow_auth,
+                db,
             )
             .await?;
             Ok(CoordinatorResult {
@@ -89,7 +102,7 @@ pub async fn start_coordinator(
         WorkflowType::Dars => {
             let config = dars_config
                 .ok_or_else(|| anyhow::anyhow!("DarsConfig is required for Dars workflow"))?;
-            dars::coordinator::start_coordinator(node_config, network_config, config).await?;
+            dars::coordinator::start_coordinator(node_config, network_config, config, db).await?;
             Ok(CoordinatorResult {
                 created_party_id: None,
             })
@@ -97,11 +110,69 @@ pub async fn start_coordinator(
         WorkflowType::Kick => {
             let config = kick_config
                 .ok_or_else(|| anyhow::anyhow!("KickConfig is required for Kick workflow"))?;
-            kick::coordinator::start_coordinator(node_config, network_config, config).await?;
+            kick::coordinator::start_coordinator(node_config, network_config, config, db).await?;
             Ok(CoordinatorResult {
                 created_party_id: None,
             })
         }
+    }
+}
+
+/// Maximum time the coordinator's `run_workflow` loop is allowed to spend in
+/// the same step before treating the run as failed. Wait-states like
+/// `WaitingForPeers`, `SignDns`, `SignP2p` only advance when peers
+/// post messages over Noise; if every peer goes away (process killed,
+/// network partition) the loop has no other way to give up. Without this
+/// budget the spawned coordinator task blocks forever and the persisted
+/// `workflow_runs` row stays `inprogress`, leaving operators no way to
+/// retry/dismiss.
+///
+/// Sized to be larger than any legitimate per-step wait we've observed in
+/// CI (peer sign+round-trip is sub-30s) but well under the chaos
+/// suite's tightest deadline (P1 = 120s for the row to flip to `failed`).
+pub const COORDINATOR_STEP_STALENESS_THRESHOLD: Duration = Duration::from_secs(90);
+
+/// Per-iteration watchdog used by every coordinator's `run_workflow` loop.
+/// Tracks how long the workflow has been pinned on the same step; once the
+/// dwell time crosses [`COORDINATOR_STEP_STALENESS_THRESHOLD`], `check`
+/// returns an error so `start_coordinator` propagates it back to the
+/// spawning task, which calls `mark_run_failed` and surfaces the run as
+/// `failed` in the API/DB.
+///
+/// Step transitions reset the timer on the next `check`, so long active
+/// steps (e.g., `submit_dns_proposals`, which can block the loop on Canton
+/// topology propagation) don't trip it: the loop only re-enters `check`
+/// after the step returns and `advance_step` fires.
+pub struct StepStalenessWatchdog<S> {
+    last_step: Option<S>,
+    last_change: Instant,
+    threshold: Duration,
+}
+
+impl<S: PartialEq + Copy + std::fmt::Debug> StepStalenessWatchdog<S> {
+    pub fn new(threshold: Duration) -> Self {
+        Self {
+            last_step: None,
+            last_change: Instant::now(),
+            threshold,
+        }
+    }
+
+    pub fn check(&mut self, current: S) -> Result {
+        if self.last_step != Some(current) {
+            self.last_step = Some(current);
+            self.last_change = Instant::now();
+            return Ok(());
+        }
+        let elapsed = self.last_change.elapsed();
+        if elapsed >= self.threshold {
+            anyhow::bail!(
+                "Coordinator stalled in step {current:?} for {elapsed:?} \
+                 (threshold {threshold:?}); peers likely unreachable",
+                threshold = self.threshold
+            );
+        }
+        Ok(())
     }
 }
 
@@ -132,25 +203,22 @@ pub async fn run_server_with_workflow<S: state::WorkflowStep + 'static>(
     Ok(())
 }
 
-pub async fn save_attestor_data<S: state::WorkflowStep + 'static>(
-    workflow_state: &WorkflowState<S>,
-    dir: &std::path::Path,
-    prefix: &str,
+/// Start node in peer mode (client)
+/// Called when this node receives a workflow invite from the coordinator.
+///
+/// `instance_name` is the local peer-side `workflow_runs` row's primary
+/// key — accept_invitation creates the row with a synthetic name (e.g.
+/// `peer-onboarding-<pubkey>-<ts>`) and we use that same name for every
+/// `workflow_artifacts` write, so the FK constraint to `workflow_runs` is
+/// satisfied. The coordinator's logical instance_name (carried in
+/// OnboardingConfig/ContractsConfig/KickConfig payloads) is the coordinator's
+/// own primary key on its DB and is not used for storage on the peer side.
+pub async fn start_peer(
+    node_config: NodeConfig,
+    coordinator: Peer,
+    db: SqlitePool,
+    instance_name: String,
 ) -> Result {
-    let attestor_data = workflow_state.get_all_attestor_data().await;
-    for (attestor_id, data) in attestor_data {
-        let file_path = dir.join(format!("{prefix}-{attestor_id}.bin"));
-        tokio::fs::write(&file_path, &data).await.with_context(|| {
-            format!("Failed to write attestor data to '{}'", file_path.display())
-        })?;
-    }
-    workflow_state.clear_attestor_data().await;
-    Ok(())
-}
-
-/// Start node in attestor mode (client)
-/// Called when this node receives a workflow invite from the coordinator
-pub async fn start_attestor(node_config: NodeConfig, coordinator: Peer) -> Result {
     tracing::info!(
         "Initializing Noise client to connect to coordinator {}...",
         coordinator.participant_id
@@ -158,13 +226,28 @@ pub async fn start_attestor(node_config: NodeConfig, coordinator: Peer) -> Resul
 
     let client = NoiseClient::new(node_config.clone(), coordinator).await?;
 
-    // Directories are created lazily when workflow config is received
-    let mut onboarding_dirs: Option<onboarding::OnboardingDirs> = None;
-
     tracing::info!("Noise client initialized, entering command polling loop");
+
+    // Cache the workflow kind so each polled command can be mapped to a
+    // human-readable step (current_step / step_index) on this peer's
+    // workflow_runs row. Falling back to None just means the notification
+    // feed UI keeps showing the row's initial "Active" placeholder for this
+    // run, which is harmless.
+    let peer_kind: Option<WorkflowKind> = match db.get_workflow_run(&instance_name).await {
+        Ok(Some(run)) => Some(run.kind),
+        Ok(None) => {
+            tracing::warn!("peer step persist: no workflow_runs row for {instance_name}");
+            None
+        }
+        Err(e) => {
+            tracing::warn!("peer step persist: lookup failed for {instance_name}: {e}");
+            None
+        }
+    };
 
     // Command polling loop
     let mut consecutive_errors = 0;
+    let mut consecutive_step_failures = 0;
     loop {
         // Poll coordinator for next command (with payload for commands that need data)
         let message = match client.get_next_command_with_payload().await {
@@ -189,9 +272,7 @@ pub async fn start_attestor(node_config: NodeConfig, coordinator: Peer) -> Resul
                     tracing::error!(
                         "Failed to communicate with coordinator after 3 attempts. Aborting."
                     );
-                    anyhow::bail!(
-                        "Attestor failed: persistent communication errors with coordinator"
-                    );
+                    anyhow::bail!("Peer failed: persistent communication errors with coordinator");
                 }
 
                 tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
@@ -201,6 +282,10 @@ pub async fn start_attestor(node_config: NodeConfig, coordinator: Peer) -> Resul
 
         let command = message.msg_type;
         let payload = message.payload;
+
+        if let Some(kind) = peer_kind {
+            persist_peer_step(&db, &instance_name, kind, command).await;
+        }
 
         match command {
             MessageType::Wait => {
@@ -238,78 +323,130 @@ pub async fn start_attestor(node_config: NodeConfig, coordinator: Peer) -> Resul
             }
             MessageType::GenerateKeys => {
                 tracing::info!("Executing: Generate keys");
-                // Deserialize onboarding config from payload
+                // Deserialize onboarding config from payload (we still need
+                // the prefix for namespace_key_name / daml_key_name; the
+                // config's `instance_name` is the coordinator's view and is
+                // intentionally unused here).
                 let onboarding_config: onboarding::OnboardingConfig =
                     match serde_json::from_slice(&payload) {
                         Ok(config) => config,
                         Err(e) => {
                             tracing::error!("Failed to deserialize onboarding config: {e}");
+                            consecutive_step_failures += 1;
+                            if consecutive_step_failures >= 3 {
+                                anyhow::bail!("Aborting peer: 3 consecutive step failures");
+                            }
                             continue;
                         }
                     };
 
-                // Create directories lazily on first command with config
-                let dirs = onboarding::OnboardingDirs::with_base(
-                    node_config.workflow_data_dir(),
-                    &onboarding_config.instance_name,
-                );
-                if let Err(e) = dirs.create_dirs().await {
-                    tracing::error!("Failed to create onboarding dirs: {e}");
-                    continue;
-                }
-                onboarding_dirs = Some(dirs.clone());
-
                 if let Err(e) =
-                    onboarding::generate_keys(&node_config, &dirs, &onboarding_config).await
+                    onboarding::generate_keys(&node_config, &db, &instance_name, &onboarding_config)
+                        .await
                 {
                     tracing::error!("Step execution failed: {e}");
+                    consecutive_step_failures += 1;
+                    if consecutive_step_failures >= 3 {
+                        anyhow::bail!("Aborting peer: 3 consecutive step failures: {e}");
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                     continue;
                 }
-                if let Err(e) = onboarding::attestor::send_keys_to_coordinator(&client, &dirs).await
+                consecutive_step_failures = 0;
+                if let Err(e) = onboarding::peer::send_keys_to_coordinator(
+                    &client,
+                    &db,
+                    &instance_name,
+                    &node_config,
+                )
+                .await
                 {
                     tracing::error!("Failed to send keys to coordinator: {e}");
                 }
             }
             MessageType::SignDns => {
                 tracing::info!("Executing: Sign DNS proposal");
-                // Payload contains the DNS proposal from coordinator
                 if payload.is_empty() {
                     tracing::error!("No DNS proposal payload received from coordinator");
                     continue;
                 }
-                let Some(ref dirs) = onboarding_dirs else {
-                    tracing::error!("Onboarding dirs not initialized (GenerateKeys not received?)");
-                    continue;
-                };
-                if let Err(e) = onboarding::sign_dns_proposals(&node_config, dirs, &payload).await {
+                if let Err(e) =
+                    onboarding::sign_dns_proposals(&node_config, &db, &instance_name, &payload)
+                        .await
+                {
                     tracing::error!("Step execution failed: {e}");
+                    consecutive_step_failures += 1;
+                    if consecutive_step_failures >= 3 {
+                        anyhow::bail!("Aborting peer: 3 consecutive step failures: {e}");
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                     continue;
                 }
-                if let Err(e) =
-                    onboarding::attestor::send_dns_signature_to_coordinator(&client, dirs).await
+                consecutive_step_failures = 0;
+                if let Err(e) = onboarding::peer::send_dns_signature_to_coordinator(
+                    &client,
+                    &db,
+                    &instance_name,
+                    &node_config,
+                )
+                .await
                 {
                     tracing::error!("Failed to send DNS signature to coordinator: {e}");
                 }
             }
             MessageType::SignP2p => {
                 tracing::info!("Executing: Sign P2P proposals");
-                // Payload contains the P2P proposal from coordinator
                 if payload.is_empty() {
                     tracing::error!("No P2P proposal payload received from coordinator");
                     continue;
                 }
-                let Some(ref dirs) = onboarding_dirs else {
-                    tracing::error!("Onboarding dirs not initialized (GenerateKeys not received?)");
-                    continue;
-                };
-                if let Err(e) = onboarding::sign_p2p_proposals(&node_config, dirs, &payload).await {
+                if let Err(e) =
+                    onboarding::sign_p2p_proposals(&node_config, &db, &instance_name, &payload)
+                        .await
+                {
                     tracing::error!("Step execution failed: {e}");
+                    consecutive_step_failures += 1;
+                    if consecutive_step_failures >= 3 {
+                        anyhow::bail!("Aborting peer: 3 consecutive step failures: {e}");
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                     continue;
                 }
-                if let Err(e) =
-                    onboarding::attestor::send_p2p_signatures_to_coordinator(&client, dirs).await
+                consecutive_step_failures = 0;
+                if let Err(e) = onboarding::peer::send_p2p_signatures_to_coordinator(
+                    &client,
+                    &db,
+                    &instance_name,
+                    &node_config,
+                )
+                .await
                 {
                     tracing::error!("Failed to send P2P signatures to coordinator: {e}");
+                }
+
+                // Identity hook (peer side): the SignP2p payload is a
+                // SignedTopologyTransaction whose PartyToParticipant mapping
+                // carries the resolved dec_party_id in its `party` field. By
+                // now the namespace has been signed and submitted by the
+                // coordinator, so we can persist this peer's keys +
+                // participant id under the dec_party_identity table for use
+                // by post-onboarding workflows on this node.
+                match extract_party_id_from_p2p_payload(&payload) {
+                    Ok(dec_party_id) => {
+                        if let Err(e) = onboarding::peer::copy_self_identity_for_party(
+                            &db,
+                            &instance_name,
+                            &node_config,
+                            &dec_party_id,
+                        )
+                        .await
+                        {
+                            tracing::error!("Failed to copy self identity for {dec_party_id}: {e}");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to extract dec_party_id from P2P payload: {e}");
+                    }
                 }
             }
             MessageType::SignSubmissions => {
@@ -338,44 +475,54 @@ pub async fn start_attestor(node_config: NodeConfig, coordinator: Peer) -> Resul
                         }
                     };
 
-                // Create directories lazily on first command with config
-                let dirs = contracts::ContractsDirs::with_base(
-                    node_config.workflow_data_dir(),
-                    &contracts_config.instance_name,
-                    &contracts_config.decentralized_party_id.prefix,
-                    node_config.dars_dir(),
-                );
-                if let Err(e) = dirs.create_dirs().await {
-                    tracing::error!("Failed to create contracts dirs: {e}");
-                    continue;
-                }
+                let dec_party_id = contracts_config.decentralized_party_id.clone();
 
-                // Save prepared submissions from payload
-                if let Err(e) = save_prepared_submissions_from_payload(&items[1], &dirs).await {
-                    tracing::error!("Failed to save prepared submissions from coordinator: {e}");
-                    continue;
-                }
-
-                if let Err(e) = contracts::sign_submissions(&node_config, &dirs).await {
-                    tracing::error!("Step execution failed: {e:#}");
-                    continue;
-                }
+                // Persist the prepared submissions sent by the coordinator into
+                // this peer's workflow_artifacts so sign_submissions can
+                // read them back via list_artifacts.
                 if let Err(e) =
-                    contracts::attestor::send_submission_signatures_to_coordinator(&client, &dirs)
+                    save_prepared_submissions_from_payload(&items[1], &db, &instance_name).await
+                {
+                    tracing::error!("Failed to save prepared submissions from coordinator: {e}");
+                    consecutive_step_failures += 1;
+                    if consecutive_step_failures >= 3 {
+                        anyhow::bail!("Aborting peer: 3 consecutive step failures: {e}");
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    continue;
+                }
+
+                if let Err(e) =
+                    contracts::sign_submissions(&node_config, &db, &instance_name, &dec_party_id)
                         .await
+                {
+                    tracing::error!("Step execution failed: {e:#}");
+                    consecutive_step_failures += 1;
+                    if consecutive_step_failures >= 3 {
+                        anyhow::bail!("Aborting peer: 3 consecutive step failures: {e}");
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    continue;
+                }
+                consecutive_step_failures = 0;
+                if let Err(e) = contracts::peer::send_submission_signatures_to_coordinator(
+                    &client,
+                    &db,
+                    &instance_name,
+                    &node_config,
+                )
+                .await
                 {
                     tracing::error!("Failed to send submission signatures to coordinator: {e}");
                 }
             }
             MessageType::SignKick => {
                 tracing::info!("Executing: Sign kick proposals");
-                // Payload contains: [config_json, dns_kick_data, p2p_kick_data]
                 if payload.is_empty() {
                     tracing::error!("No kick proposals payload received from coordinator");
                     continue;
                 }
 
-                // Decode config and kick data from payload
                 let items = match utils::decode_length_prefixed(&payload, 3) {
                     Ok(items) => items,
                     Err(e) => {
@@ -384,7 +531,7 @@ pub async fn start_attestor(node_config: NodeConfig, coordinator: Peer) -> Resul
                     }
                 };
 
-                let kick_config: kick::KickConfig = match serde_json::from_slice(&items[0]) {
+                let _kick_config: kick::KickConfig = match serde_json::from_slice(&items[0]) {
                     Ok(config) => config,
                     Err(e) => {
                         tracing::error!("Failed to deserialize kick config: {e}");
@@ -392,24 +539,26 @@ pub async fn start_attestor(node_config: NodeConfig, coordinator: Peer) -> Resul
                     }
                 };
 
-                // Create directories lazily on first command with config
-                let dirs = kick::KickDirs::with_base(
-                    node_config.workflow_data_dir(),
-                    &kick_config.instance_name,
-                );
-                if let Err(e) = dirs.create_dirs().await {
-                    tracing::error!("Failed to create kick dirs: {e}");
-                    continue;
-                }
-
-                // Re-encode the kick data (without config) for sign_proposals
                 let kick_data = utils::encode_length_prefixed(&[&items[1], &items[2]]);
-                if let Err(e) = kick::sign_proposals(&node_config, &dirs, &kick_data).await {
+                if let Err(e) =
+                    kick::sign_proposals(&node_config, &db, &instance_name, &kick_data).await
+                {
                     tracing::error!("Step execution failed: {e}");
+                    consecutive_step_failures += 1;
+                    if consecutive_step_failures >= 3 {
+                        anyhow::bail!("Aborting peer: 3 consecutive step failures: {e}");
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                     continue;
                 }
-                if let Err(e) =
-                    kick::attestor::send_kick_signatures_to_coordinator(&client, &dirs).await
+                consecutive_step_failures = 0;
+                if let Err(e) = kick::peer::send_kick_signatures_to_coordinator(
+                    &client,
+                    &db,
+                    &instance_name,
+                    &node_config,
+                )
+                .await
                 {
                     tracing::error!("Failed to send kick signatures to coordinator: {e}");
                 }
@@ -420,51 +569,155 @@ pub async fn start_attestor(node_config: NodeConfig, coordinator: Peer) -> Resul
         }
     }
 
-    tracing::info!("Attestor shutting down");
+    tracing::info!("Peer shutting down");
     Ok(())
 }
 
-/// Find and read the first file matching prefix/suffix pattern
-pub async fn find_and_read_file(
-    dir: &std::path::Path,
-    prefix: &str,
-    suffix: &str,
-    error_msg: &str,
-) -> Result<Vec<u8>> {
-    let files = utils::find_files_by_pattern(dir, prefix, suffix).await?;
+/// Extract the resolved decentralized party id from a SignP2p command payload.
+/// The payload is a `varint(len)||SignedTopologyTransaction` blob whose
+/// `transaction.mapping` is a `PartyToParticipant` mapping carrying `party`
+/// (i.e. `{prefix}::{namespace_fingerprint}`). We pull that out so the
+/// peer's identity hook can key its `dec_party_identity` rows.
+fn extract_party_id_from_p2p_payload(payload: &[u8]) -> Result<CantonId> {
+    let signed: SignedTopologyTransaction = utils::read_first_message_from_bytes(payload)?;
 
-    if let Some(path) = files.first() {
-        let data = tokio::fs::read(path)
-            .await
-            .with_context(|| format!("Failed to read file '{}'", path.display()))?;
-        return Ok(data);
+    // `signed.transaction` is an UntypedVersionedMessage envelope (not raw
+    // TopologyTransaction bytes) — Canton wraps every protocol-versioned
+    // message this way. Unwrap one layer, then decode the inner data.
+    let versioned = UntypedVersionedMessage::decode(signed.transaction.as_slice())
+        .context("Failed to decode UntypedVersionedMessage from SignedTopologyTransaction")?;
+    let inner_bytes = match versioned.wrapper {
+        Some(untyped_versioned_message::Wrapper::Data(b)) => b,
+        None => anyhow::bail!("UntypedVersionedMessage has no wrapper data"),
+    };
+    let tx = TopologyTransaction::decode(inner_bytes.as_slice())
+        .context("Failed to decode TopologyTransaction from versioned wrapper")?;
+    let mapping = tx
+        .mapping
+        .and_then(|m| m.mapping)
+        .ok_or_else(|| anyhow::anyhow!("TopologyTransaction has no mapping"))?;
+    match mapping {
+        topology_mapping::Mapping::PartyToParticipant(p2p) => CantonId::parse(&p2p.party),
+        other => anyhow::bail!("Expected PartyToParticipant mapping, got {other:?}"),
     }
-
-    anyhow::bail!("{error_msg} in {path}", path = dir.display())
 }
 
-/// Save prepared submission files received from coordinator
+/// Map an inbound coordinator command to the peer's view of step
+/// progress for the given workflow kind. Returns `(step_name, step_index,
+/// step_total)` for commands that correspond to a real step on the peer
+/// side; returns `None` for `Wait` (no transition) and any unrelated
+/// command.
+fn peer_step_for_command(
+    kind: WorkflowKind,
+    command: MessageType,
+) -> Option<(&'static str, i64, i64)> {
+    match kind {
+        WorkflowKind::Onboarding => {
+            let step = match command {
+                MessageType::GenerateKeys => OnboardingStep::GenerateKeys,
+                MessageType::SignDns => OnboardingStep::SignDns,
+                MessageType::SignP2p => OnboardingStep::SignP2p,
+                MessageType::Disconnect => OnboardingStep::Complete,
+                _ => return None,
+            };
+            Some((
+                step.step_name(),
+                step.step_index(),
+                OnboardingStep::step_total(),
+            ))
+        }
+        WorkflowKind::Kick => {
+            let step = match command {
+                MessageType::SignKick => KickStep::SignProposals,
+                MessageType::Disconnect => KickStep::Complete,
+                _ => return None,
+            };
+            Some((step.step_name(), step.step_index(), KickStep::step_total()))
+        }
+        WorkflowKind::Contracts => {
+            let step = match command {
+                MessageType::SignSubmissions => ContractsStep::SignSubmissions,
+                MessageType::Disconnect => ContractsStep::Complete,
+                _ => return None,
+            };
+            Some((
+                step.step_name(),
+                step.step_index(),
+                ContractsStep::step_total(),
+            ))
+        }
+        WorkflowKind::Dars => {
+            let step = match command {
+                MessageType::UploadDars => DarsStep::UploadDars,
+                MessageType::Disconnect => DarsStep::Complete,
+                _ => return None,
+            };
+            Some((step.step_name(), step.step_index(), DarsStep::step_total()))
+        }
+    }
+}
+
+/// Persist peer-side step progress for a command. Best-effort: any
+/// failure is logged at WARN — the workflow itself doesn't depend on this
+/// row staying in sync, only the notification feed UI does.
+async fn persist_peer_step(
+    db: &SqlitePool,
+    instance_name: &str,
+    kind: WorkflowKind,
+    command: MessageType,
+) {
+    let Some((step_name, step_index, _step_total)) = peer_step_for_command(kind, command) else {
+        return;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let mut tx = match db.begin_transaction().await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!("peer step persist: begin_transaction failed: {e}");
+            return;
+        }
+    };
+    if let Err(e) = tx
+        .update_workflow_run_step(instance_name, step_name, step_index, &[], now)
+        .await
+    {
+        tracing::warn!("peer step persist: update failed: {e}");
+        return;
+    }
+    if let Err(e) = Commitable::commit(tx).await {
+        tracing::warn!("peer step persist: commit failed: {e}");
+    }
+}
+
+/// Persist the prepared submissions blob received from the coordinator into
+/// `workflow_artifacts` keyed by the same zero-padded ordinals the coordinator
+/// used. The byte-for-byte payload of each submission is preserved so the
+/// peer's sign step decodes them identically to what the coordinator
+/// produced.
 async fn save_prepared_submissions_from_payload(
     payload: &[u8],
-    dirs: &contracts::ContractsDirs,
+    db: &SqlitePool,
+    instance_name: &str,
 ) -> Result {
     let files = utils::decode_files(payload)?;
 
     tracing::info!(
-        "Received {count} prepared submission file(s) from coordinator",
+        "Received {count} prepared submission artefact(s) from coordinator",
         count = files.len()
     );
 
-    let prepared_dir = dirs
-        .workflow_dir
-        .join(LEDGER_SUBMISSIONS_DIR)
-        .join(PREPARED_DIR);
-    utils::create_directory(&prepared_dir).await?;
-
-    for (filename, data) in files {
-        let path = prepared_dir.join(&filename);
-        tokio::fs::write(&path, &data).await?;
-        tracing::debug!("Saved prepared submission: {filename}");
+    for (ordinal, data) in &files {
+        db.write_artifact(
+            instance_name,
+            artifact_kinds::PREPARED_SUBMISSION,
+            Some(ordinal),
+            data,
+        )
+        .await?;
+        tracing::debug!("Saved prepared submission ordinal {ordinal}");
     }
 
     Ok(())

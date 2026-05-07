@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
@@ -13,21 +13,24 @@ use super::parties::{
 };
 use crate::{
     config::{NetworkConfig, NodeConfig},
-    db::schema::SchemaRead,
+    db::schema::{Commitable, SchemaRead, SchemaWrite},
     error::Result,
     noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
     participant_id::CantonId,
     server::{
         AppState,
         middleware::require_admin,
+        respawn_coordinator,
         types::{
-            ContractsRequest, DarsRequest, ErrorResponse, HttpWorkflowState, KickRequest,
-            KickResponse, KickStatus, ListenerPauseGuard, MissingEdgeKind, MissingPeerEdge,
-            OnboardingMeshErrorResponse, OnboardingRequest, OnboardingResponse, OnboardingStatus,
-            SuccessResponse, WorkflowProgress, WorkflowResponse, WorkflowStatusResponse,
+            ContractsRequest, DarsInvitePayload, DarsRequest, ErrorResponse, HttpWorkflowState,
+            KickRequest, KickResponse, KickStatus, ListenerPauseGuard, MessageResponse,
+            MissingEdgeKind, MissingPeerEdge, OnboardingInvitePayload, OnboardingMeshErrorResponse,
+            OnboardingRequest, OnboardingResponse, OnboardingStatus, SuccessResponse, WorkflowKind,
+            WorkflowProgress, WorkflowResponse, WorkflowRole, WorkflowRun, WorkflowRunsResponse,
+            WorkflowStatusResponse,
         },
     },
-    workflow,
+    workflow::{self, ContractsStep, DarsStep, KickStep, OnboardingStep, state::WorkflowStep},
 };
 
 // ============================================================================
@@ -45,6 +48,94 @@ pub type ContractsWorkflowState = HttpWorkflowState<WorkflowProgress>;
 
 /// State for tracking DARs distribution workflow
 pub type DarsWorkflowState = HttpWorkflowState<WorkflowProgress>;
+
+// ============================================================================
+// Workflow run persistence helpers
+// ============================================================================
+
+fn now_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Insert the coordinator-side `workflow_runs` row for a freshly-started run.
+/// The partial unique index enforces "one InProgress run per (kind, role)" so a
+/// duplicate insert here surfaces as the right error to bubble back as 409.
+async fn insert_coordinator_run<S, C>(
+    db: &SqlitePool,
+    instance_name: &str,
+    kind: WorkflowKind,
+    initial_step: S,
+    config: &C,
+    invitees: &[CantonId],
+    dec_party_id: Option<CantonId>,
+) -> Result
+where
+    S: WorkflowStep,
+    C: serde::Serialize,
+{
+    let now = now_secs();
+    let run = WorkflowRun {
+        instance_name: instance_name.to_string(),
+        kind,
+        role: WorkflowRole::Coordinator,
+        status: WorkflowProgress::InProgress,
+        current_step: initial_step.step_name().to_string(),
+        step_index: initial_step.step_index(),
+        step_total: S::step_total(),
+        config_json: serde_json::to_string(config)
+            .map_err(|e| anyhow::anyhow!("encode workflow config: {e}"))?,
+        coordinator_pubkey: None,
+        coordinator_name: None,
+        expected_peers: invitees.to_vec(),
+        completed_peers: Vec::new(),
+        dec_party_id,
+        error: None,
+        dismissed: false,
+        created_at: now,
+        updated_at: now,
+    };
+
+    let mut tx = db.begin_transaction().await?;
+    tx.upsert_workflow_run(&run).await?;
+    Commitable::commit(tx).await
+}
+
+/// Flip the persisted run's status to Completed. Errors are logged and
+/// swallowed — the spawned task can't usefully react to a DB error here.
+async fn mark_run_completed(db: &SqlitePool, instance_name: &str) {
+    if let Err(e) = mark_run_status(db, instance_name, WorkflowProgress::Completed, None).await {
+        tracing::warn!("Failed to mark run {instance_name} completed: {e:#}");
+    }
+}
+
+/// Flip the persisted run's status to Failed with a message.
+async fn mark_run_failed(db: &SqlitePool, instance_name: &str, error: &str) {
+    if let Err(e) = mark_run_status(
+        db,
+        instance_name,
+        WorkflowProgress::Failed,
+        Some(error.to_string()),
+    )
+    .await
+    {
+        tracing::warn!("Failed to mark run {instance_name} failed: {e:#}");
+    }
+}
+
+async fn mark_run_status(
+    db: &SqlitePool,
+    instance_name: &str,
+    status: WorkflowProgress,
+    error: Option<String>,
+) -> Result {
+    let mut tx = db.begin_transaction().await?;
+    tx.set_workflow_run_status(instance_name, status, error.as_deref(), now_secs())
+        .await?;
+    Commitable::commit(tx).await
+}
 
 // ============================================================================
 // Kick Workflow
@@ -79,24 +170,10 @@ pub async fn start_kick(
         body.new_threshold
     );
 
-    // Parse IDs first for validation
-    let decentralized_party_id = match CantonId::parse(&body.decentralized_party_id) {
-        Ok(id) => id,
-        Err(e) => {
-            return HttpResponse::BadRequest().json(ErrorResponse {
-                error: format!("Invalid decentralized_party_id: {e}"),
-            });
-        }
-    };
-
-    let participant_id = match CantonId::parse(&body.participant_id) {
-        Ok(id) => id,
-        Err(e) => {
-            return HttpResponse::BadRequest().json(ErrorResponse {
-                error: format!("Invalid participant_id: {e}"),
-            });
-        }
-    };
+    // KickRequest's CantonId fields validate during deserialization, so by
+    // the time we get here both ids are well-formed.
+    let decentralized_party_id = body.decentralized_party_id.clone();
+    let participant_id = body.participant_id.clone();
 
     // Prevent kicking ourselves
     if participant_id == *data.config.participant_id() {
@@ -110,10 +187,7 @@ pub async fn start_kick(
     // into a clear server error rather than a silent invalid request.
     let namespace_fingerprint = match data
         .db
-        .get_dec_party_participant_owner_key(
-            &decentralized_party_id.to_string(),
-            &participant_id.to_string(),
-        )
+        .get_dec_party_participant_owner_key(&decentralized_party_id, &participant_id.to_string())
         .await
     {
         Ok(Some(key)) => key,
@@ -145,23 +219,72 @@ pub async fn start_kick(
         }
     }
 
-    // Update status to in progress
+    // Compute peers we're going to invite — every peer except self + the kicked participant.
+    // Done before the InProgress flip so a concurrent /kick/cancel cannot observe
+    // InProgress while we're still preparing.
+    let invitees: Vec<CantonId> = match data.db.get_all_peers().await {
+        Ok(peers) => peers
+            .into_iter()
+            .map(|p| p.participant_id)
+            .filter(|p| p != data.config.participant_id() && p != &participant_id)
+            .collect(),
+        Err(e) => {
+            tracing::warn!("Failed to load peers for cancel-invite tracking: {e}");
+            Vec::new()
+        }
+    };
+
+    // Compute instance name + config up-front so the persisted workflow_runs row
+    // can carry the same identifier the coordinator task will use.
+    let timestamp = now_secs();
+    let instance_name = format!("{}-kick-{timestamp}", decentralized_party_id.prefix);
+    let kick_config = workflow::KickConfig::new(
+        decentralized_party_id.clone(),
+        participant_id.clone(),
+        namespace_fingerprint,
+        body.new_threshold,
+        instance_name.clone(),
+    );
+
+    // Insert the workflow_runs row BEFORE flipping in-memory status. If the
+    // insert fails (e.g. partial-unique-index says another kick is already in
+    // flight), bubble that out as a 409 — same semantics as the existing
+    // in-memory check just upgraded to durable storage.
+    if let Err(e) = insert_coordinator_run(
+        &data.db,
+        &instance_name,
+        WorkflowKind::Kick,
+        KickStep::WaitingForPeers,
+        &kick_config,
+        &invitees,
+        Some(decentralized_party_id.clone()),
+    )
+    .await
     {
-        let mut status = kick_state.status.write().await;
-        *status = KickStatus::InProgress;
-        let mut error = kick_state.error.write().await;
-        *error = None;
+        tracing::warn!("Failed to persist kick workflow run: {e:#}");
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!("Failed to start kick workflow: {e}"),
+        });
     }
+
+    *kick_state.invited_peers.write().await = invitees;
 
     // Spawn the kick workflow in the background
     let config = data.config.clone();
     let db = data.db.clone();
     let kick_state_clone = kick_state.get_ref().clone();
-    let new_threshold = body.new_threshold;
     let listener_control = data.noise_listener_control.clone();
     let listener_notify = data.noise_listener_notify.clone();
+    let instance_for_task = instance_name.clone();
 
-    tokio::spawn(async move {
+    // See start_dars below for the rationale: abort_handle, status, and error
+    // are flipped under simultaneously-held locks so a concurrent /kick/cancel
+    // can never observe "status=InProgress + abort_handle=None" and bail.
+    let mut abort_guard = kick_state.abort_handle.lock().await;
+    let mut status_guard = kick_state.status.write().await;
+    let mut error_guard = kick_state.error.write().await;
+
+    let join_handle = tokio::spawn(async move {
         let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
 
         // Send kick invites to all peers before starting coordinator workflow
@@ -169,32 +292,23 @@ pub async fn start_kick(
         if let Err(e) = invite_result {
             tracing::error!("Failed to send kick invites: {e}");
             guard.resume().await;
-            let mut status = kick_state_clone.status.write().await;
-            let mut error = kick_state_clone.error.write().await;
-            *status = KickStatus::Failed;
-            *error = Some(format!("Failed to send invites: {e}"));
+            let msg = format!("Failed to send invites: {e}");
+            {
+                let mut status = kick_state_clone.status.write().await;
+                let mut error = kick_state_clone.error.write().await;
+                *status = KickStatus::Failed;
+                *error = Some(msg.clone());
+            }
+            mark_run_failed(&db, &instance_for_task, &msg).await;
             return;
         }
 
-        // Give peers time to start their attestor workflows
+        // Give peers time to start their peer workflows
         tokio::time::sleep(Duration::from_secs(2)).await;
-
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let instance_name = format!("{}-kick-{timestamp}", decentralized_party_id.prefix);
-        let kick_config = workflow::KickConfig::new(
-            decentralized_party_id,
-            participant_id,
-            namespace_fingerprint,
-            new_threshold,
-            instance_name,
-        );
 
         let result = workflow::start_coordinator(
             config,
-            db,
+            db.clone(),
             workflow::WorkflowType::Kick,
             None, // No onboarding config
             Some(kick_config),
@@ -206,21 +320,38 @@ pub async fn start_kick(
 
         guard.resume().await;
 
-        let mut status = kick_state_clone.status.write().await;
-        let mut error = kick_state_clone.error.write().await;
-
+        // Update in-memory state in tight scopes — never hold the RwLock
+        // across a DB await. /kick/status acquires a read lock to serve
+        // every poll; if a writer holds the lock during the DB write, every
+        // concurrent read blocks for that duration on a slow runner.
         match result {
             Ok(_) => {
-                *status = KickStatus::Completed;
+                {
+                    let mut status = kick_state_clone.status.write().await;
+                    *status = KickStatus::Completed;
+                }
                 tracing::info!("Kick workflow completed successfully");
+                mark_run_completed(&db, &instance_for_task).await;
             }
             Err(e) => {
-                *status = KickStatus::Failed;
-                *error = Some(format!("{e}"));
+                let msg = format!("{e}");
+                {
+                    let mut status = kick_state_clone.status.write().await;
+                    let mut error = kick_state_clone.error.write().await;
+                    *status = KickStatus::Failed;
+                    *error = Some(msg.clone());
+                }
                 tracing::error!("Kick workflow failed: {e}");
+                mark_run_failed(&db, &instance_for_task, &msg).await;
             }
         }
     });
+    *abort_guard = Some(join_handle.abort_handle());
+    *status_guard = KickStatus::InProgress;
+    *error_guard = None;
+    drop(error_guard);
+    drop(status_guard);
+    drop(abort_guard);
 
     HttpResponse::Accepted().json(KickResponse {
         status: KickStatus::InProgress,
@@ -380,7 +511,7 @@ pub async fn start_onboarding(
 
     // Pre-flight: every selected peer must have every other selected peer in
     // its network config, otherwise the coordinator workflow will hang waiting
-    // for attestor connections that can never be established.
+    // for peer connections that can never be established.
     match verify_peer_mesh(&data.config, &data.db, &body.peer_ids).await {
         Ok(missing) if !missing.is_empty() => {
             // Tag each edge with its failure mode in the human-readable
@@ -426,46 +557,71 @@ pub async fn start_onboarding(
         }
     }
 
-    // Update status to in progress
+    // Build instance + config up-front so the persisted workflow_runs row
+    // can carry the same identifier as the spawned coordinator task.
+    let party_id_prefix = body.party_id_prefix.clone();
+    let peer_ids = body.peer_ids.clone();
+    let instance_name = format!("{party_id_prefix}-creation");
+    let onboarding_config =
+        workflow::OnboardingConfig::new(party_id_prefix.clone(), instance_name.clone());
+
+    if let Err(e) = insert_coordinator_run(
+        &data.db,
+        &instance_name,
+        WorkflowKind::Onboarding,
+        OnboardingStep::WaitingForPeers,
+        &onboarding_config,
+        &peer_ids,
+        None,
+    )
+    .await
     {
-        let mut status = onboarding_state.status.write().await;
-        *status = OnboardingStatus::InProgress;
-        let mut error = onboarding_state.error.write().await;
-        *error = None;
+        tracing::warn!("Failed to persist onboarding workflow run: {e:#}");
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!("Failed to start onboarding workflow: {e}"),
+        });
     }
 
-    // Spawn the onboarding workflow in the background
     let config = data.config.clone();
     let db = data.db.clone();
     let onboarding_state_clone = onboarding_state.get_ref().clone();
     let listener_control = data.noise_listener_control.clone();
     let listener_notify = data.noise_listener_notify.clone();
-    let party_id_prefix = body.party_id_prefix.clone();
-    let peer_ids = body.peer_ids.clone();
+    *onboarding_state.invited_peers.write().await = peer_ids.clone();
     let party_credentials = data.party_credentials.clone();
     let auth_lock = data.auth.clone();
+    let instance_for_task = instance_name.clone();
 
-    tokio::spawn(async move {
+    // See start_dars below for the rationale: abort_handle, status, and error
+    // are flipped under simultaneously-held locks so a concurrent
+    // /onboarding/cancel can never observe "status=InProgress + abort_handle=None"
+    // and bail.
+    let mut abort_guard = onboarding_state.abort_handle.lock().await;
+    let mut status_guard = onboarding_state.status.write().await;
+    let mut error_guard = onboarding_state.error.write().await;
+
+    let join_handle = tokio::spawn(async move {
         let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
 
         // Send invites to selected peers before starting coordinator workflow
-        let invite_result = send_onboarding_invites(&config, &db, &peer_ids).await;
+        let invite_result =
+            send_onboarding_invites(&config, &db, &peer_ids, &party_id_prefix).await;
         if let Err(e) = invite_result {
             tracing::error!("Failed to send onboarding invites: {e}");
             guard.resume().await;
-            let mut status = onboarding_state_clone.status.write().await;
-            let mut error = onboarding_state_clone.error.write().await;
-            *status = OnboardingStatus::Failed;
-            *error = Some(format!("Failed to send invites: {e}"));
+            let msg = format!("Failed to send invites: {e}");
+            {
+                let mut status = onboarding_state_clone.status.write().await;
+                let mut error = onboarding_state_clone.error.write().await;
+                *status = OnboardingStatus::Failed;
+                *error = Some(msg.clone());
+            }
+            mark_run_failed(&db, &instance_for_task, &msg).await;
             return;
         }
 
-        // Give peers time to start their attestor workflows
+        // Give peers time to start their peer workflows
         tokio::time::sleep(Duration::from_secs(2)).await;
-
-        let instance_name = format!("{party_id_prefix}-creation");
-        let onboarding_config =
-            workflow::OnboardingConfig::new(party_id_prefix.clone(), instance_name);
 
         let result = workflow::start_coordinator(
             config.clone(),
@@ -481,14 +637,20 @@ pub async fn start_onboarding(
 
         guard.resume().await;
 
-        let mut status = onboarding_state_clone.status.write().await;
-        let mut error = onboarding_state_clone.error.write().await;
-
+        // Update in-memory state in tight scopes — never hold the RwLock
+        // across a DB await. /onboarding/status acquires a read lock to
+        // serve every poll; if a writer holds the lock during the DB write,
+        // every concurrent read blocks for that duration on a slow runner.
         match result {
             Ok(_) => {
-                *status = OnboardingStatus::Completed;
+                {
+                    let mut status = onboarding_state_clone.status.write().await;
+                    *status = OnboardingStatus::Completed;
+                }
                 tracing::info!("Onboarding workflow completed successfully");
-                // Operator configures party credentials via the Party Configuration dialog; auto-saving placeholders pollutes the auth registry.
+                mark_run_completed(&db, &instance_for_task).await;
+                // Operator configures party credentials via the Party Configuration
+                // dialog; auto-saving placeholders pollutes the auth registry.
 
                 // Refresh dec_party cache in background
                 let bg_config = config.clone();
@@ -511,21 +673,20 @@ pub async fn start_onboarding(
                             // refresh — but unexpected for a freshly
                             // onboarded party.
                             for party in &resp.parties {
-                                let party_id = party.party_id.to_string();
                                 for p in &party.participants {
                                     let uid = p.participant_uid.to_string();
                                     match bg_db
-                                        .get_dec_party_participant_owner_key(&party_id, &uid)
+                                        .get_dec_party_participant_owner_key(&party.party_id, &uid)
                                         .await
                                     {
                                         Ok(Some(_)) => {} // resolved
                                         Ok(None) => tracing::warn!(
-                                            party_id = %party_id,
+                                            party_id = %party.party_id,
                                             participant_uid = %uid,
                                             "Participant owner_key unresolved after onboarding"
                                         ),
                                         Err(e) => tracing::warn!(
-                                            party_id = %party_id,
+                                            party_id = %party.party_id,
                                             participant_uid = %uid,
                                             error = %e,
                                             "Failed to read owner_key from cache during post-onboarding audit"
@@ -539,12 +700,24 @@ pub async fn start_onboarding(
                 });
             }
             Err(e) => {
-                *status = OnboardingStatus::Failed;
-                *error = Some(format!("{e}"));
+                let msg = format!("{e}");
+                {
+                    let mut status = onboarding_state_clone.status.write().await;
+                    let mut error = onboarding_state_clone.error.write().await;
+                    *status = OnboardingStatus::Failed;
+                    *error = Some(msg.clone());
+                }
                 tracing::error!("Onboarding workflow failed: {e}");
+                mark_run_failed(&db, &instance_for_task, &msg).await;
             }
         }
     });
+    *abort_guard = Some(join_handle.abort_handle());
+    *status_guard = OnboardingStatus::InProgress;
+    *error_guard = None;
+    drop(error_guard);
+    drop(status_guard);
+    drop(abort_guard);
 
     HttpResponse::Accepted().json(OnboardingResponse {
         status: OnboardingStatus::InProgress,
@@ -576,18 +749,24 @@ pub async fn get_onboarding_status(
 async fn send_onboarding_invites(
     config: &NodeConfig,
     db: &SqlitePool,
-    peer_ids: &[String],
+    peer_ids: &[CantonId],
+    party_id_prefix: &str,
 ) -> Result {
     let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
 
-    let invite_message = Message::new_empty(MessageType::InviteOnboarding);
+    let payload = OnboardingInvitePayload {
+        prefix: party_id_prefix.to_string(),
+        participants: peer_ids.to_vec(),
+    };
+    let payload_bytes = serde_json::to_vec(&payload)?;
+    let invite_message = Message::new(MessageType::InviteOnboarding, payload_bytes);
 
     for peer_id in peer_ids {
         let peer = match network_config
             .peers
             .iter()
-            .find(|p| p.participant_id.to_string() == *peer_id)
+            .find(|p| &p.participant_id == peer_id)
         {
             Some(p) => p,
             None => {
@@ -660,7 +839,7 @@ async fn send_onboarding_invites(
 async fn verify_peer_mesh(
     config: &NodeConfig,
     db: &SqlitePool,
-    peer_ids: &[String],
+    peer_ids: &[CantonId],
 ) -> Result<Vec<MissingPeerEdge>> {
     let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
@@ -674,14 +853,14 @@ async fn verify_peer_mesh(
         let peer = match network_config
             .peers
             .iter()
-            .find(|p| p.participant_id.to_string() == *peer_id)
+            .find(|p| &p.participant_id == peer_id)
         {
             Some(p) => p,
             None => {
                 // Coordinator doesn't know this peer — won't be able to invite them.
                 missing_edges.push(MissingPeerEdge {
                     from: identity.clone(),
-                    to: peer_id.clone(),
+                    to: peer_id.to_string(),
                     kind: MissingEdgeKind::UnreachableFromCoordinator,
                 });
                 continue;
@@ -692,7 +871,7 @@ async fn verify_peer_mesh(
             tracing::warn!("Peer {peer_id} has no public key configured — cannot mesh-check");
             missing_edges.push(MissingPeerEdge {
                 from: identity.clone(),
-                to: peer_id.clone(),
+                to: peer_id.to_string(),
                 kind: MissingEdgeKind::UnreachableFromCoordinator,
             });
             continue;
@@ -704,7 +883,7 @@ async fn verify_peer_mesh(
                 tracing::warn!("Peer {peer_id} has invalid public key: {e}");
                 missing_edges.push(MissingPeerEdge {
                     from: identity.clone(),
-                    to: peer_id.clone(),
+                    to: peer_id.to_string(),
                     kind: MissingEdgeKind::UnreachableFromCoordinator,
                 });
                 continue;
@@ -727,7 +906,7 @@ async fn verify_peer_mesh(
                 tracing::warn!("Failed to query peers from {peer_id}: {e}");
                 missing_edges.push(MissingPeerEdge {
                     from: identity.clone(),
-                    to: peer_id.clone(),
+                    to: peer_id.to_string(),
                     kind: MissingEdgeKind::UnreachableFromCoordinator,
                 });
                 continue;
@@ -740,7 +919,7 @@ async fn verify_peer_mesh(
                 tracing::warn!("Malformed response from {peer_id}: {e}");
                 missing_edges.push(MissingPeerEdge {
                     from: identity.clone(),
-                    to: peer_id.clone(),
+                    to: peer_id.to_string(),
                     kind: MissingEdgeKind::UnreachableFromCoordinator,
                 });
                 continue;
@@ -754,7 +933,7 @@ async fn verify_peer_mesh(
             );
             missing_edges.push(MissingPeerEdge {
                 from: identity.clone(),
-                to: peer_id.clone(),
+                to: peer_id.to_string(),
                 kind: MissingEdgeKind::UnreachableFromCoordinator,
             });
             continue;
@@ -766,19 +945,19 @@ async fn verify_peer_mesh(
                 tracing::warn!("Could not parse peer list from {peer_id}: {e}");
                 missing_edges.push(MissingPeerEdge {
                     from: identity.clone(),
-                    to: peer_id.clone(),
+                    to: peer_id.to_string(),
                     kind: MissingEdgeKind::UnreachableFromCoordinator,
                 });
                 continue;
             }
         };
-        peer_views.insert(peer_id.clone(), view);
+        peer_views.insert(peer_id.to_string(), view);
     }
 
     // For every directed pair within selected peers, check that A's peer view
     // includes B. Missing means A and B aren't mutually connected.
     for a in peer_ids {
-        let Some(a_view) = peer_views.get(a) else {
+        let Some(a_view) = peer_views.get(&a.to_string()) else {
             // Already recorded a coordinator→A reachability problem above.
             continue;
         };
@@ -786,10 +965,10 @@ async fn verify_peer_mesh(
             if a == b {
                 continue;
             }
-            if !a_view.contains(b) {
+            if !a_view.contains(&b.to_string()) {
                 missing_edges.push(MissingPeerEdge {
-                    from: a.clone(),
-                    to: b.clone(),
+                    from: a.to_string(),
+                    to: b.to_string(),
                     kind: MissingEdgeKind::MeshHole,
                 });
             }
@@ -828,19 +1007,8 @@ pub async fn start_contracts(
         }
     }
 
-    // Update status to in progress
-    {
-        let mut status = contracts_state.status.write().await;
-        *status = WorkflowProgress::InProgress;
-        let mut error = contracts_state.error.write().await;
-        *error = None;
-    }
-
     // Create contracts config from request
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let timestamp = now_secs();
     let instance_name = format!(
         "{}-contracts-{timestamp}",
         body.decentralized_party_id.prefix
@@ -854,7 +1022,37 @@ pub async fn start_contracts(
         instance_name,
     );
 
-    // Spawn the contracts workflow in the background
+    // Track invitees for /cancel: every peer except self.
+    let contracts_invitees: Vec<CantonId> = match data.db.get_all_peers().await {
+        Ok(peers) => peers
+            .into_iter()
+            .map(|p| p.participant_id)
+            .filter(|p| p != data.config.participant_id())
+            .collect(),
+        Err(e) => {
+            tracing::warn!("Failed to load peers for cancel-invite tracking: {e}");
+            Vec::new()
+        }
+    };
+
+    let instance_name_for_run = contracts_config.instance_name.clone();
+    if let Err(e) = insert_coordinator_run(
+        &data.db,
+        &instance_name_for_run,
+        WorkflowKind::Contracts,
+        ContractsStep::WaitingForPeers,
+        &contracts_config,
+        &contracts_invitees,
+        Some(body.decentralized_party_id.clone()),
+    )
+    .await
+    {
+        tracing::warn!("Failed to persist contracts workflow run: {e:#}");
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!("Failed to start contracts workflow: {e}"),
+        });
+    }
+
     let config = data.config.clone();
     let db = data.db.clone();
     let workflow_auth = data.auth.read().await.clone();
@@ -863,8 +1061,18 @@ pub async fn start_contracts(
     let listener_control = data.noise_listener_control.clone();
     let listener_notify = data.noise_listener_notify.clone();
     let party_credentials = data.party_credentials.clone();
+    *contracts_state.invited_peers.write().await = contracts_invitees;
+    let instance_for_task = instance_name_for_run.clone();
 
-    tokio::spawn(async move {
+    // See start_dars below for the rationale: abort_handle, status, and error
+    // are flipped under simultaneously-held locks so a concurrent
+    // /contracts/cancel can never observe "status=InProgress + abort_handle=None"
+    // and bail.
+    let mut abort_guard = contracts_state.abort_handle.lock().await;
+    let mut status_guard = contracts_state.status.write().await;
+    let mut error_guard = contracts_state.error.write().await;
+
+    let join_handle = tokio::spawn(async move {
         let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
 
         // Send invites to all peers before starting coordinator workflow
@@ -872,14 +1080,18 @@ pub async fn start_contracts(
         if let Err(e) = invite_result {
             tracing::error!("Failed to send contracts invites: {e}");
             guard.resume().await;
-            let mut status = contracts_state_clone.status.write().await;
-            let mut error = contracts_state_clone.error.write().await;
-            *status = WorkflowProgress::Failed;
-            *error = Some(format!("Failed to send invites: {e}"));
+            let msg = format!("Failed to send invites: {e}");
+            {
+                let mut status = contracts_state_clone.status.write().await;
+                let mut error = contracts_state_clone.error.write().await;
+                *status = WorkflowProgress::Failed;
+                *error = Some(msg.clone());
+            }
+            mark_run_failed(&db, &instance_for_task, &msg).await;
             return;
         }
 
-        // Give peers time to start their attestor workflows
+        // Give peers time to start their peer workflows
         tokio::time::sleep(Duration::from_secs(2)).await;
 
         let result = workflow::start_coordinator(
@@ -896,13 +1108,18 @@ pub async fn start_contracts(
 
         guard.resume().await;
 
-        let mut status = contracts_state_clone.status.write().await;
-        let mut error = contracts_state_clone.error.write().await;
-
+        // Update in-memory state in tight scopes — never hold the RwLock
+        // across a DB await. /contracts/status acquires a read lock to
+        // serve every poll; if a writer holds the lock during the DB write,
+        // every concurrent read blocks for that duration on a slow runner.
         match result {
             Ok(_) => {
-                *status = WorkflowProgress::Completed;
+                {
+                    let mut status = contracts_state_clone.status.write().await;
+                    *status = WorkflowProgress::Completed;
+                }
                 tracing::info!("Contracts workflow completed successfully");
+                mark_run_completed(&db, &instance_for_task).await;
 
                 // Refresh dec_party cache to pick up new contracts
                 let bg_config = config.clone();
@@ -932,12 +1149,24 @@ pub async fn start_contracts(
                 });
             }
             Err(e) => {
-                *status = WorkflowProgress::Failed;
-                *error = Some(format!("{e}"));
+                let msg = format!("{e}");
+                {
+                    let mut status = contracts_state_clone.status.write().await;
+                    let mut error = contracts_state_clone.error.write().await;
+                    *status = WorkflowProgress::Failed;
+                    *error = Some(msg.clone());
+                }
                 tracing::error!("Contracts workflow failed: {e}");
+                mark_run_failed(&db, &instance_for_task, &msg).await;
             }
         }
     });
+    *abort_guard = Some(join_handle.abort_handle());
+    *status_guard = WorkflowProgress::InProgress;
+    *error_guard = None;
+    drop(error_guard);
+    drop(status_guard);
+    drop(abort_guard);
 
     HttpResponse::Accepted().json(WorkflowResponse {
         status: WorkflowProgress::InProgress,
@@ -1036,39 +1265,68 @@ pub async fn start_dars(
         }
     }
 
-    // Update status to in progress
-    {
-        let mut status = dars_state.status.write().await;
-        *status = WorkflowProgress::InProgress;
-        let mut error = dars_state.error.write().await;
-        *error = None;
-    }
-
     // Create DARs config from request
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let timestamp = now_secs();
     let instance_name = format!("dars-distribute-{timestamp}");
     let dars_config = workflow::DarsConfig {
         dar_files: body.dar_files.clone(),
-        instance_name,
+        instance_name: instance_name.clone(),
         peer_ids: body.peer_ids.clone(),
     };
 
-    // Spawn the DARs workflow in the background
+    if let Err(e) = insert_coordinator_run(
+        &data.db,
+        &instance_name,
+        WorkflowKind::Dars,
+        DarsStep::WaitingForPeers,
+        &dars_config,
+        &body.peer_ids,
+        None,
+    )
+    .await
+    {
+        tracing::warn!("Failed to persist dars workflow run: {e:#}");
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!("Failed to start DARs workflow: {e}"),
+        });
+    }
+
     let config = data.config.clone();
     let db = data.db.clone();
     let dars_state_clone = dars_state.get_ref().clone();
     let listener_control = data.noise_listener_control.clone();
     let listener_notify = data.noise_listener_notify.clone();
     let peer_ids = body.peer_ids.clone();
+    *dars_state.invited_peers.write().await = peer_ids.clone();
+    let instance_for_task = instance_name.clone();
 
-    tokio::spawn(async move {
+    // Acquire abort_handle, status, and error locks BEFORE spawning, then
+    // flip all three together. Held simultaneously around the spawn so a
+    // concurrent /dars/cancel either runs entirely before us (status !=
+    // InProgress → 409 "no workflow in progress") or entirely after us
+    // (status InProgress AND abort_handle Some → cancel proceeds). Without
+    // this, a cancel arriving between the status flip and the abort_handle
+    // assignment would observe "InProgress + None" and bail with the
+    // spurious "still initializing" 409 — which leaves dars_state pinned
+    // to InProgress and breaks the next /dars/distribute with a stale
+    // 409. Holding `status.write()` across the spawn also blocks the
+    // spawned task's terminal status write until our InProgress flip
+    // lands, so a fast-failing task can't publish its terminal status
+    // before we publish InProgress.
+    let mut abort_guard = dars_state.abort_handle.lock().await;
+    let mut status_guard = dars_state.status.write().await;
+    let mut error_guard = dars_state.error.write().await;
+
+    let join_handle = tokio::spawn(async move {
         let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
 
         // Send invites to selected peers before starting coordinator workflow
-        let invite_result = send_dars_invites(&config, &db, &peer_ids).await;
+        let dar_filenames: Vec<String> = dars_config
+            .dar_files
+            .iter()
+            .map(|f| f.filename.clone())
+            .collect();
+        let invite_result = send_dars_invites(&config, &db, &peer_ids, &dar_filenames).await;
         if let Err(e) = invite_result {
             tracing::error!("Failed to send DARs invites: {e}");
             guard.resume().await;
@@ -1076,15 +1334,21 @@ pub async fn start_dars(
             let mut error = dars_state_clone.error.write().await;
             *status = WorkflowProgress::Failed;
             *error = Some(format!("Failed to send invites: {e}"));
+            mark_run_failed(
+                &db,
+                &instance_for_task,
+                &format!("Failed to send invites: {e}"),
+            )
+            .await;
             return;
         }
 
-        // Give peers time to start their attestor workflows
+        // Give peers time to start their peer workflows
         tokio::time::sleep(Duration::from_secs(2)).await;
 
         let result = workflow::start_coordinator(
             config,
-            db,
+            db.clone(),
             workflow::WorkflowType::Dars,
             None, // No onboarding config
             None, // No kick config
@@ -1096,21 +1360,36 @@ pub async fn start_dars(
 
         guard.resume().await;
 
-        let mut status = dars_state_clone.status.write().await;
-        let mut error = dars_state_clone.error.write().await;
-
+        // Update in-memory state in tight scopes — never hold the RwLock
+        // across a DB await (see kick/onboarding/contracts handlers above).
         match result {
             Ok(_) => {
-                *status = WorkflowProgress::Completed;
+                {
+                    let mut status = dars_state_clone.status.write().await;
+                    *status = WorkflowProgress::Completed;
+                }
                 tracing::info!("DARs distribution workflow completed successfully");
+                mark_run_completed(&db, &instance_for_task).await;
             }
             Err(e) => {
-                *status = WorkflowProgress::Failed;
-                *error = Some(format!("{e}"));
+                let msg = format!("{e}");
+                {
+                    let mut status = dars_state_clone.status.write().await;
+                    let mut error = dars_state_clone.error.write().await;
+                    *status = WorkflowProgress::Failed;
+                    *error = Some(msg.clone());
+                }
                 tracing::error!("DARs distribution workflow failed: {e}");
+                mark_run_failed(&db, &instance_for_task, &msg).await;
             }
         }
     });
+    *abort_guard = Some(join_handle.abort_handle());
+    *status_guard = WorkflowProgress::InProgress;
+    *error_guard = None;
+    drop(error_guard);
+    drop(status_guard);
+    drop(abort_guard);
 
     HttpResponse::Accepted().json(WorkflowResponse {
         status: WorkflowProgress::InProgress,
@@ -1137,11 +1416,20 @@ pub async fn get_dars_status(dars_state: web::Data<Arc<DarsWorkflowState>>) -> i
 }
 
 /// Send DARs invites to selected peers using Noise protocol
-async fn send_dars_invites(config: &NodeConfig, db: &SqlitePool, peer_ids: &[CantonId]) -> Result {
+async fn send_dars_invites(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    peer_ids: &[CantonId],
+    dar_filenames: &[String],
+) -> Result {
     let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
 
-    let invite_message = Message::new_empty(MessageType::InviteDars);
+    let payload = DarsInvitePayload {
+        dar_filenames: dar_filenames.to_vec(),
+    };
+    let payload_bytes = serde_json::to_vec(&payload)?;
+    let invite_message = Message::new(MessageType::InviteDars, payload_bytes);
 
     for peer_id in peer_ids {
         let peer = match network_config
@@ -1205,6 +1493,493 @@ async fn send_dars_invites(config: &NodeConfig, db: &SqlitePool, peer_ids: &[Can
         }
     }
 
+    Ok(())
+}
+
+/// Shared cancel logic. All four workflow types use HttpWorkflowState<WorkflowProgress>.
+async fn cancel_workflow_state(
+    state: &Arc<HttpWorkflowState<WorkflowProgress>>,
+    data: &web::Data<AppState>,
+    label: &str,
+    kind: WorkflowKind,
+) -> HttpResponse {
+    {
+        let status = state.status.read().await;
+        if *status != WorkflowProgress::InProgress {
+            return HttpResponse::Conflict().json(ErrorResponse {
+                error: format!("No {label} workflow in progress"),
+            });
+        }
+    }
+
+    // Take the abort handle FIRST. If it's None we're racing with a start path that
+    // hasn't finished setting itself up yet; refuse the cancel rather than mark the
+    // workflow Cancelled while the spawned task is still alive. Start paths always
+    // populate abort_handle before they let any await reach this point.
+    let Some(handle) = state.abort_handle.lock().await.take() else {
+        tracing::warn!(
+            "{label} cancel arrived before the workflow finished initializing — refusing"
+        );
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!("{label} workflow is still initializing — try again in a moment"),
+        });
+    };
+    handle.abort();
+
+    {
+        let mut control = data.noise_listener_control.write().await;
+        control.should_pause = false;
+    }
+    data.noise_listener_notify.notify_one();
+
+    let invitees = state.invited_peers.read().await.clone();
+    if !invitees.is_empty()
+        && let Err(e) = send_cancel_invites(&data.config, &data.db, &invitees).await
+    {
+        tracing::warn!("send_cancel_invites failed during {label} cancel: {e}");
+    }
+
+    {
+        let mut status = state.status.write().await;
+        *status = WorkflowProgress::Cancelled;
+    }
+    {
+        let mut error = state.error.write().await;
+        *error = None;
+    }
+
+    // Mirror the cancel into the persisted workflow_runs row so the feed picks it up.
+    if let Ok(Some(run)) = data
+        .db
+        .get_active_workflow_run(kind, WorkflowRole::Coordinator)
+        .await
+        && let Err(e) = mark_run_status(
+            &data.db,
+            &run.instance_name,
+            WorkflowProgress::Cancelled,
+            None,
+        )
+        .await
+    {
+        tracing::warn!(
+            "Failed to flip workflow_runs row {} to cancelled: {e:#}",
+            run.instance_name
+        );
+    }
+
+    tracing::info!("{label} workflow cancelled");
+    HttpResponse::Ok().json(MessageResponse {
+        message: format!("{label} workflow cancelled"),
+    })
+}
+
+#[utoipa::path(
+    tag = "Workflows",
+    responses(
+        (status = 200, description = "Workflow cancelled", body = MessageResponse),
+        (status = 409, description = "No workflow in progress", body = ErrorResponse)
+    )
+)]
+#[post("/onboarding/cancel")]
+pub async fn cancel_onboarding(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    state: web::Data<Arc<OnboardingWorkflowState>>,
+) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
+    cancel_workflow_state(
+        state.get_ref(),
+        &data,
+        "Onboarding",
+        WorkflowKind::Onboarding,
+    )
+    .await
+}
+
+#[utoipa::path(
+    tag = "Workflows",
+    responses(
+        (status = 200, description = "Workflow cancelled", body = MessageResponse),
+        (status = 409, description = "No workflow in progress", body = ErrorResponse)
+    )
+)]
+#[post("/kick/cancel")]
+pub async fn cancel_kick(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    state: web::Data<Arc<KickWorkflowState>>,
+) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
+    cancel_workflow_state(state.get_ref(), &data, "Kick", WorkflowKind::Kick).await
+}
+
+#[utoipa::path(
+    tag = "Workflows",
+    responses(
+        (status = 200, description = "Workflow cancelled", body = MessageResponse),
+        (status = 409, description = "No workflow in progress", body = ErrorResponse)
+    )
+)]
+#[post("/contracts/cancel")]
+pub async fn cancel_contracts(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    state: web::Data<Arc<ContractsWorkflowState>>,
+) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
+    cancel_workflow_state(state.get_ref(), &data, "Contracts", WorkflowKind::Contracts).await
+}
+
+#[utoipa::path(
+    tag = "Workflows",
+    responses(
+        (status = 200, description = "Workflow cancelled", body = MessageResponse),
+        (status = 409, description = "No workflow in progress", body = ErrorResponse)
+    )
+)]
+#[post("/dars/cancel")]
+pub async fn cancel_dars(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    state: web::Data<Arc<DarsWorkflowState>>,
+) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
+    cancel_workflow_state(state.get_ref(), &data, "DARs", WorkflowKind::Dars).await
+}
+
+// ============================================================================
+// Generic workflow_runs endpoints (used by the unified notifications feed)
+// ============================================================================
+
+/// List every workflow run that should appear in the notifications feed:
+/// every InProgress run on this node + any terminal run the operator hasn't
+/// dismissed yet. `coordinator_name` is joined from the peers table.
+#[utoipa::path(
+    tag = "Workflows",
+    responses((status = 200, description = "Visible workflow runs", body = WorkflowRunsResponse))
+)]
+#[get("/workflows")]
+pub async fn list_workflows(data: web::Data<AppState>) -> impl Responder {
+    let runs = match data.db.get_visible_workflow_runs().await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("Failed to list workflow runs: {e:#}");
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to list workflow runs: {e}"),
+            });
+        }
+    };
+
+    // Resolve coordinator names from the peers table — same pattern get_invitations uses.
+    let pubkey_to_name: HashMap<String, String> = data
+        .db
+        .get_all_peers()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| (p.public_key, p.name))
+        .collect();
+
+    let resolved: Vec<WorkflowRun> = runs
+        .into_iter()
+        .map(|mut r| {
+            if let Some(pk) = r.coordinator_pubkey.as_deref() {
+                r.coordinator_name = pubkey_to_name.get(pk).cloned();
+            }
+            r
+        })
+        .collect();
+
+    HttpResponse::Ok().json(WorkflowRunsResponse { runs: resolved })
+}
+
+/// Mark a terminal-state workflow run as dismissed so it disappears from the
+/// notifications feed. Returns 409 if the run is still InProgress.
+#[utoipa::path(
+    tag = "Workflows",
+    responses(
+        (status = 200, description = "Run dismissed", body = MessageResponse),
+        (status = 404, description = "Run not found", body = ErrorResponse),
+        (status = 409, description = "Run is still in progress", body = ErrorResponse)
+    )
+)]
+#[post("/workflows/{instance_name}/dismiss")]
+pub async fn dismiss_workflow(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    path: web::Path<String>,
+) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
+    let instance_name = path.into_inner();
+
+    let run = match data.db.get_workflow_run(&instance_name).await {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return HttpResponse::NotFound().json(ErrorResponse {
+                error: format!("workflow run {instance_name} not found"),
+            });
+        }
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to load workflow run: {e}"),
+            });
+        }
+    };
+
+    if run.status == WorkflowProgress::InProgress {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!(
+                "{} workflow {instance_name} is still in progress — cancel it first",
+                run.kind
+            ),
+        });
+    }
+
+    let mut tx = match data.db.begin_transaction().await {
+        Ok(t) => t,
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to begin tx: {e}"),
+            });
+        }
+    };
+    if let Err(e) = tx.dismiss_workflow_run(&instance_name).await {
+        return HttpResponse::InternalServerError().json(ErrorResponse {
+            error: format!("Failed to dismiss workflow run: {e}"),
+        });
+    }
+    if let Err(e) = Commitable::commit(tx).await {
+        return HttpResponse::InternalServerError().json(ErrorResponse {
+            error: format!("Failed to commit dismiss: {e}"),
+        });
+    }
+
+    HttpResponse::Ok().json(MessageResponse {
+        message: format!("workflow {instance_name} dismissed"),
+    })
+}
+
+/// Retry a Failed coordinator-side workflow run from where it left off.
+///
+/// Flips `status` back to `inprogress`, clears `error`, and re-spawns the
+/// coordinator task. `NoiseServer::new` re-hydrates `WorkflowState` from the
+/// persisted `current_step`, so the run picks up at the same step that
+/// failed. Only valid on Failed coordinator-side rows; peer retry is not
+/// supported (the coordinator may already be past the config-bearing
+/// command — operator should dismiss the peer row and re-accept the
+/// invite instead).
+#[utoipa::path(
+    tag = "Workflows",
+    params(
+        ("instance_name" = String, Path, description = "Workflow run identifier")
+    ),
+    responses(
+        (status = 200, description = "Retry started", body = MessageResponse),
+        (status = 404, description = "Run not found", body = ErrorResponse),
+        (status = 409, description = "Run is not in a retryable state", body = ErrorResponse)
+    )
+)]
+#[post("/workflows/{instance_name}/retry")]
+pub async fn retry_workflow(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    kick_state: web::Data<Arc<KickWorkflowState>>,
+    onboarding_state: web::Data<Arc<OnboardingWorkflowState>>,
+    contracts_state: web::Data<Arc<ContractsWorkflowState>>,
+    dars_state: web::Data<Arc<DarsWorkflowState>>,
+    path: web::Path<String>,
+) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
+    let instance_name = path.into_inner();
+
+    let run = match data.db.get_workflow_run(&instance_name).await {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return HttpResponse::NotFound().json(ErrorResponse {
+                error: format!("workflow run {instance_name} not found"),
+            });
+        }
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to load workflow run: {e}"),
+            });
+        }
+    };
+
+    if run.role != WorkflowRole::Coordinator {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: "Retry must be initiated from the coordinator side. Peer rows flip back \
+                    to InProgress automatically when the coordinator retries — wait for that or \
+                    dismiss the row."
+                .to_string(),
+        });
+    }
+    if run.status != WorkflowProgress::Failed {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!(
+                "Cannot retry a workflow in status {:?}; only Failed runs can be retried",
+                run.status
+            ),
+        });
+    }
+
+    // Flip the row back to InProgress so the partial unique index reserves
+    // (kind, role) again before we spawn the resumed task. If a fresh run of
+    // the same kind+role has been started since this one failed, that index
+    // will reject this update and we surface a 409.
+    let mut tx = match data.db.begin_transaction().await {
+        Ok(t) => t,
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to begin tx: {e}"),
+            });
+        }
+    };
+    if let Err(e) = tx
+        .set_workflow_run_status(
+            &instance_name,
+            WorkflowProgress::InProgress,
+            None,
+            now_secs(),
+        )
+        .await
+    {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!("Failed to flip status to InProgress: {e}"),
+        });
+    }
+    if let Err(e) = Commitable::commit(tx).await {
+        return HttpResponse::InternalServerError().json(ErrorResponse {
+            error: format!("Failed to commit retry status: {e}"),
+        });
+    }
+
+    // Re-load the row (now InProgress), broadcast RetryWorkflow to the
+    // peer cohort, and re-spawn the coordinator task. respawn_coordinator
+    // updates the matching HttpWorkflowState, stashes a new abort handle,
+    // and finalizes the row to Completed/Failed when the task ends.
+    let run = match data.db.get_workflow_run(&instance_name).await {
+        Ok(Some(r)) => r,
+        _ => {
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: "Workflow run vanished mid-retry".to_string(),
+            });
+        }
+    };
+    // Tell every previously-invited peer to flip their Failed row back to
+    // InProgress and re-spin start_peer. Best-effort — peers that are
+    // unreachable now will stay Failed; operator can dismiss + re-accept.
+    if let Err(e) = send_retry_workflow(&data.config, &data.db, &run.expected_peers).await {
+        tracing::warn!("Failed to broadcast RetryWorkflow: {e:#}");
+    }
+    respawn_coordinator(
+        data.db.clone(),
+        data.config.clone(),
+        &run,
+        kick_state,
+        onboarding_state,
+        contracts_state,
+        dars_state,
+        data.noise_listener_control.clone(),
+        data.noise_listener_notify.clone(),
+        data.auth.clone(),
+    )
+    .await;
+
+    HttpResponse::Ok().json(MessageResponse {
+        message: format!(
+            "Retrying workflow {instance_name} from step {}",
+            run.current_step
+        ),
+    })
+}
+
+/// Best-effort: notify previously-invited peers that the workflow is cancelled
+/// so they can drop the matching pending invitation.
+async fn send_cancel_invites(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    peer_ids: &[CantonId],
+) -> Result {
+    broadcast_simple_message(
+        config,
+        db,
+        peer_ids,
+        Message::new_empty(MessageType::CancelInvite),
+        "CancelInvite",
+    )
+    .await
+}
+
+/// Best-effort: notify previously-invited peers that the coordinator is
+/// retrying the workflow so they flip their Failed row back to InProgress
+/// and re-spin `start_peer`.
+async fn send_retry_workflow(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    peer_ids: &[CantonId],
+) -> Result {
+    broadcast_simple_message(
+        config,
+        db,
+        peer_ids,
+        Message::new_empty(MessageType::RetryWorkflow),
+        "RetryWorkflow",
+    )
+    .await
+}
+
+async fn broadcast_simple_message(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    peer_ids: &[CantonId],
+    message: Message,
+    label: &str,
+) -> Result {
+    let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
+    let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
+    let identity = config.participant_id().to_string();
+
+    for peer_id in peer_ids {
+        let Some(peer) = network_config
+            .peers
+            .iter()
+            .find(|p| &p.participant_id == peer_id)
+        else {
+            continue;
+        };
+        if peer.public_key.is_empty() {
+            continue;
+        }
+        let Ok(peer_pub_key) = parse_public_key(&peer.public_key) else {
+            continue;
+        };
+        let psk = keypair.derive_psk(&peer_pub_key);
+
+        if let Err(e) = send_noise_message(
+            &peer.address,
+            peer.port,
+            &psk,
+            identity.as_bytes(),
+            &message,
+        )
+        .await
+        {
+            tracing::warn!("Failed to send {label} to {peer_id}: {e}");
+        }
+    }
     Ok(())
 }
 

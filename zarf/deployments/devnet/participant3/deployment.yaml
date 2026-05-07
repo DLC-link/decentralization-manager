@@ -21,7 +21,7 @@ metadata:
   labels:
     app.kubernetes.io/name: dec-party-manager
     app.kubernetes.io/instance: participant-3
-    app.kubernetes.io/component: attestor
+    app.kubernetes.io/component: peer
 spec:
   replicas: 1
   selector:
@@ -33,7 +33,7 @@ spec:
       labels:
         app.kubernetes.io/name: dec-party-manager
         app.kubernetes.io/instance: participant-3
-        app.kubernetes.io/component: attestor
+        app.kubernetes.io/component: peer
     spec:
       initContainers:
         - name: init-data
@@ -44,7 +44,7 @@ spec:
               mountPath: /app
       containers:
         - name: dec-party-manager
-          image: public.ecr.aws/dlc-link/canton-decparty-manager:0.0.30
+          image: public.ecr.aws/dlc-link/canton-decparty-manager:0.0.31
           imagePullPolicy: Always
           command:
             [

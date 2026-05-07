@@ -334,6 +334,7 @@ mod tests {
             contracts_trigger: Arc::new(Notify::new()),
             dars_trigger: Arc::new(Notify::new()),
             coordinator_pubkey: Arc::new(RwLock::new(None)),
+            peer_run_instance: Arc::new(RwLock::new(None)),
             pending_invitations: Arc::new(RwLock::new(Vec::new())),
             auth: Arc::new(RwLock::new(None)),
             token_validator: validator,

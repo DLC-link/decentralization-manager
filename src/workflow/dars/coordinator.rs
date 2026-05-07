@@ -7,15 +7,16 @@ use crate::{
     error::Result,
     noise::server::NoiseServer,
     utils,
-    workflow::contracts,
+    workflow::{COORDINATOR_STEP_STALENESS_THRESHOLD, StepStalenessWatchdog, contracts},
 };
 
-use super::{DarsConfig, DarsDirs, DarsStep};
+use super::{DarsConfig, DarsStep};
 
 pub async fn start_coordinator(
     node_config: NodeConfig,
     network_config: NetworkConfig,
     config: DarsConfig,
+    db: sqlx::SqlitePool,
 ) -> Result {
     tracing::info!("Initializing Noise server for DARs upload...");
 
@@ -30,14 +31,13 @@ pub async fn start_coordinator(
     let server = NoiseServer::new(
         node_config.clone(),
         network_config,
-        DarsStep::WaitingForAttestors,
+        db,
+        config.instance_name.clone(),
+        DarsStep::WaitingForPeers,
         Some(excluded),
     )
     .await?;
     let server = Arc::new(server);
-
-    let dirs = DarsDirs::with_base(node_config.workflow_data_dir(), &config.instance_name);
-    dirs.create_dirs().await?;
 
     tracing::info!("Noise server initialized, listening for connections");
 
@@ -54,17 +54,19 @@ async fn run_workflow(
     node_config: NodeConfig,
     config: DarsConfig,
 ) -> Result {
-    // Encode DAR files to send to attestors with UploadDars command
+    // Encode DAR files to send to peers with UploadDars command
     let dar_payload = encode_dars_payload(&config)?;
     workflow_state.set_command_payload(dar_payload).await;
 
     let mut coordinator_completed = false;
+    let mut watchdog = StepStalenessWatchdog::new(COORDINATOR_STEP_STALENESS_THRESHOLD);
 
     loop {
         let current_step = workflow_state.current_step().await;
+        watchdog.check(current_step)?;
 
         match current_step {
-            DarsStep::WaitingForAttestors => {
+            DarsStep::WaitingForPeers => {
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             }
             DarsStep::UploadDars => {
@@ -86,15 +88,15 @@ async fn run_workflow(
     Ok(())
 }
 
-/// Encode DAR files from config for transmission to attestors
+/// Encode DAR files from config for transmission to peers
 fn encode_dars_payload(config: &DarsConfig) -> Result<Vec<u8>> {
     if config.dar_files.is_empty() {
-        tracing::info!("No DAR files to distribute to attestors");
+        tracing::info!("No DAR files to distribute to peers");
         return Ok(Vec::new());
     }
 
     tracing::info!(
-        "Encoding {count} DAR file(s) for distribution to attestors",
+        "Encoding {count} DAR file(s) for distribution to peers",
         count = config.dar_files.len()
     );
 

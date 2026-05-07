@@ -99,7 +99,7 @@ Each node runs a Noise Protocol server for secure peer-to-peer communication:
 
 The server handles two categories of connections:
 1. **Heartbeat pings** -- peers ping each other every 5 seconds to track connectivity
-2. **Workflow messages** -- coordinator sends commands, attestors return results
+2. **Workflow messages** -- coordinator sends commands, peers return results
 
 ### Canton gRPC Client
 
@@ -128,26 +128,26 @@ The application communicates with Canton via gRPC using the following services:
 
 Each workflow type is modeled as a state machine with a defined step sequence. The engine:
 1. Advances through steps sequentially
-2. Sends commands to attestors at steps that require their participation
-3. Waits for all attestor responses before advancing
+2. Sends commands to peers at steps that require their participation
+3. Waits for all peer responses before advancing
 4. Executes coordinator-only steps (proposal creation, submission) locally
 
-## Coordinator / Attestor Model
+## Coordinator / Peer Model
 
-The system uses a coordinator/attestor pattern for multi-party operations. Any participant can serve either role -- it is determined per-workflow, not per-node.
+The system uses a coordinator/peer pattern for multi-party operations. Any participant can serve either role -- it is determined per-workflow, not per-node.
 
 ### Coordinator
 
 The coordinator is the participant that initiates a workflow. Responsibilities:
 - Sends invitations to selected peers via Noise protocol
-- Waits for attestors to accept and connect
+- Waits for peers to accept and connect
 - Orchestrates the step sequence (sends commands, collects results)
 - Performs coordinator-only operations (proposal creation, Canton submissions)
-- Runs a Noise server that attestors poll for commands
+- Runs a Noise server that peers poll for commands
 
-### Attestor
+### Peer
 
-An attestor participates in a workflow initiated by another participant. Responsibilities:
+An peer participates in a workflow initiated by another participant. Responsibilities:
 - Receives an invitation via heartbeat connection
 - User accepts/declines via UI (stored as pending invitation)
 - Connects to coordinator's Noise server as a client
@@ -158,7 +158,7 @@ An attestor participates in a workflow initiated by another participant. Respons
 ### Invitation Flow
 
 ```
-Coordinator                           Attestor
+Coordinator                           Peer
     |                                     |
     |--- InviteOnboarding (Noise) ------->|
     |<-- Ack ----------------------------|
@@ -190,7 +190,7 @@ Minimum message size: 6 bytes (type + length with zero payload).
 
 ### Message Categories
 
-**Commands (0x0001 - 0x000F):** Sent by coordinator to attestors.
+**Commands (0x0001 - 0x000F):** Sent by coordinator to peers.
 
 | Code | Name | Payload | Description |
 |------|------|---------|-------------|
@@ -199,9 +199,9 @@ Minimum message size: 6 bytes (type + length with zero payload).
 | 0x0003 | SignDns | Binary DNS proposal | Sign DNS topology proposal |
 | 0x0004 | SignP2p | Binary P2P proposal | Sign P2P topology proposals |
 | 0x0005 | SignSubmissions | Config + prepared files | Sign ledger submissions |
-| 0x0006 | StatusUpdate | UTF-8 status text | Status update from attestor |
+| 0x0006 | StatusUpdate | UTF-8 status text | Status update from peer |
 | 0x0007 | Disconnect | (empty) | Workflow complete, disconnect |
-| 0x0008 | GetNextCommand | (empty) | Attestor polls for next command |
+| 0x0008 | GetNextCommand | (empty) | Peer polls for next command |
 | 0x0009 | SignKick | Config + kick proposals | Sign kick topology proposals |
 | 0x000A | Ping | (empty) | Heartbeat ping |
 
@@ -214,18 +214,18 @@ Minimum message size: 6 bytes (type + length with zero payload).
 | 0x0012 | InviteContracts | Invite to contracts workflow |
 | 0x0013 | InviteDars | Invite to DARs upload workflow |
 
-**Responses (0x0100 - 0x01FF):** Replies from coordinator or attestor.
+**Responses (0x0100 - 0x01FF):** Replies from coordinator or peer.
 
 | Code | Name | Description |
 |------|------|-------------|
 | 0x0101 | Ack | Acknowledgement |
 | 0x0102 | Data | Generic data payload |
 | 0x0103 | Error | Error message |
-| 0x0104 | Ready | Attestor is ready |
+| 0x0104 | Ready | Peer is ready |
 | 0x0105 | Wait | No command ready, poll again |
 | 0x0106 | Pong | Heartbeat response |
 
-**Data Transfers (0x0200 - 0x02FF):** Attestor data uploads to coordinator.
+**Data Transfers (0x0200 - 0x02FF):** Peer data uploads to coordinator.
 
 | Code | Name | Description |
 |------|------|-------------|
@@ -247,7 +247,7 @@ Chunk size: 1024 bytes. Chunking is required for payloads exceeding `MAX_PAYLOAD
 
 ### Security
 
-- **PSK derivation**: Each peer pair derives a unique PSK via secp256k1 ECDH. The coordinator's secret key and the attestor's public key (or vice versa) produce a shared secret used as the Noise PSK.
+- **PSK derivation**: Each peer pair derives a unique PSK via secp256k1 ECDH. The coordinator's secret key and the peer's public key (or vice versa) produce a shared secret used as the Noise PSK.
 - **Peer allowlist**: Only peers registered in the database can establish connections. Unknown public keys are rejected.
 - **Transport encryption**: All data is encrypted by the Noise protocol after handshake completion.
 
@@ -261,14 +261,14 @@ Creates a new decentralized party with multiple hosting participants.
 
 | # | Step | Actor | Description |
 |---|------|-------|-------------|
-| 1 | WaitingForAttestors | Coordinator | Wait for all invited peers to connect |
+| 1 | WaitingForPeers | Coordinator | Wait for all invited peers to connect |
 | 2 | GenerateKeys | All | Each participant generates namespace + DAML signing keys via Canton Admin API |
 | 3 | CreateProposals | Coordinator | Compute decentralized namespace hash, create DNS and P2P topology proposals |
 | 4 | SignDns | All | Each participant signs the DNS proposal with their namespace key |
 | 5 | SubmitDns | Coordinator | Submit signed DNS proposal to Canton, wait for topology propagation (30s) |
 | 6 | SignP2p | All | Each participant signs P2P proposals with their namespace key |
 | 7 | SubmitFinal | Coordinator | Submit signed P2P proposals, wait for propagation |
-| 8 | Complete | All | Disconnect attestors, workflow finished |
+| 8 | Complete | All | Disconnect peers, workflow finished |
 
 **Canton API calls:**
 - `VaultManagerService.GenerateKey` -- Generate namespace and signing keys (step 2)
@@ -286,12 +286,12 @@ Removes a participant from an existing decentralized party.
 
 | # | Step | Actor | Description |
 |---|------|-------|-------------|
-| 1 | WaitingForAttestors | Coordinator | Wait for remaining members to connect |
+| 1 | WaitingForPeers | Coordinator | Wait for remaining members to connect |
 | 2 | ExportState | Coordinator | Export current DNS and P2P topology state |
 | 3 | CreateProposals | Coordinator | Create new DNS (reduced owners) and P2P (removed member) proposals |
 | 4 | SignProposals | All remaining | Each remaining member signs the kick proposals |
 | 5 | SubmitKick | Coordinator | Submit signed proposals to Canton |
-| 6 | Complete | All | Disconnect attestors |
+| 6 | Complete | All | Disconnect peers |
 
 **Canton API calls:**
 - `TopologyManagerReadService.ListDecentralizedNamespaceDefinition` -- Read current DNS (step 2)
@@ -309,12 +309,12 @@ Deploys DAR packages and creates Daml contracts on the ledger.
 
 | # | Step | Actor | Description |
 |---|------|-------|-------------|
-| 1 | WaitingForAttestors | Coordinator | Wait for all participants to connect |
+| 1 | WaitingForPeers | Coordinator | Wait for all participants to connect |
 | 2 | UploadDars | All | Each participant uploads DAR files to their local Canton node |
 | 3 | PrepareSubmissions | Coordinator | Prepare ledger command submissions from contract definitions |
 | 4 | SignSubmissions | All | Each participant signs the prepared submissions |
 | 5 | ExecuteSubmissions | Coordinator | Execute signed submissions on the Canton ledger |
-| 6 | Complete | All | Disconnect attestors |
+| 6 | Complete | All | Disconnect peers |
 
 **Canton API calls:**
 - `PackageService.UploadDarFile` -- Upload DAR packages (step 2)
@@ -331,9 +331,9 @@ Uploads DAR packages to all participants without deploying contracts.
 
 | # | Step | Actor | Description |
 |---|------|-------|-------------|
-| 1 | WaitingForAttestors | Coordinator | Wait for all participants to connect |
+| 1 | WaitingForPeers | Coordinator | Wait for all participants to connect |
 | 2 | UploadDars | All | Each participant uploads DAR files to their local Canton node |
-| 3 | Complete | All | Disconnect attestors |
+| 3 | Complete | All | Disconnect peers |
 
 **Canton API calls:**
 - `PackageService.UploadDarFile` -- Upload DAR packages (step 2)
@@ -663,7 +663,7 @@ FAR configuration is used in:
 - **ACS sync for existing contracts**: Adding a new member to a party that already has active contracts requires Active Contract Set (ACS) export/import. This operation requires Canton's repair mode, which necessitates a participant restart. If the party has no active contracts, ACS sync is not needed.
 - **No external party support**: All members must run the DPM application on their own Canton participant node. There is no API for external parties to join without running the software.
 - **Single workflow at a time**: The Noise listener is paused during active workflows. Only one workflow can run concurrently per node.
-- **Coordinator single point of progress**: If the coordinator goes offline during a workflow, the workflow cannot continue. Attestors will retry 3 times before aborting.
+- **Coordinator single point of progress**: If the coordinator goes offline during a workflow, the workflow cannot continue. Peers will retry 3 times before aborting.
 
 ### Daml Package Dependencies
 

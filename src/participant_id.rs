@@ -13,7 +13,7 @@ pub const NAMESPACE_LENGTH: usize = 34;
 /// Canton namespaces are multihash-encoded SHA-256 hashes:
 /// - First 2 bytes: multihash prefix (0x1220 for SHA-256)
 /// - Next 32 bytes: SHA-256 hash
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct Namespace(#[serde(with = "BigArray")] [u8; NAMESPACE_LENGTH]);
 
 impl Namespace {
@@ -64,7 +64,7 @@ impl fmt::Display for Namespace {
 /// Examples:
 /// - `participant::1220c4010d6883f367...`
 /// - `sv::1220034c3a6a9454...`
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct CantonId {
     /// The prefix (e.g., "participant", "sv")
     pub prefix: String,

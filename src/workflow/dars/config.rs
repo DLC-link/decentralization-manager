@@ -9,6 +9,6 @@ pub struct DarsConfig {
     pub dar_files: Vec<DarFile>,
     /// Workflow instance name for directory organization
     pub instance_name: String,
-    /// Selected peers — the only nodes the coordinator expects as attestors
+    /// Selected peers — the only nodes the coordinator expects as peers
     pub peer_ids: Vec<CantonId>,
 }

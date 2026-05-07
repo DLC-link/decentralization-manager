@@ -1,5 +1,3 @@
-use tokio::time;
-
 use canton_proto_rs::com::digitalasset::canton::{
     protocol::v30::{DecentralizedNamespaceDefinition, SignedTopologyTransaction},
     topology::admin::v30::{
@@ -9,52 +7,56 @@ use canton_proto_rs::com::digitalasset::canton::{
         topology_manager_write_service_client::TopologyManagerWriteServiceClient,
     },
 };
+use sqlx::SqlitePool;
+use tokio::time;
 
 use crate::{
     config::NodeConfig,
     consts::{
-        DNS_PROTO_FILENAME, NAMESPACE_DEF_FILENAME, P2P_PROTO_FILENAME, SIGNED_DNS_PROPOSAL_PREFIX,
-        SIGNED_P2P_PROPOSALS_PREFIX, TOPOLOGY_PROPAGATION_DELAY_SECS, TOPOLOGY_RETRY_DELAY_SECS,
-        TOPOLOGY_RETRY_MAX_ATTEMPTS,
+        TOPOLOGY_PROPAGATION_DELAY_SECS, TOPOLOGY_RETRY_DELAY_SECS, TOPOLOGY_RETRY_MAX_ATTEMPTS,
     },
     error::Result,
+    participant_id::CantonId,
     utils,
-    workflow::onboarding::{OnboardingConfig, OnboardingDirs},
+    workflow::{
+        onboarding::OnboardingConfig,
+        storage::{WorkflowStorage, artifact_kinds},
+    },
 };
 
 /// Aggregate and submit DNS proposals
 ///
-/// This step must be run once by the coordinator after all attestors have signed the DNS proposal.
+/// This step must be run once by the coordinator after all peers have signed the DNS proposal.
 /// It aggregates all signatures and submits the fully-signed proposal to Canton.
-pub async fn submit_dns_proposals(config: &NodeConfig, dirs: &OnboardingDirs) -> Result {
+pub async fn submit_dns_proposals(
+    config: &NodeConfig,
+    storage: &SqlitePool,
+    instance_name: &str,
+) -> Result {
     tracing::info!("Submitting DNS proposals...");
 
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
     tracing::debug!("Using synchronizer ID: {synchronizer_id}");
 
-    let dns_file = dirs.dns_proposals_dir.join(DNS_PROTO_FILENAME);
-    tracing::info!(
-        "Reading original DNS proposal from {path}",
-        path = dns_file.display()
-    );
+    let dns_bytes = storage
+        .read_artifact(instance_name, artifact_kinds::DNS_PROTO, None)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("DNS_PROTO artifact missing — did CreateProposals run?"))?;
     let mut dns_transaction: SignedTopologyTransaction =
-        utils::read_first_message_from_file(&dns_file).await?;
+        utils::read_first_message_from_bytes(&dns_bytes)?;
 
-    let signed_files =
-        utils::find_files_by_pattern(&dirs.dns_signed_dir, SIGNED_DNS_PROPOSAL_PREFIX, ".bin")
-            .await?;
+    let signed_dns = storage
+        .list_artifacts(instance_name, artifact_kinds::SIGNED_DNS_PROPOSAL)
+        .await?;
     tracing::info!(
-        "Found {count} signed DNS proposal files",
-        count = signed_files.len()
+        "Found {count} signed DNS proposal artefacts",
+        count = signed_dns.len()
     );
 
-    for signed_file in &signed_files {
-        tracing::info!(
-            "Reading signatures from {path}",
-            path = signed_file.display()
-        );
+    for (peer_id, signed_payload) in &signed_dns {
+        tracing::info!("Reading signatures from peer {peer_id}");
         let signed_transactions: Vec<SignedTopologyTransaction> =
-            utils::read_all_messages_from_file(signed_file).await?;
+            decode_messages_from_bytes(signed_payload)?;
 
         for signed_tx in signed_transactions {
             dns_transaction
@@ -86,13 +88,12 @@ pub async fn submit_dns_proposals(config: &NodeConfig, dirs: &OnboardingDirs) ->
     topology_write_client.add_transactions(request).await?;
     tracing::info!("DNS proposal submitted to topology");
 
-    let namespace_def_file = dirs.dns_submission_dir.join(NAMESPACE_DEF_FILENAME);
-    tracing::info!(
-        "Reading namespace definition from {path}",
-        path = namespace_def_file.display()
-    );
+    let namespace_bytes = storage
+        .read_artifact(instance_name, artifact_kinds::NAMESPACE_DEF, None)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("NAMESPACE_DEF artifact missing"))?;
     let namespace_def: DecentralizedNamespaceDefinition =
-        utils::read_first_message_from_file(&namespace_def_file).await?;
+        utils::read_first_message_from_bytes(&namespace_bytes)?;
 
     tracing::info!(
         "Waiting for DNS to appear in topology for namespace {namespace}...",
@@ -164,11 +165,12 @@ async fn wait_for_dns_in_topology(
 /// **Canton 3.4+**: Submits P2P proposals with embedded signing keys
 /// (replaces the separate PartyToKeyMapping transactions from Canton 3.3).
 ///
-/// This step must be run once by the coordinator after all attestors have signed the P2P proposals.
+/// This step must be run once by the coordinator after all peers have signed the P2P proposals.
 /// It aggregates all signatures and submits the fully-signed proposal to Canton.
 pub async fn submit_final_proposals(
     config: &NodeConfig,
-    dirs: &OnboardingDirs,
+    storage: &SqlitePool,
+    instance_name: &str,
     onboarding_config: &OnboardingConfig,
 ) -> Result {
     tracing::info!("Submitting P2P proposal with embedded signing keys (Canton 3.4+)...");
@@ -179,34 +181,29 @@ pub async fn submit_final_proposals(
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
     tracing::debug!("Using synchronizer ID: {synchronizer_id}");
 
-    let p2p_file = dirs.p2p_proposals_dir.join(P2P_PROTO_FILENAME);
-    tracing::info!(
-        "Reading original P2P proposal from {path}",
-        path = p2p_file.display()
-    );
+    let p2p_bytes = storage
+        .read_artifact(instance_name, artifact_kinds::P2P_PROTO, None)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("P2P_PROTO artifact missing — did CreateProposals run?"))?;
     let mut p2p_transaction: SignedTopologyTransaction =
-        utils::read_first_message_from_file(&p2p_file).await?;
+        utils::read_first_message_from_bytes(&p2p_bytes)?;
 
-    let signed_files =
-        utils::find_files_by_pattern(&dirs.final_signed_dir, SIGNED_P2P_PROPOSALS_PREFIX, ".bin")
-            .await?;
+    let signed_p2p = storage
+        .list_artifacts(instance_name, artifact_kinds::SIGNED_P2P_PROPOSAL)
+        .await?;
     tracing::info!(
-        "Found {count} signed P2P proposal files",
-        count = signed_files.len()
+        "Found {count} signed P2P proposal artefacts",
+        count = signed_p2p.len()
     );
 
-    for signed_file in &signed_files {
-        tracing::info!(
-            "Reading signatures from {path}",
-            path = signed_file.display()
-        );
+    for (peer_id, signed_payload) in &signed_p2p {
+        tracing::info!("Reading signatures from peer {peer_id}");
         let signed_transactions: Vec<SignedTopologyTransaction> =
-            utils::read_all_messages_from_file(signed_file).await?;
+            decode_messages_from_bytes(signed_payload)?;
 
         if signed_transactions.len() != 1 {
             anyhow::bail!(
-                "Expected 1 transaction in {path}, got {count}",
-                path = signed_file.display(),
+                "Expected 1 transaction from peer {peer_id}, got {count}",
                 count = signed_transactions.len()
             );
         }
@@ -221,18 +218,18 @@ pub async fn submit_final_proposals(
         count = p2p_transaction.signatures.len()
     );
 
-    let namespace_file = dirs.dns_submission_dir.join(NAMESPACE_DEF_FILENAME);
-    tracing::info!(
-        "Reading namespace definition from {path}",
-        path = namespace_file.display()
-    );
+    let namespace_bytes = storage
+        .read_artifact(instance_name, artifact_kinds::NAMESPACE_DEF, None)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("NAMESPACE_DEF artifact missing"))?;
     let namespace_def: DecentralizedNamespaceDefinition =
-        utils::read_first_message_from_file(&namespace_file).await?;
+        utils::read_first_message_from_bytes(&namespace_bytes)?;
 
-    let party_id = format!(
+    let party_id_str = format!(
         "{party_id_prefix}::{namespace}",
         namespace = namespace_def.decentralized_namespace
     );
+    let party_id = CantonId::parse(&party_id_str)?;
     tracing::info!("Constructed party ID: {party_id}");
 
     tracing::info!("Submitting aggregated P2P proposal...");
@@ -281,13 +278,36 @@ pub async fn submit_final_proposals(
     Ok(())
 }
 
+/// Decode multiple consecutive `varint(len)||proto` messages from a single
+/// payload. Mirrors `utils::read_all_messages_from_file` but operates on
+/// in-memory bytes instead of a file path.
+fn decode_messages_from_bytes<M: prost::Message + Default>(payload: &[u8]) -> Result<Vec<M>> {
+    let mut cursor: &[u8] = payload;
+    let mut out = Vec::new();
+    while !cursor.is_empty() {
+        let len = prost::encoding::decode_varint(&mut cursor)? as usize;
+        if cursor.len() < len {
+            anyhow::bail!(
+                "Truncated message stream: expected {len} bytes, only {remaining} remain",
+                remaining = cursor.len()
+            );
+        }
+        let (msg_bytes, rest) = cursor.split_at(len);
+        let msg = M::decode(msg_bytes)?;
+        out.push(msg);
+        cursor = rest;
+    }
+    Ok(out)
+}
+
 /// Wait for P2P (PartyToParticipant) to appear in topology by polling
 /// Returns the effective time (valid_from) when the P2P mapping becomes active
 async fn wait_for_p2p_in_topology(
     config: &NodeConfig,
     synchronizer_id: &str,
-    party_id: &str,
+    party_id: &CantonId,
 ) -> Result<prost_types::Timestamp> {
+    let party_id_str = party_id.to_string();
     let mut topology_read_client =
         TopologyManagerReadServiceClient::connect(config.admin_api_url()).await?;
 
@@ -308,7 +328,7 @@ async fn wait_for_p2p_in_topology(
                 filter_signed_key: String::new(),
                 protocol_version: None,
             }),
-            filter_party: party_id.to_string(),
+            filter_party: party_id_str.clone(),
             filter_participant: String::new(),
         });
 

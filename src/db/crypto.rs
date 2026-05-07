@@ -92,6 +92,61 @@ pub fn decrypt_opt(value: Option<String>) -> Result<Option<String>> {
     }
 }
 
+/// Encrypt a binary blob. Returns the raw byte form `nonce || ciphertext` (no
+/// base64) suitable for a SQLite BLOB column. If encryption is not enabled,
+/// returns the input unchanged so the read path can transparently round-trip
+/// either form.
+///
+/// # Errors
+///
+/// Returns an error if AES-GCM encryption fails.
+pub fn encrypt_bytes(plaintext: &[u8]) -> Result<Vec<u8>> {
+    let Some(key) = ENCRYPTION_KEY.get() else {
+        return Ok(plaintext.to_vec());
+    };
+
+    let cipher = Aes256Gcm::new(key.into());
+    let mut nonce_bytes = [0u8; 12];
+    OsRng.fill_bytes(&mut nonce_bytes);
+
+    let ciphertext = cipher
+        .encrypt(&nonce_bytes.into(), plaintext)
+        .map_err(|e| anyhow::anyhow!("encryption failed: {e}"))?;
+
+    let mut combined = Vec::with_capacity(12 + ciphertext.len());
+    combined.extend_from_slice(&nonce_bytes);
+    combined.extend_from_slice(&ciphertext);
+    Ok(combined)
+}
+
+/// Decrypt a `nonce || ciphertext` blob. If encryption is not enabled, or the
+/// blob is too short / decryption fails (e.g. legacy plaintext written before
+/// encryption was turned on), returns the input bytes unchanged.
+///
+/// # Errors
+///
+/// Returns an error only if the stored blob has a malformed nonce length.
+pub fn decrypt_bytes(stored: &[u8]) -> Result<Vec<u8>> {
+    let Some(key) = ENCRYPTION_KEY.get() else {
+        return Ok(stored.to_vec());
+    };
+
+    if stored.len() <= 12 {
+        return Ok(stored.to_vec());
+    }
+
+    let (nonce_bytes, ciphertext) = stored.split_at(12);
+    let cipher = Aes256Gcm::new(key.into());
+    let nonce: [u8; 12] = nonce_bytes
+        .try_into()
+        .context("nonce slice is not 12 bytes")?;
+
+    match cipher.decrypt(&nonce.into(), ciphertext) {
+        Ok(plaintext) => Ok(plaintext),
+        Err(_) => Ok(stored.to_vec()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

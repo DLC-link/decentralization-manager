@@ -1,31 +1,33 @@
-use anyhow::Context;
+use bytes::{BufMut, BytesMut};
 use canton_proto_rs::com::digitalasset::canton::topology::admin::v30::{
     BaseQuery, ListDecentralizedNamespaceDefinitionRequest, ListPartyToParticipantRequest, StoreId,
     Synchronizer, base_query, store_id, synchronizer,
     topology_manager_read_service_client::TopologyManagerReadServiceClient,
 };
+use prost::Message;
+use sqlx::SqlitePool;
 
 use crate::{
     config::NodeConfig,
-    consts::{
-        KICK_PARTICIPANT_ID_FILENAME, KICK_TARGET_FILENAME, NAMESPACE_DEF_FILENAME,
-        NEW_THRESHOLD_FILENAME,
-    },
     error::Result,
     utils,
-    workflow::kick::{KickConfig, KickDirs},
+    workflow::{
+        kick::KickConfig,
+        storage::{WorkflowStorage, artifact_kinds},
+    },
 };
 
 /// Export current decentralized namespace state
 ///
 /// This step exports:
-/// - Current namespace definition
-/// - Kick target (namespace fingerprint to remove)
-/// - Kick participant ID
-/// - New threshold after kick
+/// - Current namespace definition (`KICK_NAMESPACE_DEF`)
+/// - Kick target (`KICK_TARGET_NAMESPACE` — the namespace fingerprint to remove)
+/// - Kick participant ID (`KICK_TARGET_PARTICIPANT`)
+/// - New threshold after kick (`KICK_NEW_THRESHOLD`)
 pub async fn export_state(
     config: &NodeConfig,
-    dirs: &KickDirs,
+    storage: &SqlitePool,
+    instance_name: &str,
     kick_config: &KickConfig,
 ) -> Result {
     tracing::info!("Exporting current decentralized namespace state...");
@@ -87,13 +89,18 @@ pub async fn export_state(
         );
     }
 
-    // Save namespace definition
-    let namespace_file = dirs.kick_config_dir.join(NAMESPACE_DEF_FILENAME);
-    tracing::info!(
-        "Saving namespace definition to {path}",
-        path = namespace_file.display()
-    );
-    utils::write_message_to_file(namespace_def, &namespace_file).await?;
+    // Save namespace definition as a length-prefixed protobuf — same byte
+    // shape as the file written by `utils::write_message_to_file`.
+    let namespace_bytes = encode_length_prefixed_message(namespace_def);
+    storage
+        .write_artifact(
+            instance_name,
+            artifact_kinds::KICK_NAMESPACE_DEF,
+            None,
+            &namespace_bytes,
+        )
+        .await?;
+    tracing::info!("Saved namespace definition to storage");
 
     // Get P2P mapping to find participants
     // Use the prefix from the decentralized party ID provided via UI
@@ -159,17 +166,26 @@ pub async fn export_state(
         "Successfully mapped participant {kick_participant} to DNS owner {kick_target_hex}"
     );
 
-    // Save kick target
-    let kick_target_file = dirs.kick_config_dir.join(KICK_TARGET_FILENAME);
-    tokio::fs::write(&kick_target_file, format!("{kick_target_hex}\n"))
-        .await
-        .with_context(|| format!("Failed to write '{}'", kick_target_file.display()))?;
+    // Save kick target — plaintext, mirrors the previous file write that
+    // included a trailing newline so existing reader trim behaviour matches.
+    storage
+        .write_artifact(
+            instance_name,
+            artifact_kinds::KICK_TARGET_NAMESPACE,
+            None,
+            format!("{kick_target_hex}\n").as_bytes(),
+        )
+        .await?;
 
-    // Save kick participant ID
-    let kick_participant_file = dirs.kick_config_dir.join(KICK_PARTICIPANT_ID_FILENAME);
-    tokio::fs::write(&kick_participant_file, format!("{kick_participant}\n"))
-        .await
-        .with_context(|| format!("Failed to write '{}'", kick_participant_file.display()))?;
+    // Save kick participant ID — plaintext.
+    storage
+        .write_artifact(
+            instance_name,
+            artifact_kinds::KICK_TARGET_PARTICIPANT,
+            None,
+            format!("{kick_participant}\n").as_bytes(),
+        )
+        .await?;
 
     // Use the threshold configured by the user
     let remaining_members = namespace_def.owners.len() - 1;
@@ -178,15 +194,27 @@ pub async fn export_state(
     tracing::info!("Remaining members after kick: {remaining_members}");
     tracing::info!("New threshold (configured): {new_threshold}");
 
-    // Save new threshold
-    let threshold_file = dirs.kick_config_dir.join(NEW_THRESHOLD_FILENAME);
-    tokio::fs::write(&threshold_file, format!("{new_threshold}\n"))
-        .await
-        .with_context(|| format!("Failed to write '{}'", threshold_file.display()))?;
+    // Save new threshold — plaintext.
+    storage
+        .write_artifact(
+            instance_name,
+            artifact_kinds::KICK_NEW_THRESHOLD,
+            None,
+            format!("{new_threshold}\n").as_bytes(),
+        )
+        .await?;
 
-    tracing::info!(
-        "State exported successfully to {path}",
-        path = dirs.kick_config_dir.display()
-    );
+    tracing::info!("State exported successfully to workflow storage");
     Ok(())
+}
+
+/// Encode a single protobuf message with a varint length prefix, matching the
+/// byte layout produced by `utils::write_message_to_file`. Used so reads via
+/// `utils::read_first_message_from_bytes` keep working unchanged.
+fn encode_length_prefixed_message<M: Message>(message: &M) -> Vec<u8> {
+    let encoded = message.encode_to_vec();
+    let mut buffer = BytesMut::new();
+    prost::encoding::encode_varint(encoded.len() as u64, &mut buffer);
+    buffer.put_slice(&encoded);
+    buffer.to_vec()
 }

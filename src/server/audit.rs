@@ -2,6 +2,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use sqlx::SqlitePool;
 
+use crate::participant_id::CantonId;
+
 use super::types::GovernanceType;
 
 /// Event types for the governance audit trail
@@ -29,8 +31,8 @@ impl AuditEvent {
 /// Parameters for an audit log entry
 pub struct AuditParams {
     pub event_type: AuditEvent,
-    pub party_id: String,
-    pub member_party_id: String,
+    pub party_id: CantonId,
+    pub member_party_id: CantonId,
     pub governance_type: GovernanceType,
     pub action_summary: String,
     pub details: String,
@@ -61,8 +63,8 @@ async fn log_governance_audit(pool: &SqlitePool, params: AuditParams) {
     )
     .bind(now)
     .bind(params.event_type.as_str())
-    .bind(&params.party_id)
-    .bind(&params.member_party_id)
+    .bind(params.party_id.to_string())
+    .bind(params.member_party_id.to_string())
     .bind(&gov_type)
     .bind(&params.action_summary)
     .bind(&params.details)

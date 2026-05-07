@@ -1,5 +1,4 @@
-use tokio::fs;
-
+use bytes::{BufMut, BytesMut};
 use canton_proto_rs::com::digitalasset::canton::{
     protocol::v30::SignedTopologyTransaction,
     topology::admin::v30::{
@@ -7,17 +6,31 @@ use canton_proto_rs::com::digitalasset::canton::{
         topology_manager_write_service_client::TopologyManagerWriteServiceClient,
     },
 };
+use prost::Message;
+use sqlx::SqlitePool;
 
 use crate::{
-    config::NodeConfig, consts::SIGNED_KICK_PROPOSALS_PREFIX, error::Result, utils,
-    workflow::kick::KickDirs,
+    config::NodeConfig,
+    error::Result,
+    utils,
+    workflow::storage::{WorkflowStorage, artifact_kinds},
 };
 
 /// Sign kick proposals
 ///
 /// Each remaining member (not the kicked member) signs both proposals.
 /// `proposal_data` contains both DNS and P2P proposals received from coordinator.
-pub async fn sign_proposals(config: &NodeConfig, dirs: &KickDirs, proposal_data: &[u8]) -> Result {
+///
+/// Persists the per-peer signed DNS / P2P proposals as
+/// `SIGNED_KICK_DNS` / `SIGNED_KICK_P2P` artefacts (keyed by this node's
+/// participant id). The byte-shape per artefact is `varint(len)||proto`,
+/// matching the original on-disk format produced by `write_message_to_file`.
+pub async fn sign_proposals(
+    config: &NodeConfig,
+    storage: &SqlitePool,
+    instance_name: &str,
+    proposal_data: &[u8],
+) -> Result {
     tracing::info!("Signing kick proposals...");
 
     let node_id = config.participant_id().to_string();
@@ -61,18 +74,43 @@ pub async fn sign_proposals(config: &NodeConfig, dirs: &KickDirs, proposal_data:
         );
     }
 
-    // Save signed proposals
-    fs::create_dir_all(&dirs.kick_signed_dir).await?;
-    let output_file = dirs
-        .kick_signed_dir
-        .join(format!("{SIGNED_KICK_PROPOSALS_PREFIX}-{node_id}.bin"));
-    tracing::info!(
-        "Saving signed kick proposals to {path}",
-        path = output_file.display()
-    );
+    // Persist signed DNS + P2P as separate per-peer artefacts. Each is
+    // written as `varint(len)||proto` so the bytes that go on the wire to the
+    // coordinator (which is the concatenation of these two artefacts) are
+    // byte-identical to what `write_messages_to_file(&[dns, p2p], path)`
+    // produced before — Canton sees the exact same protobufs.
+    let dns_bytes = encode_length_prefixed_message(&response.transactions[0]);
+    let p2p_bytes = encode_length_prefixed_message(&response.transactions[1]);
 
-    utils::write_messages_to_file(&response.transactions, &output_file).await?;
+    storage
+        .write_artifact(
+            instance_name,
+            artifact_kinds::SIGNED_KICK_DNS,
+            Some(&node_id),
+            &dns_bytes,
+        )
+        .await?;
+    storage
+        .write_artifact(
+            instance_name,
+            artifact_kinds::SIGNED_KICK_P2P,
+            Some(&node_id),
+            &p2p_bytes,
+        )
+        .await?;
 
     tracing::info!("Kick proposals signed successfully");
     Ok(())
+}
+
+/// Encode a protobuf message as `varint(len)||proto`. Matches the on-disk
+/// format `utils::write_message_to_file` used to produce; concatenating the
+/// DNS and P2P encodings yields exactly the buffer the peer sends to the
+/// coordinator over Noise (i.e. the original combined-file bytes).
+fn encode_length_prefixed_message<M: Message>(message: &M) -> Vec<u8> {
+    let encoded = message.encode_to_vec();
+    let mut buffer = BytesMut::new();
+    prost::encoding::encode_varint(encoded.len() as u64, &mut buffer);
+    buffer.put_slice(&encoded);
+    buffer.to_vec()
 }

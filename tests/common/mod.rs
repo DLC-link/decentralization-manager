@@ -1,13 +1,16 @@
 #![allow(dead_code)]
 
+pub mod chaos;
+pub mod db;
 pub mod governance;
 pub mod http;
 pub mod invitations;
 pub mod phases;
+pub mod processes;
 pub mod scenario;
 pub mod types;
 
-use std::{sync::Mutex, time::Duration};
+use std::{path::PathBuf, sync::Mutex, time::Duration};
 
 use anyhow::Context;
 use reqwest::Client;
@@ -23,9 +26,15 @@ pub struct NodePorts {
 pub struct Fixture {
     pub client: Client,
     pub jwt: String,
+    pub dev_dir: PathBuf,
     pub p1: NodePorts,
     pub p2: NodePorts,
     pub p3: NodePorts,
+
+    /// Live PID for each participant. Initialized from `P{1,2,3}_PID` env
+    /// vars at boot; restart helpers update the slot in place so subsequent
+    /// chaos tests target the freshly-spawned process.
+    pub current_pids: [Option<u32>; 3],
 
     pub party_id: Option<String>,
     pub party_prefix: Option<String>,
@@ -66,16 +75,29 @@ impl Fixture {
             participant_id: read_env("P3_PARTICIPANT_ID")?,
         };
         let jwt = read_env("MOCK_TOKEN")?;
+        let dev_dir = PathBuf::from(read_env("DEV_DIR")?);
+        let current_pids = [
+            std::env::var("P1_PID").ok().and_then(|s| s.parse().ok()),
+            std::env::var("P2_PID").ok().and_then(|s| s.parse().ok()),
+            std::env::var("P3_PID").ok().and_then(|s| s.parse().ok()),
+        ];
+        // Match the bash harness's `curl -s` (no client-side timeout). Some
+        // governance proposes against Canton can take >30s when state has
+        // accumulated across phases; the e2e itself caps total time so a
+        // hung server still fails — we just don't want a per-request 30s
+        // ceiling that's tighter than bash's behavior.
         let client = Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(180))
             .build()
             .context("build reqwest client")?;
         Ok(Fixture {
             client,
             jwt,
+            dev_dir,
             p1,
             p2,
             p3,
+            current_pids,
             party_id: None,
             party_prefix: None,
             rules_contract_id: None,
@@ -129,6 +151,8 @@ impl Fixture {
                 .build()
                 .expect("build reqwest client for test"),
             jwt: "test-jwt".to_string(),
+            dev_dir: PathBuf::from("/tmp/dpm-it-test"),
+            current_pids: [None, None, None],
             p1: NodePorts {
                 http: 8081,
                 noise: 9001,
@@ -176,6 +200,7 @@ mod tests {
             std::env::set_var("P2_PARTICIPANT_ID", "p2");
             std::env::set_var("P3_PARTICIPANT_ID", "p3");
             std::env::set_var("MOCK_TOKEN", "mock-jwt");
+            std::env::set_var("DEV_DIR", "/tmp/dpm-it-test");
         }
     }
 
@@ -192,6 +217,7 @@ mod tests {
                 "P2_PARTICIPANT_ID",
                 "P3_PARTICIPANT_ID",
                 "MOCK_TOKEN",
+                "DEV_DIR",
             ] {
                 std::env::remove_var(k);
             }
