@@ -115,6 +115,33 @@ jobs:
       - name: Run integration tests
         run: ./integration-tests/run.sh
 
+  cargo-audit:
+    name: Cargo Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  cargo-deny:
+    name: Cargo Deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # cargo-deny invokes `cargo metadata` to resolve the dep tree, which
+      # has to clone the private canton-lib git deps — reuse the shared
+      # setup so it gets the bot SSH key and registry cache.
+      - uses: ./.github/actions/setup-build-env
+        with:
+          ssh-private-key: ${{ secrets.BOT_SSH_PRIVATE_KEY }}
+      - uses: dtolnay/rust-toolchain@stable
+      # Only `advisories` until a deny.toml is checked in; bans, licenses,
+      # and sources need policy decisions to be useful.
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories
+
   daml:
     name: DAML Build & Test
     runs-on: ubuntu-8-core
