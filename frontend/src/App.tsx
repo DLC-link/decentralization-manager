@@ -682,6 +682,17 @@ const App = () => {
               }
             />
             <Tab label="Configuration" />
+            <Tab
+              label={
+                <Badge
+                  badgeContent={notificationCount}
+                  color={activeTab === 3 ? "primary" : "error"}
+                  sx={{ pr: notificationCount ? 2.5 : 0 }}
+                >
+                  Notifications
+                </Badge>
+              }
+            />
           </Tabs>
         </Box>
       )}
