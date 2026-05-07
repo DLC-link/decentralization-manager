@@ -120,15 +120,15 @@ pub async fn start_coordinator(
 
 /// Maximum time the coordinator's `run_workflow` loop is allowed to spend in
 /// the same step before treating the run as failed. Wait-states like
-/// `WaitingForAttestors`, `SignDns`, `SignP2p` only advance when attestors
-/// post messages over Noise; if every attestor goes away (process killed,
+/// `WaitingForPeers`, `SignDns`, `SignP2p` only advance when peers
+/// post messages over Noise; if every peer goes away (process killed,
 /// network partition) the loop has no other way to give up. Without this
 /// budget the spawned coordinator task blocks forever and the persisted
 /// `workflow_runs` row stays `inprogress`, leaving operators no way to
 /// retry/dismiss.
 ///
 /// Sized to be larger than any legitimate per-step wait we've observed in
-/// CI (attestor sign+round-trip is sub-30s) but well under the chaos
+/// CI (peer sign+round-trip is sub-30s) but well under the chaos
 /// suite's tightest deadline (P1 = 120s for the row to flip to `failed`).
 pub const COORDINATOR_STEP_STALENESS_THRESHOLD: Duration = Duration::from_secs(90);
 
@@ -168,7 +168,7 @@ impl<S: PartialEq + Copy + std::fmt::Debug> StepStalenessWatchdog<S> {
         if elapsed >= self.threshold {
             anyhow::bail!(
                 "Coordinator stalled in step {current:?} for {elapsed:?} \
-                 (threshold {threshold:?}); attestors likely unreachable",
+                 (threshold {threshold:?}); peers likely unreachable",
                 threshold = self.threshold
             );
         }
@@ -203,17 +203,17 @@ pub async fn run_server_with_workflow<S: state::WorkflowStep + 'static>(
     Ok(())
 }
 
-/// Start node in attestor mode (client)
+/// Start node in peer mode (client)
 /// Called when this node receives a workflow invite from the coordinator.
 ///
-/// `instance_name` is the local attestor-side `workflow_runs` row's primary
+/// `instance_name` is the local peer-side `workflow_runs` row's primary
 /// key — accept_invitation creates the row with a synthetic name (e.g.
-/// `attestor-onboarding-<pubkey>-<ts>`) and we use that same name for every
+/// `peer-onboarding-<pubkey>-<ts>`) and we use that same name for every
 /// `workflow_artifacts` write, so the FK constraint to `workflow_runs` is
 /// satisfied. The coordinator's logical instance_name (carried in
 /// OnboardingConfig/ContractsConfig/KickConfig payloads) is the coordinator's
-/// own primary key on its DB and is not used for storage on the attestor side.
-pub async fn start_attestor(
+/// own primary key on its DB and is not used for storage on the peer side.
+pub async fn start_peer(
     node_config: NodeConfig,
     coordinator: Peer,
     db: SqlitePool,
@@ -229,18 +229,18 @@ pub async fn start_attestor(
     tracing::info!("Noise client initialized, entering command polling loop");
 
     // Cache the workflow kind so each polled command can be mapped to a
-    // human-readable step (current_step / step_index) on this attestor's
+    // human-readable step (current_step / step_index) on this peer's
     // workflow_runs row. Falling back to None just means the notification
     // feed UI keeps showing the row's initial "Active" placeholder for this
     // run, which is harmless.
-    let attestor_kind: Option<WorkflowKind> = match db.get_workflow_run(&instance_name).await {
+    let peer_kind: Option<WorkflowKind> = match db.get_workflow_run(&instance_name).await {
         Ok(Some(run)) => Some(run.kind),
         Ok(None) => {
-            tracing::warn!("attestor step persist: no workflow_runs row for {instance_name}");
+            tracing::warn!("peer step persist: no workflow_runs row for {instance_name}");
             None
         }
         Err(e) => {
-            tracing::warn!("attestor step persist: lookup failed for {instance_name}: {e}");
+            tracing::warn!("peer step persist: lookup failed for {instance_name}: {e}");
             None
         }
     };
@@ -272,9 +272,7 @@ pub async fn start_attestor(
                     tracing::error!(
                         "Failed to communicate with coordinator after 3 attempts. Aborting."
                     );
-                    anyhow::bail!(
-                        "Attestor failed: persistent communication errors with coordinator"
-                    );
+                    anyhow::bail!("Peer failed: persistent communication errors with coordinator");
                 }
 
                 tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
@@ -285,8 +283,8 @@ pub async fn start_attestor(
         let command = message.msg_type;
         let payload = message.payload;
 
-        if let Some(kind) = attestor_kind {
-            persist_attestor_step(&db, &instance_name, kind, command).await;
+        if let Some(kind) = peer_kind {
+            persist_peer_step(&db, &instance_name, kind, command).await;
         }
 
         match command {
@@ -336,7 +334,7 @@ pub async fn start_attestor(
                             tracing::error!("Failed to deserialize onboarding config: {e}");
                             consecutive_step_failures += 1;
                             if consecutive_step_failures >= 3 {
-                                anyhow::bail!("Aborting attestor: 3 consecutive step failures");
+                                anyhow::bail!("Aborting peer: 3 consecutive step failures");
                             }
                             continue;
                         }
@@ -349,13 +347,13 @@ pub async fn start_attestor(
                     tracing::error!("Step execution failed: {e}");
                     consecutive_step_failures += 1;
                     if consecutive_step_failures >= 3 {
-                        anyhow::bail!("Aborting attestor: 3 consecutive step failures: {e}");
+                        anyhow::bail!("Aborting peer: 3 consecutive step failures: {e}");
                     }
                     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                     continue;
                 }
                 consecutive_step_failures = 0;
-                if let Err(e) = onboarding::attestor::send_keys_to_coordinator(
+                if let Err(e) = onboarding::peer::send_keys_to_coordinator(
                     &client,
                     &db,
                     &instance_name,
@@ -379,13 +377,13 @@ pub async fn start_attestor(
                     tracing::error!("Step execution failed: {e}");
                     consecutive_step_failures += 1;
                     if consecutive_step_failures >= 3 {
-                        anyhow::bail!("Aborting attestor: 3 consecutive step failures: {e}");
+                        anyhow::bail!("Aborting peer: 3 consecutive step failures: {e}");
                     }
                     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                     continue;
                 }
                 consecutive_step_failures = 0;
-                if let Err(e) = onboarding::attestor::send_dns_signature_to_coordinator(
+                if let Err(e) = onboarding::peer::send_dns_signature_to_coordinator(
                     &client,
                     &db,
                     &instance_name,
@@ -409,13 +407,13 @@ pub async fn start_attestor(
                     tracing::error!("Step execution failed: {e}");
                     consecutive_step_failures += 1;
                     if consecutive_step_failures >= 3 {
-                        anyhow::bail!("Aborting attestor: 3 consecutive step failures: {e}");
+                        anyhow::bail!("Aborting peer: 3 consecutive step failures: {e}");
                     }
                     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                     continue;
                 }
                 consecutive_step_failures = 0;
-                if let Err(e) = onboarding::attestor::send_p2p_signatures_to_coordinator(
+                if let Err(e) = onboarding::peer::send_p2p_signatures_to_coordinator(
                     &client,
                     &db,
                     &instance_name,
@@ -426,16 +424,16 @@ pub async fn start_attestor(
                     tracing::error!("Failed to send P2P signatures to coordinator: {e}");
                 }
 
-                // Identity hook (attestor side): the SignP2p payload is a
+                // Identity hook (peer side): the SignP2p payload is a
                 // SignedTopologyTransaction whose PartyToParticipant mapping
                 // carries the resolved dec_party_id in its `party` field. By
                 // now the namespace has been signed and submitted by the
-                // coordinator, so we can persist this attestor's keys +
+                // coordinator, so we can persist this peer's keys +
                 // participant id under the dec_party_identity table for use
                 // by post-onboarding workflows on this node.
                 match extract_party_id_from_p2p_payload(&payload) {
                     Ok(dec_party_id) => {
-                        if let Err(e) = onboarding::attestor::copy_self_identity_for_party(
+                        if let Err(e) = onboarding::peer::copy_self_identity_for_party(
                             &db,
                             &instance_name,
                             &node_config,
@@ -480,7 +478,7 @@ pub async fn start_attestor(
                 let dec_party_id = contracts_config.decentralized_party_id.clone();
 
                 // Persist the prepared submissions sent by the coordinator into
-                // this attestor's workflow_artifacts so sign_submissions can
+                // this peer's workflow_artifacts so sign_submissions can
                 // read them back via list_artifacts.
                 if let Err(e) =
                     save_prepared_submissions_from_payload(&items[1], &db, &instance_name).await
@@ -488,7 +486,7 @@ pub async fn start_attestor(
                     tracing::error!("Failed to save prepared submissions from coordinator: {e}");
                     consecutive_step_failures += 1;
                     if consecutive_step_failures >= 3 {
-                        anyhow::bail!("Aborting attestor: 3 consecutive step failures: {e}");
+                        anyhow::bail!("Aborting peer: 3 consecutive step failures: {e}");
                     }
                     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                     continue;
@@ -501,13 +499,13 @@ pub async fn start_attestor(
                     tracing::error!("Step execution failed: {e:#}");
                     consecutive_step_failures += 1;
                     if consecutive_step_failures >= 3 {
-                        anyhow::bail!("Aborting attestor: 3 consecutive step failures: {e}");
+                        anyhow::bail!("Aborting peer: 3 consecutive step failures: {e}");
                     }
                     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                     continue;
                 }
                 consecutive_step_failures = 0;
-                if let Err(e) = contracts::attestor::send_submission_signatures_to_coordinator(
+                if let Err(e) = contracts::peer::send_submission_signatures_to_coordinator(
                     &client,
                     &db,
                     &instance_name,
@@ -548,13 +546,13 @@ pub async fn start_attestor(
                     tracing::error!("Step execution failed: {e}");
                     consecutive_step_failures += 1;
                     if consecutive_step_failures >= 3 {
-                        anyhow::bail!("Aborting attestor: 3 consecutive step failures: {e}");
+                        anyhow::bail!("Aborting peer: 3 consecutive step failures: {e}");
                     }
                     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                     continue;
                 }
                 consecutive_step_failures = 0;
-                if let Err(e) = kick::attestor::send_kick_signatures_to_coordinator(
+                if let Err(e) = kick::peer::send_kick_signatures_to_coordinator(
                     &client,
                     &db,
                     &instance_name,
@@ -571,7 +569,7 @@ pub async fn start_attestor(
         }
     }
 
-    tracing::info!("Attestor shutting down");
+    tracing::info!("Peer shutting down");
     Ok(())
 }
 
@@ -579,7 +577,7 @@ pub async fn start_attestor(
 /// The payload is a `varint(len)||SignedTopologyTransaction` blob whose
 /// `transaction.mapping` is a `PartyToParticipant` mapping carrying `party`
 /// (i.e. `{prefix}::{namespace_fingerprint}`). We pull that out so the
-/// attestor's identity hook can key its `dec_party_identity` rows.
+/// peer's identity hook can key its `dec_party_identity` rows.
 fn extract_party_id_from_p2p_payload(payload: &[u8]) -> Result<CantonId> {
     let signed: SignedTopologyTransaction = utils::read_first_message_from_bytes(payload)?;
 
@@ -604,12 +602,12 @@ fn extract_party_id_from_p2p_payload(payload: &[u8]) -> Result<CantonId> {
     }
 }
 
-/// Map an inbound coordinator command to the attestor's view of step
+/// Map an inbound coordinator command to the peer's view of step
 /// progress for the given workflow kind. Returns `(step_name, step_index,
-/// step_total)` for commands that correspond to a real step on the attestor
+/// step_total)` for commands that correspond to a real step on the peer
 /// side; returns `None` for `Wait` (no transition) and any unrelated
 /// command.
-fn attestor_step_for_command(
+fn peer_step_for_command(
     kind: WorkflowKind,
     command: MessageType,
 ) -> Option<(&'static str, i64, i64)> {
@@ -659,17 +657,16 @@ fn attestor_step_for_command(
     }
 }
 
-/// Persist attestor-side step progress for a command. Best-effort: any
+/// Persist peer-side step progress for a command. Best-effort: any
 /// failure is logged at WARN — the workflow itself doesn't depend on this
 /// row staying in sync, only the notification feed UI does.
-async fn persist_attestor_step(
+async fn persist_peer_step(
     db: &SqlitePool,
     instance_name: &str,
     kind: WorkflowKind,
     command: MessageType,
 ) {
-    let Some((step_name, step_index, _step_total)) = attestor_step_for_command(kind, command)
-    else {
+    let Some((step_name, step_index, _step_total)) = peer_step_for_command(kind, command) else {
         return;
     };
     let now = std::time::SystemTime::now()
@@ -679,7 +676,7 @@ async fn persist_attestor_step(
     let mut tx = match db.begin_transaction().await {
         Ok(t) => t,
         Err(e) => {
-            tracing::warn!("attestor step persist: begin_transaction failed: {e}");
+            tracing::warn!("peer step persist: begin_transaction failed: {e}");
             return;
         }
     };
@@ -687,18 +684,18 @@ async fn persist_attestor_step(
         .update_workflow_run_step(instance_name, step_name, step_index, &[], now)
         .await
     {
-        tracing::warn!("attestor step persist: update failed: {e}");
+        tracing::warn!("peer step persist: update failed: {e}");
         return;
     }
     if let Err(e) = Commitable::commit(tx).await {
-        tracing::warn!("attestor step persist: commit failed: {e}");
+        tracing::warn!("peer step persist: commit failed: {e}");
     }
 }
 
 /// Persist the prepared submissions blob received from the coordinator into
 /// `workflow_artifacts` keyed by the same zero-padded ordinals the coordinator
 /// used. The byte-for-byte payload of each submission is preserved so the
-/// attestor's sign step decodes them identically to what the coordinator
+/// peer's sign step decodes them identically to what the coordinator
 /// produced.
 async fn save_prepared_submissions_from_payload(
     payload: &[u8],

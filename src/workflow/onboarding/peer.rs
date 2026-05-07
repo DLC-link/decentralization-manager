@@ -9,9 +9,9 @@ use crate::{
     workflow::storage::{WorkflowStorage, artifact_kinds, identity_kinds},
 };
 
-/// Send the attestor's own (namespace_key, daml_key) blob + participant id to
+/// Send the peer's own (namespace_key, daml_key) blob + participant id to
 /// the coordinator. Both artefacts were just persisted by `generate_keys` to
-/// `workflow_artifacts` keyed by this attestor's canton id; we read them back
+/// `workflow_artifacts` keyed by this peer's canton id; we read them back
 /// and combine into a single length-prefixed payload (decoded as 2 items by
 /// the coordinator).
 pub async fn send_keys_to_coordinator(
@@ -25,11 +25,11 @@ pub async fn send_keys_to_coordinator(
     let keys_data = storage
         .read_artifact(
             instance_name,
-            artifact_kinds::ATTESTOR_PUBLIC_KEYS,
+            artifact_kinds::PEER_PUBLIC_KEYS,
             Some(&self_id),
         )
         .await?
-        .ok_or_else(|| anyhow::anyhow!("ATTESTOR_PUBLIC_KEYS artifact missing for {self_id}"))?;
+        .ok_or_else(|| anyhow::anyhow!("PEER_PUBLIC_KEYS artifact missing for {self_id}"))?;
 
     let id_data = storage
         .read_artifact(
@@ -52,7 +52,7 @@ pub async fn send_keys_to_coordinator(
     Ok(())
 }
 
-/// Send this attestor's signed DNS proposal (the `SIGNED_DNS_PROPOSAL`
+/// Send this peer's signed DNS proposal (the `SIGNED_DNS_PROPOSAL`
 /// artefact written by `sign_dns_proposals`) to the coordinator.
 pub async fn send_dns_signature_to_coordinator(
     client: &NoiseClient,
@@ -75,7 +75,7 @@ pub async fn send_dns_signature_to_coordinator(
     Ok(())
 }
 
-/// Send this attestor's signed P2P proposal (the `SIGNED_P2P_PROPOSAL`
+/// Send this peer's signed P2P proposal (the `SIGNED_P2P_PROPOSAL`
 /// artefact written by `sign_p2p_proposals`) to the coordinator.
 pub async fn send_p2p_signatures_to_coordinator(
     client: &NoiseClient,
@@ -98,9 +98,9 @@ pub async fn send_p2p_signatures_to_coordinator(
     Ok(())
 }
 
-/// Identity hook (attestor side): once the dec_party_id is known (extracted
+/// Identity hook (peer side): once the dec_party_id is known (extracted
 /// from the P2P proposal's `party` field at SignP2p time), copy this
-/// attestor's own `ATTESTOR_PUBLIC_KEYS` + `PARTICIPANT_ID` artefacts into
+/// peer's own `PEER_PUBLIC_KEYS` + `PARTICIPANT_ID` artefacts into
 /// `dec_party_identity` keyed by `(party_id, self_id)`. These rows survive
 /// the workflow_runs row's eventual dismissal and are read by post-onboarding
 /// workflows on this node (e.g. contracts::sign_submissions).
@@ -115,7 +115,7 @@ pub async fn copy_self_identity_for_party(
     if let Some(keys) = storage
         .read_artifact(
             instance_name,
-            artifact_kinds::ATTESTOR_PUBLIC_KEYS,
+            artifact_kinds::PEER_PUBLIC_KEYS,
             Some(&self_id),
         )
         .await?
@@ -123,7 +123,7 @@ pub async fn copy_self_identity_for_party(
         storage
             .write_identity(
                 dec_party_id,
-                identity_kinds::ATTESTOR_PUBLIC_KEYS,
+                identity_kinds::PEER_PUBLIC_KEYS,
                 &self_id,
                 &keys,
             )

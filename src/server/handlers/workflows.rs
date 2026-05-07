@@ -89,8 +89,8 @@ where
             .map_err(|e| anyhow::anyhow!("encode workflow config: {e}"))?,
         coordinator_pubkey: None,
         coordinator_name: None,
-        expected_attestors: invitees.to_vec(),
-        completed_attestors: Vec::new(),
+        expected_peers: invitees.to_vec(),
+        completed_peers: Vec::new(),
         dec_party_id,
         error: None,
         dismissed: false,
@@ -254,7 +254,7 @@ pub async fn start_kick(
         &data.db,
         &instance_name,
         WorkflowKind::Kick,
-        KickStep::WaitingForAttestors,
+        KickStep::WaitingForPeers,
         &kick_config,
         &invitees,
         Some(decentralized_party_id.clone()),
@@ -303,7 +303,7 @@ pub async fn start_kick(
             return;
         }
 
-        // Give peers time to start their attestor workflows
+        // Give peers time to start their peer workflows
         tokio::time::sleep(Duration::from_secs(2)).await;
 
         let result = workflow::start_coordinator(
@@ -511,7 +511,7 @@ pub async fn start_onboarding(
 
     // Pre-flight: every selected peer must have every other selected peer in
     // its network config, otherwise the coordinator workflow will hang waiting
-    // for attestor connections that can never be established.
+    // for peer connections that can never be established.
     match verify_peer_mesh(&data.config, &data.db, &body.peer_ids).await {
         Ok(missing) if !missing.is_empty() => {
             // Tag each edge with its failure mode in the human-readable
@@ -569,7 +569,7 @@ pub async fn start_onboarding(
         &data.db,
         &instance_name,
         WorkflowKind::Onboarding,
-        OnboardingStep::WaitingForAttestors,
+        OnboardingStep::WaitingForPeers,
         &onboarding_config,
         &peer_ids,
         None,
@@ -620,7 +620,7 @@ pub async fn start_onboarding(
             return;
         }
 
-        // Give peers time to start their attestor workflows
+        // Give peers time to start their peer workflows
         tokio::time::sleep(Duration::from_secs(2)).await;
 
         let result = workflow::start_coordinator(
@@ -1040,7 +1040,7 @@ pub async fn start_contracts(
         &data.db,
         &instance_name_for_run,
         WorkflowKind::Contracts,
-        ContractsStep::WaitingForAttestors,
+        ContractsStep::WaitingForPeers,
         &contracts_config,
         &contracts_invitees,
         Some(body.decentralized_party_id.clone()),
@@ -1091,7 +1091,7 @@ pub async fn start_contracts(
             return;
         }
 
-        // Give peers time to start their attestor workflows
+        // Give peers time to start their peer workflows
         tokio::time::sleep(Duration::from_secs(2)).await;
 
         let result = workflow::start_coordinator(
@@ -1278,7 +1278,7 @@ pub async fn start_dars(
         &data.db,
         &instance_name,
         WorkflowKind::Dars,
-        DarsStep::WaitingForAttestors,
+        DarsStep::WaitingForPeers,
         &dars_config,
         &body.peer_ids,
         None,
@@ -1343,7 +1343,7 @@ pub async fn start_dars(
             return;
         }
 
-        // Give peers time to start their attestor workflows
+        // Give peers time to start their peer workflows
         tokio::time::sleep(Duration::from_secs(2)).await;
 
         let result = workflow::start_coordinator(
@@ -1774,9 +1774,9 @@ pub async fn dismiss_workflow(
 /// Flips `status` back to `inprogress`, clears `error`, and re-spawns the
 /// coordinator task. `NoiseServer::new` re-hydrates `WorkflowState` from the
 /// persisted `current_step`, so the run picks up at the same step that
-/// failed. Only valid on Failed coordinator-side rows; attestor retry is not
+/// failed. Only valid on Failed coordinator-side rows; peer retry is not
 /// supported (the coordinator may already be past the config-bearing
-/// command — operator should dismiss the attestor row and re-accept the
+/// command — operator should dismiss the peer row and re-accept the
 /// invite instead).
 #[utoipa::path(
     tag = "Workflows",
@@ -1820,7 +1820,7 @@ pub async fn retry_workflow(
 
     if run.role != WorkflowRole::Coordinator {
         return HttpResponse::Conflict().json(ErrorResponse {
-            error: "Retry must be initiated from the coordinator side. Attestor rows flip back \
+            error: "Retry must be initiated from the coordinator side. Peer rows flip back \
                     to InProgress automatically when the coordinator retries — wait for that or \
                     dismiss the row."
                 .to_string(),
@@ -1867,7 +1867,7 @@ pub async fn retry_workflow(
     }
 
     // Re-load the row (now InProgress), broadcast RetryWorkflow to the
-    // attestor cohort, and re-spawn the coordinator task. respawn_coordinator
+    // peer cohort, and re-spawn the coordinator task. respawn_coordinator
     // updates the matching HttpWorkflowState, stashes a new abort handle,
     // and finalizes the row to Completed/Failed when the task ends.
     let run = match data.db.get_workflow_run(&instance_name).await {
@@ -1879,9 +1879,9 @@ pub async fn retry_workflow(
         }
     };
     // Tell every previously-invited peer to flip their Failed row back to
-    // InProgress and re-spin start_attestor. Best-effort — peers that are
+    // InProgress and re-spin start_peer. Best-effort — peers that are
     // unreachable now will stay Failed; operator can dismiss + re-accept.
-    if let Err(e) = send_retry_workflow(&data.config, &data.db, &run.expected_attestors).await {
+    if let Err(e) = send_retry_workflow(&data.config, &data.db, &run.expected_peers).await {
         tracing::warn!("Failed to broadcast RetryWorkflow: {e:#}");
     }
     respawn_coordinator(
@@ -1925,7 +1925,7 @@ async fn send_cancel_invites(
 
 /// Best-effort: notify previously-invited peers that the coordinator is
 /// retrying the workflow so they flip their Failed row back to InProgress
-/// and re-spin `start_attestor`.
+/// and re-spin `start_peer`.
 async fn send_retry_workflow(
     config: &NodeConfig,
     db: &SqlitePool,

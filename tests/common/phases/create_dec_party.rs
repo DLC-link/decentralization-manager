@@ -130,22 +130,20 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         },
     )
     .then(
-        "Onboarding completed run visible in /workflows on P2 (Attestor)",
+        "Onboarding completed run visible in /workflows on P2 (Peer)",
         Duration::from_secs(30),
         |f, _| {
             Box::pin(async move {
-                probe_workflow_run_visible(f, f.p2.http, "Onboarding", "Attestor", "completed")
-                    .await
+                probe_workflow_run_visible(f, f.p2.http, "Onboarding", "Peer", "completed").await
             })
         },
     )
     .then(
-        "Onboarding completed run visible in /workflows on P3 (Attestor)",
+        "Onboarding completed run visible in /workflows on P3 (Peer)",
         Duration::from_secs(30),
         |f, _| {
             Box::pin(async move {
-                probe_workflow_run_visible(f, f.p3.http, "Onboarding", "Attestor", "completed")
-                    .await
+                probe_workflow_run_visible(f, f.p3.http, "Onboarding", "Peer", "completed").await
             })
         },
     )

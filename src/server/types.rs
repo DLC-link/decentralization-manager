@@ -342,7 +342,7 @@ pub type KickResponse = WorkflowResponse;
 pub type OnboardingResponse = WorkflowResponse;
 
 /// Which workflow this run belongs to. Mirrors InvitationType, but lives on
-/// every persisted run (coordinator + attestor) regardless of how it started.
+/// every persisted run (coordinator + peer) regardless of how it started.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "PascalCase")]
 pub enum WorkflowKind {
@@ -394,19 +394,19 @@ impl From<InvitationType> for WorkflowKind {
 }
 
 /// Whether this node is driving the workflow (Coordinator) or signing /
-/// participating because it accepted an invite (Attestor).
+/// participating because it accepted an invite (Peer).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "PascalCase")]
 pub enum WorkflowRole {
     Coordinator,
-    Attestor,
+    Peer,
 }
 
 impl WorkflowRole {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Coordinator => "Coordinator",
-            Self::Attestor => "Attestor",
+            Self::Peer => "Peer",
         }
     }
 }
@@ -422,14 +422,14 @@ impl std::str::FromStr for WorkflowRole {
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s {
             "Coordinator" => Ok(Self::Coordinator),
-            "Attestor" => Ok(Self::Attestor),
+            "Peer" => Ok(Self::Peer),
             other => Err(anyhow::anyhow!("unknown workflow role: {other}")),
         }
     }
 }
 
 /// A single persisted workflow run — control-plane state for either the
-/// coordinator side or an attestor side. The matching artefacts live in
+/// coordinator side or an peer side. The matching artefacts live in
 /// `workflow_artifacts` and are looked up by `instance_name`.
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct WorkflowRun {
@@ -450,8 +450,8 @@ pub struct WorkflowRun {
     /// like get_invitations does for PendingInvitation).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub coordinator_name: Option<String>,
-    pub expected_attestors: Vec<CantonId>,
-    pub completed_attestors: Vec<CantonId>,
+    pub expected_peers: Vec<CantonId>,
+    pub completed_peers: Vec<CantonId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dec_party_id: Option<CantonId>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -468,7 +468,7 @@ pub struct WorkflowRunsResponse {
 }
 
 /// Payload for the `CancelWorkflow` Noise message — the coordinator tells an
-/// attestor to abort its in-flight run for `instance_name`.
+/// peer to abort its in-flight run for `instance_name`.
 #[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CancelWorkflowPayload {
     pub instance_name: String,
@@ -1456,8 +1456,8 @@ mod tests {
         let participant_id_str = format!("participant::{ns}");
         let dec_party_id_str = format!("test-network-1::{ns}");
 
-        let attestor_a = CantonId::parse(&format!("participant::{ns}")).unwrap();
-        let attestor_b = CantonId::parse(&format!(
+        let peer_a = CantonId::parse(&format!("participant::{ns}")).unwrap();
+        let peer_b = CantonId::parse(&format!(
             "participant::1220{0}{0}",
             "abcdefabcdefabcdefabcdefabcdef00"
         ))
@@ -1468,14 +1468,14 @@ mod tests {
             kind: WorkflowKind::Onboarding,
             role: WorkflowRole::Coordinator,
             status: WorkflowProgress::InProgress,
-            current_step: "WaitingForAttestors".to_string(),
+            current_step: "WaitingForPeers".to_string(),
             step_index: 0,
             step_total: 7,
             config_json: r#"{"prefix":"test-network-1"}"#.to_string(),
             coordinator_pubkey: None,
             coordinator_name: None,
-            expected_attestors: vec![attestor_a.clone(), attestor_b.clone()],
-            completed_attestors: vec![attestor_a],
+            expected_peers: vec![peer_a.clone(), peer_b.clone()],
+            completed_peers: vec![peer_a],
             dec_party_id: Some(CantonId::parse(&dec_party_id_str).unwrap()),
             error: None,
             dismissed: false,
@@ -1485,25 +1485,25 @@ mod tests {
 
         let json = serde_json::to_value(&run).expect("serialize WorkflowRun");
 
-        // expected_attestors and completed_attestors must be JSON arrays of
+        // expected_peers and completed_peers must be JSON arrays of
         // plain strings — never objects with prefix/namespace fields.
         let expected = json
-            .get("expected_attestors")
+            .get("expected_peers")
             .and_then(Value::as_array)
-            .expect("expected_attestors must be a JSON array");
+            .expect("expected_peers must be a JSON array");
         assert_eq!(expected.len(), 2);
         for v in expected {
             assert!(
                 v.is_string(),
-                "expected_attestors entry must be a string, got {v}"
+                "expected_peers entry must be a string, got {v}"
             );
         }
         assert_eq!(expected[0].as_str().unwrap(), participant_id_str);
 
         let completed = json
-            .get("completed_attestors")
+            .get("completed_peers")
             .and_then(Value::as_array)
-            .expect("completed_attestors must be a JSON array");
+            .expect("completed_peers must be a JSON array");
         assert_eq!(completed.len(), 1);
         assert!(completed[0].is_string());
 

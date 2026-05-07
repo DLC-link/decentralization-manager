@@ -35,8 +35,8 @@ const ED25519_PRIVATE_KEY_LENGTH: u8 = 0x20;
 
 /// Sign prepared ledger submissions with DAML key
 ///
-/// This step must be run by each attestor participant to sign the prepared submissions.
-/// Each attestor signs with their DAML signing key.
+/// This step must be run by each peer participant to sign the prepared submissions.
+/// Each peer signs with their DAML signing key.
 ///
 /// The signed bundle is persisted as a `SUBMISSION_SIGNATURES` artefact keyed
 /// by this node's participant id, byte-identical to the previous on-disk file
@@ -46,7 +46,7 @@ const ED25519_PRIVATE_KEY_LENGTH: u8 = 0x20;
 /// * `config` - Configuration with Admin API connection details
 /// * `db` - Workflow storage backend (SqlitePool implementing `WorkflowStorage`)
 /// * `instance_name` - Workflow run instance name (key for `workflow_artifacts`)
-/// * `dec_party_id` - Decentralized party id used to look up `attestor_public_keys`
+/// * `dec_party_id` - Decentralized party id used to look up `peer_public_keys`
 ///   in the `dec_party_identity` table (this run's local DAML signing key bundle)
 pub async fn sign_submissions(
     config: &NodeConfig,
@@ -73,16 +73,16 @@ pub async fn sign_submissions(
         "Loading DAML public key bundle for {node_id} on {dec_party_id} from identity table..."
     );
     let keys_bytes = match db
-        .read_identity(dec_party_id, identity_kinds::ATTESTOR_PUBLIC_KEYS, &node_id)
+        .read_identity(dec_party_id, identity_kinds::PEER_PUBLIC_KEYS, &node_id)
         .await?
     {
         Some(bytes) => bytes,
         None => {
             tracing::warn!(
-                "ATTESTOR_PUBLIC_KEYS missing in identity table for {node_id} on {dec_party_id}; \
+                "PEER_PUBLIC_KEYS missing in identity table for {node_id} on {dec_party_id}; \
                  attempting backfill from completed onboarding artifacts"
             );
-            let from_local = backfill_attestor_keys(db, dec_party_id, &node_id).await?;
+            let from_local = backfill_peer_keys(db, dec_party_id, &node_id).await?;
             let bytes = match from_local {
                 Some(b) => b,
                 None => {
@@ -91,11 +91,11 @@ pub async fn sign_submissions(
                          PartyToParticipant on-chain to recover this node's DAML signing \
                          key for {dec_party_id}"
                     );
-                    backfill_attestor_keys_from_chain(config, dec_party_id)
+                    backfill_peer_keys_from_chain(config, dec_party_id)
                         .await?
                         .ok_or_else(|| {
                             anyhow::anyhow!(
-                                "ATTESTOR_PUBLIC_KEYS not found in identity table, completed \
+                                "PEER_PUBLIC_KEYS not found in identity table, completed \
                                  onboarding artifacts, OR PartyToParticipant on-chain for \
                                  {node_id} on {dec_party_id} — onboarding may not have \
                                  completed yet"
@@ -108,14 +108,14 @@ pub async fn sign_submissions(
             if let Err(e) = db
                 .write_identity(
                     dec_party_id,
-                    identity_kinds::ATTESTOR_PUBLIC_KEYS,
+                    identity_kinds::PEER_PUBLIC_KEYS,
                     &node_id,
                     &bytes,
                 )
                 .await
             {
                 tracing::warn!(
-                    "Failed to write backfilled ATTESTOR_PUBLIC_KEYS to identity table: {e:#}"
+                    "Failed to write backfilled PEER_PUBLIC_KEYS to identity table: {e:#}"
                 );
             }
             bytes
@@ -129,7 +129,7 @@ pub async fn sign_submissions(
 
     if exported_keys.len() != 2 {
         anyhow::bail!(
-            "Expected 2 keys in ATTESTOR_PUBLIC_KEYS for {node_id}, but found {count}",
+            "Expected 2 keys in PEER_PUBLIC_KEYS for {node_id}, but found {count}",
             count = exported_keys.len()
         );
     }
@@ -482,7 +482,7 @@ fn encode_messages_length_prefixed<M: prost::Message>(messages: &[M]) -> Vec<u8>
 /// `read_all_messages_from_bytes` expects. Index `[0]` is unused downstream
 /// (originally the namespace key), so we duplicate the DAML key to keep the
 /// shape valid; the caller only reads `[1]`.
-async fn backfill_attestor_keys_from_chain(
+async fn backfill_peer_keys_from_chain(
     config: &NodeConfig,
     dec_party_id: &CantonId,
 ) -> Result<Option<Vec<u8>>> {
@@ -565,12 +565,12 @@ async fn backfill_attestor_keys_from_chain(
     Ok(None)
 }
 
-/// Find this node's `ATTESTOR_PUBLIC_KEYS` blob from the most recent completed
+/// Find this node's `PEER_PUBLIC_KEYS` blob from the most recent completed
 /// Onboarding (or Kick — same kind of identity payload) coordinator run for
 /// the given dec_party_id, by joining `workflow_artifacts` to `workflow_runs`.
 /// Used as a one-shot backfill for parties whose onboarding ran before the
 /// `dec_party_identity` write hook was added.
-async fn backfill_attestor_keys(
+async fn backfill_peer_keys(
     db: &SqlitePool,
     dec_party_id: &CantonId,
     node_id: &str,
@@ -583,8 +583,8 @@ async fn backfill_attestor_keys(
          WHERE r.dec_party_id = ?1 \
            AND r.kind = 'Onboarding' \
            AND r.status = 'completed' \
-           AND a.artifact_kind = 'attestor_public_keys' \
-           AND a.attestor_id = ?2 \
+           AND a.artifact_kind = 'peer_public_keys' \
+           AND a.peer_id = ?2 \
          ORDER BY r.updated_at DESC \
          LIMIT 1",
     )

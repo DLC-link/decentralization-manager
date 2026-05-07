@@ -1,14 +1,14 @@
 //! G10: Start handler rejects a second InProgress run of same (kind, role).
 //!
 //! Drive the coordinator into an inprogress state by posting /onboarding
-//! without accepting the invites on either attestor — the coordinator stalls
-//! at `WaitingForAttestors`. A second POST /onboarding must return 409. Same
+//! without accepting the invites on either peer — the coordinator stalls
+//! at `WaitingForPeers`. A second POST /onboarding must return 409. Same
 //! shape for /dars/distribute. Cleanup cancels and dismisses the leftover
 //! rows so subsequent phases run clean.
 //!
 //! Stalling is achieved by deferring `accept_invitation` rather than by
-//! pausing attestor processes — the start handler pre-flight peer-meshes
-//! over Noise, so attestors must remain responsive.
+//! pausing peer processes — the start handler pre-flight peer-meshes
+//! over Noise, so peers must remain responsive.
 
 use std::{path::Path, time::Duration};
 
@@ -199,7 +199,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 .post_expect_status(f.p1.http, "/dars/cancel", &json!({}))
                 .await;
 
-            // Decline pending invitations on both attestors.
+            // Decline pending invitations on both peers.
             for port in [f.p2.http, f.p3.http] {
                 if let Ok(r) = f
                     .get_json::<crate::common::types::PendingInvitationsResponse>(

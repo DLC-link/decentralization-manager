@@ -1,6 +1,6 @@
-pub mod attestor;
 pub mod config;
 pub mod coordinator;
+pub mod peer;
 pub mod steps;
 
 pub use config::{ContractDefinition, ContractsConfig, DarFile, FieldDefinition};
@@ -13,8 +13,8 @@ use crate::{noise::MessageType, workflow::state::WorkflowStep};
 /// Contracts workflow steps (contract deployment only)
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ContractsStep {
-    /// Waiting for all attestors to connect
-    WaitingForAttestors,
+    /// Waiting for all peers to connect
+    WaitingForPeers,
     /// Coordinator prepares submissions
     PrepareSubmissions,
     /// Sign submissions
@@ -30,13 +30,13 @@ impl WorkflowStep for ContractsStep {
         match self {
             Self::SignSubmissions => Some(MessageType::SignSubmissions),
             Self::Complete => Some(MessageType::Disconnect),
-            Self::WaitingForAttestors | Self::PrepareSubmissions | Self::ExecuteSubmissions => None,
+            Self::WaitingForPeers | Self::PrepareSubmissions | Self::ExecuteSubmissions => None,
         }
     }
 
     fn next(&self) -> Option<Self> {
         match self {
-            Self::WaitingForAttestors => Some(Self::PrepareSubmissions),
+            Self::WaitingForPeers => Some(Self::PrepareSubmissions),
             Self::PrepareSubmissions => Some(Self::SignSubmissions),
             Self::SignSubmissions => Some(Self::ExecuteSubmissions),
             Self::ExecuteSubmissions => Some(Self::Complete),
@@ -44,17 +44,17 @@ impl WorkflowStep for ContractsStep {
         }
     }
 
-    fn requires_attestors(&self) -> bool {
+    fn requires_peers(&self) -> bool {
         *self == Self::SignSubmissions
     }
 
-    fn is_waiting_for_attestors(&self) -> bool {
-        *self == Self::WaitingForAttestors
+    fn is_waiting_for_peers(&self) -> bool {
+        *self == Self::WaitingForPeers
     }
 
     fn step_index(&self) -> i64 {
         match self {
-            Self::WaitingForAttestors => 0,
+            Self::WaitingForPeers => 0,
             Self::PrepareSubmissions => 1,
             Self::SignSubmissions => 2,
             Self::ExecuteSubmissions => 3,
@@ -68,7 +68,7 @@ impl WorkflowStep for ContractsStep {
 
     fn step_name(&self) -> &'static str {
         match self {
-            Self::WaitingForAttestors => "WaitingForAttestors",
+            Self::WaitingForPeers => "WaitingForPeers",
             Self::PrepareSubmissions => "PrepareSubmissions",
             Self::SignSubmissions => "SignSubmissions",
             Self::ExecuteSubmissions => "ExecuteSubmissions",
@@ -78,7 +78,7 @@ impl WorkflowStep for ContractsStep {
 
     fn try_from_step_name(name: &str) -> Option<Self> {
         Some(match name {
-            "WaitingForAttestors" => Self::WaitingForAttestors,
+            "WaitingForPeers" => Self::WaitingForPeers,
             "PrepareSubmissions" => Self::PrepareSubmissions,
             "SignSubmissions" => Self::SignSubmissions,
             "ExecuteSubmissions" => Self::ExecuteSubmissions,

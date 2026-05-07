@@ -1,6 +1,6 @@
 //! G4: Dismiss of a Failed run cascades artifact cleanup.
 //!
-//! Force a coordinator-side failure by killing both attestors after they've
+//! Force a coordinator-side failure by killing both peers after they've
 //! accepted the onboarding invite. Confirm artifacts exist for the failed
 //! run; dismiss; confirm artifacts gone, the run row stays as dismissed=1,
 //! and a fresh onboarding of the same kind starts (proving the unique
@@ -31,10 +31,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     })
     .await?;
 
-    chaos::say(
-        "G4",
-        "hard-killing both attestors to force coordinator failure",
-    );
+    chaos::say("G4", "hard-killing both peers to force coordinator failure");
     processes::kill_node(f, 2).await?;
     processes::kill_node(f, 3).await?;
 
@@ -85,7 +82,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     anyhow::ensure!(dismissed, "row not marked dismissed");
     chaos::say("G4", "artifacts cleaned, run row preserved as dismissed");
 
-    // Restart attestors so the fresh-start path can succeed.
+    // Restart peers so the fresh-start path can succeed.
     chaos::say("G4", "restarting P2 and P3");
     processes::spawn_only(f, 2).await?;
     processes::spawn_only(f, 3).await?;

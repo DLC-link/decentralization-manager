@@ -159,7 +159,7 @@ pub async fn prepare_submissions(
         let payload = encode_length_prefixed_message(&prepared_submission);
         let ordinal = format!("{idx:04}");
         tracing::debug!(
-            "Saving prepared submission {index} to artifact attestor key {ordinal}",
+            "Saving prepared submission {index} to artifact peer key {ordinal}",
             index = idx + 1,
         );
         db.write_artifact(

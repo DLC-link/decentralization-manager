@@ -41,7 +41,7 @@ pub async fn upload_dars(config: &NodeConfig, dar_files: &[DarFile]) -> Result {
 /// Upload DAR files from raw bytes
 ///
 /// Takes a list of (filename, data) tuples and uploads them to the Canton participant.
-/// Used by attestors who receive DAR files from the coordinator.
+/// Used by peers who receive DAR files from the coordinator.
 pub async fn upload_dars_from_bytes(
     config: &NodeConfig,
     dar_files: Vec<(String, Vec<u8>)>,

@@ -1,7 +1,7 @@
-//! G6: Cancel during in-flight attestor run cancels accepted-but-running rows.
+//! G6: Cancel during in-flight peer run cancels accepted-but-running rows.
 //!
-//! Start onboarding P1 → {P2, P3}. P2 accepts (attestor row goes inprogress);
-//! BEFORE P3 accepts, P1 cancels. Assert: P2's attestor row flips to
+//! Start onboarding P1 → {P2, P3}. P2 accepts (peer row goes inprogress);
+//! BEFORE P3 accepts, P1 cancels. Assert: P2's peer row flips to
 //! cancelled with an error mentioning cancellation, and P3 has no leftover
 //! pending Onboarding invitation.
 
@@ -23,15 +23,15 @@ struct Ctx {
     invites: InvitationIds,
     /// Coordinator-side instance_name on P1 (`<prefix>-creation`).
     instance_name: String,
-    /// Attestor-side instance_name on P2 — synthesized by accept_invitation
-    /// as `attestor-onboarding-<pubkey>-<epoch>`. Captured once the
+    /// Peer-side instance_name on P2 — synthesized by accept_invitation
+    /// as `peer-onboarding-<pubkey>-<epoch>`. Captured once the
     /// inprogress row is observable so subsequent steps can refer to it
     /// after it flips to `cancelled`.
-    p2_attestor_instance: Option<String>,
+    p2_peer_instance: Option<String>,
 }
 
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
-    info!("Phase: cancel_cascades_to_attestors");
+    info!("Phase: cancel_cascades_to_peers");
 
     let prefix = format!(
         "cancel-cascade-{}",
@@ -43,7 +43,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     let instance_name = format!("{prefix}-creation");
 
     Scenario::with_ctx(
-        format!("cancel cascades to in-flight attestor ({prefix})"),
+        format!("cancel cascades to in-flight peer ({prefix})"),
         Ctx {
             instance_name: instance_name.clone(),
             ..Default::default()
@@ -99,17 +99,17 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         })
     })
     .then(
-        "P2 attestor row reaches inprogress",
+        "P2 peer row reaches inprogress",
         Duration::from_secs(60),
         |f, ctx| {
             let db_path = f.db_path(2);
             Box::pin(async move {
-                match db::current_inprogress_attestor_instance(&db_path, "Onboarding").await {
+                match db::current_inprogress_peer_instance(&db_path, "Onboarding").await {
                     Ok(Some(name)) => {
-                        ctx.p2_attestor_instance = Some(name);
+                        ctx.p2_peer_instance = Some(name);
                         Some(Ok(()))
                     }
-                    // No inprogress attestor row yet — keep polling.
+                    // No inprogress peer row yet — keep polling.
                     Ok(None) => None,
                     // Transient DB error (e.g. WAL contention) — keep polling.
                     Err(_) => None,
@@ -127,14 +127,14 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         })
     })
     .then(
-        "P2 attestor row flipped to cancelled",
+        "P2 peer row flipped to cancelled",
         Duration::from_secs(30),
         |f, ctx| {
             let db_path = f.db_path(2);
-            let instance = ctx.p2_attestor_instance.clone();
+            let instance = ctx.p2_peer_instance.clone();
             Box::pin(async move {
                 let instance = instance?;
-                let s = db::workflow_run_status(&db_path, &instance, "Attestor")
+                let s = db::workflow_run_status(&db_path, &instance, "Peer")
                     .await
                     .ok()
                     .flatten()?;
@@ -160,7 +160,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     )
     .when("dismiss leftover rows on P1 + P2", |f, ctx| {
         let p1_instance = ctx.instance_name.clone();
-        let p2_instance = ctx.p2_attestor_instance.clone();
+        let p2_instance = ctx.p2_peer_instance.clone();
         Box::pin(async move {
             let p1_path = format!("/workflows/{p1_instance}/dismiss");
             let _ = f.post_expect_status(f.p1.http, &p1_path, &json!({})).await;

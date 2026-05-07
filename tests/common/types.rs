@@ -122,9 +122,9 @@ pub struct WorkflowRun {
     #[serde(default)]
     pub step_total: usize,
     #[serde(default)]
-    pub expected_attestors: Vec<String>,
+    pub expected_peers: Vec<String>,
     #[serde(default)]
-    pub completed_attestors: Vec<String>,
+    pub completed_peers: Vec<String>,
     #[serde(default)]
     pub coordinator_pubkey: Option<String>,
     #[serde(default)]

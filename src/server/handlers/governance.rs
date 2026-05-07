@@ -1266,7 +1266,7 @@ pub async fn get_network_info(data: web::Data<AppState>) -> impl Responder {
 #[post("/token-standard-contracts")]
 pub async fn get_token_standard_contracts(body: web::Json<serde_json::Value>) -> impl Responder {
     let client = reqwest::Client::new();
-    let url = "https://devnet.dlc.link/attestor-2/app/get-token-standard-contracts";
+    let url = "https://devnet.dlc.link/peer-2/app/get-token-standard-contracts";
 
     match client.post(url).json(&body.into_inner()).send().await {
         Ok(res) => match res.json::<serde_json::Value>().await {

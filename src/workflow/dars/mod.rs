@@ -8,8 +8,8 @@ use crate::{noise::MessageType, workflow::state::WorkflowStep};
 /// DARs upload workflow steps
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum DarsStep {
-    /// Waiting for all attestors to connect
-    WaitingForAttestors,
+    /// Waiting for all peers to connect
+    WaitingForPeers,
     /// Upload DARs
     UploadDars,
     /// Workflow complete
@@ -21,29 +21,29 @@ impl WorkflowStep for DarsStep {
         match self {
             Self::UploadDars => Some(MessageType::UploadDars),
             Self::Complete => Some(MessageType::Disconnect),
-            Self::WaitingForAttestors => None,
+            Self::WaitingForPeers => None,
         }
     }
 
     fn next(&self) -> Option<Self> {
         match self {
-            Self::WaitingForAttestors => Some(Self::UploadDars),
+            Self::WaitingForPeers => Some(Self::UploadDars),
             Self::UploadDars => Some(Self::Complete),
             Self::Complete => None,
         }
     }
 
-    fn requires_attestors(&self) -> bool {
+    fn requires_peers(&self) -> bool {
         *self == Self::UploadDars
     }
 
-    fn is_waiting_for_attestors(&self) -> bool {
-        *self == Self::WaitingForAttestors
+    fn is_waiting_for_peers(&self) -> bool {
+        *self == Self::WaitingForPeers
     }
 
     fn step_index(&self) -> i64 {
         match self {
-            Self::WaitingForAttestors => 0,
+            Self::WaitingForPeers => 0,
             Self::UploadDars => 1,
             Self::Complete => 2,
         }
@@ -55,7 +55,7 @@ impl WorkflowStep for DarsStep {
 
     fn step_name(&self) -> &'static str {
         match self {
-            Self::WaitingForAttestors => "WaitingForAttestors",
+            Self::WaitingForPeers => "WaitingForPeers",
             Self::UploadDars => "UploadDars",
             Self::Complete => "Complete",
         }
@@ -63,7 +63,7 @@ impl WorkflowStep for DarsStep {
 
     fn try_from_step_name(name: &str) -> Option<Self> {
         Some(match name {
-            "WaitingForAttestors" => Self::WaitingForAttestors,
+            "WaitingForPeers" => Self::WaitingForPeers,
             "UploadDars" => Self::UploadDars,
             "Complete" => Self::Complete,
             _ => return None,

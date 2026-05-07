@@ -1,7 +1,7 @@
 //! G1: Coordinator crash mid-workflow → auto-resume on restart.
 //!
 //! POST /onboarding on P1, wait for the coordinator row + invites delivered,
-//! hard-kill P1, restart, accept on both attestors, and assert the run
+//! hard-kill P1, restart, accept on both peers, and assert the run
 //! reaches Completed via the persisted DB row (the in-memory
 //! `<Kind>WorkflowState` is freshly constructed after restart and lags the
 //! DB on slow runners). Invariant: exactly one coordinator row.
@@ -21,9 +21,9 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     chaos::post_onboarding(f, &prefix).await?;
 
     // Wait for coordinator row inprogress AND for invites to actually reach
-    // both attestors. The resume path doesn't re-send invites — killing P1
+    // both peers. The resume path doesn't re-send invites — killing P1
     // before the spawned task's 500ms ListenerPauseGuard + send_*_invites
-    // runs leaves attestors with no pending invitation.
+    // runs leaves peers with no pending invitation.
     let p1_db = f.db_path(1);
     let f_imm = &*f;
     chaos::poll_until(Duration::from_secs(60), || async {
@@ -50,7 +50,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     chaos::say("G1", "row + invites ready; hard-killing P1");
     processes::restart_node(f, 1).await?;
 
-    // Now accept on both attestors.
+    // Now accept on both peers.
     let p2_inv =
         chaos::wait_for_invite(f, f.p2.http, "Onboarding", Duration::from_secs(60)).await?;
     let p3_inv =

@@ -27,7 +27,7 @@ pub async fn start_coordinator(
 ) -> Result {
     tracing::info!("Initializing Noise server...");
 
-    // Exclude the participant being kicked from attestors
+    // Exclude the participant being kicked from peers
     let excluded_participants = vec![kick_config.participant_id.to_string()];
 
     let server = NoiseServer::new(
@@ -35,7 +35,7 @@ pub async fn start_coordinator(
         network_config.clone(),
         db.clone(),
         kick_config.instance_name.clone(),
-        KickStep::WaitingForAttestors,
+        KickStep::WaitingForPeers,
         Some(excluded_participants),
     )
     .await?;
@@ -60,7 +60,7 @@ pub async fn start_coordinator(
                 watchdog.check(current_step)?;
 
                 match current_step {
-                    KickStep::WaitingForAttestors => {
+                    KickStep::WaitingForPeers => {
                         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                     }
                     KickStep::ExportState => {
@@ -76,9 +76,9 @@ pub async fn start_coordinator(
                         tracing::info!("Coordinator executing: Create proposals");
                         create_proposals(&node_config, &db, &instance_name, &kick_config).await?;
 
-                        // Load kick proposals to send to attestors with SignKick command.
+                        // Load kick proposals to send to peers with SignKick command.
                         // Combine kick config + DNS and P2P kick proposals into a single
-                        // length-prefixed payload (decoded as 3 items by the attestor).
+                        // length-prefixed payload (decoded as 3 items by the peer).
                         let dns_data = db
                             .read_artifact(&instance_name, artifact_kinds::KICK_DNS_PROPOSAL, None)
                             .await?
@@ -110,44 +110,44 @@ pub async fn start_coordinator(
                     KickStep::SubmitKick => {
                         tracing::info!("Coordinator executing: Submit kick");
 
-                        // Each attestor sent us a single buffer containing two
+                        // Each peer sent us a single buffer containing two
                         // length-prefixed protobufs (DNS sig followed by P2P sig).
-                        // Split that pair back into separate per-attestor artefacts so
+                        // Split that pair back into separate per-peer artefacts so
                         // submit_kick can `list_artifacts(SIGNED_KICK_DNS)` and
-                        // `list_artifacts(SIGNED_KICK_P2P)` and join by attestor id.
-                        let attestor_data = workflow_state.get_all_attestor_data().await;
-                        for (attestor_id, combined) in &attestor_data {
+                        // `list_artifacts(SIGNED_KICK_P2P)` and join by peer id.
+                        let peer_data = workflow_state.get_all_peer_data().await;
+                        for (peer_id, combined) in &peer_data {
                             let (dns_blob, p2p_blob) = split_signed_kick_pair(combined)
                                 .with_context(|| {
                                     format!(
                                         "Failed to split signed kick pair from \
-                                         attestor {attestor_id}"
+                                         peer {peer_id}"
                                     )
                                 })?;
-                            let attestor_key = attestor_id.to_string();
+                            let peer_key = peer_id.to_string();
                             db.write_artifact(
                                 &instance_name,
                                 artifact_kinds::SIGNED_KICK_DNS,
-                                Some(&attestor_key),
+                                Some(&peer_key),
                                 &dns_blob,
                             )
                             .await?;
                             db.write_artifact(
                                 &instance_name,
                                 artifact_kinds::SIGNED_KICK_P2P,
-                                Some(&attestor_key),
+                                Some(&peer_key),
                                 &p2p_blob,
                             )
                             .await?;
                         }
-                        workflow_state.clear_attestor_data().await;
+                        workflow_state.clear_peer_data().await;
 
                         submit_kick(&node_config, &db, &instance_name).await?;
                         workflow_state.advance_step().await;
                     }
                     KickStep::Complete => {
                         tracing::info!("Kick workflow complete!");
-                        tracing::debug!("Waiting for attestors to receive Disconnect command...");
+                        tracing::debug!("Waiting for peers to receive Disconnect command...");
                         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                         break;
                     }
@@ -162,8 +162,8 @@ pub async fn start_coordinator(
 }
 
 /// Split the combined `varint(len_dns)||dns_proto||varint(len_p2p)||p2p_proto`
-/// buffer attestors send back into two separate `varint(len)||proto` blobs.
-/// The output blobs are byte-identical to what each attestor wrote as its
+/// buffer peers send back into two separate `varint(len)||proto` blobs.
+/// The output blobs are byte-identical to what each peer wrote as its
 /// own `SIGNED_KICK_DNS` / `SIGNED_KICK_P2P` artefact, so re-encoding via
 /// `read_first_message_from_bytes` round-trips cleanly.
 fn split_signed_kick_pair(combined: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
@@ -210,8 +210,8 @@ fn encode_length_prefixed_bytes(proto: &[u8]) -> Vec<u8> {
     buffer.to_vec()
 }
 
-// Tests below exercise the round-trip between the per-attestor blob format
-// (what sign.rs writes to storage) and the combined wire-format the attestor
+// Tests below exercise the round-trip between the per-peer blob format
+// (what sign.rs writes to storage) and the combined wire-format the peer
 // sends to the coordinator.
 #[cfg(test)]
 mod tests {

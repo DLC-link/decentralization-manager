@@ -49,47 +49,44 @@ pub async fn count_workflow_runs_inprogress(
     Ok(n)
 }
 
-/// Resolve the attestor-side instance_name for the current inprogress run
-/// of `kind`. Attestors mint their own synthetic instance_name on accept
-/// (e.g. `attestor-onboarding-<pubkey>-<epoch>`), so chaos phases can't
+/// Resolve the peer-side instance_name for the current inprogress run
+/// of `kind`. Peers mint their own synthetic instance_name on accept
+/// (e.g. `peer-onboarding-<pubkey>-<epoch>`), so chaos phases can't
 /// guess it from the coordinator's prefix. The partial unique index
 /// `(kind, role) WHERE status='inprogress'` guarantees at most one match.
-pub async fn current_inprogress_attestor_instance(
+pub async fn current_inprogress_peer_instance(
     db_path: &Path,
     kind: &str,
 ) -> anyhow::Result<Option<String>> {
     let pool = open(db_path).await?;
     let v: Option<String> = sqlx::query_scalar(
         "SELECT instance_name FROM workflow_runs \
-         WHERE kind = ?1 AND role = 'Attestor' AND status = 'inprogress' \
+         WHERE kind = ?1 AND role = 'Peer' AND status = 'inprogress' \
          ORDER BY created_at DESC LIMIT 1",
     )
     .bind(kind)
     .fetch_optional(&pool)
     .await
-    .context("current_inprogress_attestor_instance")?;
+    .context("current_inprogress_peer_instance")?;
     pool.close().await;
     Ok(v)
 }
 
-/// Most recent attestor-side instance_name of `kind` regardless of status.
+/// Most recent peer-side instance_name of `kind` regardless of status.
 /// Used by chaos phases that need the row identity *after* it's flipped to a
 /// terminal state (failed/cancelled), where the inprogress lookup can no
 /// longer find it.
-pub async fn latest_attestor_instance(
-    db_path: &Path,
-    kind: &str,
-) -> anyhow::Result<Option<String>> {
+pub async fn latest_peer_instance(db_path: &Path, kind: &str) -> anyhow::Result<Option<String>> {
     let pool = open(db_path).await?;
     let v: Option<String> = sqlx::query_scalar(
         "SELECT instance_name FROM workflow_runs \
-         WHERE kind = ?1 AND role = 'Attestor' \
+         WHERE kind = ?1 AND role = 'Peer' \
          ORDER BY created_at DESC LIMIT 1",
     )
     .bind(kind)
     .fetch_optional(&pool)
     .await
-    .context("latest_attestor_instance")?;
+    .context("latest_peer_instance")?;
     pool.close().await;
     Ok(v)
 }

@@ -84,7 +84,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     let _: Value = f.post_json(f.p1.http, "/dars/distribute", &req).await?;
 
     // Wait for two distinct InProgress coordinator rows + invites of both
-    // kinds delivered to both attestors (resume path doesn't re-send invites).
+    // kinds delivered to both peers (resume path doesn't re-send invites).
     let p1_db = f.db_path(1);
     let p1_db_clone = p1_db.clone();
     let f_imm: &Fixture = &*f;

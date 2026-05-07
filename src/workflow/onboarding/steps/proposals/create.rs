@@ -30,18 +30,18 @@ use crate::{
 ///
 /// **Important**: This step must be run by a coordinator participant that:
 /// 1. Is connected to the Canton synchronizer
-/// 2. Has collected keys and IDs from all attestors (via Step 1)
+/// 2. Has collected keys and IDs from all peers (via Step 1)
 /// 3. Has appropriate permissions to create topology proposals
 ///
 /// This step:
-/// 1. Loads all attestor key payloads from `workflow_artifacts`
+/// 1. Loads all peer key payloads from `workflow_artifacts`
 /// 2. Loads all participant ID payloads from `workflow_artifacts`
 /// 3. Creates two topology proposals:
 ///    - Decentralized Namespace Definition (DNS)
 ///    - Party-to-Participant mapping (P2P) with embedded signing keys (Canton 3.4+)
 /// 4. Saves proposals to `workflow_artifacts`
-/// 5. Once the dec_party_id is known, copies every attestor's
-///    `ATTESTOR_PUBLIC_KEYS` + `PARTICIPANT_ID` artefact into
+/// 5. Once the dec_party_id is known, copies every peer's
+///    `PEER_PUBLIC_KEYS` + `PARTICIPANT_ID` artefact into
 ///    `dec_party_identity` so the rows survive the workflow run's dismissal
 ///    (read by `contracts::sign_submissions`, future kicks, etc.).
 ///
@@ -58,32 +58,32 @@ pub async fn create_proposals(
     // Use party_id_prefix from onboarding config (provided via UI)
     let party_id_prefix = &onboarding_config.party_id_prefix;
 
-    // Step 1: Load all attestor key payloads from storage
+    // Step 1: Load all peer key payloads from storage
     let key_payloads = storage
-        .list_artifacts(instance_name, artifact_kinds::ATTESTOR_PUBLIC_KEYS)
+        .list_artifacts(instance_name, artifact_kinds::PEER_PUBLIC_KEYS)
         .await?;
 
     tracing::info!(
-        "Found {count} attestor key payloads",
+        "Found {count} peer key payloads",
         count = key_payloads.len()
     );
 
     if key_payloads.is_empty() {
-        anyhow::bail!("No attestor key payloads found for instance {instance_name}");
+        anyhow::bail!("No peer key payloads found for instance {instance_name}");
     }
 
     // Step 2: Decode each (namespace_key, daml_key) pair from its payload
     let mut namespace_keys = Vec::new();
     let mut daml_keys = Vec::new();
 
-    for (attestor_id, payload) in &key_payloads {
-        tracing::info!("Loading keys from attestor {attestor_id}");
+    for (peer_id, payload) in &key_payloads {
+        tracing::info!("Loading keys from peer {peer_id}");
 
         let keys: Vec<SigningPublicKey> = decode_keys_payload(payload)?;
 
         if keys.len() != 2 {
             anyhow::bail!(
-                "Expected exactly 2 keys from attestor {attestor_id}, but found {count}",
+                "Expected exactly 2 keys from peer {peer_id}, but found {count}",
                 count = keys.len()
             );
         }
@@ -94,7 +94,7 @@ pub async fn create_proposals(
 
         // Debug: Log fingerprints of keys being added to P2P mapping
         let daml_key_fp = utils::compute_fingerprint(&keys[1]);
-        tracing::debug!("DAML key from {attestor_id} has fingerprint: {daml_key_fp}");
+        tracing::debug!("DAML key from {peer_id} has fingerprint: {daml_key_fp}");
     }
 
     // Step 3: Extract namespaces from namespace keys
@@ -125,7 +125,7 @@ pub async fn create_proposals(
     }
 
     let mut participant_ids = Vec::new();
-    for (_attestor_id, payload) in &id_payloads {
+    for (_peer_id, payload) in &id_payloads {
         let file_content = std::str::from_utf8(payload)
             .map_err(|e| anyhow::anyhow!("Invalid UTF-8 in participant id payload: {e}"))?;
         let participant_id = CantonId::parse_from_file(file_content)?;
@@ -180,32 +180,27 @@ pub async fn create_proposals(
         .await?;
 
     // Identity hook (coordinator side): with the dec_party_id now known, copy
-    // each attestor's ATTESTOR_PUBLIC_KEYS + PARTICIPANT_ID workflow artefacts
-    // into dec_party_identity, keyed by `(party_id, attestor_id, kind)`. These
+    // each peer's PEER_PUBLIC_KEYS + PARTICIPANT_ID workflow artefacts
+    // into dec_party_identity, keyed by `(party_id, peer_id, kind)`. These
     // rows survive the workflow_runs row's eventual dismissal and are read by
     // post-onboarding workflows (e.g. contracts::sign_submissions).
-    for (attestor_id, payload) in &key_payloads {
+    for (peer_id, payload) in &key_payloads {
         storage
             .write_identity(
                 &party_id,
-                identity_kinds::ATTESTOR_PUBLIC_KEYS,
-                attestor_id,
+                identity_kinds::PEER_PUBLIC_KEYS,
+                peer_id,
                 payload,
             )
             .await?;
     }
-    for (attestor_id, payload) in &id_payloads {
+    for (peer_id, payload) in &id_payloads {
         storage
-            .write_identity(
-                &party_id,
-                identity_kinds::PARTICIPANT_ID,
-                attestor_id,
-                payload,
-            )
+            .write_identity(&party_id, identity_kinds::PARTICIPANT_ID, peer_id, payload)
             .await?;
     }
     tracing::info!(
-        "Persisted {count} attestor identity records for {party_id}",
+        "Persisted {count} peer identity records for {party_id}",
         count = key_payloads.len()
     );
 
@@ -242,7 +237,7 @@ pub async fn create_proposals(
         TopologyManagerWriteServiceClient::connect(config.admin_api_url()).await?;
 
     // Create DNS proposal in Authorized store
-    // The coordinator creates this proposal locally, which will later be shared with attestors
+    // The coordinator creates this proposal locally, which will later be shared with peers
     tracing::info!("Creating DNS proposal...");
 
     let dns_request = tonic::Request::new(AuthorizeRequest {

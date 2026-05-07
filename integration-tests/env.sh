@@ -517,9 +517,9 @@ poll_workflow_run_status() {
 # Assert that a Completed workflow run of the given kind is visible in the
 # unified notification feed (`GET /workflows`) on every relevant node:
 # - exactly one Coordinator row on the coordinator's port
-# - exactly one Attestor row on each attestor's port
+# - exactly one Peer row on each peer's port
 #
-# Args: kind coord_port [attestor_port ...]
+# Args: kind coord_port [peer_port ...]
 # Example: assert_workflow_completed_visible "Onboarding" $P1_HTTP $P2_HTTP $P3_HTTP
 assert_workflow_completed_visible() {
     local kind=$1
@@ -535,19 +535,19 @@ assert_workflow_completed_visible() {
         exit 1
     fi
 
-    local attestor_port
-    for attestor_port in "$@"; do
-        local attestor_count
-        attestor_count=$(curl -s "http://localhost:$attestor_port/workflows" \
+    local peer_port
+    for peer_port in "$@"; do
+        local peer_count
+        peer_count=$(curl -s "http://localhost:$peer_port/workflows" \
             | jq -r --arg k "$kind" \
-                '[.runs[] | select(.kind == $k and .role == "Attestor" and .status == "completed")] | length')
-        if [ "$attestor_count" -lt 1 ]; then
-            echo "ERROR: $kind/Attestor completed row missing from /workflows on port $attestor_port"
+                '[.runs[] | select(.kind == $k and .role == "Peer" and .status == "completed")] | length')
+        if [ "$peer_count" -lt 1 ]; then
+            echo "ERROR: $kind/Peer completed row missing from /workflows on port $peer_port"
             exit 1
         fi
     done
 
-    echo "$kind run visible in /workflows on coordinator + ${#} attestor(s)"
+    echo "$kind run visible in /workflows on coordinator + ${#} peer(s)"
 }
 
 # Assert that a governance proposal_cid is visible in

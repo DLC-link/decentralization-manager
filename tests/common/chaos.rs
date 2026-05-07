@@ -77,7 +77,7 @@ pub async fn dismiss_p1(f: &Fixture, instance_name: &str) {
 }
 
 /// Best-effort dismiss on a specific port (used when the row exists on an
-/// attestor too).
+/// peer too).
 pub async fn dismiss_on(f: &Fixture, port: u16, instance_name: &str) {
     let path = format!("/workflows/{instance_name}/dismiss");
     let _ = f.post_expect_status(f.p1.http, &path, &json!({})).await;
@@ -108,7 +108,7 @@ pub async fn ensure_nodes_healthy(f: &mut Fixture) -> anyhow::Result<()> {
         // `current_pids[idx] = None` slot means a chaos phase intentionally
         // killed this node and is expecting it to stay dead — respawning
         // it here would defeat the test's own premise (e.g. G3/G4/P2 kill
-        // attestors to force a coordinator failure within the bounded
+        // peers to force a coordinator failure within the bounded
         // wait). Crashes leave the slot as `Some(stale_pid)`, so the
         // self-heal path still kicks in for the case it's meant to cover.
         let has_pid = f.current_pids[(idx as usize) - 1].is_some();

@@ -48,8 +48,8 @@ pub async fn submit_kick(config: &NodeConfig, storage: &SqlitePool, instance_nam
     let mut p2p_transaction: SignedTopologyTransaction =
         utils::read_first_message_from_bytes(&p2p_bytes)?;
 
-    // Gather per-attestor signed proposals from storage. We list both kinds
-    // and join by attestor id so DNS and P2P signatures stay paired the way
+    // Gather per-peer signed proposals from storage. We list both kinds
+    // and join by peer id so DNS and P2P signatures stay paired the way
     // the original combined-file format guaranteed.
     let signed_dns = storage
         .list_artifacts(instance_name, artifact_kinds::SIGNED_KICK_DNS)
@@ -61,7 +61,7 @@ pub async fn submit_kick(config: &NodeConfig, storage: &SqlitePool, instance_nam
         .collect();
 
     tracing::info!(
-        "Found signed proposals from {count} attestor(s)",
+        "Found signed proposals from {count} peer(s)",
         count = signed_dns.len()
     );
 
@@ -73,15 +73,15 @@ pub async fn submit_kick(config: &NodeConfig, storage: &SqlitePool, instance_nam
         );
     }
 
-    // Aggregate signatures from each attestor
-    for (attestor_id, dns_signed_bytes) in &signed_dns {
-        tracing::info!("Reading signatures from attestor {attestor_id}");
+    // Aggregate signatures from each peer
+    for (peer_id, dns_signed_bytes) in &signed_dns {
+        tracing::info!("Reading signatures from peer {peer_id}");
 
         let dns_signed: SignedTopologyTransaction =
             utils::read_first_message_from_bytes(dns_signed_bytes)?;
         let p2p_signed_bytes = signed_p2p
-            .get(attestor_id)
-            .ok_or_else(|| anyhow::anyhow!("Attestor {attestor_id} signed DNS but not P2P"))?;
+            .get(peer_id)
+            .ok_or_else(|| anyhow::anyhow!("Peer {peer_id} signed DNS but not P2P"))?;
         let p2p_signed: SignedTopologyTransaction =
             utils::read_first_message_from_bytes(p2p_signed_bytes)?;
 

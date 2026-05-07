@@ -21,8 +21,8 @@ pub const CANTON_PROTOCOL_VERSION: i32 = 34;
 pub const TOPOLOGY_PROPAGATION_DELAY_SECS: u64 = 30;
 
 // File name prefixes
-/// Prefix for attestor public key files
-pub const ATTESTOR_KEYS_PREFIX: &str = "attestor-public-keys";
+/// Prefix for peer public key files
+pub const PEER_KEYS_PREFIX: &str = "peer-public-keys";
 
 /// Prefix for participant ID files
 pub const PARTICIPANT_ID_PREFIX: &str = "participant-id";

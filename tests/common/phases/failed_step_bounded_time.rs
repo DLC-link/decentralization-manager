@@ -1,8 +1,8 @@
 //! P1: Failed step surfaces as Failed within bounded time.
 //!
-//! Hard-kill both attestors and DO NOT restart them — the coordinator must
+//! Hard-kill both peers and DO NOT restart them — the coordinator must
 //! give up within a bounded time and mark the run Failed. /workflows must
-//! still surface the failed run for operator inspection. Restart attestors
+//! still surface the failed run for operator inspection. Restart peers
 //! at the end so subsequent phases run.
 
 use std::time::Duration;
@@ -25,7 +25,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     post_accept_invitation(f, f.p2.http, &p2_inv).await?;
     post_accept_invitation(f, f.p3.http, &p3_inv).await?;
 
-    chaos::say("P1", "hard-killing both attestors and leaving them dead");
+    chaos::say("P1", "hard-killing both peers and leaving them dead");
     processes::kill_node(f, 2).await?;
     processes::kill_node(f, 3).await?;
 
@@ -54,7 +54,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         "/workflows did not surface the failed run for operator inspection"
     );
 
-    // Restart attestors so subsequent phases aren't poisoned.
+    // Restart peers so subsequent phases aren't poisoned.
     chaos::say("P1", "restarting P2 and P3");
     processes::spawn_only(f, 2).await?;
     processes::spawn_only(f, 3).await?;

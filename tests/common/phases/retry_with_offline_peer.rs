@@ -29,13 +29,10 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     post_accept_invitation(f, f.p2.http, &p2_inv).await?;
     post_accept_invitation(f, f.p3.http, &p3_inv).await?;
 
-    // Brief settle so attestor rows persist before we kill them.
+    // Brief settle so peer rows persist before we kill them.
     sleep(Duration::from_secs(3)).await;
 
-    chaos::say(
-        "P2",
-        "hard-killing both attestors to force coordinator failure",
-    );
+    chaos::say("P2", "hard-killing both peers to force coordinator failure");
     processes::kill_node(f, 2).await?;
     processes::kill_node(f, 3).await?;
 

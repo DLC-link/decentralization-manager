@@ -21,7 +21,7 @@ use crate::{
 /// Each remaining member (not the kicked member) signs both proposals.
 /// `proposal_data` contains both DNS and P2P proposals received from coordinator.
 ///
-/// Persists the per-attestor signed DNS / P2P proposals as
+/// Persists the per-peer signed DNS / P2P proposals as
 /// `SIGNED_KICK_DNS` / `SIGNED_KICK_P2P` artefacts (keyed by this node's
 /// participant id). The byte-shape per artefact is `varint(len)||proto`,
 /// matching the original on-disk format produced by `write_message_to_file`.
@@ -74,7 +74,7 @@ pub async fn sign_proposals(
         );
     }
 
-    // Persist signed DNS + P2P as separate per-attestor artefacts. Each is
+    // Persist signed DNS + P2P as separate per-peer artefacts. Each is
     // written as `varint(len)||proto` so the bytes that go on the wire to the
     // coordinator (which is the concatenation of these two artefacts) are
     // byte-identical to what `write_messages_to_file(&[dns, p2p], path)`
@@ -105,7 +105,7 @@ pub async fn sign_proposals(
 
 /// Encode a protobuf message as `varint(len)||proto`. Matches the on-disk
 /// format `utils::write_message_to_file` used to produce; concatenating the
-/// DNS and P2P encodings yields exactly the buffer the attestor sends to the
+/// DNS and P2P encodings yields exactly the buffer the peer sends to the
 /// coordinator over Noise (i.e. the original combined-file bytes).
 fn encode_length_prefixed_message<M: Message>(message: &M) -> Vec<u8> {
     let encoded = message.encode_to_vec();

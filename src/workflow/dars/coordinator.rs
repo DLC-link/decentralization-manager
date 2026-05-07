@@ -33,7 +33,7 @@ pub async fn start_coordinator(
         network_config,
         db,
         config.instance_name.clone(),
-        DarsStep::WaitingForAttestors,
+        DarsStep::WaitingForPeers,
         Some(excluded),
     )
     .await?;
@@ -54,7 +54,7 @@ async fn run_workflow(
     node_config: NodeConfig,
     config: DarsConfig,
 ) -> Result {
-    // Encode DAR files to send to attestors with UploadDars command
+    // Encode DAR files to send to peers with UploadDars command
     let dar_payload = encode_dars_payload(&config)?;
     workflow_state.set_command_payload(dar_payload).await;
 
@@ -66,7 +66,7 @@ async fn run_workflow(
         watchdog.check(current_step)?;
 
         match current_step {
-            DarsStep::WaitingForAttestors => {
+            DarsStep::WaitingForPeers => {
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             }
             DarsStep::UploadDars => {
@@ -88,15 +88,15 @@ async fn run_workflow(
     Ok(())
 }
 
-/// Encode DAR files from config for transmission to attestors
+/// Encode DAR files from config for transmission to peers
 fn encode_dars_payload(config: &DarsConfig) -> Result<Vec<u8>> {
     if config.dar_files.is_empty() {
-        tracing::info!("No DAR files to distribute to attestors");
+        tracing::info!("No DAR files to distribute to peers");
         return Ok(Vec::new());
     }
 
     tracing::info!(
-        "Encoding {count} DAR file(s) for distribution to attestors",
+        "Encoding {count} DAR file(s) for distribution to peers",
         count = config.dar_files.len()
     );
 

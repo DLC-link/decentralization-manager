@@ -246,8 +246,8 @@ pub struct WorkflowRunRow {
     pub step_total: i64,
     pub config_json: String,
     pub coordinator_pubkey: Option<String>,
-    pub expected_attestors_json: String,
-    pub completed_attestors_json: String,
+    pub expected_peers_json: String,
+    pub completed_peers_json: String,
     pub dec_party_id: Option<String>,
     pub error: Option<String>,
     pub dismissed: i64,
@@ -281,7 +281,7 @@ impl WorkflowRunRow {
     ///
     /// # Errors
     ///
-    /// Returns an error if the expected/completed attestor lists fail to
+    /// Returns an error if the expected/completed peer lists fail to
     /// JSON-encode.
     pub fn from_domain(r: &WorkflowRun) -> Result<Self> {
         Ok(Self {
@@ -294,10 +294,10 @@ impl WorkflowRunRow {
             step_total: r.step_total,
             config_json: r.config_json.clone(),
             coordinator_pubkey: r.coordinator_pubkey.clone(),
-            expected_attestors_json: serde_json::to_string(&r.expected_attestors)
-                .context("encode expected_attestors")?,
-            completed_attestors_json: serde_json::to_string(&r.completed_attestors)
-                .context("encode completed_attestors")?,
+            expected_peers_json: serde_json::to_string(&r.expected_peers)
+                .context("encode expected_peers")?,
+            completed_peers_json: serde_json::to_string(&r.completed_peers)
+                .context("encode completed_peers")?,
             dec_party_id: r.dec_party_id.as_ref().map(CantonId::to_string),
             error: r.error.clone(),
             dismissed: if r.dismissed { 1 } else { 0 },
@@ -311,7 +311,7 @@ impl WorkflowRunRow {
     /// # Errors
     ///
     /// Returns an error if `kind`, `role` or `status` is unrecognised, or if
-    /// the expected/completed attestor JSON fields fail to decode.
+    /// the expected/completed peer JSON fields fail to decode.
     pub fn into_domain(self) -> Result<WorkflowRun> {
         let kind = WorkflowKind::from_str(&self.kind)
             .with_context(|| format!("invalid workflow kind on {}", self.instance_name))?;
@@ -319,11 +319,10 @@ impl WorkflowRunRow {
             .with_context(|| format!("invalid workflow role on {}", self.instance_name))?;
         let status = parse_workflow_progress(&self.status)
             .with_context(|| format!("invalid workflow status on {}", self.instance_name))?;
-        let expected_attestors: Vec<CantonId> = serde_json::from_str(&self.expected_attestors_json)
-            .with_context(|| format!("decode expected_attestors on {}", self.instance_name))?;
-        let completed_attestors: Vec<CantonId> =
-            serde_json::from_str(&self.completed_attestors_json)
-                .with_context(|| format!("decode completed_attestors on {}", self.instance_name))?;
+        let expected_peers: Vec<CantonId> = serde_json::from_str(&self.expected_peers_json)
+            .with_context(|| format!("decode expected_peers on {}", self.instance_name))?;
+        let completed_peers: Vec<CantonId> = serde_json::from_str(&self.completed_peers_json)
+            .with_context(|| format!("decode completed_peers on {}", self.instance_name))?;
         let dec_party_id = self
             .dec_party_id
             .as_deref()
@@ -341,8 +340,8 @@ impl WorkflowRunRow {
             config_json: self.config_json,
             coordinator_pubkey: self.coordinator_pubkey,
             coordinator_name: None,
-            expected_attestors,
-            completed_attestors,
+            expected_peers,
+            completed_peers,
             dec_party_id,
             error: self.error,
             dismissed: self.dismissed != 0,
@@ -356,7 +355,7 @@ impl WorkflowRunRow {
 pub struct WorkflowArtifactRow {
     pub instance_name: String,
     pub artifact_kind: String,
-    pub attestor_id: String,
+    pub peer_id: String,
     pub payload: Vec<u8>,
     pub created_at: i64,
 }
@@ -365,7 +364,7 @@ pub struct WorkflowArtifactRow {
 pub struct DecPartyIdentityRow {
     pub dec_party_id: String,
     pub artifact_kind: String,
-    pub attestor_id: String,
+    pub peer_id: String,
     pub payload: Vec<u8>,
     pub created_at: i64,
 }

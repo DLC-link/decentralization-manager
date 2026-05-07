@@ -28,7 +28,7 @@ curl -X POST http://custodian-a:8080/onboarding \
   }'
 ```
 
-After all attestors accept and the workflow completes, a decentralized party `joint-vault::1220...` exists with threshold 2.
+After all peers accept and the workflow completes, a decentralized party `joint-vault::1220...` exists with threshold 2.
 
 **2. Deploy governance contracts:**
 

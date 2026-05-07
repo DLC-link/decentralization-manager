@@ -65,7 +65,7 @@ const FIELD_TYPES = [
   { value: "operator_party", label: "Operator" },
   { value: "participant_party", label: "Party" },
   { value: "party_set", label: "Member Set" },
-  { value: "attestors_set", label: "Attestors Set" },
+  { value: "attestors_set", label: "Attestor Set" },
   { value: "governance_threshold", label: "Threshold" },
   { value: "rel_time", label: "Proposal Timeout" },
   { value: "optional", label: "Optional" },
@@ -764,10 +764,7 @@ const FieldEditor = ({
       }}
     >
       {lockStructure ? (
-        <Typography
-          variant="body2"
-          sx={{ fontWeight: 500, pl: 1.5, py: 1 }}
-        >
+        <Typography variant="body2" sx={{ fontWeight: 500, pl: 1.5, py: 1 }}>
           {label ??
             FIELD_TYPES.find((t) => t.value === field.type)?.label ??
             field.type}
@@ -1084,9 +1081,7 @@ const ContractTypeSelection = ({
           >
             <PluginCard
               icon={
-                <LockIcon
-                  sx={{ fontSize: 48, color: "primary.main", mb: 1 }}
-                />
+                <LockIcon sx={{ fontSize: 48, color: "primary.main", mb: 1 }} />
               }
               label="Token Custody"
               description="Receive, transfer, and manage tokens via governance"
@@ -1131,9 +1126,7 @@ const ContractTypeSelection = ({
             />
             <PluginCard
               icon={
-                <AddIcon
-                  sx={{ fontSize: 48, color: "primary.main", mb: 1 }}
-                />
+                <AddIcon sx={{ fontSize: 48, color: "primary.main", mb: 1 }} />
               }
               label="Add Plugin"
               description="Upload a custom plugin DAR from the Packages tab"
@@ -1195,8 +1188,14 @@ export const ContractsDialog = ({
       return patterns.some((pat) => name.includes(pat));
     });
 
-  const isGovernanceCoreDarUploaded = isDarUploaded(["governance-core", "governance.rules"]);
-  const isTokenCustodyDarUploaded = isDarUploaded(["governance-token-custody", "tokencustody"]);
+  const isGovernanceCoreDarUploaded = isDarUploaded([
+    "governance-core",
+    "governance.rules",
+  ]);
+  const isTokenCustodyDarUploaded = isDarUploaded([
+    "governance-token-custody",
+    "tokencustody",
+  ]);
 
   // Combine package IDs from config + known contracts for dropdown
   const allPackageIds = useMemo(() => {
@@ -1212,7 +1211,9 @@ export const ContractsDialog = ({
   // Fetch packages config when dialog opens
   useEffect(() => {
     if (open && partyId) {
-      authenticatedFetch(`${API_BASE}/packages?party_id=${encodeURIComponent(partyId)}`)
+      authenticatedFetch(
+        `${API_BASE}/packages?party_id=${encodeURIComponent(partyId)}`,
+      )
         .then((res) => res.json())
         .then((data: PackageConfig) => setPackages(data))
         .catch((e) => console.warn("Failed to fetch packages:", e));
@@ -1337,7 +1338,11 @@ export const ContractsDialog = ({
     setError(null);
 
     // Validate required fields
-    if (contractType !== "vault" && contractType !== "governance-core" && !operatorParty) {
+    if (
+      contractType !== "vault" &&
+      contractType !== "governance-core" &&
+      !operatorParty
+    ) {
       setError("Operator party ID is required");
       setLoading(false);
       return;
@@ -1406,7 +1411,9 @@ export const ContractsDialog = ({
         setError(data.error || "Failed to cancel workflow");
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to cancel workflow");
+      setError(
+        err instanceof Error ? err.message : "Failed to cancel workflow",
+      );
     } finally {
       setCancelling(false);
     }
@@ -1428,7 +1435,8 @@ export const ContractsDialog = ({
   const isFailed = status?.status === "failed";
 
   const getDialogTitle = () => {
-    if (!contractType) return isGovernanceCoreDeployed ? "Plugin Manager" : "Deploy Contracts";
+    if (!contractType)
+      return isGovernanceCoreDeployed ? "Plugin Manager" : "Deploy Contracts";
     if (contractType === "governance-core") return "Deploy Governance Core";
     if (contractType === "cbtc") return "Deploy CBTC Contracts";
     return "Deploy Vault Contracts";
@@ -1485,120 +1493,129 @@ export const ContractsDialog = ({
                 submissions. Make sure DARs have been uploaded first.
               </Typography>
 
-              {contractType !== "vault" && contractType !== "governance-core" && (
-                <>
-                  <Divider />
-                  <Typography variant="subtitle1">
-                    Party Configuration
-                  </Typography>
-                </>
-              )}
+              {contractType !== "vault" &&
+                contractType !== "governance-core" && (
+                  <>
+                    <Divider />
+                    <Typography variant="subtitle1">
+                      Party Configuration
+                    </Typography>
+                  </>
+                )}
 
-              {contractType !== "vault" && contractType !== "governance-core" && (
-                <TextField
-                  size="small"
-                  label="Operator Party ID"
-                  value={operatorParty}
-                  onChange={(e) => setOperatorParty(e.target.value)}
-                  fullWidth
-                  required
-                  error={!operatorParty}
-                  helperText="Full party ID for the operator (e.g., operator::1220...)"
-                />
-              )}
-
-              {contractType !== "governance-core" && (
-              <>
-                <Typography variant="subtitle2" sx={{ mt: 1 }}>
-                  Participant Party IDs ({participantParties.length}/
-                  {participantIds.length})
-                </Typography>
-                <Typography
-                  variant="body2"
-                  color="text.secondary"
-                  sx={{ mb: 1 }}
-                >
-                  Enter the party ID for each participant. Must match the order
-                  of participant IDs.
-                </Typography>
-                <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+              {contractType !== "vault" &&
+                contractType !== "governance-core" && (
                   <TextField
                     size="small"
-                    placeholder="Paste party ID, press Enter"
+                    label="Operator Party ID"
+                    value={operatorParty}
+                    onChange={(e) => setOperatorParty(e.target.value)}
                     fullWidth
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") {
-                        const input = e.target as HTMLInputElement;
-                        const value = input.value.trim();
-                        if (
-                          value &&
-                          participantParties.length < participantIds.length
-                        ) {
-                          setParticipantParties([...participantParties, value]);
-                          input.value = "";
-                        }
-                        e.preventDefault();
-                      }
-                    }}
-                    disabled={
-                      participantParties.length >= participantIds.length
-                    }
+                    required
+                    error={!operatorParty}
+                    helperText="Full party ID for the operator (e.g., operator::1220...)"
                   />
-                  {participantParties.length > 0 && (
-                    <Box
-                      sx={{
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: 0.5,
+                )}
+
+              {contractType !== "governance-core" && (
+                <>
+                  <Typography variant="subtitle2" sx={{ mt: 1 }}>
+                    Participant Party IDs ({participantParties.length}/
+                    {participantIds.length})
+                  </Typography>
+                  <Typography
+                    variant="body2"
+                    color="text.secondary"
+                    sx={{ mb: 1 }}
+                  >
+                    Enter the party ID for each participant. Must match the
+                    order of participant IDs.
+                  </Typography>
+                  <Box
+                    sx={{ display: "flex", flexDirection: "column", gap: 1 }}
+                  >
+                    <TextField
+                      size="small"
+                      placeholder="Paste party ID, press Enter"
+                      fullWidth
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          const input = e.target as HTMLInputElement;
+                          const value = input.value.trim();
+                          if (
+                            value &&
+                            participantParties.length < participantIds.length
+                          ) {
+                            setParticipantParties([
+                              ...participantParties,
+                              value,
+                            ]);
+                            input.value = "";
+                          }
+                          e.preventDefault();
+                        }
                       }}
-                    >
-                      {participantParties.map((party, idx) => (
-                        <Box
-                          key={idx}
-                          sx={{
-                            display: "flex",
-                            alignItems: "center",
-                            bgcolor: "action.hover",
-                            borderRadius: 1,
-                            px: 1,
-                            py: 0.5,
-                          }}
-                        >
-                          <Typography
-                            variant="caption"
-                            color="text.secondary"
-                            sx={{ mr: 1, minWidth: 20 }}
-                          >
-                            {idx + 1}.
-                          </Typography>
-                          <Typography
-                            variant="caption"
+                      disabled={
+                        participantParties.length >= participantIds.length
+                      }
+                    />
+                    {participantParties.length > 0 && (
+                      <Box
+                        sx={{
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: 0.5,
+                        }}
+                      >
+                        {participantParties.map((party, idx) => (
+                          <Box
+                            key={idx}
                             sx={{
-                              flex: 1,
-                              fontFamily: "monospace",
-                              overflow: "hidden",
-                              textOverflow: "ellipsis",
+                              display: "flex",
+                              alignItems: "center",
+                              bgcolor: "action.hover",
+                              borderRadius: 1,
+                              px: 1,
+                              py: 0.5,
                             }}
                           >
-                            {party}
-                          </Typography>
-                          <IconButton
-                            size="small"
-                            onClick={() =>
-                              setParticipantParties(
-                                participantParties.filter((_, i) => i !== idx),
-                              )
-                            }
-                            sx={{ p: 0.25 }}
-                          >
-                            <DeleteIcon sx={{ fontSize: 14 }} />
-                          </IconButton>
-                        </Box>
-                      ))}
-                    </Box>
-                  )}
-                </Box>
-              </>
+                            <Typography
+                              variant="caption"
+                              color="text.secondary"
+                              sx={{ mr: 1, minWidth: 20 }}
+                            >
+                              {idx + 1}.
+                            </Typography>
+                            <Typography
+                              variant="caption"
+                              sx={{
+                                flex: 1,
+                                fontFamily: "monospace",
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                              }}
+                            >
+                              {party}
+                            </Typography>
+                            <IconButton
+                              size="small"
+                              onClick={() =>
+                                setParticipantParties(
+                                  participantParties.filter(
+                                    (_, i) => i !== idx,
+                                  ),
+                                )
+                              }
+                              sx={{ p: 0.25 }}
+                            >
+                              <DeleteIcon sx={{ fontSize: 14 }} />
+                            </IconButton>
+                          </Box>
+                        ))}
+                      </Box>
+                    )}
+                  </Box>
+                </>
               )}
 
               <Divider />

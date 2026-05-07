@@ -1,7 +1,7 @@
-//! G3: Coordinator-initiated retry of a Failed run flips attestor rows back.
+//! G3: Coordinator-initiated retry of a Failed run flips peer rows back.
 //!
-//! Force a coordinator-side failure by killing both attestors after they
-//! accept. Restart attestors. POST /workflows/{instance}/retry on P1.
+//! Force a coordinator-side failure by killing both peers after they
+//! accept. Restart peers. POST /workflows/{instance}/retry on P1.
 //! Assert all three workflow_runs rows reach Completed.
 
 use std::time::Duration;
@@ -24,15 +24,15 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     post_accept_invitation(f, f.p2.http, &p2_inv).await?;
     post_accept_invitation(f, f.p3.http, &p3_inv).await?;
 
-    // Wait for both attestor rows to be persisted as inprogress, capturing
+    // Wait for both peer rows to be persisted as inprogress, capturing
     // their synthesized instance_names so later assertions can refer to them
     // after they flip to terminal states.
     let p2_db = f.db_path(2);
     let p3_db = f.db_path(3);
-    let p2_inst = wait_for_attestor_instance(&p2_db).await?;
-    let p3_inst = wait_for_attestor_instance(&p3_db).await?;
+    let p2_inst = wait_for_peer_instance(&p2_db).await?;
+    let p3_inst = wait_for_peer_instance(&p3_db).await?;
 
-    chaos::say("G3", "hard-killing both attestors");
+    chaos::say("G3", "hard-killing both peers");
     processes::kill_node(f, 2).await?;
     processes::kill_node(f, 3).await?;
 
@@ -65,7 +65,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     }
     chaos::say("G3", "coordinator row marked Failed");
 
-    // Restart attestors so they're reachable for retry.
+    // Restart peers so they're reachable for retry.
     processes::spawn_only(f, 2).await?;
     processes::spawn_only(f, 3).await?;
 
@@ -93,19 +93,19 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     })
     .await?;
 
-    // Wait until both attestors flip back to completed (RetryWorkflow
+    // Wait until both peers flip back to completed (RetryWorkflow
     // re-broadcasts and the resumed runs go through to terminal completed).
     chaos::poll_until(Duration::from_secs(240), || async {
-        let s2 = db::workflow_run_status(&p2_db, &p2_inst, "Attestor").await?;
-        let s3 = db::workflow_run_status(&p3_db, &p3_inst, "Attestor").await?;
+        let s2 = db::workflow_run_status(&p2_db, &p2_inst, "Peer").await?;
+        let s3 = db::workflow_run_status(&p3_db, &p3_inst, "Peer").await?;
         Ok(s2.as_deref() == Some("completed") && s3.as_deref() == Some("completed"))
     })
     .await?;
 
     // Final assertions: all three rows Completed.
     let p1_final = db::workflow_run_status(&p1_db, &instance, "Coordinator").await?;
-    let p2_final = db::workflow_run_status(&p2_db, &p2_inst, "Attestor").await?;
-    let p3_final = db::workflow_run_status(&p3_db, &p3_inst, "Attestor").await?;
+    let p2_final = db::workflow_run_status(&p2_db, &p2_inst, "Peer").await?;
+    let p3_final = db::workflow_run_status(&p3_db, &p3_inst, "Peer").await?;
     anyhow::ensure!(
         p1_final.as_deref() == Some("completed")
             && p2_final.as_deref() == Some("completed")
@@ -118,16 +118,16 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn wait_for_attestor_instance(db_path: &std::path::Path) -> anyhow::Result<String> {
+async fn wait_for_peer_instance(db_path: &std::path::Path) -> anyhow::Result<String> {
     use std::time::Instant;
     let start = Instant::now();
     let deadline = Duration::from_secs(60);
     loop {
-        if let Some(name) = db::current_inprogress_attestor_instance(db_path, "Onboarding").await? {
+        if let Some(name) = db::current_inprogress_peer_instance(db_path, "Onboarding").await? {
             return Ok(name);
         }
         if start.elapsed() >= deadline {
-            anyhow::bail!("inprogress attestor row not visible at {db_path:?} within {deadline:?}");
+            anyhow::bail!("inprogress peer row not visible at {db_path:?} within {deadline:?}");
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }

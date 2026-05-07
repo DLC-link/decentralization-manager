@@ -109,18 +109,18 @@ pub trait SchemaRead {
     /// yet. Newest-updated first.
     async fn get_visible_workflow_runs(&self) -> Result<Vec<WorkflowRun>>;
 
-    /// Read a single artefact for a workflow run. `attestor` may be None for
+    /// Read a single artefact for a workflow run. `peer` may be None for
     /// shared artefacts (proposals, namespace defs).
     async fn read_workflow_artifact(
         &self,
         instance_name: &str,
         artifact_kind: &str,
-        attestor: Option<&str>,
+        peer: Option<&str>,
     ) -> Result<Option<Vec<u8>>>;
 
     /// List all artefacts of a given kind for a workflow run, returning
-    /// `(attestor_id, payload)` pairs. Used when the coordinator needs to
-    /// gather one-per-attestor artefacts (signatures, attestor pubkeys).
+    /// `(peer_id, payload)` pairs. Used when the coordinator needs to
+    /// gather one-per-peer artefacts (signatures, peer pubkeys).
     async fn list_workflow_artifacts(
         &self,
         instance_name: &str,
@@ -134,11 +134,11 @@ pub trait SchemaRead {
         &self,
         dec_party_id: &CantonId,
         artifact_kind: &str,
-        attestor_id: &str,
+        peer_id: &str,
     ) -> Result<Option<Vec<u8>>>;
 
     /// List every identity artefact of a given kind for a dec party,
-    /// returning `(attestor_id, payload)` pairs sorted by attestor_id.
+    /// returning `(peer_id, payload)` pairs sorted by peer_id.
     async fn list_dec_party_identity(
         &self,
         dec_party_id: &CantonId,
@@ -226,7 +226,7 @@ pub trait Commitable {
         instance_name: &str,
         current_step: &str,
         step_index: i64,
-        completed_attestors: &[CantonId],
+        completed_peers: &[CantonId],
         updated_at: i64,
     ) -> Result;
 
@@ -248,7 +248,7 @@ pub trait Commitable {
         &mut self,
         instance_name: &str,
         artifact_kind: &str,
-        attestor: Option<&str>,
+        peer: Option<&str>,
         payload: &[u8],
     ) -> Result;
 
@@ -257,7 +257,7 @@ pub trait Commitable {
         &mut self,
         dec_party_id: &CantonId,
         artifact_kind: &str,
-        attestor_id: &str,
+        peer_id: &str,
         payload: &[u8],
     ) -> Result;
 }

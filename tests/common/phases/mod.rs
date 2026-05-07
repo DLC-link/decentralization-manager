@@ -1,6 +1,5 @@
 #![allow(dead_code)]
 
-pub mod attestor_3_strikes_abort;
 pub mod cancel_cascades;
 pub mod create_dec_party;
 pub mod deploy_gov_core;
@@ -13,8 +12,9 @@ pub mod identity_survives_dismiss;
 pub mod kick;
 pub mod notification_feed;
 pub mod owner_key_resilience;
-pub mod restart_attestor_resume;
+pub mod peer_3_strikes_abort;
 pub mod restart_coordinator_resume;
+pub mod restart_peer_resume;
 pub mod restart_with_concurrent_kinds;
 pub mod retry_coordinator_broadcast;
 pub mod retry_with_offline_peer;

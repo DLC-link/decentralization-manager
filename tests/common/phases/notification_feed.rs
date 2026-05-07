@@ -65,7 +65,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         },
     )
     .then(
-        "P1 has Onboarding/Coordinator row with 2 expected attestors",
+        "P1 has Onboarding/Coordinator row with 2 expected peers",
         Duration::from_secs(15),
         |f, _| {
             Box::pin(async move {
@@ -74,10 +74,10 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     .runs
                     .iter()
                     .find(|w| w.kind == "Onboarding" && w.role == "Coordinator")?;
-                if row.expected_attestors.len() != 2 {
+                if row.expected_peers.len() != 2 {
                     return Some(Err(anyhow::anyhow!(
-                        "expected 2 attestors on P1's Onboarding row, got {}",
-                        row.expected_attestors.len()
+                        "expected 2 peers on P1's Onboarding row, got {}",
+                        row.expected_peers.len()
                     )));
                 }
                 Some(Ok(()))
@@ -85,7 +85,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         },
     )
     .then(
-        "P2 has Onboarding/Attestor row with coordinator_name resolved",
+        "P2 has Onboarding/Peer row with coordinator_name resolved",
         Duration::from_secs(15),
         |f, _| {
             Box::pin(async move {
@@ -93,12 +93,12 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 let row = r
                     .runs
                     .iter()
-                    .find(|w| w.kind == "Onboarding" && w.role == "Attestor")?;
+                    .find(|w| w.kind == "Onboarding" && w.role == "Peer")?;
                 let pubkey = row.coordinator_pubkey.as_deref().unwrap_or("");
                 let name = row.coordinator_name.as_deref().unwrap_or("");
                 if pubkey.is_empty() {
                     return Some(Err(anyhow::anyhow!(
-                        "P2 Onboarding/Attestor row has empty coordinator_pubkey"
+                        "P2 Onboarding/Peer row has empty coordinator_pubkey"
                     )));
                 }
                 if name != "Participant 1" {

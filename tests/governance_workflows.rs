@@ -107,13 +107,13 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     phases::cancel_cascades::run(&mut f).await?;
     phases::start_handler_conflict_409::run(&mut f).await?;
     phases::restart_coordinator_resume::run(&mut f).await?; // G1
-    phases::restart_attestor_resume::run(&mut f).await?; // G2
+    phases::restart_peer_resume::run(&mut f).await?; // G2
     phases::retry_coordinator_broadcast::run(&mut f).await?; // G3
     phases::dismiss_failed_cleans_artifacts::run(&mut f).await?; // G4
     phases::generate_keys_idempotent::run(&mut f).await?; // G7
-    phases::attestor_3_strikes_abort::run(&mut f).await?; // G8 (stub)
+    phases::peer_3_strikes_abort::run(&mut f).await?; // G8 (stub)
     // G9 disabled: the concurrent-kinds resume scenario flakes on the shared
-    // dars_state across chaos phases — the attestor-handler/abort-handle race
+    // dars_state across chaos phases — the peer-handler/abort-handle race
     // is fixed but G10's stalled /dars/distribute + downstream P1 respawns
     // can still leave the row in a state where a fresh /dars/distribute
     // 409s. Re-enable once we've drained the pre-G9 dars_state more

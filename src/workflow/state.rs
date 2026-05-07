@@ -1,8 +1,8 @@
 //! Generic workflow state machine.
 //!
 //! `WorkflowState<S>` holds the live state for a single workflow run on this
-//! node — the current step, the set of expected attestors, who's connected, and
-//! the buffered command/attestor data — and writes through to the persisted
+//! node — the current step, the set of expected peers, who's connected, and
+//! the buffered command/peer data — and writes through to the persisted
 //! `workflow_runs` row so the run survives a restart.
 
 use std::{
@@ -28,8 +28,8 @@ pub trait WorkflowStep:
 {
     fn to_command(&self) -> Option<MessageType>;
     fn next(&self) -> Option<Self>;
-    fn requires_attestors(&self) -> bool;
-    fn is_waiting_for_attestors(&self) -> bool;
+    fn requires_peers(&self) -> bool;
+    fn is_waiting_for_peers(&self) -> bool;
 
     /// Stable index of this variant (0..step_total). Used for the persisted
     /// `step_index` column on `workflow_runs` — the frontend renders progress
@@ -55,15 +55,15 @@ pub struct WorkflowState<S> {
     instance_name: String,
     /// Current workflow step
     current_step: RwLock<S>,
-    /// Expected attestor IDs
-    expected_attestors: HashSet<CantonId>,
-    /// Attestors that have connected (transient — not persisted, recoverable
+    /// Expected peer IDs
+    expected_peers: HashSet<CantonId>,
+    /// Peers that have connected (transient — not persisted, recoverable
     /// via Noise reconnect after a restart)
-    connected_attestors: RwLock<HashSet<CantonId>>,
-    /// Attestors that have completed the current step
-    completed_attestors: RwLock<HashSet<CantonId>>,
-    /// Data received from attestors (e.g., keys, signatures)
-    attestor_data: RwLock<HashMap<CantonId, Vec<u8>>>,
+    connected_peers: RwLock<HashSet<CantonId>>,
+    /// Peers that have completed the current step
+    completed_peers: RwLock<HashSet<CantonId>>,
+    /// Data received from peers (e.g., keys, signatures)
+    peer_data: RwLock<HashMap<CantonId, Vec<u8>>>,
     /// Payload data to send with the next command (e.g., proposals for signing)
     command_payload: RwLock<Vec<u8>>,
     _p: PhantomData<()>,
@@ -77,39 +77,39 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
         db: SqlitePool,
         instance_name: String,
         initial_step: S,
-        expected_attestors: Vec<CantonId>,
+        expected_peers: Vec<CantonId>,
     ) -> Arc<Self> {
         Arc::new(Self {
             db,
             instance_name,
             current_step: RwLock::new(initial_step),
-            expected_attestors: expected_attestors.into_iter().collect(),
-            connected_attestors: RwLock::new(HashSet::new()),
-            completed_attestors: RwLock::new(HashSet::new()),
-            attestor_data: RwLock::new(HashMap::new()),
+            expected_peers: expected_peers.into_iter().collect(),
+            connected_peers: RwLock::new(HashSet::new()),
+            completed_peers: RwLock::new(HashSet::new()),
+            peer_data: RwLock::new(HashMap::new()),
             command_payload: RwLock::new(Vec::new()),
             _p: PhantomData,
         })
     }
 
     /// Re-hydrate from a persisted `workflow_runs` row. The previously-completed
-    /// attestors (for the current step) are restored so the run picks back up
+    /// peers (for the current step) are restored so the run picks back up
     /// without losing partial progress.
     pub fn from_persisted(
         db: SqlitePool,
         instance_name: String,
         current_step: S,
-        expected_attestors: Vec<CantonId>,
-        completed_attestors: Vec<CantonId>,
+        expected_peers: Vec<CantonId>,
+        completed_peers: Vec<CantonId>,
     ) -> Arc<Self> {
         Arc::new(Self {
             db,
             instance_name,
             current_step: RwLock::new(current_step),
-            expected_attestors: expected_attestors.into_iter().collect(),
-            connected_attestors: RwLock::new(HashSet::new()),
-            completed_attestors: RwLock::new(completed_attestors.into_iter().collect()),
-            attestor_data: RwLock::new(HashMap::new()),
+            expected_peers: expected_peers.into_iter().collect(),
+            connected_peers: RwLock::new(HashSet::new()),
+            completed_peers: RwLock::new(completed_peers.into_iter().collect()),
+            peer_data: RwLock::new(HashMap::new()),
             command_payload: RwLock::new(Vec::new()),
             _p: PhantomData,
         })
@@ -140,40 +140,40 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
         *self.current_step.read().await
     }
 
-    pub async fn store_attestor_data(&self, attestor_id: CantonId, data: Vec<u8>) {
-        let mut attestor_data = self.attestor_data.write().await;
-        attestor_data.insert(attestor_id, data);
+    pub async fn store_peer_data(&self, peer_id: CantonId, data: Vec<u8>) {
+        let mut peer_data = self.peer_data.write().await;
+        peer_data.insert(peer_id, data);
     }
 
-    pub async fn get_all_attestor_data(&self) -> HashMap<CantonId, Vec<u8>> {
-        self.attestor_data.read().await.clone()
+    pub async fn get_all_peer_data(&self) -> HashMap<CantonId, Vec<u8>> {
+        self.peer_data.read().await.clone()
     }
 
-    pub async fn clear_attestor_data(&self) {
-        let mut attestor_data = self.attestor_data.write().await;
-        attestor_data.clear();
+    pub async fn clear_peer_data(&self) {
+        let mut peer_data = self.peer_data.write().await;
+        peer_data.clear();
     }
 
-    pub async fn has_attestor_completed(&self, attestor_id: &CantonId) -> bool {
-        let completed = self.completed_attestors.read().await;
-        completed.contains(attestor_id)
+    pub async fn has_peer_completed(&self, peer_id: &CantonId) -> bool {
+        let completed = self.completed_peers.read().await;
+        completed.contains(peer_id)
     }
 
-    pub async fn attestor_connected(&self, attestor_id: CantonId) {
-        let mut connected = self.connected_attestors.write().await;
+    pub async fn peer_connected(&self, peer_id: CantonId) {
+        let mut connected = self.connected_peers.write().await;
 
-        let is_new = connected.insert(attestor_id.clone());
+        let is_new = connected.insert(peer_id.clone());
         if !is_new {
             return;
         }
 
         let connected_count = connected.len();
-        let total_count = self.expected_attestors.len();
-        tracing::info!("Attestor connected: {attestor_id} ({connected_count}/{total_count})");
+        let total_count = self.expected_peers.len();
+        tracing::info!("Peer connected: {peer_id} ({connected_count}/{total_count})");
 
         if connected_count == total_count {
             let current = self.current_step.read().await;
-            if current.is_waiting_for_attestors() {
+            if current.is_waiting_for_peers() {
                 drop(current);
                 drop(connected);
                 self.advance_step().await;
@@ -186,26 +186,26 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
         step.to_command()
     }
 
-    pub async fn attestor_completed(&self, attestor_id: CantonId) {
-        let mut completed = self.completed_attestors.write().await;
-        completed.insert(attestor_id.clone());
+    pub async fn peer_completed(&self, peer_id: CantonId) {
+        let mut completed = self.completed_peers.write().await;
+        completed.insert(peer_id.clone());
 
         let current = self.current_step.read().await;
         let completed_count = completed.len();
-        let total_count = self.expected_attestors.len();
+        let total_count = self.expected_peers.len();
         let step_name = format!("{current:?}");
         tracing::info!(
-            "Attestor completed step {step_name}: {attestor_id} ({completed_count}/{total_count})"
+            "Peer completed step {step_name}: {peer_id} ({completed_count}/{total_count})"
         );
 
-        // Persist the new completed-attestors set. Failures here are logged
+        // Persist the new completed-peers set. Failures here are logged
         // but don't abort the workflow — on a future restart the recovery path
         // would just re-issue the command, which steps are designed to no-op
         // when the artefact already exists.
         let completed_vec: Vec<CantonId> = completed.iter().cloned().collect();
         self.persist_step_progress(*current, completed_vec).await;
 
-        if current.requires_attestors() && completed_count == total_count {
+        if current.requires_peers() && completed_count == total_count {
             drop(current);
             drop(completed);
             self.advance_step().await;
@@ -214,7 +214,7 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
 
     pub async fn advance_step(&self) {
         let mut current = self.current_step.write().await;
-        let mut completed = self.completed_attestors.write().await;
+        let mut completed = self.completed_peers.write().await;
 
         if let Some(next_step) = current.next() {
             let current_name = format!("{current:?}");
@@ -241,7 +241,7 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
     }
 
     /// Mark the run as Cancelled. Used by the cancel propagation path on
-    /// attestors when they receive a `CancelWorkflow` Noise message.
+    /// peers when they receive a `CancelWorkflow` Noise message.
     pub async fn mark_cancelled(&self) {
         self.persist_status(WorkflowProgress::Cancelled, None).await;
     }

@@ -22,27 +22,27 @@ use super::{
     steps::{create_proposals, generate_keys, submit_dns_proposals, submit_final_proposals},
 };
 
-/// Save each attestor's combined `keys||participant_id` payload into
-/// `workflow_artifacts` as two separate per-attestor rows
-/// (`ATTESTOR_PUBLIC_KEYS`, `PARTICIPANT_ID`). Mirrors how kick's coordinator
-/// splits per-attestor data.
+/// Save each peer's combined `keys||participant_id` payload into
+/// `workflow_artifacts` as two separate per-peer rows
+/// (`PEER_PUBLIC_KEYS`, `PARTICIPANT_ID`). Mirrors how kick's coordinator
+/// splits per-peer data.
 async fn save_keys_and_ids<S: crate::workflow::state::WorkflowStep + 'static>(
     workflow_state: &WorkflowState<S>,
     storage: &SqlitePool,
     instance_name: &str,
 ) -> Result {
-    let attestor_data = workflow_state.get_all_attestor_data().await;
+    let peer_data = workflow_state.get_all_peer_data().await;
 
-    for (attestor_id, data) in attestor_data {
+    for (peer_id, data) in peer_data {
         let items = utils::decode_length_prefixed(&data, 2)
-            .with_context(|| format!("Invalid payload from {attestor_id}"))?;
+            .with_context(|| format!("Invalid payload from {peer_id}"))?;
 
         let keys_data = &items[0];
         let id_data = &items[1];
-        let attestor_key = attestor_id.to_string();
+        let peer_key = peer_id.to_string();
 
         tracing::debug!(
-            "Received from {attestor_id}: {keys_len} bytes keys + {id_len} bytes participant ID",
+            "Received from {peer_id}: {keys_len} bytes keys + {id_len} bytes participant ID",
             keys_len = keys_data.len(),
             id_len = id_data.len()
         );
@@ -50,8 +50,8 @@ async fn save_keys_and_ids<S: crate::workflow::state::WorkflowStep + 'static>(
         storage
             .write_artifact(
                 instance_name,
-                artifact_kinds::ATTESTOR_PUBLIC_KEYS,
-                Some(&attestor_key),
+                artifact_kinds::PEER_PUBLIC_KEYS,
+                Some(&peer_key),
                 keys_data,
             )
             .await?;
@@ -60,19 +60,19 @@ async fn save_keys_and_ids<S: crate::workflow::state::WorkflowStep + 'static>(
             .write_artifact(
                 instance_name,
                 artifact_kinds::PARTICIPANT_ID,
-                Some(&attestor_key),
+                Some(&peer_key),
                 id_data,
             )
             .await?;
     }
 
-    workflow_state.clear_attestor_data().await;
+    workflow_state.clear_peer_data().await;
     Ok(())
 }
 
-/// Save each attestor's signed proposal payload (DNS or P2P) into
-/// `workflow_artifacts` keyed by attestor id. The byte-shape stored matches
-/// what the attestor's sign step persisted locally (single
+/// Save each peer's signed proposal payload (DNS or P2P) into
+/// `workflow_artifacts` keyed by peer id. The byte-shape stored matches
+/// what the peer's sign step persisted locally (single
 /// `varint(len)||proto`), so the submit step can reconstruct the original
 /// SignedTopologyTransaction(s) via `read_first_message_from_bytes`.
 async fn save_signed_proposals<S: crate::workflow::state::WorkflowStep + 'static>(
@@ -81,16 +81,16 @@ async fn save_signed_proposals<S: crate::workflow::state::WorkflowStep + 'static
     instance_name: &str,
     artifact_kind: &str,
 ) -> Result {
-    let attestor_data = workflow_state.get_all_attestor_data().await;
+    let peer_data = workflow_state.get_all_peer_data().await;
 
-    for (attestor_id, data) in attestor_data {
-        let attestor_key = attestor_id.to_string();
+    for (peer_id, data) in peer_data {
+        let peer_key = peer_id.to_string();
         storage
-            .write_artifact(instance_name, artifact_kind, Some(&attestor_key), &data)
+            .write_artifact(instance_name, artifact_kind, Some(&peer_key), &data)
             .await?;
     }
 
-    workflow_state.clear_attestor_data().await;
+    workflow_state.clear_peer_data().await;
     Ok(())
 }
 
@@ -107,7 +107,7 @@ pub async fn start_coordinator(
         network_config.clone(),
         db.clone(),
         onboarding_config.instance_name.clone(),
-        OnboardingStep::WaitingForAttestors,
+        OnboardingStep::WaitingForPeers,
         None, // No excluded participants
     )
     .await?;
@@ -166,7 +166,7 @@ async fn run_workflow(
         watchdog.check(current_step)?;
 
         match current_step {
-            OnboardingStep::WaitingForAttestors => {
+            OnboardingStep::WaitingForPeers => {
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             }
             OnboardingStep::GenerateKeys => {
@@ -184,11 +184,11 @@ async fn run_workflow(
             }
             OnboardingStep::CreateProposals => {
                 tracing::info!("Coordinator executing: Create proposals");
-                // Save attestor keys and participant IDs uploaded during GenerateKeys step
+                // Save peer keys and participant IDs uploaded during GenerateKeys step
                 save_keys_and_ids(&workflow_state, &db, &instance_name).await?;
                 create_proposals(&node_config, &db, &instance_name, &onboarding_config).await?;
 
-                // Load DNS proposal to send to attestors with SignDns command
+                // Load DNS proposal to send to peers with SignDns command
                 let dns_proposal_data = db
                     .read_artifact(&instance_name, artifact_kinds::DNS_PROTO, None)
                     .await?
@@ -213,7 +213,7 @@ async fn run_workflow(
                 .await?;
                 submit_dns_proposals(&node_config, &db, &instance_name).await?;
 
-                // Load P2P proposal to send to attestors with SignP2p command
+                // Load P2P proposal to send to peers with SignP2p command
                 let p2p_proposal_data = db
                     .read_artifact(&instance_name, artifact_kinds::P2P_PROTO, None)
                     .await?

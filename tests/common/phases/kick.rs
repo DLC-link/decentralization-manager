@@ -108,11 +108,11 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             },
         )
         .then(
-            "Kick completed run visible in /workflows on P2 (Attestor)",
+            "Kick completed run visible in /workflows on P2 (Peer)",
             Duration::from_secs(30),
             |f, _| {
                 Box::pin(async move {
-                    probe_workflow_run_visible(f, f.p2.http, "Kick", "Attestor", "completed").await
+                    probe_workflow_run_visible(f, f.p2.http, "Kick", "Peer", "completed").await
                 })
             },
         )

@@ -78,13 +78,13 @@ pub async fn execute_submissions(
     let num_submissions = prepared_submissions.len();
     tracing::debug!("Loaded {num_submissions} prepared submissions");
 
-    // Step 3: Load all per-attestor signature bundles from storage.
-    tracing::info!("Loading attestor signatures...");
+    // Step 3: Load all per-peer signature bundles from storage.
+    tracing::info!("Loading peer signatures...");
     let signature_rows = db
         .list_artifacts(instance_name, artifact_kinds::SUBMISSION_SIGNATURES)
         .await?;
     tracing::debug!(
-        "Found signatures from {count} attestor(s)",
+        "Found signatures from {count} peer(s)",
         count = signature_rows.len()
     );
 
@@ -96,16 +96,16 @@ pub async fn execute_submissions(
     }
 
     // Each row is `varint(len)||proto` × N messages produced by
-    // `sign_submissions`. Decode them per-attestor.
+    // `sign_submissions`. Decode them per-peer.
     let mut all_signatures: Vec<Vec<CantonSignature>> = Vec::new();
-    for (attestor_id, payload) in &signature_rows {
-        tracing::debug!("Loading signatures from attestor {attestor_id}");
+    for (peer_id, payload) in &signature_rows {
+        tracing::debug!("Loading signatures from peer {peer_id}");
 
         let sigs: Vec<CantonSignature> = read_all_messages_from_bytes(payload)?;
 
         if sigs.len() != num_submissions {
             anyhow::bail!(
-                "Expected {num_submissions} signatures from attestor {attestor_id}, \
+                "Expected {num_submissions} signatures from peer {peer_id}, \
                  but found {count}",
                 count = sigs.len()
             );
@@ -115,7 +115,7 @@ pub async fn execute_submissions(
     }
 
     tracing::info!(
-        "Loaded signatures from {count} attestors",
+        "Loaded signatures from {count} peers",
         count = all_signatures.len()
     );
 
@@ -126,10 +126,10 @@ pub async fn execute_submissions(
     for (idx, prepared_response) in prepared_submissions.iter().enumerate() {
         tracing::info!("Executing submission {index}...", index = idx + 1);
 
-        // Collect signatures for this submission from all attestors
+        // Collect signatures for this submission from all peers
         let mut signatures_for_submission = Vec::new();
-        for attestor_sigs in &all_signatures {
-            let canton_sig = &attestor_sigs[idx];
+        for peer_sigs in &all_signatures {
+            let canton_sig = &peer_sigs[idx];
 
             // Convert Canton Signature to Ledger API Signature
             // The Ledger API Signature doesn't have signature_delegation field

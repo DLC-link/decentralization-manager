@@ -36,7 +36,7 @@ use crate::{
 /// 2. DAML transaction key (for signing transactions)
 /// 3. Persists both keys + the participant id into `workflow_artifacts`
 ///    keyed by this node's own canton id, so the coordinator can later
-///    aggregate all attestors' keys via `list_artifacts`.
+///    aggregate all peers' keys via `list_artifacts`.
 ///
 /// This function generates signing keys and exports them,
 /// and proposes a namespace delegation for the generated namespace key.
@@ -85,14 +85,14 @@ pub async fn generate_keys(
             .await?;
 
     // Persist keys + participant id under this node's own canton id so the
-    // coordinator can later list every attestor's keys/ids.
+    // coordinator can later list every peer's keys/ids.
     let self_id = config.participant_id().to_string();
 
     let keys_payload = encode_keys_payload(&namespace_key, &daml_key);
     storage
         .write_artifact(
             instance_name,
-            artifact_kinds::ATTESTOR_PUBLIC_KEYS,
+            artifact_kinds::PEER_PUBLIC_KEYS,
             Some(&self_id),
             &keys_payload,
         )

@@ -20,7 +20,7 @@ use crate::{
 ///
 /// `proposal_data` is the `varint(len)||SignedTopologyTransaction` blob the
 /// coordinator sent (matches the original on-disk dns_proto.bin /
-/// p2p_proto.bin format). The signed result is persisted as a per-attestor
+/// p2p_proto.bin format). The signed result is persisted as a per-peer
 /// artefact under `(instance, kind, self_id)` using the same
 /// length-prefixed framing.
 async fn sign_proposal(
@@ -65,7 +65,7 @@ async fn sign_proposal(
         anyhow::bail!("No signed transaction returned for {proposal_type}");
     }
 
-    // Persist as a single per-attestor artefact. Each transaction is written
+    // Persist as a single per-peer artefact. Each transaction is written
     // as `varint(len)||proto`; concatenated, this matches the previous on-disk
     // format produced by `write_messages_to_file`.
     let mut buffer = BytesMut::new();
@@ -83,10 +83,10 @@ async fn sign_proposal(
     Ok(())
 }
 
-/// Sign DNS proposal with attestor's key
+/// Sign DNS proposal with peer's key
 ///
-/// This step must be run by each attestor participant (except the coordinator who created the proposal).
-/// Each attestor signs the DNS proposal with their namespace key.
+/// This step must be run by each peer participant (except the coordinator who created the proposal).
+/// Each peer signs the DNS proposal with their namespace key.
 pub async fn sign_dns_proposals(
     config: &NodeConfig,
     storage: &SqlitePool,
@@ -104,7 +104,7 @@ pub async fn sign_dns_proposals(
     .await
 }
 
-/// Sign P2P proposals with attestor's key
+/// Sign P2P proposals with peer's key
 ///
 /// **Canton 3.4+**: Signing keys are now embedded in the P2P mapping.
 /// This function signs the P2P proposal which contains both participant and key information.

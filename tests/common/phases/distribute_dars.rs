@@ -127,20 +127,20 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             },
         )
         .then(
-            "Dars completed run visible in /workflows on P2 (Attestor)",
+            "Dars completed run visible in /workflows on P2 (Peer)",
             Duration::from_secs(30),
             |f, _| {
                 Box::pin(async move {
-                    probe_workflow_run_visible(f, f.p2.http, "Dars", "Attestor", "completed").await
+                    probe_workflow_run_visible(f, f.p2.http, "Dars", "Peer", "completed").await
                 })
             },
         )
         .then(
-            "Dars completed run visible in /workflows on P3 (Attestor)",
+            "Dars completed run visible in /workflows on P3 (Peer)",
             Duration::from_secs(30),
             |f, _| {
                 Box::pin(async move {
-                    probe_workflow_run_visible(f, f.p3.http, "Dars", "Attestor", "completed").await
+                    probe_workflow_run_visible(f, f.p3.http, "Dars", "Peer", "completed").await
                 })
             },
         )

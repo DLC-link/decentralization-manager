@@ -1,7 +1,7 @@
-//! G8: Attestor 3-strikes abort flips the row to Failed and unblocks future
+//! G8: Peer 3-strikes abort flips the row to Failed and unblocks future
 //! starts.
 //!
-//! This test requires sending the attestor a step where the payload
+//! This test requires sending the peer a step where the payload
 //! deliberately fails to deserialize three times in a row. Producing that
 //! without a custom Noise client (or modifying production code) is harness
 //! work that is outside this PR's scope — the existing test helpers only

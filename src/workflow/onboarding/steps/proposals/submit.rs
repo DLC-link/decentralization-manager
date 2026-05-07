@@ -26,7 +26,7 @@ use crate::{
 
 /// Aggregate and submit DNS proposals
 ///
-/// This step must be run once by the coordinator after all attestors have signed the DNS proposal.
+/// This step must be run once by the coordinator after all peers have signed the DNS proposal.
 /// It aggregates all signatures and submits the fully-signed proposal to Canton.
 pub async fn submit_dns_proposals(
     config: &NodeConfig,
@@ -53,8 +53,8 @@ pub async fn submit_dns_proposals(
         count = signed_dns.len()
     );
 
-    for (attestor_id, signed_payload) in &signed_dns {
-        tracing::info!("Reading signatures from attestor {attestor_id}");
+    for (peer_id, signed_payload) in &signed_dns {
+        tracing::info!("Reading signatures from peer {peer_id}");
         let signed_transactions: Vec<SignedTopologyTransaction> =
             decode_messages_from_bytes(signed_payload)?;
 
@@ -165,7 +165,7 @@ async fn wait_for_dns_in_topology(
 /// **Canton 3.4+**: Submits P2P proposals with embedded signing keys
 /// (replaces the separate PartyToKeyMapping transactions from Canton 3.3).
 ///
-/// This step must be run once by the coordinator after all attestors have signed the P2P proposals.
+/// This step must be run once by the coordinator after all peers have signed the P2P proposals.
 /// It aggregates all signatures and submits the fully-signed proposal to Canton.
 pub async fn submit_final_proposals(
     config: &NodeConfig,
@@ -196,14 +196,14 @@ pub async fn submit_final_proposals(
         count = signed_p2p.len()
     );
 
-    for (attestor_id, signed_payload) in &signed_p2p {
-        tracing::info!("Reading signatures from attestor {attestor_id}");
+    for (peer_id, signed_payload) in &signed_p2p {
+        tracing::info!("Reading signatures from peer {peer_id}");
         let signed_transactions: Vec<SignedTopologyTransaction> =
             decode_messages_from_bytes(signed_payload)?;
 
         if signed_transactions.len() != 1 {
             anyhow::bail!(
-                "Expected 1 transaction from attestor {attestor_id}, got {count}",
+                "Expected 1 transaction from peer {peer_id}, got {count}",
                 count = signed_transactions.len()
             );
         }

@@ -7,9 +7,9 @@
 //!
 //! Artefacts come in two shapes:
 //! - **shared**: one per workflow run (e.g. `dns_proto`, `namespace_def`). Pass
-//!   `attestor = None`.
-//! - **per-attestor**: one per (run, attestor) (e.g. `signed_dns_proposal`,
-//!   `submission_signatures`). Pass `attestor = Some(canton_id_string)`.
+//!   `peer = None`.
+//! - **per-peer**: one per (run, peer) (e.g. `signed_dns_proposal`,
+//!   `submission_signatures`). Pass `peer = Some(canton_id_string)`.
 
 use sqlx::SqlitePool;
 
@@ -31,10 +31,10 @@ pub mod artifact_kinds {
     pub const NAMESPACE_DEF: &str = "namespace_def";
     pub const SIGNED_DNS_PROPOSAL: &str = "signed_dns_proposal";
     pub const SIGNED_P2P_PROPOSAL: &str = "signed_p2p_proposal";
-    pub const ATTESTOR_PUBLIC_KEYS: &str = "attestor_public_keys";
+    pub const PEER_PUBLIC_KEYS: &str = "peer_public_keys";
     pub const PARTICIPANT_ID: &str = "participant_id";
     /// Resolved decentralized party id (`{prefix}::{namespace_fingerprint}`)
-    /// produced by onboarding's CreateProposals once all attestor namespace
+    /// produced by onboarding's CreateProposals once all peer namespace
     /// keys are aggregated. Plaintext UTF-8. Read by the coordinator's HTTP
     /// path after the workflow finishes so it can return the new party id to
     /// the UI without round-tripping through the file system.
@@ -66,23 +66,23 @@ pub mod artifact_kinds {
     pub const KICK_NEW_NAMESPACE_DEF: &str = "kick_new_namespace_def";
     /// Full decentralized party id (`{prefix}::{namespace_hex}`). Plaintext.
     pub const KICK_PARTY_ID: &str = "kick_party_id";
-    /// Per-attestor signed DNS kick proposal — a single length-prefixed
-    /// `SignedTopologyTransaction` protobuf containing only that attestor's
+    /// Per-peer signed DNS kick proposal — a single length-prefixed
+    /// `SignedTopologyTransaction` protobuf containing only that peer's
     /// signature contribution.
     pub const SIGNED_KICK_DNS: &str = "signed_kick_dns";
-    /// Per-attestor signed P2P kick proposal — same shape as `SIGNED_KICK_DNS`.
+    /// Per-peer signed P2P kick proposal — same shape as `SIGNED_KICK_DNS`.
     pub const SIGNED_KICK_P2P: &str = "signed_kick_p2p";
 }
 
 /// Identity-table artefact kinds. These survive the originating workflow run's
 /// dismissal and are read by post-onboarding workflows (contracts, kick, …).
 pub mod identity_kinds {
-    /// Each attestor's exported namespace + DAML signing keys. Stored under
-    /// `(dec_party_id, attestor_id)` — the local node's own row is the
+    /// Each peer's exported namespace + DAML signing keys. Stored under
+    /// `(dec_party_id, peer_id)` — the local node's own row is the
     /// canonical source for sign.rs's "load my DAML signing key" lookup.
-    pub const ATTESTOR_PUBLIC_KEYS: &str = "attestor_public_keys";
-    /// Each attestor's `participant_id` file content. Coordinator's row set
-    /// holds one per attestor; an attestor's row set holds just their own.
+    pub const PEER_PUBLIC_KEYS: &str = "peer_public_keys";
+    /// Each peer's `participant_id` file content. Coordinator's row set
+    /// holds one per peer; an peer's row set holds just their own.
     pub const PARTICIPANT_ID: &str = "participant_id";
 }
 
@@ -100,12 +100,12 @@ pub trait WorkflowStorage: Send + Sync {
         &self,
         instance_name: &str,
         artifact_kind: &str,
-        attestor: Option<&str>,
+        peer: Option<&str>,
     ) -> Result<Option<Vec<u8>>>;
 
-    /// List every per-attestor artefact of a given kind for a run, returning
-    /// `(attestor_id, payload)` pairs sorted by attestor id. Used by the
-    /// coordinator to gather signatures, attestor pubkeys, etc.
+    /// List every per-peer artefact of a given kind for a run, returning
+    /// `(peer_id, payload)` pairs sorted by peer id. Used by the
+    /// coordinator to gather signatures, peer pubkeys, etc.
     async fn list_artifacts(
         &self,
         instance_name: &str,
@@ -118,21 +118,21 @@ pub trait WorkflowStorage: Send + Sync {
         &self,
         instance_name: &str,
         artifact_kind: &str,
-        attestor: Option<&str>,
+        peer: Option<&str>,
         payload: &[u8],
     ) -> Result;
 
-    /// Read a per-(dec_party, attestor) identity artefact. Returns `None` if
+    /// Read a per-(dec_party, peer) identity artefact. Returns `None` if
     /// no row exists for that combination.
     async fn read_identity(
         &self,
         dec_party_id: &CantonId,
         artifact_kind: &str,
-        attestor_id: &str,
+        peer_id: &str,
     ) -> Result<Option<Vec<u8>>>;
 
     /// List every identity artefact of a given kind for a dec party,
-    /// returning `(attestor_id, payload)` pairs sorted by attestor id.
+    /// returning `(peer_id, payload)` pairs sorted by peer id.
     async fn list_identity(
         &self,
         dec_party_id: &CantonId,
@@ -140,14 +140,14 @@ pub trait WorkflowStorage: Send + Sync {
     ) -> Result<Vec<(String, Vec<u8>)>>;
 
     /// Write an identity artefact. Used at onboarding completion to copy
-    /// `participant_id` and `attestor_public_keys` rows from
+    /// `participant_id` and `peer_public_keys` rows from
     /// `workflow_artifacts` into `dec_party_identity` keyed by the resolved
     /// dec_party_id.
     async fn write_identity(
         &self,
         dec_party_id: &CantonId,
         artifact_kind: &str,
-        attestor_id: &str,
+        peer_id: &str,
         payload: &[u8],
     ) -> Result;
 }
@@ -157,9 +157,9 @@ impl WorkflowStorage for SqlitePool {
         &self,
         instance_name: &str,
         artifact_kind: &str,
-        attestor: Option<&str>,
+        peer: Option<&str>,
     ) -> Result<Option<Vec<u8>>> {
-        SchemaRead::read_workflow_artifact(self, instance_name, artifact_kind, attestor).await
+        SchemaRead::read_workflow_artifact(self, instance_name, artifact_kind, peer).await
     }
 
     async fn list_artifacts(
@@ -174,11 +174,11 @@ impl WorkflowStorage for SqlitePool {
         &self,
         instance_name: &str,
         artifact_kind: &str,
-        attestor: Option<&str>,
+        peer: Option<&str>,
         payload: &[u8],
     ) -> Result {
         let mut tx = self.begin_transaction().await?;
-        tx.write_workflow_artifact(instance_name, artifact_kind, attestor, payload)
+        tx.write_workflow_artifact(instance_name, artifact_kind, peer, payload)
             .await?;
         Commitable::commit(tx).await
     }
@@ -187,9 +187,9 @@ impl WorkflowStorage for SqlitePool {
         &self,
         dec_party_id: &CantonId,
         artifact_kind: &str,
-        attestor_id: &str,
+        peer_id: &str,
     ) -> Result<Option<Vec<u8>>> {
-        SchemaRead::read_dec_party_identity(self, dec_party_id, artifact_kind, attestor_id).await
+        SchemaRead::read_dec_party_identity(self, dec_party_id, artifact_kind, peer_id).await
     }
 
     async fn list_identity(
@@ -204,11 +204,11 @@ impl WorkflowStorage for SqlitePool {
         &self,
         dec_party_id: &CantonId,
         artifact_kind: &str,
-        attestor_id: &str,
+        peer_id: &str,
         payload: &[u8],
     ) -> Result {
         let mut tx = self.begin_transaction().await?;
-        tx.write_dec_party_identity(dec_party_id, artifact_kind, attestor_id, payload)
+        tx.write_dec_party_identity(dec_party_id, artifact_kind, peer_id, payload)
             .await?;
         Commitable::commit(tx).await
     }

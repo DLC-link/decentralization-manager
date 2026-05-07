@@ -1120,17 +1120,17 @@ const WorkflowRunCard = ({
         ? `from ${run.coordinator_pubkey.slice(0, 12)}…${run.coordinator_pubkey.slice(-6)}`
         : null;
 
-  const completedCount = run.completed_attestors.length;
-  const totalCount = run.expected_attestors.length;
-  // Per-kind label for the attestor progress counter. DARs distribution
-  // doesn't sign anything — attestors just upload the dar locally and
+  const completedCount = run.completed_peers.length;
+  const totalCount = run.expected_peers.length;
+  // Per-kind label for the peer progress counter. DARs distribution
+  // doesn't sign anything — peers just upload the dar locally and
   // signal completion. Other kinds collect DAML signatures.
-  const attestorVerb = run.kind === "Dars" ? "uploaded" : "signed";
+  const peerVerb = run.kind === "Dars" ? "uploaded" : "signed";
   // Step counters are only meaningful on the coordinator side — the
-  // attestor's `current_step` is always "Active" with step_index=0,
-  // step_total=N (see invitations.rs `upsert_attestor_run`), so rendering
-  // it as "Active (1/N)" is misleading. Hide step + attestor count rows
-  // entirely for attestor-side cards.
+  // peer's `current_step` is always "Active" with step_index=0,
+  // step_total=N (see invitations.rs `upsert_peer_run`), so rendering
+  // it as "Active (1/N)" is misleading. Hide step + peer count rows
+  // entirely for peer-side cards.
   const isCoordinator = run.role === "Coordinator";
 
   return (
@@ -1211,10 +1211,10 @@ const WorkflowRunCard = ({
                 color="text.secondary"
                 sx={{ minWidth: 96 }}
               >
-                Attestors
+                Peers
               </Typography>
               <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                {completedCount} / {totalCount} {attestorVerb}
+                {completedCount} / {totalCount} {peerVerb}
               </Typography>
             </Box>
           )}

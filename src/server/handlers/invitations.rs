@@ -37,11 +37,11 @@ fn step_total_for(kind: WorkflowKind) -> i64 {
     }
 }
 
-/// Insert the attestor-side `workflow_runs` row for a freshly-accepted invite.
-/// The synthetic instance_name is `attestor-<kind>-<coord_pubkey[..16]>-<ts>`
+/// Insert the peer-side `workflow_runs` row for a freshly-accepted invite.
+/// The synthetic instance_name is `peer-<kind>-<coord_pubkey[..16]>-<ts>`
 /// — only one accepted invite can be active per node at a time so the
 /// timestamp suffix is enough to keep older completed rows distinct.
-async fn insert_attestor_run(
+async fn insert_peer_run(
     data: &web::Data<AppState>,
     invitation: &PendingInvitation,
 ) -> Option<String> {
@@ -53,7 +53,7 @@ async fn insert_attestor_run(
     let pubkey_short =
         &invitation.coordinator_pubkey[..invitation.coordinator_pubkey.len().min(16)];
     let instance_name = format!(
-        "attestor-{}-{}-{}",
+        "peer-{}-{}-{}",
         kind.as_str().to_lowercase(),
         pubkey_short,
         now
@@ -61,9 +61,9 @@ async fn insert_attestor_run(
     let run = WorkflowRun {
         instance_name: instance_name.clone(),
         kind,
-        role: WorkflowRole::Attestor,
+        role: WorkflowRole::Peer,
         status: WorkflowProgress::InProgress,
-        // No per-step granularity on the attestor side yet — coordinator drives
+        // No per-step granularity on the peer side yet — coordinator drives
         // the protocol; we just track "I'm participating".
         current_step: "Active".to_string(),
         step_index: 0,
@@ -79,10 +79,10 @@ async fn insert_attestor_run(
         .to_string(),
         coordinator_pubkey: Some(invitation.coordinator_pubkey.clone()),
         coordinator_name: None,
-        // For onboarding the participants list is the authoritative attestor
+        // For onboarding the participants list is the authoritative peer
         // set. For other kinds we don't get a list from the invite.
-        expected_attestors: invitation.participants.clone(),
-        completed_attestors: Vec::new(),
+        expected_peers: invitation.participants.clone(),
+        completed_peers: Vec::new(),
         dec_party_id: None,
         error: None,
         dismissed: false,
@@ -93,16 +93,16 @@ async fn insert_attestor_run(
     let mut tx = match data.db.begin_transaction().await {
         Ok(t) => t,
         Err(e) => {
-            tracing::warn!("attestor run: begin_transaction failed: {e}");
+            tracing::warn!("peer run: begin_transaction failed: {e}");
             return None;
         }
     };
     if let Err(e) = tx.upsert_workflow_run(&run).await {
-        tracing::warn!("attestor run: upsert failed: {e}");
+        tracing::warn!("peer run: upsert failed: {e}");
         return None;
     }
     if let Err(e) = Commitable::commit(tx).await {
-        tracing::warn!("attestor run: commit failed: {e}");
+        tracing::warn!("peer run: commit failed: {e}");
         return None;
     }
     Some(instance_name)
@@ -171,13 +171,13 @@ pub async fn accept_invitation(
 
     delete_persisted_invitation(&data, &invitation.id).await;
 
-    // Persist an attestor-side workflow_runs row so the operator's feed shows
+    // Persist an peer-side workflow_runs row so the operator's feed shows
     // "I'm participating in <kind>" until completion. The trigger listener
-    // reads `attestor_run_instance` to know which row to flip on terminal status.
-    let attestor_instance = insert_attestor_run(&data, &invitation).await;
+    // reads `peer_run_instance` to know which row to flip on terminal status.
+    let peer_instance = insert_peer_run(&data, &invitation).await;
     {
-        let mut slot = data.attestor_run_instance.write().await;
-        *slot = attestor_instance;
+        let mut slot = data.peer_run_instance.write().await;
+        *slot = peer_instance;
     }
 
     // Store coordinator's public key and trigger the appropriate workflow
@@ -188,19 +188,19 @@ pub async fn accept_invitation(
 
     match invitation.invitation_type {
         InvitationType::Onboarding => {
-            tracing::info!("Accepting onboarding invitation, triggering attestor workflow");
+            tracing::info!("Accepting onboarding invitation, triggering peer workflow");
             data.onboarding_trigger.notify_one();
         }
         InvitationType::Kick => {
-            tracing::info!("Accepting kick invitation, triggering attestor workflow");
+            tracing::info!("Accepting kick invitation, triggering peer workflow");
             data.kick_trigger.notify_one();
         }
         InvitationType::Contracts => {
-            tracing::info!("Accepting contracts invitation, triggering attestor workflow");
+            tracing::info!("Accepting contracts invitation, triggering peer workflow");
             data.contracts_trigger.notify_one();
         }
         InvitationType::Dars => {
-            tracing::info!("Accepting DARs invitation, triggering attestor workflow");
+            tracing::info!("Accepting DARs invitation, triggering peer workflow");
             data.dars_trigger.notify_one();
         }
     }

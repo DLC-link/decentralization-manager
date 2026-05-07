@@ -1,7 +1,7 @@
 //! G7: GenerateKeys idempotent re-run on resume reuses existing vault keys.
 //!
-//! Drive an Onboarding to mid-flight on P2 (after the attestor has persisted
-//! its `attestor_public_keys` artifact), capture the artifact payload, kill
+//! Drive an Onboarding to mid-flight on P2 (after the peer has persisted
+//! its `peer_public_keys` artifact), capture the artifact payload, kill
 //! and restart P2, drive to completion, and verify the dec_party_identity
 //! row was created (proving the keys persisted across the restart).
 
@@ -26,20 +26,20 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     post_accept_invitation(f, f.p2.http, &p2_inv).await?;
     post_accept_invitation(f, f.p3.http, &p3_inv).await?;
 
-    // Wait for P2 to persist the attestor_public_keys artifact for its
-    // synthesized attestor instance (proves GenerateKeys completed once on
+    // Wait for P2 to persist the peer_public_keys artifact for its
+    // synthesized peer instance (proves GenerateKeys completed once on
     // P2 before we kill it).
     let p2_db = f.db_path(2);
     let p2_db_clone = p2_db.clone();
     chaos::poll_until(Duration::from_secs(60), || {
         let p2_db = p2_db_clone.clone();
         async move {
-            let attestor_inst =
-                match db::current_inprogress_attestor_instance(&p2_db, "Onboarding").await? {
-                    Some(n) => n,
-                    None => return Ok(false),
-                };
-            Ok(db::count_artifacts(&p2_db, &attestor_inst).await? > 0)
+            let peer_inst = match db::current_inprogress_peer_instance(&p2_db, "Onboarding").await?
+            {
+                Some(n) => n,
+                None => return Ok(false),
+            };
+            Ok(db::count_artifacts(&p2_db, &peer_inst).await? > 0)
         }
     })
     .await?;

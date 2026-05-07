@@ -43,9 +43,9 @@ pub enum MessageType {
     InviteContracts = 0x0012,
     InviteDars = 0x0013,
     CancelInvite = 0x0014,
-    /// Coordinator-initiated retry: tells attestors who accepted an earlier
+    /// Coordinator-initiated retry: tells peers who accepted an earlier
     /// invite from this coordinator to flip their Failed run back to
-    /// InProgress and re-spin `start_attestor`.
+    /// InProgress and re-spin `start_peer`.
     RetryWorkflow = 0x0015,
 
     // Responses (0x0100 - 0x01FF)

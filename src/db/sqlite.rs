@@ -376,15 +376,15 @@ impl SchemaRead for SqlitePool {
         &self,
         instance_name: &str,
         artifact_kind: &str,
-        attestor: Option<&str>,
+        peer: Option<&str>,
     ) -> Result<Option<Vec<u8>>> {
         let row = sqlx::query_as::<_, WorkflowArtifactRow>(
             "SELECT * FROM workflow_artifacts \
-             WHERE instance_name = ? AND artifact_kind = ? AND attestor_id = ?",
+             WHERE instance_name = ? AND artifact_kind = ? AND peer_id = ?",
         )
         .bind(instance_name)
         .bind(artifact_kind)
-        .bind(attestor.unwrap_or(""))
+        .bind(peer.unwrap_or(""))
         .fetch_optional(self)
         .await?;
 
@@ -399,7 +399,7 @@ impl SchemaRead for SqlitePool {
         let rows = sqlx::query_as::<_, WorkflowArtifactRow>(
             "SELECT * FROM workflow_artifacts \
              WHERE instance_name = ? AND artifact_kind = ? \
-             ORDER BY attestor_id ASC",
+             ORDER BY peer_id ASC",
         )
         .bind(instance_name)
         .bind(artifact_kind)
@@ -407,7 +407,7 @@ impl SchemaRead for SqlitePool {
         .await?;
 
         rows.into_iter()
-            .map(|r| Ok((r.attestor_id, crypto::decrypt_bytes(&r.payload)?)))
+            .map(|r| Ok((r.peer_id, crypto::decrypt_bytes(&r.payload)?)))
             .collect()
     }
 
@@ -415,15 +415,15 @@ impl SchemaRead for SqlitePool {
         &self,
         dec_party_id: &CantonId,
         artifact_kind: &str,
-        attestor_id: &str,
+        peer_id: &str,
     ) -> Result<Option<Vec<u8>>> {
         let row = sqlx::query_as::<_, DecPartyIdentityRow>(
             "SELECT * FROM dec_party_identity \
-             WHERE dec_party_id = ? AND artifact_kind = ? AND attestor_id = ?",
+             WHERE dec_party_id = ? AND artifact_kind = ? AND peer_id = ?",
         )
         .bind(dec_party_id.to_string())
         .bind(artifact_kind)
-        .bind(attestor_id)
+        .bind(peer_id)
         .fetch_optional(self)
         .await?;
 
@@ -438,7 +438,7 @@ impl SchemaRead for SqlitePool {
         let rows = sqlx::query_as::<_, DecPartyIdentityRow>(
             "SELECT * FROM dec_party_identity \
              WHERE dec_party_id = ? AND artifact_kind = ? \
-             ORDER BY attestor_id ASC",
+             ORDER BY peer_id ASC",
         )
         .bind(dec_party_id.to_string())
         .bind(artifact_kind)
@@ -446,7 +446,7 @@ impl SchemaRead for SqlitePool {
         .await?;
 
         rows.into_iter()
-            .map(|r| Ok((r.attestor_id, crypto::decrypt_bytes(&r.payload)?)))
+            .map(|r| Ok((r.peer_id, crypto::decrypt_bytes(&r.payload)?)))
             .collect()
     }
 }
@@ -825,8 +825,8 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                 step_total,
                 config_json,
                 coordinator_pubkey,
-                expected_attestors_json,
-                completed_attestors_json,
+                expected_peers_json,
+                completed_peers_json,
                 dec_party_id,
                 error,
                 dismissed,
@@ -842,8 +842,8 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                 step_total               = excluded.step_total,
                 config_json              = excluded.config_json,
                 coordinator_pubkey       = excluded.coordinator_pubkey,
-                expected_attestors_json  = excluded.expected_attestors_json,
-                completed_attestors_json = excluded.completed_attestors_json,
+                expected_peers_json  = excluded.expected_peers_json,
+                completed_peers_json = excluded.completed_peers_json,
                 dec_party_id             = excluded.dec_party_id,
                 error                    = excluded.error,
                 dismissed                = excluded.dismissed,
@@ -859,8 +859,8 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         .bind(row.step_total)
         .bind(&row.config_json)
         .bind(&row.coordinator_pubkey)
-        .bind(&row.expected_attestors_json)
-        .bind(&row.completed_attestors_json)
+        .bind(&row.expected_peers_json)
+        .bind(&row.completed_peers_json)
         .bind(&row.dec_party_id)
         .bind(&row.error)
         .bind(row.dismissed)
@@ -877,18 +877,18 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         instance_name: &str,
         current_step: &str,
         step_index: i64,
-        completed_attestors: &[CantonId],
+        completed_peers: &[CantonId],
         updated_at: i64,
     ) -> Result {
         let completed_json =
-            serde_json::to_string(completed_attestors).context("encode completed_attestors")?;
+            serde_json::to_string(completed_peers).context("encode completed_peers")?;
 
         sqlx::query(
             r"
             UPDATE workflow_runs
             SET current_step = ?,
                 step_index = ?,
-                completed_attestors_json = ?,
+                completed_peers_json = ?,
                 updated_at = ?
             WHERE instance_name = ?
             ",
@@ -979,7 +979,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         &mut self,
         instance_name: &str,
         artifact_kind: &str,
-        attestor: Option<&str>,
+        peer: Option<&str>,
         payload: &[u8],
     ) -> Result {
         let encrypted = crypto::encrypt_bytes(payload)?;
@@ -991,13 +991,13 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         sqlx::query(
             r"
             INSERT OR REPLACE INTO workflow_artifacts
-                (instance_name, artifact_kind, attestor_id, payload, created_at)
+                (instance_name, artifact_kind, peer_id, payload, created_at)
             VALUES (?, ?, ?, ?, ?)
             ",
         )
         .bind(instance_name)
         .bind(artifact_kind)
-        .bind(attestor.unwrap_or(""))
+        .bind(peer.unwrap_or(""))
         .bind(&encrypted)
         .bind(now)
         .execute(&mut **self)
@@ -1010,7 +1010,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         &mut self,
         dec_party_id: &CantonId,
         artifact_kind: &str,
-        attestor_id: &str,
+        peer_id: &str,
         payload: &[u8],
     ) -> Result {
         let encrypted = crypto::encrypt_bytes(payload)?;
@@ -1022,13 +1022,13 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         sqlx::query(
             r"
             INSERT OR REPLACE INTO dec_party_identity
-                (dec_party_id, artifact_kind, attestor_id, payload, created_at)
+                (dec_party_id, artifact_kind, peer_id, payload, created_at)
             VALUES (?, ?, ?, ?, ?)
             ",
         )
         .bind(dec_party_id.to_string())
         .bind(artifact_kind)
-        .bind(attestor_id)
+        .bind(peer_id)
         .bind(&encrypted)
         .bind(now)
         .execute(&mut **self)
@@ -1844,17 +1844,17 @@ mod tests {
             kind: kind.parse().unwrap(),
             role: role.parse().unwrap(),
             status: WorkflowProgress::InProgress,
-            current_step: "WaitingForAttestors".to_string(),
+            current_step: "WaitingForPeers".to_string(),
             step_index: 0,
             step_total: 7,
             config_json: r#"{"foo":"bar"}"#.to_string(),
             coordinator_pubkey: Some("aaaa".to_string()),
             coordinator_name: None,
-            expected_attestors: vec![
+            expected_peers: vec![
                 CantonId::parse(&format!("a::{TEST_NS}")).unwrap(),
                 CantonId::parse(&format!("b::{TEST_NS}")).unwrap(),
             ],
-            completed_attestors: Vec::new(),
+            completed_peers: Vec::new(),
             dec_party_id: None,
             error: None,
             dismissed: false,
@@ -1885,7 +1885,7 @@ mod tests {
         let loaded = pool.get_workflow_run(&run.instance_name).await?.unwrap();
         assert_eq!(loaded.current_step, "SignDns");
         assert_eq!(loaded.step_index, 3);
-        assert_eq!(loaded.completed_attestors, completed);
+        assert_eq!(loaded.completed_peers, completed);
 
         // Seed an artefact so we can verify the terminal-state cleanup wipes it.
         let mut tx = pool.begin_transaction().await?;
@@ -1959,10 +1959,10 @@ mod tests {
         let run = test_run("art-test", "Onboarding", "Coordinator");
         let mut tx = pool.begin_transaction().await?;
         tx.upsert_workflow_run(&run).await?;
-        // Shared artefact (no attestor).
+        // Shared artefact (no peer).
         tx.write_workflow_artifact(&run.instance_name, "dns_proto", None, b"shared-proto-bytes")
             .await?;
-        // Per-attestor artefacts.
+        // Per-peer artefacts.
         tx.write_workflow_artifact(
             &run.instance_name,
             "signed_dns_proposal",

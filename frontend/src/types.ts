@@ -247,7 +247,7 @@ export interface PendingInvitationsResponse {
 // Workflow runs (live in-progress + recently-completed runs displayed in the
 // notifications feed alongside pending invitations).
 export type WorkflowKind = "Onboarding" | "Kick" | "Contracts" | "Dars";
-export type WorkflowRole = "Coordinator" | "Attestor";
+export type WorkflowRole = "Coordinator" | "Peer";
 
 export interface WorkflowRun {
   instance_name: string;
@@ -264,8 +264,8 @@ export interface WorkflowRun {
   coordinator_pubkey?: string;
   /** Resolved from the peers table when set. */
   coordinator_name?: string;
-  expected_attestors: string[];
-  completed_attestors: string[];
+  expected_peers: string[];
+  completed_peers: string[];
   dec_party_id?: string;
   prefix?: string;
   participants?: string[];

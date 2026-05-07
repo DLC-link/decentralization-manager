@@ -64,10 +64,10 @@ pub struct AppState {
     pub dars_trigger: Arc<Notify>,
     /// Coordinator's public key (set when invite is received)
     pub coordinator_pubkey: Arc<RwLock<Option<String>>>,
-    /// `instance_name` of the attestor-side `workflow_runs` row that the
+    /// `instance_name` of the peer-side `workflow_runs` row that the
     /// trigger listener should mark Completed/Failed when the workflow ends.
     /// Populated by `accept_invitation` right before it fires the trigger.
-    pub attestor_run_instance: Arc<RwLock<Option<String>>>,
+    pub peer_run_instance: Arc<RwLock<Option<String>>>,
     /// Pending invitations awaiting user acceptance
     pub pending_invitations: Arc<RwLock<Vec<PendingInvitation>>>,
     /// Authentication registry (real Keycloak or mock for test mode)
@@ -104,14 +104,14 @@ struct WorkflowTriggers {
     /// Read by the `RequestMemberParty` listener arm.
     party_credentials: Arc<RwLock<Vec<PartyCredentials>>>,
     /// Per-kind triggers + AppState slots, used by the `RetryWorkflow`
-    /// listener arm to flip a Failed attestor row back to InProgress and
+    /// listener arm to flip a Failed peer row back to InProgress and
     /// re-spin its workflow loop.
     onboarding_trigger: Arc<Notify>,
     kick_trigger: Arc<Notify>,
     contracts_trigger: Arc<Notify>,
     dars_trigger: Arc<Notify>,
     coordinator_pubkey: Arc<RwLock<Option<String>>>,
-    attestor_run_instance: Arc<RwLock<Option<String>>>,
+    peer_run_instance: Arc<RwLock<Option<String>>>,
 }
 
 enum InvitationMeta {
@@ -133,12 +133,12 @@ enum InvitationMeta {
 /// is set to InProgress and the new abort handle is stashed so
 /// `/{kind}/cancel` can stop the resumed task.
 ///
-/// Attestor-side (we accepted an invite): we re-fire the per-kind trigger so
-/// the existing listener calls `start_attestor`, which establishes a fresh
+/// Peer-side (we accepted an invite): we re-fire the per-kind trigger so
+/// the existing listener calls `start_peer`, which establishes a fresh
 /// Noise client back to the persisted `coordinator_pubkey`. Limitation: the
-/// attestor pulls its instance_name out of the GenerateKeys / SignSubmissions
+/// peer pulls its instance_name out of the GenerateKeys / SignSubmissions
 /// / SignKick command payload — if the coordinator is past those steps, the
-/// attestor cannot rebind its instance_name and will fail. Those runs surface
+/// peer cannot rebind its instance_name and will fail. Those runs surface
 /// as Failed in the feed, with the operator left to dismiss. Lifting this
 /// limitation requires coordinator-side protocol changes (sending the config
 /// alongside every command) and is tracked separately.
@@ -158,7 +158,7 @@ async fn recover_in_progress_workflows(
     contracts_trigger: Arc<Notify>,
     dars_trigger: Arc<Notify>,
     coordinator_pubkey: Arc<RwLock<Option<String>>>,
-    attestor_run_instance: Arc<RwLock<Option<String>>>,
+    peer_run_instance: Arc<RwLock<Option<String>>>,
 ) {
     let runs = match SchemaRead::get_in_progress_workflow_runs(&db).await {
         Ok(r) => r,
@@ -192,15 +192,15 @@ async fn recover_in_progress_workflows(
                 )
                 .await;
             }
-            WorkflowRole::Attestor => {
-                refire_attestor(
+            WorkflowRole::Peer => {
+                refire_peer(
                     &run,
                     &onboarding_trigger,
                     &kick_trigger,
                     &contracts_trigger,
                     &dars_trigger,
                     &coordinator_pubkey,
-                    &attestor_run_instance,
+                    &peer_run_instance,
                 )
                 .await;
             }
@@ -211,7 +211,7 @@ async fn recover_in_progress_workflows(
 /// Re-spawn a coordinator-side workflow that was running when the node
 /// stopped. The original `workflow_runs` row stays in place; the spawned task
 /// uses `WorkflowState::from_persisted` (via `NoiseServer::new`) to resume at
-/// `current_step` instead of restarting from `WaitingForAttestors`.
+/// `current_step` instead of restarting from `WaitingForPeers`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn respawn_coordinator(
     db: SqlitePool,
@@ -230,9 +230,9 @@ pub(crate) async fn respawn_coordinator(
     let current_step = run.current_step.clone();
     tracing::info!(
         "Resuming {kind:?} coordinator run {instance} at step {current_step} \
-         ({completed} of {total} attestors completed)",
-        completed = run.completed_attestors.len(),
-        total = run.expected_attestors.len()
+         ({completed} of {total} peers completed)",
+        completed = run.completed_peers.len(),
+        total = run.expected_peers.len()
     );
 
     match kind {
@@ -248,7 +248,7 @@ pub(crate) async fn respawn_coordinator(
                         return;
                     }
                 };
-            *onboarding_state.invited_peers.write().await = run.expected_attestors.clone();
+            *onboarding_state.invited_peers.write().await = run.expected_peers.clone();
             let state_ref = onboarding_state.get_ref().clone();
             // Hold abort_handle, status, and error locks across the spawn so a
             // concurrent /onboarding/cancel can't observe "status=InProgress
@@ -278,7 +278,7 @@ pub(crate) async fn respawn_coordinator(
                     return;
                 }
             };
-            *kick_state.invited_peers.write().await = run.expected_attestors.clone();
+            *kick_state.invited_peers.write().await = run.expected_peers.clone();
             let state_ref = kick_state.get_ref().clone();
             let mut abort_guard = kick_state.abort_handle.lock().await;
             let mut status_guard = kick_state.status.write().await;
@@ -308,7 +308,7 @@ pub(crate) async fn respawn_coordinator(
                         return;
                     }
                 };
-            *contracts_state.invited_peers.write().await = run.expected_attestors.clone();
+            *contracts_state.invited_peers.write().await = run.expected_peers.clone();
             let state_ref = contracts_state.get_ref().clone();
             let auth_snapshot = auth.read().await.clone();
             let mut abort_guard = contracts_state.abort_handle.lock().await;
@@ -337,7 +337,7 @@ pub(crate) async fn respawn_coordinator(
                     return;
                 }
             };
-            *dars_state.invited_peers.write().await = run.expected_attestors.clone();
+            *dars_state.invited_peers.write().await = run.expected_peers.clone();
             let state_ref = dars_state.get_ref().clone();
             let mut abort_guard = dars_state.abort_handle.lock().await;
             let mut status_guard = dars_state.status.write().await;
@@ -548,24 +548,24 @@ async fn spawn_dars_resume(
     }
 }
 
-pub(crate) async fn refire_attestor(
+pub(crate) async fn refire_peer(
     run: &WorkflowRun,
     onboarding_trigger: &Arc<Notify>,
     kick_trigger: &Arc<Notify>,
     contracts_trigger: &Arc<Notify>,
     dars_trigger: &Arc<Notify>,
     coordinator_pubkey: &Arc<RwLock<Option<String>>>,
-    attestor_run_instance: &Arc<RwLock<Option<String>>>,
+    peer_run_instance: &Arc<RwLock<Option<String>>>,
 ) {
     let Some(pk) = run.coordinator_pubkey.clone() else {
         tracing::warn!(
-            "Skipping attestor recover for {}: no coordinator_pubkey persisted",
+            "Skipping peer recover for {}: no coordinator_pubkey persisted",
             run.instance_name
         );
         return;
     };
     *coordinator_pubkey.write().await = Some(pk);
-    *attestor_run_instance.write().await = Some(run.instance_name.clone());
+    *peer_run_instance.write().await = Some(run.instance_name.clone());
     let trigger = match run.kind {
         WorkflowKind::Onboarding => onboarding_trigger,
         WorkflowKind::Kick => kick_trigger,
@@ -574,7 +574,7 @@ pub(crate) async fn refire_attestor(
     };
     trigger.notify_one();
     tracing::info!(
-        "Re-fired {:?} attestor trigger for resumed run {} (coordinator may be past the \
+        "Re-fired {:?} peer trigger for resumed run {} (coordinator may be past the \
          config-bearing command — run will fail if so; remediation: dismiss and re-accept)",
         run.kind,
         run.instance_name
@@ -689,16 +689,16 @@ impl WorkflowTriggers {
         invitations.retain(|i| i.coordinator_pubkey != coordinator_pubkey);
     }
 
-    /// Cancel any attestor-side workflow_runs we have InProgress whose
+    /// Cancel any peer-side workflow_runs we have InProgress whose
     /// coordinator matches the sender of a CancelInvite. Same authority — the
     /// coordinator who started the workflow is also the one who's allowed to
     /// abort it. Used by the CancelInvite listener arm so a single message
     /// covers both un-accepted invites AND accepted-but-running runs.
-    async fn cancel_attestor_runs_from(&self, coordinator_pubkey: &str) {
+    async fn cancel_peer_runs_from(&self, coordinator_pubkey: &str) {
         let runs = match SchemaRead::get_in_progress_workflow_runs(&self.db).await {
             Ok(r) => r,
             Err(e) => {
-                tracing::warn!("cancel_attestor_runs_from: load failed: {e}");
+                tracing::warn!("cancel_peer_runs_from: load failed: {e}");
                 return;
             }
         };
@@ -707,13 +707,13 @@ impl WorkflowTriggers {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         for run in runs.into_iter().filter(|r| {
-            r.role == WorkflowRole::Attestor
+            r.role == WorkflowRole::Peer
                 && r.coordinator_pubkey.as_deref() == Some(coordinator_pubkey)
         }) {
             let mut tx = match self.db.begin_transaction().await {
                 Ok(t) => t,
                 Err(e) => {
-                    tracing::warn!("cancel_attestor_runs_from: begin_transaction: {e}");
+                    tracing::warn!("cancel_peer_runs_from: begin_transaction: {e}");
                     continue;
                 }
             };
@@ -727,35 +727,35 @@ impl WorkflowTriggers {
                 .await
             {
                 tracing::warn!(
-                    "cancel_attestor_runs_from: update failed for {}: {e}",
+                    "cancel_peer_runs_from: update failed for {}: {e}",
                     run.instance_name
                 );
                 continue;
             }
             if let Err(e) = Commitable::commit(tx).await {
                 tracing::warn!(
-                    "cancel_attestor_runs_from: commit failed for {}: {e}",
+                    "cancel_peer_runs_from: commit failed for {}: {e}",
                     run.instance_name
                 );
             } else {
                 tracing::info!(
-                    "Cancelled attestor workflow run {} (coordinator cancelled)",
+                    "Cancelled peer workflow run {} (coordinator cancelled)",
                     run.instance_name
                 );
             }
         }
     }
 
-    /// Coordinator-initiated retry: find any Failed attestor rows whose
+    /// Coordinator-initiated retry: find any Failed peer rows whose
     /// `coordinator_pubkey` matches the sender, flip them back to InProgress,
-    /// and fire the per-kind trigger so `start_attestor` re-spins. Same
-    /// authority model as `cancel_attestor_runs_from` — the coordinator who
+    /// and fire the per-kind trigger so `start_peer` re-spins. Same
+    /// authority model as `cancel_peer_runs_from` — the coordinator who
     /// started the run is also the one allowed to retry it.
-    async fn retry_attestor_runs_from(&self, coordinator_pubkey: &str) {
+    async fn retry_peer_runs_from(&self, coordinator_pubkey: &str) {
         let runs = match SchemaRead::get_visible_workflow_runs(&self.db).await {
             Ok(r) => r,
             Err(e) => {
-                tracing::warn!("retry_attestor_runs_from: load failed: {e}");
+                tracing::warn!("retry_peer_runs_from: load failed: {e}");
                 return;
             }
         };
@@ -764,14 +764,14 @@ impl WorkflowTriggers {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         for run in runs.into_iter().filter(|r| {
-            r.role == WorkflowRole::Attestor
+            r.role == WorkflowRole::Peer
                 && r.status == WorkflowProgress::Failed
                 && r.coordinator_pubkey.as_deref() == Some(coordinator_pubkey)
         }) {
             let mut tx = match self.db.begin_transaction().await {
                 Ok(t) => t,
                 Err(e) => {
-                    tracing::warn!("retry_attestor_runs_from: begin_transaction: {e}");
+                    tracing::warn!("retry_peer_runs_from: begin_transaction: {e}");
                     continue;
                 }
             };
@@ -785,30 +785,30 @@ impl WorkflowTriggers {
                 .await
             {
                 tracing::warn!(
-                    "retry_attestor_runs_from: status flip failed for {}: {e}",
+                    "retry_peer_runs_from: status flip failed for {}: {e}",
                     run.instance_name
                 );
                 continue;
             }
             if let Err(e) = Commitable::commit(tx).await {
                 tracing::warn!(
-                    "retry_attestor_runs_from: commit failed for {}: {e}",
+                    "retry_peer_runs_from: commit failed for {}: {e}",
                     run.instance_name
                 );
                 continue;
             }
-            refire_attestor(
+            refire_peer(
                 &run,
                 &self.onboarding_trigger,
                 &self.kick_trigger,
                 &self.contracts_trigger,
                 &self.dars_trigger,
                 &self.coordinator_pubkey,
-                &self.attestor_run_instance,
+                &self.peer_run_instance,
             )
             .await;
             tracing::info!(
-                "Re-fired attestor workflow run {} (coordinator retried)",
+                "Re-fired peer workflow run {} (coordinator retried)",
                 run.instance_name
             );
         }
@@ -928,7 +928,7 @@ pub async fn start_server(
     let contracts_trigger = Arc::new(Notify::new());
     let dars_trigger = Arc::new(Notify::new());
     let coordinator_pubkey = Arc::new(RwLock::new(None));
-    let attestor_run_instance = Arc::new(RwLock::new(None));
+    let peer_run_instance = Arc::new(RwLock::new(None));
     let persisted_invitations = db.get_all_pending_invitations().await.unwrap_or_else(|e| {
         tracing::warn!("Failed to load persisted pending invitations: {e}");
         Vec::new()
@@ -952,7 +952,7 @@ pub async fn start_server(
         contracts_trigger: contracts_trigger.clone(),
         dars_trigger: dars_trigger.clone(),
         coordinator_pubkey: coordinator_pubkey.clone(),
-        attestor_run_instance: attestor_run_instance.clone(),
+        peer_run_instance: peer_run_instance.clone(),
         pending_invitations: pending_invitations.clone(),
         auth,
         token_validator,
@@ -970,7 +970,7 @@ pub async fn start_server(
     // Boot-time workflow recovery. For any `workflow_runs` row that was
     // InProgress when we shut down, re-spawn the coordinator task (which
     // resumes at the persisted `current_step` via `WorkflowState::from_persisted`)
-    // or re-fire the attestor trigger so its listener picks the run back up.
+    // or re-fire the peer trigger so its listener picks the run back up.
     recover_in_progress_workflows(
         db.clone(),
         config.clone(),
@@ -986,7 +986,7 @@ pub async fn start_server(
         contracts_trigger.clone(),
         dars_trigger.clone(),
         coordinator_pubkey.clone(),
-        attestor_run_instance.clone(),
+        peer_run_instance.clone(),
     )
     .await;
 
@@ -1007,7 +1007,7 @@ pub async fn start_server(
         contracts_trigger: contracts_trigger.clone(),
         dars_trigger: dars_trigger.clone(),
         coordinator_pubkey: coordinator_pubkey.clone(),
-        attestor_run_instance: attestor_run_instance.clone(),
+        peer_run_instance: peer_run_instance.clone(),
     };
     tokio::spawn(async move {
         run_heartbeat(
@@ -1021,90 +1021,90 @@ pub async fn start_server(
         .await;
     });
 
-    // Start attestor trigger listener for onboarding (starts attestor workflow when invite received)
-    let onboarding_attestor_config = config.clone();
-    let onboarding_attestor_db = db.clone();
-    let onboarding_attestor_control = listener_control.clone();
-    let onboarding_attestor_notify = listener_notify.clone();
-    let onboarding_attestor_state = onboarding_state.clone();
+    // Start peer trigger listener for onboarding (starts peer workflow when invite received)
+    let onboarding_peer_config = config.clone();
+    let onboarding_peer_db = db.clone();
+    let onboarding_peer_control = listener_control.clone();
+    let onboarding_peer_notify = listener_notify.clone();
+    let onboarding_peer_state = onboarding_state.clone();
     let onboarding_coordinator_pubkey = coordinator_pubkey.clone();
-    let onboarding_attestor_run_instance = attestor_run_instance.clone();
+    let onboarding_peer_run_instance = peer_run_instance.clone();
     tokio::spawn(async move {
-        run_onboarding_attestor_listener(
-            onboarding_attestor_config,
-            onboarding_attestor_db,
-            onboarding_attestor_control,
-            onboarding_attestor_notify,
-            onboarding_attestor_state,
+        run_onboarding_peer_listener(
+            onboarding_peer_config,
+            onboarding_peer_db,
+            onboarding_peer_control,
+            onboarding_peer_notify,
+            onboarding_peer_state,
             onboarding_trigger,
             onboarding_coordinator_pubkey,
-            onboarding_attestor_run_instance,
+            onboarding_peer_run_instance,
         )
         .await;
     });
 
-    // Start attestor trigger listener for kick (starts attestor workflow when kick invite received)
-    let kick_attestor_config = config.clone();
-    let kick_attestor_db = db.clone();
-    let kick_attestor_control = listener_control.clone();
-    let kick_attestor_notify = listener_notify.clone();
-    let kick_attestor_state = kick_state.clone();
+    // Start peer trigger listener for kick (starts peer workflow when kick invite received)
+    let kick_peer_config = config.clone();
+    let kick_peer_db = db.clone();
+    let kick_peer_control = listener_control.clone();
+    let kick_peer_notify = listener_notify.clone();
+    let kick_peer_state = kick_state.clone();
     let kick_coordinator_pubkey = coordinator_pubkey.clone();
-    let kick_attestor_run_instance = attestor_run_instance.clone();
+    let kick_peer_run_instance = peer_run_instance.clone();
     tokio::spawn(async move {
-        run_kick_attestor_listener(
-            kick_attestor_config,
-            kick_attestor_db,
-            kick_attestor_control,
-            kick_attestor_notify,
-            kick_attestor_state,
+        run_kick_peer_listener(
+            kick_peer_config,
+            kick_peer_db,
+            kick_peer_control,
+            kick_peer_notify,
+            kick_peer_state,
             kick_trigger,
             kick_coordinator_pubkey,
-            kick_attestor_run_instance,
+            kick_peer_run_instance,
         )
         .await;
     });
 
-    // Start attestor trigger listener for contracts (starts attestor workflow when contracts invite received)
-    let contracts_attestor_config = config.clone();
-    let contracts_attestor_db = db.clone();
-    let contracts_attestor_control = listener_control.clone();
-    let contracts_attestor_notify = listener_notify.clone();
-    let contracts_attestor_state = contracts_state.clone();
+    // Start peer trigger listener for contracts (starts peer workflow when contracts invite received)
+    let contracts_peer_config = config.clone();
+    let contracts_peer_db = db.clone();
+    let contracts_peer_control = listener_control.clone();
+    let contracts_peer_notify = listener_notify.clone();
+    let contracts_peer_state = contracts_state.clone();
     let contracts_coordinator_pubkey = coordinator_pubkey.clone();
-    let contracts_attestor_run_instance = attestor_run_instance.clone();
+    let contracts_peer_run_instance = peer_run_instance.clone();
     tokio::spawn(async move {
-        run_contracts_attestor_listener(
-            contracts_attestor_config,
-            contracts_attestor_db,
-            contracts_attestor_control,
-            contracts_attestor_notify,
-            contracts_attestor_state,
+        run_contracts_peer_listener(
+            contracts_peer_config,
+            contracts_peer_db,
+            contracts_peer_control,
+            contracts_peer_notify,
+            contracts_peer_state,
             contracts_trigger,
             contracts_coordinator_pubkey,
-            contracts_attestor_run_instance,
+            contracts_peer_run_instance,
         )
         .await;
     });
 
-    // Start attestor trigger listener for DARs (starts attestor workflow when DARs invite received)
-    let dars_attestor_config = config.clone();
-    let dars_attestor_db = db.clone();
-    let dars_attestor_control = listener_control.clone();
-    let dars_attestor_notify = listener_notify.clone();
-    let dars_attestor_state = dars_state.clone();
+    // Start peer trigger listener for DARs (starts peer workflow when DARs invite received)
+    let dars_peer_config = config.clone();
+    let dars_peer_db = db.clone();
+    let dars_peer_control = listener_control.clone();
+    let dars_peer_notify = listener_notify.clone();
+    let dars_peer_state = dars_state.clone();
     let dars_coordinator_pubkey = coordinator_pubkey.clone();
-    let dars_attestor_run_instance = attestor_run_instance.clone();
+    let dars_peer_run_instance = peer_run_instance.clone();
     tokio::spawn(async move {
-        run_dars_attestor_listener(
-            dars_attestor_config,
-            dars_attestor_db,
-            dars_attestor_control,
-            dars_attestor_notify,
-            dars_attestor_state,
+        run_dars_peer_listener(
+            dars_peer_config,
+            dars_peer_db,
+            dars_peer_control,
+            dars_peer_notify,
+            dars_peer_state,
             dars_trigger,
             dars_coordinator_pubkey,
-            dars_attestor_run_instance,
+            dars_peer_run_instance,
         )
         .await;
     });
@@ -1576,11 +1576,11 @@ async fn handle_incoming_connection(
                         MessageType::CancelInvite => {
                             tracing::info!(
                                 "Received CancelInvite, dropping pending invites + cancelling \
-                                 any in-flight attestor runs from sender"
+                                 any in-flight peer runs from sender"
                             );
                             if let Some(ref pubkey) = peer_pubkey_hex {
                                 triggers.drop_invitations_from(pubkey).await;
-                                triggers.cancel_attestor_runs_from(pubkey).await;
+                                triggers.cancel_peer_runs_from(pubkey).await;
                             }
                             let ack = Message::new_empty(MessageType::Ack);
                             return Ok(Response::builder()
@@ -1590,11 +1590,11 @@ async fn handle_incoming_connection(
                         }
                         MessageType::RetryWorkflow => {
                             tracing::info!(
-                                "Received RetryWorkflow, retrying any Failed attestor runs from \
+                                "Received RetryWorkflow, retrying any Failed peer runs from \
                                  sender"
                             );
                             if let Some(ref pubkey) = peer_pubkey_hex {
-                                triggers.retry_attestor_runs_from(pubkey).await;
+                                triggers.retry_peer_runs_from(pubkey).await;
                             }
                             let ack = Message::new_empty(MessageType::Ack);
                             return Ok(Response::builder()
@@ -1678,11 +1678,11 @@ async fn run_peer_ping_loop(
     }
 }
 
-/// Take the attestor-side `instance_name` slot and flip the matching
+/// Take the peer-side `instance_name` slot and flip the matching
 /// `workflow_runs` row to a terminal status. No-op if no slot was set (the
-/// attestor row creation may have failed; we don't want to over-write
+/// peer row creation may have failed; we don't want to over-write
 /// unrelated state).
-async fn finalize_attestor_run(
+async fn finalize_peer_run(
     db: &SqlitePool,
     instance_slot: &Arc<RwLock<Option<String>>>,
     success: bool,
@@ -1700,7 +1700,7 @@ async fn finalize_attestor_run(
     let mut tx = match db.begin_transaction().await {
         Ok(t) => t,
         Err(e) => {
-            tracing::warn!("finalize_attestor_run: begin_transaction failed: {e}");
+            tracing::warn!("finalize_peer_run: begin_transaction failed: {e}");
             return;
         }
     };
@@ -1713,17 +1713,17 @@ async fn finalize_attestor_run(
         .set_workflow_run_status(&instance, status, error_msg.as_deref(), now)
         .await
     {
-        tracing::warn!("finalize_attestor_run: update failed: {e}");
+        tracing::warn!("finalize_peer_run: update failed: {e}");
         return;
     }
     if let Err(e) = Commitable::commit(tx).await {
-        tracing::warn!("finalize_attestor_run: commit failed: {e}");
+        tracing::warn!("finalize_peer_run: commit failed: {e}");
     }
 }
 
-/// Background task that starts onboarding attestor workflow when triggered by an invite
+/// Background task that starts onboarding peer workflow when triggered by an invite
 #[allow(clippy::too_many_arguments)]
-async fn run_onboarding_attestor_listener(
+async fn run_onboarding_peer_listener(
     config: NodeConfig,
     db: SqlitePool,
     listener_control: Arc<RwLock<ListenerControl>>,
@@ -1731,13 +1731,13 @@ async fn run_onboarding_attestor_listener(
     onboarding_state: web::Data<Arc<handlers::OnboardingWorkflowState>>,
     onboarding_trigger: Arc<Notify>,
     coordinator_pubkey: Arc<RwLock<Option<String>>>,
-    attestor_run_instance: Arc<RwLock<Option<String>>>,
+    peer_run_instance: Arc<RwLock<Option<String>>>,
 ) {
     loop {
         // Wait for trigger
         onboarding_trigger.notified().await;
 
-        tracing::info!("Received onboarding invite, starting attestor workflow...");
+        tracing::info!("Received onboarding invite, starting peer workflow...");
 
         // Check if already in progress
         {
@@ -1754,7 +1754,7 @@ async fn run_onboarding_attestor_listener(
             let pubkey = match pubkey_guard.as_ref() {
                 Some(pk) => pk.clone(),
                 None => {
-                    tracing::error!("No coordinator public key stored, cannot start attestor");
+                    tracing::error!("No coordinator public key stored, cannot start peer");
                     continue;
                 }
             };
@@ -1776,16 +1776,14 @@ async fn run_onboarding_attestor_listener(
 
         tracing::info!("Coordinator identified: {}", coordinator.participant_id);
 
-        // Resolve attestor instance BEFORE flipping status (see DARs handler
-        // below for the rationale: attestor_run_instance is shared across
+        // Resolve peer instance BEFORE flipping status (see DARs handler
+        // below for the rationale: peer_run_instance is shared across
         // kinds and a race can leave us with None, which used to leak
         // status=InProgress).
-        let local_instance = match attestor_run_instance.read().await.clone() {
+        let local_instance = match peer_run_instance.read().await.clone() {
             Some(inst) => inst,
             None => {
-                tracing::error!(
-                    "Attestor trigger fired without an attestor_run_instance; skipping run"
-                );
+                tracing::error!("Peer trigger fired without an peer_run_instance; skipping run");
                 continue;
             }
         };
@@ -1803,8 +1801,7 @@ async fn run_onboarding_attestor_listener(
                 .await;
         let workflow_config = config.clone();
         let result =
-            workflow::start_attestor(workflow_config, coordinator, db.clone(), local_instance)
-                .await;
+            workflow::start_peer(workflow_config, coordinator, db.clone(), local_instance).await;
 
         guard.resume().await;
 
@@ -1817,23 +1814,23 @@ async fn run_onboarding_attestor_listener(
         match result {
             Ok(()) => {
                 *status = types::OnboardingStatus::Completed;
-                tracing::info!("Onboarding attestor workflow completed successfully");
+                tracing::info!("Onboarding peer workflow completed successfully");
             }
             Err(e) => {
                 *status = types::OnboardingStatus::Failed;
                 *error = Some(format!("{e}"));
-                tracing::error!("Onboarding attestor workflow failed: {e}");
+                tracing::error!("Onboarding peer workflow failed: {e}");
             }
         }
         drop(status);
         drop(error);
-        finalize_attestor_run(&db, &attestor_run_instance, success, err_msg).await;
+        finalize_peer_run(&db, &peer_run_instance, success, err_msg).await;
     }
 }
 
-/// Background task that starts kick attestor workflow when triggered by an invite
+/// Background task that starts kick peer workflow when triggered by an invite
 #[allow(clippy::too_many_arguments)]
-async fn run_kick_attestor_listener(
+async fn run_kick_peer_listener(
     config: NodeConfig,
     db: SqlitePool,
     listener_control: Arc<RwLock<ListenerControl>>,
@@ -1841,13 +1838,13 @@ async fn run_kick_attestor_listener(
     kick_state: web::Data<Arc<handlers::KickWorkflowState>>,
     kick_trigger: Arc<Notify>,
     coordinator_pubkey: Arc<RwLock<Option<String>>>,
-    attestor_run_instance: Arc<RwLock<Option<String>>>,
+    peer_run_instance: Arc<RwLock<Option<String>>>,
 ) {
     loop {
         // Wait for trigger
         kick_trigger.notified().await;
 
-        tracing::info!("Received kick invite, starting kick attestor workflow...");
+        tracing::info!("Received kick invite, starting kick peer workflow...");
 
         // Check if already in progress
         {
@@ -1864,7 +1861,7 @@ async fn run_kick_attestor_listener(
             let pubkey = match pubkey_guard.as_ref() {
                 Some(pk) => pk.clone(),
                 None => {
-                    tracing::error!("No coordinator public key stored, cannot start attestor");
+                    tracing::error!("No coordinator public key stored, cannot start peer");
                     continue;
                 }
             };
@@ -1885,13 +1882,13 @@ async fn run_kick_attestor_listener(
 
         tracing::info!("Coordinator identified: {}", coordinator.participant_id);
 
-        // Resolve attestor instance BEFORE flipping status (see DARs handler
+        // Resolve peer instance BEFORE flipping status (see DARs handler
         // below for rationale).
-        let local_instance = match attestor_run_instance.read().await.clone() {
+        let local_instance = match peer_run_instance.read().await.clone() {
             Some(inst) => inst,
             None => {
                 tracing::error!(
-                    "Kick attestor trigger fired without an attestor_run_instance; skipping run"
+                    "Kick peer trigger fired without an peer_run_instance; skipping run"
                 );
                 continue;
             }
@@ -1910,8 +1907,7 @@ async fn run_kick_attestor_listener(
                 .await;
         let workflow_config = config.clone();
         let result =
-            workflow::start_attestor(workflow_config, coordinator, db.clone(), local_instance)
-                .await;
+            workflow::start_peer(workflow_config, coordinator, db.clone(), local_instance).await;
 
         guard.resume().await;
 
@@ -1924,23 +1920,23 @@ async fn run_kick_attestor_listener(
         match result {
             Ok(()) => {
                 *status = types::KickStatus::Completed;
-                tracing::info!("Kick attestor workflow completed successfully");
+                tracing::info!("Kick peer workflow completed successfully");
             }
             Err(e) => {
                 *status = types::KickStatus::Failed;
                 *error = Some(format!("{e}"));
-                tracing::error!("Kick attestor workflow failed: {e}");
+                tracing::error!("Kick peer workflow failed: {e}");
             }
         }
         drop(status);
         drop(error);
-        finalize_attestor_run(&db, &attestor_run_instance, success, err_msg).await;
+        finalize_peer_run(&db, &peer_run_instance, success, err_msg).await;
     }
 }
 
-/// Background task that starts contracts attestor workflow when triggered by an invite
+/// Background task that starts contracts peer workflow when triggered by an invite
 #[allow(clippy::too_many_arguments)]
-async fn run_contracts_attestor_listener(
+async fn run_contracts_peer_listener(
     config: NodeConfig,
     db: SqlitePool,
     listener_control: Arc<RwLock<ListenerControl>>,
@@ -1948,13 +1944,13 @@ async fn run_contracts_attestor_listener(
     contracts_state: web::Data<Arc<handlers::ContractsWorkflowState>>,
     contracts_trigger: Arc<Notify>,
     coordinator_pubkey: Arc<RwLock<Option<String>>>,
-    attestor_run_instance: Arc<RwLock<Option<String>>>,
+    peer_run_instance: Arc<RwLock<Option<String>>>,
 ) {
     loop {
         // Wait for trigger
         contracts_trigger.notified().await;
 
-        tracing::info!("Received contracts invite, starting contracts attestor workflow...");
+        tracing::info!("Received contracts invite, starting contracts peer workflow...");
 
         // Check if already in progress
         {
@@ -1971,7 +1967,7 @@ async fn run_contracts_attestor_listener(
             let pubkey = match pubkey_guard.as_ref() {
                 Some(pk) => pk.clone(),
                 None => {
-                    tracing::error!("No coordinator public key stored, cannot start attestor");
+                    tracing::error!("No coordinator public key stored, cannot start peer");
                     continue;
                 }
             };
@@ -1992,13 +1988,13 @@ async fn run_contracts_attestor_listener(
 
         tracing::info!("Coordinator identified: {}", coordinator.participant_id);
 
-        // Resolve attestor instance BEFORE flipping status (see DARs handler
+        // Resolve peer instance BEFORE flipping status (see DARs handler
         // below for rationale).
-        let local_instance = match attestor_run_instance.read().await.clone() {
+        let local_instance = match peer_run_instance.read().await.clone() {
             Some(inst) => inst,
             None => {
                 tracing::error!(
-                    "Contracts attestor trigger fired without an attestor_run_instance; skipping run"
+                    "Contracts peer trigger fired without an peer_run_instance; skipping run"
                 );
                 continue;
             }
@@ -2017,8 +2013,7 @@ async fn run_contracts_attestor_listener(
                 .await;
         let workflow_config = config.clone();
         let result =
-            workflow::start_attestor(workflow_config, coordinator, db.clone(), local_instance)
-                .await;
+            workflow::start_peer(workflow_config, coordinator, db.clone(), local_instance).await;
 
         guard.resume().await;
 
@@ -2031,23 +2026,23 @@ async fn run_contracts_attestor_listener(
         match result {
             Ok(()) => {
                 *status = types::WorkflowProgress::Completed;
-                tracing::info!("Contracts attestor workflow completed successfully");
+                tracing::info!("Contracts peer workflow completed successfully");
             }
             Err(e) => {
                 *status = types::WorkflowProgress::Failed;
                 *error = Some(format!("{e}"));
-                tracing::error!("Contracts attestor workflow failed: {e}");
+                tracing::error!("Contracts peer workflow failed: {e}");
             }
         }
         drop(status);
         drop(error);
-        finalize_attestor_run(&db, &attestor_run_instance, success, err_msg).await;
+        finalize_peer_run(&db, &peer_run_instance, success, err_msg).await;
     }
 }
 
-/// Background task that starts DARs attestor workflow when triggered by an invite
+/// Background task that starts DARs peer workflow when triggered by an invite
 #[allow(clippy::too_many_arguments)]
-async fn run_dars_attestor_listener(
+async fn run_dars_peer_listener(
     config: NodeConfig,
     db: SqlitePool,
     listener_control: Arc<RwLock<ListenerControl>>,
@@ -2055,13 +2050,13 @@ async fn run_dars_attestor_listener(
     dars_state: web::Data<Arc<handlers::DarsWorkflowState>>,
     dars_trigger: Arc<Notify>,
     coordinator_pubkey: Arc<RwLock<Option<String>>>,
-    attestor_run_instance: Arc<RwLock<Option<String>>>,
+    peer_run_instance: Arc<RwLock<Option<String>>>,
 ) {
     loop {
         // Wait for trigger
         dars_trigger.notified().await;
 
-        tracing::info!("Received DARs invite, starting DARs attestor workflow...");
+        tracing::info!("Received DARs invite, starting DARs peer workflow...");
 
         // Check if already in progress
         {
@@ -2078,7 +2073,7 @@ async fn run_dars_attestor_listener(
             let pubkey = match pubkey_guard.as_ref() {
                 Some(pk) => pk.clone(),
                 None => {
-                    tracing::error!("No coordinator public key stored, cannot start attestor");
+                    tracing::error!("No coordinator public key stored, cannot start peer");
                     continue;
                 }
             };
@@ -2099,20 +2094,20 @@ async fn run_dars_attestor_listener(
 
         tracing::info!("Coordinator identified: {}", coordinator.participant_id);
 
-        // Resolve the attestor instance BEFORE flipping status to InProgress.
-        // attestor_run_instance is shared across all four workflow kinds, so a
+        // Resolve the peer instance BEFORE flipping status to InProgress.
+        // peer_run_instance is shared across all four workflow kinds, so a
         // race with another kind's accept_invitation can leave it None when
         // our trigger fires (or pointing at the wrong kind's instance, in
-        // which case start_attestor will return an error and we set Failed
+        // which case start_peer will return an error and we set Failed
         // — that's recoverable). Setting status=InProgress and *then*
         // bailing on a missing instance leaks status pinned to InProgress
         // until something else flips it: the next /dars/distribute observes
         // it and 409s.
-        let local_instance = match attestor_run_instance.read().await.clone() {
+        let local_instance = match peer_run_instance.read().await.clone() {
             Some(inst) => inst,
             None => {
                 tracing::error!(
-                    "DARs attestor trigger fired without an attestor_run_instance; skipping run"
+                    "DARs peer trigger fired without an peer_run_instance; skipping run"
                 );
                 continue;
             }
@@ -2131,8 +2126,7 @@ async fn run_dars_attestor_listener(
                 .await;
         let workflow_config = config.clone();
         let result =
-            workflow::start_attestor(workflow_config, coordinator, db.clone(), local_instance)
-                .await;
+            workflow::start_peer(workflow_config, coordinator, db.clone(), local_instance).await;
 
         guard.resume().await;
 
@@ -2145,17 +2139,17 @@ async fn run_dars_attestor_listener(
         match result {
             Ok(()) => {
                 *status = types::WorkflowProgress::Completed;
-                tracing::info!("DARs attestor workflow completed successfully");
+                tracing::info!("DARs peer workflow completed successfully");
             }
             Err(e) => {
                 *status = types::WorkflowProgress::Failed;
                 *error = Some(format!("{e}"));
-                tracing::error!("DARs attestor workflow failed: {e}");
+                tracing::error!("DARs peer workflow failed: {e}");
             }
         }
         drop(status);
         drop(error);
-        finalize_attestor_run(&db, &attestor_run_instance, success, err_msg).await;
+        finalize_peer_run(&db, &peer_run_instance, success, err_msg).await;
     }
 }
 

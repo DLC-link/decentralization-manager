@@ -34,7 +34,7 @@ pub async fn start_coordinator(
         network_config.clone(),
         db.clone(),
         config.instance_name.clone(),
-        ContractsStep::WaitingForAttestors,
+        ContractsStep::WaitingForPeers,
         None, // No excluded participants
     )
     .await?;
@@ -85,7 +85,7 @@ async fn run_workflow(
         watchdog.check(current_step)?;
 
         match current_step {
-            ContractsStep::WaitingForAttestors => {
+            ContractsStep::WaitingForPeers => {
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             }
             ContractsStep::PrepareSubmissions => {
@@ -101,9 +101,9 @@ async fn run_workflow(
                 )
                 .await?;
 
-                // Load prepared submissions from storage to ship to attestors with the
+                // Load prepared submissions from storage to ship to peers with the
                 // SignSubmissions command. Pair with the contracts config so the
-                // attestor can recover the instance name + dec party id on its side.
+                // peer can recover the instance name + dec party id on its side.
                 let submissions_payload =
                     load_prepared_submissions_payload(&db, &instance_name, &config).await?;
                 workflow_state
@@ -122,22 +122,22 @@ async fn run_workflow(
             ContractsStep::ExecuteSubmissions => {
                 tracing::info!("Coordinator executing: Execute submissions");
 
-                // Persist each attestor's `SUBMISSION_SIGNATURES` blob into
-                // workflow storage keyed by attestor id, so `execute_submissions`
+                // Persist each peer's `SUBMISSION_SIGNATURES` blob into
+                // workflow storage keyed by peer id, so `execute_submissions`
                 // can read them via `list_artifacts`. The coordinator's own
                 // bundle was already written by `sign_submissions` above.
-                let attestor_data = workflow_state.get_all_attestor_data().await;
-                for (attestor_id, payload) in &attestor_data {
-                    let attestor_key = attestor_id.to_string();
+                let peer_data = workflow_state.get_all_peer_data().await;
+                for (peer_id, payload) in &peer_data {
+                    let peer_key = peer_id.to_string();
                     db.write_artifact(
                         &instance_name,
                         artifact_kinds::SUBMISSION_SIGNATURES,
-                        Some(&attestor_key),
+                        Some(&peer_key),
                         payload,
                     )
                     .await?;
                 }
-                workflow_state.clear_attestor_data().await;
+                workflow_state.clear_peer_data().await;
 
                 execute_submissions(&node_config, &db, &instance_name, &config, &token, &user_id)
                     .await?;
@@ -155,9 +155,9 @@ async fn run_workflow(
 }
 
 /// Load all prepared submission artefacts from storage and encode them for
-/// transmission to attestors. The blobs are keyed by zero-padded ordinal so
+/// transmission to peers. The blobs are keyed by zero-padded ordinal so
 /// `list_artifacts` returns them in their original creation order, which the
-/// receiving attestor preserves when it re-keys them on its side.
+/// receiving peer preserves when it re-keys them on its side.
 ///
 /// Returns a payload of shape `[config_json][files_payload]` (length-prefixed),
 /// where each file is `(ordinal, blob)` — same wire shape the previous
@@ -178,7 +178,7 @@ async fn load_prepared_submissions_payload(
     }
 
     tracing::info!(
-        "Loaded {count} prepared submission artefact(s) for distribution to attestors",
+        "Loaded {count} prepared submission artefact(s) for distribution to peers",
         count = submission_rows.len()
     );
 
