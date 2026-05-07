@@ -1,6 +1,6 @@
-# DPM Migration Guide
+# Dec Party Manager Migration Guide
 
-How to move an existing single-participant DPM (Dec Party Manager) deployment to the current release.
+How to move an existing single-participant Dec Party Manager deployment to the current release.
 
 The format has changed substantially: configuration moved from a mounted TOML file to environment variables, the Service type changed from `LoadBalancer` to `ClusterIP` behind an Ingress, the ConfigMap is gone, and the admin UI is now gated by Keycloak. Rather than patching the old deployment in place, **the cleanest path is a fresh deployment**: tear the old deployment down, apply the new manifests, and re-establish your peer list with the other participants once everyone has redeployed. Because the new deployment generates a fresh Noise keypair on first start (and every other participant going through the same migration will too), there's no value in carrying the old peer list across — every public key in it is about to change. Treat this as a coordinated rebuild, not an in-place upgrade.
 
@@ -14,7 +14,7 @@ This guide assumes:
 
 1. **Tear down** the old Deployment, ConfigMap, Secret, and LoadBalancer Service.
 2. **Pull the latest image tag** and prepare new manifests (Secret, Deployment + PVC, Service, Ingress).
-3. **Apply the new manifests** and let DPM start clean.
+3. **Apply the new manifests** and let it start clean.
 4. **Re-share public keys** with the other participants and add them as peers in the new UI.
 5. **Re-enter party credentials** (Keycloak per-party client info) through the new UI.
 
@@ -36,7 +36,7 @@ The PVC contains the SQLite database and the Noise keypair; wiping it is what fo
 
 ## 2 — Pull the latest image
 
-The new DPM is published as a public container image:
+The Dec Party Manager is published as a public container image:
 
 ```
 public.ecr.aws/dlc-link/canton-decparty-manager:<tag>
@@ -50,13 +50,13 @@ To check the version of a running pod:
 kubectl -n <your-namespace> get deploy dec-party-manager -o jsonpath='{.spec.template.spec.containers[0].image}'
 ```
 
-Bumping the tag in the Deployment manifest and re-applying is how you upgrade DPM going forward — no schema migrations or config rewrites are required between minor releases.
+Bumping the tag in the Deployment manifest and re-applying is how you upgrade going forward. The application runs any required SQL migrations against its SQLite database automatically on startup, so a tag bump is the only operator step between releases.
 
 ## 3 — Apply the new manifests
 
-Below is a complete single-participant manifest set. Replace every `<...>` placeholder with values for your environment, save as a file, and apply with `kubectl apply -f <file>.yaml`.
+Below is the core single-participant manifest set. Replace every `<...>` placeholder with values for your environment, save as a file, and apply with `kubectl apply -f <file>.yaml`. Public exposure of the Noise port is environment-specific and is covered separately under "Service" below.
 
-### 4a. Namespace (skip if it already exists)
+### 3a. Namespace (skip if it already exists)
 
 ```yaml
 apiVersion: v1
@@ -65,7 +65,7 @@ metadata:
   name: <your-namespace>
 ```
 
-### 4b. Secret (configuration)
+### 3b. Secret (configuration)
 
 ```yaml
 apiVersion: v1
@@ -99,14 +99,15 @@ stringData:
   # DECPM_ADMIN_ROLE: "dpm-admin"
 
   # Optional: encryption key for secrets stored in the SQLite database
-  # (Keycloak client secrets per party). 32-byte random hex. If unset,
-  # secrets are stored in plaintext in the DB.
-  # DECPM_DB_ENCRYPTION_KEY: "<64-hex-chars>"
+  # (Keycloak client secrets per party). Any sufficiently long random
+  # passphrase — it is hashed with SHA-256 to derive the actual 32-byte
+  # key. If unset, secrets are stored in plaintext in the DB.
+  # DECPM_DB_ENCRYPTION_KEY: "<long-random-passphrase>"
 
   # Optional: tighten CORS to a specific origin if the UI is served from a
   # different host than the API (reverse-proxy / dev server). Defaults to
   # same-origin only, which is correct for the Ingress setup below.
-  # DECPM_ALLOWED_ORIGIN: "https://<ui-host>"
+  # DECPM_ALLOWED_ORIGIN: "https://<your-ui-host>"
 
   # Noise transport timeouts (seconds). Defaults are usually fine.
   DECPM_TIMEOUT_HANDSHAKE: "30"
@@ -115,7 +116,7 @@ stringData:
   DECPM_TIMEOUT_RETRY_DELAY: "5"
 ```
 
-### 4c. Deployment + PersistentVolumeClaim
+### 3c. Deployment + PersistentVolumeClaim
 
 ```yaml
 apiVersion: v1
@@ -190,7 +191,7 @@ spec:
             claimName: dec-party-manager-data
 ```
 
-### 4d. Service
+### 3d. Service
 
 ```yaml
 apiVersion: v1
@@ -213,7 +214,7 @@ spec:
 
 The Noise port (9000) must also be reachable from the public internet for peers to connect. Depending on your cluster, you may need a separate `LoadBalancer`-type Service, a `NodePort`, or another mechanism (MetalLB, native cloud load balancer, etc.) for the `noise` port specifically. The HTTP UI does not need to be exposed publicly — it is reached through the Ingress (next).
 
-### 4e. Ingress (Traefik example)
+### 3e. Ingress (Traefik example)
 
 ```yaml
 apiVersion: networking.k8s.io/v1
@@ -249,52 +250,54 @@ Once the pod is `Running`, hit `https://<your-ui-host>` in a browser. Keycloak s
 
 ## 4 — Re-establish peers
 
-The new DPM has generated a fresh Noise keypair on first start. None of the other participants know it yet, and you do not yet know any of theirs (assuming they are also redeploying). The peer list has to be rebuilt from scratch by exchanging public keys out-of-band.
+The fresh deployment has generated a new Noise keypair on first start. None of the other participants know it yet, and you do not yet know any of theirs (assuming they are also redeploying). The peer list has to be rebuilt from scratch by exchanging public keys out-of-band.
 
-For each participant in your network:
+The UI makes the round-trip simple. For each participant in your network:
 
-1. Find your own public key + public address. In the UI, open the "Network Config" panel — your local node's public key is shown there. (Same value is reachable via `GET /keys/status`.) Note your `DECPM_PUBLIC_ADDRESS` and Noise port (default `9000`).
-2. Share that information with each peer through whatever out-of-band channel you use (chat, email, ticket). They need: your `participant_id`, a friendly name, the public address, the Noise port, and the public key.
-3. Collect the same information from each of them.
-4. In the "Network Config" panel, add each peer with their newly-shared values and save.
+1. Open the **Network** panel.
+2. Click **Share my data** — this copies your own peer entry (participant id, friendly name, public address, Noise port, public key) to the clipboard as JSON.
+3. Send that JSON to your peer through whatever out-of-band channel you use (chat, email, ticket).
+4. When a peer sends you their JSON, click **Paste from Clipboard** in your **Network** panel and save. The peer is added with all the right fields filled in.
 
-The "Participants Status" panel shows handshake / reachability state per peer; healthy peers will turn green within seconds of both sides having added each other.
+Repeat with every participant. The "Participants Status" indicators turn green within seconds once both sides have added each other.
 
-If a peer is migrating ahead of you, share your old public key and let them add you with that value temporarily — once you have redeployed, share the new key and they can update their entry.
+If a peer is migrating ahead of you, share your old peer data and let them add you with those values temporarily — once you have redeployed, click **Share my data** again and re-send so they can update their entry.
 
 ## 5 — Re-enter party credentials
 
-For each decentralized party your node manages, open the "Party Config" dialog and re-enter the Keycloak settings (URL, realm, client ID, client secret). DPM uses these to obtain Canton ledger tokens on behalf of each party.
+For each decentralized party your node manages, open the "Party Config" dialog and re-enter the Keycloak settings (URL, realm, client ID, client secret). The application uses these to obtain Canton ledger tokens on behalf of each party.
 
 ## Configuration reference
 
-| Variable | Default | Notes |
-|---|---|---|
-| `DECPM_LISTEN_ADDRESS` | `0.0.0.0` | Noise transport bind address |
-| `DECPM_NOISE_PORT` | `9000` | Noise transport port |
-| `DECPM_PUBLIC_ADDRESS` | — | **Required.** Hostname peers use to reach this node |
-| `DECPM_CANTON_ADMIN_HOST` | — | **Required.** Canton Admin API host |
-| `DECPM_CANTON_ADMIN_PORT` | — | **Required.** Canton Admin API port (typ. `5002`) |
-| `DECPM_CANTON_LEDGER_HOST` | — | **Required.** Canton Ledger API host |
-| `DECPM_CANTON_LEDGER_PORT` | — | **Required.** Canton Ledger API port (typ. `5001`) |
-| `DECPM_CANTON_SYNCHRONIZER` | — | **Required.** Synchronizer name (`global` for mainnet) |
-| `DECPM_CANTON_NETWORK` | — | **Required.** `mainnet`, `testnet`, or `devnet` |
-| `DECPM_KEYCLOAK_URL` | — | **Required.** Keycloak server URL for frontend auth |
-| `DECPM_KEYCLOAK_REALM` | — | **Required.** Keycloak realm |
-| `DECPM_KEYCLOAK_CLIENT_ID` | — | **Required.** Keycloak client used by the SPA |
-| `DECPM_ADMIN_ROLE` | unset | Optional Keycloak role required for privileged endpoints |
-| `DECPM_ALLOWED_ORIGIN` | same-origin | Optional CORS origin if UI host ≠ API host |
-| `DECPM_DB_ENCRYPTION_KEY` | unset | Optional encryption key for secrets at rest in the SQLite DB |
-| `DECPM_TIMEOUT_HANDSHAKE` | `30` | Noise handshake timeout (seconds) |
-| `DECPM_TIMEOUT_MESSAGE` | `120` | Noise message timeout (seconds) |
-| `DECPM_TIMEOUT_RETRY_ATTEMPTS` | `3` | Connection retry attempts |
-| `DECPM_TIMEOUT_RETRY_DELAY` | `5` | Connection retry delay (seconds) |
+Most variables have a default that's only useful for local development (loopback Canton, devnet, etc.). For a Kubernetes deployment you should set every variable in the "Set for K8s" column even when there is a code default — the defaults shown are what the binary falls back to if the variable is unset, not what your cluster wants.
 
-## Note: keeping the existing PVC
+| Variable | Code default | Set for K8s? | Notes |
+|---|---|---|---|
+| `DECPM_LISTEN_ADDRESS` | `0.0.0.0` | optional | Noise transport bind address |
+| `DECPM_NOISE_PORT` | `9000` | optional | Noise transport port |
+| `DECPM_PUBLIC_ADDRESS` | falls back to `DECPM_LISTEN_ADDRESS` | **yes** | Hostname peers use to reach this node from the public internet |
+| `DECPM_CANTON_ADMIN_HOST` | `127.0.0.1` | **yes** | Canton Admin API host |
+| `DECPM_CANTON_ADMIN_PORT` | `5002` | optional | Canton Admin API port |
+| `DECPM_CANTON_LEDGER_HOST` | `127.0.0.1` | **yes** | Canton Ledger API host |
+| `DECPM_CANTON_LEDGER_PORT` | `5001` | optional | Canton Ledger API port |
+| `DECPM_CANTON_SYNCHRONIZER` | `global` | optional | Synchronizer name |
+| `DECPM_CANTON_NETWORK` | `devnet` | **yes** | `mainnet`, `testnet`, or `devnet` |
+| `DECPM_KEYCLOAK_URL` | unset | **yes** | Keycloak server URL for frontend auth |
+| `DECPM_KEYCLOAK_REALM` | unset | **yes** | Keycloak realm |
+| `DECPM_KEYCLOAK_CLIENT_ID` | unset | **yes** | Keycloak client used by the SPA |
+| `DECPM_ADMIN_ROLE` | unset | recommended | Keycloak role required for privileged endpoints. If unset, every authenticated caller is treated as admin. |
+| `DECPM_ALLOWED_ORIGIN` | same-origin | optional | CORS origin if UI host ≠ API host |
+| `DECPM_DB_ENCRYPTION_KEY` | unset | recommended | Random passphrase (hashed via SHA-256) protecting party secrets at rest. If unset, secrets are stored in plaintext in the SQLite DB. |
+| `DECPM_TIMEOUT_HANDSHAKE` | `30` | optional | Noise handshake timeout (seconds) |
+| `DECPM_TIMEOUT_MESSAGE` | `120` | optional | Noise message timeout (seconds) |
+| `DECPM_TIMEOUT_RETRY_ATTEMPTS` | `3` | optional | Connection retry attempts |
+| `DECPM_TIMEOUT_RETRY_DELAY` | `5` | optional | Connection retry delay (seconds) |
 
-If you would rather not regenerate your Noise keypair (so peers don't have to update their entries for you), you can keep the existing PVC and only replace the Deployment, Service, ConfigMap, and Ingress resources. The new DPM reads its existing SQLite database on first start, so your peer list and Noise keypair carry over automatically.
+## Note: keeping the existing Noise keypair
 
-The trade-off: if there have been schema changes between your old version and the latest, the new DPM may need to migrate the database in place. If the migration fails or you hit unexpected behavior, fall back to the clean-slate approach above.
+If you would rather not regenerate your Noise keypair (so peers don't have to update their entry for you), you can preserve the keypair file from your old PVC. The keypair is stored as a file in the data directory (not in the SQLite database), so it survives a clean redeploy as long as you keep the same PVC mounted at `/app`.
+
+The peer list and party credentials do **not** carry over: those live in the SQLite database, which the new format introduces. The first time the new application starts on the preserved PVC it will create a fresh database alongside the existing keypair file. You will still need to re-establish peers (Step 4) and re-enter party credentials (Step 5) — the only thing you save is the round-trip with peers having to update their entry for you.
 
 ## Troubleshooting
 
