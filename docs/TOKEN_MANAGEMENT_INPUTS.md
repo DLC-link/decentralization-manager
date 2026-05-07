@@ -1,5 +1,9 @@
 # Token Management — Governance Action Inputs
 
+**Notion mirror:** https://www.notion.so/bitsafe/359636dd0ba5811eaec7f24bd6bad94c — keep this page in sync when this document is updated.
+
+**Just here for the UI inputs?** Skip to [Phase 1 — Onboard as a registry participant](#phase-1--onboard-as-a-registry-participant).
+
 This is the focused, semantic reference for the **token-management** governance actions: what each input field *means*, where the value comes from, and how it maps from the on-chain DAML template to the field you fill in on the UI.
 
 Token management is implemented as **two governance plugins** that cooperate end-to-end:
@@ -11,22 +15,30 @@ Token management is implemented as **two governance plugins** that cooperate end
 
 Together they cover thirteen governance actions. The rest of this document explains each one.
 
-> **Demo values:** every action has a *Demo value* column left blank. Fill in the values used in the existing demo so the table doubles as a copy-paste cheat sheet.
+## How to read this document
 
-> **Vocabulary warning:** several proper-noun terms (especially **Operator** and **Provider**) mean *different* things in the Utility Registry, in Splice / Canton Coin, and in the broader Canton governance context. The [Glossary](#glossary) and the [field-name disambiguation table](#field-name-disambiguation) at the end are essential reading before completing any form.
+### Demo values
 
-> **Reading the input tables.** Each action lists its inputs in a single table. The **UI field** column shows the on-screen label, with inline annotations in italics that describe the UI mechanics:
->
-> - `(text, required)` — free-text input that blocks submission if empty.
-> - `(text, optional)` — free-text input; empty is accepted.
-> - `(decimal, required, > 0)` — numeric text input; the listed validation is enforced (here, on-chain via a DAML `ensure`).
-> - `(checkbox, default ✓)` / `(checkbox, default ☐)` — boolean toggle and its initial state.
-> - `(select: A / B / C, required)` — drop-down with the listed options.
-> - `(textarea, multiline, …)` — multi-line input, plus any conditional-display rule.
-> - `_(implicit)_` — set automatically by the form (e.g. the governance party from the *Governance Contract ID*); the user does not type a value.
-> - `_(not in UI)_` — present in the DAML template but not exposed by the form; the backend supplies a default.
->
-> The UI does **not** apply format checks to party-id / contract-id text fields — non-empty is the only client-side check. Substantive validation happens on the ledger when the proposal executes.
+Every action has a *Demo value* column left blank. Fill in the values used in the existing demo so the table doubles as a copy-paste cheat sheet.
+
+### Vocabulary warning
+
+Several proper-noun terms (especially **Operator** and **Provider**) mean *different* things in the Utility Registry, in Splice / Canton Coin, and in the broader Canton governance context. The [Glossary](#glossary) and the [field-name disambiguation table](#field-name-disambiguation) at the end are essential reading before completing any form.
+
+### Reading the input tables
+
+Each action lists its inputs in a single table. The **UI field** column shows the on-screen label, with inline annotations in italics that describe the UI mechanics:
+
+- `(text, required)` — free-text input that blocks submission if empty.
+- `(text, optional)` — free-text input; empty is accepted.
+- `(decimal, required, > 0)` — numeric text input; the listed validation is enforced (here, on-chain via a DAML `ensure`).
+- `(checkbox, default ✓)` / `(checkbox, default ☐)` — boolean toggle and its initial state.
+- `(select: A / B / C, required)` — drop-down with the listed options.
+- `(textarea, multiline, …)` — multi-line input, plus any conditional-display rule.
+- `_(implicit)_` — set automatically by the form (e.g. the governance party from the *Governance Contract ID*); the user does not type a value.
+- `_(not in UI)_` — present in the DAML template but not exposed by the form; the backend supplies a default.
+
+The UI does **not** apply format checks to party-id / contract-id text fields — non-empty is the only client-side check. Substantive validation happens on the ledger when the proposal executes.
 
 ---
 
@@ -107,7 +119,7 @@ The same on-ledger party can play several of these roles at once.
 | **Registrar** | "Maintains ownership records for assets on behalf of Issuers … maintains criteria for holding, minting, and burning asset tokens." Example: SS&C, CSDs, custodians. | The party with day-to-day responsibility for a particular instrument's books. |
 | **Holder** | "Any ledger party can send, receive, mint, and burn tokens, provided they fulfill the predefined criteria set by the registrar." | An end-user / treasury / issuer of the token. |
 
-> In the actions below, **the decentralized governance party is being onboarded as a Provider and Registrar simultaneously**. The composite `SetupUtility` action runs the full chain: the governance party becomes its own provider *and* registrar of a single instrument.
+**In this codebase:** in the actions below, **the decentralized governance party is being onboarded as a Provider and Registrar simultaneously**. The composite `SetupUtility` action runs the full chain: the governance party becomes its own provider *and* registrar of a single instrument.
 
 ### The onboarding contracts
 
@@ -182,7 +194,7 @@ The actions can be run independently in any order; the lifecycle above is just t
 
 **Effect on success:** creates a `ProviderService` directly with `operator = proposer` and `provider = governanceParty`. This is **not** the same as accepting a `ProviderServiceRequest` — it short-circuits the request/accept dance because the proposer (a member that controls the registry-app) and the governance party are jointly creating the contract inside the executed proposal. Use this when the governance committee has already agreed offline that the proposer is the Operator.
 
-> The DAML comment explains why this wrapper exists at all: a governance party is externally signed (threshold > 1), so a plain `create ProviderService` from a single submitter would fail authorization. The proposal carries both authorities into one transaction.
+**Why this wrapper exists:** a governance party is externally signed (threshold > 1), so a plain `create ProviderService` from a single submitter would fail authorization. The proposal carries both authorities into one transaction. (From the DAML comment.)
 
 **UI form:** *New Proposal → Provision Provider Service*  
 **Submit button:** *Submit Proposal*  
@@ -209,7 +221,7 @@ The actions can be run independently in any order; the lifecycle above is just t
 | _(implicit)_ Governance party | `governanceParty` | — | auto | n/a |
 | _(implicit)_ Proposer | `proposer` | — | auto | n/a |
 
-> The UI's **New Governance Action → Create Provider Service** form (a single-input variant with only Operator) calls into a different code path that auto-fills `provider = governanceParty`. Both forms ultimately produce the same on-chain `ProviderServiceRequest`.
+**UI variant:** the UI's **New Governance Action → Create Provider Service** form (a single-input variant with only Operator) calls into a different code path that auto-fills `provider = governanceParty`. Both forms ultimately produce the same on-chain `ProviderServiceRequest`.
 
 ---
 
@@ -271,7 +283,7 @@ After this proposal executes, the governance party owns a fresh registrar servic
 | _(implicit)_ Governance party | `governanceParty` | — | auto; will be both `provider` and `registrar` on the resulting contracts. | n/a |
 | _(implicit)_ Proposer | `proposer` | — | auto | n/a |
 
-> **Trap:** the `issuerRequirements` and `holderRequirements` on the resulting `InstrumentConfiguration` are **empty**. That means no credential checks are enforced for mint / burn / hold of this instrument. If you want gated instruments, do *not* use this composite — drive each step manually so you can pass non-empty requirements.
+**Trap:** the `issuerRequirements` and `holderRequirements` on the resulting `InstrumentConfiguration` are **empty**. That means no credential checks are enforced for mint / burn / hold of this instrument. If you want gated instruments, do *not* use this composite — drive each step manually so you can pass non-empty requirements.
 
 ---
 
@@ -314,7 +326,7 @@ The DAML field is `Optional [AppRewardBeneficiary]`:
 | _(implicit)_ Governance party | `governanceParty` | — | auto | n/a |
 | _(implicit)_ Proposer | `proposer` | — | auto | n/a |
 
-> **Prerequisite:** the provider party must already hold a `Splice.Amulet:FeaturedAppRight`, otherwise no markers will be emitted regardless of beneficiaries.
+**Prerequisite:** the provider party must already hold a `Splice.Amulet:FeaturedAppRight`, otherwise no markers will be emitted regardless of beneficiaries.
 
 ---
 
@@ -324,7 +336,7 @@ The DAML field is `Optional [AppRewardBeneficiary]`:
 
 **Effect on success:** creates a `TransferPreapprovalProposal` (from `Splice.Wallet`) where the governance party is the *receiver*. The CC **provider** must then separately accept that proposal, which is when fees are paid. After acceptance, anyone can transfer Canton Coin to the governance party in one step.
 
-> This action lives in the **token-custody** package and uses Splice / Canton Coin contracts, not the Utility Registry. The "Provider Party" field below has nothing to do with a Utility-Registry [Provider](#the-four-registry-roles).
+**Context:** this action lives in the **token-custody** package and uses Splice / Canton Coin contracts, not the Utility Registry. The "Provider Party" field below has nothing to do with a Utility-Registry [Provider](#the-four-registry-roles).
 
 **UI form:** *New Proposal → Setup CC Preapproval*  
 **Submit button:** *Submit Proposal*
@@ -336,7 +348,7 @@ The DAML field is `Optional [AppRewardBeneficiary]`:
 | _(implicit)_ Governance party | `governanceParty` | — | Decentralized-party id; auto-filled from the *Governance Contract ID*. | n/a |
 | _(implicit)_ Proposer | `proposer` | — | Logged-in member; auto. | n/a |
 
-> **Trap:** "Provider Party" is **not** the utility-registry provider used elsewhere in the governance UI; it is the Canton-Coin fee provider. If you copy the operator from `Setup Utility` here, the proposal will execute but the resulting `TransferPreapprovalProposal` will be rejected by that party.
+**Trap:** "Provider Party" is **not** the utility-registry provider used elsewhere in the governance UI; it is the Canton-Coin fee provider. If you copy the operator from `Setup Utility` here, the proposal will execute but the resulting `TransferPreapprovalProposal` will be rejected by that party.
 
 ---
 
@@ -355,7 +367,7 @@ The DAML field is `Optional [AppRewardBeneficiary]`:
 | _(implicit)_ Governance party | `governanceParty` | — | auto | n/a |
 | _(implicit)_ Proposer | `proposer` | — | auto | n/a |
 
-> **Gap:** the UI does not expose `instrumentAllowances`; the resulting preapproval is always for *all* instruments of the admin.
+**Gap:** the UI does not expose `instrumentAllowances`; the resulting preapproval is always for *all* instruments of the admin.
 
 ---
 
@@ -385,7 +397,7 @@ The `ChoiceContext` includes `instrumentConfigurationContextKey → instrumentCo
 | _(implicit)_ Governance party | `governanceParty` | — | auto; passed as `expectedAdmin` to the `AllocationFactory_OfferMint` choice. The on-chain code asserts the factory's admin matches. | n/a |
 | _(implicit)_ Proposer | `proposer` | — | auto | n/a |
 
-> **Pre-flight:** issuer credentials are sent empty. If the `InstrumentConfiguration` was created with non-empty `issuerRequirements` (i.e. *not* via `SetupUtility`'s default), the mint offer will be rejected at acceptance time. Either keep the configuration's requirements empty or extend the plugin to accept credentials.
+**Pre-flight:** issuer credentials are sent empty. If the `InstrumentConfiguration` was created with non-empty `issuerRequirements` (i.e. *not* via `SetupUtility`'s default), the mint offer will be rejected at acceptance time. Either keep the configuration's requirements empty or extend the plugin to accept credentials.
 
 ---
 
@@ -438,10 +450,11 @@ The on-chain `ensure transfer.amount > 0.0` enforces a positive amount.
 | _(implicit)_ Governance party | `governanceParty` | — | auto | n/a |
 | _(implicit)_ Proposer | `proposer` | — | auto | n/a |
 
-> **UTXO timing risk** (per the DAML comment): the input holdings are captured at *proposal* time. If any of them gets spent before the proposal reaches its threshold and executes, execution fails. Mitigations:
-> - reserve dedicated holdings for governance proposals,
-> - keep the governance confirmation timeout short,
-> - re-propose if holdings change.
+**UTXO timing risk** (per the DAML comment): the input holdings are captured at *proposal* time. If any of them gets spent before the proposal reaches its threshold and executes, execution fails. Mitigations:
+
+- reserve dedicated holdings for governance proposals,
+- keep the governance confirmation timeout short,
+- re-propose if holdings change.
 
 ---
 
@@ -459,7 +472,7 @@ The on-chain `ensure transfer.amount > 0.0` enforces a positive amount.
 | _(implicit)_ Governance party | `governanceParty` | — | auto | n/a |
 | _(implicit)_ Proposer | `proposer` | — | auto | n/a |
 
-> **Trap:** the sender of a two-step transfer can withdraw the `TransferInstruction` before the governance accept proposal completes. If they do, execution fails with a contract-not-found error. Reproduce this for QA by withdrawing the offer between *propose* and *threshold reached*.
+**Trap:** the sender of a two-step transfer can withdraw the `TransferInstruction` before the governance accept proposal completes. If they do, execution fails with a contract-not-found error. Reproduce this for QA by withdrawing the offer between *propose* and *threshold reached*.
 
 ---
 
@@ -486,4 +499,4 @@ The same word is used in different roles across these actions. Use the following
 | "Result contracts" | An optional alternative to ledger-event-only signalling on a registrar service. The official docs do not yet expose a glossary entry — confirm semantics with the integration team before relying on this flag. | [Set Enable Result Contracts](#set-enable-result-contracts) |
 | "DSO" | Decentralized Synchronizer Operator — the party operating the Splice synchronizer. **Not** related to the Utility Registry. | [Setup CC Preapproval](#setup-cc-preapproval) |
 
-> If a UI label and a DAML field name disagree, the DAML field name in the linked source files is authoritative.
+**Authoritative source:** if a UI label and a DAML field name disagree, the DAML field name in the linked source files is authoritative.
