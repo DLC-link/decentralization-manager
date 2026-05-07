@@ -2,13 +2,17 @@
 
 set -e
 
-TAG="0.0.30"
+aws sso login
+
+TAG="0.0.31"
 IMAGE="public.ecr.aws/dlc-link/canton-decparty-manager"
 DEPLOY_DIR="zarf/deployments/devnet"
 
 echo "Building and pushing image with tag: $TAG"
 docker build --no-cache --ssh default=$HOME/.ssh/github_docker -t dec-party-manager .
 docker tag dec-party-manager "$IMAGE:$TAG"
+docker logout public.ecr.aws
+aws ecr-public get-login-password --region us-east-1 --profile "$AWS_PROFILE" | docker login --username AWS --password-stdin public.ecr.aws
 docker push "$IMAGE:$TAG"
 
 echo "Updating image tag in deployment configs..."

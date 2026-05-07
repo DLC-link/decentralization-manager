@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    consts::{DARS_DIR, DATA_DIR, DB_FILENAME, NOISE_KEY_FILENAME, WORKFLOW_DATA_DIR},
+    consts::{DARS_DIR, DATA_DIR, DB_FILENAME, NOISE_KEY_FILENAME},
     participant_id::CantonId,
 };
 
@@ -296,11 +296,6 @@ impl NodeConfig {
     /// Get the path to the noise key file
     pub fn key_file_path(&self) -> PathBuf {
         self.data_dir().join(NOISE_KEY_FILENAME)
-    }
-
-    /// Get the workflow data directory
-    pub fn workflow_data_dir(&self) -> PathBuf {
-        self.data_dir().join(WORKFLOW_DATA_DIR)
     }
 
     /// Get the dars directory

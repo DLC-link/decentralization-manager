@@ -622,9 +622,9 @@ Response:
 }
 ```
 
-### Step 2: Accept Invitations (Attestors)
+### Step 2: Accept Invitations (Peers)
 
-On each attestor node, invitations appear in the UI or via API:
+On each peer node, invitations appear in the UI or via API:
 
 ```bash
 # Check for pending invitations
@@ -841,12 +841,12 @@ Participants in a decentralized party can have different permission levels:
 | `Confirmation` | Can confirm transactions (mediator role) |
 | `Observation` | Read-only access to party's transactions |
 
-### Coordinator vs Attestor
+### Coordinator vs Peer
 
 These are **workflow roles**, not permanent privileges:
 - Any participant can act as coordinator for any workflow
 - The coordinator role is determined at workflow initiation time
-- There is no privilege difference between coordinator and attestor nodes
+- There is no privilege difference between coordinator and peer nodes
 - The coordinator simply manages the workflow orchestration; all participants sign equally
 
 ### Ledger API User Rights

@@ -6,15 +6,19 @@ use std::{
 
 use hyper::{Body, Request, Response, StatusCode};
 use secp256k1::PublicKey;
+use sqlx::SqlitePool;
 use tokio::net::TcpListener;
 use tokio_noise::handshakes::nn_psk2::Responder;
 
 use crate::{
     config::{NetworkConfig, NodeConfig},
+    db::schema::SchemaRead,
     noise::{
         CHUNK_SIZE, MAX_PAYLOAD_SIZE, Message, MessageType, NOISE_REQUEST_TIMEOUT, NoiseError,
         NoiseKeypair, parse_public_key,
     },
+    participant_id::CantonId,
+    server::WorkflowProgress,
     workflow::{WorkflowState, state::WorkflowStep},
 };
 
@@ -23,13 +27,13 @@ use crate::{
 /// `Disconnect` is a pure control signal marking the end of a workflow and
 /// must never inherit the residual payload from an earlier step (e.g. the
 /// DAR bundle from `UploadDars`). Shipping it would turn a small control
-/// message into a multi-MB chunked transfer and delay the attestor's invite
+/// message into a multi-MB chunked transfer and delay the peer's invite
 /// listener from resuming, which has caused Contracts-invite races in CI.
 const fn command_carries_payload(command: MessageType) -> bool {
     !matches!(command, MessageType::Disconnect)
 }
 
-/// Coordinator server that accepts connections from attestors
+/// Coordinator server that accepts connections from peers
 pub struct NoiseServer<S: WorkflowStep + 'static> {
     node_config: Arc<NodeConfig>,
     keypair: Arc<NoiseKeypair>,
@@ -44,11 +48,18 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
     /// # Arguments
     /// * `node_config` - Node configuration
     /// * `network_config` - Network configuration
+    /// * `db` - SQLite pool used to persist `WorkflowState` updates against the
+    ///   matching `workflow_runs` row.
+    /// * `instance_name` - Identifier for the persisted run (matches the row's
+    ///   primary key).
     /// * `initial_step` - Initial workflow step
-    /// * `exclude_participants` - Optional list of participant IDs to exclude from attestors (e.g., participants being kicked)
+    /// * `exclude_participants` - Optional list of participant IDs to exclude from peers (e.g., participants being kicked)
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         node_config: NodeConfig,
         network_config: NetworkConfig,
+        db: SqlitePool,
+        instance_name: String,
         initial_step: S,
         exclude_participants: Option<Vec<String>>,
     ) -> Result<Self, NoiseError> {
@@ -70,31 +81,78 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
             peer_keys.insert(peer_id, pub_key);
         }
 
-        let expected_attestors: Vec<String> = network_config
+        let expected_peers: Vec<CantonId> = network_config
             .peers
             .iter()
             .filter(|p| {
                 let peer_id = p.participant_id.to_string();
                 p.participant_id != *node_config.participant_id() && !excluded.contains(&peer_id)
             })
-            .map(|p| p.participant_id.to_string())
+            .map(|p| p.participant_id.clone())
             .collect();
 
         if !excluded.is_empty() {
             tracing::info!(
-                "Excluding {count} participant(s) from attestors: {participants}",
+                "Excluding {count} participant(s) from peers: {participants}",
                 count = excluded.len(),
                 participants = excluded.iter().cloned().collect::<Vec<_>>().join(", ")
             );
         }
 
         tracing::info!(
-            "Expected {count} attestor(s): {attestors}",
-            count = expected_attestors.len(),
-            attestors = expected_attestors.join(", ")
+            "Expected {count} peer(s): {peers}",
+            count = expected_peers.len(),
+            peers = expected_peers
+                .iter()
+                .map(CantonId::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
         );
 
-        let workflow_state = WorkflowState::new(initial_step, expected_attestors);
+        // Resume-aware construction: if an InProgress workflow_runs row already
+        // exists for `instance_name` (we restarted mid-flight), re-hydrate the
+        // state machine from its persisted `current_step` + already-completed
+        // peers instead of starting fresh from `initial_step`. The
+        // coordinator workflow loop is naturally driven by `current_step`, so
+        // seeding it from the row picks the run back up at the right place.
+        let workflow_state = match SchemaRead::get_workflow_run(&db, &instance_name).await {
+            Ok(Some(run)) if run.status == WorkflowProgress::InProgress => {
+                match S::try_from_step_name(&run.current_step) {
+                    Some(step) => {
+                        tracing::info!(
+                            "Resuming workflow {instance_name} at step {step:?} \
+                             ({} of {} peers completed)",
+                            run.completed_peers.len(),
+                            run.expected_peers.len()
+                        );
+                        WorkflowState::from_persisted(
+                            db,
+                            instance_name,
+                            step,
+                            expected_peers,
+                            run.completed_peers,
+                        )
+                    }
+                    None => {
+                        tracing::warn!(
+                            "Persisted current_step {:?} for {instance_name} is not a valid \
+                             {kind} step; starting fresh from {initial_step:?}",
+                            run.current_step,
+                            kind = std::any::type_name::<S>()
+                        );
+                        WorkflowState::new(db, instance_name, initial_step, expected_peers)
+                    }
+                }
+            }
+            Ok(_) => WorkflowState::new(db, instance_name, initial_step, expected_peers),
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to look up persisted workflow_runs row for {instance_name}: {e}; \
+                     starting fresh"
+                );
+                WorkflowState::new(db, instance_name, initial_step, expected_peers)
+            }
+        };
 
         Ok(Self {
             node_config: Arc::new(node_config),
@@ -178,13 +236,21 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         Ok(())
     }
 
-    /// Handle an incoming request from an attestor
+    /// Handle an incoming request from an peer
     async fn handle_request(
         &self,
         peer_id: String,
         req: Request<Body>,
     ) -> Result<Response<Body>, NoiseError> {
         tracing::debug!("Received request from peer: {peer_id}");
+
+        // The Noise handshake delivers the peer's identity as a string of the
+        // form `prefix::namespace_hex` (set by the client side via
+        // `node_config.participant_id().to_string()`). Parse it back into a
+        // typed `CantonId` once at the entry point so every downstream call
+        // can stay typed.
+        let peer_id = CantonId::parse(&peer_id)
+            .map_err(|e| NoiseError::UnknownPeer(format!("Invalid peer id {peer_id}: {e}")))?;
 
         // Read request body
         let body_bytes = hyper::body::to_bytes(req.into_body()).await?;
@@ -202,23 +268,23 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
             MessageType::GetNextCommand => self.handle_get_next_command(peer_id).await?,
             MessageType::GetChunk => self.handle_get_chunk(message.payload).await?,
             MessageType::KeysUpload => {
-                self.handle_attestor_data(peer_id, message.payload, "keys upload")
+                self.handle_peer_data(peer_id, message.payload, "keys upload")
                     .await?
             }
             MessageType::DnsSignature => {
-                self.handle_attestor_data(peer_id, message.payload, "DNS signature")
+                self.handle_peer_data(peer_id, message.payload, "DNS signature")
                     .await?
             }
             MessageType::P2pSignatures => {
-                self.handle_attestor_data(peer_id, message.payload, "P2P signatures")
+                self.handle_peer_data(peer_id, message.payload, "P2P signatures")
                     .await?
             }
             MessageType::SubmissionSignatures => {
-                self.handle_attestor_data(peer_id, message.payload, "submission signatures")
+                self.handle_peer_data(peer_id, message.payload, "submission signatures")
                     .await?
             }
             MessageType::KickSignatures => {
-                self.handle_attestor_data(peer_id, message.payload, "kick signatures")
+                self.handle_peer_data(peer_id, message.payload, "kick signatures")
                     .await?
             }
             MessageType::StatusUpdate => {
@@ -235,17 +301,15 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
             .body(Body::from(response.to_bytes()))?)
     }
 
-    /// Handle attestor requesting next command
-    async fn handle_get_next_command(&self, peer_id: String) -> Result<Message, NoiseError> {
-        // Mark attestor as connected on first command poll
-        self.workflow_state
-            .attestor_connected(peer_id.clone())
-            .await;
+    /// Handle peer requesting next command
+    async fn handle_get_next_command(&self, peer_id: CantonId) -> Result<Message, NoiseError> {
+        // Mark peer as connected on first command poll
+        self.workflow_state.peer_connected(peer_id.clone()).await;
 
-        // Check if attestor has already completed current step
-        let has_completed = self.workflow_state.has_attestor_completed(&peer_id).await;
+        // Check if peer has already completed current step
+        let has_completed = self.workflow_state.has_peer_completed(&peer_id).await;
         if has_completed {
-            // Attestor has completed current step, tell them to wait
+            // Peer has completed current step, tell them to wait
             tracing::debug!("Sending Wait to {peer_id} (already completed current step)");
             return Ok(Message::new_empty(MessageType::Wait));
         }
@@ -282,13 +346,13 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                 Ok(Message::new(MessageType::ChunkedCommand, meta))
             }
         } else {
-            // No command for attestors right now (coordinator-only step)
+            // No command for peers right now (coordinator-only step)
             tracing::debug!("Sending Wait to {peer_id} (coordinator-only step)");
             Ok(Message::new_empty(MessageType::Wait))
         }
     }
 
-    /// Handle chunk request from attestor
+    /// Handle chunk request from peer
     async fn handle_get_chunk(&self, request_payload: Vec<u8>) -> Result<Message, NoiseError> {
         if request_payload.len() < 4 {
             return Err(NoiseError::InvalidMessage);
@@ -324,35 +388,35 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         Ok(Message::new(MessageType::Chunk, response))
     }
 
-    /// Handle attestor data upload (keys, signatures, etc.)
-    async fn handle_attestor_data(
+    /// Handle peer data upload (keys, signatures, etc.)
+    async fn handle_peer_data(
         &self,
-        peer_id: String,
+        peer_id: CantonId,
         payload: Vec<u8>,
         data_type: &str,
     ) -> Result<Message, NoiseError> {
         tracing::info!("Handling {data_type} from {peer_id}");
 
         self.workflow_state
-            .store_attestor_data(peer_id.clone(), payload)
+            .store_peer_data(peer_id.clone(), payload)
             .await;
 
-        self.workflow_state.attestor_completed(peer_id).await;
+        self.workflow_state.peer_completed(peer_id).await;
 
         Ok(Message::new_empty(MessageType::Ack))
     }
 
-    /// Handle status update from attestor
+    /// Handle status update from peer
     async fn handle_status_update(
         &self,
-        peer_id: String,
+        peer_id: CantonId,
         payload: Vec<u8>,
     ) -> Result<Message, NoiseError> {
         let status = String::from_utf8_lossy(&payload);
         tracing::info!("Handling status update from {peer_id}: {status}");
 
-        // Mark attestor as completed for this step
-        self.workflow_state.attestor_completed(peer_id).await;
+        // Mark peer as completed for this step
+        self.workflow_state.peer_completed(peer_id).await;
 
         Ok(Message::new_empty(MessageType::Ack))
     }

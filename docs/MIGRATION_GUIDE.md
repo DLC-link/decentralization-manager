@@ -188,4 +188,4 @@ deployments/
       secrets.yaml
 ```
 
-Each participant's Secret points to its own Canton node and can have its own Keycloak client. The Deployment labels distinguish coordinator (`app.kubernetes.io/component: coordinator`) from attestors (`app.kubernetes.io/component: attestor`).
+Each participant's Secret points to its own Canton node and can have its own Keycloak client. The Deployment labels distinguish coordinator (`app.kubernetes.io/component: coordinator`) from peers (`app.kubernetes.io/component: peer`).

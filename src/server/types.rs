@@ -16,10 +16,14 @@ use super::ListenerControl;
 /// Trait for workflow status types that can be used with HttpWorkflowState
 pub trait WorkflowStatus: Default + Copy + Send + Sync {}
 
-/// Generic state for tracking HTTP-triggered workflows
+/// Generic state for tracking HTTP-triggered workflows. Holds enough context
+/// for the matching `/cancel` endpoint to abort the spawn and notify the
+/// peers that received an invite.
 pub struct HttpWorkflowState<S: WorkflowStatus> {
     pub status: RwLock<S>,
     pub error: RwLock<Option<String>>,
+    pub abort_handle: tokio::sync::Mutex<Option<tokio::task::AbortHandle>>,
+    pub invited_peers: RwLock<Vec<CantonId>>,
 }
 
 impl<S: WorkflowStatus> Default for HttpWorkflowState<S> {
@@ -27,6 +31,8 @@ impl<S: WorkflowStatus> Default for HttpWorkflowState<S> {
         Self {
             status: RwLock::new(S::default()),
             error: RwLock::new(None),
+            abort_handle: tokio::sync::Mutex::new(None),
+            invited_peers: RwLock::new(Vec::new()),
         }
     }
 }
@@ -105,12 +111,24 @@ pub struct ParticipantInfo {
     pub owner_key: Option<String>,
 }
 
-/// Contract information
+/// Contract information surfaced in the dec_party detail view.
+///
+/// `template_id` is the short `Module.Path:Entity` form (NOT the fully
+/// qualified package_id-prefixed form). `package_name` is the human-readable
+/// Daml package name (from verbose ACS); `package_version` is joined in from
+/// the participant Admin API's PackageService. `created_at` is the ISO 8601
+/// timestamp Canton stamps on the create event.
 #[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct ContractInfo {
     pub contract_id: String,
     pub template_id: String,
     pub package_id: String,
+    #[serde(default)]
+    pub package_name: String,
+    #[serde(default)]
+    pub package_version: String,
+    #[serde(default)]
+    pub created_at: String,
 }
 
 /// Vetted package information
@@ -223,8 +241,8 @@ pub struct ParticipantsStatusResponse {
 #[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct KickRequest {
-    pub decentralized_party_id: String,
-    pub participant_id: String,
+    pub decentralized_party_id: CantonId,
+    pub participant_id: CantonId,
     pub new_threshold: i32,
 }
 
@@ -234,7 +252,7 @@ pub struct OnboardingRequest {
     /// Party ID prefix for the decentralized party (e.g., "xyz-network")
     pub party_id_prefix: String,
     /// List of peer IDs to invite to the decentralized party
-    pub peer_ids: Vec<String>,
+    pub peer_ids: Vec<CantonId>,
 }
 
 /// Why a directed edge was reported missing. The frontend renders different
@@ -303,6 +321,7 @@ pub enum WorkflowProgress {
     InProgress,
     Completed,
     Failed,
+    Cancelled,
 }
 
 impl WorkflowStatus for WorkflowProgress {}
@@ -322,6 +341,139 @@ pub struct WorkflowResponse {
 pub type KickResponse = WorkflowResponse;
 pub type OnboardingResponse = WorkflowResponse;
 
+/// Which workflow this run belongs to. Mirrors InvitationType, but lives on
+/// every persisted run (coordinator + peer) regardless of how it started.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "PascalCase")]
+pub enum WorkflowKind {
+    Onboarding,
+    Kick,
+    Contracts,
+    Dars,
+}
+
+impl WorkflowKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Onboarding => "Onboarding",
+            Self::Kick => "Kick",
+            Self::Contracts => "Contracts",
+            Self::Dars => "Dars",
+        }
+    }
+}
+
+impl std::fmt::Display for WorkflowKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for WorkflowKind {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "Onboarding" => Ok(Self::Onboarding),
+            "Kick" => Ok(Self::Kick),
+            "Contracts" => Ok(Self::Contracts),
+            "Dars" => Ok(Self::Dars),
+            other => Err(anyhow::anyhow!("unknown workflow kind: {other}")),
+        }
+    }
+}
+
+impl From<InvitationType> for WorkflowKind {
+    fn from(t: InvitationType) -> Self {
+        match t {
+            InvitationType::Onboarding => Self::Onboarding,
+            InvitationType::Kick => Self::Kick,
+            InvitationType::Contracts => Self::Contracts,
+            InvitationType::Dars => Self::Dars,
+        }
+    }
+}
+
+/// Whether this node is driving the workflow (Coordinator) or signing /
+/// participating because it accepted an invite (Peer).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "PascalCase")]
+pub enum WorkflowRole {
+    Coordinator,
+    Peer,
+}
+
+impl WorkflowRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Coordinator => "Coordinator",
+            Self::Peer => "Peer",
+        }
+    }
+}
+
+impl std::fmt::Display for WorkflowRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for WorkflowRole {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "Coordinator" => Ok(Self::Coordinator),
+            "Peer" => Ok(Self::Peer),
+            other => Err(anyhow::anyhow!("unknown workflow role: {other}")),
+        }
+    }
+}
+
+/// A single persisted workflow run — control-plane state for either the
+/// coordinator side or an peer side. The matching artefacts live in
+/// `workflow_artifacts` and are looked up by `instance_name`.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct WorkflowRun {
+    pub instance_name: String,
+    pub kind: WorkflowKind,
+    pub role: WorkflowRole,
+    pub status: WorkflowProgress,
+    pub current_step: String,
+    pub step_index: i64,
+    pub step_total: i64,
+    /// JSON-encoded copy of the original *Config struct that started the
+    /// workflow — the resume path round-trips it back through serde.
+    pub config_json: String,
+    /// Hex pubkey of the coordinator. None for coordinator-side rows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coordinator_pubkey: Option<String>,
+    /// Resolved coordinator name from the peers table (server-side join,
+    /// like get_invitations does for PendingInvitation).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coordinator_name: Option<String>,
+    pub expected_peers: Vec<CantonId>,
+    pub completed_peers: Vec<CantonId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dec_party_id: Option<CantonId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub dismissed: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// Response wrapper for `GET /workflows`.
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct WorkflowRunsResponse {
+    pub runs: Vec<WorkflowRun>,
+}
+
+/// Payload for the `CancelWorkflow` Noise message — the coordinator tells an
+/// peer to abort its in-flight run for `instance_name`.
+#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct CancelWorkflowPayload {
+    pub instance_name: String,
+}
+
 /// Response for key status check
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct KeyStatusResponse {
@@ -339,6 +491,51 @@ pub enum InvitationType {
     Dars,
 }
 
+impl InvitationType {
+    /// Stable string label used for DB storage. Matches the PascalCase serde repr.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Onboarding => "Onboarding",
+            Self::Kick => "Kick",
+            Self::Contracts => "Contracts",
+            Self::Dars => "Dars",
+        }
+    }
+}
+
+impl std::fmt::Display for InvitationType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for InvitationType {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "Onboarding" => Ok(Self::Onboarding),
+            "Kick" => Ok(Self::Kick),
+            "Contracts" => Ok(Self::Contracts),
+            "Dars" => Ok(Self::Dars),
+            other => Err(anyhow::anyhow!("unknown invitation type: {other}")),
+        }
+    }
+}
+
+/// Payload sent inside an `InviteOnboarding` Noise message.
+#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct OnboardingInvitePayload {
+    pub prefix: String,
+    pub participants: Vec<CantonId>,
+}
+
+/// Payload sent inside an `InviteDars` Noise message.
+#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct DarsInvitePayload {
+    pub dar_filenames: Vec<String>,
+}
+
 /// A pending invitation from a coordinator
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct PendingInvitation {
@@ -347,6 +544,15 @@ pub struct PendingInvitation {
     pub coordinator_pubkey: String,
     pub coordinator_name: Option<String>,
     pub received_at: i64,
+    /// Onboarding-only: party ID prefix the coordinator chose.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+    /// Onboarding-only: full participant list the coordinator selected.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub participants: Vec<CantonId>,
+    /// Dars-only: filenames the coordinator is distributing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dar_filenames: Vec<String>,
 }
 
 /// Response for pending invitations endpoint
@@ -397,8 +603,8 @@ impl RightsStatus {
 /// Authentication status for a single party
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct PartyAuthStatus {
-    pub dec_party_id: String,
-    pub member_party_id: String,
+    pub dec_party_id: CantonId,
+    pub member_party_id: CantonId,
     pub user_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keycloak_url: Option<String>,
@@ -418,7 +624,7 @@ pub struct AuthStatusResponse {
 /// Result of an authentication test
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct AuthTestResult {
-    pub party_id: String,
+    pub party_id: CantonId,
     pub success: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -430,10 +636,11 @@ pub struct AuthTestResponse {
     pub results: Vec<AuthTestResult>,
 }
 
-/// One participant's member party for a given dec party. `None` member_party_id = peer not configured / unreachable.
+/// One participant's member party for a given dec party. `None`
+/// member_party_id = peer not configured / unreachable.
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct KnownMember {
-    pub participant_uid: String,
+    pub participant_uid: CantonId,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub member_party_id: Option<CantonId>,
 }
@@ -869,7 +1076,11 @@ pub struct ExecuteActionRequest {
 pub struct GovernanceConfirmation {
     pub contract_id: String,
     pub action: ActionType,
-    pub confirming_party: String,
+    pub confirming_party: CantonId,
+    /// Unix seconds when the confirmation contract was created on the ledger.
+    /// 0 if the timestamp could not be resolved.
+    #[serde(default)]
+    pub created_at: i64,
 }
 
 /// A governance action with its confirmations, grouped by action hash
@@ -885,6 +1096,9 @@ pub struct GovernanceAction {
     pub confirmation_count: usize,
     /// Whether threshold is met for execution
     pub can_execute: bool,
+    /// Unix seconds of the most recent confirmation (used for sorting in UI).
+    #[serde(default)]
+    pub last_confirmation_at: i64,
 }
 
 /// Response for governance confirmations endpoint
@@ -897,7 +1111,7 @@ pub struct GovernanceResponse {
     pub threshold: usize,
     /// The member party ID for the requesting party (used to identify own confirmations)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub member_party_id: Option<String>,
+    pub member_party_id: Option<CantonId>,
 }
 
 /// Request to expire a stale confirmation
@@ -1136,8 +1350,8 @@ pub struct AuditLogEntry {
     pub id: i64,
     pub timestamp: i64,
     pub event_type: String,
-    pub party_id: String,
-    pub member_party_id: String,
+    pub party_id: CantonId,
+    pub member_party_id: CantonId,
     pub governance_type: String,
     pub action_summary: String,
     pub details: serde_json::Value,
@@ -1225,4 +1439,81 @@ impl From<crate::db::rows::ChainAuditCacheRow> for ChainAuditEntry {
 pub struct ChainAuditResponse {
     pub entries: Vec<ChainAuditEntry>,
     pub total_returned: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::Value;
+
+    use super::*;
+
+    /// P3: locks the wire shape of `WorkflowRun` so the `String → CantonId`
+    /// typing change for participant-id fields cannot silently switch from
+    /// plain strings to nested objects on the JSON the frontend consumes.
+    #[test]
+    fn workflow_run_serializes_canton_ids_as_plain_strings() {
+        let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
+        let participant_id_str = format!("participant::{ns}");
+        let dec_party_id_str = format!("test-network-1::{ns}");
+
+        let peer_a = CantonId::parse(&format!("participant::{ns}")).unwrap();
+        let peer_b = CantonId::parse(&format!(
+            "participant::1220{0}{0}",
+            "abcdefabcdefabcdefabcdefabcdef00"
+        ))
+        .unwrap();
+
+        let run = WorkflowRun {
+            instance_name: "test-network-1-creation".to_string(),
+            kind: WorkflowKind::Onboarding,
+            role: WorkflowRole::Coordinator,
+            status: WorkflowProgress::InProgress,
+            current_step: "WaitingForPeers".to_string(),
+            step_index: 0,
+            step_total: 7,
+            config_json: r#"{"prefix":"test-network-1"}"#.to_string(),
+            coordinator_pubkey: None,
+            coordinator_name: None,
+            expected_peers: vec![peer_a.clone(), peer_b.clone()],
+            completed_peers: vec![peer_a],
+            dec_party_id: Some(CantonId::parse(&dec_party_id_str).unwrap()),
+            error: None,
+            dismissed: false,
+            created_at: 1_700_000_000,
+            updated_at: 1_700_000_001,
+        };
+
+        let json = serde_json::to_value(&run).expect("serialize WorkflowRun");
+
+        // expected_peers and completed_peers must be JSON arrays of
+        // plain strings — never objects with prefix/namespace fields.
+        let expected = json
+            .get("expected_peers")
+            .and_then(Value::as_array)
+            .expect("expected_peers must be a JSON array");
+        assert_eq!(expected.len(), 2);
+        for v in expected {
+            assert!(
+                v.is_string(),
+                "expected_peers entry must be a string, got {v}"
+            );
+        }
+        assert_eq!(expected[0].as_str().unwrap(), participant_id_str);
+
+        let completed = json
+            .get("completed_peers")
+            .and_then(Value::as_array)
+            .expect("completed_peers must be a JSON array");
+        assert_eq!(completed.len(), 1);
+        assert!(completed[0].is_string());
+
+        // dec_party_id (Option<CantonId>) must serialize as a plain string,
+        // not as a nested object with prefix/namespace fields.
+        let dec_party = json.get("dec_party_id").expect("dec_party_id key present");
+        assert!(
+            dec_party.is_string(),
+            "dec_party_id must be a JSON string when set, got {dec_party}"
+        );
+        assert_eq!(dec_party.as_str().unwrap(), dec_party_id_str);
+    }
 }

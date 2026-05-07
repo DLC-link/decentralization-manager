@@ -1,5 +1,6 @@
 use std::{path::Path, str::FromStr, time::Duration};
 
+use anyhow::Context;
 use sqlx::{
     SqlitePool,
     migrate::Migrator,
@@ -7,9 +8,11 @@ use sqlx::{
 };
 
 use super::{
+    crypto,
     rows::{
-        ChainAuditCacheRow, DecPartyContractRow, DecPartyParticipantRow, DecPartyRow,
-        GovernanceAuditRow, PartyCredentialsRow, PeerRow,
+        ChainAuditCacheRow, DecPartyContractRow, DecPartyIdentityRow, DecPartyParticipantRow,
+        DecPartyRow, GovernanceAuditRow, PartyCredentialsRow, PeerRow, PendingInvitationRow,
+        WorkflowArtifactRow, WorkflowRunRow,
     },
     schema::{Commitable, SchemaRead, SchemaWrite},
 };
@@ -17,6 +20,7 @@ use crate::{
     config::{PartyCredentials, Peer},
     error::Result,
     participant_id::CantonId,
+    server::{PendingInvitation, WorkflowKind, WorkflowProgress, WorkflowRole, WorkflowRun},
 };
 
 pub static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
@@ -90,11 +94,14 @@ impl SchemaRead for SqlitePool {
         rows.into_iter().map(|r| r.into_domain()).collect()
     }
 
-    async fn get_party_credentials(&self, dec_party_id: &str) -> Result<Option<PartyCredentials>> {
+    async fn get_party_credentials(
+        &self,
+        dec_party_id: &CantonId,
+    ) -> Result<Option<PartyCredentials>> {
         let row = sqlx::query_as::<_, PartyCredentialsRow>(
             "SELECT * FROM party_credentials WHERE dec_party_id = ?",
         )
-        .bind(dec_party_id)
+        .bind(dec_party_id.to_string())
         .fetch_optional(self)
         .await?;
 
@@ -116,11 +123,11 @@ impl SchemaRead for SqlitePool {
         Ok(rows)
     }
 
-    async fn get_dec_party_owners(&self, party_id: &str) -> Result<Vec<String>> {
+    async fn get_dec_party_owners(&self, party_id: &CantonId) -> Result<Vec<String>> {
         let rows = sqlx::query_as::<_, (String,)>(
             "SELECT owner_key FROM dec_party_owner WHERE dec_party_id = ?",
         )
-        .bind(party_id)
+        .bind(party_id.to_string())
         .fetch_all(self)
         .await?;
 
@@ -129,12 +136,12 @@ impl SchemaRead for SqlitePool {
 
     async fn get_dec_party_participants(
         &self,
-        party_id: &str,
+        party_id: &CantonId,
     ) -> Result<Vec<DecPartyParticipantRow>> {
         let rows = sqlx::query_as::<_, DecPartyParticipantRow>(
             "SELECT * FROM dec_party_participant WHERE dec_party_id = ?",
         )
-        .bind(party_id)
+        .bind(party_id.to_string())
         .fetch_all(self)
         .await?;
 
@@ -143,7 +150,7 @@ impl SchemaRead for SqlitePool {
 
     async fn get_dec_party_participant_owner_key(
         &self,
-        party_id: &str,
+        party_id: &CantonId,
         participant_uid: &str,
     ) -> Result<Option<String>> {
         let row: Option<(Option<String>,)> = sqlx::query_as(
@@ -152,18 +159,21 @@ impl SchemaRead for SqlitePool {
             WHERE dec_party_id = ? AND participant_uid = ?
             ",
         )
-        .bind(party_id)
+        .bind(party_id.to_string())
         .bind(participant_uid)
         .fetch_optional(self)
         .await?;
         Ok(row.and_then(|(k,)| k))
     }
 
-    async fn get_dec_party_contracts(&self, party_id: &str) -> Result<Vec<DecPartyContractRow>> {
+    async fn get_dec_party_contracts(
+        &self,
+        party_id: &CantonId,
+    ) -> Result<Vec<DecPartyContractRow>> {
         let rows = sqlx::query_as::<_, DecPartyContractRow>(
             "SELECT * FROM dec_party_contract WHERE dec_party_id = ?",
         )
-        .bind(party_id)
+        .bind(party_id.to_string())
         .fetch_all(self)
         .await?;
 
@@ -282,7 +292,7 @@ impl SchemaRead for SqlitePool {
 
     async fn get_chain_audit_cache(
         &self,
-        party_id: &str,
+        party_id: &CantonId,
         limit: i64,
     ) -> Result<Vec<ChainAuditCacheRow>> {
         let rows = sqlx::query_as::<_, ChainAuditCacheRow>(
@@ -293,12 +303,151 @@ impl SchemaRead for SqlitePool {
             LIMIT ?
             ",
         )
-        .bind(party_id)
+        .bind(party_id.to_string())
         .bind(limit)
         .fetch_all(self)
         .await?;
 
         Ok(rows)
+    }
+
+    async fn get_all_pending_invitations(&self) -> Result<Vec<PendingInvitation>> {
+        let rows = sqlx::query_as::<_, PendingInvitationRow>(
+            "SELECT * FROM pending_invitations ORDER BY received_at ASC",
+        )
+        .fetch_all(self)
+        .await?;
+
+        rows.into_iter().map(|r| r.into_domain()).collect()
+    }
+
+    async fn get_in_progress_workflow_runs(&self) -> Result<Vec<WorkflowRun>> {
+        let rows = sqlx::query_as::<_, WorkflowRunRow>(
+            "SELECT * FROM workflow_runs WHERE status = 'inprogress' ORDER BY created_at ASC",
+        )
+        .fetch_all(self)
+        .await?;
+
+        rows.into_iter().map(|r| r.into_domain()).collect()
+    }
+
+    async fn get_workflow_run(&self, instance_name: &str) -> Result<Option<WorkflowRun>> {
+        let row = sqlx::query_as::<_, WorkflowRunRow>(
+            "SELECT * FROM workflow_runs WHERE instance_name = ?",
+        )
+        .bind(instance_name)
+        .fetch_optional(self)
+        .await?;
+
+        row.map(|r| r.into_domain()).transpose()
+    }
+
+    async fn get_active_workflow_run(
+        &self,
+        kind: WorkflowKind,
+        role: WorkflowRole,
+    ) -> Result<Option<WorkflowRun>> {
+        let row = sqlx::query_as::<_, WorkflowRunRow>(
+            "SELECT * FROM workflow_runs \
+             WHERE kind = ? AND role = ? AND status = 'inprogress' \
+             LIMIT 1",
+        )
+        .bind(kind.as_str())
+        .bind(role.as_str())
+        .fetch_optional(self)
+        .await?;
+
+        row.map(|r| r.into_domain()).transpose()
+    }
+
+    async fn get_visible_workflow_runs(&self) -> Result<Vec<WorkflowRun>> {
+        let rows = sqlx::query_as::<_, WorkflowRunRow>(
+            "SELECT * FROM workflow_runs \
+             WHERE status = 'inprogress' OR dismissed = 0 \
+             ORDER BY updated_at DESC",
+        )
+        .fetch_all(self)
+        .await?;
+
+        rows.into_iter().map(|r| r.into_domain()).collect()
+    }
+
+    async fn read_workflow_artifact(
+        &self,
+        instance_name: &str,
+        artifact_kind: &str,
+        peer: Option<&str>,
+    ) -> Result<Option<Vec<u8>>> {
+        let row = sqlx::query_as::<_, WorkflowArtifactRow>(
+            "SELECT * FROM workflow_artifacts \
+             WHERE instance_name = ? AND artifact_kind = ? AND peer_id = ?",
+        )
+        .bind(instance_name)
+        .bind(artifact_kind)
+        .bind(peer.unwrap_or(""))
+        .fetch_optional(self)
+        .await?;
+
+        row.map(|r| crypto::decrypt_bytes(&r.payload)).transpose()
+    }
+
+    async fn list_workflow_artifacts(
+        &self,
+        instance_name: &str,
+        artifact_kind: &str,
+    ) -> Result<Vec<(String, Vec<u8>)>> {
+        let rows = sqlx::query_as::<_, WorkflowArtifactRow>(
+            "SELECT * FROM workflow_artifacts \
+             WHERE instance_name = ? AND artifact_kind = ? \
+             ORDER BY peer_id ASC",
+        )
+        .bind(instance_name)
+        .bind(artifact_kind)
+        .fetch_all(self)
+        .await?;
+
+        rows.into_iter()
+            .map(|r| Ok((r.peer_id, crypto::decrypt_bytes(&r.payload)?)))
+            .collect()
+    }
+
+    async fn read_dec_party_identity(
+        &self,
+        dec_party_id: &CantonId,
+        artifact_kind: &str,
+        peer_id: &str,
+    ) -> Result<Option<Vec<u8>>> {
+        let row = sqlx::query_as::<_, DecPartyIdentityRow>(
+            "SELECT * FROM dec_party_identity \
+             WHERE dec_party_id = ? AND artifact_kind = ? AND peer_id = ?",
+        )
+        .bind(dec_party_id.to_string())
+        .bind(artifact_kind)
+        .bind(peer_id)
+        .fetch_optional(self)
+        .await?;
+
+        row.map(|r| crypto::decrypt_bytes(&r.payload)).transpose()
+    }
+
+    async fn list_dec_party_identity(
+        &self,
+        dec_party_id: &CantonId,
+        artifact_kind: &str,
+    ) -> Result<Vec<(String, Vec<u8>)>> {
+        let rows = sqlx::query_as::<_, DecPartyIdentityRow>(
+            "SELECT * FROM dec_party_identity \
+             WHERE dec_party_id = ? AND artifact_kind = ? \
+             ORDER BY peer_id ASC",
+        )
+        .bind(dec_party_id.to_string())
+        .bind(artifact_kind)
+        .fetch_all(self)
+        .await?;
+
+        rows.into_iter()
+            .map(|r| Ok((r.peer_id, crypto::decrypt_bytes(&r.payload)?)))
+            .collect()
     }
 }
 
@@ -417,9 +566,10 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         Ok(())
     }
 
-    async fn replace_dec_party_owners(&mut self, party_id: &str, owners: &[String]) -> Result {
+    async fn replace_dec_party_owners(&mut self, party_id: &CantonId, owners: &[String]) -> Result {
+        let party_id_str = party_id.to_string();
         sqlx::query("DELETE FROM dec_party_owner WHERE dec_party_id = ?")
-            .bind(party_id)
+            .bind(&party_id_str)
             .execute(&mut **self)
             .await?;
 
@@ -430,7 +580,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                 VALUES (?, ?)
                 ",
             )
-            .bind(party_id)
+            .bind(&party_id_str)
             .bind(owner)
             .execute(&mut **self)
             .await?;
@@ -441,9 +591,10 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
 
     async fn replace_dec_party_participants(
         &mut self,
-        party_id: &str,
+        party_id: &CantonId,
         participants: &[DecPartyParticipantRow],
     ) -> Result {
+        let party_id_str = party_id.to_string();
         // UPSERT each fresh row. permission may change (e.g., submission ->
         // confirmation); owner_key only ever transitions NULL -> Some, never
         // back to NULL. COALESCE keeps a previously-known fingerprint when
@@ -462,7 +613,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                     owner_key = COALESCE(excluded.owner_key, dec_party_participant.owner_key)
                 ",
             )
-            .bind(party_id)
+            .bind(&party_id_str)
             .bind(&p.participant_uid)
             .bind(&p.permission)
             .bind(&p.owner_key)
@@ -478,7 +629,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
             .collect();
         if fresh_uids.is_empty() {
             sqlx::query("DELETE FROM dec_party_participant WHERE dec_party_id = ?")
-                .bind(party_id)
+                .bind(&party_id_str)
                 .execute(&mut **self)
                 .await?;
         } else {
@@ -487,7 +638,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                 "DELETE FROM dec_party_participant WHERE dec_party_id = ? \
                  AND participant_uid NOT IN ({placeholders})"
             );
-            let mut q = sqlx::query(&query).bind(party_id);
+            let mut q = sqlx::query(&query).bind(&party_id_str);
             for uid in fresh_uids {
                 q = q.bind(uid);
             }
@@ -499,11 +650,12 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
 
     async fn replace_dec_party_contracts(
         &mut self,
-        party_id: &str,
+        party_id: &CantonId,
         contracts: &[DecPartyContractRow],
     ) -> Result {
+        let party_id_str = party_id.to_string();
         sqlx::query("DELETE FROM dec_party_contract WHERE dec_party_id = ?")
-            .bind(party_id)
+            .bind(&party_id_str)
             .execute(&mut **self)
             .await?;
 
@@ -514,14 +666,20 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                     dec_party_id,
                     contract_id,
                     template_id,
-                    package_id
-                ) VALUES (?, ?, ?, ?)
+                    package_id,
+                    package_name,
+                    package_version,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 ",
             )
-            .bind(party_id)
+            .bind(&party_id_str)
             .bind(&c.contract_id)
             .bind(&c.template_id)
             .bind(&c.package_id)
+            .bind(&c.package_name)
+            .bind(&c.package_version)
+            .bind(&c.created_at)
             .execute(&mut **self)
             .await?;
         }
@@ -578,7 +736,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
 
     async fn update_participant_owner_key(
         &mut self,
-        party_id: &str,
+        party_id: &CantonId,
         participant_uid: &str,
         owner_key: &str,
     ) -> Result {
@@ -590,8 +748,289 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
             ",
         )
         .bind(owner_key)
-        .bind(party_id)
+        .bind(party_id.to_string())
         .bind(participant_uid)
+        .execute(&mut **self)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn upsert_pending_invitation(&mut self, inv: &PendingInvitation) -> Result {
+        let row = PendingInvitationRow::from_domain(inv)?;
+
+        sqlx::query(
+            r"
+            INSERT OR REPLACE INTO pending_invitations (
+                id,
+                invitation_type,
+                coordinator_pubkey,
+                received_at,
+                prefix,
+                participants,
+                dar_filenames
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ",
+        )
+        .bind(&row.id)
+        .bind(&row.invitation_type)
+        .bind(&row.coordinator_pubkey)
+        .bind(row.received_at)
+        .bind(&row.prefix)
+        .bind(&row.participants)
+        .bind(&row.dar_filenames)
+        .execute(&mut **self)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn delete_pending_invitation(&mut self, id: &str) -> Result {
+        sqlx::query("DELETE FROM pending_invitations WHERE id = ?")
+            .bind(id)
+            .execute(&mut **self)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn delete_pending_invitations_by_coordinator(
+        &mut self,
+        coordinator_pubkey: &str,
+    ) -> Result {
+        sqlx::query("DELETE FROM pending_invitations WHERE coordinator_pubkey = ?")
+            .bind(coordinator_pubkey)
+            .execute(&mut **self)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn upsert_workflow_run(&mut self, run: &WorkflowRun) -> Result {
+        let row = WorkflowRunRow::from_domain(run)?;
+
+        // ON CONFLICT(instance_name) so re-saving the same run (resume,
+        // step advance, etc.) replaces in place. Conflicts on the partial
+        // unique index `idx_workflow_runs_inprogress_per_kind` propagate as
+        // an error — that's what enforces "one InProgress run per (kind, role)".
+        sqlx::query(
+            r"
+            INSERT INTO workflow_runs (
+                instance_name,
+                kind,
+                role,
+                status,
+                current_step,
+                step_index,
+                step_total,
+                config_json,
+                coordinator_pubkey,
+                expected_peers_json,
+                completed_peers_json,
+                dec_party_id,
+                error,
+                dismissed,
+                created_at,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(instance_name) DO UPDATE SET
+                kind                     = excluded.kind,
+                role                     = excluded.role,
+                status                   = excluded.status,
+                current_step             = excluded.current_step,
+                step_index               = excluded.step_index,
+                step_total               = excluded.step_total,
+                config_json              = excluded.config_json,
+                coordinator_pubkey       = excluded.coordinator_pubkey,
+                expected_peers_json  = excluded.expected_peers_json,
+                completed_peers_json = excluded.completed_peers_json,
+                dec_party_id             = excluded.dec_party_id,
+                error                    = excluded.error,
+                dismissed                = excluded.dismissed,
+                updated_at               = excluded.updated_at
+            ",
+        )
+        .bind(&row.instance_name)
+        .bind(&row.kind)
+        .bind(&row.role)
+        .bind(&row.status)
+        .bind(&row.current_step)
+        .bind(row.step_index)
+        .bind(row.step_total)
+        .bind(&row.config_json)
+        .bind(&row.coordinator_pubkey)
+        .bind(&row.expected_peers_json)
+        .bind(&row.completed_peers_json)
+        .bind(&row.dec_party_id)
+        .bind(&row.error)
+        .bind(row.dismissed)
+        .bind(row.created_at)
+        .bind(row.updated_at)
+        .execute(&mut **self)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn update_workflow_run_step(
+        &mut self,
+        instance_name: &str,
+        current_step: &str,
+        step_index: i64,
+        completed_peers: &[CantonId],
+        updated_at: i64,
+    ) -> Result {
+        let completed_json =
+            serde_json::to_string(completed_peers).context("encode completed_peers")?;
+
+        sqlx::query(
+            r"
+            UPDATE workflow_runs
+            SET current_step = ?,
+                step_index = ?,
+                completed_peers_json = ?,
+                updated_at = ?
+            WHERE instance_name = ?
+            ",
+        )
+        .bind(current_step)
+        .bind(step_index)
+        .bind(&completed_json)
+        .bind(updated_at)
+        .bind(instance_name)
+        .execute(&mut **self)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn set_workflow_run_status(
+        &mut self,
+        instance_name: &str,
+        status: WorkflowProgress,
+        error: Option<&str>,
+        updated_at: i64,
+    ) -> Result {
+        let status_str = match status {
+            WorkflowProgress::Idle => "idle",
+            WorkflowProgress::InProgress => "inprogress",
+            WorkflowProgress::Completed => "completed",
+            WorkflowProgress::Failed => "failed",
+            WorkflowProgress::Cancelled => "cancelled",
+        };
+
+        sqlx::query(
+            r"
+            UPDATE workflow_runs
+            SET status = ?,
+                error = ?,
+                updated_at = ?
+            WHERE instance_name = ?
+            ",
+        )
+        .bind(status_str)
+        .bind(error)
+        .bind(updated_at)
+        .bind(instance_name)
+        .execute(&mut **self)
+        .await?;
+
+        // Clean up `workflow_artifacts` rows when the run reaches a clean
+        // terminal state — they're transient working data, the long-lived
+        // identity material lives in `dec_party_identity`. Failed runs keep
+        // their artefacts so the operator can post-mortem before dismissing.
+        if matches!(
+            status,
+            WorkflowProgress::Completed | WorkflowProgress::Cancelled
+        ) {
+            sqlx::query("DELETE FROM workflow_artifacts WHERE instance_name = ?")
+                .bind(instance_name)
+                .execute(&mut **self)
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn dismiss_workflow_run(&mut self, instance_name: &str) -> Result {
+        sqlx::query(
+            r"
+            UPDATE workflow_runs
+            SET dismissed = 1
+            WHERE instance_name = ? AND status != 'inprogress'
+            ",
+        )
+        .bind(instance_name)
+        .execute(&mut **self)
+        .await?;
+
+        // Drop any leftover artefacts. Completed/Cancelled runs already had
+        // their artefacts cleared at terminal time; Failed runs kept theirs
+        // for post-mortem and now release them on dismiss.
+        sqlx::query("DELETE FROM workflow_artifacts WHERE instance_name = ?")
+            .bind(instance_name)
+            .execute(&mut **self)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn write_workflow_artifact(
+        &mut self,
+        instance_name: &str,
+        artifact_kind: &str,
+        peer: Option<&str>,
+        payload: &[u8],
+    ) -> Result {
+        let encrypted = crypto::encrypt_bytes(payload)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        sqlx::query(
+            r"
+            INSERT OR REPLACE INTO workflow_artifacts
+                (instance_name, artifact_kind, peer_id, payload, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            ",
+        )
+        .bind(instance_name)
+        .bind(artifact_kind)
+        .bind(peer.unwrap_or(""))
+        .bind(&encrypted)
+        .bind(now)
+        .execute(&mut **self)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn write_dec_party_identity(
+        &mut self,
+        dec_party_id: &CantonId,
+        artifact_kind: &str,
+        peer_id: &str,
+        payload: &[u8],
+    ) -> Result {
+        let encrypted = crypto::encrypt_bytes(payload)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        sqlx::query(
+            r"
+            INSERT OR REPLACE INTO dec_party_identity
+                (dec_party_id, artifact_kind, peer_id, payload, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            ",
+        )
+        .bind(dec_party_id.to_string())
+        .bind(artifact_kind)
+        .bind(peer_id)
+        .bind(&encrypted)
+        .bind(now)
         .execute(&mut **self)
         .await?;
 
@@ -611,6 +1050,10 @@ mod tests {
         },
         error::Result,
         participant_id::CantonId,
+        server::{
+            InvitationType, PendingInvitation, WorkflowKind, WorkflowProgress, WorkflowRole,
+            WorkflowRun,
+        },
     };
 
     use super::MIGRATOR;
@@ -782,9 +1225,10 @@ mod tests {
         tx.upsert_party_credentials(&test_creds("party-b")).await?;
         Commitable::commit(tx).await?;
 
-        let dec_id = format!("party-a::{TEST_NS}");
+        let dec_id = CantonId::parse(&format!("party-a::{TEST_NS}")).unwrap();
         assert!(pool.get_party_credentials(&dec_id).await?.is_some());
-        assert!(pool.get_party_credentials("nonexistent").await?.is_none());
+        let nonexistent = CantonId::parse(&format!("nonexistent::{TEST_NS}")).unwrap();
+        assert!(pool.get_party_credentials(&nonexistent).await?.is_none());
 
         Ok(())
     }
@@ -820,7 +1264,8 @@ mod tests {
     async fn test_dec_party_owners(pool: SqlitePool) -> Result {
         let mut tx = pool.begin_transaction().await?;
         tx.upsert_dec_party(&test_dec_party("net-a")).await?;
-        let party_id = format!("net-a::{TEST_NS}");
+        let party_id_str = format!("net-a::{TEST_NS}");
+        let party_id = CantonId::parse(&party_id_str).unwrap();
         let owners = vec!["owner-key-1".to_string(), "owner-key-2".to_string()];
         tx.replace_dec_party_owners(&party_id, &owners).await?;
         Commitable::commit(tx).await?;
@@ -845,16 +1290,17 @@ mod tests {
     async fn test_dec_party_participants(pool: SqlitePool) -> Result {
         let mut tx = pool.begin_transaction().await?;
         tx.upsert_dec_party(&test_dec_party("net-a")).await?;
-        let party_id = format!("net-a::{TEST_NS}");
+        let party_id_str = format!("net-a::{TEST_NS}");
+        let party_id = CantonId::parse(&party_id_str).unwrap();
         let participants = vec![
             DecPartyParticipantRow {
-                dec_party_id: party_id.clone(),
+                dec_party_id: party_id_str.clone(),
                 participant_uid: "node1::1220aa".to_string(),
                 permission: "submission".to_string(),
                 owner_key: Some("fingerprint-1".to_string()),
             },
             DecPartyParticipantRow {
-                dec_party_id: party_id.clone(),
+                dec_party_id: party_id_str.clone(),
                 participant_uid: "node2::1220bb".to_string(),
                 permission: "confirmation".to_string(),
                 owner_key: None,
@@ -877,13 +1323,14 @@ mod tests {
     async fn test_replace_preserves_owner_key_when_incoming_is_null(pool: SqlitePool) -> Result {
         let mut tx = pool.begin_transaction().await?;
         tx.upsert_dec_party(&test_dec_party("net-a")).await?;
-        let party_id = format!("net-a::{TEST_NS}");
+        let party_id_str = format!("net-a::{TEST_NS}");
+        let party_id = CantonId::parse(&party_id_str).unwrap();
 
         // First write — owner_key is known.
         tx.replace_dec_party_participants(
             &party_id,
             &[DecPartyParticipantRow {
-                dec_party_id: party_id.clone(),
+                dec_party_id: party_id_str.clone(),
                 participant_uid: "node1::1220aa".to_string(),
                 permission: "submission".to_string(),
                 owner_key: Some("fingerprint-1".to_string()),
@@ -898,7 +1345,7 @@ mod tests {
         tx.replace_dec_party_participants(
             &party_id,
             &[DecPartyParticipantRow {
-                dec_party_id: party_id.clone(),
+                dec_party_id: party_id_str.clone(),
                 participant_uid: "node1::1220aa".to_string(),
                 permission: "submission".to_string(),
                 owner_key: None,
@@ -926,11 +1373,12 @@ mod tests {
         // UPSERT could COALESCE them back.
         let mut tx = pool.begin_transaction().await?;
         tx.upsert_dec_party(&test_dec_party("net-a")).await?;
-        let party_id = format!("net-a::{TEST_NS}");
+        let party_id_str = format!("net-a::{TEST_NS}");
+        let party_id = CantonId::parse(&party_id_str).unwrap();
         tx.replace_dec_party_participants(
             &party_id,
             &[DecPartyParticipantRow {
-                dec_party_id: party_id.clone(),
+                dec_party_id: party_id_str.clone(),
                 participant_uid: "node1::1220aa".to_string(),
                 permission: "submission".to_string(),
                 owner_key: Some("fingerprint-1".to_string()),
@@ -967,7 +1415,7 @@ mod tests {
         tx.replace_dec_party_participants(
             &party_id,
             &[DecPartyParticipantRow {
-                dec_party_id: party_id.clone(),
+                dec_party_id: party_id_str.clone(),
                 participant_uid: "node1::1220aa".to_string(),
                 permission: "submission".to_string(),
                 owner_key: None,
@@ -995,20 +1443,21 @@ mod tests {
         // the party must be removed from the cache.
         let mut tx = pool.begin_transaction().await?;
         tx.upsert_dec_party(&test_dec_party("net-a")).await?;
-        let party_id = format!("net-a::{TEST_NS}");
+        let party_id_str = format!("net-a::{TEST_NS}");
+        let party_id = CantonId::parse(&party_id_str).unwrap();
         let p1 = "node1::1220aa";
         let p2 = "node2::1220bb";
         tx.replace_dec_party_participants(
             &party_id,
             &[
                 DecPartyParticipantRow {
-                    dec_party_id: party_id.clone(),
+                    dec_party_id: party_id_str.clone(),
                     participant_uid: p1.to_string(),
                     permission: "submission".to_string(),
                     owner_key: Some("fp-1".to_string()),
                 },
                 DecPartyParticipantRow {
-                    dec_party_id: party_id.clone(),
+                    dec_party_id: party_id_str.clone(),
                     participant_uid: p2.to_string(),
                     permission: "submission".to_string(),
                     owner_key: Some("fp-2".to_string()),
@@ -1024,7 +1473,7 @@ mod tests {
         tx.replace_dec_party_participants(
             &party_id,
             &[DecPartyParticipantRow {
-                dec_party_id: party_id.clone(),
+                dec_party_id: party_id_str.clone(),
                 participant_uid: p1.to_string(),
                 permission: "submission".to_string(),
                 owner_key: Some("fp-1".to_string()),
@@ -1049,18 +1498,19 @@ mod tests {
     async fn test_get_dec_party_participant_owner_key(pool: SqlitePool) -> Result {
         let mut tx = pool.begin_transaction().await?;
         tx.upsert_dec_party(&test_dec_party("net-a")).await?;
-        let party_id = format!("net-a::{TEST_NS}");
+        let party_id_str = format!("net-a::{TEST_NS}");
+        let party_id = CantonId::parse(&party_id_str).unwrap();
         tx.replace_dec_party_participants(
             &party_id,
             &[
                 DecPartyParticipantRow {
-                    dec_party_id: party_id.clone(),
+                    dec_party_id: party_id_str.clone(),
                     participant_uid: "node1::1220aa".to_string(),
                     permission: "submission".to_string(),
                     owner_key: Some("fingerprint-1".to_string()),
                 },
                 DecPartyParticipantRow {
-                    dec_party_id: party_id.clone(),
+                    dec_party_id: party_id_str.clone(),
                     participant_uid: "node2::1220bb".to_string(),
                     permission: "confirmation".to_string(),
                     owner_key: None,
@@ -1093,19 +1543,26 @@ mod tests {
     async fn test_dec_party_contracts(pool: SqlitePool) -> Result {
         let mut tx = pool.begin_transaction().await?;
         tx.upsert_dec_party(&test_dec_party("net-a")).await?;
-        let party_id = format!("net-a::{TEST_NS}");
+        let party_id_str = format!("net-a::{TEST_NS}");
+        let party_id = CantonId::parse(&party_id_str).unwrap();
         let contracts = vec![
             DecPartyContractRow {
-                dec_party_id: party_id.clone(),
+                dec_party_id: party_id_str.clone(),
                 contract_id: "contract-1".to_string(),
                 template_id: "Governance:GovernanceRules".to_string(),
                 package_id: "#gov-core".to_string(),
+                package_name: "governance-core-v0-rc3".to_string(),
+                package_version: "0.1.0".to_string(),
+                created_at: "2026-04-28T11:07:59.073177Z".to_string(),
             },
             DecPartyContractRow {
-                dec_party_id: party_id.clone(),
+                dec_party_id: party_id_str.clone(),
                 contract_id: "contract-2".to_string(),
                 template_id: "Vault:Vault".to_string(),
                 package_id: "#vault".to_string(),
+                package_name: "vault".to_string(),
+                package_version: "0.1.0".to_string(),
+                created_at: "2026-04-28T11:08:00.000000Z".to_string(),
             },
         ];
         tx.replace_dec_party_contracts(&party_id, &contracts)
@@ -1121,7 +1578,8 @@ mod tests {
 
     #[sqlx::test(migrator = "MIGRATOR")]
     async fn test_delete_dec_parties_cascades(pool: SqlitePool) -> Result {
-        let party_id = format!("net-a::{TEST_NS}");
+        let party_id_str = format!("net-a::{TEST_NS}");
+        let party_id = CantonId::parse(&party_id_str).unwrap();
 
         let mut tx = pool.begin_transaction().await?;
         tx.upsert_dec_party(&test_dec_party("net-a")).await?;
@@ -1130,7 +1588,7 @@ mod tests {
         tx.replace_dec_party_participants(
             &party_id,
             &[DecPartyParticipantRow {
-                dec_party_id: party_id.clone(),
+                dec_party_id: party_id_str.clone(),
                 participant_uid: "node1".to_string(),
                 permission: "submission".to_string(),
                 owner_key: None,
@@ -1140,10 +1598,13 @@ mod tests {
         tx.replace_dec_party_contracts(
             &party_id,
             &[DecPartyContractRow {
-                dec_party_id: party_id.clone(),
+                dec_party_id: party_id_str.clone(),
                 contract_id: "c1".to_string(),
                 template_id: "t1".to_string(),
                 package_id: "p1".to_string(),
+                package_name: String::new(),
+                package_version: String::new(),
+                created_at: String::new(),
             }],
         )
         .await?;
@@ -1272,6 +1733,88 @@ mod tests {
         Ok(())
     }
 
+    // ====================================================================
+    // Pending invitations
+    // ====================================================================
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_pending_invitations_roundtrip(pool: SqlitePool) -> Result {
+        assert!(pool.get_all_pending_invitations().await?.is_empty());
+
+        let inv_a = PendingInvitation {
+            id: "onboarding-aaaaaaaaaaaaaaaa".to_string(),
+            invitation_type: InvitationType::Onboarding,
+            coordinator_pubkey: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            coordinator_name: None,
+            received_at: 1000,
+            prefix: Some("my-party".to_string()),
+            participants: vec![
+                CantonId::parse(&format!("node1::{TEST_NS}")).unwrap(),
+                CantonId::parse(&format!("node2::{TEST_NS}")).unwrap(),
+            ],
+            dar_filenames: Vec::new(),
+        };
+        let inv_b = PendingInvitation {
+            id: "kick-bbbbbbbbbbbbbbbb".to_string(),
+            invitation_type: InvitationType::Kick,
+            coordinator_pubkey: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+            coordinator_name: None,
+            received_at: 2000,
+            prefix: None,
+            participants: Vec::new(),
+            dar_filenames: Vec::new(),
+        };
+
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_pending_invitation(&inv_a).await?;
+        tx.upsert_pending_invitation(&inv_b).await?;
+        Commitable::commit(tx).await?;
+
+        let inv_c = PendingInvitation {
+            id: "dars-cccccccccccccccc".to_string(),
+            invitation_type: InvitationType::Dars,
+            coordinator_pubkey: "cccccccccccccccccccccccccccccccc".to_string(),
+            coordinator_name: None,
+            received_at: 3000,
+            prefix: None,
+            participants: Vec::new(),
+            dar_filenames: vec!["app.dar".to_string(), "lib.dar".to_string()],
+        };
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_pending_invitation(&inv_c).await?;
+        Commitable::commit(tx).await?;
+
+        let loaded = pool.get_all_pending_invitations().await?;
+        assert_eq!(loaded.len(), 3);
+        assert_eq!(loaded[0].id, inv_a.id);
+        assert_eq!(loaded[0].prefix.as_deref(), Some("my-party"));
+        assert_eq!(loaded[0].participants.len(), 2);
+        assert_eq!(loaded[1].invitation_type, InvitationType::Kick);
+        assert!(loaded[1].prefix.is_none());
+        assert!(loaded[1].participants.is_empty());
+        assert_eq!(loaded[2].invitation_type, InvitationType::Dars);
+        assert_eq!(loaded[2].dar_filenames, vec!["app.dar", "lib.dar"]);
+
+        let mut tx = pool.begin_transaction().await?;
+        tx.delete_pending_invitation(&inv_a.id).await?;
+        Commitable::commit(tx).await?;
+        assert_eq!(pool.get_all_pending_invitations().await?.len(), 2);
+
+        let mut tx = pool.begin_transaction().await?;
+        tx.delete_pending_invitations_by_coordinator(&inv_b.coordinator_pubkey)
+            .await?;
+        Commitable::commit(tx).await?;
+        assert_eq!(pool.get_all_pending_invitations().await?.len(), 1);
+
+        let mut tx = pool.begin_transaction().await?;
+        tx.delete_pending_invitations_by_coordinator(&inv_c.coordinator_pubkey)
+            .await?;
+        Commitable::commit(tx).await?;
+        assert!(pool.get_all_pending_invitations().await?.is_empty());
+
+        Ok(())
+    }
+
     #[sqlx::test(migrator = "MIGRATOR")]
     async fn test_governance_audit_filters_by_party(pool: SqlitePool) -> Result {
         let party_a = test_party_id("party-a");
@@ -1287,6 +1830,177 @@ mod tests {
         let entries = pool.get_governance_audit(&party_b, 50, 0).await?;
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].event_type, "confirm");
+
+        Ok(())
+    }
+
+    // ====================================================================
+    // Workflow runs + artefacts
+    // ====================================================================
+
+    fn test_run(instance: &str, kind: &str, role: &str) -> WorkflowRun {
+        WorkflowRun {
+            instance_name: instance.to_string(),
+            kind: kind.parse().unwrap(),
+            role: role.parse().unwrap(),
+            status: WorkflowProgress::InProgress,
+            current_step: "WaitingForPeers".to_string(),
+            step_index: 0,
+            step_total: 7,
+            config_json: r#"{"foo":"bar"}"#.to_string(),
+            coordinator_pubkey: Some("aaaa".to_string()),
+            coordinator_name: None,
+            expected_peers: vec![
+                CantonId::parse(&format!("a::{TEST_NS}")).unwrap(),
+                CantonId::parse(&format!("b::{TEST_NS}")).unwrap(),
+            ],
+            completed_peers: Vec::new(),
+            dec_party_id: None,
+            error: None,
+            dismissed: false,
+            created_at: 1000,
+            updated_at: 1000,
+        }
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_workflow_runs_lifecycle(pool: SqlitePool) -> Result {
+        let run = test_run("party-a-creation", "Onboarding", "Coordinator");
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_workflow_run(&run).await?;
+        Commitable::commit(tx).await?;
+
+        let active = pool
+            .get_active_workflow_run(WorkflowKind::Onboarding, WorkflowRole::Coordinator)
+            .await?;
+        assert!(active.is_some());
+
+        // Advance step
+        let mut tx = pool.begin_transaction().await?;
+        let completed = vec![CantonId::parse(&format!("a::{TEST_NS}")).unwrap()];
+        tx.update_workflow_run_step(&run.instance_name, "SignDns", 3, &completed, 2000)
+            .await?;
+        Commitable::commit(tx).await?;
+
+        let loaded = pool.get_workflow_run(&run.instance_name).await?.unwrap();
+        assert_eq!(loaded.current_step, "SignDns");
+        assert_eq!(loaded.step_index, 3);
+        assert_eq!(loaded.completed_peers, completed);
+
+        // Seed an artefact so we can verify the terminal-state cleanup wipes it.
+        let mut tx = pool.begin_transaction().await?;
+        tx.write_workflow_artifact(&run.instance_name, "dns_proto", None, b"some-bytes")
+            .await?;
+        Commitable::commit(tx).await?;
+
+        // Mark completed → workflow_artifacts for this instance should drop.
+        let mut tx = pool.begin_transaction().await?;
+        tx.set_workflow_run_status(&run.instance_name, WorkflowProgress::Completed, None, 3000)
+            .await?;
+        Commitable::commit(tx).await?;
+
+        let leftover = pool
+            .read_workflow_artifact(&run.instance_name, "dns_proto", None)
+            .await?;
+        assert!(
+            leftover.is_none(),
+            "workflow_artifacts should be cleaned up on terminal status"
+        );
+
+        // Visible feed: still here because not dismissed.
+        let visible = pool.get_visible_workflow_runs().await?;
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].status, WorkflowProgress::Completed);
+
+        // Dismiss → vanishes from feed.
+        let mut tx = pool.begin_transaction().await?;
+        tx.dismiss_workflow_run(&run.instance_name).await?;
+        Commitable::commit(tx).await?;
+
+        let visible = pool.get_visible_workflow_runs().await?;
+        assert!(visible.is_empty());
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_workflow_runs_unique_inprogress_per_kind(pool: SqlitePool) -> Result {
+        let mut a = test_run("alpha", "Onboarding", "Coordinator");
+        let mut b = test_run("beta", "Onboarding", "Coordinator");
+
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_workflow_run(&a).await?;
+        Commitable::commit(tx).await?;
+
+        // A second InProgress run of the same (kind, role) must fail.
+        let mut tx = pool.begin_transaction().await?;
+        let err = tx.upsert_workflow_run(&b).await;
+        assert!(err.is_err(), "expected unique-partial-index violation");
+        // tx is poisoned — drop it
+        drop(tx);
+
+        // Once A is terminal, B can start.
+        let mut tx = pool.begin_transaction().await?;
+        tx.set_workflow_run_status(&a.instance_name, WorkflowProgress::Completed, None, 2000)
+            .await?;
+        Commitable::commit(tx).await?;
+
+        a.status = WorkflowProgress::Completed;
+        b.status = WorkflowProgress::InProgress;
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_workflow_run(&b).await?;
+        Commitable::commit(tx).await?;
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_workflow_artifacts_roundtrip_and_cascade(pool: SqlitePool) -> Result {
+        let run = test_run("art-test", "Onboarding", "Coordinator");
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_workflow_run(&run).await?;
+        // Shared artefact (no peer).
+        tx.write_workflow_artifact(&run.instance_name, "dns_proto", None, b"shared-proto-bytes")
+            .await?;
+        // Per-peer artefacts.
+        tx.write_workflow_artifact(
+            &run.instance_name,
+            "signed_dns_proposal",
+            Some("a::1220aa"),
+            b"sig-from-a",
+        )
+        .await?;
+        tx.write_workflow_artifact(
+            &run.instance_name,
+            "signed_dns_proposal",
+            Some("b::1220bb"),
+            b"sig-from-b",
+        )
+        .await?;
+        Commitable::commit(tx).await?;
+
+        let proto = pool
+            .read_workflow_artifact(&run.instance_name, "dns_proto", None)
+            .await?
+            .unwrap();
+        assert_eq!(proto, b"shared-proto-bytes");
+
+        let listed = pool
+            .list_workflow_artifacts(&run.instance_name, "signed_dns_proposal")
+            .await?;
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].0, "a::1220aa");
+        assert_eq!(listed[0].1, b"sig-from-a");
+
+        // CASCADE: deleting the run drops the artefacts.
+        sqlx::query("DELETE FROM workflow_runs WHERE instance_name = ?")
+            .bind(&run.instance_name)
+            .execute(&pool)
+            .await?;
+        let listed = pool
+            .list_workflow_artifacts(&run.instance_name, "signed_dns_proposal")
+            .await?;
+        assert!(listed.is_empty());
 
         Ok(())
     }

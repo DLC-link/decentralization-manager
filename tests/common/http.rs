@@ -2,7 +2,7 @@ use anyhow::Context;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use super::Fixture;
+use super::{Fixture, types::WorkflowRunsResponse};
 
 impl Fixture {
     pub async fn post_json<B, R>(&self, port: u16, path: &str, body: &B) -> anyhow::Result<R>
@@ -93,6 +93,35 @@ impl Fixture {
             .with_context(|| format!("deserialize PUT {url}: {}", String::from_utf8_lossy(&bytes)))
     }
 
+    /// POST that returns the HTTP status code (and body) without erroring on
+    /// non-2xx. Used by tests that assert specific failure codes (409, 422,
+    /// etc.) rather than the success-path JSON shape.
+    pub async fn post_expect_status<B>(
+        &self,
+        port: u16,
+        path: &str,
+        body: &B,
+    ) -> anyhow::Result<(reqwest::StatusCode, String)>
+    where
+        B: Serialize + ?Sized,
+    {
+        let url = format!("http://localhost:{port}{path}");
+        let res = self
+            .client
+            .post(&url)
+            .header(CONTENT_TYPE, "application/json")
+            .json(body)
+            .send()
+            .await
+            .with_context(|| format!("POST {url}"))?;
+        let status = res.status();
+        let bytes = res
+            .bytes()
+            .await
+            .with_context(|| format!("read body POST {url}"))?;
+        Ok((status, String::from_utf8_lossy(&bytes).into_owned()))
+    }
+
     pub async fn post_json_auth<B, R>(&self, port: u16, path: &str, body: &B) -> anyhow::Result<R>
     where
         B: Serialize + ?Sized,
@@ -151,4 +180,22 @@ pub async fn probe_workflow_status(
         ))),
         _ => None,
     }
+}
+
+/// Probe `GET /workflows` on `port` until a run matching `kind` + `role` +
+/// `status` is visible. Used to assert the unified notification feed surfaces
+/// completed/cancelled/failed runs from each side. Status values match the
+/// JSON enum form returned by the handler (`completed`, `failed`, etc.).
+pub async fn probe_workflow_run_visible(
+    f: &Fixture,
+    port: u16,
+    kind: &str,
+    role: &str,
+    status: &str,
+) -> Option<anyhow::Result<()>> {
+    let r: WorkflowRunsResponse = f.get_json(port, "/workflows").await.ok()?;
+    r.runs
+        .iter()
+        .any(|w| w.kind == kind && w.role == role && w.status == status)
+        .then_some(Ok(()))
 }

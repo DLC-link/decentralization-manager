@@ -1,26 +1,30 @@
-use anyhow::Context;
-use ed25519_dalek::{Signer, SigningKey};
-
+use bytes::{Buf, BufMut, BytesMut};
 use canton_proto_rs::com::{
     daml::ledger::api::v2::interactive::PrepareSubmissionResponse,
-    digitalasset::canton::crypto::{
-        admin::v30::{
-            ExportKeyPairRequest, ListKeysFilters, ListMyKeysRequest,
-            vault_service_client::VaultServiceClient,
+    digitalasset::canton::{
+        crypto::{
+            admin::v30::{
+                ExportKeyPairRequest, ListKeysFilters, ListMyKeysRequest,
+                vault_service_client::VaultServiceClient,
+            },
+            v30::{Signature, SignatureFormat, SigningAlgorithmSpec, SigningPublicKey},
         },
-        v30::{Signature, SignatureFormat, SigningAlgorithmSpec, SigningPublicKey},
+        topology::admin::v30::{
+            BaseQuery, ListPartyToParticipantRequest, StoreId, Synchronizer, base_query, store_id,
+            synchronizer, topology_manager_read_service_client::TopologyManagerReadServiceClient,
+        },
     },
 };
+use ed25519_dalek::{Signature as DalekSignature, Signer, SigningKey, Verifier};
+use sqlx::SqlitePool;
 
 use crate::{
     config::NodeConfig,
-    consts::{
-        ATTESTOR_KEYS_PREFIX, CANTON_PROTOCOL_VERSION, EXECUTION_DIR, LEDGER_SUBMISSIONS_DIR,
-        PREPARED_DIR, PREPARED_SUBMISSION_PREFIX, SIGNATURES_DIR, SUBMISSION_SIGNATURES_PREFIX,
-    },
+    consts::CANTON_PROTOCOL_VERSION,
     error::Result,
+    participant_id::CantonId,
     utils,
-    workflow::contracts::ContractsDirs,
+    workflow::storage::{WorkflowStorage, artifact_kinds, identity_kinds},
 };
 
 /// DER OCTET STRING tag
@@ -31,38 +35,101 @@ const ED25519_PRIVATE_KEY_LENGTH: u8 = 0x20;
 
 /// Sign prepared ledger submissions with DAML key
 ///
-/// This step must be run by each attestor participant to sign the prepared submissions.
-/// Each attestor signs with their DAML signing key.
+/// This step must be run by each peer participant to sign the prepared submissions.
+/// Each peer signs with their DAML signing key.
+///
+/// The signed bundle is persisted as a `SUBMISSION_SIGNATURES` artefact keyed
+/// by this node's participant id, byte-identical to the previous on-disk file
+/// `submission-signatures-{node_id}.bin`.
 ///
 /// # Arguments
 /// * `config` - Configuration with Admin API connection details
-/// * `dirs` - WorkflowDirs containing all directory paths
-pub async fn sign_submissions(config: &NodeConfig, dirs: &ContractsDirs) -> Result {
+/// * `db` - Workflow storage backend (SqlitePool implementing `WorkflowStorage`)
+/// * `instance_name` - Workflow run instance name (key for `workflow_artifacts`)
+/// * `dec_party_id` - Decentralized party id used to look up `peer_public_keys`
+///   in the `dec_party_identity` table (this run's local DAML signing key bundle)
+pub async fn sign_submissions(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    instance_name: &str,
+    dec_party_id: &CantonId,
+) -> Result {
     tracing::info!("Signing submissions...");
 
     let node_id = config.participant_id().to_string();
 
-    // Step 1: Load the DAML public key that was exported during onboarding
-    // This ensures we use the newly generated key, not an old key from a previous run
-    tracing::info!("Loading DAML public key from exported file...");
-    let keys_file = dirs
-        .keys_dir
-        .join(format!("{ATTESTOR_KEYS_PREFIX}-{node_id}.bin"));
+    // Step 1: Load the DAML public key bundle that was exported during onboarding.
+    // It MUST come from `dec_party_identity` (long-lived, survives the
+    // originating onboarding run's dismissal) — not from `workflow_artifacts`,
+    // because by the time contracts runs the onboarding run may have been
+    // dismissed/aged out.
+    //
+    // Backfill path: onboardings that completed before the
+    // `dec_party_identity` write hook was added didn't populate that table.
+    // For those parties we fall back to the original onboarding run's
+    // `workflow_artifacts` row, then mirror it into `dec_party_identity` so
+    // subsequent contracts runs hit the fast path.
+    tracing::info!(
+        "Loading DAML public key bundle for {node_id} on {dec_party_id} from identity table..."
+    );
+    let keys_bytes = match db
+        .read_identity(dec_party_id, identity_kinds::PEER_PUBLIC_KEYS, &node_id)
+        .await?
+    {
+        Some(bytes) => bytes,
+        None => {
+            tracing::warn!(
+                "PEER_PUBLIC_KEYS missing in identity table for {node_id} on {dec_party_id}; \
+                 attempting backfill from completed onboarding artifacts"
+            );
+            let from_local = backfill_peer_keys(db, dec_party_id, &node_id).await?;
+            let bytes = match from_local {
+                Some(b) => b,
+                None => {
+                    tracing::warn!(
+                        "Local artifacts backfill failed; querying Canton's \
+                         PartyToParticipant on-chain to recover this node's DAML signing \
+                         key for {dec_party_id}"
+                    );
+                    backfill_peer_keys_from_chain(config, dec_party_id)
+                        .await?
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "PEER_PUBLIC_KEYS not found in identity table, completed \
+                                 onboarding artifacts, OR PartyToParticipant on-chain for \
+                                 {node_id} on {dec_party_id} — onboarding may not have \
+                                 completed yet"
+                            )
+                        })?
+                }
+            };
+            // Best-effort populate identity table for future calls; a failure
+            // here is non-fatal — we still have the keys we need to sign now.
+            if let Err(e) = db
+                .write_identity(
+                    dec_party_id,
+                    identity_kinds::PEER_PUBLIC_KEYS,
+                    &node_id,
+                    &bytes,
+                )
+                .await
+            {
+                tracing::warn!(
+                    "Failed to write backfilled PEER_PUBLIC_KEYS to identity table: {e:#}"
+                );
+            }
+            bytes
+        }
+    };
 
-    if !keys_file.exists() {
-        anyhow::bail!(
-            "Keys file not found: {path}. Run step 1 (generate keys) first.",
-            path = keys_file.display()
-        );
-    }
-
-    let exported_keys: Vec<SigningPublicKey> =
-        utils::read_all_messages_from_file(&keys_file).await?;
+    // The blob is two `varint(len)||SigningPublicKey` messages, written by
+    // onboarding. Decode unchanged so the bytes-on-the-wire shape stays
+    // identical to the previous file-based format.
+    let exported_keys: Vec<SigningPublicKey> = read_all_messages_from_bytes(&keys_bytes)?;
 
     if exported_keys.len() != 2 {
         anyhow::bail!(
-            "Expected 2 keys in {path}, but found {count}",
-            path = keys_file.display(),
+            "Expected 2 keys in PEER_PUBLIC_KEYS for {node_id}, but found {count}",
             count = exported_keys.len()
         );
     }
@@ -103,27 +170,28 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &ContractsDirs) -> Resu
         count = keys_response.private_keys_metadata.len()
     );
 
-    // Step 3: Dynamically load all prepared submissions
+    // Step 3: Dynamically load all prepared submissions from storage. They were
+    // written by `prepare_submissions` keyed by zero-padded ordinal so
+    // `list_artifacts` returns them sorted by their original creation order.
     tracing::info!("Loading prepared submissions...");
-    let ledger_submissions_dir = dirs.workflow_dir.join(LEDGER_SUBMISSIONS_DIR);
-    let prepared_dir = ledger_submissions_dir.join(PREPARED_DIR);
+    let submission_rows = db
+        .list_artifacts(instance_name, artifact_kinds::PREPARED_SUBMISSION)
+        .await?;
 
-    // Discover all prepared-submission-*.bin files
-    let submission_files =
-        utils::find_files_by_pattern(&prepared_dir, PREPARED_SUBMISSION_PREFIX, ".bin").await?;
-
-    if submission_files.is_empty() {
+    if submission_rows.is_empty() {
         anyhow::bail!(
-            "No prepared submission files found in {path}",
-            path = prepared_dir.display()
+            "No PREPARED_SUBMISSION artifacts found for instance {instance_name} — \
+             did PrepareSubmissions run?"
         );
     }
 
-    // Load all prepared submissions
-    let mut prepared_submissions: Vec<PrepareSubmissionResponse> = Vec::new();
-    for submission_file in &submission_files {
+    // Decode the per-submission `varint(len)||proto` blobs.
+    let mut prepared_submissions: Vec<PrepareSubmissionResponse> =
+        Vec::with_capacity(submission_rows.len());
+    for (ordinal, payload) in &submission_rows {
         let prepared_sub: PrepareSubmissionResponse =
-            utils::read_first_message_from_file(submission_file).await?;
+            utils::read_first_message_from_bytes(payload)?;
+        tracing::debug!("Loaded prepared submission ordinal {ordinal}");
         prepared_submissions.push(prepared_sub);
     }
 
@@ -264,7 +332,7 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &ContractsDirs) -> Resu
 
         // Compare raw Ed25519 public keys (32 bytes)
         if derived_public_bytes.as_slice() == expected_raw_public_key {
-            tracing::info!("✅ Found matching private key at offset {offset} ({source})");
+            tracing::info!("Found matching private key at offset {offset} ({source})");
             tracing::debug!("Private key (first 16 bytes): {:02x?}", &key_bytes[..16]);
             verified_key_bytes = Some(*key_bytes);
             break;
@@ -290,7 +358,6 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &ContractsDirs) -> Resu
     let signing_key = SigningKey::from_bytes(&key_bytes);
 
     // Verify the signatures locally before sending to Canton
-    use ed25519_dalek::{Signature as DalekSignature, Verifier};
     let verifying_key = signing_key.verifying_key();
     let verifying_key_bytes = verifying_key.to_bytes();
 
@@ -330,10 +397,10 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &ContractsDirs) -> Resu
             .verify(&prepared_sub.prepared_transaction_hash, &sig)
             .is_ok()
         {
-            tracing::info!("✅ Signature {index} verified locally", index = idx + 1);
+            tracing::info!("Signature {index} verified locally", index = idx + 1);
         } else {
             tracing::error!(
-                "❌ Signature {index} failed local verification!",
+                "Signature {index} failed local verification!",
                 index = idx + 1
             );
         }
@@ -351,22 +418,179 @@ pub async fn sign_submissions(config: &NodeConfig, dirs: &ContractsDirs) -> Resu
 
     tracing::debug!("Generated {count} signatures", count = signatures.len());
 
-    // Step 8: Save signatures to file
-    let execution_dir = dirs.workflow_dir.join(EXECUTION_DIR);
-    let signatures_dir = execution_dir.join(SIGNATURES_DIR);
-    tokio::fs::create_dir_all(&signatures_dir)
-        .await
-        .with_context(|| format!("Failed to create dir '{}'", signatures_dir.display()))?;
-
-    let signatures_file =
-        signatures_dir.join(format!("{SUBMISSION_SIGNATURES_PREFIX}-{node_id}.bin"));
+    // Step 8: Persist signatures bundle as `SUBMISSION_SIGNATURES` artefact.
+    // The blob is the same multi-message `varint(len)||proto` framing the
+    // previous on-disk `submission-signatures-{node_id}.bin` used; the
+    // execute step will read it back via `read_all_messages_from_bytes`.
+    let payload = encode_messages_length_prefixed(&signatures);
     tracing::info!(
-        "Saving signatures to {path}",
-        path = signatures_file.display()
+        "Saving signatures to artifact key {node_id} ({len} bytes)",
+        len = payload.len()
     );
-
-    utils::write_messages_to_file(&signatures, &signatures_file).await?;
+    db.write_artifact(
+        instance_name,
+        artifact_kinds::SUBMISSION_SIGNATURES,
+        Some(&node_id),
+        &payload,
+    )
+    .await?;
 
     tracing::info!("Signatures saved successfully");
     Ok(())
+}
+
+/// Decode a sequence of `varint(len)||proto` messages from a byte slice. Mirrors
+/// `utils::read_all_messages_from_file` but operates on in-memory data — used
+/// to round-trip blobs we used to read from disk.
+fn read_all_messages_from_bytes<M: prost::Message + Default>(data: &[u8]) -> Result<Vec<M>> {
+    let mut cursor = data;
+    let mut messages = Vec::new();
+    while cursor.has_remaining() {
+        let len = prost::encoding::decode_varint(&mut cursor)? as usize;
+        if cursor.remaining() < len {
+            anyhow::bail!(
+                "Incomplete message: expected {len} bytes, but only {remaining} remaining",
+                remaining = cursor.remaining()
+            );
+        }
+        let message_bytes = &cursor[..len];
+        cursor.advance(len);
+        messages.push(M::decode(message_bytes)?);
+    }
+    Ok(messages)
+}
+
+/// Encode a slice of protobuf messages as `varint(len)||proto` × N, matching the
+/// byte layout produced by `utils::write_messages_to_file`. Round-trips with
+/// `utils::read_all_messages_from_file` / `read_all_messages_from_bytes`.
+fn encode_messages_length_prefixed<M: prost::Message>(messages: &[M]) -> Vec<u8> {
+    let mut buffer = BytesMut::new();
+    for message in messages {
+        let encoded = message.encode_to_vec();
+        prost::encoding::encode_varint(encoded.len() as u64, &mut buffer);
+        buffer.put_slice(&encoded);
+    }
+    buffer.to_vec()
+}
+
+/// On-chain backfill: query Canton's `PartyToParticipant` topology mapping for
+/// the dec_party, then cross-reference its `party_signing_keys` against this
+/// node's vault. The vault key whose fingerprint matches one of the on-chain
+/// signing keys is the DAML key this node contributes to the party.
+///
+/// Returns the same `varint(len)||SigningPublicKey` × 2 byte layout that
+/// `read_all_messages_from_bytes` expects. Index `[0]` is unused downstream
+/// (originally the namespace key), so we duplicate the DAML key to keep the
+/// shape valid; the caller only reads `[1]`.
+async fn backfill_peer_keys_from_chain(
+    config: &NodeConfig,
+    dec_party_id: &CantonId,
+) -> Result<Option<Vec<u8>>> {
+    let dec_party_id_str = dec_party_id.to_string();
+    let synchronizer_id = utils::get_synchronizer_id(config).await?;
+
+    // 1. Pull this party's PartyToParticipant from Canton's topology store.
+    let mut topology_client =
+        TopologyManagerReadServiceClient::connect(config.admin_api_url()).await?;
+    let p2p_response = topology_client
+        .list_party_to_participant(tonic::Request::new(ListPartyToParticipantRequest {
+            base_query: Some(BaseQuery {
+                store: Some(StoreId {
+                    store: Some(store_id::Store::Synchronizer(Synchronizer {
+                        kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id)),
+                    })),
+                }),
+                proposals: false,
+                operation: 0,
+                time_query: Some(base_query::TimeQuery::HeadState(())),
+                filter_signed_key: String::new(),
+                protocol_version: None,
+            }),
+            filter_party: dec_party_id_str.clone(),
+            filter_participant: String::new(),
+        }))
+        .await?
+        .into_inner();
+
+    let Some(item) = p2p_response.results.into_iter().find_map(|r| r.item) else {
+        tracing::warn!("No PartyToParticipant mapping found on-chain for {dec_party_id}");
+        return Ok(None);
+    };
+    let Some(party_signing_keys) = item.party_signing_keys else {
+        tracing::warn!("PartyToParticipant for {dec_party_id} has no party_signing_keys field");
+        return Ok(None);
+    };
+    if party_signing_keys.keys.is_empty() {
+        tracing::warn!("PartyToParticipant for {dec_party_id} has empty party_signing_keys");
+        return Ok(None);
+    }
+
+    // 2. Walk the on-chain keys and pick the one our vault recognizes — that's
+    //    this node's contribution. Other entries belong to peer participants
+    //    and their private halves are not in our vault.
+    let mut vault_client = VaultServiceClient::connect(config.admin_api_url()).await?;
+    for key in &party_signing_keys.keys {
+        let fingerprint = utils::compute_fingerprint(key);
+        let resp = vault_client
+            .list_my_keys(tonic::Request::new(ListMyKeysRequest {
+                filters: Some(ListKeysFilters {
+                    fingerprint: fingerprint.clone(),
+                    name: String::new(),
+                    purpose: vec![],
+                    usage: vec![],
+                }),
+            }))
+            .await?
+            .into_inner();
+        if !resp.private_keys_metadata.is_empty() {
+            tracing::info!(
+                "Recovered DAML signing key {fingerprint} for {dec_party_id} from on-chain \
+                 PartyToParticipant"
+            );
+            // Encode as [namespace_placeholder, daml_key]. Downstream only
+            // reads index [1], so the placeholder content is irrelevant
+            // beyond the length-prefix shape — we duplicate the daml key.
+            return Ok(Some(encode_messages_length_prefixed(&[
+                key.clone(),
+                key.clone(),
+            ])));
+        }
+    }
+
+    tracing::warn!(
+        "None of the {count} on-chain signing keys for {dec_party_id} are present in this \
+         node's vault — this node may not be a hosting participant of {dec_party_id}",
+        count = party_signing_keys.keys.len()
+    );
+    Ok(None)
+}
+
+/// Find this node's `PEER_PUBLIC_KEYS` blob from the most recent completed
+/// Onboarding (or Kick — same kind of identity payload) coordinator run for
+/// the given dec_party_id, by joining `workflow_artifacts` to `workflow_runs`.
+/// Used as a one-shot backfill for parties whose onboarding ran before the
+/// `dec_party_identity` write hook was added.
+async fn backfill_peer_keys(
+    db: &SqlitePool,
+    dec_party_id: &CantonId,
+    node_id: &str,
+) -> Result<Option<Vec<u8>>> {
+    let dec_party_id_str = dec_party_id.to_string();
+    let row: Option<(Vec<u8>,)> = sqlx::query_as(
+        "SELECT a.payload \
+         FROM workflow_artifacts a \
+         JOIN workflow_runs r ON a.instance_name = r.instance_name \
+         WHERE r.dec_party_id = ?1 \
+           AND r.kind = 'Onboarding' \
+           AND r.status = 'completed' \
+           AND a.artifact_kind = 'peer_public_keys' \
+           AND a.peer_id = ?2 \
+         ORDER BY r.updated_at DESC \
+         LIMIT 1",
+    )
+    .bind(&dec_party_id_str)
+    .bind(node_id)
+    .fetch_optional(db)
+    .await?;
+    Ok(row.map(|(bytes,)| bytes))
 }

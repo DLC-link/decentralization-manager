@@ -6,7 +6,7 @@ use tracing::info;
 
 use crate::common::{
     Fixture,
-    http::probe_workflow_status,
+    http::{probe_workflow_run_visible, probe_workflow_status},
     invitations::{InvitationIds, post_accept_invitation, probe_pending_invitation},
     scenario::Scenario,
     types::DecentralizedPartiesResponse,
@@ -94,6 +94,25 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             |f, _| {
                 Box::pin(async move {
                     probe_workflow_status(&*f, f.p1.http, "/kick/status", "kick").await
+                })
+            },
+        )
+        .then(
+            "Kick completed run visible in /workflows on P1 (Coordinator)",
+            Duration::from_secs(30),
+            |f, _| {
+                Box::pin(async move {
+                    probe_workflow_run_visible(f, f.p1.http, "Kick", "Coordinator", "completed")
+                        .await
+                })
+            },
+        )
+        .then(
+            "Kick completed run visible in /workflows on P2 (Peer)",
+            Duration::from_secs(30),
+            |f, _| {
+                Box::pin(async move {
+                    probe_workflow_run_visible(f, f.p2.http, "Kick", "Peer", "completed").await
                 })
             },
         )
