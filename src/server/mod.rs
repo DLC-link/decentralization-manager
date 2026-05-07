@@ -249,9 +249,13 @@ pub(crate) async fn respawn_coordinator(
                     }
                 };
             *onboarding_state.invited_peers.write().await = run.expected_attestors.clone();
-            *onboarding_state.status.write().await = OnboardingStatus::InProgress;
-            *onboarding_state.error.write().await = None;
             let state_ref = onboarding_state.get_ref().clone();
+            // Hold abort_handle, status, and error locks across the spawn so a
+            // concurrent /onboarding/cancel can't observe "status=InProgress
+            // + abort_handle=None" — see start_dars in handlers/workflows.rs.
+            let mut abort_guard = onboarding_state.abort_handle.lock().await;
+            let mut status_guard = onboarding_state.status.write().await;
+            let mut error_guard = onboarding_state.error.write().await;
             let join_handle = tokio::spawn(spawn_onboarding_resume(
                 config,
                 db.clone(),
@@ -261,7 +265,9 @@ pub(crate) async fn respawn_coordinator(
                 listener_control,
                 listener_notify,
             ));
-            *onboarding_state.abort_handle.lock().await = Some(join_handle.abort_handle());
+            *abort_guard = Some(join_handle.abort_handle());
+            *status_guard = OnboardingStatus::InProgress;
+            *error_guard = None;
         }
         WorkflowKind::Kick => {
             let kick_config: workflow::KickConfig = match serde_json::from_str(&run.config_json) {
@@ -273,9 +279,10 @@ pub(crate) async fn respawn_coordinator(
                 }
             };
             *kick_state.invited_peers.write().await = run.expected_attestors.clone();
-            *kick_state.status.write().await = KickStatus::InProgress;
-            *kick_state.error.write().await = None;
             let state_ref = kick_state.get_ref().clone();
+            let mut abort_guard = kick_state.abort_handle.lock().await;
+            let mut status_guard = kick_state.status.write().await;
+            let mut error_guard = kick_state.error.write().await;
             let join_handle = tokio::spawn(spawn_kick_resume(
                 config,
                 db.clone(),
@@ -285,7 +292,9 @@ pub(crate) async fn respawn_coordinator(
                 listener_control,
                 listener_notify,
             ));
-            *kick_state.abort_handle.lock().await = Some(join_handle.abort_handle());
+            *abort_guard = Some(join_handle.abort_handle());
+            *status_guard = KickStatus::InProgress;
+            *error_guard = None;
         }
         WorkflowKind::Contracts => {
             let contracts_config: workflow::ContractsConfig =
@@ -300,10 +309,11 @@ pub(crate) async fn respawn_coordinator(
                     }
                 };
             *contracts_state.invited_peers.write().await = run.expected_attestors.clone();
-            *contracts_state.status.write().await = WorkflowProgress::InProgress;
-            *contracts_state.error.write().await = None;
             let state_ref = contracts_state.get_ref().clone();
             let auth_snapshot = auth.read().await.clone();
+            let mut abort_guard = contracts_state.abort_handle.lock().await;
+            let mut status_guard = contracts_state.status.write().await;
+            let mut error_guard = contracts_state.error.write().await;
             let join_handle = tokio::spawn(spawn_contracts_resume(
                 config,
                 db.clone(),
@@ -314,7 +324,9 @@ pub(crate) async fn respawn_coordinator(
                 listener_notify,
                 auth_snapshot,
             ));
-            *contracts_state.abort_handle.lock().await = Some(join_handle.abort_handle());
+            *abort_guard = Some(join_handle.abort_handle());
+            *status_guard = WorkflowProgress::InProgress;
+            *error_guard = None;
         }
         WorkflowKind::Dars => {
             let dars_config: workflow::DarsConfig = match serde_json::from_str(&run.config_json) {
@@ -326,9 +338,10 @@ pub(crate) async fn respawn_coordinator(
                 }
             };
             *dars_state.invited_peers.write().await = run.expected_attestors.clone();
-            *dars_state.status.write().await = WorkflowProgress::InProgress;
-            *dars_state.error.write().await = None;
             let state_ref = dars_state.get_ref().clone();
+            let mut abort_guard = dars_state.abort_handle.lock().await;
+            let mut status_guard = dars_state.status.write().await;
+            let mut error_guard = dars_state.error.write().await;
             let join_handle = tokio::spawn(spawn_dars_resume(
                 config,
                 db.clone(),
@@ -338,7 +351,9 @@ pub(crate) async fn respawn_coordinator(
                 listener_control,
                 listener_notify,
             ));
-            *dars_state.abort_handle.lock().await = Some(join_handle.abort_handle());
+            *abort_guard = Some(join_handle.abort_handle());
+            *status_guard = WorkflowProgress::InProgress;
+            *error_guard = None;
         }
     }
 }
@@ -1761,6 +1776,20 @@ async fn run_onboarding_attestor_listener(
 
         tracing::info!("Coordinator identified: {}", coordinator.participant_id);
 
+        // Resolve attestor instance BEFORE flipping status (see DARs handler
+        // below for the rationale: attestor_run_instance is shared across
+        // kinds and a race can leave us with None, which used to leak
+        // status=InProgress).
+        let local_instance = match attestor_run_instance.read().await.clone() {
+            Some(inst) => inst,
+            None => {
+                tracing::error!(
+                    "Attestor trigger fired without an attestor_run_instance; skipping run"
+                );
+                continue;
+            }
+        };
+
         // Update status
         {
             let mut status = onboarding_state.status.write().await;
@@ -1772,17 +1801,6 @@ async fn run_onboarding_attestor_listener(
         let guard =
             types::ListenerPauseGuard::pause(listener_control.clone(), listener_notify.clone())
                 .await;
-
-        // Start attestor workflow. Read the attestor-side workflow_runs row's
-        // primary key so workflow_artifacts writes satisfy the FK back to it.
-        let local_instance = attestor_run_instance.read().await.clone();
-        let Some(local_instance) = local_instance else {
-            tracing::error!(
-                "Attestor trigger fired without an attestor_run_instance; skipping run"
-            );
-            guard.resume().await;
-            continue;
-        };
         let workflow_config = config.clone();
         let result =
             workflow::start_attestor(workflow_config, coordinator, db.clone(), local_instance)
@@ -1867,6 +1885,18 @@ async fn run_kick_attestor_listener(
 
         tracing::info!("Coordinator identified: {}", coordinator.participant_id);
 
+        // Resolve attestor instance BEFORE flipping status (see DARs handler
+        // below for rationale).
+        let local_instance = match attestor_run_instance.read().await.clone() {
+            Some(inst) => inst,
+            None => {
+                tracing::error!(
+                    "Kick attestor trigger fired without an attestor_run_instance; skipping run"
+                );
+                continue;
+            }
+        };
+
         // Update status
         {
             let mut status = kick_state.status.write().await;
@@ -1878,16 +1908,6 @@ async fn run_kick_attestor_listener(
         let guard =
             types::ListenerPauseGuard::pause(listener_control.clone(), listener_notify.clone())
                 .await;
-
-        // Start kick attestor workflow.
-        let local_instance = attestor_run_instance.read().await.clone();
-        let Some(local_instance) = local_instance else {
-            tracing::error!(
-                "Kick attestor trigger fired without an attestor_run_instance; skipping run"
-            );
-            guard.resume().await;
-            continue;
-        };
         let workflow_config = config.clone();
         let result =
             workflow::start_attestor(workflow_config, coordinator, db.clone(), local_instance)
@@ -1972,6 +1992,18 @@ async fn run_contracts_attestor_listener(
 
         tracing::info!("Coordinator identified: {}", coordinator.participant_id);
 
+        // Resolve attestor instance BEFORE flipping status (see DARs handler
+        // below for rationale).
+        let local_instance = match attestor_run_instance.read().await.clone() {
+            Some(inst) => inst,
+            None => {
+                tracing::error!(
+                    "Contracts attestor trigger fired without an attestor_run_instance; skipping run"
+                );
+                continue;
+            }
+        };
+
         // Update status
         {
             let mut status = contracts_state.status.write().await;
@@ -1983,16 +2015,6 @@ async fn run_contracts_attestor_listener(
         let guard =
             types::ListenerPauseGuard::pause(listener_control.clone(), listener_notify.clone())
                 .await;
-
-        // Start contracts attestor workflow.
-        let local_instance = attestor_run_instance.read().await.clone();
-        let Some(local_instance) = local_instance else {
-            tracing::error!(
-                "Contracts attestor trigger fired without an attestor_run_instance; skipping run"
-            );
-            guard.resume().await;
-            continue;
-        };
         let workflow_config = config.clone();
         let result =
             workflow::start_attestor(workflow_config, coordinator, db.clone(), local_instance)
@@ -2077,6 +2099,25 @@ async fn run_dars_attestor_listener(
 
         tracing::info!("Coordinator identified: {}", coordinator.participant_id);
 
+        // Resolve the attestor instance BEFORE flipping status to InProgress.
+        // attestor_run_instance is shared across all four workflow kinds, so a
+        // race with another kind's accept_invitation can leave it None when
+        // our trigger fires (or pointing at the wrong kind's instance, in
+        // which case start_attestor will return an error and we set Failed
+        // — that's recoverable). Setting status=InProgress and *then*
+        // bailing on a missing instance leaks status pinned to InProgress
+        // until something else flips it: the next /dars/distribute observes
+        // it and 409s.
+        let local_instance = match attestor_run_instance.read().await.clone() {
+            Some(inst) => inst,
+            None => {
+                tracing::error!(
+                    "DARs attestor trigger fired without an attestor_run_instance; skipping run"
+                );
+                continue;
+            }
+        };
+
         // Update status
         {
             let mut status = dars_state.status.write().await;
@@ -2088,16 +2129,6 @@ async fn run_dars_attestor_listener(
         let guard =
             types::ListenerPauseGuard::pause(listener_control.clone(), listener_notify.clone())
                 .await;
-
-        // Start DARs attestor workflow.
-        let local_instance = attestor_run_instance.read().await.clone();
-        let Some(local_instance) = local_instance else {
-            tracing::error!(
-                "DARs attestor trigger fired without an attestor_run_instance; skipping run"
-            );
-            guard.resume().await;
-            continue;
-        };
         let workflow_config = config.clone();
         let result =
             workflow::start_attestor(workflow_config, coordinator, db.clone(), local_instance)

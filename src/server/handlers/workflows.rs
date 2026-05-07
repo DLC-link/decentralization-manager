@@ -284,17 +284,6 @@ pub async fn start_kick(
         });
     }
 
-    // Flip status, write invited_peers, spawn, and stash the abort handle in one
-    // go. cancel_workflow_state only acts when abort_handle is Some, so as long as
-    // these run without intervening cancel-visible state, the race is closed.
-    {
-        let mut status = kick_state.status.write().await;
-        *status = KickStatus::InProgress;
-    }
-    {
-        let mut error = kick_state.error.write().await;
-        *error = None;
-    }
     *kick_state.invited_peers.write().await = invitees;
 
     // Spawn the kick workflow in the background
@@ -304,6 +293,13 @@ pub async fn start_kick(
     let listener_control = data.noise_listener_control.clone();
     let listener_notify = data.noise_listener_notify.clone();
     let instance_for_task = instance_name.clone();
+
+    // See start_dars below for the rationale: abort_handle, status, and error
+    // are flipped under simultaneously-held locks so a concurrent /kick/cancel
+    // can never observe "status=InProgress + abort_handle=None" and bail.
+    let mut abort_guard = kick_state.abort_handle.lock().await;
+    let mut status_guard = kick_state.status.write().await;
+    let mut error_guard = kick_state.error.write().await;
 
     let join_handle = tokio::spawn(async move {
         let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
@@ -367,7 +363,12 @@ pub async fn start_kick(
             }
         }
     });
-    *kick_state.abort_handle.lock().await = Some(join_handle.abort_handle());
+    *abort_guard = Some(join_handle.abort_handle());
+    *status_guard = KickStatus::InProgress;
+    *error_guard = None;
+    drop(error_guard);
+    drop(status_guard);
+    drop(abort_guard);
 
     HttpResponse::Accepted().json(KickResponse {
         status: KickStatus::InProgress,
@@ -598,9 +599,6 @@ pub async fn start_onboarding(
         });
     }
 
-    // Pre-spawn handles + record invitees BEFORE we flip status to InProgress, so a
-    // concurrent /onboarding/cancel cannot observe InProgress while abort_handle is
-    // still None (cancel_workflow_state requires Some(abort_handle) to proceed).
     let config = data.config.clone();
     let db = data.db.clone();
     let onboarding_state_clone = onboarding_state.get_ref().clone();
@@ -611,14 +609,13 @@ pub async fn start_onboarding(
     let auth_lock = data.auth.clone();
     let instance_for_task = instance_name.clone();
 
-    {
-        let mut status = onboarding_state.status.write().await;
-        *status = OnboardingStatus::InProgress;
-    }
-    {
-        let mut error = onboarding_state.error.write().await;
-        *error = None;
-    }
+    // See start_dars below for the rationale: abort_handle, status, and error
+    // are flipped under simultaneously-held locks so a concurrent
+    // /onboarding/cancel can never observe "status=InProgress + abort_handle=None"
+    // and bail.
+    let mut abort_guard = onboarding_state.abort_handle.lock().await;
+    let mut status_guard = onboarding_state.status.write().await;
+    let mut error_guard = onboarding_state.error.write().await;
 
     let join_handle = tokio::spawn(async move {
         let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
@@ -733,7 +730,12 @@ pub async fn start_onboarding(
             }
         }
     });
-    *onboarding_state.abort_handle.lock().await = Some(join_handle.abort_handle());
+    *abort_guard = Some(join_handle.abort_handle());
+    *status_guard = OnboardingStatus::InProgress;
+    *error_guard = None;
+    drop(error_guard);
+    drop(status_guard);
+    drop(abort_guard);
 
     HttpResponse::Accepted().json(OnboardingResponse {
         status: OnboardingStatus::InProgress,
@@ -1069,9 +1071,6 @@ pub async fn start_contracts(
         });
     }
 
-    // Pre-spawn handles BEFORE we flip status to InProgress, so a concurrent
-    // /contracts/cancel cannot observe InProgress while abort_handle is still
-    // None (cancel_workflow_state requires Some(abort_handle) to proceed).
     let config = data.config.clone();
     let db = data.db.clone();
     let workflow_auth = data.auth.read().await.clone();
@@ -1083,14 +1082,13 @@ pub async fn start_contracts(
     *contracts_state.invited_peers.write().await = contracts_invitees;
     let instance_for_task = instance_name_for_run.clone();
 
-    {
-        let mut status = contracts_state.status.write().await;
-        *status = WorkflowProgress::InProgress;
-    }
-    {
-        let mut error = contracts_state.error.write().await;
-        *error = None;
-    }
+    // See start_dars below for the rationale: abort_handle, status, and error
+    // are flipped under simultaneously-held locks so a concurrent
+    // /contracts/cancel can never observe "status=InProgress + abort_handle=None"
+    // and bail.
+    let mut abort_guard = contracts_state.abort_handle.lock().await;
+    let mut status_guard = contracts_state.status.write().await;
+    let mut error_guard = contracts_state.error.write().await;
 
     let join_handle = tokio::spawn(async move {
         let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
@@ -1181,7 +1179,12 @@ pub async fn start_contracts(
             }
         }
     });
-    *contracts_state.abort_handle.lock().await = Some(join_handle.abort_handle());
+    *abort_guard = Some(join_handle.abort_handle());
+    *status_guard = WorkflowProgress::InProgress;
+    *error_guard = None;
+    drop(error_guard);
+    drop(status_guard);
+    drop(abort_guard);
 
     HttpResponse::Accepted().json(WorkflowResponse {
         status: WorkflowProgress::InProgress,
@@ -1306,9 +1309,6 @@ pub async fn start_dars(
         });
     }
 
-    // Pre-spawn handles + record invitees BEFORE we flip status to InProgress, so a
-    // concurrent /dars/cancel cannot observe InProgress while abort_handle is still
-    // None (cancel_workflow_state requires Some(abort_handle) to proceed).
     let config = data.config.clone();
     let db = data.db.clone();
     let dars_state_clone = dars_state.get_ref().clone();
@@ -1318,14 +1318,22 @@ pub async fn start_dars(
     *dars_state.invited_peers.write().await = peer_ids.clone();
     let instance_for_task = instance_name.clone();
 
-    {
-        let mut status = dars_state.status.write().await;
-        *status = WorkflowProgress::InProgress;
-    }
-    {
-        let mut error = dars_state.error.write().await;
-        *error = None;
-    }
+    // Acquire abort_handle, status, and error locks BEFORE spawning, then
+    // flip all three together. Held simultaneously around the spawn so a
+    // concurrent /dars/cancel either runs entirely before us (status !=
+    // InProgress → 409 "no workflow in progress") or entirely after us
+    // (status InProgress AND abort_handle Some → cancel proceeds). Without
+    // this, a cancel arriving between the status flip and the abort_handle
+    // assignment would observe "InProgress + None" and bail with the
+    // spurious "still initializing" 409 — which leaves dars_state pinned
+    // to InProgress and breaks the next /dars/distribute with a stale
+    // 409. Holding `status.write()` across the spawn also blocks the
+    // spawned task's terminal status write until our InProgress flip
+    // lands, so a fast-failing task can't publish its terminal status
+    // before we publish InProgress.
+    let mut abort_guard = dars_state.abort_handle.lock().await;
+    let mut status_guard = dars_state.status.write().await;
+    let mut error_guard = dars_state.error.write().await;
 
     let join_handle = tokio::spawn(async move {
         let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
@@ -1394,7 +1402,12 @@ pub async fn start_dars(
             }
         }
     });
-    *dars_state.abort_handle.lock().await = Some(join_handle.abort_handle());
+    *abort_guard = Some(join_handle.abort_handle());
+    *status_guard = WorkflowProgress::InProgress;
+    *error_guard = None;
+    drop(error_guard);
+    drop(status_guard);
+    drop(abort_guard);
 
     HttpResponse::Accepted().json(WorkflowResponse {
         status: WorkflowProgress::InProgress,
