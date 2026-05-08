@@ -3,5 +3,7 @@ packages:
   - governance-core-test
   - governance-token-custody
   - governance-token-custody-test
+  - governance-utility-credential
+  - governance-utility-credential-test
   - governance-utility-onboarding
   - governance-utility-onboarding-test
