@@ -41,7 +41,7 @@ P3_NOISE=9003
 # Paths
 DEV_DIR=$(mktemp -d "${TMPDIR:-/tmp}/dpm-it-XXXXXX")
 DARS_DIR="$SCRIPT_DIR/releases/v0/rc4"
-BINARY="$SCRIPT_DIR/target/release/dec-party-manager"
+BINARY="$SCRIPT_DIR/target/release-ci/dec-party-manager"
 
 # JWT token for Canton ledger access (HS256, secret "unsafe",
 # aud "https://canton.network.global"). Shared by deploy-gov-core.sh and any
@@ -73,8 +73,16 @@ check_prerequisites() {
         missing+=("docker")
     fi
 
-    if ! docker compose version &>/dev/null 2>&1; then
-        missing+=("docker compose v2")
+    # `docker compose up --wait` was introduced in Compose v2.1.1
+    # (Oct 2021). start_localnet relies on it to block until canton +
+    # splice healthchecks pass, so an older v2 would fail mid-run with
+    # an unrelated "unknown flag" error. Validate up front instead.
+    local compose_version
+    compose_version=$(docker compose version --short 2>/dev/null || echo "")
+    if [ -z "$compose_version" ]; then
+        missing+=("docker compose v2.1.1+")
+    elif ! printf '2.1.1\n%s\n' "$compose_version" | sort -CV; then
+        missing+=("docker compose v2.1.1+ (have $compose_version)")
     fi
 
     if ! command -v jq &>/dev/null; then
@@ -217,7 +225,21 @@ start_localnet() {
     localnet_compose down -v 2>/dev/null || true
 
     echo "Starting localnet..."
-    localnet_compose up -d
+    # Only start the services our tests actually use. The 3 active profiles
+    # (sv/app-provider/app-user) otherwise also bring up nginx + 7 web UI
+    # containers (wallet/ans/scan/sv UIs) which are pure browser-facing UIs
+    # — our tests hit Canton ledger/admin gRPC ports directly, never the
+    # nginx-fronted UI ports. canton -> postgres and splice -> canton are
+    # auto-started via depends_on; the UIs are not depended on by anything
+    # we use, so naming the three core services here drops the rest.
+    #
+    # --wait blocks until canton + splice healthchecks pass. Splice healthy
+    # means /api/validator/readyz returns OK, i.e. splice has registered the
+    # global synchronizer with all 3 participants. Without it, dpm processes
+    # race ahead and get "No participant ID returned" / "synchronizer with
+    # alias global is unknown" — the UIs used to incidentally pad the wall
+    # clock during compose start; trimming them exposed the race.
+    localnet_compose up -d --wait canton splice postgres
 }
 
 stop_localnet() {
@@ -225,34 +247,6 @@ stop_localnet() {
         echo "Stopping localnet..."
         localnet_compose down -v 2>/dev/null || true
     fi
-}
-
-wait_for_localnet() {
-    local max_attempts=90
-    local attempt
-
-    echo "Waiting for localnet Canton nodes..."
-
-    for port in $P1_CANTON_ADMIN $P2_CANTON_ADMIN $P3_CANTON_ADMIN; do
-        attempt=0
-        echo "  Waiting for Canton Admin API on port $port..."
-        while ! (echo >/dev/tcp/localhost/"$port") 2>/dev/null; do
-            attempt=$((attempt + 1))
-            if [ $attempt -ge $max_attempts ]; then
-                echo "ERROR: Canton node on port $port not ready after $max_attempts attempts"
-                localnet_compose logs --tail=30
-                exit 1
-            fi
-            sleep 2
-        done
-        echo "  Canton Admin API on port $port is ready"
-    done
-
-    # Allow time for Canton topology and synchronizer to fully initialize
-    echo "Waiting for Canton to fully initialize..."
-    sleep 15
-
-    echo "Localnet is ready"
 }
 
 # ============================================================================
