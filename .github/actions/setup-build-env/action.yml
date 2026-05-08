@@ -37,16 +37,18 @@ runs:
         # protobuf-compiler only Recommends it, so under --no-install-recommends
         # we have to pull it in explicitly or canton-proto-rs's build.rs fails
         # with "google/protobuf/descriptor.proto: File not found".
-        # Node is installed from NodeSource because Bookworm's apt nodejs is
-        # 18.x, but Vite 8 / ESLint 10 / @vitejs/plugin-react 6 require Node
-        # 20.19+; install curl + ca-certificates first so the setup script can
-        # fetch the repo definition.
+        # Node is installed by actions/setup-node below, not via apt — Bookworm's
+        # apt nodejs is 18.x, but Vite 8 / ESLint 10 / @vitejs/plugin-react 6
+        # require Node 20.19+.
         ${{ steps.env.outputs.sudo }} apt-get install -y --no-install-recommends \
           pkg-config libssl-dev protobuf-compiler libprotobuf-dev \
-          git openssh-client curl ca-certificates gnupg \
+          git openssh-client ca-certificates \
           ${{ inputs.extra-packages }}
-        curl -fsSL https://deb.nodesource.com/setup_22.x | ${{ steps.env.outputs.sudo }} bash -
-        ${{ steps.env.outputs.sudo }} apt-get install -y --no-install-recommends nodejs
+
+    - name: Setup Node
+      uses: actions/setup-node@v5
+      with:
+        node-version: '22'
 
     - name: Setup SSH
       shell: bash
