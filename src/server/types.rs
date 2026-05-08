@@ -896,6 +896,24 @@ pub struct Claim {
     pub value: String,
 }
 
+/// Billing parameters for a paid credential.
+/// Mirrors `Utility.Credential.App.V0.Types.BillingParams`.
+#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct BillingParams {
+    /// The daily fee for the credential in USD (corresponds to RatePerDay record).
+    #[schema(value_type = String)]
+    pub fee_per_day_usd: DamlDecimal,
+    /// Duration between fee charges, in minutes.
+    pub billing_period_minutes: i64,
+    /// Target deposit amount in USD.
+    #[schema(value_type = String)]
+    pub deposit_target_amount_usd: DamlDecimal,
+    /// Holder's weight on the activity marker (0.0 - 1.0). None means 0.
+    #[serde(default)]
+    #[schema(value_type = Option<String>)]
+    pub holder_activity_weight: Option<DamlDecimal>,
+}
+
 /// Which governance system a request targets
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -994,6 +1012,35 @@ pub enum ProposalType {
         #[schema(value_type = String)]
         amount: DamlDecimal,
         description: String,
+    },
+    /// Offer a free credential to a holder via the governance party's
+    /// `UserService`. Wraps `UserService_OfferFreeCredential` from the
+    /// Utility Credential App.
+    OfferFreeCredential {
+        user_service_cid: String,
+        holder: CantonId,
+        id: String,
+        description: String,
+        claims: Vec<Claim>,
+    },
+    /// Offer a paid credential to a holder via the governance party's
+    /// `UserService`. Wraps `UserService_OfferPaidCredential`.
+    OfferPaidCredential {
+        user_service_cid: String,
+        holder: CantonId,
+        id: String,
+        description: String,
+        claims: Vec<Claim>,
+        billing_params: BillingParams,
+        #[serde(default)]
+        #[schema(value_type = Option<String>)]
+        deposit_initial_amount_usd: Option<DamlDecimal>,
+    },
+    /// Accept a free credential offered to the governance party. Wraps
+    /// `UserService_AcceptFreeCredentialOffer`.
+    AcceptFreeCredential {
+        user_service_cid: String,
+        credential_offer_cid: String,
     },
     /// Offer a burn of `amount` tokens held by `holder` via
     /// `AllocationFactory_OfferBurn`. Holdings are supplied by the holder at
