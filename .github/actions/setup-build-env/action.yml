@@ -59,7 +59,7 @@ runs:
     # actions would race on save and the manual key would lose to
     # rust-cache's smarter trimming.
     - name: Cache npm
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: frontend/node_modules
         key: npm-${{ hashFiles('frontend/package-lock.json') }}
