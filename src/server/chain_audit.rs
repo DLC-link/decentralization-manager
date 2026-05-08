@@ -118,7 +118,7 @@ fn classify_choice(choice: &str) -> String {
     s.to_string()
 }
 
-fn classify_created(tid: &Identifier) -> (String, String) {
+fn classify_created(tid: &Identifier, is_child_of_exercise: bool) -> (String, String) {
     let entity = tid.entity_name.as_str();
     if entity.contains("Confirmation") {
         ("confirm".to_string(), entity.to_string())
@@ -126,6 +126,10 @@ fn classify_created(tid: &Identifier) -> (String, String) {
         ("create".to_string(), entity.to_string())
     } else if entity.contains("ExecutionResult") {
         ("execute_result".to_string(), entity.to_string())
+    } else if is_child_of_exercise {
+        // Created as a downstream effect of an Exercise (e.g. a service contract
+        // produced by `UserServiceRequest_Accept`) — not a fresh proposal.
+        ("create".to_string(), entity.to_string())
     } else {
         ("propose".to_string(), entity.to_string())
     }
@@ -324,6 +328,18 @@ pub async fn get_chain_audit(
         let tx_ts = tx.effective_at.as_ref().map(|t| t.seconds).unwrap_or(0);
         let update_id = tx.update_id.clone();
 
+        // Collect (node_id, last_descendant_node_id) for every Exercise in this
+        // transaction so we can later detect Created events that are downstream
+        // effects of an Exercise — those aren't fresh proposals.
+        let exercise_ranges: Vec<(i32, i32)> = tx
+            .events
+            .iter()
+            .filter_map(|evt| match evt.event.as_ref()? {
+                Event::Exercised(x) => Some((x.node_id, x.last_descendant_node_id)),
+                _ => None,
+            })
+            .collect();
+
         for evt in tx.events {
             let Some(e) = evt.event else { continue };
             match e {
@@ -344,7 +360,10 @@ pub async fn get_chain_audit(
                         })
                         .unwrap_or("unknown");
 
-                    let (event_type, action_summary) = classify_created(tid);
+                    let is_child_of_exercise = exercise_ranges
+                        .iter()
+                        .any(|(start, end)| c.node_id > *start && c.node_id <= *end);
+                    let (event_type, action_summary) = classify_created(tid, is_child_of_exercise);
 
                     entries.push(ChainAuditEntry {
                         offset: c.offset,
