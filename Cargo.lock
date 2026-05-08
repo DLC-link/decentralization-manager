@@ -1044,7 +1044,7 @@ dependencies = [
  "ed25519-dalek",
  "futures",
  "hex",
- "http 0.2.12",
+ "http 1.4.0",
  "hyper 0.14.32",
  "hyper-noise",
  "jsonwebtoken",

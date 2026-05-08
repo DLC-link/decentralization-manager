@@ -40,7 +40,7 @@ dotenvy = { version = "0.15" }
 ed25519-dalek = { version = "2.1" }
 futures = { version = "0.3" }
 hex = { version = "0.4" }
-http = { version = "0.2" }
+http = { version = "1.4" }
 hyper = { version = "0.14", features = ["full"] }
 hyper-noise = { version = "0.0.2" }
 jsonwebtoken = { version = "9.3" }
