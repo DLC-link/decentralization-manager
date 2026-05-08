@@ -17,13 +17,19 @@ jobs:
     name: Format, Clippy & Unit Tests
     runs-on: ubuntu-8-core
     container: rust:slim-bookworm
-    # Pin coverage instrumentation at the job level so clippy and the
-    # coverage test run share a fingerprint. Without this, the test step
-    # had `RUSTFLAGS=-C instrument-coverage` while clippy had only
-    # `-D warnings`, so cargo invalidated the entire dep graph between
-    # them and re-did ~3 min of work that clippy had just done.
+    # Pin coverage instrumentation AND incremental at the job level so the
+    # build, clippy, and coverage steps share one fingerprint and reuse
+    # target/. Without RUSTFLAGS unified, the coverage step had
+    # `-C instrument-coverage` while clippy had only `-D warnings` and
+    # cargo invalidated the entire dep graph between them. Without
+    # CARGO_INCREMENTAL pinned, code-coverage.sh sets it to 0 (required
+    # for instrumented coverage) while the build/clippy steps default to
+    # 1 — different fingerprint, full rebuild. 0 is the right value for
+    # CI anyway: cache is restored fresh each run, so rustc's per-fn
+    # incremental adds size and slowdown for no benefit.
     env:
       RUSTFLAGS: "-C instrument-coverage -D warnings"
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-build-env
@@ -31,15 +37,20 @@ jobs:
           ssh-private-key: ${{ secrets.BOT_SSH_PRIVATE_KEY }}
           extra-packages: jq bc
       # The coverage step compiles with `-C instrument-coverage` (now job
-      # env), so artifacts diverge from a plain debug build; key on
-      # `Cargo.lock + Cargo.toml` so profile/feature changes invalidate.
+      # env), so artifacts diverge from a plain debug build. Key includes
+      # the workflow file so any RUSTFLAGS/profile/feature change in here
+      # auto-invalidates: cargo's on-disk fingerprints embed RUSTFLAGS, so
+      # restoring a target/ built with different flags forces a full
+      # rebuild AND the combined cache action skips save on a primary-key
+      # hit, which permanently poisons the entry. v2 prefix busts any
+      # surviving stale entry from before this commit.
       - name: Cache cargo target (debug+coverage)
         uses: actions/cache@v4
         with:
           path: target
-          key: cargo-target-debug-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+          key: cargo-target-debug-v2-${{ hashFiles('Cargo.lock', 'Cargo.toml', '.github/workflows/ci.yml') }}
           restore-keys: |
-            cargo-target-debug-
+            cargo-target-debug-v2-
       # grcov is a fixed third-party tool. Build it once and cache the
       # binary so `cargo install grcov` (~30s) is skipped on every run.
       - name: Cache grcov binary
@@ -52,8 +63,18 @@ jobs:
         run: rustup component add rustfmt clippy llvm-tools-preview
       - name: cargo fmt
         run: cargo fmt -- --check
-      - name: cargo clippy (also primes target/ for the coverage step)
-        run: cargo clippy --all-targets --all-features
+      # Build the test binaries first (rlibs + sidecar rmeta) so both
+      # clippy and the coverage step reuse them. Without this priming,
+      # `cargo clippy` runs in check mode (rmeta only) and `cargo test`
+      # in code-coverage.sh then re-Compiles every dep as rlib — a full
+      # second compile of the dep graph (~1m 40s) on every run, even
+      # with a warm target cache.
+      - name: cargo build (primes target/ for clippy + tests)
+        run: cargo test --no-run --all-features
+      # `--no-deps` keeps clippy lint passes scoped to workspace crates;
+      # deps were just built above and don't need re-linting.
+      - name: cargo clippy
+        run: cargo clippy --all-targets --all-features --no-deps
       - name: Install coverage tooling
         if: steps.cache-grcov.outputs.cache-hit != 'true'
         run: cargo install grcov
@@ -89,9 +110,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: target
-          key: cargo-target-release-ci-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+          key: cargo-target-release-ci-v2-${{ hashFiles('Cargo.lock', 'Cargo.toml', '.github/workflows/ci.yml') }}
           restore-keys: |
-            cargo-target-release-ci-
+            cargo-target-release-ci-v2-
       - name: Cache localnet bundle
         uses: actions/cache@v4
         with:
@@ -104,7 +125,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: target
-          key: cargo-target-release-ci-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+          key: cargo-target-release-ci-v2-${{ hashFiles('Cargo.lock', 'Cargo.toml', '.github/workflows/ci.yml') }}
 
   daml:
     name: DAML Build & Test
