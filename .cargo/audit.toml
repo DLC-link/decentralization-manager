@@ -1,0 +1,14 @@
+# cargo-audit reads Cargo.lock directly and flags every advisory it finds,
+# even for crates that are gated behind disabled features and never compiled
+# in this workspace. cargo-deny respects feature gating and does not flag
+# them, so each ignore here documents exactly why the audit-only finding is
+# not reachable.
+
+[advisories]
+ignore = [
+  # rsa is pulled in only via sqlx-mysql, which is an optional sqlx
+  # dependency that we do not enable (default-features = false, only
+  # "sqlite" backend is on). Marvin requires an attacker to observe RSA
+  # decryption timing over the network; we do not decrypt RSA anywhere.
+  "RUSTSEC-2023-0071",
+]
