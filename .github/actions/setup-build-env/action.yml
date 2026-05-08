@@ -33,9 +33,13 @@ runs:
       shell: bash
       run: |
         ${{ steps.env.outputs.sudo }} apt-get update
-        ${{ steps.env.outputs.sudo }} apt-get install -y \
-          pkg-config libssl-dev protobuf-compiler \
-          git openssh-client nodejs npm curl \
+        # libprotobuf-dev is the source of /usr/include/google/protobuf/*.proto;
+        # protobuf-compiler only Recommends it, so under --no-install-recommends
+        # we have to pull it in explicitly or canton-proto-rs's build.rs fails
+        # with "google/protobuf/descriptor.proto: File not found".
+        ${{ steps.env.outputs.sudo }} apt-get install -y --no-install-recommends \
+          pkg-config libssl-dev protobuf-compiler libprotobuf-dev \
+          git openssh-client nodejs npm curl ca-certificates \
           ${{ inputs.extra-packages }}
 
     - name: Setup SSH
@@ -50,15 +54,10 @@ runs:
         chmod 600 "$SSH_DIR/id_ed25519"
         git config --global core.sshCommand "ssh -i $SSH_DIR/id_ed25519 -o StrictHostKeyChecking=no"
 
-    - name: Cache cargo
-      uses: actions/cache@v4
-      with:
-        path: |
-          ${{ steps.env.outputs.cargo-registry }}
-          ${{ steps.env.outputs.cargo-git }}
-          target
-        key: cargo-${{ hashFiles('Cargo.lock') }}
-
+    # Cargo registry/git caches are owned by Swatinem/rust-cache@v2 in
+    # the calling workflow. Don't double-cache CARGO_HOME here — the two
+    # actions would race on save and the manual key would lose to
+    # rust-cache's smarter trimming.
     - name: Cache npm
       uses: actions/cache@v4
       with:

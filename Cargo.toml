@@ -10,6 +10,15 @@ codegen-units = 1
 lto = true
 panic = "unwind"
 
+# CI-only profile for integration tests. Inherits release-level optimizations
+# but disables LTO and bumps codegen-units so the build finishes in a fraction
+# of the time. The shipped release profile is unaffected.
+[profile.release-ci]
+inherits = "release"
+codegen-units = 16
+lto = false
+strip = "none"
+
 [features]
 # Compile-time gate for the permissive `MockValidator` (admin-by-default,
 # accepts any token) and `MockAuthRegistry`. Enabled automatically under
