@@ -31,7 +31,7 @@ jobs:
       RUSTFLAGS: "-C instrument-coverage -D warnings"
       CARGO_INCREMENTAL: "0"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: ./.github/actions/setup-build-env
         with:
           ssh-private-key: ${{ secrets.BOT_SSH_PRIVATE_KEY }}
@@ -59,7 +59,7 @@ jobs:
       # cache key in lockstep.
       - name: Cache grcov binary
         id: cache-grcov
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /usr/local/cargo/bin/grcov
           key: grcov-bin-0.10.7
@@ -90,7 +90,7 @@ jobs:
     runs-on: ubuntu-8-core
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: ./.github/actions/setup-build-env
         with:
           ssh-private-key: ${{ secrets.BOT_SSH_PRIVATE_KEY }}
@@ -108,7 +108,7 @@ jobs:
           key: release-ci
           cache-on-failure: "true"
       - name: Cache localnet bundle
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: .localnet/
           key: localnet-0.5.17
@@ -122,7 +122,7 @@ jobs:
       checks: write
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -131,7 +131,7 @@ jobs:
     name: Cargo Deny
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       # The action runs cargo-deny in its own Docker container, so host-side
       # SSH setup is invisible to it — pass the bot key + github.com host
       # keys via the action's inputs, and force git-cli so cargo doesn't
@@ -161,14 +161,14 @@ jobs:
       run:
         working-directory: daml
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       # ~/.dpm holds the dpm CLI and the installed SDK toolchain. Cache
       # both so the install steps below short-circuit on a hit. Key on the
       # SDK version so a bump invalidates the cache automatically; keep
       # the install-script-driven steps so a cache miss still self-heals.
       - name: Cache dpm + DAML SDK
         id: cache-dpm
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.dpm
           key: dpm-3.4.11
