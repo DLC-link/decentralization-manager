@@ -105,7 +105,9 @@ const App = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [partyFilter, setPartyFilter] = useState(
-    INITIAL_ROUTE.partySlug ?? "",
+    INITIAL_ROUTE.partySlug && !INITIAL_ROUTE.partySlug.includes("::")
+      ? INITIAL_ROUTE.partySlug
+      : "",
   );
   const [refreshingParties, setRefreshingParties] = useState(false);
   const [packagesRefreshNonce, setPackagesRefreshNonce] = useState(0);
@@ -150,7 +152,7 @@ const App = () => {
           setSelectedPartyId(partySlug);
         } else {
           setSelectedPartyId(null);
-          if (partySlug) {
+          if (partySlug && !partySlug.includes("::")) {
             setPartyFilter(partySlug);
           }
         }
@@ -665,6 +667,7 @@ const App = () => {
               borderColor: "divider",
               overflow: "visible",
               "& .MuiTabs-scroller": { overflow: "visible !important" },
+              "& .MuiTab-root": { overflow: "visible" },
             }}
           >
             <Tab
