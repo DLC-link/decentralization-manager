@@ -36,21 +36,20 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.BOT_SSH_PRIVATE_KEY }}
           extra-packages: jq bc
-      # The coverage step compiles with `-C instrument-coverage` (now job
-      # env), so artifacts diverge from a plain debug build. Key includes
-      # the workflow file so any RUSTFLAGS/profile/feature change in here
-      # auto-invalidates: cargo's on-disk fingerprints embed RUSTFLAGS, so
-      # restoring a target/ built with different flags forces a full
-      # rebuild AND the combined cache action skips save on a primary-key
-      # hit, which permanently poisons the entry. v2 prefix busts any
-      # surviving stale entry from before this commit.
-      - name: Cache cargo target (debug+coverage)
-        uses: actions/cache@v4
+      # rust-cache trims target/ to only artifacts referenced by the
+      # current Cargo.lock (drops orphaned rlibs, build script junk) and
+      # auto-hashes rustc -V, RUSTFLAGS, CARGO_* env vars, and the
+      # lockfile into the key. Cuts cache size to ~⅓, which dropped
+      # post-cache save from ~3m to ~1m. The `key:` discriminator is
+      # just a namespace tag — `cargo` job (debug + coverage) shouldn't
+      # share a cache with the integration-test job (release-ci profile,
+      # test-mode feature). cache-on-failure: true preserves a warm
+      # cache when later steps fail (e.g. a flaky test).
+      - name: Setup Rust target cache
+        uses: Swatinem/rust-cache@v2
         with:
-          path: target
-          key: cargo-target-debug-v2-${{ hashFiles('Cargo.lock', 'Cargo.toml', '.github/workflows/ci.yml') }}
-          restore-keys: |
-            cargo-target-debug-v2-
+          key: debug-coverage
+          cache-on-failure: "true"
       # grcov is a fixed third-party tool. Build it once and cache the
       # binary so `cargo install grcov` (~30s) is skipped on every run.
       - name: Cache grcov binary
@@ -93,26 +92,16 @@ jobs:
           extra-packages: jq
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-      # Per-profile target cache: integration-test compiles with the
-      # `release-ci` profile and `test-mode` feature, which produces
-      # artifacts disjoint from the cargo job's debug+coverage tree. Keep
-      # a separate cache key so neither job clobbers the other's save.
-      #
-      # Split into restore + save steps because integration fails today
-      # on a known chaos-test bug (fixed elsewhere) and the combined
-      # `actions/cache@v4` only saves on job success — without the split,
-      # `cargo build` warmed `target/release-ci` for nothing and every
-      # run cold-built. `save-always: true` was deprecated. The save
-      # step's `if: always() && cache-hit != 'true'` mirrors the v4
-      # combined action's logic but lets us save on failure too.
-      - name: Restore cargo target (release-ci)
-        id: cargo-target-release-ci
-        uses: actions/cache/restore@v4
+      # `release-ci` profile + test-mode feature produces artifacts
+      # disjoint from the cargo job's debug+coverage tree, so rust-cache
+      # gets its own discriminator. cache-on-failure: true is load-bearing
+      # here — integration tests have known flakes on chaos phases and we
+      # want a warm target/release-ci on the next run regardless.
+      - name: Setup Rust target cache
+        uses: Swatinem/rust-cache@v2
         with:
-          path: target
-          key: cargo-target-release-ci-v2-${{ hashFiles('Cargo.lock', 'Cargo.toml', '.github/workflows/ci.yml') }}
-          restore-keys: |
-            cargo-target-release-ci-v2-
+          key: release-ci
+          cache-on-failure: "true"
       - name: Cache localnet bundle
         uses: actions/cache@v4
         with:
@@ -120,12 +109,6 @@ jobs:
           key: localnet-0.5.17
       - name: Run integration tests
         run: ./integration-tests/run.sh
-      - name: Save cargo target (release-ci)
-        if: always() && steps.cargo-target-release-ci.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: target
-          key: cargo-target-release-ci-v2-${{ hashFiles('Cargo.lock', 'Cargo.toml', '.github/workflows/ci.yml') }}
 
   daml:
     name: DAML Build & Test
