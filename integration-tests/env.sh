@@ -224,7 +224,14 @@ start_localnet() {
     # nginx-fronted UI ports. canton -> postgres and splice -> canton are
     # auto-started via depends_on; the UIs are not depended on by anything
     # we use, so naming the three core services here drops the rest.
-    localnet_compose up -d canton splice postgres
+    #
+    # --wait blocks until canton + splice healthchecks pass. Splice healthy
+    # means /api/validator/readyz returns OK, i.e. splice has registered the
+    # global synchronizer with all 3 participants. Without it, dpm processes
+    # race ahead and get "No participant ID returned" / "synchronizer with
+    # alias global is unknown" — the UIs used to incidentally pad the wall
+    # clock during compose start; trimming them exposed the race.
+    localnet_compose up -d --wait canton splice postgres
 }
 
 stop_localnet() {
@@ -232,34 +239,6 @@ stop_localnet() {
         echo "Stopping localnet..."
         localnet_compose down -v 2>/dev/null || true
     fi
-}
-
-wait_for_localnet() {
-    local max_attempts=90
-    local attempt
-
-    echo "Waiting for localnet Canton nodes..."
-
-    for port in $P1_CANTON_ADMIN $P2_CANTON_ADMIN $P3_CANTON_ADMIN; do
-        attempt=0
-        echo "  Waiting for Canton Admin API on port $port..."
-        while ! (echo >/dev/tcp/localhost/"$port") 2>/dev/null; do
-            attempt=$((attempt + 1))
-            if [ $attempt -ge $max_attempts ]; then
-                echo "ERROR: Canton node on port $port not ready after $max_attempts attempts"
-                localnet_compose logs --tail=30
-                exit 1
-            fi
-            sleep 2
-        done
-        echo "  Canton Admin API on port $port is ready"
-    done
-
-    # Allow time for Canton topology and synchronizer to fully initialize
-    echo "Waiting for Canton to fully initialize..."
-    sleep 15
-
-    echo "Localnet is ready"
 }
 
 # ============================================================================

@@ -102,7 +102,6 @@ fi
 log_phase "Starting localnet"
 download_localnet
 start_localnet
-wait_for_localnet
 
 # dec-party-manager instances
 log_phase "Starting dec-party-manager instances"
