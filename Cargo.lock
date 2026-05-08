@@ -1052,7 +1052,7 @@ dependencies = [
  "mime_guess",
  "prost",
  "prost-types",
- "rand 0.8.6",
+ "rand 0.10.1",
  "reqwest",
  "rust-embed",
  "secp256k1",
