@@ -591,12 +591,14 @@ const App = () => {
                 }
               }}
               disabled={refreshingParties}
-              InputProps={{
-                startAdornment: (
-                  <InputAdornment position="start">
-                    <FilterListIcon fontSize="small" color="action" />
-                  </InputAdornment>
-                ),
+              slotProps={{
+                input: {
+                  startAdornment: (
+                    <InputAdornment position="start">
+                      <FilterListIcon fontSize="small" color="action" />
+                    </InputAdornment>
+                  ),
+                },
               }}
               sx={{
                 width: 380,
@@ -797,12 +799,14 @@ const App = () => {
                         }
                       }}
                       disabled={refreshingParties}
-                      InputProps={{
-                        startAdornment: (
-                          <InputAdornment position="start">
-                            <FilterListIcon fontSize="small" color="action" />
-                          </InputAdornment>
-                        ),
+                      slotProps={{
+                        input: {
+                          startAdornment: (
+                            <InputAdornment position="start">
+                              <FilterListIcon fontSize="small" color="action" />
+                            </InputAdornment>
+                          ),
+                        },
                       }}
                       sx={{ width: 300 }}
                     />

@@ -212,13 +212,16 @@ const getDesignTokens = (mode: "light" | "dark") => ({
       },
     },
     MuiButton: {
-      styleOverrides: {
-        containedPrimary: {
-          "&:hover": {
-            backgroundColor: "#e55a2b",
+      variants: [
+        {
+          props: { variant: "contained" as const, color: "primary" as const },
+          style: {
+            "&:hover": {
+              backgroundColor: "#e55a2b",
+            },
           },
         },
-      },
+      ],
     },
   },
 });

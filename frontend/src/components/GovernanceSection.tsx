@@ -1164,7 +1164,7 @@ export const GovernanceSection = ({
               fullWidth
               sx={{ mb: 2 }}
             />
-            <Typography variant="caption" display="block" color="text.secondary">
+            <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
               FAR Config (Optional)
             </Typography>
             <Box sx={{ display: "flex", gap: 1, alignItems: "center", mb: 1 }}>
@@ -1207,7 +1207,7 @@ export const GovernanceSection = ({
               </Tooltip>
             </Box>
             <Box sx={{ mb: 2 }}>
-              <Typography variant="caption" display="block" color="text.secondary" sx={{ mb: 1 }}>
+              <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1 }}>
                 FAR Beneficiaries (who receives app rewards)
               </Typography>
               {vaultFarConfig.beneficiaries.map((b, idx) => (
@@ -1479,7 +1479,7 @@ export const GovernanceSection = ({
                 )}
               </Select>
             </FormControl>
-            <Typography variant="caption" display="block" color="text.secondary">
+            <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
               FAR Beneficiaries (add beneficiary party + weight)
             </Typography>
             {farBeneficiaries.map((b, idx) => (
@@ -1602,7 +1602,7 @@ export const GovernanceSection = ({
                 </span>
               </Tooltip>
             </Box>
-            <Typography variant="caption" display="block" color="text.secondary">
+            <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
               FAR Config (Optional)
             </Typography>
             <Box sx={{ display: "flex", gap: 1, alignItems: "center", mb: 1 }}>
@@ -1645,7 +1645,7 @@ export const GovernanceSection = ({
               </Tooltip>
             </Box>
             <Box sx={{ mb: 2 }}>
-              <Typography variant="caption" display="block" color="text.secondary" sx={{ mb: 1 }}>
+              <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1 }}>
                 FAR Beneficiaries
               </Typography>
               {vaultFarConfig.beneficiaries.map((b, idx) => (
@@ -1725,7 +1725,7 @@ export const GovernanceSection = ({
                 })()}
               </Box>
             </Box>
-            <Typography variant="caption" display="block" color="text.secondary">
+            <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
               Initial Supported Vaults
             </Typography>
             {vaultsLoading ? (
