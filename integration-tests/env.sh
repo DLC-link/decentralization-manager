@@ -73,8 +73,16 @@ check_prerequisites() {
         missing+=("docker")
     fi
 
-    if ! docker compose version &>/dev/null 2>&1; then
-        missing+=("docker compose v2")
+    # `docker compose up --wait` was introduced in Compose v2.1.1
+    # (Oct 2021). start_localnet relies on it to block until canton +
+    # splice healthchecks pass, so an older v2 would fail mid-run with
+    # an unrelated "unknown flag" error. Validate up front instead.
+    local compose_version
+    compose_version=$(docker compose version --short 2>/dev/null || echo "")
+    if [ -z "$compose_version" ]; then
+        missing+=("docker compose v2.1.1+")
+    elif ! printf '2.1.1\n%s\n' "$compose_version" | sort -CV; then
+        missing+=("docker compose v2.1.1+ (have $compose_version)")
     fi
 
     if ! command -v jq &>/dev/null; then

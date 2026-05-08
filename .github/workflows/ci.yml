@@ -52,12 +52,17 @@ jobs:
           cache-on-failure: "true"
       # grcov is a fixed third-party tool. Build it once and cache the
       # binary so `cargo install grcov` (~30s) is skipped on every run.
+      # Pin the version: an unpinned `cargo install grcov` mixed with a
+      # static cache key would mean cache-hit runs use whatever was
+      # cached the first time and cache-miss runs may pull a newer one
+      # — non-reproducible. Bumping the version requires bumping this
+      # cache key in lockstep.
       - name: Cache grcov binary
         id: cache-grcov
         uses: actions/cache@v4
         with:
           path: /usr/local/cargo/bin/grcov
-          key: grcov-bin-v1
+          key: grcov-bin-0.10.7
       - name: Install rustup components
         run: rustup component add rustfmt clippy llvm-tools-preview
       - name: cargo fmt
@@ -76,7 +81,7 @@ jobs:
         run: cargo clippy --all-targets --all-features --no-deps
       - name: Install coverage tooling
         if: steps.cache-grcov.outputs.cache-hit != 'true'
-        run: cargo install grcov
+        run: cargo install grcov --version 0.10.7
       - name: Run tests with coverage
         run: ./code-coverage.sh
 

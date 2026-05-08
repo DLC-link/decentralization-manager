@@ -23,7 +23,14 @@ if [[ "${RUSTFLAGS:-}" != *"instrument-coverage"* ]]; then
     export RUSTFLAGS="${RUSTFLAGS:-} -C instrument-coverage"
 fi
 
-CARGO_INCREMENTAL=0 LLVM_PROFILE_FILE="target/coverage/%p-%m.profraw" cargo test
+# `--all-features` keeps the cargo fingerprint aligned with the priming
+# (`cargo test --no-run --all-features`) and clippy (`cargo clippy
+# --all-features`) steps in CI. Without it, the workspace crate's
+# feature set differs across steps and cargo rebuilds dec-party-manager
+# from scratch here (~38s wasted). Functionally a no-op: the only
+# feature, `test-mode`, gates code on `cfg(any(test, feature = "test-mode"))`,
+# and `cargo test` already activates the `test` arm.
+CARGO_INCREMENTAL=0 LLVM_PROFILE_FILE="target/coverage/%p-%m.profraw" cargo test --all-features
 
 GRCOV_ARGS=(. --binary-path ./target/debug/ -s . -t covdir --branch --ignore-not-existing -o coverage.json)
 if [ -n "$LLVM_PATH" ]; then
