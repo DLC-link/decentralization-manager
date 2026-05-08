@@ -94,6 +94,18 @@ pub async fn get_governance(
     let member_party_id = get_member_party_id(&data, party_id).await;
     let packages = packages();
 
+    let rules_contract_id =
+        match query_governance_state(&data.config, party_id, token.clone(), test_mode, &packages)
+            .await
+        {
+            Ok(Some(state)) => Some(state.contract_id),
+            Ok(None) => None,
+            Err(e) => {
+                tracing::warn!("Failed to fetch active rules contract id: {e}");
+                None
+            }
+        };
+
     match get_governance_confirmations(
         &data.config,
         party_id,
@@ -109,6 +121,7 @@ pub async fn get_governance(
             domain_actions,
             threshold,
             member_party_id,
+            rules_contract_id,
         }),
         Err(e) => {
             tracing::error!("Failed to fetch governance confirmations: {e}");

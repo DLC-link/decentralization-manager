@@ -1159,6 +1159,13 @@ pub struct GovernanceResponse {
     /// The member party ID for the requesting party (used to identify own confirmations)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub member_party_id: Option<CantonId>,
+    /// Current contract id of the active GovernanceRules / VaultGovernanceRules
+    /// contract for this party. The choice exercised when confirming an action
+    /// is consuming, so this id changes after each confirm/execute — clients
+    /// should use this field rather than a cached value to avoid
+    /// `CONTRACT_NOT_FOUND` on stale ids.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rules_contract_id: Option<String>,
 }
 
 /// Request to expire a stale confirmation

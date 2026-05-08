@@ -246,6 +246,9 @@ export const GovernanceSection = ({
       if (res.ok) {
         const response: GovernanceResponse = await res.json();
         setData(response);
+        if (response.rules_contract_id) {
+          setRulesContractId(response.rules_contract_id);
+        }
         setError(null);
       } else {
         const errData = await res.json().catch(() => ({}));

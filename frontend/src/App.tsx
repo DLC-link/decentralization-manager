@@ -490,7 +490,10 @@ const App = () => {
             const data = await res.json();
             return {
               partyId: party.party_id,
-              rulesContractId: rulesContract.contract_id,
+              // Prefer the live rules contract id from the API — confirm
+              // archives + re-creates the rules contract, so the cached
+              // `parties` snapshot can point at an archived contract id.
+              rulesContractId: data.rules_contract_id ?? rulesContract.contract_id,
               memberPartyId: data.member_party_id ?? authStatus.member_party_id,
               governanceType,
               threshold: data.threshold,

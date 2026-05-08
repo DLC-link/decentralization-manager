@@ -615,8 +615,14 @@ pub async fn get_governance_confirmations(
     // Collect domain confirmations grouped by proposal CID (core domain actions)
     let mut domain_confirmations: HashMap<String, (String, Vec<GovernanceConfirmation>)> =
         HashMap::new();
-    // Collect proposal descriptions by CID (from active GovernableAction proposals)
-    let mut proposal_descriptions: HashMap<String, String> = HashMap::new();
+    // Map of `contract_id -> Option<description>` for every active
+    // `GovernableAction` proposal visible to this party on this participant.
+    // The presence of a key here is what gates inclusion in `domain_actions`
+    // below — `Confirmation`s referencing a proposal that's no longer active
+    // (or never reached this participant's ACS) get filtered out, otherwise
+    // surfacing them in the notification queue gives the user a Confirm
+    // button that always 500s with `CONTRACT_NOT_FOUND` on the proposal cid.
+    let mut proposal_descriptions: HashMap<String, Option<String>> = HashMap::new();
 
     if test_mode {
         tracing::debug!("Using WildcardFilter for governance query (test mode)");
@@ -706,25 +712,27 @@ pub async fn get_governance_confirmations(
         })
         .collect();
 
-    // Build domain actions from domain confirmations, merging proposal descriptions
+    // Build domain actions from domain confirmations, dropping any whose
+    // proposal isn't in the active set on this participant (see comment on
+    // `proposal_descriptions` above).
     let domain_actions: Vec<DomainGovernanceAction> = domain_confirmations
         .into_iter()
-        .map(|(proposal_cid, (action_label, confirmations))| {
+        .filter_map(|(proposal_cid, (action_label, confirmations))| {
+            let description = proposal_descriptions.remove(&proposal_cid)?;
             let mut seen_parties = std::collections::HashSet::new();
             let unique_confirmations: Vec<GovernanceConfirmation> = confirmations
                 .into_iter()
                 .filter(|c| seen_parties.insert(c.confirming_party.clone()))
                 .collect();
             let confirmation_count = unique_confirmations.len();
-            let description = proposal_descriptions.remove(&proposal_cid);
-            DomainGovernanceAction {
+            Some(DomainGovernanceAction {
                 proposal_cid,
                 action_label,
                 description,
                 confirmations: unique_confirmations,
                 confirmation_count,
                 can_execute: confirmation_count >= threshold,
-            }
+            })
         })
         .collect();
 
@@ -738,7 +746,7 @@ async fn fetch_governance_with_wildcard(
     token: Option<String>,
     confirmations_by_hash: &mut HashMap<String, (ActionType, Vec<GovernanceConfirmation>)>,
     domain_confirmations: &mut HashMap<String, (String, Vec<GovernanceConfirmation>)>,
-    proposal_descriptions: &mut HashMap<String, String>,
+    proposal_descriptions: &mut HashMap<String, Option<String>>,
 ) -> Result {
     let mut state_client = utils::create_state_client(config, token).await?;
 
@@ -1029,7 +1037,7 @@ fn extract_and_add_domain_confirmation(
 /// in wildcard mode).
 fn extract_proposal_description(
     created: &CreatedEvent,
-    proposal_descriptions: &mut HashMap<String, String>,
+    proposal_descriptions: &mut HashMap<String, Option<String>>,
 ) {
     let Some(record) = &created.create_arguments else {
         return;
@@ -1053,9 +1061,9 @@ fn extract_proposal_description(
             _ => None,
         });
 
-    if let Some(desc) = description {
-        proposal_descriptions.insert(created.contract_id.clone(), desc);
-    }
+    // Always record the cid, even when no description field is present —
+    // the consumer relies on map membership to gate active-proposal filtering.
+    proposal_descriptions.insert(created.contract_id.clone(), description);
 }
 
 /// Fetch proposal descriptions via GovernableAction interface query (production mode).
@@ -1067,7 +1075,7 @@ async fn fetch_proposal_descriptions(
     party_id: &CantonId,
     token: Option<String>,
     packages: &PackageConfig,
-    proposal_descriptions: &mut HashMap<String, String>,
+    proposal_descriptions: &mut HashMap<String, Option<String>>,
 ) -> Result {
     let Some(ref pkg) = packages.governance_core else {
         return Ok(());

@@ -355,6 +355,7 @@ export interface GovernanceResponse {
   domain_actions?: DomainGovernanceAction[];
   threshold: number;
   member_party_id?: string;
+  rules_contract_id?: string;
 }
 
 export interface InstrumentAllowance {
