@@ -42,7 +42,7 @@ runs:
         # require Node 20.19+.
         ${{ steps.env.outputs.sudo }} apt-get install -y --no-install-recommends \
           pkg-config libssl-dev protobuf-compiler libprotobuf-dev \
-          git openssh-client ca-certificates \
+          git openssh-client ca-certificates cmake \
           ${{ inputs.extra-packages }}
 
     - name: Setup Node
