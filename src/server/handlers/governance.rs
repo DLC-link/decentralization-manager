@@ -1786,7 +1786,24 @@ async fn execute_expire_confirmation(
             )
         }
         GovernanceType::CoreDomain => {
-            anyhow::bail!("Core domain actions not yet supported for expire")
+            // Same `GovernanceRules` template as CoreSelf but a different choice:
+            // `GovernanceRules_ExpireConfirmation` operates on the
+            // `GovernanceConfirmation` template (domain action confirmations)
+            // rather than `GovernanceSelfConfirmation`. Same argument shape
+            // ({ member, staleConfirmationCid }) so the choice_argument above
+            // is reused as-is.
+            let pkg = packages
+                .governance_core
+                .as_deref()
+                .context("governance_core package not configured")?;
+            (
+                Identifier {
+                    package_id: pkg.to_string(),
+                    module_name: "Governance.Rules".to_string(),
+                    entity_name: "GovernanceRules".to_string(),
+                },
+                "GovernanceRules_ExpireConfirmation".to_string(),
+            )
         }
     };
 
@@ -1874,7 +1891,21 @@ async fn execute_cancel_confirmation(
             )
         }
         GovernanceType::CoreDomain => {
-            anyhow::bail!("Core domain actions not yet supported for cancel")
+            // Domain confirmations live in their own template
+            // `GovernanceConfirmation` (module `Governance.Confirmation`).
+            // The `Cancel` choice is controller=confirmer with no arguments.
+            let pkg = packages
+                .governance_core
+                .as_deref()
+                .context("governance_core package not configured")?;
+            (
+                Identifier {
+                    package_id: pkg.to_string(),
+                    module_name: "Governance.Confirmation".to_string(),
+                    entity_name: "GovernanceConfirmation".to_string(),
+                },
+                "GovernanceConfirmation_Cancel".to_string(),
+            )
         }
     };
 
