@@ -747,7 +747,12 @@ mod tests {
     use super::*;
 
     fn test_retry_config() -> NoiseRetryConfig {
-        NoiseRetryConfig::default()
+        // Zero backoff so the `retry_loop_*` tests don't sleep in real time.
+        // (Tests that need to assert on backoff behavior should override.)
+        NoiseRetryConfig {
+            backoff_ms: 0,
+            ..NoiseRetryConfig::default()
+        }
     }
 
     #[test]

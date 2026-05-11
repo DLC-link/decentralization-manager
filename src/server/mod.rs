@@ -44,8 +44,8 @@ use crate::{
     db::schema::{Commitable, SchemaRead, SchemaWrite},
     error::Result,
     noise::{
-        CHUNK_SIZE, MAX_PAYLOAD_SIZE, Message, MessageType, NoiseKeypair, load_or_generate_keypair,
-        parse_public_key,
+        CHUNK_SIZE, MAX_CHUNKED_TOTAL_SIZE, MAX_PAYLOAD_SIZE, Message, MessageType, NoiseKeypair,
+        load_or_generate_keypair, parse_public_key,
     },
     server::middleware::AuthMiddleware,
     utils::{compute_fingerprint, get_synchronizer_id_from_url},
@@ -57,7 +57,9 @@ pub use types::*;
 /// TTL for cached chunked ListPackages payloads (per peer).
 const LIST_PACKAGES_CHUNK_CACHE_TTL: Duration = Duration::from_secs(30);
 
-/// Per-peer entry in the ListPackages chunk cache: (raw JSON bytes, time of insertion).
+/// Per-peer entry in the ListPackages chunk cache: `(raw JSON bytes, last-access time)`.
+/// The `Instant` is updated on every successful chunk read (see `MessageType::GetChunk`
+/// handler), so a slow peer mid-reassembly extends its own TTL window.
 type ChunkCacheEntry = (Vec<u8>, Instant);
 
 /// Shared cache of large ListPackages payloads awaiting chunk retrieval by peers.
@@ -1500,8 +1502,30 @@ async fn handle_incoming_connection(
                                     .unwrap());
                             };
 
-                            let total_size = payload.len() as u32;
-                            let chunk_count = payload.len().div_ceil(CHUNK_SIZE) as u32;
+                            // Server-side cap symmetric with the client's `MAX_CHUNKED_TOTAL_SIZE`.
+                            // Without this, a very large package listing could (a) eat unbounded
+                            // memory in the per-peer cache and (b) truncate silently on the
+                            // `usize → u32` casts below. 16 MiB is well above any plausible Canton
+                            // package listing.
+                            if payload.len() > MAX_CHUNKED_TOTAL_SIZE {
+                                tracing::error!(
+                                    "ListPackages response is {} bytes; exceeds chunked cap {} — \
+                                     refusing to chunk",
+                                    payload.len(),
+                                    MAX_CHUNKED_TOTAL_SIZE,
+                                );
+                                return Ok(Response::builder()
+                                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                    .body(Body::empty())
+                                    .unwrap());
+                            }
+
+                            // Casts are infallible because we just verified `payload.len() <=
+                            // MAX_CHUNKED_TOTAL_SIZE` (16 MiB), which fits in u32.
+                            let total_size =
+                                u32::try_from(payload.len()).expect("checked against cap");
+                            let chunk_count = u32::try_from(payload.len().div_ceil(CHUNK_SIZE))
+                                .expect("checked against cap");
                             tracing::info!(
                                 "ListPackages response too large ({total_size} bytes), chunking \
                                  into {chunk_count} chunks for peer {pk}",
