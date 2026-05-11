@@ -2208,8 +2208,13 @@ pub async fn get_instruments(
     if test_mode {
         fetch_instruments_with_wildcard(config, party_id, token).await
     } else {
-        fetch_instruments_for_template(config, party_id, token, &instrument_configuration_template())
-            .await
+        fetch_instruments_for_template(
+            config,
+            party_id,
+            token,
+            &instrument_configuration_template(),
+        )
+        .await
     }
 }
 
