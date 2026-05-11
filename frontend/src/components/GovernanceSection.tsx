@@ -63,6 +63,7 @@ import type {
   NetworkInfo,
   ProposeActionRequest,
   ProposalType,
+  InstrumentAllowance,
 } from "../types";
 
 type ActionTypeKey = ActionType["type"];
@@ -121,6 +122,8 @@ export const GovernanceSection = ({
     defaultOperatorParty || "",
   );
   const [proposalInstrumentAdmin, setProposalInstrumentAdmin] = useState("");
+  const [proposalInstrumentAllowances, setProposalInstrumentAllowances] =
+    useState<InstrumentAllowance[]>([]);
   const [proposalTransferFactoryCid, setProposalTransferFactoryCid] = useState("");
   const [proposalExpectedAdmin, setProposalExpectedAdmin] = useState("");
   const [proposalReceiver, setProposalReceiver] = useState("");
@@ -743,7 +746,9 @@ export const GovernanceSection = ({
             type: "setup_token_preapproval",
             operator: proposalOperator,
             instrument_admin: proposalInstrumentAdmin,
-            instrument_allowances: [],
+            instrument_allowances: proposalInstrumentAllowances.filter(
+              (a) => a.id.trim() !== "",
+            ),
           };
           break;
         case "transfer":
@@ -2442,6 +2447,46 @@ export const GovernanceSection = ({
                 <>
                   <TextField size="small" label="Operator Party" value={proposalOperator} onChange={(e) => setProposalOperator(e.target.value)} fullWidth required />
                   <TextField size="small" label="Instrument Admin" value={proposalInstrumentAdmin} onChange={(e) => setProposalInstrumentAdmin(e.target.value)} fullWidth required />
+                  <Typography variant="caption" display="block" color="text.secondary">
+                    Instrument Allowances (optional)
+                  </Typography>
+                  {proposalInstrumentAllowances.map((a, idx) => (
+                    <Box key={idx} sx={{ display: "flex", gap: 1, mb: 1 }}>
+                      <TextField
+                        label="Allowance ID"
+                        value={a.id}
+                        onChange={(e) => {
+                          const updated = [...proposalInstrumentAllowances];
+                          updated[idx] = { ...a, id: e.target.value };
+                          setProposalInstrumentAllowances(updated);
+                        }}
+                        size="small"
+                        sx={{ flex: 1 }}
+                      />
+                      <Button
+                        size="small"
+                        color="error"
+                        onClick={() =>
+                          setProposalInstrumentAllowances(
+                            proposalInstrumentAllowances.filter((_, i) => i !== idx),
+                          )
+                        }
+                      >
+                        Remove
+                      </Button>
+                    </Box>
+                  ))}
+                  <Button
+                    size="small"
+                    onClick={() =>
+                      setProposalInstrumentAllowances([
+                        ...proposalInstrumentAllowances,
+                        { id: "" },
+                      ])
+                    }
+                  >
+                    Add Allowance
+                  </Button>
                 </>
               )}
 
