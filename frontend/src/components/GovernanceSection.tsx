@@ -399,6 +399,18 @@ export const GovernanceSection = ({
     }
   }, [selectedActionType, fetchServices]);
 
+  // Also fetch services when a proposal type that creates a service-request is
+  // selected — used to detect when the corresponding service already exists,
+  // so the form can warn that the proposal would be a no-op.
+  useEffect(() => {
+    if (
+      proposalType === "create_user_service_request" ||
+      proposalType === "create_provider_service_request"
+    ) {
+      fetchServices();
+    }
+  }, [proposalType, fetchServices]);
+
   // Fetch InstrumentConfiguration contracts (a.k.a. "our tokens"). Used by
   // Mint/Burn (for instrument_id + instrument_configuration_cid) and by
   // set_provider_app_reward_beneficiaries (for instrument_configuration_cid).
@@ -2638,6 +2650,13 @@ export const GovernanceSection = ({
 
               {proposalType === "create_provider_service_request" && (
                 <>
+                  {providerServices.length > 0 && (
+                    <Alert severity="warning">
+                      This party already has {providerServices.length} ProviderService
+                      contract{providerServices.length === 1 ? "" : "s"}; creating
+                      another request will fail when executed.
+                    </Alert>
+                  )}
                   <TextField size="small" label="Operator Party" value={proposalOperator} onChange={(e) => setProposalOperator(e.target.value)} fullWidth required />
                   <TextField size="small" label="Provider Party" value={proposalProvider} onChange={(e) => setProposalProvider(e.target.value)} fullWidth required />
                 </>
@@ -2645,6 +2664,13 @@ export const GovernanceSection = ({
 
               {proposalType === "create_user_service_request" && (
                 <>
+                  {userServices.length > 0 && (
+                    <Alert severity="warning">
+                      This party already has {userServices.length} UserService
+                      contract{userServices.length === 1 ? "" : "s"}; creating
+                      another request will fail when executed.
+                    </Alert>
+                  )}
                   <TextField size="small" label="Operator Party" value={proposalOperator} onChange={(e) => setProposalOperator(e.target.value)} fullWidth required />
                   <TextField size="small" label="User Party" value={proposalUser} onChange={(e) => setProposalUser(e.target.value)} fullWidth required />
                 </>
