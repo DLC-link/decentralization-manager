@@ -15,7 +15,7 @@ use crate::common::{
 const DAR_FILES: &[&str] = &[
     "governance-core-v0-rc4-0.1.0.dar",
     "governance-token-custody-v0-rc4-0.1.0.dar",
-    "governance-utility-onboarding-v0-rc4-0.1.0.dar",
+    "governance-utility-onboarding-v0-rc4-0.2.0.dar",
 ];
 
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {

@@ -1,0 +1,181 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+module Governance.UtilityOnboarding.Test.AcceptBurnRequestTest where
+
+import DA.TextMap qualified as TextMap
+import DA.Time (addRelTime, hours)
+import Daml.Script
+
+import Splice.Api.Token.HoldingV1 (InstrumentId(..))
+import Splice.Api.Token.MetadataV1
+  (AnyValue(..), ChoiceContext(..), ExtraArgs(..), Metadata(..))
+
+import Utility.Registry.App.V0.Model.Burn (Burn(..), BurnRequest, ExecutedBurn)
+import Utility.Registry.App.V0.Model.Mint (Mint(..))
+import Utility.Registry.App.V0.Service.AllocationFactory
+  (AllocationFactory_RequestBurn(..), AllocationFactory_RequestMint(..))
+import Utility.Registry.Holding.V0.Holding (Holding)
+import Utility.Registry.V0.Holding.TokenApiUtils
+  (instrumentConfigurationContextKey, issuerCredentialsContextKey)
+
+import Governance.Action (GovernableAction)
+import Governance.Rules
+
+import Governance.TokenIssuance.AcceptBurnRequest
+import Governance.TokenIssuance.AcceptMintRequest
+import Governance.UtilityOnboarding.TestUtils
+
+import TestHarness
+
+data Fixture = Fixture
+  with
+    parties : OnboardingTestParties
+    rulesCid : ContractId GovernanceRules
+    artifacts : SetupArtifacts
+    burnRequestCid : ContractId BurnRequest
+    burnAmount : Decimal
+    holder : Party
+  deriving (Eq, Show)
+
+mkInstrumentId : OnboardingTestParties -> InstrumentId
+mkInstrumentId parties = InstrumentId with
+  admin = parties.governanceParty
+  id = "TEST-TOKEN"
+
+choiceContextWithEmptyCredentials
+  : SetupArtifacts -> ChoiceContext
+choiceContextWithEmptyCredentials artifacts = ChoiceContext with
+  values = TextMap.fromList
+    [ (instrumentConfigurationContextKey,
+       AV_ContractId $ coerceContractId artifacts.instrumentConfigurationCid)
+    , (issuerCredentialsContextKey, AV_List [])
+    ]
+
+-- | Seed the requester with a Holding by driving a holder-initiated mint
+-- request through governance — exercises the AcceptMintRequest action under
+-- test only as a setup helper.
+seedHoldingForRequester
+  : OnboardingTestParties -> ContractId GovernanceRules -> SetupArtifacts
+  -> Party -> Decimal -> Script (ContractId Holding)
+seedHoldingForRequester parties rulesCid artifacts holder amount = do
+  now <- getTime
+  let context = choiceContextWithEmptyCredentials artifacts
+  mintResult <- submit (actAs holder <> readAs parties.governanceParty) $
+    exerciseCmd artifacts.allocationFactoryCid AllocationFactory_RequestMint with
+      expectedAdmin = parties.governanceParty
+      mint = Mint with
+        instrumentId = mkInstrumentId parties
+        amount
+        holder
+        reference = "Seed holding via mint request"
+        requestedAt = now
+        executeBefore = now `addRelTime` hours 24
+        meta = Metadata with values = TextMap.empty
+      extraArgs = ExtraArgs with
+        context
+        meta = Metadata with values = TextMap.empty
+  proposalCid <- submit parties.member1 $ createCmd AcceptMintRequest with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    mintRequestCid = mintResult.mintRequestCid
+    instrumentConfigurationCid = artifacts.instrumentConfigurationCid
+    description = "Seed mint"
+    extraArgsMeta = Metadata with values = TextMap.empty
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  _ <- confirmAndExecute parties rulesCid proposalInterfaceCid
+    [parties.member1, parties.member2] parties.member1
+  -- Read the freshly minted holding owned by the requester.
+  [(holdingCid, _)] <- query @Holding holder
+  pure holdingCid
+
+-- | Drive a holder-initiated burn request through the registry factory.
+seedBurnRequest
+  : OnboardingTestParties -> SetupArtifacts -> Party -> Decimal
+  -> ContractId Holding -> Script (ContractId BurnRequest)
+seedBurnRequest parties artifacts holder amount holdingCid = do
+  now <- getTime
+  let context = choiceContextWithEmptyCredentials artifacts
+  result <- submit (actAs holder <> readAs parties.governanceParty) $
+    exerciseCmd artifacts.allocationFactoryCid AllocationFactory_RequestBurn with
+      expectedAdmin = parties.governanceParty
+      burn = Burn with
+        instrumentId = mkInstrumentId parties
+        amount
+        holder
+        reference = "Holder-initiated burn"
+        requestedAt = now
+        executeBefore = now `addRelTime` hours 24
+        meta = Metadata with values = TextMap.empty
+      holdingCids = [holdingCid]
+      extraArgs = ExtraArgs with
+        context
+        meta = Metadata with values = TextMap.empty
+  pure result.burnRequestCid
+
+given_burn_request_exists : Script Fixture
+given_burn_request_exists = do
+  parties <- allocateOnboardingTestParties
+  rulesCid <- createTestGovernance parties
+  artifacts <- setupUtilityForTest parties rulesCid
+  let holder = parties.outsider
+      burnAmount = 100.0
+  holdingCid <- seedHoldingForRequester parties rulesCid artifacts holder burnAmount
+  burnRequestCid <- seedBurnRequest parties artifacts holder burnAmount holdingCid
+  pure Fixture with ..
+
+-- * Happy path: propose-confirm-execute burns the holder's holding.
+
+when_accept_burn_request_executed : Fixture -> Script ()
+when_accept_burn_request_executed f = do
+  proposalCid <- submit f.parties.member1 $ createCmd AcceptBurnRequest with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+    burnRequestCid = f.burnRequestCid
+    instrumentConfigurationCid = f.artifacts.instrumentConfigurationCid
+    description = "Accept holder-initiated burn"
+    extraArgsMeta = Metadata with values = TextMap.empty
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  _ <- confirmAndExecute f.parties f.rulesCid proposalInterfaceCid
+    [f.parties.member1, f.parties.member2] f.parties.member1
+  pure ()
+
+then_holding_burned : Fixture -> () -> Script Failures
+then_holding_burned f _ = do
+  holdings <- query @Holding f.holder
+  executed <- query @ExecutedBurn f.parties.governanceParty
+  pure $
+    shouldBe "remaining holdings for holder" 0 (length holdings) <>
+    shouldBe "ExecutedBurn count" 1 (length executed)
+
+test_when_accept_burn_request_then_holding_burned = script do
+  run Test with
+    given = given_burn_request_exists
+    when = when_accept_burn_request_executed
+    then_ = then_holding_burned
+
+-- * Non-member confirm is rejected.
+
+when_outsider_confirms_accept_burn : Fixture -> Script ()
+when_outsider_confirms_accept_burn f = do
+  proposalCid <- submit f.parties.member1 $ createCmd AcceptBurnRequest with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+    burnRequestCid = f.burnRequestCid
+    instrumentConfigurationCid = f.artifacts.instrumentConfigurationCid
+    description = "Accept holder-initiated burn"
+    extraArgsMeta = Metadata with values = TextMap.empty
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  submitMustFail (memberContext f.parties.outsider f.parties.governanceParty) $
+    exerciseCmd f.rulesCid GovernanceRules_ConfirmAction with
+      confirmer = f.parties.outsider
+      actionProposalCid = proposalInterfaceCid
+
+then_nothing_burn : Fixture -> () -> Script Failures
+then_nothing_burn _ _ = pure []
+
+test_when_outsider_confirms_accept_burn_then_rejected = script do
+  run Test with
+    given = given_burn_request_exists
+    when = when_outsider_confirms_accept_burn
+    then_ = then_nothing_burn

@@ -40,6 +40,8 @@ import {
   TEMPLATE_ALLOCATION_FACTORY,
   INTERFACE_FEATURED_APP_RIGHT,
   TEMPLATE_REGISTRAR_SERVICE,
+  TEMPLATE_MINT_REQUEST,
+  TEMPLATE_BURN_REQUEST,
 } from "../constants";
 import { authenticatedFetch } from "../api";
 import { getActionTypeOptions } from "../governanceFormat";
@@ -172,6 +174,9 @@ export const GovernanceSection = ({
   const [proposalCredentialId, setProposalCredentialId] = useState("");
   const [proposalCredentialClaimsText, setProposalCredentialClaimsText] = useState("");
   const [proposalCredentialOfferCid, setProposalCredentialOfferCid] = useState("");
+  // Accept holder-initiated mint/burn request state
+  const [proposalMintRequestCid, setProposalMintRequestCid] = useState("");
+  const [proposalBurnRequestCid, setProposalBurnRequestCid] = useState("");
   const [proposalLoading, setProposalLoading] = useState(false);
   const [rulesContractId, setRulesContractId] = useState(
     initialRulesContractId || "",
@@ -259,6 +264,8 @@ export const GovernanceSection = ({
   >([]);
   const [userServices, setUserServices] = useState<UserServiceInfo[]>([]);
   const [registrarServiceContracts, setRegistrarServiceContracts] = useState<ContractWithBlob[]>([]);
+  const [mintRequestContracts, setMintRequestContracts] = useState<ContractWithBlob[]>([]);
+  const [burnRequestContracts, setBurnRequestContracts] = useState<ContractWithBlob[]>([]);
   // InstrumentConfiguration contracts fetched from /instruments. Each one
   // represents a token the governance party can mint/burn against and exposes
   // its parsed instrument_admin + instrument_id, so we can drive a real
@@ -451,6 +458,8 @@ export const GovernanceSection = ({
     if (
       proposalType === "mint" ||
       proposalType === "burn" ||
+      proposalType === "accept_mint_request" ||
+      proposalType === "accept_burn_request" ||
       proposalType === "set_provider_app_reward_beneficiaries"
     ) {
       fetchInstruments();
@@ -501,6 +510,12 @@ export const GovernanceSection = ({
     }
     if (proposalType === "set_enable_result_contracts") {
       fetchContractsByTemplate(TEMPLATE_REGISTRAR_SERVICE).then(setRegistrarServiceContracts);
+    }
+    if (proposalType === "accept_mint_request") {
+      fetchContractsByTemplate(TEMPLATE_MINT_REQUEST).then(setMintRequestContracts);
+    }
+    if (proposalType === "accept_burn_request") {
+      fetchContractsByTemplate(TEMPLATE_BURN_REQUEST).then(setBurnRequestContracts);
     }
   }, [proposalType, fetchContractsByTemplate]);
 
@@ -1077,6 +1092,22 @@ export const GovernanceSection = ({
             instrument_configuration_cid: proposalInstrumentConfigurationCid,
             holder: proposalHolder,
             amount: proposalAmount,
+            description: proposalDescription,
+          };
+          break;
+        case "accept_mint_request":
+          proposal = {
+            type: "accept_mint_request",
+            mint_request_cid: proposalMintRequestCid,
+            instrument_configuration_cid: proposalInstrumentConfigurationCid,
+            description: proposalDescription,
+          };
+          break;
+        case "accept_burn_request":
+          proposal = {
+            type: "accept_burn_request",
+            burn_request_cid: proposalBurnRequestCid,
+            instrument_configuration_cid: proposalInstrumentConfigurationCid,
             description: proposalDescription,
           };
           break;
@@ -2674,8 +2705,10 @@ export const GovernanceSection = ({
                   <MenuItem value="create_delegated_batched_markers_proxy">Create Delegated Batched Markers Proxy</MenuItem>
                   */}
                   <ListSubheader sx={{ fontStyle: "italic", lineHeight: 1.5, pl: 4 }}>Actions</ListSubheader>
-                  <MenuItem value="mint">Mint</MenuItem>
-                  <MenuItem value="burn">Burn</MenuItem>
+                  <MenuItem value="mint">Offer Mint</MenuItem>
+                  <MenuItem value="burn">Offer Burn</MenuItem>
+                  <MenuItem value="accept_mint_request">Accept Mint Request</MenuItem>
+                  <MenuItem value="accept_burn_request">Accept Burn Request</MenuItem>
                   <Divider />
                   <ListSubheader sx={{ color: "primary.main", fontWeight: 600 }}>Utility Credential</ListSubheader>
                   <MenuItem value="offer_free_credential">Offer Free Credential</MenuItem>
@@ -2716,7 +2749,7 @@ export const GovernanceSection = ({
                   )}
                   <TextField size="small" label="Operator Party" value={proposalOperator} onChange={(e) => setProposalOperator(e.target.value)} fullWidth required />
                   <TextField size="small" label="Instrument Admin" value={proposalInstrumentAdmin} onChange={(e) => setProposalInstrumentAdmin(e.target.value)} fullWidth required />
-                  <Typography variant="caption" display="block" color="text.secondary">
+                  <Typography variant="caption" sx={{ display: "block" }} color="text.secondary">
                     Instrument Allowances (optional)
                   </Typography>
                   {proposalInstrumentAllowances.map((a) => (
@@ -3001,6 +3034,63 @@ export const GovernanceSection = ({
                   <TextField size="small" label="Description" value={proposalDescription} onChange={(e) => setProposalDescription(e.target.value)} fullWidth required />
                 </>
               )}
+
+              {(proposalType === "accept_mint_request" || proposalType === "accept_burn_request") && (() => {
+                const isMint = proposalType === "accept_mint_request";
+                const requestContracts = isMint ? mintRequestContracts : burnRequestContracts;
+                const requestCid = isMint ? proposalMintRequestCid : proposalBurnRequestCid;
+                const setRequestCid = isMint ? setProposalMintRequestCid : setProposalBurnRequestCid;
+                const requestLabel = isMint ? "MintRequest" : "BurnRequest";
+                return (
+                  <>
+                    <FormControl size="small" fullWidth required>
+                      <InputLabel>{requestLabel}</InputLabel>
+                      <Select
+                        label={requestLabel}
+                        value={requestCid}
+                        onChange={(e) => setRequestCid(e.target.value)}
+                        MenuProps={{ disableScrollLock: true }}
+                      >
+                        {requestContracts.length > 0 ? (
+                          requestContracts.map((c) => (
+                            <MenuItem key={c.contract_id} value={c.contract_id}>
+                              {c.contract_id.slice(0, 16)}…
+                            </MenuItem>
+                          ))
+                        ) : (
+                          <MenuItem disabled>
+                            No {requestLabel} contracts found — holder must create one first
+                          </MenuItem>
+                        )}
+                      </Select>
+                    </FormControl>
+                    <FormControl size="small" fullWidth required>
+                      <InputLabel>Instrument</InputLabel>
+                      <Select
+                        label="Instrument"
+                        value={proposalInstrumentConfigurationCid}
+                        onChange={(e) => setProposalInstrumentConfigurationCid(e.target.value)}
+                        MenuProps={{ disableScrollLock: true }}
+                      >
+                        {instrumentsLoading ? (
+                          <MenuItem disabled>Loading instruments…</MenuItem>
+                        ) : availableInstruments.length > 0 ? (
+                          availableInstruments.map((inst) => (
+                            <MenuItem key={inst.contract_id} value={inst.contract_id}>
+                              {inst.instrument_id} ({inst.contract_id.slice(0, 8)}…)
+                            </MenuItem>
+                          ))
+                        ) : (
+                          <MenuItem disabled>
+                            No instruments found — run SetupUtility first
+                          </MenuItem>
+                        )}
+                      </Select>
+                    </FormControl>
+                    <TextField size="small" label="Description" value={proposalDescription} onChange={(e) => setProposalDescription(e.target.value)} fullWidth required />
+                  </>
+                );
+              })()}
 
               {proposalType === "offer_free_credential" && (
                 <>
