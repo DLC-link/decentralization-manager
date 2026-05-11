@@ -640,6 +640,16 @@ pub async fn propose_action(
                 }
             }
         }
+        action_serializer::ProposalPackage::GovernanceUtilityCredential => {
+            match packages.governance_utility_credential.as_deref() {
+                Some(pkg) => pkg,
+                None => {
+                    return HttpResponse::BadRequest().json(ErrorResponse {
+                        error: "governance_utility_credential package not configured".to_string(),
+                    });
+                }
+            }
+        }
         action_serializer::ProposalPackage::GovernanceUtilityOnboarding => {
             match packages.governance_utility_onboarding.as_deref() {
                 Some(pkg) => pkg,

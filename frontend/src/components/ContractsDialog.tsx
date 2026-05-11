@@ -1007,6 +1007,7 @@ interface ContractTypeSelectionProps {
   isGovernanceCoreDeployed: boolean;
   isGovernanceCoreDarUploaded: boolean;
   isTokenCustodyDarUploaded: boolean;
+  isUtilityCredentialPluginDarUploaded: boolean;
 }
 
 const ContractTypeSelection = ({
@@ -1014,6 +1015,7 @@ const ContractTypeSelection = ({
   isGovernanceCoreDeployed,
   isGovernanceCoreDarUploaded,
   isTokenCustodyDarUploaded,
+  isUtilityCredentialPluginDarUploaded,
 }: ContractTypeSelectionProps) => {
   return (
     <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
@@ -1122,7 +1124,11 @@ const ContractTypeSelection = ({
               }
               label="Utility"
               description="Registry services and verifiable credentials"
-              tooltip="Coming soon"
+              tooltip={
+                isUtilityCredentialPluginDarUploaded
+                  ? "Credential plugin DAR uploaded — propose Offer/Accept Free credential actions from the Governance section."
+                  : "Coming soon"
+              }
             />
             <PluginCard
               icon={
@@ -1195,6 +1201,9 @@ export const ContractsDialog = ({
   const isTokenCustodyDarUploaded = isDarUploaded([
     "governance-token-custody",
     "tokencustody",
+  ]);
+  const isUtilityCredentialPluginDarUploaded = isDarUploaded([
+    "governance-utility-credential",
   ]);
 
   // Combine package IDs from config + known contracts for dropdown
@@ -1482,6 +1491,9 @@ export const ContractsDialog = ({
               isGovernanceCoreDeployed={isGovernanceCoreDeployed}
               isGovernanceCoreDarUploaded={isGovernanceCoreDarUploaded}
               isTokenCustodyDarUploaded={isTokenCustodyDarUploaded}
+              isUtilityCredentialPluginDarUploaded={
+                isUtilityCredentialPluginDarUploaded
+              }
             />
           )}
 

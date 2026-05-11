@@ -442,7 +442,37 @@ export type ProposalType =
       holder: string;
       amount: string;
       description: string;
+    }
+  | {
+      type: "offer_free_credential";
+      user_service_cid: string;
+      holder: string;
+      id: string;
+      description: string;
+      claims: Claim[];
+    }
+  | {
+      type: "offer_paid_credential";
+      user_service_cid: string;
+      holder: string;
+      id: string;
+      description: string;
+      claims: Claim[];
+      billing_params: BillingParams;
+      deposit_initial_amount_usd: string | null;
+    }
+  | {
+      type: "accept_free_credential";
+      user_service_cid: string;
+      credential_offer_cid: string;
     };
+
+export interface BillingParams {
+  fee_per_day_usd: string;
+  billing_period_minutes: number;
+  deposit_target_amount_usd: string;
+  holder_activity_weight: string | null;
+}
 
 export interface ProposeActionRequest {
   party_id: string;
