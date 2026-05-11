@@ -43,7 +43,7 @@ hex = { version = "0.4" }
 http = { version = "0.2" }
 hyper = { version = "0.14", features = ["full"] }
 hyper-noise = { version = "0.0.2" }
-jsonwebtoken = { version = "10.3", features = ["aws_lc_rs"] }
+jsonwebtoken = { version = "10.4", features = ["aws_lc_rs"] }
 mime_guess = { version = "2.0" }
 prost = { version = "0.14.1" }
 prost-types = { version = "0.14.1" }
