@@ -1277,6 +1277,12 @@ pub struct NetworkInfo {
     pub amulet_rules_blob: String,
 }
 
+/// DA Utility operator info (operator party id)
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct OperatorInfo {
+    pub party_id: CantonId,
+}
+
 /// Response for the generic contract query endpoint
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct ContractQueryResponse {

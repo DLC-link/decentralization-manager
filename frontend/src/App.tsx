@@ -32,7 +32,7 @@ import { OnboardingDialog } from "./components/OnboardingDialog";
 import { NotificationsView } from "./components/NotificationsView";
 import type { PartyActions } from "./components/NotificationsView";
 import { useSnackbar } from "./contexts";
-import { API_BASE, ADMIN_ACCESS, OPERATOR_API_URLS } from "./constants";
+import { API_BASE, ADMIN_ACCESS } from "./constants";
 import { authenticatedFetch } from "./api";
 import type {
   DecentralizedParty,
@@ -187,12 +187,12 @@ const App = () => {
   }, []);
 
   useEffect(() => {
-    const network = nodeConfig?.canton.network;
-    if (!network) return;
-    const url = OPERATOR_API_URLS[network];
-    fetch(url)
-      .then((res) => res.json())
-      .then((data: { partyId: string }) => setOperatorParty(data.partyId))
+    if (!nodeConfig) return;
+    authenticatedFetch(`${API_BASE}/operator-info`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { party_id: string } | null) => {
+        if (data) setOperatorParty(data.party_id);
+      })
       .catch(() => {});
   }, [nodeConfig]);
 

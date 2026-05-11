@@ -36,7 +36,7 @@ use crate::{
             ChainAuditEntry, ChainAuditQuery, ChainAuditResponse, ConfirmActionRequest,
             ContractQueryResponse, ErrorResponse, ExecuteActionRequest, ExpireConfirmationRequest,
             GovernanceResponse, GovernanceStateResponse, GovernanceType, KnownMember,
-            KnownMembersResponse, MessageResponse, NetworkInfo, ProposeActionRequest,
+            KnownMembersResponse, MessageResponse, NetworkInfo, OperatorInfo, ProposeActionRequest,
             ProviderServicesResponse, RegistrarServicesResponse, UserServicesResponse,
             VaultsResponse,
         },
@@ -1273,6 +1273,53 @@ pub async fn get_network_info(data: web::Data<AppState>) -> impl Responder {
         }
         Err(e) => HttpResponse::BadGateway().json(ErrorResponse {
             error: format!("Failed to reach DSO API: {e}"),
+        }),
+    }
+}
+
+/// Get DA Utility operator party ID
+#[utoipa::path(
+    tag = "Proxy",
+    responses(
+        (status = 200, description = "Operator info", body = OperatorInfo),
+        (status = 502, description = "Operator API error", body = ErrorResponse)
+    )
+)]
+#[get("/operator-info")]
+pub async fn get_operator_info(data: web::Data<AppState>) -> impl Responder {
+    let url = data.config.canton.network.operator_url();
+    let client = reqwest::Client::new();
+
+    match client.get(url).send().await {
+        Ok(res) if res.status().is_success() => match res.json::<serde_json::Value>().await {
+            Ok(json) => match json.pointer("/partyId").and_then(|v| v.as_str()) {
+                Some(party) => match party.parse::<CantonId>() {
+                    Ok(party_id) => HttpResponse::Ok().json(OperatorInfo { party_id }),
+                    Err(e) => HttpResponse::BadGateway().json(ErrorResponse {
+                        error: format!("Invalid operator party ID: {e}"),
+                    }),
+                },
+                None => {
+                    tracing::warn!("Unexpected operator API response format");
+                    HttpResponse::BadGateway().json(ErrorResponse {
+                        error: "Unexpected response format from operator API".to_string(),
+                    })
+                }
+            },
+            Err(e) => HttpResponse::BadGateway().json(ErrorResponse {
+                error: format!("Failed to parse operator response: {e}"),
+            }),
+        },
+        Ok(res) => {
+            let status = res.status();
+            let body = res.text().await.unwrap_or_default();
+            tracing::error!("Operator API returned {status}: {body}");
+            HttpResponse::BadGateway().json(ErrorResponse {
+                error: format!("Operator API returned {status}: {body}"),
+            })
+        }
+        Err(e) => HttpResponse::BadGateway().json(ErrorResponse {
+            error: format!("Failed to reach operator API: {e}"),
         }),
     }
 }

@@ -117,7 +117,9 @@ export const GovernanceSection = ({
   const [proposalType, setProposalType] = useState<ProposalType["type"]>("setup_cc_preapproval");
   const [proposalProvider, setProposalProvider] = useState("");
   const [proposalExpectedDso, setProposalExpectedDso] = useState("");
-  const [proposalOperator, setProposalOperator] = useState("");
+  const [proposalOperator, setProposalOperator] = useState(
+    defaultOperatorParty || "",
+  );
   const [proposalInstrumentAdmin, setProposalInstrumentAdmin] = useState("");
   const [proposalTransferFactoryCid, setProposalTransferFactoryCid] = useState("");
   const [proposalExpectedAdmin, setProposalExpectedAdmin] = useState("");
@@ -185,6 +187,16 @@ export const GovernanceSection = ({
   const [operatorParty, setOperatorParty] = useState(
     defaultOperatorParty || "",
   );
+  // Sync the autofetched operator party (from App.tsx) into both the action
+  // and proposal operator states once it arrives — without this, the fields
+  // stay empty whenever the fetch completes after this component has already
+  // mounted with an empty default.
+  useEffect(() => {
+    if (defaultOperatorParty) {
+      setOperatorParty(defaultOperatorParty);
+      setProposalOperator(defaultOperatorParty);
+    }
+  }, [defaultOperatorParty]);
   const [providerServiceCid, setProviderServiceCid] = useState("");
   const [userServiceCid, setUserServiceCid] = useState("");
   const [amuletRulesCid, setAmuletRulesCid] = useState("");
