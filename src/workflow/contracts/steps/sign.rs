@@ -17,6 +17,7 @@ use canton_proto_rs::com::{
 };
 use ed25519_dalek::{Signature as DalekSignature, Signer, SigningKey, Verifier};
 use sqlx::SqlitePool;
+use zeroize::Zeroizing;
 
 use crate::{
     config::NodeConfig,
@@ -204,11 +205,11 @@ pub async fn sign_submissions(
     tracing::info!("Exporting private key from Canton...");
     tracing::debug!("Key fingerprint: {key_fingerprint}");
 
-    let export_response = vault_client
+    let mut export_response = vault_client
         .export_key_pair(tonic::Request::new(ExportKeyPairRequest {
             fingerprint: key_fingerprint.clone(),
             protocol_version: CANTON_PROTOCOL_VERSION,
-            password: String::new(), // No password encryption
+            password: String::new(), // No password encryption — see TODO in module docs
         }))
         .await
         .map_err(|e| {
@@ -218,33 +219,28 @@ pub async fn sign_submissions(
         })?
         .into_inner();
 
-    // Step 5: Extract Ed25519 private key from Canton's export response
-    // Canton returns the key in a custom format with embedded metadata
-    tracing::debug!("Parsing exported key pair...");
+    // Step 5: Extract Ed25519 private key from Canton's export response.
+    // Canton returns the key in a custom format with embedded metadata.
+    //
+    // Copy the export bytes into a zeroizing buffer for our own use, then
+    // wipe the proto-owned copy as soon as we no longer need it (the proto
+    // struct does not zero on drop). All 32-byte candidates derived below
+    // are also held in `Zeroizing<[u8; 32]>` so they self-wipe on drop.
+    let exported_key_data: Zeroizing<Vec<u8>> = Zeroizing::new(export_response.key_pair.clone());
+    export_response.key_pair.fill(0);
     tracing::debug!(
-        "Key pair bytes length: {len}",
-        len = export_response.key_pair.len()
+        "Parsing exported key pair ({len} bytes)",
+        len = exported_key_data.len()
     );
 
-    let exported_key_data = &export_response.key_pair;
-
-    // Dump first 256 bytes of exported data for analysis
-    let dump_len = exported_key_data.len().min(256);
-    tracing::debug!("First {dump_len} bytes of exported key data:");
-    for chunk_start in (0..dump_len).step_by(32) {
-        let chunk_end = (chunk_start + 32).min(dump_len);
-        let chunk = &exported_key_data[chunk_start..chunk_end];
-        tracing::debug!("  [{chunk_start:03}-{:03}]: {chunk:02x?}", chunk_end - 1,);
-    }
-
-    // Strategy: Try ALL possible 32-byte sequences and test each one
-    // The correct private key should verify against the public key
+    // Strategy: Try ALL possible 32-byte sequences and test each one.
+    // The correct private key should verify against the public key.
     let key_size = ED25519_PRIVATE_KEY_LENGTH as usize;
     let max_offset = exported_key_data.len().saturating_sub(key_size);
 
     tracing::info!("Searching for valid Ed25519 private key among {max_offset} possible positions");
 
-    let mut candidate_keys = Vec::new();
+    let mut candidate_keys: Vec<(usize, Zeroizing<[u8; 32]>, &str)> = Vec::new();
 
     // First, try DER-tagged sequences (0x04 0x20 pattern)
     for offset in 0..max_offset.saturating_sub(2) {
@@ -253,14 +249,13 @@ pub async fn sign_submissions(
         {
             let mut key_bytes = [0u8; 32];
             key_bytes.copy_from_slice(&exported_key_data[offset + 2..offset + 2 + key_size]);
-            candidate_keys.push((offset + 2, key_bytes, "DER-tagged"));
-            tracing::debug!(
-                "Found DER-tagged 32-byte sequence at offset {offset}: {bytes:02x?}...",
-                offset = offset + 2,
-                bytes = &key_bytes[..8]
-            );
+            candidate_keys.push((offset + 2, Zeroizing::new(key_bytes), "DER-tagged"));
         }
     }
+    tracing::debug!(
+        "Found {count} DER-tagged candidates",
+        count = candidate_keys.len()
+    );
 
     if candidate_keys.is_empty() {
         tracing::warn!("No DER-tagged sequences found, trying all possible 32-byte sequences");
@@ -269,7 +264,7 @@ pub async fn sign_submissions(
         for offset in (0..max_offset).step_by(4) {
             let mut key_bytes = [0u8; 32];
             key_bytes.copy_from_slice(&exported_key_data[offset..offset + key_size]);
-            candidate_keys.push((offset, key_bytes, "raw"));
+            candidate_keys.push((offset, Zeroizing::new(key_bytes), "raw"));
         }
 
         tracing::debug!(
@@ -295,10 +290,6 @@ pub async fn sign_submissions(
     // - Bytes 0-11: DER wrapper (SEQUENCE + algorithm OID + BIT STRING header)
     // - Bytes 12-43: Raw 32-byte Ed25519 public key
     let expected_public_key_der = &signing_public_key.public_key;
-    tracing::debug!(
-        "Expected public key DER (first 16 bytes): {:02x?}",
-        &expected_public_key_der[..16.min(expected_public_key_der.len())]
-    );
 
     // Extract raw Ed25519 public key from DER format
     const DER_HEADER_LENGTH: usize = 12;
@@ -313,28 +304,17 @@ pub async fn sign_submissions(
     }
 
     let expected_raw_public_key = &expected_public_key_der[DER_HEADER_LENGTH..];
-    tracing::debug!(
-        "Expected raw public key (first 16 bytes): {:02x?}",
-        &expected_raw_public_key[..16.min(expected_raw_public_key.len())]
-    );
 
-    let mut verified_key_bytes: Option<[u8; 32]> = None;
+    let mut verified_key_bytes: Option<Zeroizing<[u8; 32]>> = None;
 
     for (offset, key_bytes, source) in &candidate_keys {
         let signing_key = SigningKey::from_bytes(key_bytes);
-        let derived_public_key = signing_key.verifying_key();
-        let derived_public_bytes = derived_public_key.to_bytes();
-
-        tracing::debug!(
-            "Testing candidate at offset {offset} ({source}): derived public key {:02x?}...",
-            &derived_public_bytes[..8]
-        );
+        let derived_public_bytes = signing_key.verifying_key().to_bytes();
 
         // Compare raw Ed25519 public keys (32 bytes)
         if derived_public_bytes.as_slice() == expected_raw_public_key {
             tracing::info!("Found matching private key at offset {offset} ({source})");
-            tracing::debug!("Private key (first 16 bytes): {:02x?}", &key_bytes[..16]);
-            verified_key_bytes = Some(*key_bytes);
+            verified_key_bytes = Some(Zeroizing::new(**key_bytes));
             break;
         }
     }
@@ -346,50 +326,30 @@ pub async fn sign_submissions(
             count = candidate_keys.len()
         )
     })?;
+    // Drop the remaining candidates; each Zeroizing<[u8; 32]> wipes on drop.
+    drop(candidate_keys);
 
     tracing::info!("Successfully verified Ed25519 private key");
 
-    // Step 7: Sign transaction hashes with verified key
+    // Step 7: Sign transaction hashes with verified key.
+    // `SigningKey` impls `Zeroize` (via the `zeroize` feature on
+    // `ed25519-dalek`) and zeros its inner secret on drop.
     tracing::info!(
         "Signing {count} transaction hashes...",
         count = prepared_submissions.len()
     );
 
     let signing_key = SigningKey::from_bytes(&key_bytes);
-
-    // Verify the signatures locally before sending to Canton
     let verifying_key = signing_key.verifying_key();
-    let verifying_key_bytes = verifying_key.to_bytes();
-
-    tracing::debug!(
-        "Verifying key (raw 32 bytes): {:02x?}",
-        &verifying_key_bytes
-    );
-    tracing::debug!(
-        "Expected Canton key (raw): {:02x?}",
-        &expected_raw_public_key[..32.min(expected_raw_public_key.len())]
-    );
     tracing::debug!("Key fingerprint used in signatures: {key_fingerprint}");
 
     // Sign each prepared transaction hash and create Signature protobuf messages
     let mut signatures: Vec<Signature> = Vec::new();
 
     for (idx, prepared_sub) in prepared_submissions.iter().enumerate() {
-        tracing::debug!(
-            "Transaction hash {idx}: {hash:02x?}",
-            idx = idx + 1,
-            hash = &prepared_sub.prepared_transaction_hash
-        );
-
         let signature_bytes = signing_key
             .sign(&prepared_sub.prepared_transaction_hash)
             .to_bytes();
-
-        tracing::debug!(
-            "Signature {idx} (first 32 bytes): {bytes:02x?}",
-            idx = idx + 1,
-            bytes = &signature_bytes[..32]
-        );
 
         // Verify locally
         let sig = DalekSignature::from_bytes(&signature_bytes);
