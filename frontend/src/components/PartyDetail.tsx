@@ -108,6 +108,11 @@ export const PartyDetail = ({
   const [editGovContractId, setEditGovContractId] = useState<string | null>(
     null,
   );
+  // Which half of the gov-actions dialog to show. Header "New Proposal" sets
+  // "proposals"; per-contract pencil icon sets "actions".
+  const [govDialogView, setGovDialogView] = useState<"actions" | "proposals">(
+    "actions",
+  );
   const [governanceRefreshNonce, setGovernanceRefreshNonce] = useState(0);
   const [auditTrailCount, setAuditTrailCount] = useState(0);
   const [auditTrailLoading, setAuditTrailLoading] = useState(false);
@@ -220,11 +225,18 @@ export const PartyDetail = ({
             variant="outlined"
             size="small"
             startIcon={<UploadFileIcon />}
-            onClick={() => setContractsDialogOpen(true)}
+            onClick={() => {
+              if (governanceType === "core_self" && rulesContract) {
+                setGovDialogView("proposals");
+                setEditGovContractId(rulesContract.contract_id);
+              } else {
+                setContractsDialogOpen(true);
+              }
+            }}
             disabled={!ADMIN_ACCESS}
           >
             {governanceType === "core_self"
-              ? "Manage Plugins"
+              ? "New Proposal"
               : "Deploy Contracts"}
           </Button>
         )}
@@ -395,7 +407,10 @@ export const PartyDetail = ({
                           <Tooltip title="Edit governance actions">
                             <IconButton
                               size="small"
-                              onClick={() => setEditGovContractId(c.contract_id)}
+                              onClick={() => {
+                                setGovDialogView("actions");
+                                setEditGovContractId(c.contract_id);
+                              }}
                               disabled={!authStatus?.rights?.dec_party_act_as}
                             >
                               <EditIcon fontSize="small" />
@@ -539,6 +554,7 @@ export const PartyDetail = ({
           network={network}
           governanceType={governanceTypeFor(editingContract.template_id)}
           onAfterAction={() => setGovernanceRefreshNonce((n) => n + 1)}
+          view={govDialogView}
         />
       )}
     </Box>

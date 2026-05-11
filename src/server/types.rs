@@ -1080,6 +1080,15 @@ pub struct DomainGovernanceAction {
     pub confirmation_count: usize,
     /// Whether threshold is met for execution
     pub can_execute: bool,
+    /// `true` when the underlying proposal contract was not found in this
+    /// participant's ACS at query time. Confirmations referencing an archived
+    /// proposal can't be confirmed/executed (the proposal cid is gone), but
+    /// the Confirmation contracts themselves are still active and need to be
+    /// expired explicitly to clear them off the ledger. The UI uses this
+    /// flag to render a dismiss-only card instead of the normal Confirm /
+    /// Execute affordances.
+    #[serde(default)]
+    pub orphaned: bool,
 }
 
 /// Request to submit a confirmation for an action with structured type
@@ -1159,6 +1168,13 @@ pub struct GovernanceResponse {
     /// The member party ID for the requesting party (used to identify own confirmations)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub member_party_id: Option<CantonId>,
+    /// Current contract id of the active GovernanceRules / VaultGovernanceRules
+    /// contract for this party. The choice exercised when confirming an action
+    /// is consuming, so this id changes after each confirm/execute — clients
+    /// should use this field rather than a cached value to avoid
+    /// `CONTRACT_NOT_FOUND` on stale ids.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rules_contract_id: Option<String>,
 }
 
 /// Request to expire a stale confirmation
@@ -1235,6 +1251,24 @@ pub struct UserServiceInfo {
     pub user: CantonId,
 }
 
+/// Information about an InstrumentConfiguration contract (one "token" the
+/// governance party can mint/burn against). `instrument_admin` and
+/// `instrument_id` are read off the contract's `defaultIdentifier` field and
+/// match the `InstrumentId { admin, id }` shape required by Mint/Burn
+/// proposals.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct InstrumentInfo {
+    pub contract_id: String,
+    pub instrument_admin: CantonId,
+    pub instrument_id: String,
+}
+
+/// Response for the instruments endpoint
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct InstrumentsResponse {
+    pub instruments: Vec<InstrumentInfo>,
+}
+
 /// Response for the user services endpoint
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct UserServicesResponse {
@@ -1268,6 +1302,24 @@ pub struct NetworkInfo {
     pub dso_party_id: CantonId,
     pub amulet_rules_cid: String,
     pub amulet_rules_blob: String,
+}
+
+/// DA Utility operator info (operator party id)
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct OperatorInfo {
+    pub party_id: CantonId,
+}
+
+/// Count of active `TransferPreapproval` contracts a governance party already
+/// has, split by direction. The UI uses this to warn the user that re-issuing
+/// a `SetupCcPreapproval` / `SetupTokenPreapproval` proposal is pointless
+/// (the on-chain choice would fail when executed).
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct TransferPreapprovalsResponse {
+    /// `Splice.Wallet.TransferPreapproval:TransferPreapproval` — Canton Coin
+    pub cc: usize,
+    /// `Utility.Registry.App.V0.Model.TransferPreapproval:TransferPreapproval`
+    pub token: usize,
 }
 
 /// Response for the generic contract query endpoint

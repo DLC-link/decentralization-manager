@@ -1,5 +1,6 @@
 import { useState } from "react";
 import {
+  Alert,
   Box,
   Button,
   Chip,
@@ -780,6 +781,16 @@ const DomainActionCard = ({
       "Confirmation expired",
     );
 
+  // For orphaned actions (underlying proposal is gone) the only valid
+  // operation is to clear the stranded Confirmation contracts off the ledger.
+  // Loop sequentially so the `busy` lock on each /governance/expire call
+  // serializes correctly.
+  const handleDismissOrphan = async () => {
+    for (const c of domainAction.confirmations) {
+      await handleExpire(c.contract_id);
+    }
+  };
+
   const handleExecute = () =>
     post(
       "execute",
@@ -840,6 +851,13 @@ const DomainActionCard = ({
         </Box>
         <Chip label="proposal" size="small" variant="outlined" />
       </Box>
+
+      {domainAction.orphaned && (
+        <Alert severity="warning" sx={{ py: 0.5 }}>
+          The underlying proposal has been archived. These confirmation
+          contracts are stranded on the ledger — dismiss to clear them.
+        </Alert>
+      )}
 
       {domainAction.description && (
         <Typography
@@ -952,36 +970,50 @@ const DomainActionCard = ({
           color={domainAction.can_execute ? "success" : "default"}
           variant={domainAction.can_execute ? "filled" : "outlined"}
         />
-        {ownConfirmation ? (
+        {domainAction.orphaned ? (
           <Button
             size="small"
             variant="outlined"
             color="warning"
-            onClick={handleRevoke}
-            disabled={busy}
+            onClick={handleDismissOrphan}
+            disabled={busy || !party.rulesContractId}
           >
-            Revoke
+            Dismiss
           </Button>
         ) : (
-          <Button
-            size="small"
-            variant="outlined"
-            onClick={handleConfirm}
-            disabled={busy || !party.rulesContractId}
-          >
-            Confirm
-          </Button>
-        )}
-        {domainAction.can_execute && (
-          <Button
-            size="small"
-            variant="outlined"
-            color="success"
-            onClick={handleExecute}
-            disabled={busy || !party.rulesContractId}
-          >
-            Execute
-          </Button>
+          <>
+            {ownConfirmation ? (
+              <Button
+                size="small"
+                variant="outlined"
+                color="warning"
+                onClick={handleRevoke}
+                disabled={busy}
+              >
+                Revoke
+              </Button>
+            ) : (
+              <Button
+                size="small"
+                variant="outlined"
+                onClick={handleConfirm}
+                disabled={busy || !party.rulesContractId}
+              >
+                Confirm
+              </Button>
+            )}
+            {domainAction.can_execute && (
+              <Button
+                size="small"
+                variant="outlined"
+                color="success"
+                onClick={handleExecute}
+                disabled={busy || !party.rulesContractId}
+              >
+                Execute
+              </Button>
+            )}
+          </>
         )}
       </Box>
     </Box>

@@ -121,15 +121,13 @@ impl JwtValidator {
     pub fn new(
         inbound: Option<KeycloakConfig>,
         party_credentials: Arc<RwLock<Vec<PartyCredentials>>>,
+        http: reqwest::Client,
     ) -> Self {
         Self {
             inbound,
             party_credentials,
             jwks_cache: RwLock::new(HashMap::new()),
-            http: reqwest::Client::builder()
-                .timeout(Duration::from_secs(10))
-                .build()
-                .expect("reqwest client build"),
+            http,
         }
     }
 

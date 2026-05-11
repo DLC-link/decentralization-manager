@@ -343,6 +343,7 @@ mod tests {
             bootstrap_mu: Arc::new(Mutex::new(())),
             test_mode: true,
             refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
+            http_client: reqwest::Client::new(),
         })
     }
 
@@ -379,7 +380,11 @@ mod tests {
         // only way to reach the handler is the public allowlist or the
         // bootstrap exemption (neither of which apply to /node-config).
         let parties = Arc::new(RwLock::new(Vec::new()));
-        let validator = TokenValidator::Jwt(Arc::new(JwtValidator::new(None, parties.clone())));
+        let validator = TokenValidator::Jwt(Arc::new(JwtValidator::new(
+            None,
+            parties.clone(),
+            reqwest::Client::new(),
+        )));
         let state = build_app_state_with(Vec::new(), validator).await;
         let app = test::init_service(
             App::new()

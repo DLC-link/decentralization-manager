@@ -204,6 +204,19 @@ impl Network {
         }
     }
 
+    /// Get the DA Utility operator API URL for this network
+    pub fn operator_url(&self) -> &str {
+        match self {
+            Network::Devnet => {
+                "https://api.utilities.digitalasset-dev.com/api/utilities/v0/operator"
+            }
+            Network::Testnet => {
+                "https://api.utilities.digitalasset-staging.com/api/utilities/v0/operator"
+            }
+            Network::Mainnet => "https://api.utilities.digitalasset.com/api/utilities/v0/operator",
+        }
+    }
+
     /// Get default Keycloak configuration for this network
     pub fn keycloak_defaults(&self) -> KeycloakDefaults {
         match self {

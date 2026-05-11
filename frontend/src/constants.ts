@@ -1,4 +1,4 @@
-import type { DisclosedContract, Network } from "./types";
+import type { DisclosedContract } from "./types";
 
 export const API_BASE = "";
 export const ADMIN_ACCESS = import.meta.env.VITE_ADMIN_ACCESS === "true";
@@ -7,14 +7,6 @@ export const ADMIN_ACCESS = import.meta.env.VITE_ADMIN_ACCESS === "true";
 export const zebraRow = (index: number) => ({
   bgcolor: index % 2 === 0 ? "transparent" : "action.hover",
 });
-
-export const OPERATOR_API_URLS: Record<Network, string> = {
-  mainnet: "https://api.utilities.digitalasset.com/api/utilities/v0/operator",
-  testnet:
-    "https://api.utilities.digitalasset-staging.com/api/utilities/v0/operator",
-  devnet:
-    "https://api.utilities.digitalasset-dev.com/api/utilities/v0/operator",
-};
 
 // Limits
 export const MAX_TOTAL_DEPOSIT = 10000;

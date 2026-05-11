@@ -32,7 +32,7 @@ import { OnboardingDialog } from "./components/OnboardingDialog";
 import { NotificationsView } from "./components/NotificationsView";
 import type { PartyActions } from "./components/NotificationsView";
 import { useSnackbar } from "./contexts";
-import { API_BASE, ADMIN_ACCESS, OPERATOR_API_URLS } from "./constants";
+import { API_BASE, ADMIN_ACCESS } from "./constants";
 import { authenticatedFetch } from "./api";
 import type {
   DecentralizedParty,
@@ -105,7 +105,9 @@ const App = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [partyFilter, setPartyFilter] = useState(
-    INITIAL_ROUTE.partySlug ?? "",
+    INITIAL_ROUTE.partySlug && !INITIAL_ROUTE.partySlug.includes("::")
+      ? INITIAL_ROUTE.partySlug
+      : "",
   );
   const [refreshingParties, setRefreshingParties] = useState(false);
   const [packagesRefreshNonce, setPackagesRefreshNonce] = useState(0);
@@ -150,7 +152,7 @@ const App = () => {
           setSelectedPartyId(partySlug);
         } else {
           setSelectedPartyId(null);
-          if (partySlug) {
+          if (partySlug && !partySlug.includes("::")) {
             setPartyFilter(partySlug);
           }
         }
@@ -185,12 +187,12 @@ const App = () => {
   }, []);
 
   useEffect(() => {
-    const network = nodeConfig?.canton.network;
-    if (!network) return;
-    const url = OPERATOR_API_URLS[network];
-    fetch(url)
-      .then((res) => res.json())
-      .then((data: { partyId: string }) => setOperatorParty(data.partyId))
+    if (!nodeConfig) return;
+    authenticatedFetch(`${API_BASE}/operator-info`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { party_id: string } | null) => {
+        if (data) setOperatorParty(data.party_id);
+      })
       .catch(() => {});
   }, [nodeConfig]);
 
@@ -488,7 +490,10 @@ const App = () => {
             const data = await res.json();
             return {
               partyId: party.party_id,
-              rulesContractId: rulesContract.contract_id,
+              // Prefer the live rules contract id from the API — confirm
+              // archives + re-creates the rules contract, so the cached
+              // `parties` snapshot can point at an archived contract id.
+              rulesContractId: data.rules_contract_id ?? rulesContract.contract_id,
               memberPartyId: data.member_party_id ?? authStatus.member_party_id,
               governanceType,
               threshold: data.threshold,
@@ -665,6 +670,7 @@ const App = () => {
               borderColor: "divider",
               overflow: "visible",
               "& .MuiTabs-scroller": { overflow: "visible !important" },
+              "& .MuiTab-root": { overflow: "visible" },
             }}
           >
             <Tab
