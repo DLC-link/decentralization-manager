@@ -28,17 +28,18 @@ use crate::{
         chain_audit,
         queries::{
             ContractQueryParams as QueryContractParams, get_governance_confirmations,
-            get_governance_state as query_governance_state, get_provider_services,
-            get_registrar_services, get_user_services, get_vaults, query_contracts_by_template,
+            get_governance_state as query_governance_state, get_instruments,
+            get_provider_services, get_registrar_services, get_user_services, get_vaults,
+            query_contracts_by_template,
         },
         types::{
             AuditLogEntry, AuditLogQuery, AuditLogResponse, CancelConfirmationRequest,
             ChainAuditEntry, ChainAuditQuery, ChainAuditResponse, ConfirmActionRequest,
             ContractQueryResponse, ErrorResponse, ExecuteActionRequest, ExpireConfirmationRequest,
             GovernanceResponse, GovernanceStateResponse, GovernanceType, KnownMember,
-            KnownMembersResponse, MessageResponse, NetworkInfo, OperatorInfo, ProposeActionRequest,
-            ProviderServicesResponse, RegistrarServicesResponse, UserServicesResponse,
-            VaultsResponse,
+            InstrumentsResponse, KnownMembersResponse, MessageResponse, NetworkInfo, OperatorInfo,
+            ProposeActionRequest, ProviderServicesResponse, RegistrarServicesResponse,
+            UserServicesResponse, VaultsResponse,
         },
     },
     utils,
@@ -402,6 +403,40 @@ pub async fn get_registrar_services_handler(
             tracing::error!("Failed to fetch registrar services: {e}");
             HttpResponse::InternalServerError().json(ErrorResponse {
                 error: format!("Failed to fetch registrar services: {e}"),
+            })
+        }
+    }
+}
+
+/// Get InstrumentConfiguration contracts for a party. Each one represents a
+/// token the governance party can mint/burn against; the response includes the
+/// `instrument_admin` and `instrument_id` parsed from the contract's
+/// `defaultIdentifier` so the frontend can populate Mint/Burn forms without
+/// reading the contract blob.
+#[utoipa::path(
+    tag = "Services",
+    params(GovernanceQuery),
+    responses(
+        (status = 200, description = "Available instruments", body = InstrumentsResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+#[get("/instruments")]
+pub async fn get_instruments_handler(
+    data: web::Data<AppState>,
+    query: web::Query<GovernanceQuery>,
+) -> impl Responder {
+    let party_id = &query.party_id;
+
+    let token = get_party_token(&data, party_id).await;
+    let test_mode = data.test_mode;
+
+    match get_instruments(&data.config, party_id, token, test_mode).await {
+        Ok(instruments) => HttpResponse::Ok().json(InstrumentsResponse { instruments }),
+        Err(e) => {
+            tracing::error!("Failed to fetch instruments: {e}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch instruments: {e}"),
             })
         }
     }

@@ -23,8 +23,8 @@ use super::{
     action_serializer,
     types::{
         ActionType, ContractInfo, ContractWithBlob, DomainGovernanceAction, GovernanceAction,
-        GovernanceConfirmation, GovernanceState, PartyMetadata, ProviderServiceInfo,
-        RegistrarServiceInfo, UserServiceInfo, VaultInfo,
+        GovernanceConfirmation, GovernanceState, InstrumentInfo, PartyMetadata,
+        ProviderServiceInfo, RegistrarServiceInfo, UserServiceInfo, VaultInfo,
     },
 };
 
@@ -2171,6 +2171,199 @@ fn extract_registrar_service_info(created: &CreatedEvent) -> Option<RegistrarSer
         contract_id: created.contract_id.clone(),
         operator,
         registrar,
+    })
+}
+
+// ============================================================================
+// InstrumentConfiguration Queries
+// ============================================================================
+
+/// InstrumentConfiguration template identifier. Hard-coded `#utility-registry-v0`
+/// because it lives in a different package than `utility_registry`
+/// (= `#utility-registry-app-v0`) and PackageConfig has no separate field for
+/// it. Canton resolves the `#name-version` selector at query time.
+fn instrument_configuration_template() -> TemplateId {
+    TemplateId {
+        package_id: "#utility-registry-v0".to_string(),
+        module_name: "Utility.Registry.V0.Configuration.Instrument",
+        entity_name: "InstrumentConfiguration",
+    }
+}
+
+/// Get all InstrumentConfiguration contracts for a party. Each one represents
+/// one token the governance party can mint/burn against.
+pub async fn get_instruments(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    test_mode: bool,
+) -> Result<Vec<InstrumentInfo>> {
+    if test_mode {
+        fetch_instruments_with_wildcard(config, party_id, token).await
+    } else {
+        fetch_instruments_for_template(config, party_id, token, &instrument_configuration_template())
+            .await
+    }
+}
+
+async fn fetch_instruments_with_wildcard(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+) -> Result<Vec<InstrumentInfo>> {
+    let mut state_client = utils::create_state_client(config, token).await?;
+
+    let ledger_end = state_client
+        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
+        .await?
+        .into_inner()
+        .offset;
+
+    let mut filters_by_party = HashMap::new();
+    filters_by_party.insert(
+        party_id.to_string(),
+        Filters {
+            cumulative: vec![CumulativeFilter {
+                identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
+                    WildcardFilter {
+                        include_created_event_blob: false,
+                    },
+                )),
+            }],
+        },
+    );
+
+    let acs_request = GetActiveContractsRequest {
+        active_at_offset: ledger_end,
+        event_format: Some(EventFormat {
+            filters_by_party,
+            filters_for_any_party: None,
+            verbose: true,
+        }),
+    };
+
+    let mut stream = state_client
+        .get_active_contracts(acs_request)
+        .await?
+        .into_inner();
+
+    let mut instruments = Vec::new();
+    while let Some(response) = stream.message().await? {
+        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
+            && let Some(created) = active.created_event
+            && let Some(template_id) = &created.template_id
+            && template_id.module_name == "Utility.Registry.V0.Configuration.Instrument"
+            && template_id.entity_name == "InstrumentConfiguration"
+            && let Some(info) = extract_instrument_info(&created)
+        {
+            instruments.push(info);
+        }
+    }
+
+    Ok(instruments)
+}
+
+async fn fetch_instruments_for_template(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    template: &TemplateId,
+) -> Result<Vec<InstrumentInfo>> {
+    let mut state_client = utils::create_state_client(config, token).await?;
+
+    let ledger_end = state_client
+        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
+        .await?
+        .into_inner()
+        .offset;
+
+    let mut filters_by_party = HashMap::new();
+    filters_by_party.insert(
+        party_id.to_string(),
+        Filters {
+            cumulative: vec![CumulativeFilter {
+                identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
+                    TemplateFilter {
+                        template_id: Some(Identifier {
+                            package_id: template.package_id.clone(),
+                            module_name: template.module_name.to_string(),
+                            entity_name: template.entity_name.to_string(),
+                        }),
+                        include_created_event_blob: false,
+                    },
+                )),
+            }],
+        },
+    );
+
+    let acs_request = GetActiveContractsRequest {
+        active_at_offset: ledger_end,
+        event_format: Some(EventFormat {
+            filters_by_party,
+            filters_for_any_party: None,
+            verbose: true,
+        }),
+    };
+
+    let mut stream = state_client
+        .get_active_contracts(acs_request)
+        .await?
+        .into_inner();
+
+    let mut instruments = Vec::new();
+    while let Some(response) = stream.message().await? {
+        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
+            && let Some(created) = active.created_event
+            && let Some(info) = extract_instrument_info(&created)
+        {
+            instruments.push(info);
+        }
+    }
+
+    Ok(instruments)
+}
+
+/// Extract InstrumentInfo from an InstrumentConfiguration created event.
+/// Reads `instrument_admin` and `instrument_id` from the contract's
+/// `defaultIdentifier` record (fields `source` and `id` respectively, per
+/// `Utility.Registry.Holding.V0.Types.InstrumentIdentifier`).
+fn extract_instrument_info(created: &CreatedEvent) -> Option<InstrumentInfo> {
+    let record = created.create_arguments.as_ref()?;
+
+    let default_identifier = record
+        .fields
+        .iter()
+        .find(|f| f.label == "defaultIdentifier")
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Record(r)) => Some(r),
+            _ => None,
+        })?;
+
+    let instrument_admin: CantonId = default_identifier
+        .fields
+        .iter()
+        .find(|f| f.label == "source")
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Party(p)) => p.parse().ok(),
+            _ => None,
+        })?;
+
+    let instrument_id: String = default_identifier
+        .fields
+        .iter()
+        .find(|f| f.label == "id")
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Text(t)) => Some(t.clone()),
+            _ => None,
+        })?;
+
+    Some(InstrumentInfo {
+        contract_id: created.contract_id.clone(),
+        instrument_admin,
+        instrument_id,
     })
 }
 

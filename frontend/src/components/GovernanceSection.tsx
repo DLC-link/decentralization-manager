@@ -65,6 +65,8 @@ import type {
   ProposeActionRequest,
   ProposalType,
   InstrumentAllowance,
+  InstrumentInfo,
+  InstrumentsResponse,
 } from "../types";
 
 type ActionTypeKey = ActionType["type"];
@@ -252,6 +254,12 @@ export const GovernanceSection = ({
   >([]);
   const [userServices, setUserServices] = useState<UserServiceInfo[]>([]);
   const [registrarServiceContracts, setRegistrarServiceContracts] = useState<ContractWithBlob[]>([]);
+  // InstrumentConfiguration contracts fetched from /instruments. Each one
+  // represents a token the governance party can mint/burn against and exposes
+  // its parsed instrument_admin + instrument_id, so we can drive a real
+  // dropdown without the frontend having to decode contract blobs.
+  const [availableInstruments, setAvailableInstruments] = useState<InstrumentInfo[]>([]);
+  const [instrumentsLoading, setInstrumentsLoading] = useState(false);
   const [servicesLoading, setServicesLoading] = useState(false);
 
   // Contracts fetched by template (with blobs)
@@ -391,6 +399,48 @@ export const GovernanceSection = ({
     }
   }, [selectedActionType, fetchServices]);
 
+  // Fetch InstrumentConfiguration contracts (a.k.a. "our tokens"). Used by
+  // Mint/Burn (for instrument_id + instrument_configuration_cid) and by
+  // set_provider_app_reward_beneficiaries (for instrument_configuration_cid).
+  const fetchInstruments = useCallback(async () => {
+    setInstrumentsLoading(true);
+    try {
+      const res = await authenticatedFetch(
+        `${API_BASE}/instruments?party_id=${encodeURIComponent(partyId)}`,
+      );
+      if (res.ok) {
+        const response: InstrumentsResponse = await res.json();
+        setAvailableInstruments(response.instruments);
+      }
+    } catch (e) {
+      console.error("Failed to fetch instruments:", e);
+    } finally {
+      setInstrumentsLoading(false);
+    }
+  }, [partyId]);
+
+  // Fetch instruments when a proposal type needs them
+  useEffect(() => {
+    if (
+      proposalType === "mint" ||
+      proposalType === "burn" ||
+      proposalType === "set_provider_app_reward_beneficiaries"
+    ) {
+      fetchInstruments();
+    }
+  }, [proposalType, fetchInstruments]);
+
+  // Mint/Burn always use the decparty as the instrument admin — seed the field
+  // unconditionally so it's populated even before (or without) an Instrument
+  // selection from the dropdown. NOT applied to setup_token_preapproval or
+  // transfer because those can target foreign-issued instruments where the
+  // admin is a different party.
+  useEffect(() => {
+    if (proposalType === "mint" || proposalType === "burn") {
+      setProposalInstrumentIdAdmin(partyId);
+    }
+  }, [proposalType, partyId]);
+
   // Fetch contracts by template (returns CID + blob)
   const fetchContractsByTemplate = useCallback(
     async (template: {
@@ -415,6 +465,17 @@ export const GovernanceSection = ({
     },
     [partyId],
   );
+
+  // Fetch AllocationFactory contracts when Mint/Burn proposal is selected.
+  // (set_enable_result_contracts needs RegistrarService instead.)
+  useEffect(() => {
+    if (proposalType === "mint" || proposalType === "burn") {
+      fetchContractsByTemplate(TEMPLATE_ALLOCATION_FACTORY).then(setAllocationFactoryContracts);
+    }
+    if (proposalType === "set_enable_result_contracts") {
+      fetchContractsByTemplate(TEMPLATE_REGISTRAR_SERVICE).then(setRegistrarServiceContracts);
+    }
+  }, [proposalType, fetchContractsByTemplate]);
 
   // Fetch all deployment-related contracts for vault_deployment
   const fetchDeployContracts = useCallback(async () => {
@@ -2591,7 +2652,29 @@ export const GovernanceSection = ({
 
               {proposalType === "set_provider_app_reward_beneficiaries" && (
                 <>
-                  <TextField size="small" label="InstrumentConfiguration Contract ID" value={proposalInstrumentConfigurationCid} onChange={(e) => setProposalInstrumentConfigurationCid(e.target.value)} fullWidth required />
+                  <FormControl size="small" fullWidth required>
+                    <InputLabel>InstrumentConfiguration</InputLabel>
+                    <Select
+                      label="InstrumentConfiguration"
+                      value={proposalInstrumentConfigurationCid}
+                      onChange={(e) => setProposalInstrumentConfigurationCid(e.target.value)}
+                      MenuProps={{ disableScrollLock: true }}
+                    >
+                      {instrumentsLoading ? (
+                        <MenuItem disabled>Loading instruments…</MenuItem>
+                      ) : availableInstruments.length > 0 ? (
+                        availableInstruments.map((inst) => (
+                          <MenuItem key={inst.contract_id} value={inst.contract_id}>
+                            {inst.instrument_id} ({inst.contract_id.slice(0, 8)}…)
+                          </MenuItem>
+                        ))
+                      ) : (
+                        <MenuItem disabled>
+                          No instruments found — run SetupUtility first
+                        </MenuItem>
+                      )}
+                    </Select>
+                  </FormControl>
                   <FormControlLabel
                     control={<Checkbox size="small" checked={proposalClearBeneficiaries} onChange={(e) => setProposalClearBeneficiaries(e.target.checked)} />}
                     label="Clear beneficiaries (set to None)"
@@ -2614,7 +2697,27 @@ export const GovernanceSection = ({
 
               {proposalType === "set_enable_result_contracts" && (
                 <>
-                  <TextField size="small" label="RegistrarService Contract ID" value={proposalRegistrarServiceCid} onChange={(e) => setProposalRegistrarServiceCid(e.target.value)} fullWidth required />
+                  <FormControl size="small" fullWidth required>
+                    <InputLabel>RegistrarService</InputLabel>
+                    <Select
+                      label="RegistrarService"
+                      value={proposalRegistrarServiceCid}
+                      onChange={(e) => setProposalRegistrarServiceCid(e.target.value)}
+                      MenuProps={{ disableScrollLock: true }}
+                    >
+                      {registrarServiceContracts.length > 0 ? (
+                        registrarServiceContracts.map((c) => (
+                          <MenuItem key={c.contract_id} value={c.contract_id}>
+                            {c.contract_id}
+                          </MenuItem>
+                        ))
+                      ) : (
+                        <MenuItem disabled>
+                          No RegistrarService found — run SetupUtility first
+                        </MenuItem>
+                      )}
+                    </Select>
+                  </FormControl>
                   <FormControl size="small" fullWidth>
                     <InputLabel>Enable Result Contracts</InputLabel>
                     <Select
@@ -2636,10 +2739,62 @@ export const GovernanceSection = ({
 
               {(proposalType === "mint" || proposalType === "burn") && (
                 <>
-                  <TextField size="small" label="AllocationFactory Contract ID" value={proposalAllocationFactoryCid} onChange={(e) => setProposalAllocationFactoryCid(e.target.value)} fullWidth required />
-                  <TextField size="small" label="Instrument Admin" value={proposalInstrumentIdAdmin} onChange={(e) => setProposalInstrumentIdAdmin(e.target.value)} fullWidth required />
-                  <TextField size="small" label="Instrument ID" value={proposalInstrumentIdId} onChange={(e) => setProposalInstrumentIdId(e.target.value)} fullWidth required />
-                  <TextField size="small" label="InstrumentConfiguration Contract ID" value={proposalInstrumentConfigurationCid} onChange={(e) => setProposalInstrumentConfigurationCid(e.target.value)} fullWidth required />
+                  <FormControl size="small" fullWidth required>
+                    <InputLabel>Instrument</InputLabel>
+                    <Select
+                      label="Instrument"
+                      value={proposalInstrumentConfigurationCid}
+                      onChange={(e) => {
+                        const cid = e.target.value;
+                        const inst = availableInstruments.find(
+                          (i) => i.contract_id === cid,
+                        );
+                        setProposalInstrumentConfigurationCid(cid);
+                        // instrument_admin is always the decparty (seeded by
+                        // the effect above) — only `id` comes from the picked
+                        // instrument.
+                        if (inst) {
+                          setProposalInstrumentIdId(inst.instrument_id);
+                        }
+                      }}
+                      MenuProps={{ disableScrollLock: true }}
+                    >
+                      {instrumentsLoading ? (
+                        <MenuItem disabled>Loading instruments…</MenuItem>
+                      ) : availableInstruments.length > 0 ? (
+                        availableInstruments.map((inst) => (
+                          <MenuItem key={inst.contract_id} value={inst.contract_id}>
+                            {inst.instrument_id} ({inst.contract_id.slice(0, 8)}…)
+                          </MenuItem>
+                        ))
+                      ) : (
+                        <MenuItem disabled>
+                          No instruments found — run SetupUtility first
+                        </MenuItem>
+                      )}
+                    </Select>
+                  </FormControl>
+                  <FormControl size="small" fullWidth required>
+                    <InputLabel>AllocationFactory</InputLabel>
+                    <Select
+                      label="AllocationFactory"
+                      value={proposalAllocationFactoryCid}
+                      onChange={(e) => setProposalAllocationFactoryCid(e.target.value)}
+                      MenuProps={{ disableScrollLock: true }}
+                    >
+                      {allocationFactoryContracts.length > 0 ? (
+                        allocationFactoryContracts.map((c) => (
+                          <MenuItem key={c.contract_id} value={c.contract_id}>
+                            {c.contract_id}
+                          </MenuItem>
+                        ))
+                      ) : (
+                        <MenuItem disabled>
+                          No AllocationFactory found — run SetupUtility first
+                        </MenuItem>
+                      )}
+                    </Select>
+                  </FormControl>
                   <TextField size="small" label={proposalType === "mint" ? "Recipient Party" : "Holder Party"} value={proposalType === "mint" ? proposalRecipient : proposalHolder} onChange={(e) => proposalType === "mint" ? setProposalRecipient(e.target.value) : setProposalHolder(e.target.value)} fullWidth required />
                   <TextField size="small" label="Amount" value={proposalAmount} onChange={(e) => setProposalAmount(e.target.value)} fullWidth required />
                   <TextField size="small" label="Description" value={proposalDescription} onChange={(e) => setProposalDescription(e.target.value)} fullWidth required />

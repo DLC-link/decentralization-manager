@@ -736,6 +736,16 @@ export interface NetworkInfo {
   amulet_rules_blob: string;
 }
 
+export interface InstrumentInfo {
+  contract_id: string;
+  instrument_admin: string;
+  instrument_id: string;
+}
+
+export interface InstrumentsResponse {
+  instruments: InstrumentInfo[];
+}
+
 export type Network = "devnet" | "testnet" | "mainnet";
 
 // Governance audit trail types

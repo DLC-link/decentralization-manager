@@ -1242,6 +1242,24 @@ pub struct UserServiceInfo {
     pub user: CantonId,
 }
 
+/// Information about an InstrumentConfiguration contract (one "token" the
+/// governance party can mint/burn against). `instrument_admin` and
+/// `instrument_id` are read off the contract's `defaultIdentifier` field and
+/// match the `InstrumentId { admin, id }` shape required by Mint/Burn
+/// proposals.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct InstrumentInfo {
+    pub contract_id: String,
+    pub instrument_admin: CantonId,
+    pub instrument_id: String,
+}
+
+/// Response for the instruments endpoint
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct InstrumentsResponse {
+    pub instruments: Vec<InstrumentInfo>,
+}
+
 /// Response for the user services endpoint
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct UserServicesResponse {

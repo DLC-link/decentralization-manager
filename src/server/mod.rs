@@ -1227,6 +1227,7 @@ pub async fn start_server(
             .service(handlers::get_provider_services_handler)
             .service(handlers::get_user_services_handler)
             .service(handlers::get_registrar_services_handler)
+            .service(handlers::get_instruments_handler)
             .service(handlers::query_contracts_handler)
             .service(handlers::get_packages)
             .service(handlers::propose_action)
