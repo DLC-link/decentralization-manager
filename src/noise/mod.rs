@@ -355,7 +355,7 @@ impl NoiseKeypair {
     /// Generate a new random keypair
     pub fn generate() -> Self {
         let secp = Secp256k1::new();
-        let (secret_key, public_key) = secp.generate_keypair(&mut rand::thread_rng());
+        let (secret_key, public_key) = secp.generate_keypair(&mut secp256k1::rand::thread_rng());
         Self {
             secret_key,
             public_key,
