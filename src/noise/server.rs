@@ -186,7 +186,7 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
             let peer_keys = self.peer_keys.clone();
 
             move |_| {
-                let secret_key = keypair.secret_key;
+                let keypair = keypair.clone();
                 let peer_keys = peer_keys.clone();
 
                 // Create PSK derivation function
@@ -195,9 +195,8 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                     let peer_id = std::str::from_utf8(identity).ok()?;
                     let peer_pub_key = peer_keys.get(peer_id)?;
 
-                    // Derive PSK using ECDH
-                    let psk = secp256k1::ecdh::SharedSecret::new(peer_pub_key, &secret_key);
-                    Some(psk.secret_bytes())
+                    // Derive PSK using ECDH (Zeroizing wrapper dropped after copy out)
+                    Some(*keypair.derive_psk(peer_pub_key))
                 })
             }
         };

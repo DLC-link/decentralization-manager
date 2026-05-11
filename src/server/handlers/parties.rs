@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -911,7 +912,7 @@ async fn fetch_peer_packages(
         .collect();
 
     let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
-    let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
+    let keypair = Arc::new(NoiseKeypair::from_file(&config.key_file_path()).await?);
     let current_participant_id = config.participant_id();
 
     let invite_message = Message::new_empty(MessageType::ListPackages);
@@ -922,7 +923,7 @@ async fn fetch_peer_packages(
         .iter()
         .filter(|p| p.participant_id != *current_participant_id && !p.public_key.is_empty())
         .map(|peer| {
-            let keypair = keypair.clone();
+            let keypair = Arc::clone(&keypair);
             let peer = peer.clone();
             let msg = invite_message.clone();
             let noise_retry_cfg = noise_retry_cfg.clone();

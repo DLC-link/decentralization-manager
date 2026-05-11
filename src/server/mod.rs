@@ -1421,25 +1421,25 @@ async fn handle_incoming_connection(
     peer_keys: Arc<HashMap<String, secp256k1::PublicKey>>,
     triggers: WorkflowTriggers,
 ) {
-    let secret_key = keypair.secret_key;
+    let keypair_for_closure = keypair.clone();
     let peer_keys_clone = peer_keys.clone();
     let our_public_key_hex = keypair.public_key_hex();
 
-    // Create PSK derivation responder
+    // Create PSK derivation responder. Each branch returns the raw [u8; 32]
+    // by deref-copy from the Zeroizing wrapper; the wrapper drops here so
+    // the in-keypair secret material is the only long-lived copy.
     let responder = Responder::new(move |identity: &[u8]| -> Option<[u8; 32]> {
         // Identity contains peer's public key
         if identity.len() == 33 {
             // Compressed public key
             if let Ok(peer_pub_key) = secp256k1::PublicKey::from_slice(identity) {
-                let psk = secp256k1::ecdh::SharedSecret::new(&peer_pub_key, &secret_key);
-                return Some(psk.secret_bytes());
+                return Some(*keypair_for_closure.derive_psk(&peer_pub_key));
             }
         }
         // Fallback: try to find peer by ID string
         let peer_id = std::str::from_utf8(identity).ok()?;
         let peer_pub_key = peer_keys_clone.get(peer_id)?;
-        let psk = secp256k1::ecdh::SharedSecret::new(peer_pub_key, &secret_key);
-        Some(psk.secret_bytes())
+        Some(*keypair_for_closure.derive_psk(peer_pub_key))
     });
 
     let result = hyper_noise::server::serve_http(
