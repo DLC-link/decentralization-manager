@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use tokio::net::TcpStream;
 use tokio_noise::handshakes::nn_psk2::Initiator;
 
-use crate::error::Result;
+use crate::{config::NoiseRetryConfig, error::Result};
 
 /// Timeout for Noise protocol operations
 pub const NOISE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -80,6 +80,16 @@ pub const MAX_PAYLOAD_SIZE: usize = 1024;
 
 /// Chunk size for large payloads
 pub const CHUNK_SIZE: usize = 1024;
+
+/// Hard ceiling on the assembled size of a chunked response. Bounds peer-supplied
+/// `total_size` so a malicious or buggy peer can't ask the client to allocate
+/// arbitrary memory. 16 MiB is well above any plausible `ListPackages` payload
+/// (SV nodes observed at ~8 KiB) while keeping worst-case allocation bounded.
+pub const MAX_CHUNKED_TOTAL_SIZE: usize = 16 * 1024 * 1024;
+
+/// Hard ceiling on the chunk count for a chunked response. Equal to
+/// `MAX_CHUNKED_TOTAL_SIZE / CHUNK_SIZE` rounded up.
+pub const MAX_CHUNK_COUNT: usize = MAX_CHUNKED_TOTAL_SIZE.div_ceil(CHUNK_SIZE);
 
 impl TryFrom<u16> for MessageType {
     type Error = anyhow::Error;
@@ -291,7 +301,12 @@ pub fn parse_public_key(hex_str: &str) -> Result<PublicKey, NoiseError> {
     Ok(pub_key)
 }
 
-/// Send a message to a peer using Noise protocol
+/// Send a message to a peer using Noise protocol.
+///
+/// Public entry point preserved for backward compatibility — applies the
+/// default `NOISE_REQUEST_TIMEOUT` to both the TCP connect and the
+/// Noise/HTTP request budget. New callers wanting per-attempt control should
+/// use `send_noise_message_with_retry`.
 pub async fn send_noise_message(
     peer_address: &str,
     peer_port: u16,
@@ -299,9 +314,30 @@ pub async fn send_noise_message(
     identity: &[u8],
     message: &Message,
 ) -> Result<Bytes, NoiseError> {
+    send_noise_message_with_timeout(
+        peer_address,
+        peer_port,
+        psk,
+        identity,
+        message,
+        NOISE_REQUEST_TIMEOUT,
+    )
+    .await
+}
+
+/// Inner implementation of `send_noise_message`, with per-step timeout
+/// threaded through. Used both by the public single-shot entry point above
+/// and by the retry wrapper.
+async fn send_noise_message_with_timeout(
+    peer_address: &str,
+    peer_port: u16,
+    psk: &[u8; 32],
+    identity: &[u8],
+    message: &Message,
+    timeout: Duration,
+) -> Result<Bytes, NoiseError> {
     let socket_addr = format!("{peer_address}:{peer_port}");
 
-    // Create HTTP request with message payload
     let uri = parse_flexible_uri(&format!("http://{socket_addr}/message"))?;
     let request_body = message.to_bytes();
 
@@ -310,36 +346,25 @@ pub async fn send_noise_message(
         .method("POST")
         .body(Body::from(request_body))?;
 
-    // Connect with timeout
-    let tcp_stream =
-        match tokio::time::timeout(NOISE_REQUEST_TIMEOUT, TcpStream::connect(&socket_addr)).await {
-            Ok(Ok(stream)) => stream,
-            Ok(Err(e)) => {
-                return Err(NoiseError::TcpConnectionFailed(format!(
-                    "Failed to connect to {socket_addr}: {e}"
-                )));
-            }
-            Err(_) => return Err(NoiseError::TcpConnectionTimeout(socket_addr.to_string())),
-        };
+    let tcp_stream = match tokio::time::timeout(timeout, TcpStream::connect(&socket_addr)).await {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(e)) => {
+            return Err(NoiseError::TcpConnectionFailed(format!(
+                "Failed to connect to {socket_addr}: {e}"
+            )));
+        }
+        Err(_) => return Err(NoiseError::TcpConnectionTimeout(socket_addr.to_string())),
+    };
 
-    // Create Noise initiator
     let initiator = Initiator { psk, identity };
 
-    // Send request over Noise-encrypted channel
-    let mut response = hyper_noise::client::send_request(
-        tcp_stream,
-        initiator,
-        request,
-        Some(NOISE_REQUEST_TIMEOUT),
-    )
-    .await?;
+    let mut response =
+        hyper_noise::client::send_request(tcp_stream, initiator, request, Some(timeout)).await?;
 
-    // Check response status
     if response.status() != StatusCode::OK {
         return Err(NoiseError::BadStatusCode(response.status()));
     }
 
-    // Read response body
     let resp_body_bytes = hyper::body::to_bytes(response.body_mut()).await?;
     Ok(resp_body_bytes)
 }
@@ -434,9 +459,301 @@ pub async fn load_or_generate_keypair<P: AsRef<Path>>(path: P) -> Result<NoiseKe
     }
 }
 
+/// Returns `true` if a `NoiseError` represents a transient condition that
+/// is worth retrying. Deterministic errors (handshake failures, 4xx status,
+/// decode errors, configuration mistakes) are not retried; 5xx responses
+/// are treated as transient (server-side hiccup).
+///
+/// Exhaustive match (no wildcard) — adding a new `NoiseError` variant will
+/// fail to compile here until it's explicitly classified as retryable or not.
+fn is_transient(err: &NoiseError) -> bool {
+    match err {
+        NoiseError::TcpConnectionTimeout(_)
+        | NoiseError::TcpConnectionFailed(_)
+        | NoiseError::RequestTimeout
+        | NoiseError::Io(_)
+        | NoiseError::Hyper(_) => true,
+        NoiseError::BadStatusCode(code) => code.is_server_error(),
+        NoiseError::Noise(_)
+        | NoiseError::HandshakeFailed
+        | NoiseError::DecryptionError
+        | NoiseError::InvalidMessage
+        | NoiseError::JsonSerialization(_)
+        | NoiseError::Http(_)
+        | NoiseError::InvalidUri(_)
+        | NoiseError::UriParsingError(_)
+        | NoiseError::UnknownPeer(_)
+        | NoiseError::Anyhow(_) => false,
+    }
+}
+
+/// Run `op` up to `config.max_attempts` times, retrying only when the returned
+/// `NoiseError` is classified as transient by `is_transient`. Sleeps
+/// `config.backoff()` between attempts. Per-attempt failures are logged at
+/// `warn`; terminal failures (after retry exhaustion) are logged at `error`.
+/// `peer_label` is used as a structured field in the log lines.
+async fn retry_loop<F, Fut>(
+    peer_label: &str,
+    config: &NoiseRetryConfig,
+    mut op: F,
+) -> Result<Bytes, NoiseError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<Bytes, NoiseError>>,
+{
+    // Defense-in-depth: the CLI rejects 0 at parse time, but a misbehaving
+    // direct construction of `NoiseRetryConfig` (e.g. in tests) shouldn't
+    // panic in release.
+    if config.max_attempts == 0 {
+        return Err(NoiseError::Anyhow(anyhow::anyhow!(
+            "NoiseRetryConfig.max_attempts must be >= 1"
+        )));
+    }
+    let mut last_err: Option<NoiseError> = None;
+    for attempt in 1..=config.max_attempts {
+        match op().await {
+            Ok(bytes) => return Ok(bytes),
+            Err(e) if is_transient(&e) => {
+                let will_retry = attempt < config.max_attempts;
+                if will_retry {
+                    tracing::warn!(
+                        peer = peer_label,
+                        attempt,
+                        error = %e,
+                        "noise: transient failure, retrying",
+                    );
+                } else {
+                    tracing::warn!(
+                        peer = peer_label,
+                        attempt,
+                        error = %e,
+                        "noise: transient failure on final attempt",
+                    );
+                }
+                last_err = Some(e);
+                if will_retry {
+                    tokio::time::sleep(config.backoff()).await;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    peer = peer_label,
+                    attempt,
+                    error = %e,
+                    "noise: non-retryable failure",
+                );
+                return Err(e);
+            }
+        }
+    }
+    // Loop ran `max_attempts >= 1` iterations; the only way out without
+    // returning is the transient branch, which sets `last_err`.
+    let final_err = last_err.expect("retry_loop ran zero attempts");
+    tracing::error!(
+        peer = peer_label,
+        attempts = config.max_attempts,
+        error = %final_err,
+        "noise: peer unreachable after retry exhaustion",
+    );
+    Err(final_err)
+}
+
+/// Send a message to a peer with bounded retry on transient failures.
+///
+/// Up to `config.max_attempts` attempts, each governed by
+/// `config.per_attempt_timeout()`, with `config.backoff()` between attempts.
+/// Discriminating retry: only transient `NoiseError` variants (TCP connect
+/// timeouts, refused connections, request timeouts, IO/Hyper failures) are
+/// retried. Deterministic errors (handshake failure, bad status, decode
+/// errors, configuration mistakes) return immediately.
+///
+/// Per-attempt failures log at `tracing::warn!`; terminal failures (after
+/// retry exhaustion) log an additional `tracing::error!`.
+pub async fn send_noise_message_with_retry(
+    peer_address: &str,
+    peer_port: u16,
+    psk: &[u8; 32],
+    identity: &[u8],
+    message: &Message,
+    config: &NoiseRetryConfig,
+) -> Result<Bytes, NoiseError> {
+    let peer_label = format!("{peer_address}:{peer_port}");
+    let timeout = config.per_attempt_timeout();
+    // `move || async move` — `&T` references are `Copy`, so each call to the
+    // FnMut closure freshly copies the references into a new async block.
+    // Without `move`, the borrow checker has trouble proving the returned
+    // future doesn't outlive the closure's borrow.
+    retry_loop(&peer_label, config, move || async move {
+        send_noise_message_with_timeout(peer_address, peer_port, psk, identity, message, timeout)
+            .await
+    })
+    .await
+}
+
+/// Parse the 10-byte metadata payload from a `MessageType::ChunkedCommand`
+/// response: `[command_type:u16][total_size:u32][chunk_count:u32]`, all
+/// big-endian.
+///
+/// Returns `(command_type, total_size, chunk_count)` on success.
+fn parse_chunked_command_metadata(
+    payload: &[u8],
+) -> Result<(MessageType, usize, usize), NoiseError> {
+    if payload.len() < 10 {
+        return Err(NoiseError::InvalidMessage);
+    }
+    let command_type_u16 = u16::from_be_bytes([payload[0], payload[1]]);
+    let total_size = u32::from_be_bytes([payload[2], payload[3], payload[4], payload[5]]) as usize;
+    let chunk_count = u32::from_be_bytes([payload[6], payload[7], payload[8], payload[9]]) as usize;
+    let command_type =
+        MessageType::try_from(command_type_u16).map_err(|_| NoiseError::InvalidMessage)?;
+    Ok((command_type, total_size, chunk_count))
+}
+
+/// Send a message that may receive a chunked response.
+///
+/// First call goes through `send_noise_message_with_retry`. If the response
+/// is `MessageType::ChunkedCommand`, this function transparently fetches the
+/// referenced chunks (one Noise call per chunk, each with retry) and
+/// returns the **assembled** Message bytes — i.e. the final `Bytes` is the
+/// `Message::to_bytes()` form of `Message::new(original_command_type,
+/// reassembled_payload)`. Callers can decode it the same way they would a
+/// non-chunked response.
+///
+/// If the response isn't chunked, the original bytes are returned unchanged.
+///
+/// Each chunk fetch is a fresh Noise connection (TCP connect + handshake +
+/// 1 round-trip). Retry policy applies to each individual chunk fetch.
+pub async fn send_noise_message_with_chunked_response(
+    peer_address: &str,
+    peer_port: u16,
+    psk: &[u8; 32],
+    identity: &[u8],
+    message: &Message,
+    config: &NoiseRetryConfig,
+) -> Result<Bytes, NoiseError> {
+    let response =
+        send_noise_message_with_retry(peer_address, peer_port, psk, identity, message, config)
+            .await?;
+
+    let resp_msg = Message::from_bytes(&response).map_err(|_| NoiseError::InvalidMessage)?;
+
+    if resp_msg.msg_type != MessageType::ChunkedCommand {
+        // Not chunked — caller can decode `response` directly.
+        return Ok(response);
+    }
+
+    let (command_type, total_size, chunk_count) =
+        parse_chunked_command_metadata(&resp_msg.payload)?;
+
+    // Bound peer-supplied metadata before we allocate or loop. A malicious or
+    // buggy peer could otherwise advertise multi-GB sizes and trigger an OOM.
+    if total_size > MAX_CHUNKED_TOTAL_SIZE || chunk_count > MAX_CHUNK_COUNT {
+        tracing::warn!(
+            peer = format!("{peer_address}:{peer_port}"),
+            total_size,
+            chunk_count,
+            "noise: chunked-response metadata exceeds configured caps",
+        );
+        return Err(NoiseError::InvalidMessage);
+    }
+    // chunk_count must agree with total_size and CHUNK_SIZE; reject mismatch
+    // (e.g. total=10 but chunk_count=1000).
+    let expected_chunks = total_size.div_ceil(CHUNK_SIZE);
+    if chunk_count != expected_chunks {
+        tracing::warn!(
+            peer = format!("{peer_address}:{peer_port}"),
+            total_size,
+            chunk_count,
+            expected_chunks,
+            "noise: chunked-response chunk_count inconsistent with total_size",
+        );
+        return Err(NoiseError::InvalidMessage);
+    }
+
+    tracing::debug!(
+        peer = format!("{peer_address}:{peer_port}"),
+        total_size,
+        chunk_count,
+        command = ?command_type,
+        "noise: receiving chunked response"
+    );
+
+    let mut assembled = Vec::with_capacity(total_size);
+    for chunk_index in 0..chunk_count {
+        let chunk_request = Message::new(
+            MessageType::GetChunk,
+            (chunk_index as u32).to_be_bytes().to_vec(),
+        );
+        let chunk_response = send_noise_message_with_retry(
+            peer_address,
+            peer_port,
+            psk,
+            identity,
+            &chunk_request,
+            config,
+        )
+        .await?;
+        let chunk_msg =
+            Message::from_bytes(&chunk_response).map_err(|_| NoiseError::InvalidMessage)?;
+        if chunk_msg.msg_type != MessageType::Chunk || chunk_msg.payload.len() < 4 {
+            return Err(NoiseError::InvalidMessage);
+        }
+        // Chunk payload format: [chunk_index:4][chunk_data]
+        // Verify the echoed index matches what we requested so a server bug
+        // (or cache mix-up between concurrent peers) can't silently corrupt
+        // the assembled payload.
+        let received_index = u32::from_be_bytes([
+            chunk_msg.payload[0],
+            chunk_msg.payload[1],
+            chunk_msg.payload[2],
+            chunk_msg.payload[3],
+        ]) as usize;
+        if received_index != chunk_index {
+            tracing::warn!(
+                peer = format!("{peer_address}:{peer_port}"),
+                requested = chunk_index,
+                received = received_index,
+                "noise: chunk response carried wrong chunk index",
+            );
+            return Err(NoiseError::InvalidMessage);
+        }
+        assembled.extend_from_slice(&chunk_msg.payload[4..]);
+    }
+
+    if assembled.len() != total_size {
+        tracing::warn!(
+            "noise: chunked-response assembly produced {} bytes but metadata declared {}",
+            assembled.len(),
+            total_size,
+        );
+        return Err(NoiseError::InvalidMessage);
+    }
+
+    // Re-encode as a complete Message of the original command type so the
+    // caller can decode it exactly as if the response had arrived unchunked.
+    let assembled_msg = Message::new(command_type, assembled);
+    Ok(Bytes::from(assembled_msg.to_bytes()))
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use bytes::Bytes;
+
     use super::*;
+
+    fn test_retry_config() -> NoiseRetryConfig {
+        // Zero backoff so the `retry_loop_*` tests don't sleep in real time.
+        // (Tests that need to assert on backoff behavior should override.)
+        NoiseRetryConfig {
+            backoff_ms: 0,
+            ..NoiseRetryConfig::default()
+        }
+    }
 
     #[test]
     fn test_message_type_conversion() -> Result {
@@ -512,5 +829,200 @@ mod tests {
         assert_eq!(uri2.host(), Some("example.com"));
         assert_eq!(uri2.port_u16(), Some(8080));
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn retry_loop_succeeds_on_first_attempt() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_clone = calls.clone();
+        let result = retry_loop("test-peer", &test_retry_config(), move || {
+            let calls = calls_clone.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok::<Bytes, NoiseError>(Bytes::from_static(b"ok"))
+            }
+        })
+        .await;
+        assert!(matches!(result, Ok(b) if b.as_ref() == b"ok"));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn retry_loop_retries_on_transient_then_succeeds() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_clone = calls.clone();
+        let result = retry_loop("test-peer", &test_retry_config(), move || {
+            let calls = calls_clone.clone();
+            async move {
+                let n = calls.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    Err(NoiseError::TcpConnectionTimeout("test".into()))
+                } else {
+                    Ok(Bytes::from_static(b"ok"))
+                }
+            }
+        })
+        .await;
+        assert!(matches!(result, Ok(b) if b.as_ref() == b"ok"));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn retry_loop_returns_terminal_error_after_two_transient_failures() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_clone = calls.clone();
+        let result = retry_loop("test-peer", &test_retry_config(), move || {
+            let calls = calls_clone.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err::<Bytes, _>(NoiseError::TcpConnectionTimeout("test".into()))
+            }
+        })
+        .await;
+        assert!(matches!(result, Err(NoiseError::TcpConnectionTimeout(_))));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn retry_loop_does_not_retry_on_4xx_bad_status() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_clone = calls.clone();
+        let result = retry_loop("test-peer", &test_retry_config(), move || {
+            let calls = calls_clone.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err::<Bytes, _>(NoiseError::BadStatusCode(StatusCode::BAD_REQUEST))
+            }
+        })
+        .await;
+        assert!(matches!(result, Err(NoiseError::BadStatusCode(_))));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn retry_loop_retries_on_5xx_bad_status() {
+        // 5xx is a server-side hiccup — treat as transient.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_clone = calls.clone();
+        let result = retry_loop("test-peer", &test_retry_config(), move || {
+            let calls = calls_clone.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err::<Bytes, _>(NoiseError::BadStatusCode(StatusCode::INTERNAL_SERVER_ERROR))
+            }
+        })
+        .await;
+        assert!(matches!(result, Err(NoiseError::BadStatusCode(_))));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn retry_loop_does_not_retry_on_invalid_message() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_clone = calls.clone();
+        let result = retry_loop("test-peer", &test_retry_config(), move || {
+            let calls = calls_clone.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err::<Bytes, _>(NoiseError::InvalidMessage)
+            }
+        })
+        .await;
+        assert!(matches!(result, Err(NoiseError::InvalidMessage)));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn retry_loop_does_not_retry_on_handshake_failed() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_clone = calls.clone();
+        let result = retry_loop("test-peer", &test_retry_config(), move || {
+            let calls = calls_clone.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err::<Bytes, _>(NoiseError::HandshakeFailed)
+            }
+        })
+        .await;
+        assert!(matches!(result, Err(NoiseError::HandshakeFailed)));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn retry_loop_returns_error_on_zero_max_attempts() {
+        // Defense-in-depth: a `NoiseRetryConfig` constructed with max_attempts=0
+        // must produce an error rather than panic in release builds.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_clone = calls.clone();
+        let bad_config = NoiseRetryConfig {
+            per_attempt_timeout_secs: 5,
+            max_attempts: 0,
+            backoff_ms: 0,
+        };
+        let result = retry_loop("test-peer", &bad_config, move || {
+            let calls = calls_clone.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok::<Bytes, NoiseError>(Bytes::from_static(b"unreachable"))
+            }
+        })
+        .await;
+        assert!(matches!(result, Err(NoiseError::Anyhow(_))));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn retry_loop_does_not_retry_on_anyhow() {
+        // Anyhow is the catch-all for unknown wrapped errors; it must fail
+        // closed (no retry) so a stray classification mistake doesn't turn it
+        // into a retry-storm vector.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_clone = calls.clone();
+        let result = retry_loop("test-peer", &test_retry_config(), move || {
+            let calls = calls_clone.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err::<Bytes, _>(NoiseError::Anyhow(anyhow::anyhow!("unknown")))
+            }
+        })
+        .await;
+        assert!(matches!(result, Err(NoiseError::Anyhow(_))));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn parse_chunked_command_metadata_happy_path() {
+        // Build a valid metadata payload: [Data:0x0102][total_size:1024][chunk_count:5]
+        let mut payload = Vec::with_capacity(10);
+        payload.extend_from_slice(&MessageType::Data.to_u16().to_be_bytes());
+        payload.extend_from_slice(&1024u32.to_be_bytes());
+        payload.extend_from_slice(&5u32.to_be_bytes());
+
+        let (command_type, total_size, chunk_count) =
+            parse_chunked_command_metadata(&payload).unwrap();
+        assert_eq!(command_type, MessageType::Data);
+        assert_eq!(total_size, 1024);
+        assert_eq!(chunk_count, 5);
+    }
+
+    #[test]
+    fn parse_chunked_command_metadata_too_short() {
+        let payload = vec![0u8; 9]; // 1 byte short
+        assert!(matches!(
+            parse_chunked_command_metadata(&payload),
+            Err(NoiseError::InvalidMessage)
+        ));
+    }
+
+    #[test]
+    fn parse_chunked_command_metadata_unknown_command_type() {
+        // Set command_type bytes to 0xFFFF — not a valid MessageType variant.
+        let mut payload = vec![0xFF, 0xFF];
+        payload.extend_from_slice(&100u32.to_be_bytes());
+        payload.extend_from_slice(&1u32.to_be_bytes());
+        assert!(matches!(
+            parse_chunked_command_metadata(&payload),
+            Err(NoiseError::InvalidMessage)
+        ));
     }
 }

@@ -6,6 +6,17 @@ pub use clap::Parser;
 
 use dec_party_manager::config::Network;
 
+fn parse_positive_usize(s: &str) -> std::result::Result<usize, String> {
+    let v: usize = s
+        .parse()
+        .map_err(|e: std::num::ParseIntError| e.to_string())?;
+    if v == 0 {
+        Err("must be >= 1".into())
+    } else {
+        Ok(v)
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "dec-party-manager")]
 #[command(about = "Canton decentralized party onboarding workflow automation", long_about = None)]
@@ -118,5 +129,19 @@ pub enum Commands {
         /// Connection retry delay in seconds
         #[arg(long, env = "DECPM_TIMEOUT_RETRY_DELAY")]
         timeout_retry_delay: Option<u64>,
+
+        // Noise retry tuning (separate from the legacy Timeouts knobs above)
+        /// Per-attempt timeout for the bounded peer-Noise retry wrapper, in seconds
+        #[arg(long, env = "DECPM_NOISE_RETRY_TIMEOUT_SEC")]
+        noise_retry_timeout_sec: Option<u64>,
+
+        /// Total attempts (initial + retries) for the bounded peer-Noise retry wrapper.
+        /// Must be >= 1.
+        #[arg(long, env = "DECPM_NOISE_RETRY_MAX_ATTEMPTS", value_parser = parse_positive_usize)]
+        noise_retry_max_attempts: Option<usize>,
+
+        /// Backoff between attempts of the bounded peer-Noise retry wrapper, in milliseconds
+        #[arg(long, env = "DECPM_NOISE_RETRY_BACKOFF_MS")]
+        noise_retry_backoff_ms: Option<u64>,
     },
 }

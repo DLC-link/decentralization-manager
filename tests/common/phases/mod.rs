@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 pub mod cancel_cascades;
+pub mod check_peer_dars;
 pub mod create_dec_party;
 pub mod deploy_gov_core;
 pub mod dismiss_failed_cleans_artifacts;

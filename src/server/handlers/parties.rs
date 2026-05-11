@@ -27,7 +27,10 @@ use crate::{
         schema::{Commitable, SchemaRead, SchemaWrite},
     },
     error::Result,
-    noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
+    noise::{
+        Message, MessageType, NoiseError, NoiseKeypair, parse_public_key, send_noise_message,
+        send_noise_message_with_chunked_response, send_noise_message_with_retry,
+    },
     participant_id::CantonId,
     server::{
         AppState,
@@ -35,8 +38,8 @@ use crate::{
         types::{
             ConnectionStatus, ContractInfo, DecentralizedPartiesResponse, DecentralizedParty,
             ErrorResponse, PackageInfo, ParticipantInfo, ParticipantStatus,
-            ParticipantsStatusResponse, PeerPackageComparison, PeerPackageResult, Permission,
-            ResponseSource, VettedPackageInfo,
+            ParticipantsStatusResponse, PeerErrorKind, PeerPackageComparison, PeerPackageResult,
+            Permission, ResponseSource, VettedPackageInfo,
         },
     },
     utils,
@@ -780,51 +783,52 @@ async fn check_participants_status(
         let address = peer.address.clone();
         let port = peer.port;
         let ping_msg = ping_message.clone();
+        let noise_retry_cfg = config.noise_retry.clone();
 
         status_futures.push(tokio::spawn(async move {
-            // First check if node is reachable via TCP
-            let socket_addr = format!("{address}:{port}");
-            let tcp_check = tokio::time::timeout(
-                Duration::from_secs(3),
-                tokio::net::TcpStream::connect(&socket_addr),
+            let (Some(psk), Some(_)) = (psk, peer_pub_key) else {
+                // Public key parse failed — no PSK available; classify as handshake-side.
+                return ParticipantStatus {
+                    id: peer_id,
+                    status: ConnectionStatus::HandshakeFailed,
+                };
+            };
+
+            match send_noise_message_with_retry(
+                &address,
+                port,
+                &psk,
+                &identity,
+                &ping_msg,
+                &noise_retry_cfg,
             )
-            .await;
-
-            match tcp_check {
-                Ok(Ok(_)) => {
-                    // TCP connection succeeded, now check Noise handshake
-                    let (Some(psk), Some(_)) = (psk, peer_pub_key) else {
-                        // Invalid public key but node is reachable
-                        return ParticipantStatus {
-                            id: peer_id,
-                            status: ConnectionStatus::HandshakeFailed,
-                        };
+            .await
+            {
+                Ok(response) => {
+                    let status = match Message::from_bytes(&response) {
+                        Ok(msg) if msg.msg_type == MessageType::Pong => ConnectionStatus::Connected,
+                        _ => ConnectionStatus::HandshakeFailed,
                     };
-
-                    match send_noise_message(&address, port, &psk, &identity, &ping_msg).await {
-                        Ok(response) => {
-                            let status = match Message::from_bytes(&response) {
-                                Ok(msg) if msg.msg_type == MessageType::Pong => {
-                                    ConnectionStatus::Connected
-                                }
-                                _ => ConnectionStatus::HandshakeFailed,
-                            };
-                            ParticipantStatus {
-                                id: peer_id,
-                                status,
-                            }
-                        }
-                        Err(_) => ParticipantStatus {
-                            id: peer_id,
-                            status: ConnectionStatus::HandshakeFailed,
-                        },
-                    }
-                }
-                _ => {
-                    // TCP connection failed - node is unreachable
                     ParticipantStatus {
                         id: peer_id,
-                        status: ConnectionStatus::Unreachable,
+                        status,
+                    }
+                }
+                Err(e) => {
+                    // Map NoiseError -> ConnectionStatus (binary semantics — Unreachable
+                    // covers transport-side failures; HandshakeFailed covers everything
+                    // else, matching prior behavior of this endpoint).
+                    let status = match &e {
+                        NoiseError::TcpConnectionTimeout(_)
+                        | NoiseError::TcpConnectionFailed(_)
+                        | NoiseError::Io(_)
+                        | NoiseError::Hyper(_)
+                        | NoiseError::RequestTimeout => ConnectionStatus::Unreachable,
+                        _ => ConnectionStatus::HandshakeFailed,
+                    };
+                    ParticipantStatus {
+                        id: peer_id,
+                        status,
                     }
                 }
             }
@@ -858,11 +862,35 @@ pub async fn compare_peer_packages(data: web::Data<AppState>) -> impl Responder 
     }
 }
 
+/// Pure mapping from `NoiseError` to the wire-stable `PeerErrorKind`.
+///
+/// Exhaustive match (no wildcard) — adding a new `NoiseError` variant will
+/// fail to compile here until it's explicitly classified.
+fn peer_error_kind_from_noise_err(err: &NoiseError) -> PeerErrorKind {
+    match err {
+        NoiseError::TcpConnectionTimeout(_) => PeerErrorKind::TcpConnectTimeout,
+        NoiseError::TcpConnectionFailed(_) => PeerErrorKind::TcpConnectFailed,
+        NoiseError::RequestTimeout => PeerErrorKind::RequestTimeout,
+        NoiseError::Io(_) | NoiseError::Hyper(_) => PeerErrorKind::Transport,
+        NoiseError::Noise(_) | NoiseError::HandshakeFailed | NoiseError::DecryptionError => {
+            PeerErrorKind::HandshakeFailed
+        }
+        NoiseError::BadStatusCode(_) => PeerErrorKind::BadStatus,
+        NoiseError::InvalidMessage | NoiseError::JsonSerialization(_) => {
+            PeerErrorKind::DecodeFailed
+        }
+        NoiseError::Http(_)
+        | NoiseError::InvalidUri(_)
+        | NoiseError::UriParsingError(_)
+        | NoiseError::UnknownPeer(_)
+        | NoiseError::Anyhow(_) => PeerErrorKind::Other,
+    }
+}
+
 async fn fetch_peer_packages(
     config: &NodeConfig,
     db: &SqlitePool,
 ) -> Result<PeerPackageComparison> {
-    // Get local packages
     let mut client = PackageServiceClient::connect(config.admin_api_url()).await?;
     let local_response = client
         .list_packages(tonic::Request::new(ListPackagesRequest {
@@ -882,14 +910,13 @@ async fn fetch_peer_packages(
         })
         .collect();
 
-    // Load network config and keypair for Noise communication
     let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
     let current_participant_id = config.participant_id();
 
     let invite_message = Message::new_empty(MessageType::ListPackages);
+    let noise_retry_cfg = config.noise_retry.clone();
 
-    // Query each peer in parallel
     let peer_futures: Vec<_> = network_config
         .peers
         .iter()
@@ -898,6 +925,7 @@ async fn fetch_peer_packages(
             let keypair = keypair.clone();
             let peer = peer.clone();
             let msg = invite_message.clone();
+            let noise_retry_cfg = noise_retry_cfg.clone();
             async move {
                 let peer_pub_key = match parse_public_key(&peer.public_key) {
                     Ok(pk) => pk,
@@ -906,6 +934,7 @@ async fn fetch_peer_packages(
                             participant_id: peer.participant_id.to_string(),
                             name: peer.name.clone(),
                             reachable: false,
+                            error_kind: Some(PeerErrorKind::InvalidPublicKey),
                             packages: vec![],
                         };
                     }
@@ -914,8 +943,15 @@ async fn fetch_peer_packages(
                 let psk = keypair.derive_psk(&peer_pub_key);
                 let identity = current_participant_id.to_string();
 
-                match send_noise_message(&peer.address, peer.port, &psk, identity.as_bytes(), &msg)
-                    .await
+                match send_noise_message_with_chunked_response(
+                    &peer.address,
+                    peer.port,
+                    &psk,
+                    identity.as_bytes(),
+                    &msg,
+                    &noise_retry_cfg,
+                )
+                .await
                 {
                     Ok(response) => {
                         if let Ok(response_msg) = Message::from_bytes(&response)
@@ -927,20 +963,26 @@ async fn fetch_peer_packages(
                                 participant_id: peer.participant_id.to_string(),
                                 name: peer.name.clone(),
                                 reachable: true,
+                                error_kind: None,
                                 packages,
                             };
                         }
+                        // 200 OK but unexpected message shape — `error_kind` stays
+                        // None per the documented invariant; widening this case is
+                        // tracked as Future work item 5 in the spec.
                         PeerPackageResult {
                             participant_id: peer.participant_id.to_string(),
                             name: peer.name.clone(),
                             reachable: true,
+                            error_kind: None,
                             packages: vec![],
                         }
                     }
-                    _ => PeerPackageResult {
+                    Err(e) => PeerPackageResult {
                         participant_id: peer.participant_id.to_string(),
                         name: peer.name.clone(),
                         reachable: false,
+                        error_kind: Some(peer_error_kind_from_noise_err(&e)),
                         packages: vec![],
                     },
                 }
@@ -983,4 +1025,61 @@ async fn get_local_namespace_fingerprints(config: &NodeConfig) -> Result<HashSet
     }
 
     Ok(fingerprints)
+}
+
+#[cfg(test)]
+mod tests {
+    use http::StatusCode;
+
+    use super::*;
+
+    #[test]
+    fn peer_error_kind_mapping_known_variants() {
+        // Construct one easily-instantiable example of each PeerErrorKind
+        // category and assert the mapping. Hard-to-construct NoiseError
+        // variants (Hyper, Noise, JsonSerialization, Http, InvalidUri) are
+        // not exercised here — the helper's exhaustive match is what
+        // guarantees they're classified. This test catches accidental
+        // arm-swap regressions in the easy variants.
+        let pairs: Vec<(NoiseError, PeerErrorKind)> = vec![
+            (
+                NoiseError::TcpConnectionTimeout("x".into()),
+                PeerErrorKind::TcpConnectTimeout,
+            ),
+            (NoiseError::RequestTimeout, PeerErrorKind::RequestTimeout),
+            (
+                NoiseError::TcpConnectionFailed("x".into()),
+                PeerErrorKind::TcpConnectFailed,
+            ),
+            (
+                NoiseError::Io(std::io::Error::other("x")),
+                PeerErrorKind::Transport,
+            ),
+            (NoiseError::HandshakeFailed, PeerErrorKind::HandshakeFailed),
+            (NoiseError::DecryptionError, PeerErrorKind::HandshakeFailed),
+            (
+                NoiseError::BadStatusCode(StatusCode::INTERNAL_SERVER_ERROR),
+                PeerErrorKind::BadStatus,
+            ),
+            (NoiseError::InvalidMessage, PeerErrorKind::DecodeFailed),
+            (
+                NoiseError::UriParsingError("x".into()),
+                PeerErrorKind::Other,
+            ),
+            (NoiseError::UnknownPeer("x".into()), PeerErrorKind::Other),
+        ];
+        for (err, expected) in &pairs {
+            let got = peer_error_kind_from_noise_err(err);
+            assert_eq!(got, *expected, "for variant {err:?}");
+        }
+    }
+
+    #[test]
+    fn anyhow_variant_falls_through_to_other() {
+        let err = NoiseError::Anyhow(anyhow::anyhow!("anything"));
+        assert!(matches!(
+            peer_error_kind_from_noise_err(&err),
+            PeerErrorKind::Other
+        ));
+    }
 }
