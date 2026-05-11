@@ -151,7 +151,7 @@ pub async fn read_bytes_from_file(path: impl AsRef<Path>) -> Result<Vec<u8>> {
 /// Find files in a directory matching a prefix and suffix pattern
 ///
 /// Returns a sorted list of file paths that match `{prefix}*{suffix}`.
-/// Commonly used for discovering attestor keys, signed proposals, etc.
+/// Commonly used for discovering peer keys, signed proposals, etc.
 pub async fn find_files_by_pattern(
     dir: impl AsRef<Path>,
     prefix: &str,

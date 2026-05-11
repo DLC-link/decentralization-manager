@@ -6,7 +6,7 @@ use tracing::info;
 
 use crate::common::{
     Fixture,
-    http::probe_workflow_status,
+    http::{probe_workflow_run_visible, probe_workflow_status},
     invitations::{InvitationIds, post_accept_invitation, probe_pending_invitation},
     scenario::Scenario,
     types::{AllocatePartyResponse, DecentralizedPartiesResponse, GovernanceStateLookup},
@@ -208,6 +208,40 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             |f, _| {
                 Box::pin(async move {
                     probe_workflow_status(&*f, f.p1.http, "/contracts/status", "contracts").await
+                })
+            },
+        )
+        .then(
+            "Contracts completed run visible in /workflows on P1 (Coordinator)",
+            Duration::from_secs(30),
+            |f, _| {
+                Box::pin(async move {
+                    probe_workflow_run_visible(
+                        f,
+                        f.p1.http,
+                        "Contracts",
+                        "Coordinator",
+                        "completed",
+                    )
+                    .await
+                })
+            },
+        )
+        .then(
+            "Contracts completed run visible in /workflows on P2 (Peer)",
+            Duration::from_secs(30),
+            |f, _| {
+                Box::pin(async move {
+                    probe_workflow_run_visible(f, f.p2.http, "Contracts", "Peer", "completed").await
+                })
+            },
+        )
+        .then(
+            "Contracts completed run visible in /workflows on P3 (Peer)",
+            Duration::from_secs(30),
+            |f, _| {
+                Box::pin(async move {
+                    probe_workflow_run_visible(f, f.p3.http, "Contracts", "Peer", "completed").await
                 })
             },
         )

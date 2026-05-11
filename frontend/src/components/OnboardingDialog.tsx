@@ -17,6 +17,7 @@ import {
 } from "@mui/material";
 import { API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
+import { useSnackbar } from "../contexts";
 import type { OnboardingStatusResponse, Peer, NodeConfig } from "../types";
 
 interface OnboardingDialogProps {
@@ -49,6 +50,7 @@ export const OnboardingDialog = ({
     new Set(),
   );
   const [loadingPeers, setLoadingPeers] = useState(false);
+  const { showSnackbar } = useSnackbar();
 
   // Fetch peers when dialog opens
   useEffect(() => {
@@ -121,6 +123,11 @@ export const OnboardingDialog = ({
       const res = await authenticatedFetch(`${API_BASE}/onboarding/status`);
       if (res.ok) {
         const data: OnboardingStatusResponse = await res.json();
+        if (data.status === "cancelled") {
+          showSnackbar("Onboarding workflow cancelled");
+          onClose();
+          return;
+        }
         setStatus(data);
         if (data.status !== "inprogress") {
           setLoading(false);
@@ -132,7 +139,7 @@ export const OnboardingDialog = ({
     } catch {
       // Ignore polling errors
     }
-  }, [onComplete]);
+  }, [onComplete, onClose, showSnackbar]);
 
   useEffect(() => {
     let interval: number | undefined;
@@ -188,10 +195,32 @@ export const OnboardingDialog = ({
         throw new Error(data.error || "Failed to start onboarding workflow");
       }
 
-      setStatus({ status: "inprogress" });
+      showSnackbar("Onboarding workflow started — follow progress in the feed");
+      onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error");
       setLoading(false);
+    }
+  };
+
+  const [cancelling, setCancelling] = useState(false);
+  const handleCancelWorkflow = async () => {
+    setCancelling(true);
+    try {
+      const res = await authenticatedFetch(`${API_BASE}/onboarding/cancel`, {
+        method: "POST",
+      });
+      if (res.ok) {
+        showSnackbar("Onboarding workflow cancelled");
+        onClose();
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setError(data.error || "Failed to cancel workflow");
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to cancel workflow");
+    } finally {
+      setCancelling(false);
     }
   };
 
@@ -393,10 +422,23 @@ export const OnboardingDialog = ({
       </DialogContent>
       <DialogActions>
         <Button onClick={handleClose} disabled={loading}>
-          {status?.status === "completed" || status?.status === "failed"
+          {status?.status === "completed" ||
+          status?.status === "failed" ||
+          status?.status === "inprogress"
             ? "Close"
             : "Cancel"}
         </Button>
+        {status?.status === "inprogress" && (
+          <Button
+            onClick={handleCancelWorkflow}
+            variant="outlined"
+            color="error"
+            disabled={cancelling}
+            startIcon={cancelling ? <CircularProgress size={16} /> : undefined}
+          >
+            {cancelling ? "Cancelling…" : "Cancel Workflow"}
+          </Button>
+        )}
         {!status?.status ||
         status.status === "idle" ||
         status.status === "failed" ? (

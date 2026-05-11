@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
   workflow_call:
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -12,50 +13,81 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
-  fmt:
-    name: Format
-    runs-on: ubuntu-latest
+  cargo:
+    name: Format, Clippy & Unit Tests
+    runs-on: ubuntu-8-core
     container: rust:slim-bookworm
-    steps:
-      - uses: actions/checkout@v4
-      - run: rustup component add rustfmt
-      - run: cargo fmt -- --check
-
-  clippy:
-    name: Clippy
-    needs: fmt
-    runs-on: ubuntu-latest
-    container: rust:slim-bookworm
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/setup-build-env
-        with:
-          ssh-private-key: ${{ secrets.BOT_SSH_PRIVATE_KEY }}
-      - run: rustup component add clippy
-      - run: cargo clippy --all-targets --all-features
-
-  test:
-    name: Unit Tests
-    needs: clippy
-    runs-on: ubuntu-latest
-    container: rust:slim-bookworm
+    # Pin coverage instrumentation AND incremental at the job level so the
+    # build, clippy, and coverage steps share one fingerprint and reuse
+    # target/. Without RUSTFLAGS unified, the coverage step had
+    # `-C instrument-coverage` while clippy had only `-D warnings` and
+    # cargo invalidated the entire dep graph between them. Without
+    # CARGO_INCREMENTAL pinned, code-coverage.sh sets it to 0 (required
+    # for instrumented coverage) while the build/clippy steps default to
+    # 1 — different fingerprint, full rebuild. 0 is the right value for
+    # CI anyway: cache is restored fresh each run, so rustc's per-fn
+    # incremental adds size and slowdown for no benefit.
+    env:
+      RUSTFLAGS: "-C instrument-coverage -D warnings"
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-build-env
         with:
           ssh-private-key: ${{ secrets.BOT_SSH_PRIVATE_KEY }}
           extra-packages: jq bc
+      # rust-cache trims target/ to only artifacts referenced by the
+      # current Cargo.lock (drops orphaned rlibs, build script junk) and
+      # auto-hashes rustc -V, RUSTFLAGS, CARGO_* env vars, and the
+      # lockfile into the key. Cuts cache size to ~⅓, which dropped
+      # post-cache save from ~3m to ~1m. The `key:` discriminator is
+      # just a namespace tag — `cargo` job (debug + coverage) shouldn't
+      # share a cache with the integration-test job (release-ci profile,
+      # test-mode feature). cache-on-failure: true preserves a warm
+      # cache when later steps fail (e.g. a flaky test).
+      - name: Setup Rust target cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: debug-coverage
+          cache-on-failure: "true"
+      # grcov is a fixed third-party tool. Build it once and cache the
+      # binary so `cargo install grcov` (~30s) is skipped on every run.
+      # Pin the version: an unpinned `cargo install grcov` mixed with a
+      # static cache key would mean cache-hit runs use whatever was
+      # cached the first time and cache-miss runs may pull a newer one
+      # — non-reproducible. Bumping the version requires bumping this
+      # cache key in lockstep.
+      - name: Cache grcov binary
+        id: cache-grcov
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/cargo/bin/grcov
+          key: grcov-bin-0.10.7
+      - name: Install rustup components
+        run: rustup component add rustfmt clippy llvm-tools-preview
+      - name: cargo fmt
+        run: cargo fmt -- --check
+      # Build the test binaries first (rlibs + sidecar rmeta) so both
+      # clippy and the coverage step reuse them. Without this priming,
+      # `cargo clippy` runs in check mode (rmeta only) and `cargo test`
+      # in code-coverage.sh then re-Compiles every dep as rlib — a full
+      # second compile of the dep graph (~1m 40s) on every run, even
+      # with a warm target cache.
+      - name: cargo build (primes target/ for clippy + tests)
+        run: cargo test --no-run --all-features
+      # `--no-deps` keeps clippy lint passes scoped to workspace crates;
+      # deps were just built above and don't need re-linting.
+      - name: cargo clippy
+        run: cargo clippy --all-targets --all-features --no-deps
       - name: Install coverage tooling
-        run: |
-          rustup component add llvm-tools-preview
-          cargo install grcov
+        if: steps.cache-grcov.outputs.cache-hit != 'true'
+        run: cargo install grcov --version 0.10.7
       - name: Run tests with coverage
         run: ./code-coverage.sh
 
   integration-test:
     name: Integration Tests
-    needs: test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-8-core
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -65,6 +97,16 @@ jobs:
           extra-packages: jq
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+      # `release-ci` profile + test-mode feature produces artifacts
+      # disjoint from the cargo job's debug+coverage tree, so rust-cache
+      # gets its own discriminator. cache-on-failure: true is load-bearing
+      # here — integration tests have known flakes on chaos phases and we
+      # want a warm target/release-ci on the next run regardless.
+      - name: Setup Rust target cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-ci
+          cache-on-failure: "true"
       - name: Cache localnet bundle
         uses: actions/cache@v4
         with:
@@ -73,17 +115,68 @@ jobs:
       - name: Run integration tests
         run: ./integration-tests/run.sh
 
+  cargo-audit:
+    name: Cargo Audit
+    runs-on: ubuntu-latest
+    permissions:
+      checks: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  cargo-deny:
+    name: Cargo Deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The action runs cargo-deny in its own Docker container, so host-side
+      # SSH setup is invisible to it — pass the bot key + github.com host
+      # keys via the action's inputs, and force git-cli so cargo doesn't
+      # fall back to libgit2's ssh-agent path (which has no key inside the
+      # container).
+      - name: Capture github.com host keys
+        id: keyscan
+        run: |
+          {
+            echo 'known-hosts<<KNOWN_HOSTS_EOF'
+            ssh-keyscan github.com
+            echo KNOWN_HOSTS_EOF
+          } >> "$GITHUB_OUTPUT"
+      # Only `advisories` until a deny.toml is checked in; bans, licenses,
+      # and sources need policy decisions to be useful.
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories
+          ssh-key: ${{ secrets.BOT_SSH_PRIVATE_KEY }}
+          ssh-known-hosts: ${{ steps.keyscan.outputs.known-hosts }}
+          use-git-cli: true
+
   daml:
     name: DAML Build & Test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-8-core
     defaults:
       run:
         working-directory: daml
     steps:
       - uses: actions/checkout@v4
+      # ~/.dpm holds the dpm CLI and the installed SDK toolchain. Cache
+      # both so the install steps below short-circuit on a hit. Key on the
+      # SDK version so a bump invalidates the cache automatically; keep
+      # the install-script-driven steps so a cache miss still self-heals.
+      - name: Cache dpm + DAML SDK
+        id: cache-dpm
+        uses: actions/cache@v4
+        with:
+          path: ~/.dpm
+          key: dpm-3.4.11
       - name: Install dpm
+        if: steps.cache-dpm.outputs.cache-hit != 'true'
         run: curl -sSL https://get.digitalasset.com/install/install.sh | sh
       - name: Install DAML SDK
+        if: steps.cache-dpm.outputs.cache-hit != 'true'
         run: ~/.dpm/bin/dpm install 3.4.11
       - name: Build
         run: ~/.dpm/bin/dpm build --all

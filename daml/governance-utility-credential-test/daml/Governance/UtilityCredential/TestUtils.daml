@@ -1,0 +1,110 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Test utilities for the utility-credential governance plugin.
+module Governance.UtilityCredential.TestUtils where
+
+import DA.Set as Set hiding (filter)
+import DA.Time (minutes)
+import Daml.Script
+
+import Utility.Credential.App.V0.Service.User (UserService(..))
+import Utility.Credential.V0.Credential (Claim(..))
+
+import Governance.Action (GovernableAction)
+import Governance.Confirmation (GovernanceConfirmation)
+import Governance.ExecutionResult
+import Governance.Rules
+
+-- | Standard test party allocation for credential plugin tests.
+data CredentialTestParties = CredentialTestParties
+  with
+    governanceParty : Party
+    member1 : Party
+    member2 : Party
+    member3 : Party
+    outsider : Party
+    operator : Party
+    dso : Party
+    holder : Party
+  deriving (Show, Eq)
+
+-- | Allocate parties used across all credential plugin tests.
+allocateCredentialTestParties : Script CredentialTestParties
+allocateCredentialTestParties = do
+  governanceParty <- allocateParty "GovernanceParty"
+  member1 <- allocateParty "Member1"
+  member2 <- allocateParty "Member2"
+  member3 <- allocateParty "Member3"
+  outsider <- allocateParty "Outsider"
+  operator <- allocateParty "Operator"
+  dso <- allocateParty "DSO"
+  holder <- allocateParty "Holder"
+  pure CredentialTestParties with ..
+
+-- | Get the standard member set.
+getMembers : CredentialTestParties -> Set Party
+getMembers parties = Set.fromList [parties.member1, parties.member2, parties.member3]
+
+-- | Build submission context for a member with readAs on governance party.
+memberContext : Party -> Party -> SubmitOptions
+memberContext member gp = actAs member <> readAs gp
+
+-- | Create governance rules with standard test configuration.
+createTestGovernance : CredentialTestParties -> Script (ContractId GovernanceRules)
+createTestGovernance parties =
+  submit parties.governanceParty $ createCmd GovernanceRules with
+    governanceParty = parties.governanceParty
+    members = getMembers parties
+    threshold = 2
+    actionConfirmationTimeout = minutes 30
+    additionalProposers = None
+
+-- | Provision a UserService for the governance party via multi-party submit.
+-- Stands in for the full credential-app onboarding chain. The governance party
+-- is the `user` (matching how canton CBTC binds `user = registrar`).
+initUserService : CredentialTestParties -> Script (ContractId UserService)
+initUserService parties =
+  submit (actAs parties.governanceParty <> actAs parties.operator) $
+    createCmd UserService with
+      operator = parties.operator
+      user = parties.governanceParty
+      dso = parties.dso
+
+-- | Standard test claim used by Offer/Accept tests.
+testClaim : Party -> Claim
+testClaim subject = Claim with
+  subject = partyToText subject
+  property = "hasTestRole"
+  value = "Member"
+
+-- | Collect confirmations from a list of members for an interface action.
+submitConfirmations
+  : Party -> ContractId GovernanceRules -> ContractId GovernableAction -> [Party]
+  -> Script [ContractId GovernanceConfirmation]
+submitConfirmations governanceParty rulesCid proposalCid confirmers =
+  mapA (\confirmer -> do
+    result <- submit (memberContext confirmer governanceParty) $
+      exerciseCmd rulesCid GovernanceRules_ConfirmAction with
+        confirmer
+        actionProposalCid = proposalCid
+    pure result.confirmationCid
+  ) confirmers
+
+-- | Confirm and execute an interface action in one go.
+confirmAndExecute
+  : CredentialTestParties -> ContractId GovernanceRules
+  -> ContractId GovernableAction -> [Party] -> Party
+  -> Script ExecuteConfirmedActionResult
+confirmAndExecute parties rulesCid proposalCid confirmers executor = do
+  confirmationCids <- submitConfirmations parties.governanceParty rulesCid proposalCid confirmers
+  submit (actAs executor
+    <> readAs parties.governanceParty
+    <> readAs parties.outsider
+    <> readAs parties.operator
+    <> readAs parties.dso
+    <> readAs parties.holder) $
+    exerciseCmd rulesCid GovernanceRules_ExecuteConfirmedAction with
+      executor
+      actionProposalCid = proposalCid
+      confirmations = confirmationCids

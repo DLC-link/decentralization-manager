@@ -12,8 +12,8 @@ use canton_proto_rs::com::daml::ledger::api::v2::{
 use crate::{error::Result, participant_id::CantonId};
 
 use super::types::{
-    ActionType, AppRewardBeneficiary, Claim, FarConfig, InstrumentAllowance, InstrumentId,
-    ProposalType, VaultLimits,
+    ActionType, AppRewardBeneficiary, BillingParams, Claim, FarConfig, InstrumentAllowance,
+    InstrumentId, ProposalType, VaultLimits,
 };
 
 // ============================================================================
@@ -178,6 +178,30 @@ fn serialize_claim(claim: &Claim) -> Value {
         field("subject", make_text(&claim.subject)),
         field("property", make_text(&claim.property)),
         field("value", make_text(&claim.value)),
+    ])
+}
+
+fn serialize_billing_params(params: &BillingParams) -> Value {
+    make_record(vec![
+        field(
+            "feePerDayUsd",
+            make_record(vec![field(
+                "rate",
+                make_numeric(&params.fee_per_day_usd.to_string()),
+            )]),
+        ),
+        field(
+            "billingPeriodMinutes",
+            make_int64(params.billing_period_minutes),
+        ),
+        field(
+            "depositTargetAmountUsd",
+            make_numeric(&params.deposit_target_amount_usd.to_string()),
+        ),
+        field(
+            "holderActivityWeight",
+            make_optional_numeric(&params.holder_activity_weight),
+        ),
     ])
 }
 
@@ -756,6 +780,7 @@ fn serialize_instrument_allowances(allowances: &[InstrumentAllowance]) -> Value 
 pub enum ProposalPackage {
     GovernanceCore,
     GovernanceTokenCustody,
+    GovernanceUtilityCredential,
     GovernanceUtilityOnboarding,
 }
 
@@ -1072,6 +1097,82 @@ pub fn build_proposal_create_args(
                     ),
                     field("meta", make_empty_metadata()),
                     field("extraArgsMeta", make_empty_metadata()),
+                ],
+            },
+        ),
+        ProposalType::OfferFreeCredential {
+            user_service_cid,
+            holder,
+            id,
+            description,
+            claims,
+        } => (
+            ProposalPackage::GovernanceUtilityCredential,
+            "Governance.UtilityCredential.OfferFreeCredential",
+            "OfferFreeCredential",
+            Record {
+                record_id: None,
+                fields: vec![
+                    field("governanceParty", make_party(governance_party)),
+                    field("proposer", make_party(proposer)),
+                    field("userServiceCid", make_contract_id(user_service_cid)),
+                    field("holder", make_party(holder)),
+                    field("id", make_text(id)),
+                    field("description", make_text(description)),
+                    field(
+                        "claims",
+                        make_list(claims.iter().map(serialize_claim).collect()),
+                    ),
+                ],
+            },
+        ),
+        ProposalType::OfferPaidCredential {
+            user_service_cid,
+            holder,
+            id,
+            description,
+            claims,
+            billing_params,
+            deposit_initial_amount_usd,
+        } => (
+            ProposalPackage::GovernanceUtilityCredential,
+            "Governance.UtilityCredential.OfferPaidCredential",
+            "OfferPaidCredential",
+            Record {
+                record_id: None,
+                fields: vec![
+                    field("governanceParty", make_party(governance_party)),
+                    field("proposer", make_party(proposer)),
+                    field("userServiceCid", make_contract_id(user_service_cid)),
+                    field("holder", make_party(holder)),
+                    field("id", make_text(id)),
+                    field("description", make_text(description)),
+                    field(
+                        "claims",
+                        make_list(claims.iter().map(serialize_claim).collect()),
+                    ),
+                    field("billingParams", serialize_billing_params(billing_params)),
+                    field(
+                        "depositInitialAmountUsd",
+                        make_optional_numeric(deposit_initial_amount_usd),
+                    ),
+                ],
+            },
+        ),
+        ProposalType::AcceptFreeCredential {
+            user_service_cid,
+            credential_offer_cid,
+        } => (
+            ProposalPackage::GovernanceUtilityCredential,
+            "Governance.UtilityCredential.AcceptFreeCredential",
+            "AcceptFreeCredential",
+            Record {
+                record_id: None,
+                fields: vec![
+                    field("governanceParty", make_party(governance_party)),
+                    field("proposer", make_party(proposer)),
+                    field("userServiceCid", make_contract_id(user_service_cid)),
+                    field("credentialOfferCid", make_contract_id(credential_offer_cid)),
                 ],
             },
         ),

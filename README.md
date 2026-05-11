@@ -10,7 +10,7 @@ A web application for managing decentralized parties in Canton blockchain networ
 - **Governance Actions**: View and manage governance confirmations with threshold-based execution
 - **Participant Management**: View party membership, kick participants with threshold-based voting
 - **Keycloak Authentication**: Supports M2M (client_credentials) and password flows for Ledger API access
-- **Secure P2P Communication**: Noise Protocol Framework for encrypted coordinator-attestor communication
+- **Secure P2P Communication**: Noise Protocol Framework for encrypted coordinator-peer communication
 - **Real-time Status**: Live peer connectivity monitoring and workflow progress tracking
 - **Canton Integration**: Native gRPC integration with Canton Admin and Ledger APIs
 
@@ -25,13 +25,13 @@ A web application for managing decentralized parties in Canton blockchain networ
 The application runs as an HTTP server with an embedded React frontend. Multiple instances coordinate via the Noise Protocol:
 
 - **Coordinator**: Initiates workflows and orchestrates multi-party operations
-- **Attestors**: Respond to coordinator commands, sign proposals, and execute local operations
+- **Peers**: Respond to coordinator commands, sign proposals, and execute local operations
 - **Automatic Key Management**: Noise keypairs are generated automatically on first run
 
 ```
 ┌─────────────────┐     Noise Protocol      ┌─────────────────┐
 │  Participant 1  │◄───────────────────────►│  Participant 2  │
-│   (Coordinator) │                         │    (Attestor)   │
+│   (Coordinator) │                         │    (Peer)   │
 │   HTTP :8081    │                         │   HTTP :8082    │
 │   Noise :9001   │                         │   Noise :9002   │
 └────────┬────────┘                         └────────┬────────┘
@@ -223,7 +223,7 @@ curl http://localhost:8081/party-config/decparty::1220abc...
 1. Configure all participant nodes with each other's connection details via the `/network-config` API
 2. Start all participant servers
 3. On the coordinator's UI, click **Create Party** and enter a party ID prefix
-4. The coordinator invites attestors and orchestrates:
+4. The coordinator invites peers and orchestrates:
    - Cryptographic key generation (namespace + DAML signing keys)
    - Topology proposal creation (DNS and P2P mappings)
    - Multi-party signing

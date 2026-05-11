@@ -15,6 +15,9 @@ export interface ContractInfo {
   contract_id: string;
   template_id: string;
   package_id: string;
+  package_name?: string;
+  package_version?: string;
+  created_at?: string;
 }
 
 export interface PackageConfig {
@@ -147,7 +150,12 @@ export interface KickRequest {
   new_threshold: number;
 }
 
-export type WorkflowProgress = "idle" | "inprogress" | "completed" | "failed";
+export type WorkflowProgress =
+  | "idle"
+  | "inprogress"
+  | "completed"
+  | "failed"
+  | "cancelled";
 
 // Type aliases for backwards compatibility
 export type KickStatus = WorkflowProgress;
@@ -197,6 +205,8 @@ export interface ContractDefinition {
   module_name: string;
   entity_name: string;
   fields: FieldDefinition[];
+  /** Optional UI-only labels for each field, by index. Backend ignores. */
+  fieldLabels?: string[];
 }
 
 export interface ContractsRequest {
@@ -222,10 +232,52 @@ export interface PendingInvitation {
   coordinator_pubkey: string;
   coordinator_name?: string;
   received_at: number;
+  /** Onboarding-only: party ID prefix the coordinator chose. */
+  prefix?: string;
+  /** Onboarding-only: participant canton IDs the coordinator selected. */
+  participants?: string[];
+  /** Dars-only: filenames the coordinator is distributing. */
+  dar_filenames?: string[];
 }
 
 export interface PendingInvitationsResponse {
   invitations: PendingInvitation[];
+}
+
+// Workflow runs (live in-progress + recently-completed runs displayed in the
+// notifications feed alongside pending invitations).
+export type WorkflowKind = "Onboarding" | "Kick" | "Contracts" | "Dars";
+export type WorkflowRole = "Coordinator" | "Peer";
+
+export interface WorkflowRun {
+  instance_name: string;
+  kind: WorkflowKind;
+  role: WorkflowRole;
+  status: WorkflowProgress;
+  current_step: string;
+  step_index: number;
+  step_total: number;
+  /** Original config struct serialized to JSON — used for resume on the
+   * backend; the frontend just treats this as opaque. */
+  config_json: string;
+  /** Hex-encoded coordinator Noise pubkey. None on coordinator-side rows. */
+  coordinator_pubkey?: string;
+  /** Resolved from the peers table when set. */
+  coordinator_name?: string;
+  expected_peers: string[];
+  completed_peers: string[];
+  dec_party_id?: string;
+  prefix?: string;
+  participants?: string[];
+  dar_filenames?: string[];
+  error?: string;
+  dismissed: boolean;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface WorkflowRunsResponse {
+  runs: WorkflowRun[];
 }
 
 // Authentication types
@@ -275,6 +327,8 @@ export interface GovernanceConfirmation {
   contract_id: string;
   action: ActionType;
   confirming_party: string;
+  /** Unix seconds when this confirmation contract was created on the ledger. */
+  created_at?: number;
 }
 
 export interface GovernanceAction {
@@ -283,6 +337,8 @@ export interface GovernanceAction {
   confirmations: GovernanceConfirmation[];
   confirmation_count: number;
   can_execute: boolean;
+  /** Unix seconds of the most recent confirmation. 0 if unresolved. */
+  last_confirmation_at?: number;
 }
 
 export interface DomainGovernanceAction {
@@ -386,7 +442,37 @@ export type ProposalType =
       holder: string;
       amount: string;
       description: string;
+    }
+  | {
+      type: "offer_free_credential";
+      user_service_cid: string;
+      holder: string;
+      id: string;
+      description: string;
+      claims: Claim[];
+    }
+  | {
+      type: "offer_paid_credential";
+      user_service_cid: string;
+      holder: string;
+      id: string;
+      description: string;
+      claims: Claim[];
+      billing_params: BillingParams;
+      deposit_initial_amount_usd: string | null;
+    }
+  | {
+      type: "accept_free_credential";
+      user_service_cid: string;
+      credential_offer_cid: string;
     };
+
+export interface BillingParams {
+  fee_per_day_usd: string;
+  billing_period_minutes: number;
+  deposit_target_amount_usd: string;
+  holder_activity_weight: string | null;
+}
 
 export interface ProposeActionRequest {
   party_id: string;

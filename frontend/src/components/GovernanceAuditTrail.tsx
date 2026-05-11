@@ -7,7 +7,6 @@ import {
   TableCell,
   TableHead,
   TableRow,
-  CircularProgress,
   Alert,
   Button,
   Chip,
@@ -28,12 +27,19 @@ import type { ChainAuditEntry, ChainAuditResponse } from "../types";
 
 interface GovernanceAuditTrailProps {
   partyId: string;
-  /// Bumped by the parent after a sibling governance action mutates state, to
-  /// trigger a fresh fetch without the operator clicking Refresh.
+  /// Bumped by the parent after a sibling governance action mutates state, OR
+  /// when the operator clicks the Refresh icon in the section header — both
+  /// trigger a fresh fetch.
   refreshNonce?: number;
+  /// Reports the loaded entry count to the parent so it can render a badge in
+  /// the section header (matches the Contracts pattern).
+  onCountChange?: (count: number) => void;
+  /// Reports fetch in-flight state up so the parent can disable its Refresh
+  /// icon while a request is pending.
+  onLoadingChange?: (loading: boolean) => void;
 }
 
-const CHAIN_LIMIT = 200;
+export const CHAIN_LIMIT = 200;
 
 const formatTimestamp = (epochSeconds: number): string =>
   new Date(epochSeconds * 1000).toLocaleString();
@@ -120,6 +126,8 @@ const CopyButton = ({
 export const GovernanceAuditTrail = ({
   partyId,
   refreshNonce,
+  onCountChange,
+  onLoadingChange,
 }: GovernanceAuditTrailProps) => {
   const jsonTreeTheme = useJsonTreeTheme();
   const [loading, setLoading] = useState(false);
@@ -204,6 +212,14 @@ export const GovernanceAuditTrail = ({
     fetchAudit(true);
   }, [refreshNonce, fetchAudit]);
 
+  useEffect(() => {
+    onCountChange?.(entries.length);
+  }, [entries.length, onCountChange]);
+
+  useEffect(() => {
+    onLoadingChange?.(loading);
+  }, [loading, onLoadingChange]);
+
   if (error) {
     return (
       <Box sx={{ mt: 2, mb: 2 }}>
@@ -223,38 +239,7 @@ export const GovernanceAuditTrail = ({
   }
 
   return (
-    <Box sx={{ mt: 1 }}>
-      <Box
-        sx={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          mb: 1.5,
-        }}
-      >
-        <Typography variant="subtitle2">
-          Audit Trail
-          {entries.length > 0 && (
-            <Chip
-              label={`${entries.length}${
-                entries.length === CHAIN_LIMIT ? "+" : ""
-              }`}
-              size="small"
-              sx={{ ml: 1 }}
-            />
-          )}
-        </Typography>
-        <Button
-          startIcon={loading ? <CircularProgress size={16} /> : <RefreshIcon />}
-          onClick={() => fetchAudit(true)}
-          disabled={loading}
-          size="small"
-          sx={{ mr: 1 }}
-        >
-          Refresh
-        </Button>
-      </Box>
-
+    <Box>
       {entries.length === 0 ? (
         <Typography variant="body2" color="text.secondary" sx={{ py: 2 }}>
           No on-chain governance events found for this party.
@@ -278,7 +263,12 @@ export const GovernanceAuditTrail = ({
           <Box
             ref={scrollRef}
             sx={{
-              maxHeight: 400,
+              // Viewport-relative cap so the list grows with the window
+              // instead of stopping at a hardcoded 400px. Offset accounts for
+              // sticky chrome above the table on a typical Parties layout
+              // (header chips + owner-key row + collapsed sections + this
+              // section's header).
+              maxHeight: "calc(100vh - 280px)",
               overflowY: "auto",
               overflowX: "auto",
             }}

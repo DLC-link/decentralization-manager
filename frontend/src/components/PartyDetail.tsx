@@ -19,13 +19,14 @@ import EditIcon from "@mui/icons-material/Edit";
 import PersonRemoveIcon from "@mui/icons-material/PersonRemove";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
+import RefreshIcon from "@mui/icons-material/Refresh";
 import SettingsIcon from "@mui/icons-material/Settings";
 import { CopyableText } from "./CopyableText";
 import { KickDialog } from "./KickDialog";
 import { ContractsDialog } from "./ContractsDialog";
 import { PartyConfigDialog } from "./PartyConfigDialog";
 import { GovernanceActionsDialog } from "./GovernanceActionsDialog";
-import { GovernanceAuditTrail } from "./GovernanceAuditTrail";
+import { GovernanceAuditTrail, CHAIN_LIMIT } from "./GovernanceAuditTrail";
 import { AuthSection } from "./AuthSection";
 import { zebraRow } from "../styles";
 import { ADMIN_ACCESS } from "../constants";
@@ -108,6 +109,8 @@ export const PartyDetail = ({
     null,
   );
   const [governanceRefreshNonce, setGovernanceRefreshNonce] = useState(0);
+  const [auditTrailCount, setAuditTrailCount] = useState(0);
+  const [auditTrailLoading, setAuditTrailLoading] = useState(false);
   const [canScrollUp, setCanScrollUp] = useState(false);
   const [canScrollDown, setCanScrollDown] = useState(false);
   const contractsScrollRef = useRef<HTMLDivElement>(null);
@@ -349,7 +352,10 @@ export const PartyDetail = ({
               <Table size="small">
                 <TableHead>
                   <TableRow>
+                    <TableCell sx={{ py: 1 }}>Package</TableCell>
+                    <TableCell sx={{ py: 1 }}>Version</TableCell>
                     <TableCell sx={{ py: 1 }}>Template</TableCell>
+                    <TableCell sx={{ py: 1 }}>Created</TableCell>
                     <TableCell sx={{ py: 1 }}>Contract ID</TableCell>
                     <TableCell sx={{ py: 1, width: 40 }} />
                   </TableRow>
@@ -358,12 +364,29 @@ export const PartyDetail = ({
                   {party.contracts.map((c, idx) => (
                     <TableRow key={c.contract_id} sx={zebraRow(idx)}>
                       <TableCell sx={{ py: 1 }}>
+                        {c.package_name || "—"}
+                      </TableCell>
+                      <TableCell sx={{ py: 1 }}>
+                        {c.package_version || "—"}
+                      </TableCell>
+                      <TableCell sx={{ py: 1 }}>
                         {c.template_id}
+                      </TableCell>
+                      <TableCell sx={{ py: 1 }}>
+                        {c.created_at
+                          ? new Date(c.created_at).toLocaleString(undefined, {
+                              year: "numeric",
+                              month: "short",
+                              day: "2-digit",
+                              hour: "2-digit",
+                              minute: "2-digit",
+                            })
+                          : "—"}
                       </TableCell>
                       <TableCell sx={{ py: 1 }}>
                         <CopyableText
                           text={c.contract_id}
-                          truncate={{ start: 16, end: 16 }}
+                          truncate={{ start: 12, end: 12 }}
                           variant="caption"
                         />
                       </TableCell>
@@ -427,11 +450,41 @@ export const PartyDetail = ({
           title="Audit Trail"
           expanded={governanceExpanded}
           onToggle={() => setGovernanceExpanded(!governanceExpanded)}
+          badge={
+            <>
+              {auditTrailCount > 0 && (
+                <Chip
+                  label={`${auditTrailCount}${auditTrailCount === CHAIN_LIMIT ? "+" : ""}`}
+                  size="small"
+                  sx={{ ml: 1 }}
+                  color="primary"
+                />
+              )}
+              <Tooltip title="Refresh audit trail">
+                <span>
+                  <IconButton
+                    size="small"
+                    sx={{ ml: 0.5 }}
+                    onClick={(e) => {
+                      // Don't toggle the collapsible section.
+                      e.stopPropagation();
+                      setGovernanceRefreshNonce((n) => n + 1);
+                    }}
+                    disabled={auditTrailLoading}
+                  >
+                    <RefreshIcon fontSize="small" />
+                  </IconButton>
+                </span>
+              </Tooltip>
+            </>
+          }
         >
           <Box sx={{ pl: 3 }}>
             <GovernanceAuditTrail
               partyId={party.party_id}
               refreshNonce={governanceRefreshNonce}
+              onCountChange={setAuditTrailCount}
+              onLoadingChange={setAuditTrailLoading}
             />
           </Box>
         </CollapsibleSection>
@@ -482,7 +535,6 @@ export const PartyDetail = ({
           onClose={() => setEditGovContractId(null)}
           partyId={party.party_id}
           rulesContractId={editingContract.contract_id}
-          memberPartyId={authStatus.member_party_id}
           defaultOperatorParty={operatorParty}
           network={network}
           governanceType={governanceTypeFor(editingContract.template_id)}

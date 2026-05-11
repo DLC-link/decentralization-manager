@@ -1,11 +1,24 @@
 #![allow(dead_code)]
 
+pub mod cancel_cascades;
 pub mod check_peer_dars;
 pub mod create_dec_party;
 pub mod deploy_gov_core;
+pub mod dismiss_failed_cleans_artifacts;
 pub mod distribute_dars;
+pub mod failed_step_bounded_time;
+pub mod generate_keys_idempotent;
 pub mod generic_vote;
+pub mod identity_survives_dismiss;
 pub mod kick;
+pub mod notification_feed;
 pub mod owner_key_resilience;
+pub mod peer_3_strikes_abort;
+pub mod restart_coordinator_resume;
+pub mod restart_peer_resume;
+pub mod restart_with_concurrent_kinds;
+pub mod retry_coordinator_broadcast;
+pub mod retry_with_offline_peer;
+pub mod start_handler_conflict_409;
 pub mod token_custody;
 pub mod utility_onboarding;

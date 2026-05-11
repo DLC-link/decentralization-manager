@@ -1,8 +1,16 @@
+use std::str::FromStr;
+
+use anyhow::Context;
+
 use crate::{
     config::{KeycloakConfig, PackageConfig, PartyCredentials, Peer},
     db::crypto,
     error::Result,
     participant_id::CantonId,
+    server::{
+        InvitationType, PendingInvitation, WorkflowKind, WorkflowProgress, WorkflowRole,
+        WorkflowRun,
+    },
 };
 
 #[derive(Debug, sqlx::FromRow)]
@@ -114,6 +122,9 @@ pub struct DecPartyContractRow {
     pub contract_id: String,
     pub template_id: String,
     pub package_id: String,
+    pub package_name: String,
+    pub package_version: String,
+    pub created_at: String,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -132,6 +143,82 @@ pub struct GovernanceAuditRow {
 }
 
 #[derive(Debug, sqlx::FromRow)]
+pub struct PendingInvitationRow {
+    pub id: String,
+    pub invitation_type: String,
+    pub coordinator_pubkey: String,
+    pub received_at: i64,
+    pub prefix: Option<String>,
+    pub participants: Option<String>,
+    pub dar_filenames: Option<String>,
+}
+
+fn encode_list<T: serde::Serialize>(items: &[T], context_label: &str) -> Result<Option<String>> {
+    if items.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(serde_json::to_string(items).with_context(|| {
+            format!("failed to encode {context_label}")
+        })?))
+    }
+}
+
+fn decode_list<T: for<'de> serde::Deserialize<'de>>(
+    raw: Option<String>,
+    id: &str,
+    context_label: &str,
+) -> Result<Vec<T>> {
+    match raw {
+        Some(s) if !s.is_empty() => serde_json::from_str(&s)
+            .with_context(|| format!("invalid {context_label} JSON for id {id}")),
+        _ => Ok(Vec::new()),
+    }
+}
+
+impl PendingInvitationRow {
+    /// Build a row from the in-memory domain object.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the participants/dar_filenames lists fail to
+    /// JSON-encode.
+    pub fn from_domain(inv: &PendingInvitation) -> Result<Self> {
+        Ok(Self {
+            id: inv.id.clone(),
+            invitation_type: inv.invitation_type.to_string(),
+            coordinator_pubkey: inv.coordinator_pubkey.clone(),
+            received_at: inv.received_at,
+            prefix: inv.prefix.clone(),
+            participants: encode_list(&inv.participants, "pending invitation participants")?,
+            dar_filenames: encode_list(&inv.dar_filenames, "pending invitation dar_filenames")?,
+        })
+    }
+
+    /// Decode a row read from the database back into a domain object.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `invitation_type` is unrecognised or if the
+    /// participants/dar_filenames JSON fields are malformed.
+    pub fn into_domain(self) -> Result<PendingInvitation> {
+        let invitation_type = InvitationType::from_str(&self.invitation_type)
+            .with_context(|| format!("invalid invitation_type for id {}", self.id))?;
+        let participants = decode_list(self.participants, &self.id, "participants")?;
+        let dar_filenames = decode_list(self.dar_filenames, &self.id, "dar_filenames")?;
+        Ok(PendingInvitation {
+            id: self.id,
+            invitation_type,
+            coordinator_pubkey: self.coordinator_pubkey,
+            coordinator_name: None,
+            received_at: self.received_at,
+            prefix: self.prefix,
+            participants,
+            dar_filenames,
+        })
+    }
+}
+
+#[derive(Debug, sqlx::FromRow)]
 pub struct ChainAuditCacheRow {
     pub party_id: String,
     pub offset: i64,
@@ -146,4 +233,138 @@ pub struct ChainAuditCacheRow {
     pub acting_parties: String,
     pub update_id: String,
     pub details: String,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct WorkflowRunRow {
+    pub instance_name: String,
+    pub kind: String,
+    pub role: String,
+    pub status: String,
+    pub current_step: String,
+    pub step_index: i64,
+    pub step_total: i64,
+    pub config_json: String,
+    pub coordinator_pubkey: Option<String>,
+    pub expected_peers_json: String,
+    pub completed_peers_json: String,
+    pub dec_party_id: Option<String>,
+    pub error: Option<String>,
+    pub dismissed: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+fn workflow_progress_str(p: WorkflowProgress) -> &'static str {
+    match p {
+        WorkflowProgress::Idle => "idle",
+        WorkflowProgress::InProgress => "inprogress",
+        WorkflowProgress::Completed => "completed",
+        WorkflowProgress::Failed => "failed",
+        WorkflowProgress::Cancelled => "cancelled",
+    }
+}
+
+fn parse_workflow_progress(s: &str) -> Result<WorkflowProgress> {
+    Ok(match s {
+        "idle" => WorkflowProgress::Idle,
+        "inprogress" => WorkflowProgress::InProgress,
+        "completed" => WorkflowProgress::Completed,
+        "failed" => WorkflowProgress::Failed,
+        "cancelled" => WorkflowProgress::Cancelled,
+        other => anyhow::bail!("unknown workflow status: {other}"),
+    })
+}
+
+impl WorkflowRunRow {
+    /// Build a row from the in-memory domain object.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the expected/completed peer lists fail to
+    /// JSON-encode.
+    pub fn from_domain(r: &WorkflowRun) -> Result<Self> {
+        Ok(Self {
+            instance_name: r.instance_name.clone(),
+            kind: r.kind.to_string(),
+            role: r.role.to_string(),
+            status: workflow_progress_str(r.status).to_string(),
+            current_step: r.current_step.clone(),
+            step_index: r.step_index,
+            step_total: r.step_total,
+            config_json: r.config_json.clone(),
+            coordinator_pubkey: r.coordinator_pubkey.clone(),
+            expected_peers_json: serde_json::to_string(&r.expected_peers)
+                .context("encode expected_peers")?,
+            completed_peers_json: serde_json::to_string(&r.completed_peers)
+                .context("encode completed_peers")?,
+            dec_party_id: r.dec_party_id.as_ref().map(CantonId::to_string),
+            error: r.error.clone(),
+            dismissed: if r.dismissed { 1 } else { 0 },
+            created_at: r.created_at,
+            updated_at: r.updated_at,
+        })
+    }
+
+    /// Decode a row read from the database back into a domain object.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `kind`, `role` or `status` is unrecognised, or if
+    /// the expected/completed peer JSON fields fail to decode.
+    pub fn into_domain(self) -> Result<WorkflowRun> {
+        let kind = WorkflowKind::from_str(&self.kind)
+            .with_context(|| format!("invalid workflow kind on {}", self.instance_name))?;
+        let role = WorkflowRole::from_str(&self.role)
+            .with_context(|| format!("invalid workflow role on {}", self.instance_name))?;
+        let status = parse_workflow_progress(&self.status)
+            .with_context(|| format!("invalid workflow status on {}", self.instance_name))?;
+        let expected_peers: Vec<CantonId> = serde_json::from_str(&self.expected_peers_json)
+            .with_context(|| format!("decode expected_peers on {}", self.instance_name))?;
+        let completed_peers: Vec<CantonId> = serde_json::from_str(&self.completed_peers_json)
+            .with_context(|| format!("decode completed_peers on {}", self.instance_name))?;
+        let dec_party_id = self
+            .dec_party_id
+            .as_deref()
+            .map(CantonId::parse)
+            .transpose()
+            .with_context(|| format!("decode dec_party_id on {}", self.instance_name))?;
+        Ok(WorkflowRun {
+            instance_name: self.instance_name,
+            kind,
+            role,
+            status,
+            current_step: self.current_step,
+            step_index: self.step_index,
+            step_total: self.step_total,
+            config_json: self.config_json,
+            coordinator_pubkey: self.coordinator_pubkey,
+            coordinator_name: None,
+            expected_peers,
+            completed_peers,
+            dec_party_id,
+            error: self.error,
+            dismissed: self.dismissed != 0,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        })
+    }
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct WorkflowArtifactRow {
+    pub instance_name: String,
+    pub artifact_kind: String,
+    pub peer_id: String,
+    pub payload: Vec<u8>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct DecPartyIdentityRow {
+    pub dec_party_id: String,
+    pub artifact_kind: String,
+    pub peer_id: String,
+    pub payload: Vec<u8>,
+    pub created_at: i64,
 }

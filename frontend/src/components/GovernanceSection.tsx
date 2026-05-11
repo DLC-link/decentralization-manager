@@ -1,13 +1,8 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback } from "react";
 import {
   Autocomplete,
   Box,
   Typography,
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableRow,
   Button,
   Chip,
   CircularProgress,
@@ -28,12 +23,8 @@ import {
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import ExpandLessIcon from "@mui/icons-material/ExpandLess";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
-import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import AddIcon from "@mui/icons-material/Add";
-import UndoIcon from "@mui/icons-material/Undo";
 import RefreshIcon from "@mui/icons-material/Refresh";
-import TimerOffIcon from "@mui/icons-material/TimerOff";
-import { ExecuteDialog } from "./ExecuteDialog";
 import {
   API_BASE,
   ADMIN_ACCESS,
@@ -50,16 +41,11 @@ import {
   TEMPLATE_REGISTRAR_SERVICE,
 } from "../constants";
 import { authenticatedFetch } from "../api";
-import { zebraRow } from "../styles";
+import { getActionTypeOptions } from "../governanceFormat";
 import type {
   GovernanceResponse,
-  GovernanceAction,
   ActionType,
   ConfirmActionRequest,
-  ExecuteActionRequest,
-  CancelConfirmationRequest,
-  ExpireConfirmationRequest,
-  DisclosedContractInput,
   InstrumentId,
   VaultLimits,
   FarConfig,
@@ -73,109 +59,18 @@ import type {
   UserServicesResponse,
   ContractWithBlob,
   ContractQueryResponse,
-  DomainGovernanceAction,
   Network,
   NetworkInfo,
   ProposeActionRequest,
   ProposalType,
 } from "../types";
 
-// Action types — ordered per GOVERNANCE_CLIENT_MIGRATION.md vault launch sequence
-// Hidden entries are kept for type safety and display of existing actions
-const getActionTypeOptions = (
-  network?: Network,
-): { value: ActionType["type"]; label: string; hidden?: boolean }[] => [
-  // Step 1: Utility Registry Onboarding
-  {
-    value: "utility_create_provider_request",
-    label: "Create Provider Service",
-  },
-  { value: "utility_create_user_request", label: "Create User Service" },
-  { value: "utility_setup", label: "Setup Utility" },
-  // Feature App (needed before vault deployment for FAR config, devnet only)
-  {
-    value: "dev_net_feature_app",
-    label: "DevNet: Feature App",
-    hidden: network !== "devnet",
-  },
-  // Deploy Vault
-  { value: "vault_deployment", label: "Deploy Vault" },
-  // Deploy YieldEpoch
-  { value: "yield_epoch_deployment", label: "Deploy YieldEpoch" },
-  // Request Processor Deployment
-  {
-    value: "processor_deployment_request",
-    label: "Request Processor Deployment",
-  },
-  // Accept Holder Service Requests
-  {
-    value: "utility_accept_holder_service_request",
-    label: "Accept Holder Service",
-    hidden: true,
-  },
-  // Hidden — not in current vault launch sequence
-  {
-    value: "governance_add_member",
-    label: "Add Governance Member",
-    hidden: true,
-  },
-  {
-    value: "governance_remove_member",
-    label: "Remove Governance Member",
-    hidden: true,
-  },
-  {
-    value: "governance_set_threshold",
-    label: "Set Governance Threshold",
-    hidden: true,
-  },
-  {
-    value: "governance_set_timeout",
-    label: "Set Governance Timeout",
-    hidden: true,
-  },
-  { value: "vault_pause", label: "Pause Vault" },
-  { value: "vault_unpause", label: "Unpause Vault" },
-  { value: "vault_update_limits", label: "Update Vault Limits", hidden: true },
-  {
-    value: "vault_update_backend",
-    label: "Update Vault Backend",
-    hidden: true,
-  },
-  {
-    value: "vault_update_far_beneficiaries",
-    label: "Update FAR Beneficiaries",
-    hidden: true,
-  },
-  {
-    value: "credential_offer_free",
-    label: "Credential: Offer Free",
-    hidden: true,
-  },
-  {
-    value: "credential_accept_free",
-    label: "Credential: Accept Free",
-  },
-];
-
 type ActionTypeKey = ActionType["type"];
-
-// All action type options (network-independent, for label lookup)
-const ALL_ACTION_TYPE_OPTIONS = getActionTypeOptions();
-
-// Format an ActionType for display
-const formatActionType = (action: ActionType): string => {
-  const label =
-    ALL_ACTION_TYPE_OPTIONS.find((opt) => opt.value === action.type)?.label ||
-    action.type;
-  return label;
-};
 
 interface GovernanceSectionProps {
   partyId: string;
   rulesContractId?: string;
   governanceContractIds?: string[];
-  memberPartyId?: string;
   defaultOperatorParty?: string;
   network?: Network;
   governanceType?: "vault" | "core_self" | "core_domain";
@@ -208,7 +103,6 @@ export const GovernanceSection = ({
   partyId,
   rulesContractId: initialRulesContractId,
   governanceContractIds = [],
-  memberPartyId,
   defaultOperatorParty,
   network,
   governanceType = "vault",
@@ -218,10 +112,6 @@ export const GovernanceSection = ({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<GovernanceResponse | null>(null);
-  const [actionLoading, setActionLoading] = useState<string | null>(null);
-  const [executeDialogAction, setExecuteDialogAction] =
-    useState<GovernanceAction | null>(null);
-  const [executeError, setExecuteError] = useState<string | null>(null);
   // Domain proposal state
   const [showProposalForm, setShowProposalForm] = useState(false);
   const [proposalType, setProposalType] = useState<ProposalType["type"]>("setup_cc_preapproval");
@@ -252,6 +142,11 @@ export const GovernanceSection = ({
   const [proposalAllocationFactoryCid, setProposalAllocationFactoryCid] = useState("");
   const [proposalRecipient, setProposalRecipient] = useState("");
   const [proposalHolder, setProposalHolder] = useState("");
+  // Credential proposal state (offer_free / accept_free)
+  const [proposalUserServiceCid, setProposalUserServiceCid] = useState("");
+  const [proposalCredentialId, setProposalCredentialId] = useState("");
+  const [proposalCredentialClaimsText, setProposalCredentialClaimsText] = useState("");
+  const [proposalCredentialOfferCid, setProposalCredentialOfferCid] = useState("");
   const [proposalLoading, setProposalLoading] = useState(false);
   const [rulesContractId, setRulesContractId] = useState(
     initialRulesContractId || "",
@@ -329,7 +224,6 @@ export const GovernanceSection = ({
   const [vaultRulesContracts, setVaultRulesContracts] = useState<ContractWithBlob[]>([]);
   const [allocationFactoryContracts, setAllocationFactoryContracts] = useState<ContractWithBlob[]>([]);
   const [featuredAppRightContracts, setFeaturedAppRightContracts] = useState<ContractWithBlob[]>([]);
-  const [amuletRulesContract, setAmuletRulesContract] = useState<ContractWithBlob | null>(null);
   const [amuletRulesLoading, setAmuletRulesLoading] = useState(false);
   const [deployContractsLoading, setDeployContractsLoading] = useState(false);
 
@@ -547,10 +441,6 @@ export const GovernanceSection = ({
       const res = await authenticatedFetch(`${API_BASE}/network-info`);
       if (res.ok) {
         const data: NetworkInfo = await res.json();
-        setAmuletRulesContract({
-          contract_id: data.amulet_rules_cid,
-          blob: data.amulet_rules_blob,
-        });
         setAmuletRulesCid(data.amulet_rules_cid);
         setDsoPartyId(data.dso_party_id);
         setProposalExpectedDso(data.dso_party_id);
@@ -579,201 +469,6 @@ export const GovernanceSection = ({
     }
   }, [selectedActionType, fetchDeployContracts, fetchBurnMintFactory, fetchNetworkInfo]);
 
-  // Build dynamic blob map from queried contracts (for ExecuteDialog)
-  const contractBlobMap = useMemo(() => {
-    const map: Record<string, string> = {};
-    for (const c of [
-      ...vaultRulesContracts,
-      ...allocationFactoryContracts,
-      ...featuredAppRightContracts,
-      ...registrarServiceContracts,
-    ]) {
-      if (c.blob) map[c.contract_id] = c.blob;
-    }
-    if (burnMintFactory?.blob) {
-      map[burnMintFactory.contract_id] = burnMintFactory.blob;
-    }
-    if (amuletRulesContract?.blob) {
-      map[amuletRulesContract.contract_id] = amuletRulesContract.blob;
-    }
-    return map;
-  }, [vaultRulesContracts, allocationFactoryContracts, featuredAppRightContracts, registrarServiceContracts, burnMintFactory, amuletRulesContract]);
-
-  const handleConfirm = async (action: GovernanceAction) => {
-    if (!rulesContractId) {
-      setError("Please enter the Governance contract ID");
-      return;
-    }
-
-    setActionLoading(action.action_hash);
-    setError(null);
-
-    try {
-      const request: ConfirmActionRequest = {
-        party_id: partyId,
-        rules_contract_id: rulesContractId,
-        action: action.action,
-        governance_type: governanceType,
-      };
-
-      const res = await authenticatedFetch(`${API_BASE}/governance/confirm`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(request),
-      });
-
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.error || "Failed to submit confirmation");
-      }
-
-      // Refresh data
-      await fetchGovernance();
-      onAfterAction?.();
-    } catch (e) {
-      setError(
-        e instanceof Error ? e.message : "Failed to submit confirmation",
-      );
-    } finally {
-      setActionLoading(null);
-    }
-  };
-
-  const handleExecute = async (
-    action: GovernanceAction,
-    disclosedContracts: DisclosedContractInput[],
-  ) => {
-    if (!rulesContractId) {
-      setExecuteError("Please enter the Governance contract ID");
-      return;
-    }
-
-    setActionLoading(action.action_hash);
-    setExecuteError(null);
-
-    try {
-      const request: ExecuteActionRequest = {
-        party_id: partyId,
-        rules_contract_id: rulesContractId,
-        action: action.action,
-        confirmation_cids: action.confirmations.map((c) => c.contract_id),
-        disclosed_contracts: disclosedContracts,
-        governance_type: governanceType,
-      };
-
-      const res = await authenticatedFetch(`${API_BASE}/governance/execute`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(request),
-      });
-
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.error || "Failed to execute action");
-      }
-
-      // Close dialog and refresh data
-      setExecuteDialogAction(null);
-      await fetchGovernance();
-      onAfterAction?.();
-    } catch (e) {
-      setExecuteError(
-        e instanceof Error ? e.message : "Failed to execute action",
-      );
-    } finally {
-      setActionLoading(null);
-    }
-  };
-
-  const handleRevoke = async (
-    action: GovernanceAction,
-    confirmationCid: string,
-  ) => {
-    setActionLoading(action.action_hash);
-    setError(null);
-
-    try {
-      const request: CancelConfirmationRequest = {
-        party_id: partyId,
-        confirmation_cid: confirmationCid,
-        governance_type: governanceType,
-      };
-
-      const res = await authenticatedFetch(`${API_BASE}/governance/cancel`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(request),
-      });
-
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.error || "Failed to revoke confirmation");
-      }
-
-      // Refresh data
-      await fetchGovernance();
-      onAfterAction?.();
-    } catch (e) {
-      setError(
-        e instanceof Error ? e.message : "Failed to revoke confirmation",
-      );
-    } finally {
-      setActionLoading(null);
-    }
-  };
-
-  const handleExpire = async (
-    action: GovernanceAction,
-    confirmationCid: string,
-  ) => {
-    if (!rulesContractId) {
-      setError("Please enter the Governance contract ID");
-      return;
-    }
-
-    setActionLoading(action.action_hash);
-    setError(null);
-
-    try {
-      const request: ExpireConfirmationRequest = {
-        party_id: partyId,
-        rules_contract_id: rulesContractId,
-        confirmation_cid: confirmationCid,
-        governance_type: governanceType,
-      };
-
-      const res = await authenticatedFetch(`${API_BASE}/governance/expire`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(request),
-      });
-
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.error || "Failed to expire confirmation");
-      }
-
-      await fetchGovernance();
-      onAfterAction?.();
-    } catch (e) {
-      setError(
-        e instanceof Error ? e.message : "Failed to expire confirmation",
-      );
-    } finally {
-      setActionLoading(null);
-    }
-  };
-
-  // Helper to find the current user's confirmation for an action
-  // confirming_party is the member party ID, not the decentralized party ID
-  // Use member_party_id from response (primary) or prop (fallback)
-  const getUserConfirmation = (action: GovernanceAction) => {
-    const myMemberPartyId = data?.member_party_id || memberPartyId;
-    if (!myMemberPartyId) return undefined;
-    return action.confirmations.find(
-      (c) => c.confirming_party === myMemberPartyId,
-    );
-  };
 
   // Build ActionType from form state
   const buildActionFromForm = (): ActionType | null => {
@@ -907,6 +602,25 @@ export const GovernanceSection = ({
       default:
         return null;
     }
+  };
+
+  // Parse a multi-line "subject,property,value" textarea into a Claim[].
+  // Mirrors the comma-split-with-error-on-bad-line pattern used by
+  // set_provider_app_reward_beneficiaries.
+  const parseClaimsText = (text: string): Claim[] => {
+    const lines = text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+    return lines.map((line, idx) => {
+      const parts = line.split(",").map((s) => s.trim());
+      if (parts.length !== 3 || !parts[0] || !parts[1] || !parts[2]) {
+        throw new Error(
+          `Claim line ${idx + 1}: expected "<subject>,<property>,<value>", got "${line}"`,
+        );
+      }
+      return { subject: parts[0], property: parts[1], value: parts[2] };
+    });
   };
 
   const validateBeneficiaryWeights = (
@@ -1129,6 +843,29 @@ export const GovernanceSection = ({
             description: proposalDescription,
           };
           break;
+        case "offer_free_credential": {
+          const claims = parseClaimsText(proposalCredentialClaimsText);
+          proposal = {
+            type: "offer_free_credential",
+            user_service_cid: proposalUserServiceCid,
+            holder: proposalHolder,
+            id: proposalCredentialId,
+            description: proposalDescription,
+            claims,
+          };
+          break;
+        }
+        case "accept_free_credential":
+          proposal = {
+            type: "accept_free_credential",
+            user_service_cid: proposalUserServiceCid,
+            credential_offer_cid: proposalCredentialOfferCid,
+          };
+          break;
+        case "offer_paid_credential":
+          throw new Error(
+            "Paid credential proposal forms are not implemented yet — use the Free direction or call the API directly.",
+          );
       }
 
       const request: ProposeActionRequest = {
@@ -1155,72 +892,6 @@ export const GovernanceSection = ({
       setError(e instanceof Error ? e.message : "Failed to create proposal");
     } finally {
       setProposalLoading(false);
-    }
-  };
-
-  const handleConfirmDomain = async (domainAction: DomainGovernanceAction) => {
-    if (!rulesContractId) return;
-    setActionLoading(domainAction.proposal_cid);
-    setError(null);
-
-    try {
-      const res = await authenticatedFetch(`${API_BASE}/governance/confirm`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          party_id: partyId,
-          rules_contract_id: rulesContractId,
-          action: { type: "governance_set_threshold", new_threshold: 0 }, // placeholder
-          governance_type: "core_domain",
-          proposal_cid: domainAction.proposal_cid,
-        }),
-      });
-
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.error || "Failed to confirm proposal");
-      }
-
-      await fetchGovernance();
-      onAfterAction?.();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to confirm proposal");
-    } finally {
-      setActionLoading(null);
-    }
-  };
-
-  const handleExecuteDomain = async (domainAction: DomainGovernanceAction) => {
-    if (!rulesContractId) return;
-    setActionLoading(domainAction.proposal_cid);
-    setError(null);
-
-    try {
-      const res = await authenticatedFetch(`${API_BASE}/governance/execute`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          party_id: partyId,
-          rules_contract_id: rulesContractId,
-          action: { type: "governance_set_threshold", new_threshold: 0 }, // placeholder
-          governance_type: "core_domain",
-          proposal_cid: domainAction.proposal_cid,
-          confirmation_cids: domainAction.confirmations.map((c) => c.contract_id),
-          disclosed_contracts: [],
-        }),
-      });
-
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.error || "Failed to execute proposal");
-      }
-
-      await fetchGovernance();
-      onAfterAction?.();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to execute proposal");
-    } finally {
-      setActionLoading(null);
     }
   };
 
@@ -2681,167 +2352,9 @@ export const GovernanceSection = ({
           </Collapse>
         </Box>
 
-        {data && data.actions.length > 0 ? (
-          <Box sx={{ overflowX: "auto", mx: -2 }}>
-            <Table size="small">
-              <TableHead>
-                <TableRow>
-                  <TableCell sx={{ py: 1 }}>Action</TableCell>
-                  <TableCell sx={{ py: 1 }}>Confirmations</TableCell>
-                  <TableCell sx={{ py: 1 }} align="right">
-                    Actions
-                  </TableCell>
-                </TableRow>
-              </TableHead>
-              <TableBody>
-                {data.actions.map((action, idx) => (
-                  <TableRow key={action.action_hash} sx={zebraRow(idx)}>
-                    <TableCell sx={{ py: 1 }}>
-                      <Typography variant="body2" sx={{ fontWeight: 500 }}>
-                        {formatActionType(action.action)}
-                      </Typography>
-                      <Typography
-                        variant="caption"
-                        color="text.secondary"
-                        sx={{ fontFamily: "monospace" }}
-                      >
-                        {action.action_hash}
-                      </Typography>
-                    </TableCell>
-                    <TableCell sx={{ py: 1 }}>
-                      <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: action.confirmations.length > 0 ? 0.5 : 0 }}>
-                        <Chip
-                          label={`${action.confirmation_count} / ${data.threshold}`}
-                          size="small"
-                          color={action.can_execute ? "success" : "default"}
-                        />
-                      </Box>
-                      {action.confirmations.map((conf) => {
-                        const isOwn = conf.confirming_party === (data?.member_party_id || memberPartyId);
-                        return (
-                          <Box
-                            key={conf.contract_id}
-                            sx={{ display: "flex", alignItems: "center", gap: 0.5, mt: 0.5 }}
-                          >
-                            <Typography
-                              variant="caption"
-                              sx={{
-                                fontFamily: "monospace",
-                                color: isOwn ? "primary.main" : "text.secondary",
-                              }}
-                            >
-                              {conf.confirming_party.length > 20
-                                ? `${conf.confirming_party.slice(0, 10)}...${conf.confirming_party.slice(-8)}`
-                                : conf.confirming_party}
-                              {isOwn ? " (you)" : ""}
-                            </Typography>
-                            {!isOwn && ADMIN_ACCESS && rulesContractId && (
-                              <Tooltip title="Expire confirmation">
-                                <span>
-                                  <IconButton
-                                    size="small"
-                                    onClick={() => handleExpire(action, conf.contract_id)}
-                                    disabled={actionLoading === action.action_hash}
-                                    sx={{ p: 0.25 }}
-                                  >
-                                    <TimerOffIcon sx={{ fontSize: 14 }} />
-                                  </IconButton>
-                                </span>
-                              </Tooltip>
-                            )}
-                          </Box>
-                        );
-                      })}
-                    </TableCell>
-                    <TableCell sx={{ py: 1 }} align="right">
-                      <Box
-                        sx={{
-                          display: "flex",
-                          gap: 1,
-                          justifyContent: "flex-end",
-                        }}
-                      >
-                        {getUserConfirmation(action) ? (
-                          <Button
-                            size="small"
-                            variant="outlined"
-                            color="warning"
-                            startIcon={
-                              actionLoading === action.action_hash ? (
-                                <CircularProgress size={16} />
-                              ) : (
-                                <UndoIcon />
-                              )
-                            }
-                            onClick={() => {
-                              const confirmation = getUserConfirmation(action);
-                              if (confirmation) {
-                                handleRevoke(action, confirmation.contract_id);
-                              }
-                            }}
-                            disabled={
-                              !ADMIN_ACCESS ||
-                              actionLoading === action.action_hash
-                            }
-                          >
-                            Revoke
-                          </Button>
-                        ) : (
-                          <Button
-                            size="small"
-                            variant="outlined"
-                            startIcon={
-                              actionLoading === action.action_hash ? (
-                                <CircularProgress size={16} />
-                              ) : (
-                                <CheckCircleIcon />
-                              )
-                            }
-                            onClick={() => handleConfirm(action)}
-                            disabled={
-                              !ADMIN_ACCESS ||
-                              !rulesContractId ||
-                              actionLoading === action.action_hash
-                            }
-                          >
-                            Confirm
-                          </Button>
-                        )}
-                        {action.can_execute && (
-                          <Button
-                            size="small"
-                            variant="contained"
-                            color="success"
-                            startIcon={
-                              actionLoading === action.action_hash ? (
-                                <CircularProgress size={16} color="inherit" />
-                              ) : (
-                                <PlayArrowIcon />
-                              )
-                            }
-                            onClick={() => {
-                              setExecuteError(null);
-                              setExecuteDialogAction(action);
-                            }}
-                            disabled={
-                              !ADMIN_ACCESS ||
-                              !rulesContractId ||
-                              actionLoading === action.action_hash
-                            }
-                          >
-                            Execute
-                          </Button>
-                        )}
-                      </Box>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </Box>
-        ) : (
-          <Typography variant="body2" color="text.secondary" sx={{ pt: 2, pb: 2 }}>
-            No governance actions found for this party.
+        {data && data.actions.length > 0 && (
+          <Typography variant="caption" color="text.secondary" sx={{ display: "block", pt: 1 }}>
+            {data.actions.length} pending action{data.actions.length === 1 ? "" : "s"} — open the Notifications tab to confirm, revoke, or execute.
           </Typography>
         )}
       </Collapse>
@@ -2890,6 +2403,12 @@ export const GovernanceSection = ({
                   <MenuItem value="create_delegated_batched_markers_proxy">Create Delegated Batched Markers Proxy</MenuItem>
                   <MenuItem value="mint">Mint</MenuItem>
                   <MenuItem value="burn">Burn</MenuItem>
+                  <Divider />
+                  <MenuItem value="offer_free_credential">Offer Free Credential</MenuItem>
+                  <MenuItem value="accept_free_credential">Accept Free Credential</MenuItem>
+                  <MenuItem value="offer_paid_credential" disabled>
+                    Offer Paid Credential (form coming soon)
+                  </MenuItem>
                 </Select>
               </FormControl>
 
@@ -3020,89 +2539,53 @@ export const GovernanceSection = ({
                 </>
               )}
 
-              <Button variant="contained" size="small" onClick={handleSubmitProposal} disabled={proposalLoading}>
+              {proposalType === "offer_free_credential" && (
+                <>
+                  <TextField size="small" label="UserService Contract ID" value={proposalUserServiceCid} onChange={(e) => setProposalUserServiceCid(e.target.value)} fullWidth required helperText="Governance party's UserService cid" />
+                  <TextField size="small" label="Holder Party" value={proposalHolder} onChange={(e) => setProposalHolder(e.target.value)} fullWidth required />
+                  <TextField size="small" label="Credential ID" value={proposalCredentialId} onChange={(e) => setProposalCredentialId(e.target.value)} fullWidth required />
+                  <TextField size="small" label="Description" value={proposalDescription} onChange={(e) => setProposalDescription(e.target.value)} fullWidth required />
+                  <TextField
+                    size="small"
+                    label="Claims (one per line: subject,property,value)"
+                    value={proposalCredentialClaimsText}
+                    onChange={(e) => setProposalCredentialClaimsText(e.target.value)}
+                    fullWidth
+                    multiline
+                    minRows={2}
+                    maxRows={6}
+                    helperText='Each line: "<subject>,<property>,<value>"'
+                  />
+                </>
+              )}
+
+              {proposalType === "accept_free_credential" && (
+                <>
+                  <TextField size="small" label="UserService Contract ID" value={proposalUserServiceCid} onChange={(e) => setProposalUserServiceCid(e.target.value)} fullWidth required helperText="Governance party's UserService cid" />
+                  <TextField size="small" label="CredentialOffer Contract ID" value={proposalCredentialOfferCid} onChange={(e) => setProposalCredentialOfferCid(e.target.value)} fullWidth required />
+                </>
+              )}
+
+              {proposalType === "offer_paid_credential" && (
+                <Typography variant="caption" color="text.secondary">
+                  Paid credential proposal form is not implemented yet. Use the Free direction or call <code>POST /governance/propose</code> directly with a <code>type: "offer_paid_credential"</code> payload.
+                </Typography>
+              )}
+
+              <Button variant="contained" size="small" onClick={handleSubmitProposal} disabled={proposalLoading || proposalType === "offer_paid_credential"}>
                 {proposalLoading ? <CircularProgress size={16} /> : "Submit Proposal"}
               </Button>
             </Box>
           </Collapse>
 
-          {(data.domain_actions?.length ?? 0) > 0 ? (
-            <Table size="small">
-              <TableHead>
-                <TableRow>
-                  <TableCell>Proposal</TableCell>
-                  <TableCell>Confirmations</TableCell>
-                  <TableCell align="right">Actions</TableCell>
-                </TableRow>
-              </TableHead>
-              <TableBody>
-                {data.domain_actions!.map((da, idx) => (
-                  <TableRow key={da.proposal_cid} sx={zebraRow(idx)}>
-                    <TableCell>
-                      <Typography variant="body2">{da.action_label}</Typography>
-                      {da.description && (
-                        <Typography variant="caption" color="text.primary" sx={{ display: "block" }}>
-                          {da.description}
-                        </Typography>
-                      )}
-                      <Typography variant="caption" color="text.secondary" sx={{ fontFamily: "monospace" }}>
-                        {da.proposal_cid.slice(0, 16)}...
-                      </Typography>
-                    </TableCell>
-                    <TableCell>
-                      {da.confirmation_count} / {data.threshold}
-                    </TableCell>
-                    <TableCell align="right">
-                      <Box sx={{ display: "flex", gap: 0.5, justifyContent: "flex-end" }}>
-                        {!da.confirmations.some((c) => c.confirming_party === (data.member_party_id || memberPartyId)) && (
-                          <Button
-                            size="small"
-                            variant="outlined"
-                            onClick={() => handleConfirmDomain(da)}
-                            disabled={actionLoading === da.proposal_cid}
-                          >
-                            Confirm
-                          </Button>
-                        )}
-                        {da.can_execute && (
-                          <Button
-                            size="small"
-                            variant="contained"
-                            onClick={() => handleExecuteDomain(da)}
-                            disabled={actionLoading === da.proposal_cid}
-                          >
-                            Execute
-                          </Button>
-                        )}
-                      </Box>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          ) : (
-            !showProposalForm && (
-              <Typography variant="body2" color="text.secondary" sx={{ px: 2, pb: 2 }}>
-                No domain proposals pending.
-              </Typography>
-            )
+          {(data.domain_actions?.length ?? 0) > 0 && !showProposalForm && (
+            <Typography variant="caption" color="text.secondary" sx={{ display: "block", px: 2, pb: 2 }}>
+              {data.domain_actions!.length} pending proposal{data.domain_actions!.length === 1 ? "" : "s"} — open the Notifications tab to confirm, revoke, or execute.
+            </Typography>
           )}
         </Box>
       )}
 
-      <ExecuteDialog
-        open={executeDialogAction !== null}
-        onClose={() => setExecuteDialogAction(null)}
-        onExecute={(disclosedContracts) => {
-          if (executeDialogAction) {
-            handleExecute(executeDialogAction, disclosedContracts);
-          }
-        }}
-        action={executeDialogAction}
-        loading={actionLoading === executeDialogAction?.action_hash}
-        error={executeError}
-        blobMap={contractBlobMap}
-      />
     </Box>
   );
 };

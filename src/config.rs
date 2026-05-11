@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    consts::{DARS_DIR, DATA_DIR, DB_FILENAME, NOISE_KEY_FILENAME, WORKFLOW_DATA_DIR},
+    consts::{DARS_DIR, DATA_DIR, DB_FILENAME, NOISE_KEY_FILENAME},
     participant_id::CantonId,
 };
 
@@ -74,6 +74,7 @@ pub struct KeycloakConfig {
 pub struct PackageConfig {
     pub governance_core: Option<String>,
     pub governance_token_custody: Option<String>,
+    pub governance_utility_credential: Option<String>,
     pub governance_utility_onboarding: Option<String>,
     pub utility_credential: Option<String>,
     pub utility_registry: Option<String>,
@@ -263,6 +264,7 @@ pub fn default_package_config() -> PackageConfig {
     PackageConfig {
         governance_core: Some("#governance-core-v0-rc4".to_string()),
         governance_token_custody: Some("#governance-token-custody-v0-rc4".to_string()),
+        governance_utility_credential: Some("#governance-utility-credential-v0-rc4".to_string()),
         governance_utility_onboarding: Some("#governance-utility-onboarding-v0-rc4".to_string()),
         utility_credential: Some("#utility-credential-app-v0".to_string()),
         utility_registry: Some("#utility-registry-app-v0".to_string()),
@@ -332,11 +334,6 @@ impl NodeConfig {
     /// Get the path to the noise key file
     pub fn key_file_path(&self) -> PathBuf {
         self.data_dir().join(NOISE_KEY_FILENAME)
-    }
-
-    /// Get the workflow data directory
-    pub fn workflow_data_dir(&self) -> PathBuf {
-        self.data_dir().join(WORKFLOW_DATA_DIR)
     }
 
     /// Get the dars directory
@@ -425,6 +422,10 @@ mod tests {
         assert_eq!(
             packages.governance_token_custody.as_deref(),
             Some("#governance-token-custody-v0-rc4"),
+        );
+        assert_eq!(
+            packages.governance_utility_credential.as_deref(),
+            Some("#governance-utility-credential-v0-rc4"),
         );
         assert_eq!(
             packages.governance_utility_onboarding.as_deref(),
