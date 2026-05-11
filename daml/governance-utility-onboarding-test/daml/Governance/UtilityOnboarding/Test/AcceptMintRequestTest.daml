@@ -1,0 +1,140 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+module Governance.UtilityOnboarding.Test.AcceptMintRequestTest where
+
+import DA.TextMap qualified as TextMap
+import DA.Time (addRelTime, hours)
+import Daml.Script
+
+import Splice.Api.Token.HoldingV1 (InstrumentId(..))
+import Splice.Api.Token.MetadataV1
+  (AnyValue(..), ChoiceContext(..), ExtraArgs(..), Metadata(..))
+
+import Utility.Registry.App.V0.Model.Mint (Mint(..), MintRequest)
+import Utility.Registry.App.V0.Service.AllocationFactory
+  (AllocationFactory_RequestMint(..))
+import Utility.Registry.Holding.V0.Holding (Holding)
+import Utility.Registry.V0.Holding.TokenApiUtils
+  (instrumentConfigurationContextKey, issuerCredentialsContextKey)
+
+import Governance.Action (GovernableAction)
+import Governance.Rules
+
+import Governance.TokenIssuance.AcceptMintRequest
+import Governance.UtilityOnboarding.TestUtils
+
+import TestHarness
+
+data Fixture = Fixture
+  with
+    parties : OnboardingTestParties
+    rulesCid : ContractId GovernanceRules
+    artifacts : SetupArtifacts
+    mintRequestCid : ContractId MintRequest
+    requestedAmount : Decimal
+    requestedHolder : Party
+  deriving (Eq, Show)
+
+mkInstrumentId : OnboardingTestParties -> InstrumentId
+mkInstrumentId parties = InstrumentId with
+  admin = parties.governanceParty
+  id = "TEST-TOKEN"
+
+-- | Drive a holder-initiated mint request through the registry factory.
+-- The MintRequest is the prerequisite that the AcceptMintRequest action
+-- under test consumes.
+seedMintRequest
+  : OnboardingTestParties -> SetupArtifacts -> Party -> Decimal
+  -> Script (ContractId MintRequest)
+seedMintRequest parties artifacts holder amount = do
+  now <- getTime
+  let context = ChoiceContext with
+        values = TextMap.fromList
+          [ (instrumentConfigurationContextKey,
+             AV_ContractId $ coerceContractId artifacts.instrumentConfigurationCid)
+          , (issuerCredentialsContextKey, AV_List [])
+          ]
+  result <- submit (actAs holder <> readAs parties.governanceParty) $
+    exerciseCmd artifacts.allocationFactoryCid AllocationFactory_RequestMint with
+      expectedAdmin = parties.governanceParty
+      mint = Mint with
+        instrumentId = mkInstrumentId parties
+        amount
+        holder
+        reference = "Holder-initiated mint"
+        requestedAt = now
+        executeBefore = now `addRelTime` hours 24
+        meta = Metadata with values = TextMap.empty
+      extraArgs = ExtraArgs with
+        context
+        meta = Metadata with values = TextMap.empty
+  pure result.mintRequestCid
+
+given_mint_request_exists : Script Fixture
+given_mint_request_exists = do
+  parties <- allocateOnboardingTestParties
+  rulesCid <- createTestGovernance parties
+  artifacts <- setupUtilityForTest parties rulesCid
+  let requestedHolder = parties.outsider
+      requestedAmount = 150.0
+  mintRequestCid <- seedMintRequest parties artifacts requestedHolder requestedAmount
+  pure Fixture with ..
+
+-- * Happy path: propose-confirm-execute mints a Holding for the requester.
+
+when_accept_mint_request_executed : Fixture -> Script ()
+when_accept_mint_request_executed f = do
+  proposalCid <- submit f.parties.member1 $ createCmd AcceptMintRequest with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+    mintRequestCid = f.mintRequestCid
+    instrumentConfigurationCid = f.artifacts.instrumentConfigurationCid
+    description = "Accept holder-initiated mint"
+    extraArgsMeta = Metadata with values = TextMap.empty
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  _ <- confirmAndExecute f.parties f.rulesCid proposalInterfaceCid
+    [f.parties.member1, f.parties.member2] f.parties.member1
+  pure ()
+
+then_holding_minted_for_requester : Fixture -> () -> Script Failures
+then_holding_minted_for_requester f _ = do
+  holdings <- query @Holding f.requestedHolder
+  case holdings of
+    [(_, holding)] -> pure $
+      shouldBe "holding.owner" f.requestedHolder holding.owner <>
+      shouldBe "holding.amount" f.requestedAmount holding.amount <>
+      shouldBe "holding.registrar" f.parties.governanceParty holding.registrar
+    _ -> pure $ shouldBe "Holding count" 1 (length holdings)
+
+test_when_accept_mint_request_then_holding_minted = script do
+  run Test with
+    given = given_mint_request_exists
+    when = when_accept_mint_request_executed
+    then_ = then_holding_minted_for_requester
+
+-- * Non-member confirm is rejected (mirrors AcceptFreeCredentialTest).
+
+when_outsider_confirms_accept_mint : Fixture -> Script ()
+when_outsider_confirms_accept_mint f = do
+  proposalCid <- submit f.parties.member1 $ createCmd AcceptMintRequest with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+    mintRequestCid = f.mintRequestCid
+    instrumentConfigurationCid = f.artifacts.instrumentConfigurationCid
+    description = "Accept holder-initiated mint"
+    extraArgsMeta = Metadata with values = TextMap.empty
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  submitMustFail (memberContext f.parties.outsider f.parties.governanceParty) $
+    exerciseCmd f.rulesCid GovernanceRules_ConfirmAction with
+      confirmer = f.parties.outsider
+      actionProposalCid = proposalInterfaceCid
+
+then_nothing_mint : Fixture -> () -> Script Failures
+then_nothing_mint _ _ = pure []
+
+test_when_outsider_confirms_accept_mint_then_rejected = script do
+  run Test with
+    given = given_mint_request_exists
+    when = when_outsider_confirms_accept_mint
+    then_ = then_nothing_mint
