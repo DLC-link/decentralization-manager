@@ -37,10 +37,18 @@ runs:
         # protobuf-compiler only Recommends it, so under --no-install-recommends
         # we have to pull it in explicitly or canton-proto-rs's build.rs fails
         # with "google/protobuf/descriptor.proto: File not found".
+        # Node is installed by actions/setup-node below, not via apt — Bookworm's
+        # apt nodejs is 18.x, but Vite 8 / ESLint 10 / @vitejs/plugin-react 6
+        # require Node 20.19+.
         ${{ steps.env.outputs.sudo }} apt-get install -y --no-install-recommends \
           pkg-config libssl-dev protobuf-compiler libprotobuf-dev \
-          git openssh-client nodejs npm curl ca-certificates \
+          git openssh-client ca-certificates cmake \
           ${{ inputs.extra-packages }}
+
+    - name: Setup Node
+      uses: actions/setup-node@v5
+      with:
+        node-version: '22'
 
     - name: Setup SSH
       shell: bash
@@ -59,7 +67,7 @@ runs:
     # actions would race on save and the manual key would lose to
     # rust-cache's smarter trimming.
     - name: Cache npm
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: frontend/node_modules
         key: npm-${{ hashFiles('frontend/package-lock.json') }}
