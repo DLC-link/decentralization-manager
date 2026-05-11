@@ -2705,8 +2705,8 @@ export const GovernanceSection = ({
                   <MenuItem value="create_delegated_batched_markers_proxy">Create Delegated Batched Markers Proxy</MenuItem>
                   */}
                   <ListSubheader sx={{ fontStyle: "italic", lineHeight: 1.5, pl: 4 }}>Actions</ListSubheader>
-                  <MenuItem value="mint">Mint</MenuItem>
-                  <MenuItem value="burn">Burn</MenuItem>
+                  <MenuItem value="mint">Offer Mint</MenuItem>
+                  <MenuItem value="burn">Offer Burn</MenuItem>
                   <MenuItem value="accept_mint_request">Accept Mint Request</MenuItem>
                   <MenuItem value="accept_burn_request">Accept Burn Request</MenuItem>
                   <Divider />
