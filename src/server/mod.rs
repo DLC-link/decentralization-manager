@@ -7,6 +7,8 @@ mod middleware;
 mod queries;
 mod types;
 
+pub mod peer_status;
+
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
