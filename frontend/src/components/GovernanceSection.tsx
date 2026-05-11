@@ -2458,8 +2458,14 @@ export const GovernanceSection = ({
                   <ListSubheader sx={{ fontStyle: "italic", lineHeight: 1.5, pl: 4 }}>Settings / Configuration</ListSubheader>
                   <MenuItem value="set_provider_app_reward_beneficiaries">Set Provider App Reward Beneficiaries</MenuItem>
                   <MenuItem value="set_enable_result_contracts">Set Enable Result Contracts</MenuItem>
+                  {/*
+                  Hidden per Notion "Clean up Utility Plugin" task — keep the
+                  ProposalType variants + form fields + submit handlers wired
+                  so existing API consumers still work; just not surfaced in
+                  the dropdown for now.
                   <MenuItem value="provision_provider_service">Provision Provider Service</MenuItem>
                   <MenuItem value="create_delegated_batched_markers_proxy">Create Delegated Batched Markers Proxy</MenuItem>
+                  */}
                   <ListSubheader sx={{ fontStyle: "italic", lineHeight: 1.5, pl: 4 }}>Actions</ListSubheader>
                   <MenuItem value="mint">Mint</MenuItem>
                   <MenuItem value="burn">Burn</MenuItem>
