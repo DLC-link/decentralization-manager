@@ -38,7 +38,7 @@ use crate::{
             GovernanceResponse, GovernanceStateResponse, GovernanceType, InstrumentsResponse,
             KnownMember, KnownMembersResponse, MessageResponse, NetworkInfo, OperatorInfo,
             ProposeActionRequest, ProviderServicesResponse, RegistrarServicesResponse,
-            UserServicesResponse, VaultsResponse,
+            TransferPreapprovalsResponse, UserServicesResponse, VaultsResponse,
         },
     },
     utils,
@@ -405,6 +405,103 @@ pub async fn get_registrar_services_handler(
             })
         }
     }
+}
+
+/// Count active `TransferPreapproval` contracts visible to this party, split
+/// between Canton Coin (Splice.Wallet) and utility-token (Utility.Registry)
+/// variants. Used by the proposal forms to warn that re-issuing a CC / Token
+/// preapproval would be a no-op when one already exists.
+#[utoipa::path(
+    tag = "Services",
+    params(GovernanceQuery),
+    responses(
+        (status = 200, description = "Preapproval counts", body = TransferPreapprovalsResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+#[get("/transfer-preapprovals")]
+pub async fn get_transfer_preapprovals_handler(
+    data: web::Data<AppState>,
+    query: web::Query<GovernanceQuery>,
+) -> impl Responder {
+    let party_id = &query.party_id;
+    let token = get_party_token(&data, party_id).await;
+    let test_mode = data.test_mode;
+
+    // Canton Coin: the actual `TransferPreapproval` template lives in
+    // `Splice.AmuletRules` (signatories: receiver, provider, dso — gov party
+    // sees it as receiver). The intermediate `TransferPreapprovalProposal`
+    // (in `Splice.Wallet.TransferPreapproval`) is what the gov flow creates
+    // right after execution and sits there until the DSO accepts it; we
+    // count both so the warning fires regardless of which stage you're in.
+    let cc_preapproval = QueryContractParams {
+        package_id: "#splice-amulet".to_string(),
+        module_name: "Splice.AmuletRules".to_string(),
+        entity_name: "TransferPreapproval".to_string(),
+        use_interface_filter: false,
+    };
+    let cc_proposal = QueryContractParams {
+        package_id: "#splice-amulet".to_string(),
+        module_name: "Splice.Wallet.TransferPreapproval".to_string(),
+        entity_name: "TransferPreapprovalProposal".to_string(),
+        use_interface_filter: false,
+    };
+    let token_params = QueryContractParams {
+        package_id: "#utility-registry-app-v0".to_string(),
+        module_name: "Utility.Registry.App.V0.Model.TransferPreapproval".to_string(),
+        entity_name: "TransferPreapproval".to_string(),
+        use_interface_filter: false,
+    };
+
+    async fn count(
+        config: &crate::config::NodeConfig,
+        party: &CantonId,
+        token: Option<String>,
+        test_mode: bool,
+        params: &QueryContractParams,
+        label: &str,
+    ) -> usize {
+        match query_contracts_by_template(config, party, token, test_mode, params).await {
+            Ok(c) => c.len(),
+            Err(e) => {
+                tracing::warn!("Failed to query {label}: {e}");
+                0
+            }
+        }
+    }
+
+    let cc_accepted = count(
+        &data.config,
+        party_id,
+        token.clone(),
+        test_mode,
+        &cc_preapproval,
+        "CC TransferPreapproval",
+    )
+    .await;
+    let cc_pending = count(
+        &data.config,
+        party_id,
+        token.clone(),
+        test_mode,
+        &cc_proposal,
+        "CC TransferPreapprovalProposal",
+    )
+    .await;
+    let token_count = count(
+        &data.config,
+        party_id,
+        token,
+        test_mode,
+        &token_params,
+        "utility TransferPreapproval",
+    )
+    .await;
+
+    HttpResponse::Ok().json(TransferPreapprovalsResponse {
+        cc: cc_accepted + cc_pending,
+        token: token_count,
+    })
 }
 
 /// Get InstrumentConfiguration contracts for a party. Each one represents a

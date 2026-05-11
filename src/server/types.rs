@@ -1310,6 +1310,18 @@ pub struct OperatorInfo {
     pub party_id: CantonId,
 }
 
+/// Count of active `TransferPreapproval` contracts a governance party already
+/// has, split by direction. The UI uses this to warn the user that re-issuing
+/// a `SetupCcPreapproval` / `SetupTokenPreapproval` proposal is pointless
+/// (the on-chain choice would fail when executed).
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct TransferPreapprovalsResponse {
+    /// `Splice.Wallet.TransferPreapproval:TransferPreapproval` — Canton Coin
+    pub cc: usize,
+    /// `Utility.Registry.App.V0.Model.TransferPreapproval:TransferPreapproval`
+    pub token: usize,
+}
+
 /// Response for the generic contract query endpoint
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct ContractQueryResponse {

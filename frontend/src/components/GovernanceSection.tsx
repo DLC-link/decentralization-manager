@@ -67,6 +67,7 @@ import type {
   InstrumentAllowance,
   InstrumentInfo,
   InstrumentsResponse,
+  TransferPreapprovalsResponse,
 } from "../types";
 
 type ActionTypeKey = ActionType["type"];
@@ -264,6 +265,13 @@ export const GovernanceSection = ({
   // dropdown without the frontend having to decode contract blobs.
   const [availableInstruments, setAvailableInstruments] = useState<InstrumentInfo[]>([]);
   const [instrumentsLoading, setInstrumentsLoading] = useState(false);
+  // Counts of active TransferPreapproval contracts the gov party already has
+  // (CC + Token). Used to warn before issuing a Setup*Preapproval proposal
+  // that would be a no-op when executed.
+  const [preapprovalCounts, setPreapprovalCounts] = useState<TransferPreapprovalsResponse>({
+    cc: 0,
+    token: 0,
+  });
   const [servicesLoading, setServicesLoading] = useState(false);
 
   // Contracts fetched by template (with blobs)
@@ -406,10 +414,13 @@ export const GovernanceSection = ({
   // Also fetch services when a proposal type that creates a service-request is
   // selected — used to detect when the corresponding service already exists,
   // so the form can warn that the proposal would be a no-op.
+  // SetupUtility additionally needs the ProviderService list to populate its
+  // dropdown of available services to wire the utility setup against.
   useEffect(() => {
     if (
       proposalType === "create_user_service_request" ||
-      proposalType === "create_provider_service_request"
+      proposalType === "create_provider_service_request" ||
+      proposalType === "setup_utility"
     ) {
       fetchServices();
     }
@@ -582,6 +593,39 @@ export const GovernanceSection = ({
       fetchNetworkInfo();
     }
   }, [selectedActionType, fetchDeployContracts, fetchBurnMintFactory, fetchNetworkInfo]);
+
+  // Setup CC Preapproval needs the DSO party id from the network-info
+  // endpoint to prefill `expected_dso`. Mirror the action-form trigger above
+  // for the proposal form.
+  useEffect(() => {
+    if (proposalType === "setup_cc_preapproval" && !dsoPartyId) {
+      fetchNetworkInfo();
+    }
+  }, [proposalType, dsoPartyId, fetchNetworkInfo]);
+
+  // Setup*Preapproval forms warn when one already exists — fetch the counts
+  // (cheap, two ACS template-filter queries).
+  const fetchPreapprovalCounts = useCallback(async () => {
+    try {
+      const res = await authenticatedFetch(
+        `${API_BASE}/transfer-preapprovals?party_id=${encodeURIComponent(partyId)}`,
+      );
+      if (res.ok) {
+        setPreapprovalCounts(await res.json());
+      }
+    } catch (e) {
+      console.error("Failed to fetch transfer preapproval counts:", e);
+    }
+  }, [partyId]);
+
+  useEffect(() => {
+    if (
+      proposalType === "setup_cc_preapproval" ||
+      proposalType === "setup_token_preapproval"
+    ) {
+      fetchPreapprovalCounts();
+    }
+  }, [proposalType, fetchPreapprovalCounts]);
 
 
   // Build ActionType from form state
@@ -2650,6 +2694,12 @@ export const GovernanceSection = ({
 
               {proposalType === "setup_cc_preapproval" && (
                 <>
+                  {preapprovalCounts.cc > 0 && (
+                    <Alert severity="warning">
+                      This party already has a Canton Coin TransferPreapproval;
+                      issuing another would create a duplicate and burn fees again.
+                    </Alert>
+                  )}
                   <TextField size="small" label="Provider Party" value={proposalProvider} onChange={(e) => setProposalProvider(e.target.value)} fullWidth required />
                   <TextField size="small" label="Expected DSO Party" value={proposalExpectedDso} onChange={(e) => setProposalExpectedDso(e.target.value)} fullWidth required />
                 </>
@@ -2657,6 +2707,13 @@ export const GovernanceSection = ({
 
               {proposalType === "setup_token_preapproval" && (
                 <>
+                  {preapprovalCounts.token > 0 && (
+                    <Alert severity="warning">
+                      This party already has {preapprovalCounts.token} token
+                      TransferPreapproval{preapprovalCounts.token === 1 ? "" : "s"};
+                      issuing another for the same instrument would likely be redundant.
+                    </Alert>
+                  )}
                   <TextField size="small" label="Operator Party" value={proposalOperator} onChange={(e) => setProposalOperator(e.target.value)} fullWidth required />
                   <TextField size="small" label="Instrument Admin" value={proposalInstrumentAdmin} onChange={(e) => setProposalInstrumentAdmin(e.target.value)} fullWidth required />
                   <Typography variant="caption" display="block" color="text.secondary">
@@ -2730,7 +2787,29 @@ export const GovernanceSection = ({
 
               {proposalType === "setup_utility" && (
                 <>
-                  <TextField size="small" label="ProviderService Contract ID" value={proposalProviderServiceCid} onChange={(e) => setProposalProviderServiceCid(e.target.value)} fullWidth required />
+                  <FormControl size="small" fullWidth required>
+                    <InputLabel>ProviderService</InputLabel>
+                    <Select
+                      label="ProviderService"
+                      value={proposalProviderServiceCid}
+                      onChange={(e) => setProposalProviderServiceCid(e.target.value)}
+                      MenuProps={{ disableScrollLock: true }}
+                    >
+                      {servicesLoading ? (
+                        <MenuItem disabled>Loading services…</MenuItem>
+                      ) : providerServices.length > 0 ? (
+                        providerServices.map((svc) => (
+                          <MenuItem key={svc.contract_id} value={svc.contract_id}>
+                            {svc.contract_id}
+                          </MenuItem>
+                        ))
+                      ) : (
+                        <MenuItem disabled>
+                          No ProviderService found — run "Create Provider Service Request" first
+                        </MenuItem>
+                      )}
+                    </Select>
+                  </FormControl>
                   <TextField size="small" label="Operator Party" value={proposalOperator} onChange={(e) => setProposalOperator(e.target.value)} fullWidth required />
                   <TextField size="small" label="Instrument ID" value={proposalInstrumentIdText} onChange={(e) => setProposalInstrumentIdText(e.target.value)} fullWidth required />
                   <FormControlLabel

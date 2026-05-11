@@ -750,6 +750,13 @@ export interface InstrumentsResponse {
   instruments: InstrumentInfo[];
 }
 
+/** Count of active TransferPreapproval contracts the gov party already has,
+ *  split by direction (CC = Canton Coin via Splice; token = via Utility). */
+export interface TransferPreapprovalsResponse {
+  cc: number;
+  token: number;
+}
+
 export type Network = "devnet" | "testnet" | "mainnet";
 
 // Governance audit trail types
