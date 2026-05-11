@@ -712,27 +712,34 @@ pub async fn get_governance_confirmations(
         })
         .collect();
 
-    // Build domain actions from domain confirmations, dropping any whose
-    // proposal isn't in the active set on this participant (see comment on
-    // `proposal_descriptions` above).
+    // Build domain actions from domain confirmations. Confirmations whose
+    // proposal isn't in this participant's active set are marked `orphaned`
+    // (rather than dropped) so the UI can offer a dismiss-only card — the
+    // underlying Confirmation contracts are still on-ledger and need to be
+    // expired explicitly to clear them.
     let domain_actions: Vec<DomainGovernanceAction> = domain_confirmations
         .into_iter()
-        .filter_map(|(proposal_cid, (action_label, confirmations))| {
-            let description = proposal_descriptions.remove(&proposal_cid)?;
+        .map(|(proposal_cid, (action_label, confirmations))| {
+            let (description, orphaned) = match proposal_descriptions.remove(&proposal_cid) {
+                Some(d) => (d, false),
+                None => (None, true),
+            };
             let mut seen_parties = std::collections::HashSet::new();
             let unique_confirmations: Vec<GovernanceConfirmation> = confirmations
                 .into_iter()
                 .filter(|c| seen_parties.insert(c.confirming_party.clone()))
                 .collect();
             let confirmation_count = unique_confirmations.len();
-            Some(DomainGovernanceAction {
+            DomainGovernanceAction {
                 proposal_cid,
                 action_label,
                 description,
                 confirmations: unique_confirmations,
                 confirmation_count,
-                can_execute: confirmation_count >= threshold,
-            })
+                // Orphans can't be executed regardless of threshold.
+                can_execute: !orphaned && confirmation_count >= threshold,
+                orphaned,
+            }
         })
         .collect();
 

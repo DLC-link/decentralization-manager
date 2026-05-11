@@ -1080,6 +1080,15 @@ pub struct DomainGovernanceAction {
     pub confirmation_count: usize,
     /// Whether threshold is met for execution
     pub can_execute: bool,
+    /// `true` when the underlying proposal contract was not found in this
+    /// participant's ACS at query time. Confirmations referencing an archived
+    /// proposal can't be confirmed/executed (the proposal cid is gone), but
+    /// the Confirmation contracts themselves are still active and need to be
+    /// expired explicitly to clear them off the ledger. The UI uses this
+    /// flag to render a dismiss-only card instead of the normal Confirm /
+    /// Execute affordances.
+    #[serde(default)]
+    pub orphaned: bool,
 }
 
 /// Request to submit a confirmation for an action with structured type

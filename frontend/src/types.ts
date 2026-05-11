@@ -348,6 +348,10 @@ export interface DomainGovernanceAction {
   confirmations: GovernanceConfirmation[];
   confirmation_count: number;
   can_execute: boolean;
+  /** Underlying proposal contract is no longer in this participant's ACS;
+   *  Confirmation contracts can only be expired (dismissed), not confirmed
+   *  or executed. */
+  orphaned?: boolean;
 }
 
 export interface GovernanceResponse {
