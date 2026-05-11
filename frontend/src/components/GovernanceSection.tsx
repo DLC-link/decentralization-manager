@@ -2451,16 +2451,20 @@ export const GovernanceSection = ({
                   <MenuItem value="accept_transfer">Accept Transfer</MenuItem>
                   <Divider />
                   <ListSubheader sx={{ color: "primary.main", fontWeight: 600 }}>Utility Onboarding</ListSubheader>
-                  <MenuItem value="provision_provider_service">Provision Provider Service</MenuItem>
-                  <MenuItem value="setup_utility">Setup Utility</MenuItem>
-                  <MenuItem value="create_provider_service_request">Create Provider Service Request</MenuItem>
-                  <MenuItem value="create_user_service_request">Create User Service Request</MenuItem>
+                  <ListSubheader sx={{ fontStyle: "italic", lineHeight: 1.5, pl: 4 }}>Onboarding (in order)</ListSubheader>
+                  <MenuItem value="create_user_service_request">1. Create User Service Request</MenuItem>
+                  <MenuItem value="create_provider_service_request">2. Create Provider Service Request</MenuItem>
+                  <MenuItem value="setup_utility">3. Setup Utility</MenuItem>
+                  <ListSubheader sx={{ fontStyle: "italic", lineHeight: 1.5, pl: 4 }}>Settings / Configuration</ListSubheader>
                   <MenuItem value="set_provider_app_reward_beneficiaries">Set Provider App Reward Beneficiaries</MenuItem>
                   <MenuItem value="set_enable_result_contracts">Set Enable Result Contracts</MenuItem>
+                  <MenuItem value="provision_provider_service">Provision Provider Service</MenuItem>
                   <MenuItem value="create_delegated_batched_markers_proxy">Create Delegated Batched Markers Proxy</MenuItem>
+                  <ListSubheader sx={{ fontStyle: "italic", lineHeight: 1.5, pl: 4 }}>Actions</ListSubheader>
                   <MenuItem value="mint">Mint</MenuItem>
                   <MenuItem value="burn">Burn</MenuItem>
                   <Divider />
+                  <ListSubheader sx={{ color: "primary.main", fontWeight: 600 }}>Utility Credential</ListSubheader>
                   <MenuItem value="offer_free_credential">Offer Free Credential</MenuItem>
                   <MenuItem value="accept_free_credential">Accept Free Credential</MenuItem>
                   <MenuItem value="offer_paid_credential" disabled>
