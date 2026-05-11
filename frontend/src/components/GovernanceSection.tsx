@@ -172,6 +172,9 @@ export const GovernanceSection = ({
   const [proposalCredentialId, setProposalCredentialId] = useState("");
   const [proposalCredentialClaimsText, setProposalCredentialClaimsText] = useState("");
   const [proposalCredentialOfferCid, setProposalCredentialOfferCid] = useState("");
+  // Accept holder-initiated mint/burn request state
+  const [proposalMintRequestCid, setProposalMintRequestCid] = useState("");
+  const [proposalBurnRequestCid, setProposalBurnRequestCid] = useState("");
   const [proposalLoading, setProposalLoading] = useState(false);
   const [rulesContractId, setRulesContractId] = useState(
     initialRulesContractId || "",
@@ -1077,6 +1080,22 @@ export const GovernanceSection = ({
             instrument_configuration_cid: proposalInstrumentConfigurationCid,
             holder: proposalHolder,
             amount: proposalAmount,
+            description: proposalDescription,
+          };
+          break;
+        case "accept_mint_request":
+          proposal = {
+            type: "accept_mint_request",
+            mint_request_cid: proposalMintRequestCid,
+            instrument_configuration_cid: proposalInstrumentConfigurationCid,
+            description: proposalDescription,
+          };
+          break;
+        case "accept_burn_request":
+          proposal = {
+            type: "accept_burn_request",
+            burn_request_cid: proposalBurnRequestCid,
+            instrument_configuration_cid: proposalInstrumentConfigurationCid,
             description: proposalDescription,
           };
           break;
@@ -2676,6 +2695,8 @@ export const GovernanceSection = ({
                   <ListSubheader sx={{ fontStyle: "italic", lineHeight: 1.5, pl: 4 }}>Actions</ListSubheader>
                   <MenuItem value="mint">Mint</MenuItem>
                   <MenuItem value="burn">Burn</MenuItem>
+                  <MenuItem value="accept_mint_request">Accept Mint Request</MenuItem>
+                  <MenuItem value="accept_burn_request">Accept Burn Request</MenuItem>
                   <Divider />
                   <ListSubheader sx={{ color: "primary.main", fontWeight: 600 }}>Utility Credential</ListSubheader>
                   <MenuItem value="offer_free_credential">Offer Free Credential</MenuItem>
@@ -2998,6 +3019,22 @@ export const GovernanceSection = ({
                   </FormControl>
                   <TextField size="small" label={proposalType === "mint" ? "Recipient Party" : "Holder Party"} value={proposalType === "mint" ? proposalRecipient : proposalHolder} onChange={(e) => proposalType === "mint" ? setProposalRecipient(e.target.value) : setProposalHolder(e.target.value)} fullWidth required />
                   <TextField size="small" label="Amount" value={proposalAmount} onChange={(e) => setProposalAmount(e.target.value)} fullWidth required />
+                  <TextField size="small" label="Description" value={proposalDescription} onChange={(e) => setProposalDescription(e.target.value)} fullWidth required />
+                </>
+              )}
+
+              {(proposalType === "accept_mint_request" || proposalType === "accept_burn_request") && (
+                <>
+                  <TextField
+                    size="small"
+                    label={proposalType === "accept_mint_request" ? "MintRequest Contract ID" : "BurnRequest Contract ID"}
+                    value={proposalType === "accept_mint_request" ? proposalMintRequestCid : proposalBurnRequestCid}
+                    onChange={(e) => proposalType === "accept_mint_request" ? setProposalMintRequestCid(e.target.value) : setProposalBurnRequestCid(e.target.value)}
+                    fullWidth
+                    required
+                    helperText="Cid of the holder-initiated request to accept"
+                  />
+                  <TextField size="small" label="InstrumentConfiguration Contract ID" value={proposalInstrumentConfigurationCid} onChange={(e) => setProposalInstrumentConfigurationCid(e.target.value)} fullWidth required />
                   <TextField size="small" label="Description" value={proposalDescription} onChange={(e) => setProposalDescription(e.target.value)} fullWidth required />
                 </>
               )}

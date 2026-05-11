@@ -1054,6 +1054,22 @@ pub enum ProposalType {
         amount: DamlDecimal,
         description: String,
     },
+    /// Accept a holder-initiated `MintRequest` via `MintRequest_Accept`. The
+    /// `MintRequest` must already exist on-ledger (typically created by the
+    /// holder by exercising `AllocationFactory_RequestMint`).
+    AcceptMintRequest {
+        mint_request_cid: String,
+        instrument_configuration_cid: String,
+        description: String,
+    },
+    /// Accept a holder-initiated `BurnRequest` via `BurnRequest_Accept`. The
+    /// `BurnRequest` must already exist on-ledger (typically created by the
+    /// holder by exercising `AllocationFactory_RequestBurn`).
+    AcceptBurnRequest {
+        burn_request_cid: String,
+        instrument_configuration_cid: String,
+        description: String,
+    },
 }
 
 /// Request to propose a governance domain action (creates proposal contract)
