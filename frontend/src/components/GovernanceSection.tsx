@@ -142,6 +142,11 @@ export const GovernanceSection = ({
   const [proposalAllocationFactoryCid, setProposalAllocationFactoryCid] = useState("");
   const [proposalRecipient, setProposalRecipient] = useState("");
   const [proposalHolder, setProposalHolder] = useState("");
+  // Credential proposal state (offer_free / accept_free)
+  const [proposalUserServiceCid, setProposalUserServiceCid] = useState("");
+  const [proposalCredentialId, setProposalCredentialId] = useState("");
+  const [proposalCredentialClaimsText, setProposalCredentialClaimsText] = useState("");
+  const [proposalCredentialOfferCid, setProposalCredentialOfferCid] = useState("");
   const [proposalLoading, setProposalLoading] = useState(false);
   const [rulesContractId, setRulesContractId] = useState(
     initialRulesContractId || "",
@@ -599,6 +604,25 @@ export const GovernanceSection = ({
     }
   };
 
+  // Parse a multi-line "subject,property,value" textarea into a Claim[].
+  // Mirrors the comma-split-with-error-on-bad-line pattern used by
+  // set_provider_app_reward_beneficiaries.
+  const parseClaimsText = (text: string): Claim[] => {
+    const lines = text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+    return lines.map((line, idx) => {
+      const parts = line.split(",").map((s) => s.trim());
+      if (parts.length !== 3 || !parts[0] || !parts[1] || !parts[2]) {
+        throw new Error(
+          `Claim line ${idx + 1}: expected "<subject>,<property>,<value>", got "${line}"`,
+        );
+      }
+      return { subject: parts[0], property: parts[1], value: parts[2] };
+    });
+  };
+
   const validateBeneficiaryWeights = (
     beneficiaries: AppRewardBeneficiary[],
   ): string | null => {
@@ -819,6 +843,29 @@ export const GovernanceSection = ({
             description: proposalDescription,
           };
           break;
+        case "offer_free_credential": {
+          const claims = parseClaimsText(proposalCredentialClaimsText);
+          proposal = {
+            type: "offer_free_credential",
+            user_service_cid: proposalUserServiceCid,
+            holder: proposalHolder,
+            id: proposalCredentialId,
+            description: proposalDescription,
+            claims,
+          };
+          break;
+        }
+        case "accept_free_credential":
+          proposal = {
+            type: "accept_free_credential",
+            user_service_cid: proposalUserServiceCid,
+            credential_offer_cid: proposalCredentialOfferCid,
+          };
+          break;
+        case "offer_paid_credential":
+          throw new Error(
+            "Paid credential proposal forms are not implemented yet — use the Free direction or call the API directly.",
+          );
       }
 
       const request: ProposeActionRequest = {
@@ -2356,6 +2403,12 @@ export const GovernanceSection = ({
                   <MenuItem value="create_delegated_batched_markers_proxy">Create Delegated Batched Markers Proxy</MenuItem>
                   <MenuItem value="mint">Mint</MenuItem>
                   <MenuItem value="burn">Burn</MenuItem>
+                  <Divider />
+                  <MenuItem value="offer_free_credential">Offer Free Credential</MenuItem>
+                  <MenuItem value="accept_free_credential">Accept Free Credential</MenuItem>
+                  <MenuItem value="offer_paid_credential" disabled>
+                    Offer Paid Credential (form coming soon)
+                  </MenuItem>
                 </Select>
               </FormControl>
 
@@ -2486,7 +2539,40 @@ export const GovernanceSection = ({
                 </>
               )}
 
-              <Button variant="contained" size="small" onClick={handleSubmitProposal} disabled={proposalLoading}>
+              {proposalType === "offer_free_credential" && (
+                <>
+                  <TextField size="small" label="UserService Contract ID" value={proposalUserServiceCid} onChange={(e) => setProposalUserServiceCid(e.target.value)} fullWidth required helperText="Governance party's UserService cid" />
+                  <TextField size="small" label="Holder Party" value={proposalHolder} onChange={(e) => setProposalHolder(e.target.value)} fullWidth required />
+                  <TextField size="small" label="Credential ID" value={proposalCredentialId} onChange={(e) => setProposalCredentialId(e.target.value)} fullWidth required />
+                  <TextField size="small" label="Description" value={proposalDescription} onChange={(e) => setProposalDescription(e.target.value)} fullWidth required />
+                  <TextField
+                    size="small"
+                    label="Claims (one per line: subject,property,value)"
+                    value={proposalCredentialClaimsText}
+                    onChange={(e) => setProposalCredentialClaimsText(e.target.value)}
+                    fullWidth
+                    multiline
+                    minRows={2}
+                    maxRows={6}
+                    helperText='Each line: "<subject>,<property>,<value>"'
+                  />
+                </>
+              )}
+
+              {proposalType === "accept_free_credential" && (
+                <>
+                  <TextField size="small" label="UserService Contract ID" value={proposalUserServiceCid} onChange={(e) => setProposalUserServiceCid(e.target.value)} fullWidth required helperText="Governance party's UserService cid" />
+                  <TextField size="small" label="CredentialOffer Contract ID" value={proposalCredentialOfferCid} onChange={(e) => setProposalCredentialOfferCid(e.target.value)} fullWidth required />
+                </>
+              )}
+
+              {proposalType === "offer_paid_credential" && (
+                <Typography variant="caption" color="text.secondary">
+                  Paid credential proposal form is not implemented yet. Use the Free direction or call <code>POST /governance/propose</code> directly with a <code>type: "offer_paid_credential"</code> payload.
+                </Typography>
+              )}
+
+              <Button variant="contained" size="small" onClick={handleSubmitProposal} disabled={proposalLoading || proposalType === "offer_paid_credential"}>
                 {proposalLoading ? <CircularProgress size={16} /> : "Submit Proposal"}
               </Button>
             </Box>

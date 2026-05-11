@@ -1,0 +1,17 @@
+sdk-version: 3.4.11
+name: governance-utility-credential-v0-rc4
+version: 0.1.0
+source: daml
+dependencies:
+  - daml-prim
+  - daml-stdlib
+data-dependencies:
+  - ../governance-core/.daml/dist/governance-core-v0-rc4-0.1.0.dar
+  - ../dars/splice-util-0.1.4.dar
+  - ../dars/utility-credential-app-v0-0.4.1.dar
+  - ../dars/utility-credential-v0-0.1.0.dar
+build-options:
+  - --target=2.2
+  - -Wupgrade-interfaces
+  - --ghc-option=-Wunused-binds
+  - --ghc-option=-Wunused-matches
