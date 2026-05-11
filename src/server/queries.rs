@@ -623,6 +623,12 @@ pub async fn get_governance_confirmations(
     // surfacing them in the notification queue gives the user a Confirm
     // button that always 500s with `CONTRACT_NOT_FOUND` on the proposal cid.
     let mut proposal_descriptions: HashMap<String, Option<String>> = HashMap::new();
+    // Whether `proposal_descriptions` reflects the full active-proposal set
+    // for this party on this participant. If the description fetch errored we
+    // can't tell orphans apart from "we just couldn't read the proposals", so
+    // we skip orphan-marking below to avoid surfacing a flood of false
+    // orphans to the user.
+    let mut proposal_descriptions_complete = true;
 
     if test_mode {
         tracing::debug!("Using WildcardFilter for governance query (test mode)");
@@ -681,6 +687,7 @@ pub async fn get_governance_confirmations(
         .await
         {
             tracing::debug!("Could not fetch proposal descriptions: {e}");
+            proposal_descriptions_complete = false;
         }
     }
 
@@ -720,9 +727,12 @@ pub async fn get_governance_confirmations(
     let domain_actions: Vec<DomainGovernanceAction> = domain_confirmations
         .into_iter()
         .map(|(proposal_cid, (action_label, confirmations))| {
+            // Only mark as orphaned when we successfully fetched the full
+            // active-proposal set; otherwise the missing-from-map signal is
+            // unreliable and we'd falsely mark everything as orphaned.
             let (description, orphaned) = match proposal_descriptions.remove(&proposal_cid) {
                 Some(d) => (d, false),
-                None => (None, true),
+                None => (None, proposal_descriptions_complete),
             };
             let mut seen_parties = std::collections::HashSet::new();
             let unique_confirmations: Vec<GovernanceConfirmation> = confirmations

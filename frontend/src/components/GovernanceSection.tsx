@@ -137,8 +137,12 @@ export const GovernanceSection = ({
     defaultOperatorParty || "",
   );
   const [proposalInstrumentAdmin, setProposalInstrumentAdmin] = useState("");
+  // Local row type carries a stable `uid` so React's reconciliation keeps
+  // inputs / cursor position correct when rows are removed (using array
+  // index as key reuses DOM nodes across rows and causes value/cursor
+  // swaps). The `uid` is stripped before submit.
   const [proposalInstrumentAllowances, setProposalInstrumentAllowances] =
-    useState<InstrumentAllowance[]>([]);
+    useState<({ uid: string } & InstrumentAllowance)[]>([]);
   const [proposalTransferFactoryCid, setProposalTransferFactoryCid] = useState("");
   const [proposalExpectedAdmin, setProposalExpectedAdmin] = useState("");
   const [proposalReceiver, setProposalReceiver] = useState("");
@@ -838,9 +842,10 @@ export const GovernanceSection = ({
             type: "setup_token_preapproval",
             operator: proposalOperator,
             instrument_admin: proposalInstrumentAdmin,
-            instrument_allowances: proposalInstrumentAllowances.filter(
-              (a) => a.id.trim() !== "",
-            ),
+            // Strip the local-only `uid` field and drop empty rows.
+            instrument_allowances: proposalInstrumentAllowances
+              .filter((a) => a.id.trim() !== "")
+              .map(({ id }) => ({ id })),
           };
           break;
         case "transfer":
@@ -2584,16 +2589,20 @@ export const GovernanceSection = ({
                   <Typography variant="caption" display="block" color="text.secondary">
                     Instrument Allowances (optional)
                   </Typography>
-                  {proposalInstrumentAllowances.map((a, idx) => (
-                    <Box key={idx} sx={{ display: "flex", gap: 1, mb: 1 }}>
+                  {proposalInstrumentAllowances.map((a) => (
+                    <Box key={a.uid} sx={{ display: "flex", gap: 1, mb: 1 }}>
                       <TextField
                         label="Allowance ID"
                         value={a.id}
-                        onChange={(e) => {
-                          const updated = [...proposalInstrumentAllowances];
-                          updated[idx] = { ...a, id: e.target.value };
-                          setProposalInstrumentAllowances(updated);
-                        }}
+                        onChange={(e) =>
+                          setProposalInstrumentAllowances((prev) =>
+                            prev.map((row) =>
+                              row.uid === a.uid
+                                ? { ...row, id: e.target.value }
+                                : row,
+                            ),
+                          )
+                        }
                         size="small"
                         sx={{ flex: 1 }}
                       />
@@ -2601,8 +2610,8 @@ export const GovernanceSection = ({
                         size="small"
                         color="error"
                         onClick={() =>
-                          setProposalInstrumentAllowances(
-                            proposalInstrumentAllowances.filter((_, i) => i !== idx),
+                          setProposalInstrumentAllowances((prev) =>
+                            prev.filter((row) => row.uid !== a.uid),
                           )
                         }
                       >
@@ -2613,9 +2622,9 @@ export const GovernanceSection = ({
                   <Button
                     size="small"
                     onClick={() =>
-                      setProposalInstrumentAllowances([
-                        ...proposalInstrumentAllowances,
-                        { id: "" },
+                      setProposalInstrumentAllowances((prev) => [
+                        ...prev,
+                        { uid: crypto.randomUUID(), id: "" },
                       ])
                     }
                   >

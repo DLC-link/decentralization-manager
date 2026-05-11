@@ -1261,9 +1261,8 @@ pub async fn get_packages() -> impl Responder {
 #[get("/network-info")]
 pub async fn get_network_info(data: web::Data<AppState>) -> impl Responder {
     let url = data.config.canton.network.dso_url();
-    let client = reqwest::Client::new();
 
-    match client.get(url).send().await {
+    match data.http_client.get(url).send().await {
         Ok(res) if res.status().is_success() => match res.json::<serde_json::Value>().await {
             Ok(json) => {
                 let dso_party = json.pointer("/dso_party_id").and_then(|v| v.as_str());
@@ -1322,9 +1321,8 @@ pub async fn get_network_info(data: web::Data<AppState>) -> impl Responder {
 #[get("/operator-info")]
 pub async fn get_operator_info(data: web::Data<AppState>) -> impl Responder {
     let url = data.config.canton.network.operator_url();
-    let client = reqwest::Client::new();
 
-    match client.get(url).send().await {
+    match data.http_client.get(url).send().await {
         Ok(res) if res.status().is_success() => match res.json::<serde_json::Value>().await {
             Ok(json) => match json.pointer("/partyId").and_then(|v| v.as_str()) {
                 Some(party) => match party.parse::<CantonId>() {
@@ -1368,11 +1366,19 @@ pub async fn get_operator_info(data: web::Data<AppState>) -> impl Responder {
     )
 )]
 #[post("/token-standard-contracts")]
-pub async fn get_token_standard_contracts(body: web::Json<serde_json::Value>) -> impl Responder {
-    let client = reqwest::Client::new();
+pub async fn get_token_standard_contracts(
+    data: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> impl Responder {
     let url = "https://devnet.dlc.link/peer-2/app/get-token-standard-contracts";
 
-    match client.post(url).json(&body.into_inner()).send().await {
+    match data
+        .http_client
+        .post(url)
+        .json(&body.into_inner())
+        .send()
+        .await
+    {
         Ok(res) => match res.json::<serde_json::Value>().await {
             Ok(json) => HttpResponse::Ok().json(json),
             Err(e) => HttpResponse::BadGateway().json(ErrorResponse {

@@ -87,6 +87,11 @@ pub struct AppState {
     pub test_mode: bool,
     /// Prefixes currently being refreshed from Canton (deduplication)
     pub refreshing_prefixes: Arc<RwLock<HashSet<String>>>,
+    /// Shared `reqwest::Client` for the proxy-style handlers (`/network-info`,
+    /// `/operator-info`, `/token-standard-contracts`). Constructed once at
+    /// startup so its connection pool / keep-alives are reused across
+    /// requests instead of paying TCP+TLS setup on every call.
+    pub http_client: reqwest::Client,
 }
 
 /// Control mechanism for the Noise port listener
@@ -887,6 +892,15 @@ pub async fn start_server(
 
     // Inbound token validator. Production verifies JWT signatures locally
     // against the JWKS of any trusted issuer derived from the top-level
+    // Single process-wide `reqwest::Client`. Shared by `AppState.http_client`
+    // (proxy-style handlers) and the JWT/OIDC validators so all outbound
+    // HTTPS traffic goes through the same connection pool / TLS session
+    // cache and inherits the same 10s timeout.
+    let http_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .expect("reqwest client build");
+
     // keycloak config plus any `party_credentials` rows. The permissive
     // `MockValidator` is compiled in only behind `cfg(any(test, feature =
     // "test-mode"))`, so a release binary cannot select it.
@@ -915,6 +929,7 @@ pub async fn start_server(
         TokenValidator::Jwt(Arc::new(JwtValidator::new(
             config.keycloak.clone(),
             party_credentials.clone(),
+            http_client.clone(),
         )))
     };
 
@@ -961,6 +976,7 @@ pub async fn start_server(
         bootstrap_mu: Arc::new(Mutex::new(())),
         test_mode,
         refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
+        http_client,
     });
     let kick_state = web::Data::new(Arc::new(handlers::KickWorkflowState::new()));
     let onboarding_state = web::Data::new(Arc::new(handlers::OnboardingWorkflowState::new()));
