@@ -35,6 +35,16 @@ export const TEMPLATE_REGISTRAR_SERVICE = {
   module: "Utility.Registry.App.V0.Service.Registrar",
   entity: "RegistrarService",
 };
+export const TEMPLATE_MINT_REQUEST = {
+  package_ref: "#utility-registry-app-v0",
+  module: "Utility.Registry.App.V0.Model.Mint",
+  entity: "MintRequest",
+};
+export const TEMPLATE_BURN_REQUEST = {
+  package_ref: "#utility-registry-app-v0",
+  module: "Utility.Registry.App.V0.Model.Burn",
+  entity: "BurnRequest",
+};
 
 export const DEVNET_VAULT_RULES: DisclosedContract = {
   contract_id:
