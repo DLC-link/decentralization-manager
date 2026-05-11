@@ -10,7 +10,7 @@ mod types;
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use actix_cors::Cors;
@@ -43,13 +43,27 @@ use crate::{
     config::{NodeConfig, PartyCredentials},
     db::schema::{Commitable, SchemaRead, SchemaWrite},
     error::Result,
-    noise::{Message, MessageType, NoiseKeypair, load_or_generate_keypair, parse_public_key},
+    noise::{
+        CHUNK_SIZE, MAX_CHUNKED_TOTAL_SIZE, MAX_PAYLOAD_SIZE, Message, MessageType, NoiseKeypair,
+        load_or_generate_keypair, parse_public_key,
+    },
     server::middleware::AuthMiddleware,
     utils::{compute_fingerprint, get_synchronizer_id_from_url},
     workflow::{self, WorkflowType},
 };
 
 pub use types::*;
+
+/// TTL for cached chunked ListPackages payloads (per peer).
+const LIST_PACKAGES_CHUNK_CACHE_TTL: Duration = Duration::from_secs(30);
+
+/// Per-peer entry in the ListPackages chunk cache: `(raw JSON bytes, last-access time)`.
+/// The `Instant` is updated on every successful chunk read (see `MessageType::GetChunk`
+/// handler), so a slow peer mid-reassembly extends its own TTL window.
+type ChunkCacheEntry = (Vec<u8>, Instant);
+
+/// Shared cache of large ListPackages payloads awaiting chunk retrieval by peers.
+type ListPackagesChunkCache = Arc<Mutex<HashMap<String, ChunkCacheEntry>>>;
 
 /// Application state shared across all handlers
 pub struct AppState {
@@ -105,6 +119,12 @@ struct WorkflowTriggers {
     pending_invitations: Arc<RwLock<Vec<PendingInvitation>>>,
     admin_api_url: String,
     synchronizer: String,
+    /// Cache for chunked ListPackages responses, keyed by the requesting
+    /// peer's pubkey (hex). Populated when a ListPackages response exceeds
+    /// `MAX_PAYLOAD_SIZE`; consumed by subsequent GetChunk requests from the
+    /// same peer. TTL: 30 seconds. One entry per peer; replaced on new
+    /// ListPackages call from the same peer.
+    list_packages_chunk_cache: ListPackagesChunkCache,
     db: SqlitePool,
     /// Read by the `RequestMemberParty` listener arm.
     party_credentials: Arc<RwLock<Vec<PartyCredentials>>>,
@@ -1016,6 +1036,7 @@ pub async fn start_server(
         pending_invitations: pending_invitations.clone(),
         admin_api_url: config.admin_api_url(),
         synchronizer: config.synchronizer().to_string(),
+        list_packages_chunk_cache: Arc::new(Mutex::new(HashMap::new())),
         db: db.clone(),
         party_credentials: party_credentials.clone(),
         onboarding_trigger: onboarding_trigger.clone(),
@@ -1469,7 +1490,179 @@ async fn handle_incoming_connection(
                                     b"[]".to_vec()
                                 }
                             };
-                            let response_msg = Message::new(MessageType::Data, payload);
+
+                            if payload.len() <= MAX_PAYLOAD_SIZE {
+                                // Small enough to ship in one un-chunked Data response.
+                                let response_msg = Message::new(MessageType::Data, payload);
+                                return Ok(Response::builder()
+                                    .status(StatusCode::OK)
+                                    .body(Body::from(response_msg.to_bytes()))
+                                    .unwrap());
+                            }
+
+                            // Too large for one Noise frame — cache the payload and send
+                            // ChunkedCommand metadata. Subsequent GetChunk requests from the same
+                            // peer will pull chunks from the cache.
+                            let Some(ref pk) = peer_pubkey_hex else {
+                                // Without a peer pubkey we have nowhere to key the cache. Fall
+                                // through to sending the full payload anyway — it'll fail at the
+                                // transport layer, but logs will show what happened.
+                                tracing::warn!(
+                                    "ListPackages response is {} bytes (> {} chunk threshold) but \
+                                     no peer pubkey available; cannot chunk. Sending unchunked \
+                                     anyway, may fail at transport.",
+                                    payload.len(),
+                                    MAX_PAYLOAD_SIZE,
+                                );
+                                let response_msg = Message::new(MessageType::Data, payload);
+                                return Ok(Response::builder()
+                                    .status(StatusCode::OK)
+                                    .body(Body::from(response_msg.to_bytes()))
+                                    .unwrap());
+                            };
+
+                            // Server-side cap symmetric with the client's `MAX_CHUNKED_TOTAL_SIZE`.
+                            // Without this, a very large package listing could (a) eat unbounded
+                            // memory in the per-peer cache and (b) truncate silently on the
+                            // `usize → u32` casts below. 16 MiB is well above any plausible Canton
+                            // package listing.
+                            if payload.len() > MAX_CHUNKED_TOTAL_SIZE {
+                                tracing::error!(
+                                    "ListPackages response is {} bytes; exceeds chunked cap {} — \
+                                     refusing to chunk",
+                                    payload.len(),
+                                    MAX_CHUNKED_TOTAL_SIZE,
+                                );
+                                return Ok(Response::builder()
+                                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                    .body(Body::empty())
+                                    .unwrap());
+                            }
+
+                            // Casts are infallible because we just verified `payload.len() <=
+                            // MAX_CHUNKED_TOTAL_SIZE` (16 MiB), which fits in u32.
+                            let total_size =
+                                u32::try_from(payload.len()).expect("checked against cap");
+                            let chunk_count = u32::try_from(payload.len().div_ceil(CHUNK_SIZE))
+                                .expect("checked against cap");
+                            tracing::info!(
+                                "ListPackages response too large ({total_size} bytes), chunking \
+                                 into {chunk_count} chunks for peer {pk}",
+                            );
+
+                            // Cache the payload (evict expired entries first; replace this peer's
+                            // existing entry if any).
+                            {
+                                let mut cache = triggers.list_packages_chunk_cache.lock().await;
+                                cache.retain(|_, (_, t)| {
+                                    t.elapsed() < LIST_PACKAGES_CHUNK_CACHE_TTL
+                                });
+                                cache.insert(pk.clone(), (payload, Instant::now()));
+                            }
+
+                            // Build ChunkedCommand metadata: [Data:2][total_size:4][chunk_count:4]
+                            // The first 2 bytes record the type the client should reconstitute the
+                            // assembled payload as — `Data` for ListPackages responses.
+                            let mut meta = Vec::with_capacity(10);
+                            meta.extend_from_slice(&MessageType::Data.to_u16().to_be_bytes());
+                            meta.extend_from_slice(&total_size.to_be_bytes());
+                            meta.extend_from_slice(&chunk_count.to_be_bytes());
+
+                            let response_msg = Message::new(MessageType::ChunkedCommand, meta);
+                            return Ok(Response::builder()
+                                .status(StatusCode::OK)
+                                .body(Body::from(response_msg.to_bytes()))
+                                .unwrap());
+                        }
+                        MessageType::GetChunk => {
+                            if msg.payload.len() < 4 {
+                                tracing::warn!("Received GetChunk request with payload < 4 bytes");
+                                return Ok(Response::builder()
+                                    .status(StatusCode::BAD_REQUEST)
+                                    .body(Body::empty())
+                                    .unwrap());
+                            }
+                            let chunk_index = u32::from_be_bytes([
+                                msg.payload[0],
+                                msg.payload[1],
+                                msg.payload[2],
+                                msg.payload[3],
+                            ]) as usize;
+
+                            let Some(ref pk) = peer_pubkey_hex else {
+                                tracing::warn!(
+                                    "Received GetChunk request without identifiable peer pubkey"
+                                );
+                                return Ok(Response::builder()
+                                    .status(StatusCode::BAD_REQUEST)
+                                    .body(Body::empty())
+                                    .unwrap());
+                            };
+
+                            let chunk_bytes = {
+                                let mut cache = triggers.list_packages_chunk_cache.lock().await;
+
+                                // Pre-check expiry without holding a borrow into the entry,
+                                // so we can `remove` the expired entry without borrowck pain.
+                                let entry_state = cache
+                                    .get(pk)
+                                    .map(|(_, t)| t.elapsed() >= LIST_PACKAGES_CHUNK_CACHE_TTL);
+                                match entry_state {
+                                    None => {
+                                        tracing::warn!(
+                                            "GetChunk request from {pk} for chunk {chunk_index} \
+                                             but no cached payload"
+                                        );
+                                        return Ok(Response::builder()
+                                            .status(StatusCode::NOT_FOUND)
+                                            .body(Body::empty())
+                                            .unwrap());
+                                    }
+                                    Some(true) => {
+                                        // Expired — drop the stale entry now so it doesn't
+                                        // linger until the next ListPackages-driven `retain`.
+                                        cache.remove(pk);
+                                        tracing::warn!(
+                                            "GetChunk for {pk} chunk {chunk_index}: cache entry \
+                                             expired (removed)"
+                                        );
+                                        return Ok(Response::builder()
+                                            .status(StatusCode::NOT_FOUND)
+                                            .body(Body::empty())
+                                            .unwrap());
+                                    }
+                                    Some(false) => {}
+                                }
+
+                                let (payload, t) = cache.get_mut(pk).expect("checked above");
+                                let start = chunk_index * CHUNK_SIZE;
+                                if start >= payload.len() {
+                                    tracing::warn!(
+                                        "GetChunk for {pk} chunk {chunk_index}: out of range \
+                                         (start={start}, payload_len={})",
+                                        payload.len(),
+                                    );
+                                    return Ok(Response::builder()
+                                        .status(StatusCode::BAD_REQUEST)
+                                        .body(Body::empty())
+                                        .unwrap());
+                                }
+                                let end = (start + CHUNK_SIZE).min(payload.len());
+                                let bytes = payload[start..end].to_vec();
+                                // Extend TTL on successful read so a slow peer
+                                // mid-reassembly can't have entries evicted out from
+                                // under it just because the original 30s window from
+                                // insertion ran out.
+                                *t = Instant::now();
+                                bytes
+                            };
+
+                            // Build Chunk response: [chunk_index:4][chunk_data]
+                            let mut response_payload = Vec::with_capacity(4 + chunk_bytes.len());
+                            response_payload.extend_from_slice(&(chunk_index as u32).to_be_bytes());
+                            response_payload.extend_from_slice(&chunk_bytes);
+
+                            let response_msg = Message::new(MessageType::Chunk, response_payload);
                             return Ok(Response::builder()
                                 .status(StatusCode::OK)
                                 .body(Body::from(response_msg.to_bytes()))

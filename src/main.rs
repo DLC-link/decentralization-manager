@@ -74,6 +74,9 @@ async fn main() -> Result {
             timeout_message,
             timeout_retry_attempts,
             timeout_retry_delay,
+            noise_retry_timeout_sec,
+            noise_retry_max_attempts,
+            noise_retry_backoff_ms,
             db_encryption_key,
             ..
         } => {
@@ -138,6 +141,15 @@ async fn main() -> Result {
             }
             if let Some(v) = timeout_retry_delay {
                 config.timeouts.connection_retry_delay_secs = *v;
+            }
+            if let Some(v) = noise_retry_timeout_sec {
+                config.noise_retry.per_attempt_timeout_secs = *v;
+            }
+            if let Some(v) = noise_retry_max_attempts {
+                config.noise_retry.max_attempts = *v;
+            }
+            if let Some(v) = noise_retry_backoff_ms {
+                config.noise_retry.backoff_ms = *v;
             }
         }
     }

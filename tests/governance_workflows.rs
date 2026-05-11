@@ -88,6 +88,7 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     let mut f = Fixture::from_env()?;
     phases::create_dec_party::run(&mut f).await?;
     phases::distribute_dars::run(&mut f).await?;
+    phases::check_peer_dars::run(&mut f).await?;
     phases::deploy_gov_core::run(&mut f).await?;
     phases::token_custody::run(&mut f).await?;
     phases::utility_onboarding::run(&mut f).await?;

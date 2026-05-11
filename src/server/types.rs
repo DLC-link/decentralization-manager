@@ -147,12 +147,39 @@ pub struct PackageInfo {
     pub version: String,
 }
 
-/// Result of querying packages from a single peer
+/// Reason a peer was reported `reachable: false` in `PeerPackageResult`.
+///
+/// Mirrors `NoiseError` variants at a coarser granularity that's stable on
+/// the wire — added so the UI / future tooling can distinguish failure
+/// modes without having to scan logs. Layered transport-side: TCP connect
+/// (timeout/failed), then post-connect request budget (`RequestTimeout`),
+/// then mid-stream IO/HTTP (`Transport`); then handshake/decode/status.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PeerErrorKind {
+    TcpConnectTimeout,
+    TcpConnectFailed,
+    RequestTimeout,
+    Transport,
+    HandshakeFailed,
+    BadStatus,
+    DecodeFailed,
+    InvalidPublicKey,
+    Other,
+}
+
+/// Result of querying packages from a single peer.
+///
+/// `error_kind` is `None` when `reachable: true`. Always `Some(_)` when
+/// `reachable: false`. (Decode failures on `reachable: true` responses are
+/// not yet surfaced — see Future work item 5 in the spec.)
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct PeerPackageResult {
     pub participant_id: String,
     pub name: String,
     pub reachable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<PeerErrorKind>,
     #[serde(default)]
     pub packages: Vec<PackageInfo>,
 }
