@@ -378,6 +378,7 @@ mod tests {
             db,
             config: NodeConfig::default(),
             peer_status: Arc::new(RwLock::new(HashMap::new())),
+            last_seen: Arc::new(RwLock::new(HashMap::new())),
             noise_listener_control: Arc::new(RwLock::new(ListenerControl {
                 should_pause: false,
             })),

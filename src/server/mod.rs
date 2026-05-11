@@ -50,6 +50,7 @@ use crate::{
         load_or_generate_keypair, parse_public_key,
     },
     server::middleware::AuthMiddleware,
+    server::peer_status::LastSeen,
     utils::{compute_fingerprint, get_synchronizer_id_from_url},
     workflow::{self, WorkflowType},
 };
@@ -72,6 +73,7 @@ pub struct AppState {
     pub db: SqlitePool,
     pub config: NodeConfig,
     pub peer_status: Arc<RwLock<HashMap<String, bool>>>,
+    pub last_seen: LastSeen,
     pub noise_listener_control: Arc<RwLock<ListenerControl>>,
     pub noise_listener_notify: Arc<Notify>,
     pub onboarding_trigger: Arc<Notify>,
@@ -956,6 +958,7 @@ pub async fn start_server(
     };
 
     let peer_status = Arc::new(RwLock::new(HashMap::new()));
+    let last_seen: LastSeen = Arc::new(RwLock::new(HashMap::new()));
     let listener_control = Arc::new(RwLock::new(ListenerControl {
         should_pause: false,
     }));
@@ -982,6 +985,7 @@ pub async fn start_server(
         db: db.clone(),
         config: config.clone(),
         peer_status: peer_status.clone(),
+        last_seen: last_seen.clone(),
         noise_listener_control: listener_control.clone(),
         noise_listener_notify: listener_notify.clone(),
         onboarding_trigger: onboarding_trigger.clone(),
