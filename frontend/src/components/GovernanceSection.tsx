@@ -19,6 +19,7 @@ import {
   Checkbox,
   FormControlLabel,
   FormGroup,
+  ListSubheader,
 } from "@mui/material";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import ExpandLessIcon from "@mui/icons-material/ExpandLess";
@@ -79,6 +80,11 @@ interface GovernanceSectionProps {
   /// execute / revoke / expire / domain confirm / domain execute) so the
   /// parent can refresh sibling views (e.g. the audit trail tab).
   onAfterAction?: () => void;
+  /// Which half of the section to render:
+  /// - "actions"   = governance-action confirmations + new-action form (default)
+  /// - "proposals" = domain-proposal list + new-proposal form (core_self only)
+  /// - undefined   = both (legacy, used when rendered inline on the party page)
+  view?: "actions" | "proposals";
 }
 
 // Default values for action form
@@ -108,13 +114,20 @@ export const GovernanceSection = ({
   network,
   governanceType = "vault",
   onAfterAction,
+  view,
 }: GovernanceSectionProps) => {
+  const showActionsHalf = view !== "proposals";
+  const showProposalsHalf = view !== "actions";
   const [expanded, setExpanded] = useState(true);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<GovernanceResponse | null>(null);
   // Domain proposal state
-  const [showProposalForm, setShowProposalForm] = useState(false);
+  // Auto-expand the form when this section is rendered in proposals-only mode
+  // (header "New Proposal" button); otherwise start collapsed.
+  const [showProposalForm, setShowProposalForm] = useState(
+    view === "proposals",
+  );
   const [proposalType, setProposalType] = useState<ProposalType["type"]>("setup_cc_preapproval");
   const [proposalProvider, setProposalProvider] = useState("");
   const [proposalExpectedDso, setProposalExpectedDso] = useState("");
@@ -158,9 +171,15 @@ export const GovernanceSection = ({
   );
 
   // Action form state
-  const [showNewActionForm, setShowNewActionForm] = useState(false);
+  // Auto-expand the action form when the section is rendered in actions-only
+  // mode (pencil icon → modal); otherwise start collapsed.
+  const [showNewActionForm, setShowNewActionForm] = useState(
+    view === "actions",
+  );
   const [selectedActionType, setSelectedActionType] = useState<ActionTypeKey>(
-    "utility_create_provider_request",
+    governanceType === "core_self"
+      ? "governance_add_member"
+      : "utility_create_provider_request",
   );
   const [formLoading, setFormLoading] = useState(false);
 
@@ -2237,30 +2256,34 @@ export const GovernanceSection = ({
 
   return (
     <Box sx={{ mt: 2 }}>
-      <Box
-        sx={{
-          display: "flex",
-          alignItems: "center",
-          cursor: "pointer",
-          mb: 1,
-        }}
-        onClick={() => setExpanded(!expanded)}
-      >
-        <IconButton size="small">
-          {expanded ? <ExpandLessIcon /> : <ExpandMoreIcon />}
-        </IconButton>
-        <Typography variant="subtitle2">
-          Governance Actions
-          {data && data.actions.length > 0 && (
-            <Chip
-              label={data.actions.length}
-              size="small"
-              sx={{ ml: 1 }}
-              color="primary"
-            />
-          )}
-        </Typography>
-      </Box>
+      {showActionsHalf && (
+      <>
+      {view !== "actions" && (
+        <Box
+          sx={{
+            display: "flex",
+            alignItems: "center",
+            cursor: "pointer",
+            mb: 1,
+          }}
+          onClick={() => setExpanded(!expanded)}
+        >
+          <IconButton size="small">
+            {expanded ? <ExpandLessIcon /> : <ExpandMoreIcon />}
+          </IconButton>
+          <Typography variant="subtitle2">
+            Governance Actions
+            {data && data.actions.length > 0 && (
+              <Chip
+                label={data.actions.length}
+                size="small"
+                sx={{ ml: 1 }}
+                color="primary"
+              />
+            )}
+          </Typography>
+        </Box>
+      )}
 
       <Collapse in={expanded}>
         {error && (
@@ -2269,6 +2292,7 @@ export const GovernanceSection = ({
           </Alert>
         )}
 
+        {view !== "actions" && (
         <Box sx={{ mb: 2 }}>
           <Autocomplete
             freeSolo
@@ -2287,18 +2311,21 @@ export const GovernanceSection = ({
             )}
           />
         </Box>
+        )}
 
         {/* New Action Form */}
         <Box sx={{ mb: 2 }}>
-          <Button
-            size="small"
-            variant="outlined"
-            startIcon={showNewActionForm ? <ExpandLessIcon /> : <AddIcon />}
-            onClick={() => setShowNewActionForm(!showNewActionForm)}
-            disabled={!ADMIN_ACCESS || !rulesContractId}
-          >
-            {showNewActionForm ? "Hide Form" : "New Governance Action"}
-          </Button>
+          {view !== "actions" && (
+            <Button
+              size="small"
+              variant="outlined"
+              startIcon={showNewActionForm ? <ExpandLessIcon /> : <AddIcon />}
+              onClick={() => setShowNewActionForm(!showNewActionForm)}
+              disabled={!ADMIN_ACCESS || !rulesContractId}
+            >
+              {showNewActionForm ? "Hide Form" : "New Governance Action"}
+            </Button>
+          )}
 
           <Collapse in={showNewActionForm}>
             <Box
@@ -2361,12 +2388,14 @@ export const GovernanceSection = ({
                 >
                   Submit Confirmation
                 </Button>
-                <Button
-                  variant="outlined"
-                  onClick={() => setShowNewActionForm(false)}
-                >
-                  Cancel
-                </Button>
+                {view !== "actions" && (
+                  <Button
+                    variant="outlined"
+                    onClick={() => setShowNewActionForm(false)}
+                  >
+                    Cancel
+                  </Button>
+                )}
               </Box>
             </Box>
           </Collapse>
@@ -2378,28 +2407,32 @@ export const GovernanceSection = ({
           </Typography>
         )}
       </Collapse>
+      </>
+      )}
 
       {/* Proposals — only for governance-core */}
-      {governanceType === "core_self" && data && (
+      {showProposalsHalf && governanceType === "core_self" && data && (
         <Box sx={{ mt: 2, mx: -2 }}>
-          <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 1, px: 2 }}>
-            <Typography variant="subtitle2">
-              Proposals
-              {(data.domain_actions?.length ?? 0) > 0 && (
-                <Chip label={data.domain_actions!.length} size="small" sx={{ ml: 1 }} color="secondary" />
-              )}
-            </Typography>
-            <Button
-              size="small"
-              variant="outlined"
-              onClick={() => {
-                if (!showProposalForm && !dsoPartyId) fetchNetworkInfo();
-                setShowProposalForm(!showProposalForm);
-              }}
-            >
-              {showProposalForm ? "Cancel" : "New Proposal"}
-            </Button>
-          </Box>
+          {view !== "proposals" && (
+            <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 1, px: 2 }}>
+              <Typography variant="subtitle2">
+                Proposals
+                {(data.domain_actions?.length ?? 0) > 0 && (
+                  <Chip label={data.domain_actions!.length} size="small" sx={{ ml: 1 }} color="secondary" />
+                )}
+              </Typography>
+              <Button
+                size="small"
+                variant="outlined"
+                onClick={() => {
+                  if (!showProposalForm && !dsoPartyId) fetchNetworkInfo();
+                  setShowProposalForm(!showProposalForm);
+                }}
+              >
+                {showProposalForm ? "Cancel" : "New Proposal"}
+              </Button>
+            </Box>
+          )}
 
           <Collapse in={showProposalForm}>
             <Box sx={{ display: "flex", flexDirection: "column", gap: 1.5, mb: 2, p: 2, mx: 2, border: 1, borderColor: "divider", borderRadius: 2 }}>
@@ -2408,12 +2441,16 @@ export const GovernanceSection = ({
                   value={proposalType}
                   onChange={(e) => setProposalType(e.target.value as ProposalType["type"])}
                 >
+                  <ListSubheader sx={{ color: "primary.main", fontWeight: 600 }}>Governance Core</ListSubheader>
                   <MenuItem value="generic_vote">Generic Vote</MenuItem>
+                  <Divider />
+                  <ListSubheader sx={{ color: "primary.main", fontWeight: 600 }}>Token Custody</ListSubheader>
                   <MenuItem value="setup_cc_preapproval">Setup CC Preapproval</MenuItem>
                   <MenuItem value="setup_token_preapproval">Setup Token Preapproval</MenuItem>
                   <MenuItem value="transfer">Transfer</MenuItem>
                   <MenuItem value="accept_transfer">Accept Transfer</MenuItem>
                   <Divider />
+                  <ListSubheader sx={{ color: "primary.main", fontWeight: 600 }}>Utility Onboarding</ListSubheader>
                   <MenuItem value="provision_provider_service">Provision Provider Service</MenuItem>
                   <MenuItem value="setup_utility">Setup Utility</MenuItem>
                   <MenuItem value="create_provider_service_request">Create Provider Service Request</MenuItem>
