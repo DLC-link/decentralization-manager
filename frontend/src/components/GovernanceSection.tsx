@@ -2749,7 +2749,7 @@ export const GovernanceSection = ({
                   )}
                   <TextField size="small" label="Operator Party" value={proposalOperator} onChange={(e) => setProposalOperator(e.target.value)} fullWidth required />
                   <TextField size="small" label="Instrument Admin" value={proposalInstrumentAdmin} onChange={(e) => setProposalInstrumentAdmin(e.target.value)} fullWidth required />
-                  <Typography variant="caption" display="block" color="text.secondary">
+                  <Typography variant="caption" sx={{ display: "block" }} color="text.secondary">
                     Instrument Allowances (optional)
                   </Typography>
                   {proposalInstrumentAllowances.map((a) => (
