@@ -751,6 +751,40 @@ export const GovernanceSection = ({
     return null;
   };
 
+  // Clear the action form fields after a successful submit so the next
+  // action starts blank — keeps the form expanded and the submit button
+  // visible (the new action shows up in the notification queue on its own).
+  // NOTE: operatorParty / dsoPartyId / amuletRulesCid are intentionally NOT
+  // cleared — they're autofetched (or seeded once) and should persist across
+  // submissions of the same dialog session.
+  const resetActionForm = () => {
+    setMemberParty("");
+    setNewThreshold(2);
+    setTimeoutMicroseconds(3600000000);
+    setVaultName(defaultVaultName);
+    setShareSymbol(defaultShareSymbol);
+    setAssetInstrumentId(defaultInstrumentId);
+    setVaultLimits(defaultVaultLimits);
+    setVaultBackendSignatory(defaultVaultBackendSignatory);
+    setVaultFarConfig(defaultFarConfig);
+    setVaultCid(DEVNET_VAULT_RULES.contract_id);
+    setVaultId("");
+    setVaultRulesCid(defaultVaultRulesCid);
+    setVaultProcessorRulesCid(DEVNET_VAULT_PROCESSOR_RULES.contract_id);
+    setProviderServiceCid("");
+    setUserServiceCid("");
+    setAllocationFactoryCid("");
+    setInitialSupportedVaults([]);
+    setFarBeneficiaries([]);
+    setHolderServiceRequestCid("");
+    setHolderParty("");
+    setRegistrarServiceCid("");
+    setCredentialId("");
+    setCredentialDescription("");
+    setCredentialOfferCid("");
+    setClaims([]);
+  };
+
   const handleSubmitAction = async () => {
     if (!rulesContractId) {
       setError("Please enter the Governance contract ID");
@@ -809,8 +843,9 @@ export const GovernanceSection = ({
         throw new Error(errData.error || "Failed to submit confirmation");
       }
 
-      // Reset form and refresh data
-      setShowNewActionForm(false);
+      // Clear fields, keep the form visible. The created action shows up
+      // in the notification queue — no separate success message needed.
+      resetActionForm();
       await fetchGovernance();
       onAfterAction?.();
     } catch (e) {
@@ -820,6 +855,47 @@ export const GovernanceSection = ({
     } finally {
       setFormLoading(false);
     }
+  };
+
+  // Same idea as resetActionForm but for the proposal half. Mint/Burn re-seed
+  // instrument_admin = partyId via a useEffect on proposalType change, but
+  // because proposalType isn't changing here we re-seed it manually so it
+  // stays populated after a successful submit.
+  // NOTE: proposalOperator / proposalExpectedDso are intentionally NOT
+  // cleared — they're autofetched (operator from /operator-info, DSO from
+  // /network-info) and should persist across submissions.
+  const resetProposalForm = () => {
+    setProposalProvider("");
+    setProposalInstrumentAdmin("");
+    setProposalInstrumentAllowances([]);
+    setProposalTransferFactoryCid("");
+    setProposalExpectedAdmin("");
+    setProposalReceiver("");
+    setProposalAmount("");
+    setProposalInstrumentIdAdmin(
+      proposalType === "mint" || proposalType === "burn" ? partyId : "",
+    );
+    setProposalInstrumentIdId("");
+    setProposalInputHoldingCids("");
+    setProposalTransferInstructionCid("");
+    setProposalDescription("");
+    setProposalProviderServiceCid("");
+    setProposalInstrumentIdText("");
+    setProposalCreateTransferRule(true);
+    setProposalCreateAllocationFactory(true);
+    setProposalUser("");
+    setProposalInstrumentConfigurationCid("");
+    setProposalBeneficiariesText("");
+    setProposalClearBeneficiaries(false);
+    setProposalRegistrarServiceCid("");
+    setProposalEnableResultContracts("true");
+    setProposalAllocationFactoryCid("");
+    setProposalRecipient("");
+    setProposalHolder("");
+    setProposalUserServiceCid("");
+    setProposalCredentialId("");
+    setProposalCredentialClaimsText("");
+    setProposalCredentialOfferCid("");
   };
 
   const handleSubmitProposal = async () => {
@@ -1002,7 +1078,9 @@ export const GovernanceSection = ({
         throw new Error(errData.error || "Failed to create proposal");
       }
 
-      setShowProposalForm(false);
+      // Clear fields, keep the form visible. The created proposal shows up
+      // in the notification queue — no separate success message needed.
+      resetProposalForm();
       await fetchGovernance();
       onAfterAction?.();
     } catch (e) {
@@ -2485,11 +2563,6 @@ export const GovernanceSection = ({
           </Collapse>
         </Box>
 
-        {data && data.actions.length > 0 && (
-          <Typography variant="caption" color="text.secondary" sx={{ display: "block", pt: 1 }}>
-            {data.actions.length} pending action{data.actions.length === 1 ? "" : "s"} — open the Notifications tab to confirm, revoke, or execute.
-          </Typography>
-        )}
       </Collapse>
       </>
       )}
@@ -2888,12 +2961,6 @@ export const GovernanceSection = ({
               </Button>
             </Box>
           </Collapse>
-
-          {(data.domain_actions?.length ?? 0) > 0 && !showProposalForm && (
-            <Typography variant="caption" color="text.secondary" sx={{ display: "block", px: 2, pb: 2 }}>
-              {data.domain_actions!.length} pending proposal{data.domain_actions!.length === 1 ? "" : "s"} — open the Notifications tab to confirm, revoke, or execute.
-            </Typography>
-          )}
         </Box>
       )}
 
