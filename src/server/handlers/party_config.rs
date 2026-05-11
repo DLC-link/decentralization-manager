@@ -400,6 +400,7 @@ mod tests {
             bootstrap_mu: Arc::new(Mutex::new(())),
             test_mode: true,
             refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
+            http_client: reqwest::Client::new(),
         });
         let app =
             test::init_service(App::new().app_data(state).service(discover_member_party)).await;

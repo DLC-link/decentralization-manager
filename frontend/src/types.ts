@@ -348,6 +348,10 @@ export interface DomainGovernanceAction {
   confirmations: GovernanceConfirmation[];
   confirmation_count: number;
   can_execute: boolean;
+  /** Underlying proposal contract is no longer in this participant's ACS;
+   *  Confirmation contracts can only be expired (dismissed), not confirmed
+   *  or executed. */
+  orphaned?: boolean;
 }
 
 export interface GovernanceResponse {
@@ -355,6 +359,7 @@ export interface GovernanceResponse {
   domain_actions?: DomainGovernanceAction[];
   threshold: number;
   member_party_id?: string;
+  rules_contract_id?: string;
 }
 
 export interface InstrumentAllowance {
@@ -733,6 +738,23 @@ export interface NetworkInfo {
   dso_party_id: string;
   amulet_rules_cid: string;
   amulet_rules_blob: string;
+}
+
+export interface InstrumentInfo {
+  contract_id: string;
+  instrument_admin: string;
+  instrument_id: string;
+}
+
+export interface InstrumentsResponse {
+  instruments: InstrumentInfo[];
+}
+
+/** Count of active TransferPreapproval contracts the gov party already has,
+ *  split by direction (CC = Canton Coin via Splice; token = via Utility). */
+export interface TransferPreapprovalsResponse {
+  cc: number;
+  token: number;
 }
 
 export type Network = "devnet" | "testnet" | "mainnet";

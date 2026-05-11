@@ -18,6 +18,12 @@ interface GovernanceActionsDialogProps {
   network?: Network;
   governanceType: "vault" | "core_self" | "core_domain";
   onAfterAction?: () => void;
+  /**
+   * Which half of GovernanceSection to render:
+   * - "actions"   = governance-action confirmations + new-action form (default, used by the pencil icon)
+   * - "proposals" = domain-proposal list + new-proposal form (used by the header "New Proposal" button)
+   */
+  view?: "actions" | "proposals";
 }
 
 export const GovernanceActionsDialog = ({
@@ -29,10 +35,13 @@ export const GovernanceActionsDialog = ({
   network,
   governanceType,
   onAfterAction,
+  view = "actions",
 }: GovernanceActionsDialogProps) => {
   return (
-    <Dialog open={open} onClose={onClose} maxWidth="lg" fullWidth>
-      <DialogTitle>Governance Actions</DialogTitle>
+    <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
+      <DialogTitle>
+        {view === "proposals" ? "New Proposal" : "Governance Actions"}
+      </DialogTitle>
       <DialogContent>
         <Box sx={{ pt: 1 }}>
           <GovernanceSection
@@ -43,6 +52,7 @@ export const GovernanceActionsDialog = ({
             network={network}
             governanceType={governanceType}
             onAfterAction={onAfterAction}
+            view={view}
           />
         </Box>
       </DialogContent>

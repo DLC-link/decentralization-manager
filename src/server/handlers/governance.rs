@@ -28,17 +28,17 @@ use crate::{
         chain_audit,
         queries::{
             ContractQueryParams as QueryContractParams, get_governance_confirmations,
-            get_governance_state as query_governance_state, get_provider_services,
+            get_governance_state as query_governance_state, get_instruments, get_provider_services,
             get_registrar_services, get_user_services, get_vaults, query_contracts_by_template,
         },
         types::{
             AuditLogEntry, AuditLogQuery, AuditLogResponse, CancelConfirmationRequest,
             ChainAuditEntry, ChainAuditQuery, ChainAuditResponse, ConfirmActionRequest,
             ContractQueryResponse, ErrorResponse, ExecuteActionRequest, ExpireConfirmationRequest,
-            GovernanceResponse, GovernanceStateResponse, GovernanceType, KnownMember,
-            KnownMembersResponse, MessageResponse, NetworkInfo, ProposeActionRequest,
-            ProviderServicesResponse, RegistrarServicesResponse, UserServicesResponse,
-            VaultsResponse,
+            GovernanceResponse, GovernanceStateResponse, GovernanceType, InstrumentsResponse,
+            KnownMember, KnownMembersResponse, MessageResponse, NetworkInfo, OperatorInfo,
+            ProposeActionRequest, ProviderServicesResponse, RegistrarServicesResponse,
+            TransferPreapprovalsResponse, UserServicesResponse, VaultsResponse,
         },
     },
     utils,
@@ -94,6 +94,18 @@ pub async fn get_governance(
     let member_party_id = get_member_party_id(&data, party_id).await;
     let packages = packages();
 
+    let rules_contract_id =
+        match query_governance_state(&data.config, party_id, token.clone(), test_mode, &packages)
+            .await
+        {
+            Ok(Some(state)) => Some(state.contract_id),
+            Ok(None) => None,
+            Err(e) => {
+                tracing::warn!("Failed to fetch active rules contract id: {e}");
+                None
+            }
+        };
+
     match get_governance_confirmations(
         &data.config,
         party_id,
@@ -109,6 +121,7 @@ pub async fn get_governance(
             domain_actions,
             threshold,
             member_party_id,
+            rules_contract_id,
         }),
         Err(e) => {
             tracing::error!("Failed to fetch governance confirmations: {e}");
@@ -389,6 +402,137 @@ pub async fn get_registrar_services_handler(
             tracing::error!("Failed to fetch registrar services: {e}");
             HttpResponse::InternalServerError().json(ErrorResponse {
                 error: format!("Failed to fetch registrar services: {e}"),
+            })
+        }
+    }
+}
+
+/// Count active `TransferPreapproval` contracts visible to this party, split
+/// between Canton Coin (Splice.Wallet) and utility-token (Utility.Registry)
+/// variants. Used by the proposal forms to warn that re-issuing a CC / Token
+/// preapproval would be a no-op when one already exists.
+#[utoipa::path(
+    tag = "Services",
+    params(GovernanceQuery),
+    responses(
+        (status = 200, description = "Preapproval counts", body = TransferPreapprovalsResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+#[get("/transfer-preapprovals")]
+pub async fn get_transfer_preapprovals_handler(
+    data: web::Data<AppState>,
+    query: web::Query<GovernanceQuery>,
+) -> impl Responder {
+    let party_id = &query.party_id;
+    let token = get_party_token(&data, party_id).await;
+    let test_mode = data.test_mode;
+
+    // Canton Coin: the actual `TransferPreapproval` template lives in
+    // `Splice.AmuletRules` (signatories: receiver, provider, dso — gov party
+    // sees it as receiver). The intermediate `TransferPreapprovalProposal`
+    // (in `Splice.Wallet.TransferPreapproval`) is what the gov flow creates
+    // right after execution and sits there until the DSO accepts it; we
+    // count both so the warning fires regardless of which stage you're in.
+    let cc_preapproval = QueryContractParams {
+        package_id: "#splice-amulet".to_string(),
+        module_name: "Splice.AmuletRules".to_string(),
+        entity_name: "TransferPreapproval".to_string(),
+        use_interface_filter: false,
+    };
+    let cc_proposal = QueryContractParams {
+        package_id: "#splice-amulet".to_string(),
+        module_name: "Splice.Wallet.TransferPreapproval".to_string(),
+        entity_name: "TransferPreapprovalProposal".to_string(),
+        use_interface_filter: false,
+    };
+    let token_params = QueryContractParams {
+        package_id: "#utility-registry-app-v0".to_string(),
+        module_name: "Utility.Registry.App.V0.Model.TransferPreapproval".to_string(),
+        entity_name: "TransferPreapproval".to_string(),
+        use_interface_filter: false,
+    };
+
+    async fn count(
+        config: &crate::config::NodeConfig,
+        party: &CantonId,
+        token: Option<String>,
+        test_mode: bool,
+        params: &QueryContractParams,
+        label: &str,
+    ) -> usize {
+        match query_contracts_by_template(config, party, token, test_mode, params).await {
+            Ok(c) => c.len(),
+            Err(e) => {
+                tracing::warn!("Failed to query {label}: {e}");
+                0
+            }
+        }
+    }
+
+    let cc_accepted = count(
+        &data.config,
+        party_id,
+        token.clone(),
+        test_mode,
+        &cc_preapproval,
+        "CC TransferPreapproval",
+    )
+    .await;
+    let cc_pending = count(
+        &data.config,
+        party_id,
+        token.clone(),
+        test_mode,
+        &cc_proposal,
+        "CC TransferPreapprovalProposal",
+    )
+    .await;
+    let token_count = count(
+        &data.config,
+        party_id,
+        token,
+        test_mode,
+        &token_params,
+        "utility TransferPreapproval",
+    )
+    .await;
+
+    HttpResponse::Ok().json(TransferPreapprovalsResponse {
+        cc: cc_accepted + cc_pending,
+        token: token_count,
+    })
+}
+
+/// Get InstrumentConfiguration contracts for a party. Each one represents a
+/// token the governance party can mint/burn against; the response includes the
+/// `instrument_admin` and `instrument_id` parsed from the contract's
+/// `defaultIdentifier` so the frontend can populate Mint/Burn forms without
+/// reading the contract blob.
+#[utoipa::path(
+    tag = "Services",
+    params(GovernanceQuery),
+    responses(
+        (status = 200, description = "Available instruments", body = InstrumentsResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+#[get("/instruments")]
+pub async fn get_instruments_handler(
+    data: web::Data<AppState>,
+    query: web::Query<GovernanceQuery>,
+) -> impl Responder {
+    let party_id = &query.party_id;
+
+    let token = get_party_token(&data, party_id).await;
+    let test_mode = data.test_mode;
+
+    match get_instruments(&data.config, party_id, token, test_mode).await {
+        Ok(instruments) => HttpResponse::Ok().json(InstrumentsResponse { instruments }),
+        Err(e) => {
+            tracing::error!("Failed to fetch instruments: {e}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch instruments: {e}"),
             })
         }
     }
@@ -1214,9 +1358,8 @@ pub async fn get_packages() -> impl Responder {
 #[get("/network-info")]
 pub async fn get_network_info(data: web::Data<AppState>) -> impl Responder {
     let url = data.config.canton.network.dso_url();
-    let client = reqwest::Client::new();
 
-    match client.get(url).send().await {
+    match data.http_client.get(url).send().await {
         Ok(res) if res.status().is_success() => match res.json::<serde_json::Value>().await {
             Ok(json) => {
                 let dso_party = json.pointer("/dso_party_id").and_then(|v| v.as_str());
@@ -1264,6 +1407,52 @@ pub async fn get_network_info(data: web::Data<AppState>) -> impl Responder {
     }
 }
 
+/// Get DA Utility operator party ID
+#[utoipa::path(
+    tag = "Proxy",
+    responses(
+        (status = 200, description = "Operator info", body = OperatorInfo),
+        (status = 502, description = "Operator API error", body = ErrorResponse)
+    )
+)]
+#[get("/operator-info")]
+pub async fn get_operator_info(data: web::Data<AppState>) -> impl Responder {
+    let url = data.config.canton.network.operator_url();
+
+    match data.http_client.get(url).send().await {
+        Ok(res) if res.status().is_success() => match res.json::<serde_json::Value>().await {
+            Ok(json) => match json.pointer("/partyId").and_then(|v| v.as_str()) {
+                Some(party) => match party.parse::<CantonId>() {
+                    Ok(party_id) => HttpResponse::Ok().json(OperatorInfo { party_id }),
+                    Err(e) => HttpResponse::BadGateway().json(ErrorResponse {
+                        error: format!("Invalid operator party ID: {e}"),
+                    }),
+                },
+                None => {
+                    tracing::warn!("Unexpected operator API response format");
+                    HttpResponse::BadGateway().json(ErrorResponse {
+                        error: "Unexpected response format from operator API".to_string(),
+                    })
+                }
+            },
+            Err(e) => HttpResponse::BadGateway().json(ErrorResponse {
+                error: format!("Failed to parse operator response: {e}"),
+            }),
+        },
+        Ok(res) => {
+            let status = res.status();
+            let body = res.text().await.unwrap_or_default();
+            tracing::error!("Operator API returned {status}: {body}");
+            HttpResponse::BadGateway().json(ErrorResponse {
+                error: format!("Operator API returned {status}: {body}"),
+            })
+        }
+        Err(e) => HttpResponse::BadGateway().json(ErrorResponse {
+            error: format!("Failed to reach operator API: {e}"),
+        }),
+    }
+}
+
 /// Proxy request to fetch token standard contracts (avoids CORS)
 #[utoipa::path(
     tag = "Proxy",
@@ -1274,11 +1463,19 @@ pub async fn get_network_info(data: web::Data<AppState>) -> impl Responder {
     )
 )]
 #[post("/token-standard-contracts")]
-pub async fn get_token_standard_contracts(body: web::Json<serde_json::Value>) -> impl Responder {
-    let client = reqwest::Client::new();
+pub async fn get_token_standard_contracts(
+    data: web::Data<AppState>,
+    body: web::Json<serde_json::Value>,
+) -> impl Responder {
     let url = "https://devnet.dlc.link/peer-2/app/get-token-standard-contracts";
 
-    match client.post(url).json(&body.into_inner()).send().await {
+    match data
+        .http_client
+        .post(url)
+        .json(&body.into_inner())
+        .send()
+        .await
+    {
         Ok(res) => match res.json::<serde_json::Value>().await {
             Ok(json) => HttpResponse::Ok().json(json),
             Err(e) => HttpResponse::BadGateway().json(ErrorResponse {
@@ -1691,7 +1888,24 @@ async fn execute_expire_confirmation(
             )
         }
         GovernanceType::CoreDomain => {
-            anyhow::bail!("Core domain actions not yet supported for expire")
+            // Same `GovernanceRules` template as CoreSelf but a different choice:
+            // `GovernanceRules_ExpireConfirmation` operates on the
+            // `GovernanceConfirmation` template (domain action confirmations)
+            // rather than `GovernanceSelfConfirmation`. Same argument shape
+            // ({ member, staleConfirmationCid }) so the choice_argument above
+            // is reused as-is.
+            let pkg = packages
+                .governance_core
+                .as_deref()
+                .context("governance_core package not configured")?;
+            (
+                Identifier {
+                    package_id: pkg.to_string(),
+                    module_name: "Governance.Rules".to_string(),
+                    entity_name: "GovernanceRules".to_string(),
+                },
+                "GovernanceRules_ExpireConfirmation".to_string(),
+            )
         }
     };
 
@@ -1779,7 +1993,21 @@ async fn execute_cancel_confirmation(
             )
         }
         GovernanceType::CoreDomain => {
-            anyhow::bail!("Core domain actions not yet supported for cancel")
+            // Domain confirmations live in their own template
+            // `GovernanceConfirmation` (module `Governance.Confirmation`).
+            // The `Cancel` choice is controller=confirmer with no arguments.
+            let pkg = packages
+                .governance_core
+                .as_deref()
+                .context("governance_core package not configured")?;
+            (
+                Identifier {
+                    package_id: pkg.to_string(),
+                    module_name: "Governance.Confirmation".to_string(),
+                    entity_name: "GovernanceConfirmation".to_string(),
+                },
+                "GovernanceConfirmation_Cancel".to_string(),
+            )
         }
     };
 

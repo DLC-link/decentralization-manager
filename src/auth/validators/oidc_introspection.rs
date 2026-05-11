@@ -82,16 +82,14 @@ impl OidcIntrospectionValidator {
     pub fn new(
         inbound: Option<KeycloakConfig>,
         party_credentials: Arc<RwLock<Vec<PartyCredentials>>>,
+        http: reqwest::Client,
     ) -> Self {
         Self {
             inbound,
             party_credentials,
             token_cache: RwLock::new(HashMap::new()),
             discovery_cache: RwLock::new(HashMap::new()),
-            http: reqwest::Client::builder()
-                .timeout(Duration::from_secs(10))
-                .build()
-                .expect("reqwest client build"),
+            http,
         }
     }
 

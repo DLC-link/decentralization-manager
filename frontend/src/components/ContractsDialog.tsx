@@ -1181,6 +1181,12 @@ export const ContractsDialog = ({
   const [operatorParty, setOperatorParty] = useState(
     defaultOperatorParty || "",
   );
+  // Sync the autofetched operator party (from App.tsx) into local state once
+  // it arrives — without this, the field stays empty whenever the fetch
+  // completes after this component has already mounted with an empty default.
+  useEffect(() => {
+    if (defaultOperatorParty) setOperatorParty(defaultOperatorParty);
+  }, [defaultOperatorParty]);
   const [participantParties, setParticipantParties] = useState<string[]>([]);
   const [contracts, setContracts] = useState<ContractDefinition[]>([]);
 
