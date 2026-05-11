@@ -2402,17 +2402,23 @@ export const GovernanceSection = ({
 
           <Collapse in={showNewActionForm}>
             <Box
-              sx={{
-                mt: 2,
-                p: 2,
-                border: "1px solid",
-                borderColor: "divider",
-                borderRadius: 1,
-              }}
+              sx={
+                view === "actions"
+                  ? {}
+                  : {
+                      mt: 2,
+                      p: 2,
+                      border: "1px solid",
+                      borderColor: "divider",
+                      borderRadius: 1,
+                    }
+              }
             >
-              <Typography variant="subtitle2" sx={{ mb: 2 }}>
-                Create New Governance Action
-              </Typography>
+              {view !== "actions" && (
+                <Typography variant="subtitle2" sx={{ mb: 2 }}>
+                  Create New Governance Action
+                </Typography>
+              )}
 
               <FormControl fullWidth size="small" sx={{ mb: 2 }}>
                 <InputLabel>Action Type</InputLabel>
@@ -2485,7 +2491,7 @@ export const GovernanceSection = ({
 
       {/* Proposals — only for governance-core */}
       {showProposalsHalf && governanceType === "core_self" && data && (
-        <Box sx={{ mt: 2, mx: -2 }}>
+        <Box sx={view === "proposals" ? {} : { mt: 2, mx: -2 }}>
           {view !== "proposals" && (
             <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 1, px: 2 }}>
               <Typography variant="subtitle2">
@@ -2508,7 +2514,13 @@ export const GovernanceSection = ({
           )}
 
           <Collapse in={showProposalForm}>
-            <Box sx={{ display: "flex", flexDirection: "column", gap: 1.5, mb: 2, p: 2, mx: 2, border: 1, borderColor: "divider", borderRadius: 2 }}>
+            <Box
+              sx={
+                view === "proposals"
+                  ? { display: "flex", flexDirection: "column", gap: 1.5 }
+                  : { display: "flex", flexDirection: "column", gap: 1.5, mb: 2, p: 2, mx: 2, border: 1, borderColor: "divider", borderRadius: 2 }
+              }
+            >
               <FormControl size="small" fullWidth>
                 <Select
                   value={proposalType}
@@ -2551,6 +2563,8 @@ export const GovernanceSection = ({
                   </MenuItem>
                 </Select>
               </FormControl>
+
+              <Divider />
 
               {proposalType === "generic_vote" && (
                 <TextField size="small" label="Vote Description" value={proposalDescription} onChange={(e) => setProposalDescription(e.target.value)} fullWidth required multiline minRows={2} maxRows={6} helperText="Describe what the governance members are voting on" />
