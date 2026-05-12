@@ -1,11 +1,12 @@
 sdk-version: 3.4.11
-name: governance-core-v0-rc4
+name: governance-core-v0
 version: 0.1.0
 source: daml
 dependencies:
   - daml-prim
   - daml-stdlib
 data-dependencies:
+  - ../governance-action-v0/.daml/dist/governance-action-v0-0.1.0.dar
   - ../dars/splice-util-0.1.4.dar
 build-options:
   - --target=2.2
