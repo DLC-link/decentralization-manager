@@ -8,7 +8,7 @@ dependencies:
   - daml-script
 data-dependencies:
   - ../governance-utility-onboarding/.daml/dist/governance-utility-onboarding-v0-rc4-0.2.0.dar
-  - ../governance-core/.daml/dist/governance-core-v0-rc4-0.1.0.dar
+  - ../governance-core/.daml/dist/governance-core-v0-rc4-0.2.0.dar
   - ../dars/splice-api-featured-app-v1-1.0.0.dar
   - ../dars/splice-api-token-burn-mint-v1-1.0.0.dar
   - ../dars/splice-api-token-holding-v1-1.0.0.dar

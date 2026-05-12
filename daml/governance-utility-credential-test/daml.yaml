@@ -8,7 +8,7 @@ dependencies:
   - daml-script
 data-dependencies:
   - ../governance-utility-credential/.daml/dist/governance-utility-credential-v0-rc4-0.1.0.dar
-  - ../governance-core/.daml/dist/governance-core-v0-rc4-0.1.0.dar
+  - ../governance-core/.daml/dist/governance-core-v0-rc4-0.2.0.dar
   - ../dars/splice-util-0.1.4.dar
   - ../dars/testlib-0.1.0.dar
   - ../dars/utility-credential-app-v0-0.4.1.dar
