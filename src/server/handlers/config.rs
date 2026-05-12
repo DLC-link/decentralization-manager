@@ -1,4 +1,4 @@
-use actix_web::{HttpResponse, Responder, get, post, web};
+use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 use serde::Serialize;
 
 use sqlx::SqlitePool;
@@ -9,6 +9,7 @@ use crate::{
     error::Result,
     server::{
         AppState,
+        middleware::require_admin,
         types::{ErrorResponse, SuccessResponse},
     },
 };
@@ -45,9 +46,13 @@ pub async fn get_network_config(data: web::Data<AppState>) -> impl Responder {
 )]
 #[post("/network-config")]
 pub async fn save_network_config(
+    http_req: HttpRequest,
     data: web::Data<AppState>,
     body: web::Json<Vec<Peer>>,
 ) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
     let peers = body.into_inner();
 
     // Primary write: save to database

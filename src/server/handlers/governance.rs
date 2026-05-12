@@ -1,4 +1,4 @@
-use actix_web::{HttpResponse, Responder, get, post, web};
+use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 use anyhow::Context;
 use base64::Engine;
 use canton_proto_rs::com::{
@@ -26,6 +26,7 @@ use crate::{
         AppState, action_serializer,
         audit::{AuditEvent, AuditParams, spawn_audit_log},
         chain_audit,
+        middleware::require_admin,
         queries::{
             ContractQueryParams as QueryContractParams, get_governance_confirmations,
             get_governance_state as query_governance_state, get_instruments, get_provider_services,
@@ -735,9 +736,13 @@ pub async fn get_governance_chain_audit(
 )]
 #[post("/governance/propose")]
 pub async fn propose_action(
+    http_req: HttpRequest,
     data: web::Data<AppState>,
     body: web::Json<ProposeActionRequest>,
 ) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
     let party_id = &body.party_id;
     let (token, member_party_id) = match get_party_credentials(&data, party_id).await {
         Some(creds) => creds,
@@ -1019,9 +1024,13 @@ pub async fn propose_action(
 )]
 #[post("/governance/confirm")]
 pub async fn confirm_action(
+    http_req: HttpRequest,
     data: web::Data<AppState>,
     body: web::Json<ConfirmActionRequest>,
 ) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
     if let Err(msg) = body.action.validate() {
         return HttpResponse::BadRequest().json(ErrorResponse {
             error: msg.to_string(),
@@ -1103,9 +1112,13 @@ pub async fn confirm_action(
 )]
 #[post("/governance/execute")]
 pub async fn execute_action(
+    http_req: HttpRequest,
     data: web::Data<AppState>,
     body: web::Json<ExecuteActionRequest>,
 ) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
     if let Err(msg) = body.action.validate() {
         return HttpResponse::BadRequest().json(ErrorResponse {
             error: msg.to_string(),
@@ -1191,9 +1204,13 @@ pub async fn execute_action(
 )]
 #[post("/governance/expire")]
 pub async fn expire_confirmation(
+    http_req: HttpRequest,
     data: web::Data<AppState>,
     body: web::Json<ExpireConfirmationRequest>,
 ) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
     let party_id = &body.party_id;
 
     // Get token and credentials for this party
@@ -1464,9 +1481,13 @@ pub async fn get_operator_info(data: web::Data<AppState>) -> impl Responder {
 )]
 #[post("/token-standard-contracts")]
 pub async fn get_token_standard_contracts(
+    http_req: HttpRequest,
     data: web::Data<AppState>,
     body: web::Json<serde_json::Value>,
 ) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
     let url = "https://devnet.dlc.link/peer-2/app/get-token-standard-contracts";
 
     match data

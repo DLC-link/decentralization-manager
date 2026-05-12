@@ -495,10 +495,14 @@ async fn send_kick_invites(
 )]
 #[post("/onboarding")]
 pub async fn start_onboarding(
+    http_req: HttpRequest,
     data: web::Data<AppState>,
     onboarding_state: web::Data<Arc<OnboardingWorkflowState>>,
     body: web::Json<OnboardingRequest>,
 ) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
     // Check if an onboarding is already in progress
     {
         let status = onboarding_state.status.read().await;
@@ -993,10 +997,14 @@ async fn verify_peer_mesh(
 )]
 #[post("/contracts")]
 pub async fn start_contracts(
+    http_req: HttpRequest,
     data: web::Data<AppState>,
     contracts_state: web::Data<Arc<ContractsWorkflowState>>,
     body: web::Json<ContractsRequest>,
 ) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
     // Check if a contracts workflow is already in progress
     {
         let status = contracts_state.status.read().await;
@@ -1209,9 +1217,13 @@ pub async fn get_contracts_status(
 )]
 #[post("/dars/upload")]
 pub async fn upload_dars_local(
+    http_req: HttpRequest,
     data: web::Data<AppState>,
     body: web::Json<DarsRequest>,
 ) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
     match workflow::contracts::upload_dars(&data.config, &body.dar_files).await {
         Ok(()) => {
             tracing::info!(
@@ -1245,10 +1257,14 @@ pub async fn upload_dars_local(
 )]
 #[post("/dars/distribute")]
 pub async fn start_dars(
+    http_req: HttpRequest,
     data: web::Data<AppState>,
     dars_state: web::Data<Arc<DarsWorkflowState>>,
     body: web::Json<DarsRequest>,
 ) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
     if body.peer_ids.is_empty() {
         return HttpResponse::BadRequest().json(ErrorResponse {
             error: "peer_ids must contain at least one peer".to_string(),
