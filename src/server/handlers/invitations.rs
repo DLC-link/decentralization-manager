@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 
-use actix_web::{HttpResponse, Responder, get, post, web};
+use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 
 use crate::{
     db::schema::{Commitable, SchemaRead, SchemaWrite},
     server::{
         AppState,
+        middleware::require_admin,
         types::{
             ErrorResponse, InvitationActionRequest, InvitationType, MessageResponse,
             PendingInvitation, PendingInvitationsResponse, WorkflowKind, WorkflowProgress,
@@ -148,14 +149,20 @@ pub async fn get_invitations(data: web::Data<AppState>) -> impl Responder {
     request_body = InvitationActionRequest,
     responses(
         (status = 200, description = "Invitation accepted", body = MessageResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
         (status = 404, description = "Invitation not found", body = ErrorResponse)
     )
 )]
 #[post("/invitations/accept")]
 pub async fn accept_invitation(
+    http_req: HttpRequest,
     data: web::Data<AppState>,
     body: web::Json<InvitationActionRequest>,
 ) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
     let invitation = {
         let mut invitations = data.pending_invitations.write().await;
         let idx = invitations.iter().position(|i| i.id == body.id);
@@ -216,14 +223,20 @@ pub async fn accept_invitation(
     request_body = InvitationActionRequest,
     responses(
         (status = 200, description = "Invitation declined", body = MessageResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
         (status = 404, description = "Invitation not found", body = ErrorResponse)
     )
 )]
 #[post("/invitations/decline")]
 pub async fn decline_invitation(
+    http_req: HttpRequest,
     data: web::Data<AppState>,
     body: web::Json<InvitationActionRequest>,
 ) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
     let removed = {
         let mut invitations = data.pending_invitations.write().await;
         let idx = invitations.iter().position(|i| i.id == body.id);

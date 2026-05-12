@@ -282,7 +282,7 @@ mod tests {
 
     use std::{
         collections::{HashMap, HashSet},
-        sync::Arc,
+        sync::{Arc, atomic::AtomicBool},
     };
 
     use actix_web::{
@@ -298,7 +298,7 @@ mod tests {
     use crate::{
         auth::{JwtValidator, MockValidator, TokenValidator},
         config::{NodeConfig, PartyCredentials},
-        server::{AppState, ListenerControl},
+        server::AppState,
     };
 
     /// Stub handler for any path — returns 200 with the matched path so the
@@ -325,9 +325,7 @@ mod tests {
             db,
             config: NodeConfig::default(),
             peer_status: Arc::new(RwLock::new(HashMap::new())),
-            noise_listener_control: Arc::new(RwLock::new(ListenerControl {
-                should_pause: false,
-            })),
+            noise_listener_pause_flag: Arc::new(AtomicBool::new(false)),
             noise_listener_notify: Arc::new(Notify::new()),
             onboarding_trigger: Arc::new(Notify::new()),
             kick_trigger: Arc::new(Notify::new()),
@@ -341,6 +339,7 @@ mod tests {
             admin_role: Some("decman-admin".to_string()),
             party_credentials,
             bootstrap_mu: Arc::new(Mutex::new(())),
+            workflow_in_flight: Arc::new(AtomicBool::new(false)),
             test_mode: true,
             refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
             http_client: reqwest::Client::new(),
