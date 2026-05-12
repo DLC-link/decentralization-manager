@@ -13,15 +13,16 @@ use crate::common::{
 };
 
 const DAR_FILES: &[&str] = &[
-    "governance-core-v0-rc4-0.1.0.dar",
-    "governance-token-custody-v0-rc4-0.1.0.dar",
-    "governance-utility-onboarding-v0-rc4-0.2.0.dar",
+    "governance-action-v0-0.1.0.dar",
+    "governance-core-v0-0.1.0.dar",
+    "governance-token-custody-v0-0.1.0.dar",
+    "governance-utility-onboarding-v0-0.1.0.dar",
 ];
 
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     info!("Phase: distribute_dars");
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let dars_dir = Path::new(manifest_dir).join("releases/v0/rc4");
+    let dars_dir = Path::new(manifest_dir).join("releases/v0/release");
 
     let mut entries = Vec::with_capacity(DAR_FILES.len());
     for filename in DAR_FILES {

@@ -1,4 +1,5 @@
 packages:
+  - governance-action-v0
   - governance-core
   - governance-core-test
   - governance-token-custody
