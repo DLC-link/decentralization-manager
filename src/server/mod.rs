@@ -1482,8 +1482,14 @@ async fn handle_incoming_connection(
             let peer_keys = peer_keys.clone();
             let last_seen = last_seen.clone();
 
-            // peer_id is a participant_id string. The 33-byte raw-pubkey fallback
-            // was dead code — NoiseClient::send_message always sends participant_id.
+            // peer_id is whatever the Noise responder accepted — currently
+            // either a utf-8 `participant_id` (every dpm client sends this)
+            // or a 33-byte raw pubkey (still admitted by the responder above,
+            // tracked separately as out of scope). The removed branch in the
+            // older `peer_pubkey_hex` chain was dead code for the latter case;
+            // we conservatively derive `peer_id_str`/`peer_pubkey_hex` and
+            // bump `last_seen` only when peer_id parses as utf-8 AND is a
+            // known peer in `peer_keys`.
             let peer_id_str = std::str::from_utf8(peer_id).ok().map(str::to_owned);
             let peer_pubkey_hex = peer_id_str
                 .as_deref()
