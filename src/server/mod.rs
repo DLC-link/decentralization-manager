@@ -1376,6 +1376,7 @@ async fn run_heartbeat(
     let listener_control_spawn = listener_control.clone();
     let listener_notify_spawn = listener_notify.clone();
     let keypair_spawn = keypair.clone();
+    let last_seen_spawn = last_seen.clone();
     let peer_keys_spawn = peer_keys.clone();
     let triggers_spawn = triggers.clone();
 
@@ -1404,11 +1405,12 @@ async fn run_heartbeat(
                             result = listener.accept() => {
                                 if let Ok((socket, peer_addr)) = result {
                                     let keypair = keypair_spawn.clone();
+                                    let last_seen = last_seen_spawn.clone();
                                     let peer_keys = peer_keys_spawn.clone();
                                     let triggers = triggers_spawn.clone();
 
                                     tokio::spawn(async move {
-                                        handle_incoming_connection(socket, peer_addr, keypair, peer_keys, triggers).await;
+                                        handle_incoming_connection(socket, peer_addr, keypair, peer_keys, triggers, last_seen).await;
                                     });
                                 }
                             }
@@ -1448,6 +1450,7 @@ async fn handle_incoming_connection(
     keypair: Arc<NoiseKeypair>,
     peer_keys: Arc<HashMap<String, secp256k1::PublicKey>>,
     triggers: WorkflowTriggers,
+    last_seen: LastSeen,
 ) {
     let secret_key = keypair.secret_key;
     let peer_keys_clone = peer_keys.clone();
@@ -1477,19 +1480,25 @@ async fn handle_incoming_connection(
             let triggers = triggers.clone();
             let our_pubkey = our_public_key_hex.clone();
             let peer_keys = peer_keys.clone();
-            // Convert peer_id to hex public key for storage
-            // peer_id can be either raw 33-byte public key or participant_id string
-            let peer_pubkey_hex = if peer_id.len() == 33 {
-                Some(hex::encode(peer_id))
-            } else if let Ok(peer_id_str) = std::str::from_utf8(peer_id) {
-                // Look up public key by participant_id
-                peer_keys
-                    .get(peer_id_str)
-                    .map(|pk| hex::encode(pk.serialize()))
-            } else {
-                None
-            };
+            let last_seen = last_seen.clone();
+
+            // peer_id is a participant_id string. The 33-byte raw-pubkey fallback
+            // was dead code — NoiseClient::send_message always sends participant_id.
+            let peer_id_str = std::str::from_utf8(peer_id).ok().map(str::to_owned);
+            let peer_pubkey_hex = peer_id_str
+                .as_deref()
+                .and_then(|id| peer_keys.get(id).map(|pk| hex::encode(pk.serialize())));
+
             async move {
+                // Bump last_seen for known peers.
+                if let Some(id) = peer_id_str.as_deref()
+                    && peer_keys.contains_key(id)
+                {
+                    let now = std::time::Instant::now();
+                    let mut map = last_seen.write().await;
+                    peer_status::bump(&mut map, id.to_string(), now);
+                }
+
                 let body_bytes = hyper::body::to_bytes(req.into_body()).await?;
 
                 if body_bytes.len() < 6 {
