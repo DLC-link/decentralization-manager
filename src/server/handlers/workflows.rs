@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    sync::Arc,
+    sync::{Arc, atomic::Ordering},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -1655,7 +1655,7 @@ async fn cancel_workflow_state(
     handle.abort();
 
     data.noise_listener_pause_flag
-        .store(false, std::sync::atomic::Ordering::Release);
+        .store(false, Ordering::Release);
     data.noise_listener_notify.notify_one();
 
     let invitees = state.invited_peers.read().await.clone();

@@ -9,7 +9,10 @@ mod types;
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -70,7 +73,7 @@ pub struct AppState {
     pub db: SqlitePool,
     pub config: NodeConfig,
     pub peer_status: Arc<RwLock<HashMap<String, bool>>>,
-    pub noise_listener_pause_flag: Arc<std::sync::atomic::AtomicBool>,
+    pub noise_listener_pause_flag: Arc<AtomicBool>,
     pub noise_listener_notify: Arc<Notify>,
     pub onboarding_trigger: Arc<Notify>,
     pub kick_trigger: Arc<Notify>,
@@ -101,7 +104,7 @@ pub struct AppState {
     /// / dars is in flight. `start_*` handlers `try_acquire` the
     /// `WorkflowInFlightGuard` before spawning; the guard rides along inside
     /// the spawned task and drops when the task ends.
-    pub workflow_in_flight: Arc<std::sync::atomic::AtomicBool>,
+    pub workflow_in_flight: Arc<AtomicBool>,
     /// Whether the server is running in test mode
     pub test_mode: bool,
     /// Prefixes currently being refreshed from Canton (deduplication)
@@ -179,7 +182,7 @@ async fn recover_in_progress_workflows(
     onboarding_state: web::Data<Arc<handlers::OnboardingWorkflowState>>,
     contracts_state: web::Data<Arc<handlers::ContractsWorkflowState>>,
     dars_state: web::Data<Arc<handlers::DarsWorkflowState>>,
-    listener_control: Arc<std::sync::atomic::AtomicBool>,
+    listener_control: Arc<AtomicBool>,
     listener_notify: Arc<Notify>,
     auth: Arc<RwLock<Option<WorkflowAuth>>>,
     onboarding_trigger: Arc<Notify>,
@@ -250,7 +253,7 @@ pub(crate) async fn respawn_coordinator(
     onboarding_state: web::Data<Arc<handlers::OnboardingWorkflowState>>,
     contracts_state: web::Data<Arc<handlers::ContractsWorkflowState>>,
     dars_state: web::Data<Arc<handlers::DarsWorkflowState>>,
-    listener_control: Arc<std::sync::atomic::AtomicBool>,
+    listener_control: Arc<AtomicBool>,
     listener_notify: Arc<Notify>,
     auth: Arc<RwLock<Option<WorkflowAuth>>>,
 ) {
@@ -393,7 +396,7 @@ async fn spawn_onboarding_resume(
     onboarding_config: workflow::OnboardingConfig,
     instance: String,
     state: Arc<HttpWorkflowState<OnboardingStatus>>,
-    listener_control: Arc<std::sync::atomic::AtomicBool>,
+    listener_control: Arc<AtomicBool>,
     listener_notify: Arc<Notify>,
 ) {
     let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
@@ -443,7 +446,7 @@ async fn spawn_kick_resume(
     kick_config: workflow::KickConfig,
     instance: String,
     state: Arc<HttpWorkflowState<KickStatus>>,
-    listener_control: Arc<std::sync::atomic::AtomicBool>,
+    listener_control: Arc<AtomicBool>,
     listener_notify: Arc<Notify>,
 ) {
     let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
@@ -490,7 +493,7 @@ async fn spawn_contracts_resume(
     contracts_config: workflow::ContractsConfig,
     instance: String,
     state: Arc<HttpWorkflowState<WorkflowProgress>>,
-    listener_control: Arc<std::sync::atomic::AtomicBool>,
+    listener_control: Arc<AtomicBool>,
     listener_notify: Arc<Notify>,
     auth: Option<WorkflowAuth>,
 ) {
@@ -537,7 +540,7 @@ async fn spawn_dars_resume(
     dars_config: workflow::DarsConfig,
     instance: String,
     state: Arc<HttpWorkflowState<WorkflowProgress>>,
-    listener_control: Arc<std::sync::atomic::AtomicBool>,
+    listener_control: Arc<AtomicBool>,
     listener_notify: Arc<Notify>,
 ) {
     let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
@@ -958,7 +961,7 @@ pub async fn start_server(
     };
 
     let peer_status = Arc::new(RwLock::new(HashMap::new()));
-    let listener_control = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let listener_control = Arc::new(AtomicBool::new(false));
     let listener_notify = Arc::new(Notify::new());
     let onboarding_trigger = Arc::new(Notify::new());
     let kick_trigger = Arc::new(Notify::new());
@@ -996,7 +999,7 @@ pub async fn start_server(
         admin_role,
         party_credentials: party_credentials.clone(),
         bootstrap_mu: Arc::new(Mutex::new(())),
-        workflow_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        workflow_in_flight: Arc::new(AtomicBool::new(false)),
         test_mode,
         refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
         http_client,
@@ -1305,7 +1308,7 @@ async fn run_heartbeat(
     config: NodeConfig,
     db: SqlitePool,
     peer_status: Arc<RwLock<HashMap<String, bool>>>,
-    listener_control: Arc<std::sync::atomic::AtomicBool>,
+    listener_control: Arc<AtomicBool>,
     listener_notify: Arc<Notify>,
     triggers: WorkflowTriggers,
 ) {
@@ -1357,7 +1360,7 @@ async fn run_heartbeat(
     tokio::spawn(async move {
         loop {
             // Wait for permission to bind
-            let should_pause = listener_control_spawn.load(std::sync::atomic::Ordering::Acquire);
+            let should_pause = listener_control_spawn.load(Ordering::Acquire);
 
             if should_pause {
                 tracing::info!("Noise listener paused for workflow");
@@ -1388,7 +1391,7 @@ async fn run_heartbeat(
                                 loop {
                                     tokio::time::sleep(Duration::from_millis(100)).await;
                                     if listener_control_spawn
-                                        .load(std::sync::atomic::Ordering::Acquire)
+                                        .load(Ordering::Acquire)
                                     {
                                         break;
                                     }
@@ -1934,7 +1937,7 @@ async fn finalize_peer_run(
 async fn run_onboarding_peer_listener(
     config: NodeConfig,
     db: SqlitePool,
-    listener_control: Arc<std::sync::atomic::AtomicBool>,
+    listener_control: Arc<AtomicBool>,
     listener_notify: Arc<Notify>,
     onboarding_state: web::Data<Arc<handlers::OnboardingWorkflowState>>,
     onboarding_trigger: Arc<Notify>,
@@ -2041,7 +2044,7 @@ async fn run_onboarding_peer_listener(
 async fn run_kick_peer_listener(
     config: NodeConfig,
     db: SqlitePool,
-    listener_control: Arc<std::sync::atomic::AtomicBool>,
+    listener_control: Arc<AtomicBool>,
     listener_notify: Arc<Notify>,
     kick_state: web::Data<Arc<handlers::KickWorkflowState>>,
     kick_trigger: Arc<Notify>,
@@ -2147,7 +2150,7 @@ async fn run_kick_peer_listener(
 async fn run_contracts_peer_listener(
     config: NodeConfig,
     db: SqlitePool,
-    listener_control: Arc<std::sync::atomic::AtomicBool>,
+    listener_control: Arc<AtomicBool>,
     listener_notify: Arc<Notify>,
     contracts_state: web::Data<Arc<handlers::ContractsWorkflowState>>,
     contracts_trigger: Arc<Notify>,
@@ -2253,7 +2256,7 @@ async fn run_contracts_peer_listener(
 async fn run_dars_peer_listener(
     config: NodeConfig,
     db: SqlitePool,
-    listener_control: Arc<std::sync::atomic::AtomicBool>,
+    listener_control: Arc<AtomicBool>,
     listener_notify: Arc<Notify>,
     dars_state: web::Data<Arc<handlers::DarsWorkflowState>>,
     dars_trigger: Arc<Notify>,
