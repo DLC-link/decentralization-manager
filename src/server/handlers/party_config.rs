@@ -119,24 +119,67 @@ pub async fn save_party_config(
         return resp;
     }
 
-    let keycloak = KeycloakConfig {
-        url: req.keycloak_url,
-        realm: req.keycloak_realm,
-        client_id: req.keycloak_client_id,
-        client_secret: merge_optional_secret(
-            req.keycloak_client_secret,
-            existing_keycloak
-                .as_ref()
-                .and_then(|k| k.client_secret.clone()),
-        ),
-        username: merge_optional_secret(
-            req.keycloak_username,
-            existing_keycloak.as_ref().and_then(|k| k.username.clone()),
-        ),
-        password: merge_optional_secret(
-            req.keycloak_password,
-            existing_keycloak.as_ref().and_then(|k| k.password.clone()),
-        ),
+    // When the token-endpoint URL changes, never carry the existing
+    // credentials forward — otherwise a redirected `keycloak_url` would
+    // cause `reload_auth()` to POST the real client_secret (and any stored
+    // username/password) to the attacker-controlled host. Require the
+    // request to carry a fresh credential set in the same payload; if none
+    // is supplied, reject before persisting anything.
+    let url_changed = existing_keycloak
+        .as_ref()
+        .is_some_and(|e| e.url != req.keycloak_url);
+    let new_secret_is_present = req
+        .keycloak_client_secret
+        .as_deref()
+        .is_some_and(|s| !s.is_empty());
+    let new_password_pair_is_present = req
+        .keycloak_username
+        .as_deref()
+        .is_some_and(|s| !s.is_empty())
+        && req
+            .keycloak_password
+            .as_deref()
+            .is_some_and(|s| !s.is_empty());
+    if url_changed && !new_secret_is_present && !new_password_pair_is_present {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: "keycloak_url changed; resubmit with a fresh keycloak_client_secret \
+                    (or keycloak_username + keycloak_password) in the same request"
+                .to_string(),
+        });
+    }
+
+    let keycloak = if url_changed {
+        // Fresh URL → fresh credentials only. Treat any omitted field as
+        // "not set on the new IdP" rather than "carry forward". An empty
+        // string still means "clear" via `filter`.
+        KeycloakConfig {
+            url: req.keycloak_url,
+            realm: req.keycloak_realm,
+            client_id: req.keycloak_client_id,
+            client_secret: req.keycloak_client_secret.filter(|s| !s.is_empty()),
+            username: req.keycloak_username.filter(|s| !s.is_empty()),
+            password: req.keycloak_password.filter(|s| !s.is_empty()),
+        }
+    } else {
+        KeycloakConfig {
+            url: req.keycloak_url,
+            realm: req.keycloak_realm,
+            client_id: req.keycloak_client_id,
+            client_secret: merge_optional_secret(
+                req.keycloak_client_secret,
+                existing_keycloak
+                    .as_ref()
+                    .and_then(|k| k.client_secret.clone()),
+            ),
+            username: merge_optional_secret(
+                req.keycloak_username,
+                existing_keycloak.as_ref().and_then(|k| k.username.clone()),
+            ),
+            password: merge_optional_secret(
+                req.keycloak_password,
+                existing_keycloak.as_ref().and_then(|k| k.password.clone()),
+            ),
+        }
     };
 
     let creds = PartyCredentials {
@@ -355,11 +398,12 @@ mod tests {
     use sqlx::SqlitePool;
     use tokio::sync::{Mutex, Notify, RwLock};
 
-    use super::discover_member_party;
+    use super::{discover_member_party, save_party_config};
     use crate::{
         auth::{MockAuthRegistry, MockValidator, TokenValidator, WorkflowAuth},
-        config::NodeConfig,
-        server::{AppState, ListenerControl},
+        config::{KeycloakConfig, NodeConfig, PartyCredentials, default_package_config},
+        participant_id::CantonId,
+        server::{AppState, ListenerControl, middleware::AuthMiddleware},
     };
 
     /// `discover_member_party` is admin-gated. Drive the handler without the
@@ -415,5 +459,88 @@ mod tests {
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// Guards bullet #2 of the audit finding: an admin who changes
+    /// `keycloak_url` without supplying a fresh `keycloak_client_secret`
+    /// must get a 400 — otherwise `merge_optional_secret` would forward
+    /// the existing real secret to the new (potentially attacker-controlled)
+    /// host on the next token mint. State is pre-populated with one party so
+    /// the bootstrap exemption does not apply; the request is admin-authed
+    /// via `AuthMiddleware` + `MockValidator`.
+    #[actix_web::test]
+    async fn save_party_config_rejects_url_change_without_fresh_secret() {
+        let db = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
+        let existing_dec = CantonId::parse(&format!("dec-party::{ns}")).expect("parse dec party");
+        let existing_member =
+            CantonId::parse(&format!("member-party::{ns}")).expect("parse member party");
+        let existing = PartyCredentials {
+            dec_party_id: existing_dec.clone(),
+            member_party_id: existing_member.clone(),
+            user_id: "test-user".to_string(),
+            keycloak: KeycloakConfig {
+                url: "https://original-keycloak.example.com".to_string(),
+                realm: "test-realm".to_string(),
+                client_id: "test-client".to_string(),
+                client_secret: Some("super-secret".to_string()),
+                username: None,
+                password: None,
+            },
+            packages: default_package_config(),
+        };
+        let party_credentials = Arc::new(RwLock::new(vec![existing]));
+        let state = Data::new(AppState {
+            db,
+            config: NodeConfig::default(),
+            peer_status: Arc::new(RwLock::new(HashMap::new())),
+            noise_listener_control: Arc::new(RwLock::new(ListenerControl {
+                should_pause: false,
+            })),
+            noise_listener_notify: Arc::new(Notify::new()),
+            onboarding_trigger: Arc::new(Notify::new()),
+            kick_trigger: Arc::new(Notify::new()),
+            contracts_trigger: Arc::new(Notify::new()),
+            dars_trigger: Arc::new(Notify::new()),
+            coordinator_pubkey: Arc::new(RwLock::new(None)),
+            peer_run_instance: Arc::new(RwLock::new(None)),
+            pending_invitations: Arc::new(RwLock::new(Vec::new())),
+            auth: Arc::new(RwLock::new(Some(WorkflowAuth::Mock(Arc::new(
+                MockAuthRegistry::new(party_credentials.clone()),
+            ))))),
+            token_validator: TokenValidator::Mock(Arc::new(MockValidator::new(
+                "decman-admin".to_string(),
+            ))),
+            admin_role: Some("decman-admin".to_string()),
+            party_credentials,
+            bootstrap_mu: Arc::new(Mutex::new(())),
+            test_mode: true,
+            refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
+            http_client: reqwest::Client::new(),
+        });
+        let app = test::init_service(
+            App::new()
+                .app_data(state)
+                .wrap(AuthMiddleware)
+                .service(save_party_config),
+        )
+        .await;
+        let req = TestRequest::put()
+            .uri("/party-config")
+            .insert_header(("Authorization", "Bearer any.thing.here"))
+            .set_json(json!({
+                "dec_party_id": existing_dec.to_string(),
+                "member_party_id": existing_member.to_string(),
+                "user_id": "test-user",
+                "keycloak_url": "https://attacker-host.example.com",
+                "keycloak_realm": "test-realm",
+                "keycloak_client_id": "test-client",
+                // keycloak_client_secret intentionally omitted
+            }))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 }
