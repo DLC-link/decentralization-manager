@@ -231,3 +231,81 @@ testRemoveAdditionalProposer = script do
   Set.size aps === 0
   assertMsg "additionalProposers should normalize to None when empty"
     (rules.additionalProposers == None)
+
+-- | An `additionalProposer` may seed a `GovernanceSelfConfirmation` to put
+-- a self-action proposal on the ledger for members to observe. The marker
+-- coexists with member votes and is filtered out at execute time so it does
+-- not count toward the threshold.
+testAdditionalProposerSeedsSelfAction = script do
+  parties <- allocateTestParties
+
+  rulesCid <- submit parties.governanceParty $ createCmd GovernanceRules with
+    governanceParty = parties.governanceParty
+    members = getMembers parties
+    threshold = 2
+    actionConfirmationTimeout = minutes 30
+    additionalProposers = Some (Set.singleton parties.outsider)
+
+  let action = SelfAction_SetThreshold with updatedThreshold = 3
+
+  seed <- submit (memberContext parties.outsider parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ConfirmGovernanceAction with
+      confirmer = parties.outsider
+      action
+
+  memberConfirmations <- submitSelfConfirmations parties.governanceParty rulesCid action
+    [parties.member1, parties.member2]
+
+  _ <- submit (memberContext parties.member1 parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ExecuteGovernanceAction with
+      executor = parties.member1
+      action
+      confirmations = seed.confirmationCid :: memberConfirmations
+
+  [(_, rules)] <- query @GovernanceRules parties.governanceParty
+  rules.threshold === 3
+
+-- | An `additionalProposer` marker on its own (no member votes) is not enough
+-- to execute — only member confirmations count toward threshold.
+testAdditionalProposerAloneCannotExecute = script do
+  parties <- allocateTestParties
+
+  rulesCid <- submit parties.governanceParty $ createCmd GovernanceRules with
+    governanceParty = parties.governanceParty
+    members = getMembers parties
+    threshold = 2
+    actionConfirmationTimeout = minutes 30
+    additionalProposers = Some (Set.singleton parties.outsider)
+
+  let action = SelfAction_SetThreshold with updatedThreshold = 3
+
+  seed <- submit (memberContext parties.outsider parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ConfirmGovernanceAction with
+      confirmer = parties.outsider
+      action
+
+  submitMustFail (memberContext parties.member1 parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ExecuteGovernanceAction with
+      executor = parties.member1
+      action
+      confirmations = [seed.confirmationCid]
+
+-- | A party that is neither a member nor an `additionalProposer` still
+-- cannot confirm — the relaxation only widens the gate to the allowlist.
+testStrangerCannotConfirmSelfAction = script do
+  parties <- allocateTestParties
+  somePropParty <- allocateParty "AllowedProposer"
+
+  rulesCid <- submit parties.governanceParty $ createCmd GovernanceRules with
+    governanceParty = parties.governanceParty
+    members = getMembers parties
+    threshold = 2
+    actionConfirmationTimeout = minutes 30
+    additionalProposers = Some (Set.singleton somePropParty)
+
+  let action = SelfAction_SetThreshold with updatedThreshold = 3
+
+  submitMustFail (memberContext parties.outsider parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ConfirmGovernanceAction with
+      confirmer = parties.outsider
+      action
