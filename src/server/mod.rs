@@ -97,6 +97,11 @@ pub struct AppState {
     /// exemption and overwrite each other. Held by the auth middleware for
     /// the lifetime of a bootstrap request.
     pub bootstrap_mu: Arc<Mutex<()>>,
+    /// Cross-workflow mutex: set while any of kick / onboarding / contracts
+    /// / dars is in flight. `start_*` handlers `try_acquire` the
+    /// `WorkflowInFlightGuard` before spawning; the guard rides along inside
+    /// the spawned task and drops when the task ends.
+    pub workflow_in_flight: Arc<std::sync::atomic::AtomicBool>,
     /// Whether the server is running in test mode
     pub test_mode: bool,
     /// Prefixes currently being refreshed from Canton (deduplication)
@@ -994,6 +999,7 @@ pub async fn start_server(
         admin_role,
         party_credentials: party_credentials.clone(),
         bootstrap_mu: Arc::new(Mutex::new(())),
+        workflow_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         test_mode,
         refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
         http_client,

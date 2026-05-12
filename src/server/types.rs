@@ -1,4 +1,11 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use canton_common::decimal::DamlDecimal;
 use canton_proto_rs::com::digitalasset::canton::protocol::v30::enums::ParticipantPermission;
@@ -77,6 +84,37 @@ impl ListenerPauseGuard {
             control.should_pause = false;
         }
         self.listener_notify.notify_one();
+    }
+}
+
+/// Cross-workflow mutual exclusion.
+///
+/// At most one workflow (kick / onboarding / contracts / dars) may run at
+/// a time. Each `start_*` handler must `try_acquire` this gate before
+/// spawning its coordinator task, then move the returned guard into the
+/// spawned task's async block. The guard drops at the end of the task
+/// — on success, failure, cancellation, OR panic — so the gate cannot
+/// leak past a workflow's lifetime.
+///
+/// This replaces the previous read-then-write TOCTOU on each per-workflow
+/// status `RwLock`: two concurrent `start_kick` calls would both observe
+/// `status != InProgress` and both proceed; with this gate, the second
+/// `try_acquire` fails and the second caller gets a 409.
+pub struct WorkflowInFlightGuard(Arc<AtomicBool>);
+
+impl WorkflowInFlightGuard {
+    /// Returns `Some(guard)` if the gate was free and is now held; `None`
+    /// if another workflow already holds it.
+    pub fn try_acquire(flag: Arc<AtomicBool>) -> Option<Self> {
+        flag.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| Self(flag))
+    }
+}
+
+impl Drop for WorkflowInFlightGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
     }
 }
 

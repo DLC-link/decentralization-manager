@@ -25,9 +25,9 @@ use crate::{
             ContractsRequest, DarsInvitePayload, DarsRequest, ErrorResponse, HttpWorkflowState,
             KickRequest, KickResponse, KickStatus, ListenerPauseGuard, MessageResponse,
             MissingEdgeKind, MissingPeerEdge, OnboardingInvitePayload, OnboardingMeshErrorResponse,
-            OnboardingRequest, OnboardingResponse, OnboardingStatus, SuccessResponse, WorkflowKind,
-            WorkflowProgress, WorkflowResponse, WorkflowRole, WorkflowRun, WorkflowRunsResponse,
-            WorkflowStatusResponse,
+            OnboardingRequest, OnboardingResponse, OnboardingStatus, SuccessResponse,
+            WorkflowInFlightGuard, WorkflowKind, WorkflowProgress, WorkflowResponse, WorkflowRole,
+            WorkflowRun, WorkflowRunsResponse, WorkflowStatusResponse,
         },
     },
     workflow::{self, ContractsStep, DarsStep, KickStep, OnboardingStep, state::WorkflowStep},
@@ -162,6 +162,23 @@ pub async fn start_kick(
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
     }
+
+    // Cross-workflow mutex: at most one of kick / onboarding / contracts /
+    // dars in flight at a time. The atomic compare-and-swap closes the
+    // start-handler TOCTOU and prevents two workflows from sharing a
+    // `ListenerPauseGuard`. The guard moves into the spawned task below and
+    // drops when the task ends (success, failure, abort, or panic), so the
+    // gate cannot leak.
+    let workflow_guard = match WorkflowInFlightGuard::try_acquire(data.workflow_in_flight.clone()) {
+        Some(g) => g,
+        None => {
+            return HttpResponse::Conflict().json(ErrorResponse {
+                error: "Another workflow is already running; \
+                        wait for it to complete or cancel it first"
+                    .to_string(),
+            });
+        }
+    };
 
     tracing::info!(
         "Kick request received: party={}, participant_to_kick={}, threshold={}",
@@ -310,6 +327,7 @@ pub async fn start_kick(
     let mut error_guard = kick_state.error.write().await;
 
     let join_handle = tokio::spawn(async move {
+        let _workflow_guard = workflow_guard; // dropped at end → releases cross-workflow gate
         let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
 
         // Send kick invites to all peers before starting coordinator workflow
@@ -528,7 +546,20 @@ pub async fn start_onboarding(
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
     }
-    // Check if an onboarding is already in progress
+
+    // Cross-workflow mutex (see `start_kick` for rationale).
+    let workflow_guard = match WorkflowInFlightGuard::try_acquire(data.workflow_in_flight.clone()) {
+        Some(g) => g,
+        None => {
+            return HttpResponse::Conflict().json(ErrorResponse {
+                error: "Another workflow is already running; \
+                        wait for it to complete or cancel it first"
+                    .to_string(),
+            });
+        }
+    };
+    // Belt-and-suspenders: keep the per-workflow status check so /onboarding/status
+    // gives a precise reason when polled mid-start.
     {
         let status = onboarding_state.status.read().await;
         if *status == OnboardingStatus::InProgress {
@@ -630,6 +661,7 @@ pub async fn start_onboarding(
     let mut error_guard = onboarding_state.error.write().await;
 
     let join_handle = tokio::spawn(async move {
+        let _workflow_guard = workflow_guard; // releases cross-workflow gate on drop
         let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
 
         // Send invites to selected peers before starting coordinator workflow
@@ -1030,7 +1062,20 @@ pub async fn start_contracts(
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
     }
-    // Check if a contracts workflow is already in progress
+
+    // Cross-workflow mutex (see `start_kick` for rationale).
+    let workflow_guard = match WorkflowInFlightGuard::try_acquire(data.workflow_in_flight.clone()) {
+        Some(g) => g,
+        None => {
+            return HttpResponse::Conflict().json(ErrorResponse {
+                error: "Another workflow is already running; \
+                        wait for it to complete or cancel it first"
+                    .to_string(),
+            });
+        }
+    };
+    // Belt-and-suspenders: keep the per-workflow status check so /contracts/status
+    // gives a precise reason when polled mid-start.
     {
         let status = contracts_state.status.read().await;
         if *status == WorkflowProgress::InProgress {
@@ -1106,6 +1151,7 @@ pub async fn start_contracts(
     let mut error_guard = contracts_state.error.write().await;
 
     let join_handle = tokio::spawn(async move {
+        let _workflow_guard = workflow_guard; // releases cross-workflow gate on drop
         let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
 
         // Send invites to all peers before starting coordinator workflow
@@ -1296,7 +1342,19 @@ pub async fn start_dars(
         });
     }
 
-    // Check if a DARs workflow is already in progress
+    // Cross-workflow mutex (see `start_kick` for rationale).
+    let workflow_guard = match WorkflowInFlightGuard::try_acquire(data.workflow_in_flight.clone()) {
+        Some(g) => g,
+        None => {
+            return HttpResponse::Conflict().json(ErrorResponse {
+                error: "Another workflow is already running; \
+                        wait for it to complete or cancel it first"
+                    .to_string(),
+            });
+        }
+    };
+    // Belt-and-suspenders: keep the per-workflow status check so /dars/status
+    // gives a precise reason when polled mid-start.
     {
         let status = dars_state.status.read().await;
         if *status == WorkflowProgress::InProgress {
@@ -1359,6 +1417,7 @@ pub async fn start_dars(
     let mut error_guard = dars_state.error.write().await;
 
     let join_handle = tokio::spawn(async move {
+        let _workflow_guard = workflow_guard; // releases cross-workflow gate on drop
         let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
 
         // Send invites to selected peers before starting coordinator workflow
