@@ -7,6 +7,7 @@ use crate::{
     config::{NetworkConfig, NodeConfig},
     error::Result,
     noise::server::NoiseServer,
+    server::peer_status::LastSeen,
     utils,
     workflow::{
         COORDINATOR_STEP_STALENESS_THRESHOLD, StepStalenessWatchdog,
@@ -24,7 +25,7 @@ pub async fn start_coordinator(
     network_config: NetworkConfig,
     kick_config: KickConfig,
     db: sqlx::SqlitePool,
-    last_seen: crate::server::peer_status::LastSeen,
+    last_seen: LastSeen,
 ) -> Result {
     tracing::info!("Initializing Noise server...");
 

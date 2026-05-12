@@ -8,6 +8,7 @@ use crate::{
     error::Result,
     noise::server::NoiseServer,
     participant_id::CantonId,
+    server::peer_status::LastSeen,
     utils,
     workflow::{
         state::WorkflowState,
@@ -99,7 +100,7 @@ pub async fn start_coordinator(
     network_config: NetworkConfig,
     onboarding_config: OnboardingConfig,
     db: SqlitePool,
-    last_seen: crate::server::peer_status::LastSeen,
+    last_seen: LastSeen,
 ) -> Result<CantonId> {
     tracing::info!("Initializing Noise server...");
 

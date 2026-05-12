@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     marker::PhantomData,
     sync::Arc,
+    time::Instant,
 };
 
 use hyper::{Body, Request, Response, StatusCode};
@@ -18,7 +19,10 @@ use crate::{
         NoiseKeypair, parse_public_key,
     },
     participant_id::CantonId,
-    server::WorkflowProgress,
+    server::{
+        WorkflowProgress,
+        peer_status::{LastSeen, bump},
+    },
     workflow::{WorkflowState, state::WorkflowStep},
 };
 
@@ -39,7 +43,7 @@ pub struct NoiseServer<S: WorkflowStep + 'static> {
     keypair: Arc<NoiseKeypair>,
     peer_keys: HashMap<String, PublicKey>,
     workflow_state: Arc<WorkflowState<S>>,
-    last_seen: crate::server::peer_status::LastSeen,
+    last_seen: LastSeen,
     _p: PhantomData<S>,
 }
 
@@ -63,7 +67,7 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         instance_name: String,
         initial_step: S,
         exclude_participants: Option<Vec<String>>,
-        last_seen: crate::server::peer_status::LastSeen,
+        last_seen: LastSeen,
     ) -> Result<Self, NoiseError> {
         let keypair = NoiseKeypair::from_file(&node_config.key_file_path()).await?;
 
@@ -248,9 +252,9 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         tracing::debug!("Received request from peer: {peer_id}");
 
         {
-            let now = std::time::Instant::now();
+            let now = Instant::now();
             let mut map = self.last_seen.write().await;
-            crate::server::peer_status::bump(&mut map, peer_id.clone(), now);
+            bump(&mut map, peer_id.clone(), now);
         }
 
         // The Noise handshake delivers the peer's identity as a string of the

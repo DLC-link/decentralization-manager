@@ -25,7 +25,7 @@ use crate::{
     error::Result,
     noise::{MessageType, client::NoiseClient, server::NoiseServer},
     participant_id::CantonId,
-    server::WorkflowKind,
+    server::{WorkflowKind, peer_status::LastSeen},
     utils,
     workflow::{
         state::WorkflowStep,
@@ -65,7 +65,7 @@ pub async fn start_coordinator(
     contracts_config: Option<ContractsConfig>,
     dars_config: Option<DarsConfig>,
     workflow_auth: Option<WorkflowAuth>,
-    last_seen: crate::server::peer_status::LastSeen,
+    last_seen: LastSeen,
 ) -> Result<CoordinatorResult> {
     tracing::info!("Loading peers from database...");
     let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);

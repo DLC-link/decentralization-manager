@@ -1902,10 +1902,11 @@ async fn run_peer_ping_loop(
             }
         };
 
-        let our_id = config.participant_id().to_string();
+        let our_canton_id = config.participant_id();
+        let our_id = our_canton_id.to_string();
         let futures: Vec<_> = peers
             .iter()
-            .filter(|p| p.participant_id != *config.participant_id())
+            .filter(|p| &p.participant_id != our_canton_id)
             .map(|peer| {
                 let id = peer.participant_id.to_string();
                 let address = peer.address.clone();
