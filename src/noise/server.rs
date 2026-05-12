@@ -247,6 +247,12 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
     ) -> Result<Response<Body>, NoiseError> {
         tracing::debug!("Received request from peer: {peer_id}");
 
+        {
+            let now = std::time::Instant::now();
+            let mut map = self.last_seen.write().await;
+            crate::server::peer_status::bump(&mut map, peer_id.clone(), now);
+        }
+
         // The Noise handshake delivers the peer's identity as a string of the
         // form `prefix::namespace_hex` (set by the client side via
         // `node_config.participant_id().to_string()`). Parse it back into a
@@ -268,6 +274,7 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
 
         // Route message based on type
         let response = match message.msg_type {
+            MessageType::Ping => Message::new_empty(MessageType::Pong),
             MessageType::GetNextCommand => self.handle_get_next_command(peer_id).await?,
             MessageType::GetChunk => self.handle_get_chunk(message.payload).await?,
             MessageType::KeysUpload => {
