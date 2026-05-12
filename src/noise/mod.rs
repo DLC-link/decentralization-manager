@@ -423,10 +423,26 @@ impl NoiseKeypair {
     /// Load keypair from a file (expects hex-encoded secret key)
     pub async fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
-        let content = tokio::fs::read_to_string(path)
-            .await
-            .with_context(|| format!("Failed to read key file '{}'", path.display()))?;
-        let decoded = Zeroizing::new(hex::decode(content.trim())?);
+        // Tighten permissions BEFORE reading so any existing overly-permissive
+        // file is locked down before we leak its bytes onto our heap. Also
+        // runs here (not just in `load_or_generate_keypair`) so every other
+        // caller — workflow handlers, noise/client.rs, noise/server.rs — picks
+        // up the chmod even on the direct `from_file` path.
+        #[cfg(unix)]
+        ensure_key_file_permissions(path).await?;
+        // Read as raw bytes into a zeroizing buffer so the hex representation
+        // never lives in a non-zeroizing `String`. The decoded 32-byte secret
+        // is also held in a zeroizing buffer before being moved into
+        // `NoiseSecretKey`.
+        let raw = Zeroizing::new(
+            tokio::fs::read(path)
+                .await
+                .with_context(|| format!("Failed to read key file '{}'", path.display()))?,
+        );
+        let hex_str = std::str::from_utf8(&raw)
+            .with_context(|| format!("Key file '{}' is not UTF-8", path.display()))?
+            .trim();
+        let decoded = Zeroizing::new(hex::decode(hex_str)?);
         let bytes: [u8; 32] = decoded.as_slice().try_into().map_err(|_| {
             anyhow::anyhow!(
                 "Key file '{}' did not contain 32 bytes of hex",
@@ -545,10 +561,9 @@ pub async fn load_or_generate_keypair<P: AsRef<Path>>(path: P) -> Result<NoiseKe
             "Loading existing Noise keypair from {path}",
             path = path.display()
         );
-        let keypair = NoiseKeypair::from_file(path).await?;
-        #[cfg(unix)]
-        ensure_key_file_permissions(path).await?;
-        Ok(keypair)
+        // `from_file` itself calls `ensure_key_file_permissions` first, so
+        // every caller (not just this helper) gets the chmod-on-load.
+        NoiseKeypair::from_file(path).await
     } else {
         tracing::info!("No Noise keypair found, generating new one");
         let keypair = NoiseKeypair::generate();

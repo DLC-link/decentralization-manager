@@ -41,6 +41,8 @@ pub async fn get_network_config(data: web::Data<AppState>) -> impl Responder {
     request_body = Vec<Peer>,
     responses(
         (status = 200, description = "Network config saved", body = SuccessResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     )
 )]

@@ -249,6 +249,26 @@ pub async fn start_kick(
         }
     };
 
+    // Preconditions for a kick: there must be at least one peer left
+    // after the kick (so the surviving signer set is non-empty), and the
+    // participant being kicked must be a known peer. Without these checks
+    // the `post_kick_member_count` below could go negative and produce
+    // a "between 1 and -1" error that obscures the real problem.
+    if peers.len() < 2 {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: format!(
+                "Cannot kick: need at least 2 known peers (this node + the target), \
+                 have {n}",
+                n = peers.len(),
+            ),
+        });
+    }
+    if !peers.iter().any(|p| p.participant_id == participant_id) {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: format!("Cannot kick {participant_id}: not in this node's peer list"),
+        });
+    }
+
     // Validate `new_threshold` before persisting anything. Negative or zero
     // values corrupt topology submission: DNS `authorize()` accepts a bare
     // i32 while the subsequent P2P proposal converts via `try_into()` to
@@ -532,6 +552,8 @@ async fn send_kick_invites(
     request_body = OnboardingRequest,
     responses(
         (status = 202, description = "Onboarding workflow started", body = WorkflowResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
         (status = 409, description = "Workflow already in progress", body = ErrorResponse),
         (status = 422, description = "Selected peers are not mutually meshed", body = OnboardingMeshErrorResponse)
     )
@@ -1049,6 +1071,8 @@ async fn verify_peer_mesh(
     request_body = ContractsRequest,
     responses(
         (status = 202, description = "Contracts workflow started", body = WorkflowResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
         (status = 409, description = "Workflow already in progress", body = ErrorResponse)
     )
 )]
@@ -1283,6 +1307,8 @@ pub async fn get_contracts_status(
     request_body = DarsRequest,
     responses(
         (status = 200, description = "DARs uploaded to local node", body = SuccessResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
         (status = 500, description = "Upload failed", body = ErrorResponse)
     )
 )]
@@ -1323,6 +1349,8 @@ pub async fn upload_dars_local(
     responses(
         (status = 202, description = "DARs distribution workflow started", body = WorkflowResponse),
         (status = 400, description = "Bad request (e.g. empty peer_ids)", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
         (status = 409, description = "Workflow already in progress", body = ErrorResponse)
     )
 )]

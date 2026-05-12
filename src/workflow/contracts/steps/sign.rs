@@ -222,12 +222,14 @@ pub async fn sign_submissions(
     // Step 5: Extract Ed25519 private key from Canton's export response.
     // Canton returns the key in a custom format with embedded metadata.
     //
-    // Copy the export bytes into a zeroizing buffer for our own use, then
-    // wipe the proto-owned copy as soon as we no longer need it (the proto
-    // struct does not zero on drop). All 32-byte candidates derived below
-    // are also held in `Zeroizing<[u8; 32]>` so they self-wipe on drop.
-    let exported_key_data: Zeroizing<Vec<u8>> = Zeroizing::new(export_response.key_pair.clone());
-    export_response.key_pair.fill(0);
+    // Move the bytes directly out of the proto struct with `std::mem::take`
+    // into a zeroizing buffer — avoids a second heap copy of the secret that
+    // `.clone()` would create. The proto's `key_pair` is left as an empty
+    // `Vec` and dropped along with `export_response` shortly after. All
+    // 32-byte candidates derived below are also held in `Zeroizing<[u8; 32]>`
+    // so they self-wipe on drop.
+    let exported_key_data: Zeroizing<Vec<u8>> =
+        Zeroizing::new(std::mem::take(&mut export_response.key_pair));
     tracing::debug!(
         "Parsing exported key pair ({len} bytes)",
         len = exported_key_data.len()

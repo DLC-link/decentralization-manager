@@ -730,7 +730,9 @@ pub async fn get_governance_chain_audit(
     request_body = ProposeActionRequest,
     responses(
         (status = 200, description = "Proposal created", body = MessageResponse),
+        (status = 400, description = "Bad request", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     )
 )]
@@ -1024,6 +1026,7 @@ pub async fn propose_action(
         (status = 200, description = "Confirmation submitted", body = MessageResponse),
         (status = 400, description = "Bad request", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     )
 )]
@@ -1112,6 +1115,7 @@ pub async fn confirm_action(
         (status = 200, description = "Action executed", body = MessageResponse),
         (status = 400, description = "Bad request", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     )
 )]
@@ -1204,6 +1208,7 @@ pub async fn execute_action(
     responses(
         (status = 200, description = "Confirmation expired", body = MessageResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     )
 )]
@@ -1481,6 +1486,8 @@ pub async fn get_operator_info(data: web::Data<AppState>) -> impl Responder {
     request_body = serde_json::Value,
     responses(
         (status = 200, description = "Token standard contracts"),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
         (status = 502, description = "Bad gateway", body = ErrorResponse)
     )
 )]
