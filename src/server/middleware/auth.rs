@@ -298,7 +298,7 @@ mod tests {
     use crate::{
         auth::{JwtValidator, MockValidator, TokenValidator},
         config::{NodeConfig, PartyCredentials},
-        server::{AppState, ListenerControl},
+        server::AppState,
     };
 
     /// Stub handler for any path — returns 200 with the matched path so the
@@ -325,9 +325,7 @@ mod tests {
             db,
             config: NodeConfig::default(),
             peer_status: Arc::new(RwLock::new(HashMap::new())),
-            noise_listener_control: Arc::new(RwLock::new(ListenerControl {
-                should_pause: false,
-            })),
+            noise_listener_pause_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             noise_listener_notify: Arc::new(Notify::new()),
             onboarding_trigger: Arc::new(Notify::new()),
             kick_trigger: Arc::new(Notify::new()),

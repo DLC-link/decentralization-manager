@@ -18,8 +18,6 @@ use crate::{
     workflow::contracts::{ContractDefinition, DarFile},
 };
 
-use super::ListenerControl;
-
 /// Trait for workflow status types that can be used with HttpWorkflowState
 pub trait WorkflowStatus: Default + Copy + Send + Sync {}
 
@@ -50,39 +48,42 @@ impl<S: WorkflowStatus> HttpWorkflowState<S> {
     }
 }
 
-/// Guard that pauses the Noise listener while held and resumes it when dropped
+/// Guard that pauses the Noise listener while held and resumes it when dropped.
+///
+/// `should_pause` is an `AtomicBool` rather than a `bool` behind a lock so that
+/// the `Drop` impl can reset it synchronously. The earlier `Arc<RwLock<bool>>`
+/// design left the listener stuck in the paused state on task abort or panic
+/// (the captured guard was dropped but the async reset never ran), forcing the
+/// cancel handler to clean up manually.
 pub struct ListenerPauseGuard {
-    listener_control: Arc<RwLock<ListenerControl>>,
+    listener_pause_flag: Arc<AtomicBool>,
     listener_notify: Arc<Notify>,
 }
 
 impl ListenerPauseGuard {
-    /// Pause the listener and return a guard that will resume it when dropped
-    pub async fn pause(
-        listener_control: Arc<RwLock<ListenerControl>>,
-        listener_notify: Arc<Notify>,
-    ) -> Self {
-        {
-            let mut control = listener_control.write().await;
-            control.should_pause = true;
-        }
+    /// Pause the listener and return a guard that will resume it when dropped.
+    pub async fn pause(listener_pause_flag: Arc<AtomicBool>, listener_notify: Arc<Notify>) -> Self {
+        listener_pause_flag.store(true, Ordering::Release);
         tokio::time::sleep(Duration::from_millis(500)).await;
         Self {
-            listener_control,
+            listener_pause_flag,
             listener_notify,
         }
     }
 
-    /// Resume the listener explicitly (also called automatically on drop)
+    /// Resume the listener explicitly. `Drop` does the same thing; calling
+    /// this is only useful when you want to ensure the resume has fired
+    /// before the surrounding async function returns.
     pub async fn resume(self) {
-        self.resume_inner().await;
+        // The `Drop` impl below does the actual work; this just consumes
+        // `self` so the caller can't keep using the guard.
+        drop(self);
     }
+}
 
-    async fn resume_inner(&self) {
-        {
-            let mut control = self.listener_control.write().await;
-            control.should_pause = false;
-        }
+impl Drop for ListenerPauseGuard {
+    fn drop(&mut self) {
+        self.listener_pause_flag.store(false, Ordering::Release);
         self.listener_notify.notify_one();
     }
 }

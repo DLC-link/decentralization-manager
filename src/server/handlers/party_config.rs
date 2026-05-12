@@ -403,7 +403,7 @@ mod tests {
         auth::{MockAuthRegistry, MockValidator, TokenValidator, WorkflowAuth},
         config::{KeycloakConfig, NodeConfig, PartyCredentials, default_package_config},
         participant_id::CantonId,
-        server::{AppState, ListenerControl, middleware::AuthMiddleware},
+        server::{AppState, middleware::AuthMiddleware},
     };
 
     /// `discover_member_party` is admin-gated. Drive the handler without the
@@ -422,9 +422,7 @@ mod tests {
             db,
             config: NodeConfig::default(),
             peer_status: Arc::new(RwLock::new(HashMap::new())),
-            noise_listener_control: Arc::new(RwLock::new(ListenerControl {
-                should_pause: false,
-            })),
+            noise_listener_pause_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             noise_listener_notify: Arc::new(Notify::new()),
             onboarding_trigger: Arc::new(Notify::new()),
             kick_trigger: Arc::new(Notify::new()),
@@ -497,9 +495,7 @@ mod tests {
             db,
             config: NodeConfig::default(),
             peer_status: Arc::new(RwLock::new(HashMap::new())),
-            noise_listener_control: Arc::new(RwLock::new(ListenerControl {
-                should_pause: false,
-            })),
+            noise_listener_pause_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             noise_listener_notify: Arc::new(Notify::new()),
             onboarding_trigger: Arc::new(Notify::new()),
             kick_trigger: Arc::new(Notify::new()),

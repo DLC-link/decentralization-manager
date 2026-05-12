@@ -315,7 +315,7 @@ pub async fn start_kick(
     let config = data.config.clone();
     let db = data.db.clone();
     let kick_state_clone = kick_state.get_ref().clone();
-    let listener_control = data.noise_listener_control.clone();
+    let listener_control = data.noise_listener_pause_flag.clone();
     let listener_notify = data.noise_listener_notify.clone();
     let instance_for_task = instance_name.clone();
 
@@ -645,7 +645,7 @@ pub async fn start_onboarding(
     let config = data.config.clone();
     let db = data.db.clone();
     let onboarding_state_clone = onboarding_state.get_ref().clone();
-    let listener_control = data.noise_listener_control.clone();
+    let listener_control = data.noise_listener_pause_flag.clone();
     let listener_notify = data.noise_listener_notify.clone();
     *onboarding_state.invited_peers.write().await = peer_ids.clone();
     let party_credentials = data.party_credentials.clone();
@@ -1136,7 +1136,7 @@ pub async fn start_contracts(
     let workflow_auth = data.auth.read().await.clone();
     let auth_lock = data.auth.clone();
     let contracts_state_clone = contracts_state.get_ref().clone();
-    let listener_control = data.noise_listener_control.clone();
+    let listener_control = data.noise_listener_pause_flag.clone();
     let listener_notify = data.noise_listener_notify.clone();
     let party_credentials = data.party_credentials.clone();
     *contracts_state.invited_peers.write().await = contracts_invitees;
@@ -1393,7 +1393,7 @@ pub async fn start_dars(
     let config = data.config.clone();
     let db = data.db.clone();
     let dars_state_clone = dars_state.get_ref().clone();
-    let listener_control = data.noise_listener_control.clone();
+    let listener_control = data.noise_listener_pause_flag.clone();
     let listener_notify = data.noise_listener_notify.clone();
     let peer_ids = body.peer_ids.clone();
     *dars_state.invited_peers.write().await = peer_ids.clone();
@@ -1626,10 +1626,8 @@ async fn cancel_workflow_state(
     };
     handle.abort();
 
-    {
-        let mut control = data.noise_listener_control.write().await;
-        control.should_pause = false;
-    }
+    data.noise_listener_pause_flag
+        .store(false, std::sync::atomic::Ordering::Release);
     data.noise_listener_notify.notify_one();
 
     let invitees = state.invited_peers.read().await.clone();
@@ -1992,7 +1990,7 @@ pub async fn retry_workflow(
         onboarding_state,
         contracts_state,
         dars_state,
-        data.noise_listener_control.clone(),
+        data.noise_listener_pause_flag.clone(),
         data.noise_listener_notify.clone(),
         data.auth.clone(),
     )
