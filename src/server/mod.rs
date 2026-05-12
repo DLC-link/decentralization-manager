@@ -1440,7 +1440,7 @@ async fn run_heartbeat(
     });
 
     // Ping peers every 5 seconds
-    run_peer_ping_loop(config, db, peer_status).await;
+    run_peer_ping_loop(config, db, peer_status, last_seen, keypair).await;
 }
 
 /// Handle an incoming Noise connection (either ping or invite)
@@ -1879,6 +1879,8 @@ async fn run_peer_ping_loop(
     config: NodeConfig,
     db: SqlitePool,
     peer_status: Arc<RwLock<HashMap<String, bool>>>,
+    last_seen: LastSeen,
+    keypair: Arc<NoiseKeypair>,
 ) {
     let mut interval = tokio::time::interval(Duration::from_secs(5));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1894,24 +1896,62 @@ async fn run_peer_ping_loop(
             }
         };
 
-        let current_participant_id = config.participant_id();
+        let our_id = config.participant_id().to_string();
         let futures: Vec<_> = peers
             .iter()
-            .filter(|p| p.participant_id != *current_participant_id)
+            .filter(|p| p.participant_id != *config.participant_id())
             .map(|peer| {
                 let id = peer.participant_id.to_string();
                 let address = peer.address.clone();
                 let port = peer.port;
+                let public_key_hex = peer.public_key.clone();
+                let last_seen = last_seen.clone();
+                let keypair = keypair.clone();
+                let our_id = our_id.clone();
 
                 async move {
-                    let addr = format!("{address}:{port}");
-                    let active = tokio::time::timeout(
-                        Duration::from_secs(2),
-                        tokio::net::TcpStream::connect(&addr),
+                    // Parse the peer's pubkey from the freshly-loaded DB row.
+                    // (Cannot rely on a startup-only cache: new peers must be probed.)
+                    let peer_pubkey = match parse_public_key(&public_key_hex) {
+                        Ok(pk) => pk,
+                        Err(e) => {
+                            tracing::debug!("Skipping probe of {id}: malformed public_key: {e}");
+                            return (id, false);
+                        }
+                    };
+
+                    let now = std::time::Instant::now();
+                    let stale = {
+                        let map = last_seen.read().await;
+                        peer_status::should_probe(&map, &id, now)
+                    };
+
+                    if !stale {
+                        return (id, true);
+                    }
+
+                    let psk = keypair.derive_psk(&peer_pubkey);
+                    let result = crate::noise::send_noise_message(
+                        &address,
+                        port,
+                        &psk,
+                        our_id.as_bytes(),
+                        &Message::new_empty(MessageType::Ping),
                     )
-                    .await
-                    .map(|r| r.is_ok())
-                    .unwrap_or(false);
+                    .await;
+
+                    let active = matches!(
+                        result,
+                        Ok(ref bytes) if Message::from_bytes(bytes)
+                            .map(|m| m.msg_type == MessageType::Pong)
+                            .unwrap_or(false)
+                    );
+
+                    if active {
+                        let now = std::time::Instant::now();
+                        let mut map = last_seen.write().await;
+                        peer_status::bump(&mut map, id.clone(), now);
+                    }
 
                     (id, active)
                 }
