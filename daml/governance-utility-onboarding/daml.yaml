@@ -7,7 +7,6 @@ dependencies:
   - daml-stdlib
 data-dependencies:
   - ../governance-action-v0/.daml/dist/governance-action-v0-0.1.0.dar
-  - ../governance-core/.daml/dist/governance-core-v0-0.1.0.dar
   - ../dars/splice-api-featured-app-v1-1.0.0.dar
   - ../dars/splice-api-token-burn-mint-v1-1.0.0.dar
   - ../dars/splice-api-token-holding-v1-1.0.0.dar
