@@ -241,13 +241,18 @@ pub async fn resolve_owner_keys_from_peers(
         };
 
         let psk = keypair.derive_psk(&peer_pub_key);
-        let identity = keypair.public_key.serialize();
         let msg = Message::new_empty(MessageType::RequestOwnerKeys);
 
         tracing::debug!("Requesting owner keys from {peer_uid}");
         let response = match tokio::time::timeout(
             Duration::from_secs(10),
-            send_noise_message(&peer.address, peer.port, &psk, &identity, &msg),
+            send_noise_message(
+                &peer.address,
+                peer.port,
+                &psk,
+                current_participant_id.as_bytes(),
+                &msg,
+            ),
         )
         .await
         {
@@ -780,7 +785,7 @@ async fn check_participants_status(
 
         let peer_pub_key = parse_public_key(&peer.public_key).ok();
         let psk = peer_pub_key.map(|pk| keypair.derive_psk(&pk));
-        let identity = keypair.public_key.serialize();
+        let identity = current_participant_id.to_string();
         let address = peer.address.clone();
         let port = peer.port;
         let ping_msg = ping_message.clone();
@@ -799,7 +804,7 @@ async fn check_participants_status(
                 &address,
                 port,
                 &psk,
-                &identity,
+                identity.as_bytes(),
                 &ping_msg,
                 &noise_retry_cfg,
             )

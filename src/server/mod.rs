@@ -1425,18 +1425,16 @@ async fn handle_incoming_connection(
     let peer_keys_clone = peer_keys.clone();
     let our_public_key_hex = keypair.public_key_hex();
 
-    // Create PSK derivation responder. Each branch returns the raw [u8; 32]
-    // by deref-copy from the Zeroizing wrapper; the wrapper drops here so
+    // Create PSK derivation responder. Identity MUST be the sender's
+    // `participant_id` string — looked up in `peer_keys_clone` (the
+    // allowlist) before any ECDH happens. Returns the raw [u8; 32] by
+    // deref-copy from the Zeroizing wrapper; the wrapper drops here so
     // the in-keypair secret material is the only long-lived copy.
+    //
+    // The earlier "raw 33-byte compressed public key" fallback was
+    // removed: it bypassed the allowlist, letting any keypair-holder
+    // complete the handshake and inject Invite* messages (audit finding).
     let responder = Responder::new(move |identity: &[u8]| -> Option<[u8; 32]> {
-        // Identity contains peer's public key
-        if identity.len() == 33 {
-            // Compressed public key
-            if let Ok(peer_pub_key) = secp256k1::PublicKey::from_slice(identity) {
-                return Some(*keypair_for_closure.derive_psk(&peer_pub_key));
-            }
-        }
-        // Fallback: try to find peer by ID string
         let peer_id = std::str::from_utf8(identity).ok()?;
         let peer_pub_key = peer_keys_clone.get(peer_id)?;
         Some(*keypair_for_closure.derive_psk(peer_pub_key))
@@ -1449,18 +1447,15 @@ async fn handle_incoming_connection(
             let triggers = triggers.clone();
             let our_pubkey = our_public_key_hex.clone();
             let peer_keys = peer_keys.clone();
-            // Convert peer_id to hex public key for storage
-            // peer_id can be either raw 33-byte public key or participant_id string
-            let peer_pubkey_hex = if peer_id.len() == 33 {
-                Some(hex::encode(peer_id))
-            } else if let Ok(peer_id_str) = std::str::from_utf8(peer_id) {
-                // Look up public key by participant_id
-                peer_keys
-                    .get(peer_id_str)
-                    .map(|pk| hex::encode(pk.serialize()))
-            } else {
-                None
-            };
+            // Resolve peer's hex public key from the allowlist. The
+            // responder only authenticates identities that are valid
+            // participant_id strings present in `peer_keys`, so this
+            // lookup is the same one that already gated the handshake;
+            // a miss here would mean a peer_keys race we won't trust.
+            let peer_pubkey_hex = std::str::from_utf8(peer_id)
+                .ok()
+                .and_then(|id| peer_keys.get(id))
+                .map(|pk| hex::encode(pk.serialize()));
             async move {
                 let body_bytes = hyper::body::to_bytes(req.into_body()).await?;
 
