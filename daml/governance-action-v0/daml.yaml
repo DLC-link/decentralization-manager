@@ -1,0 +1,11 @@
+sdk-version: 3.4.11
+name: governance-action-v0
+version: 0.1.0
+source: daml
+dependencies:
+  - daml-prim
+  - daml-stdlib
+build-options:
+  - --target=2.2
+  - --ghc-option=-Wunused-binds
+  - --ghc-option=-Wunused-matches

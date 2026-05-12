@@ -1,0 +1,45 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Interface for governable actions.
+-- Any action that should be executable via governance multi-sig
+-- must implement this interface.
+module Governance.Action where
+
+-- | View data for the GovernableAction interface.
+data GovernableActionView = GovernableActionView
+  with
+    governanceParty : Party
+      -- ^ The governance party whose authority is required to execute this action.
+    proposer : Party
+      -- ^ The party that proposed this action. Used by GovernanceRules to enforce
+      -- the on-chain proposer authorization rule (must be a member or an
+      -- additional proposer of the targeting GovernanceRules contract).
+    actionLabel : Text
+      -- ^ Human-readable label for display and audit (e.g., "VaultPause", "DepositComplete").
+    description : Text
+      -- ^ Human-readable description of the action. Recorded in the execution result contract.
+  deriving (Show, Eq)
+
+-- | Interface that all governable action proposals must implement.
+-- The governance module exercises GovernableAction_Execute after threshold
+-- confirmations are collected. The governance party's authority flows
+-- through the exercise chain, enabling the action to perform privileged operations.
+interface GovernableAction where
+  viewtype GovernableActionView
+
+  -- | Implementation-specific execution logic.
+  executeImpl : Update ()
+
+  -- | Execute this action. Called by governance after threshold is met.
+  -- The governance party's authority is available because GovernanceRules
+  -- (signed by governanceParty) exercises this choice through the exercise chain.
+  choice GovernableAction_Execute : ()
+    controller (view this).governanceParty
+    do
+      executeImpl this
+
+  -- | Cancel this action proposal. Governance party can always clean up proposals.
+  choice GovernableAction_Cancel : ()
+    controller (view this).governanceParty
+    do pure ()
