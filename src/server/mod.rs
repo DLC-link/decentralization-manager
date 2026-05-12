@@ -1036,6 +1036,7 @@ pub async fn start_server(
     let heartbeat_config = config.clone();
     let heartbeat_db = db.clone();
     let heartbeat_status = peer_status.clone();
+    let heartbeat_last_seen = last_seen.clone();
     let heartbeat_control = listener_control.clone();
     let heartbeat_notify = listener_notify.clone();
     let heartbeat_triggers = WorkflowTriggers {
@@ -1057,6 +1058,7 @@ pub async fn start_server(
             heartbeat_config,
             heartbeat_db,
             heartbeat_status,
+            heartbeat_last_seen,
             heartbeat_control,
             heartbeat_notify,
             heartbeat_triggers,
@@ -1308,6 +1310,7 @@ async fn run_heartbeat(
     config: NodeConfig,
     db: SqlitePool,
     peer_status: Arc<RwLock<HashMap<String, bool>>>,
+    last_seen: LastSeen,
     listener_control: Arc<RwLock<ListenerControl>>,
     listener_notify: Arc<Notify>,
     triggers: WorkflowTriggers,
