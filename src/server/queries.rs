@@ -1094,7 +1094,7 @@ async fn fetch_proposal_descriptions(
     packages: &PackageConfig,
     proposal_descriptions: &mut HashMap<String, Option<String>>,
 ) -> Result {
-    let Some(ref pkg) = packages.governance_core else {
+    let Some(ref pkg) = packages.governance_action else {
         return Ok(());
     };
 

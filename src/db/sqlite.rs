@@ -1086,6 +1086,7 @@ mod tests {
                 password: None,
             },
             packages: PackageConfig {
+                governance_action: Some("#gov-action".to_string()),
                 governance_core: Some("#gov-core".to_string()),
                 governance_token_custody: None,
                 governance_utility_credential: None,
