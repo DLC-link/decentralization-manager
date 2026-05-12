@@ -17,6 +17,5 @@ data-dependencies:
   - ../dars/utility-registry-v0-0.6.0.dar
 build-options:
   - --target=2.2
-  - -Wupgrade-interfaces
   - --ghc-option=-Wunused-binds
   - --ghc-option=-Wunused-matches

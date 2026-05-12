@@ -13,6 +13,5 @@ data-dependencies:
   - ../dars/utility-credential-v0-0.1.0.dar
 build-options:
   - --target=2.2
-  - -Wupgrade-interfaces
   - --ghc-option=-Wunused-binds
   - --ghc-option=-Wunused-matches
