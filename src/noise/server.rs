@@ -39,6 +39,7 @@ pub struct NoiseServer<S: WorkflowStep + 'static> {
     keypair: Arc<NoiseKeypair>,
     peer_keys: HashMap<String, PublicKey>,
     workflow_state: Arc<WorkflowState<S>>,
+    last_seen: crate::server::peer_status::LastSeen,
     _p: PhantomData<S>,
 }
 
@@ -62,6 +63,7 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         instance_name: String,
         initial_step: S,
         exclude_participants: Option<Vec<String>>,
+        last_seen: crate::server::peer_status::LastSeen,
     ) -> Result<Self, NoiseError> {
         let keypair = NoiseKeypair::from_file(&node_config.key_file_path()).await?;
 
@@ -159,6 +161,7 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
             keypair: Arc::new(keypair),
             peer_keys,
             workflow_state,
+            last_seen,
             _p: PhantomData,
         })
     }

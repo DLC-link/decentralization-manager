@@ -182,6 +182,7 @@ async fn recover_in_progress_workflows(
     listener_control: Arc<RwLock<ListenerControl>>,
     listener_notify: Arc<Notify>,
     auth: Arc<RwLock<Option<WorkflowAuth>>>,
+    last_seen: LastSeen,
     onboarding_trigger: Arc<Notify>,
     kick_trigger: Arc<Notify>,
     contracts_trigger: Arc<Notify>,
@@ -218,6 +219,7 @@ async fn recover_in_progress_workflows(
                     listener_control.clone(),
                     listener_notify.clone(),
                     auth.clone(),
+                    last_seen.clone(),
                 )
                 .await;
             }
@@ -253,6 +255,7 @@ pub(crate) async fn respawn_coordinator(
     listener_control: Arc<RwLock<ListenerControl>>,
     listener_notify: Arc<Notify>,
     auth: Arc<RwLock<Option<WorkflowAuth>>>,
+    last_seen: LastSeen,
 ) {
     let instance = run.instance_name.clone();
     let kind = run.kind;
@@ -293,6 +296,7 @@ pub(crate) async fn respawn_coordinator(
                 state_ref,
                 listener_control,
                 listener_notify,
+                last_seen,
             ));
             *abort_guard = Some(join_handle.abort_handle());
             *status_guard = OnboardingStatus::InProgress;
@@ -320,6 +324,7 @@ pub(crate) async fn respawn_coordinator(
                 state_ref,
                 listener_control,
                 listener_notify,
+                last_seen,
             ));
             *abort_guard = Some(join_handle.abort_handle());
             *status_guard = KickStatus::InProgress;
@@ -352,6 +357,7 @@ pub(crate) async fn respawn_coordinator(
                 listener_control,
                 listener_notify,
                 auth_snapshot,
+                last_seen,
             ));
             *abort_guard = Some(join_handle.abort_handle());
             *status_guard = WorkflowProgress::InProgress;
@@ -379,6 +385,7 @@ pub(crate) async fn respawn_coordinator(
                 state_ref,
                 listener_control,
                 listener_notify,
+                last_seen,
             ));
             *abort_guard = Some(join_handle.abort_handle());
             *status_guard = WorkflowProgress::InProgress;
@@ -387,6 +394,7 @@ pub(crate) async fn respawn_coordinator(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn spawn_onboarding_resume(
     config: NodeConfig,
     db: SqlitePool,
@@ -395,6 +403,7 @@ async fn spawn_onboarding_resume(
     state: Arc<HttpWorkflowState<OnboardingStatus>>,
     listener_control: Arc<RwLock<ListenerControl>>,
     listener_notify: Arc<Notify>,
+    last_seen: LastSeen,
 ) {
     let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
     let result = workflow::start_coordinator(
@@ -406,6 +415,7 @@ async fn spawn_onboarding_resume(
         None,
         None,
         None,
+        last_seen,
     )
     .await;
     guard.resume().await;
@@ -437,6 +447,7 @@ async fn spawn_onboarding_resume(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn spawn_kick_resume(
     config: NodeConfig,
     db: SqlitePool,
@@ -445,6 +456,7 @@ async fn spawn_kick_resume(
     state: Arc<HttpWorkflowState<KickStatus>>,
     listener_control: Arc<RwLock<ListenerControl>>,
     listener_notify: Arc<Notify>,
+    last_seen: LastSeen,
 ) {
     let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
     let result = workflow::start_coordinator(
@@ -456,6 +468,7 @@ async fn spawn_kick_resume(
         None,
         None,
         None,
+        last_seen,
     )
     .await;
     guard.resume().await;
@@ -493,6 +506,7 @@ async fn spawn_contracts_resume(
     listener_control: Arc<RwLock<ListenerControl>>,
     listener_notify: Arc<Notify>,
     auth: Option<WorkflowAuth>,
+    last_seen: LastSeen,
 ) {
     let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
     let result = workflow::start_coordinator(
@@ -504,6 +518,7 @@ async fn spawn_contracts_resume(
         Some(contracts_config),
         None,
         auth,
+        last_seen,
     )
     .await;
     guard.resume().await;
@@ -531,6 +546,7 @@ async fn spawn_contracts_resume(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn spawn_dars_resume(
     config: NodeConfig,
     db: SqlitePool,
@@ -539,6 +555,7 @@ async fn spawn_dars_resume(
     state: Arc<HttpWorkflowState<WorkflowProgress>>,
     listener_control: Arc<RwLock<ListenerControl>>,
     listener_notify: Arc<Notify>,
+    last_seen: LastSeen,
 ) {
     let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
     let result = workflow::start_coordinator(
@@ -550,6 +567,7 @@ async fn spawn_dars_resume(
         None,
         Some(dars_config),
         None,
+        last_seen,
     )
     .await;
     guard.resume().await;
@@ -1023,6 +1041,7 @@ pub async fn start_server(
         listener_control.clone(),
         listener_notify.clone(),
         app_state.auth.clone(),
+        last_seen.clone(),
         onboarding_trigger.clone(),
         kick_trigger.clone(),
         contracts_trigger.clone(),

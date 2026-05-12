@@ -99,6 +99,7 @@ pub async fn start_coordinator(
     network_config: NetworkConfig,
     onboarding_config: OnboardingConfig,
     db: SqlitePool,
+    last_seen: crate::server::peer_status::LastSeen,
 ) -> Result<CantonId> {
     tracing::info!("Initializing Noise server...");
 
@@ -109,6 +110,7 @@ pub async fn start_coordinator(
         onboarding_config.instance_name.clone(),
         OnboardingStep::WaitingForPeers,
         None, // No excluded participants
+        last_seen,
     )
     .await?;
     let server = Arc::new(server);

@@ -65,6 +65,7 @@ pub async fn start_coordinator(
     contracts_config: Option<ContractsConfig>,
     dars_config: Option<DarsConfig>,
     workflow_auth: Option<WorkflowAuth>,
+    last_seen: crate::server::peer_status::LastSeen,
 ) -> Result<CoordinatorResult> {
     tracing::info!("Loading peers from database...");
     let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
@@ -76,9 +77,14 @@ pub async fn start_coordinator(
             let config = onboarding_config.ok_or_else(|| {
                 anyhow::anyhow!("OnboardingConfig is required for Onboarding workflow")
             })?;
-            let party_id =
-                onboarding::coordinator::start_coordinator(node_config, network_config, config, db)
-                    .await?;
+            let party_id = onboarding::coordinator::start_coordinator(
+                node_config,
+                network_config,
+                config,
+                db,
+                last_seen,
+            )
+            .await?;
             Ok(CoordinatorResult {
                 created_party_id: Some(party_id),
             })
@@ -93,6 +99,7 @@ pub async fn start_coordinator(
                 config,
                 workflow_auth,
                 db,
+                last_seen,
             )
             .await?;
             Ok(CoordinatorResult {
@@ -102,7 +109,14 @@ pub async fn start_coordinator(
         WorkflowType::Dars => {
             let config = dars_config
                 .ok_or_else(|| anyhow::anyhow!("DarsConfig is required for Dars workflow"))?;
-            dars::coordinator::start_coordinator(node_config, network_config, config, db).await?;
+            dars::coordinator::start_coordinator(
+                node_config,
+                network_config,
+                config,
+                db,
+                last_seen,
+            )
+            .await?;
             Ok(CoordinatorResult {
                 created_party_id: None,
             })
@@ -110,7 +124,14 @@ pub async fn start_coordinator(
         WorkflowType::Kick => {
             let config = kick_config
                 .ok_or_else(|| anyhow::anyhow!("KickConfig is required for Kick workflow"))?;
-            kick::coordinator::start_coordinator(node_config, network_config, config, db).await?;
+            kick::coordinator::start_coordinator(
+                node_config,
+                network_config,
+                config,
+                db,
+                last_seen,
+            )
+            .await?;
             Ok(CoordinatorResult {
                 created_party_id: None,
             })

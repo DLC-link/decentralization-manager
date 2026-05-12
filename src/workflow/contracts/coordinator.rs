@@ -26,6 +26,7 @@ pub async fn start_coordinator(
     config: ContractsConfig,
     workflow_auth: Option<WorkflowAuth>,
     db: sqlx::SqlitePool,
+    last_seen: crate::server::peer_status::LastSeen,
 ) -> Result {
     tracing::info!("Initializing Noise server...");
 
@@ -36,6 +37,7 @@ pub async fn start_coordinator(
         config.instance_name.clone(),
         ContractsStep::WaitingForPeers,
         None, // No excluded participants
+        last_seen,
     )
     .await?;
     let server = Arc::new(server);

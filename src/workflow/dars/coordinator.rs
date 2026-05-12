@@ -17,6 +17,7 @@ pub async fn start_coordinator(
     network_config: NetworkConfig,
     config: DarsConfig,
     db: sqlx::SqlitePool,
+    last_seen: crate::server::peer_status::LastSeen,
 ) -> Result {
     tracing::info!("Initializing Noise server for DARs upload...");
 
@@ -35,6 +36,7 @@ pub async fn start_coordinator(
         config.instance_name.clone(),
         DarsStep::WaitingForPeers,
         Some(excluded),
+        last_seen,
     )
     .await?;
     let server = Arc::new(server);

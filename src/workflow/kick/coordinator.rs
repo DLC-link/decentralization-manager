@@ -24,6 +24,7 @@ pub async fn start_coordinator(
     network_config: NetworkConfig,
     kick_config: KickConfig,
     db: sqlx::SqlitePool,
+    last_seen: crate::server::peer_status::LastSeen,
 ) -> Result {
     tracing::info!("Initializing Noise server...");
 
@@ -37,6 +38,7 @@ pub async fn start_coordinator(
         kick_config.instance_name.clone(),
         KickStep::WaitingForPeers,
         Some(excluded_participants),
+        last_seen,
     )
     .await?;
 
