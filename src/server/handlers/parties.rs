@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -240,13 +241,18 @@ pub async fn resolve_owner_keys_from_peers(
         };
 
         let psk = keypair.derive_psk(&peer_pub_key);
-        let identity = keypair.public_key.serialize();
         let msg = Message::new_empty(MessageType::RequestOwnerKeys);
 
         tracing::debug!("Requesting owner keys from {peer_uid}");
         let response = match tokio::time::timeout(
             Duration::from_secs(10),
-            send_noise_message(&peer.address, peer.port, &psk, &identity, &msg),
+            send_noise_message(
+                &peer.address,
+                peer.port,
+                &psk,
+                current_participant_id.as_bytes(),
+                &msg,
+            ),
         )
         .await
         {
@@ -779,7 +785,7 @@ async fn check_participants_status(
 
         let peer_pub_key = parse_public_key(&peer.public_key).ok();
         let psk = peer_pub_key.map(|pk| keypair.derive_psk(&pk));
-        let identity = keypair.public_key.serialize();
+        let identity = current_participant_id.to_string();
         let address = peer.address.clone();
         let port = peer.port;
         let ping_msg = ping_message.clone();
@@ -798,7 +804,7 @@ async fn check_participants_status(
                 &address,
                 port,
                 &psk,
-                &identity,
+                identity.as_bytes(),
                 &ping_msg,
                 &noise_retry_cfg,
             )
@@ -911,7 +917,7 @@ async fn fetch_peer_packages(
         .collect();
 
     let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
-    let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
+    let keypair = Arc::new(NoiseKeypair::from_file(&config.key_file_path()).await?);
     let current_participant_id = config.participant_id();
 
     let invite_message = Message::new_empty(MessageType::ListPackages);
@@ -922,7 +928,7 @@ async fn fetch_peer_packages(
         .iter()
         .filter(|p| p.participant_id != *current_participant_id && !p.public_key.is_empty())
         .map(|peer| {
-            let keypair = keypair.clone();
+            let keypair = Arc::clone(&keypair);
             let peer = peer.clone();
             let msg = invite_message.clone();
             let noise_retry_cfg = noise_retry_cfg.clone();

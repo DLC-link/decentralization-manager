@@ -1,4 +1,4 @@
-use actix_web::{HttpResponse, Responder, get, post, web};
+use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 use anyhow::Context;
 use base64::Engine;
 use canton_proto_rs::com::{
@@ -26,6 +26,7 @@ use crate::{
         AppState, action_serializer,
         audit::{AuditEvent, AuditParams, spawn_audit_log},
         chain_audit,
+        middleware::require_admin,
         queries::{
             ContractQueryParams as QueryContractParams, get_governance_confirmations,
             get_governance_state as query_governance_state, get_instruments, get_provider_services,
@@ -729,15 +730,26 @@ pub async fn get_governance_chain_audit(
     request_body = ProposeActionRequest,
     responses(
         (status = 200, description = "Proposal created", body = MessageResponse),
+        (status = 400, description = "Bad request", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     )
 )]
 #[post("/governance/propose")]
 pub async fn propose_action(
+    http_req: HttpRequest,
     data: web::Data<AppState>,
     body: web::Json<ProposeActionRequest>,
 ) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
+    if let Err(msg) = body.proposal.validate() {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: msg.to_string(),
+        });
+    }
     let party_id = &body.party_id;
     let (token, member_party_id) = match get_party_credentials(&data, party_id).await {
         Some(creds) => creds,
@@ -1014,14 +1026,19 @@ pub async fn propose_action(
         (status = 200, description = "Confirmation submitted", body = MessageResponse),
         (status = 400, description = "Bad request", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     )
 )]
 #[post("/governance/confirm")]
 pub async fn confirm_action(
+    http_req: HttpRequest,
     data: web::Data<AppState>,
     body: web::Json<ConfirmActionRequest>,
 ) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
     if let Err(msg) = body.action.validate() {
         return HttpResponse::BadRequest().json(ErrorResponse {
             error: msg.to_string(),
@@ -1098,14 +1115,19 @@ pub async fn confirm_action(
         (status = 200, description = "Action executed", body = MessageResponse),
         (status = 400, description = "Bad request", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     )
 )]
 #[post("/governance/execute")]
 pub async fn execute_action(
+    http_req: HttpRequest,
     data: web::Data<AppState>,
     body: web::Json<ExecuteActionRequest>,
 ) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
     if let Err(msg) = body.action.validate() {
         return HttpResponse::BadRequest().json(ErrorResponse {
             error: msg.to_string(),
@@ -1186,14 +1208,19 @@ pub async fn execute_action(
     responses(
         (status = 200, description = "Confirmation expired", body = MessageResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     )
 )]
 #[post("/governance/expire")]
 pub async fn expire_confirmation(
+    http_req: HttpRequest,
     data: web::Data<AppState>,
     body: web::Json<ExpireConfirmationRequest>,
 ) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
     let party_id = &body.party_id;
 
     // Get token and credentials for this party
@@ -1459,14 +1486,20 @@ pub async fn get_operator_info(data: web::Data<AppState>) -> impl Responder {
     request_body = serde_json::Value,
     responses(
         (status = 200, description = "Token standard contracts"),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
         (status = 502, description = "Bad gateway", body = ErrorResponse)
     )
 )]
 #[post("/token-standard-contracts")]
 pub async fn get_token_standard_contracts(
+    http_req: HttpRequest,
     data: web::Data<AppState>,
     body: web::Json<serde_json::Value>,
 ) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
     let url = "https://devnet.dlc.link/peer-2/app/get-token-standard-contracts";
 
     match data
