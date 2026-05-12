@@ -743,6 +743,11 @@ pub async fn propose_action(
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
     }
+    if let Err(msg) = body.proposal.validate() {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: msg.to_string(),
+        });
+    }
     let party_id = &body.party_id;
     let (token, member_party_id) = match get_party_credentials(&data, party_id).await {
         Some(creds) => creds,

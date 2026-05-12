@@ -922,8 +922,21 @@ pub enum ActionType {
 
 impl ActionType {
     /// Validate the action's fields. Returns an error message if invalid.
+    ///
+    /// Catches obviously-malformed inputs (negative thresholds, non-positive
+    /// timeouts) before they reach Canton's DAML checks. Canton rejects bad
+    /// values too, but here we surface a clear 400 rather than a generic
+    /// submission error after the proposal contract is already on the wire.
     pub fn validate(&self) -> Result<(), String> {
         match self {
+            ActionType::GovernanceAddMember { new_threshold, .. }
+            | ActionType::GovernanceRemoveMember { new_threshold, .. }
+            | ActionType::GovernanceSetThreshold { new_threshold } => {
+                validate_threshold(*new_threshold)
+            }
+            ActionType::GovernanceSetTimeout {
+                new_timeout_microseconds,
+            } => validate_timeout(*new_timeout_microseconds),
             ActionType::VaultDeployment {
                 vault_far_config: Some(far),
                 ..
@@ -938,6 +951,38 @@ impl ActionType {
             _ => Ok(()),
         }
     }
+}
+
+fn validate_threshold(new_threshold: i64) -> Result<(), String> {
+    if new_threshold < 1 {
+        return Err(format!(
+            "new_threshold must be at least 1, got {new_threshold}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_timeout(microseconds: i64) -> Result<(), String> {
+    if microseconds <= 0 {
+        return Err(format!(
+            "new_timeout_microseconds must be positive, got {microseconds}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_positive_amount(amount: &DamlDecimal, field: &str) -> Result<(), String> {
+    // `DamlDecimal` itself doesn't implement `PartialOrd`; compare via the
+    // inner `rust_decimal::Decimal` returned by `value()` against a parsed
+    // zero so we don't need a direct dep on `rust_decimal`.
+    let zero = "0"
+        .parse::<DamlDecimal>()
+        .expect("'0' is a valid DamlDecimal")
+        .value();
+    if amount.value() <= zero {
+        return Err(format!("{field} must be strictly positive, got {amount}"));
+    }
+    Ok(())
 }
 
 fn validate_beneficiary_weights(beneficiaries: &[AppRewardBeneficiary]) -> Result<(), String> {
@@ -1136,6 +1181,29 @@ pub enum ProposalType {
         instrument_configuration_cid: String,
         description: String,
     },
+}
+
+impl ProposalType {
+    /// Validate the proposal's fields. Mirrors `ActionType::validate` —
+    /// catches non-positive token amounts before they reach Canton's DAML
+    /// checks so a 400 surfaces a precise reason rather than a generic
+    /// submission error after a proposal contract is already created.
+    pub fn validate(&self) -> Result<(), String> {
+        match self {
+            ProposalType::Transfer { amount, .. }
+            | ProposalType::Mint { amount, .. }
+            | ProposalType::Burn { amount, .. } => validate_positive_amount(amount, "amount"),
+            ProposalType::OfferPaidCredential {
+                deposit_initial_amount_usd: Some(d),
+                ..
+            } => validate_positive_amount(d, "deposit_initial_amount_usd"),
+            ProposalType::SetProviderAppRewardBeneficiaries {
+                provider_app_reward_beneficiaries: Some(beneficiaries),
+                ..
+            } => validate_beneficiary_weights(beneficiaries),
+            _ => Ok(()),
+        }
+    }
 }
 
 /// Request to propose a governance domain action (creates proposal contract)
@@ -1696,5 +1764,68 @@ mod tests {
             "dec_party_id must be a JSON string when set, got {dec_party}"
         );
         assert_eq!(dec_party.as_str().unwrap(), dec_party_id_str);
+    }
+
+    #[test]
+    fn action_threshold_rejects_zero_and_negative() {
+        let action = ActionType::GovernanceSetThreshold { new_threshold: 0 };
+        assert!(action.validate().is_err());
+        let action = ActionType::GovernanceSetThreshold { new_threshold: -3 };
+        assert!(action.validate().is_err());
+        let action = ActionType::GovernanceSetThreshold { new_threshold: 1 };
+        assert!(action.validate().is_ok());
+    }
+
+    #[test]
+    fn action_threshold_rejects_in_add_remove_member() {
+        let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
+        let member = CantonId::parse(&format!("member::{ns}")).unwrap();
+        let action = ActionType::GovernanceAddMember {
+            member: member.clone(),
+            new_threshold: 0,
+        };
+        assert!(action.validate().is_err());
+        let action = ActionType::GovernanceRemoveMember {
+            member,
+            new_threshold: -1,
+        };
+        assert!(action.validate().is_err());
+    }
+
+    #[test]
+    fn action_timeout_rejects_zero_and_negative() {
+        let action = ActionType::GovernanceSetTimeout {
+            new_timeout_microseconds: 0,
+        };
+        assert!(action.validate().is_err());
+        let action = ActionType::GovernanceSetTimeout {
+            new_timeout_microseconds: -1_000_000,
+        };
+        assert!(action.validate().is_err());
+        let action = ActionType::GovernanceSetTimeout {
+            new_timeout_microseconds: 60_000_000,
+        };
+        assert!(action.validate().is_ok());
+    }
+
+    #[test]
+    fn proposal_transfer_rejects_non_positive_amount() {
+        let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
+        let to = CantonId::parse(&format!("recv::{ns}")).unwrap();
+        let admin = CantonId::parse(&format!("admin::{ns}")).unwrap();
+        let mk = |amount: &str| ProposalType::Transfer {
+            transfer_factory_cid: "tf".to_string(),
+            expected_admin: admin.clone(),
+            receiver: to.clone(),
+            amount: amount.parse().expect("valid decimal"),
+            instrument_id: InstrumentId {
+                admin: "a".into(),
+                id: "i".into(),
+            },
+            input_holding_cids: Vec::new(),
+        };
+        assert!(mk("0").validate().is_err());
+        assert!(mk("-1.5").validate().is_err());
+        assert!(mk("0.0001").validate().is_ok());
     }
 }
