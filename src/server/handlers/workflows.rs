@@ -219,20 +219,45 @@ pub async fn start_kick(
         }
     }
 
+    // Load peers once: we use the count to bound `new_threshold` per the
+    // audit finding, then filter into `invitees`. A DB error here is fatal
+    // — we can't safely proceed without knowing how many signers remain.
+    let peers = match data.db.get_all_peers().await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!("Failed to load peers for kick: {e}");
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: "Failed to load peers".to_string(),
+            });
+        }
+    };
+
+    // Validate `new_threshold` before persisting anything. Negative or zero
+    // values corrupt topology submission: DNS `authorize()` accepts a bare
+    // i32 while the subsequent P2P proposal converts via `try_into()` to
+    // u32 and fails partway, leaving the DNS write committed with no
+    // rollback. The upper bound is the post-kick member count — there
+    // must be at least as many remaining signers as the threshold needs.
+    let post_kick_member_count = peers.len() as i32 - 1;
+    if body.new_threshold < 1 || body.new_threshold > post_kick_member_count {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: format!(
+                "new_threshold must be between 1 and {post_kick_member_count} \
+                 (peer count {n}, minus the participant being kicked); got {got}",
+                n = peers.len(),
+                got = body.new_threshold,
+            ),
+        });
+    }
+
     // Compute peers we're going to invite — every peer except self + the kicked participant.
     // Done before the InProgress flip so a concurrent /kick/cancel cannot observe
     // InProgress while we're still preparing.
-    let invitees: Vec<CantonId> = match data.db.get_all_peers().await {
-        Ok(peers) => peers
-            .into_iter()
-            .map(|p| p.participant_id)
-            .filter(|p| p != data.config.participant_id() && p != &participant_id)
-            .collect(),
-        Err(e) => {
-            tracing::warn!("Failed to load peers for cancel-invite tracking: {e}");
-            Vec::new()
-        }
-    };
+    let invitees: Vec<CantonId> = peers
+        .into_iter()
+        .map(|p| p.participant_id)
+        .filter(|p| p != data.config.participant_id() && p != &participant_id)
+        .collect();
 
     // Compute instance name + config up-front so the persisted workflow_runs row
     // can carry the same identifier the coordinator task will use.
