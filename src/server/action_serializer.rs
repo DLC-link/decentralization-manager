@@ -1221,6 +1221,52 @@ pub fn build_proposal_create_args(
                 ],
             },
         ),
+        ProposalType::AcceptMintRequest {
+            mint_request_cid,
+            instrument_configuration_cid,
+            description,
+        } => (
+            ProposalPackage::GovernanceUtilityOnboarding,
+            "Governance.TokenIssuance.AcceptMintRequest",
+            "AcceptMintRequest",
+            Record {
+                record_id: None,
+                fields: vec![
+                    field("governanceParty", make_party(governance_party)),
+                    field("proposer", make_party(proposer)),
+                    field("mintRequestCid", make_contract_id(mint_request_cid)),
+                    field(
+                        "instrumentConfigurationCid",
+                        make_contract_id(instrument_configuration_cid),
+                    ),
+                    field("description", make_text(description)),
+                    field("extraArgsMeta", make_empty_metadata()),
+                ],
+            },
+        ),
+        ProposalType::AcceptBurnRequest {
+            burn_request_cid,
+            instrument_configuration_cid,
+            description,
+        } => (
+            ProposalPackage::GovernanceUtilityOnboarding,
+            "Governance.TokenIssuance.AcceptBurnRequest",
+            "AcceptBurnRequest",
+            Record {
+                record_id: None,
+                fields: vec![
+                    field("governanceParty", make_party(governance_party)),
+                    field("proposer", make_party(proposer)),
+                    field("burnRequestCid", make_contract_id(burn_request_cid)),
+                    field(
+                        "instrumentConfigurationCid",
+                        make_contract_id(instrument_configuration_cid),
+                    ),
+                    field("description", make_text(description)),
+                    field("extraArgsMeta", make_empty_metadata()),
+                ],
+            },
+        ),
     }
 }
 

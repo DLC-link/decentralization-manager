@@ -11,7 +11,10 @@ pub mod peer_status;
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -74,7 +77,7 @@ pub struct AppState {
     pub config: NodeConfig,
     pub peer_status: Arc<RwLock<HashMap<String, bool>>>,
     pub last_seen: LastSeen,
-    pub noise_listener_control: Arc<RwLock<ListenerControl>>,
+    pub noise_listener_pause_flag: Arc<AtomicBool>,
     pub noise_listener_notify: Arc<Notify>,
     pub onboarding_trigger: Arc<Notify>,
     pub kick_trigger: Arc<Notify>,
@@ -101,6 +104,11 @@ pub struct AppState {
     /// exemption and overwrite each other. Held by the auth middleware for
     /// the lifetime of a bootstrap request.
     pub bootstrap_mu: Arc<Mutex<()>>,
+    /// Cross-workflow mutex: set while any of kick / onboarding / contracts
+    /// / dars is in flight. `start_*` handlers `try_acquire` the
+    /// `WorkflowInFlightGuard` before spawning; the guard rides along inside
+    /// the spawned task and drops when the task ends.
+    pub workflow_in_flight: Arc<AtomicBool>,
     /// Whether the server is running in test mode
     pub test_mode: bool,
     /// Prefixes currently being refreshed from Canton (deduplication)
@@ -112,10 +120,9 @@ pub struct AppState {
     pub http_client: reqwest::Client,
 }
 
-/// Control mechanism for the Noise port listener
-pub struct ListenerControl {
-    pub should_pause: bool,
-}
+// The previous `ListenerControl` struct collapsed to a single `Arc<AtomicBool>`
+// (see `noise_listener_pause_flag` below). Atomic so `ListenerPauseGuard::Drop`
+// can reset it synchronously when a spawned workflow task is aborted or panics.
 
 /// Workflow triggers shared across Noise server handlers
 #[derive(Clone)]
@@ -179,7 +186,7 @@ async fn recover_in_progress_workflows(
     onboarding_state: web::Data<Arc<handlers::OnboardingWorkflowState>>,
     contracts_state: web::Data<Arc<handlers::ContractsWorkflowState>>,
     dars_state: web::Data<Arc<handlers::DarsWorkflowState>>,
-    listener_control: Arc<RwLock<ListenerControl>>,
+    listener_control: Arc<AtomicBool>,
     listener_notify: Arc<Notify>,
     auth: Arc<RwLock<Option<WorkflowAuth>>>,
     last_seen: LastSeen,
@@ -252,7 +259,7 @@ pub(crate) async fn respawn_coordinator(
     onboarding_state: web::Data<Arc<handlers::OnboardingWorkflowState>>,
     contracts_state: web::Data<Arc<handlers::ContractsWorkflowState>>,
     dars_state: web::Data<Arc<handlers::DarsWorkflowState>>,
-    listener_control: Arc<RwLock<ListenerControl>>,
+    listener_control: Arc<AtomicBool>,
     listener_notify: Arc<Notify>,
     auth: Arc<RwLock<Option<WorkflowAuth>>>,
     last_seen: LastSeen,
@@ -401,7 +408,7 @@ async fn spawn_onboarding_resume(
     onboarding_config: workflow::OnboardingConfig,
     instance: String,
     state: Arc<HttpWorkflowState<OnboardingStatus>>,
-    listener_control: Arc<RwLock<ListenerControl>>,
+    listener_control: Arc<AtomicBool>,
     listener_notify: Arc<Notify>,
     last_seen: LastSeen,
 ) {
@@ -454,7 +461,7 @@ async fn spawn_kick_resume(
     kick_config: workflow::KickConfig,
     instance: String,
     state: Arc<HttpWorkflowState<KickStatus>>,
-    listener_control: Arc<RwLock<ListenerControl>>,
+    listener_control: Arc<AtomicBool>,
     listener_notify: Arc<Notify>,
     last_seen: LastSeen,
 ) {
@@ -503,7 +510,7 @@ async fn spawn_contracts_resume(
     contracts_config: workflow::ContractsConfig,
     instance: String,
     state: Arc<HttpWorkflowState<WorkflowProgress>>,
-    listener_control: Arc<RwLock<ListenerControl>>,
+    listener_control: Arc<AtomicBool>,
     listener_notify: Arc<Notify>,
     auth: Option<WorkflowAuth>,
     last_seen: LastSeen,
@@ -553,7 +560,7 @@ async fn spawn_dars_resume(
     dars_config: workflow::DarsConfig,
     instance: String,
     state: Arc<HttpWorkflowState<WorkflowProgress>>,
-    listener_control: Arc<RwLock<ListenerControl>>,
+    listener_control: Arc<AtomicBool>,
     listener_notify: Arc<Notify>,
     last_seen: LastSeen,
 ) {
@@ -977,9 +984,7 @@ pub async fn start_server(
 
     let peer_status = Arc::new(RwLock::new(HashMap::new()));
     let last_seen: LastSeen = Arc::new(RwLock::new(HashMap::new()));
-    let listener_control = Arc::new(RwLock::new(ListenerControl {
-        should_pause: false,
-    }));
+    let listener_control = Arc::new(AtomicBool::new(false));
     let listener_notify = Arc::new(Notify::new());
     let onboarding_trigger = Arc::new(Notify::new());
     let kick_trigger = Arc::new(Notify::new());
@@ -1004,7 +1009,7 @@ pub async fn start_server(
         config: config.clone(),
         peer_status: peer_status.clone(),
         last_seen: last_seen.clone(),
-        noise_listener_control: listener_control.clone(),
+        noise_listener_pause_flag: listener_control.clone(),
         noise_listener_notify: listener_notify.clone(),
         onboarding_trigger: onboarding_trigger.clone(),
         kick_trigger: kick_trigger.clone(),
@@ -1018,6 +1023,7 @@ pub async fn start_server(
         admin_role,
         party_credentials: party_credentials.clone(),
         bootstrap_mu: Arc::new(Mutex::new(())),
+        workflow_in_flight: Arc::new(AtomicBool::new(false)),
         test_mode,
         refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
         http_client,
@@ -1330,7 +1336,7 @@ async fn run_heartbeat(
     db: SqlitePool,
     peer_status: Arc<RwLock<HashMap<String, bool>>>,
     last_seen: LastSeen,
-    listener_control: Arc<RwLock<ListenerControl>>,
+    listener_control: Arc<AtomicBool>,
     listener_notify: Arc<Notify>,
     triggers: WorkflowTriggers,
 ) {
@@ -1383,10 +1389,7 @@ async fn run_heartbeat(
     tokio::spawn(async move {
         loop {
             // Wait for permission to bind
-            let should_pause = {
-                let control = listener_control_spawn.read().await;
-                control.should_pause
-            };
+            let should_pause = listener_control_spawn.load(Ordering::Acquire);
 
             if should_pause {
                 tracing::info!("Noise listener paused for workflow");
@@ -1417,8 +1420,9 @@ async fn run_heartbeat(
                             _ = async {
                                 loop {
                                     tokio::time::sleep(Duration::from_millis(100)).await;
-                                    let control = listener_control_spawn.read().await;
-                                    if control.should_pause {
+                                    if listener_control_spawn
+                                        .load(Ordering::Acquire)
+                                    {
                                         break;
                                     }
                                 }
@@ -1452,25 +1456,23 @@ async fn handle_incoming_connection(
     triggers: WorkflowTriggers,
     last_seen: LastSeen,
 ) {
-    let secret_key = keypair.secret_key;
+    let keypair_for_closure = keypair.clone();
     let peer_keys_clone = peer_keys.clone();
     let our_public_key_hex = keypair.public_key_hex();
 
-    // Create PSK derivation responder
+    // Create PSK derivation responder. Identity MUST be the sender's
+    // `participant_id` string — looked up in `peer_keys_clone` (the
+    // allowlist) before any ECDH happens. Returns the raw [u8; 32] by
+    // deref-copy from the Zeroizing wrapper; the wrapper drops here so
+    // the in-keypair secret material is the only long-lived copy.
+    //
+    // The earlier "raw 33-byte compressed public key" fallback was
+    // removed: it bypassed the allowlist, letting any keypair-holder
+    // complete the handshake and inject Invite* messages (audit finding).
     let responder = Responder::new(move |identity: &[u8]| -> Option<[u8; 32]> {
-        // Identity contains peer's public key
-        if identity.len() == 33 {
-            // Compressed public key
-            if let Ok(peer_pub_key) = secp256k1::PublicKey::from_slice(identity) {
-                let psk = secp256k1::ecdh::SharedSecret::new(&peer_pub_key, &secret_key);
-                return Some(psk.secret_bytes());
-            }
-        }
-        // Fallback: try to find peer by ID string
         let peer_id = std::str::from_utf8(identity).ok()?;
         let peer_pub_key = peer_keys_clone.get(peer_id)?;
-        let psk = secp256k1::ecdh::SharedSecret::new(peer_pub_key, &secret_key);
-        Some(psk.secret_bytes())
+        Some(*keypair_for_closure.derive_psk(peer_pub_key))
     });
 
     let result = hyper_noise::server::serve_http(
@@ -1482,18 +1484,18 @@ async fn handle_incoming_connection(
             let peer_keys = peer_keys.clone();
             let last_seen = last_seen.clone();
 
-            // peer_id is whatever the Noise responder accepted — currently
-            // either a utf-8 `participant_id` (every dpm client sends this)
-            // or a 33-byte raw pubkey (still admitted by the responder above,
-            // tracked separately as out of scope). The removed branch in the
-            // older `peer_pubkey_hex` chain was dead code for the latter case;
-            // we conservatively derive `peer_id_str`/`peer_pubkey_hex` and
-            // bump `last_seen` only when peer_id parses as utf-8 AND is a
-            // known peer in `peer_keys`.
+            // The responder above only authenticates identities that are
+            // valid utf-8 participant_id strings present in `peer_keys` (the
+            // raw 33-byte fallback was removed in #136 as an audit finding).
+            // We extract `peer_id_str` once so both `peer_pubkey_hex` and the
+            // `last_seen` bump below can reuse it; the conservative
+            // `peer_keys` re-check on the bump path is defensive against any
+            // future responder change.
             let peer_id_str = std::str::from_utf8(peer_id).ok().map(str::to_owned);
             let peer_pubkey_hex = peer_id_str
                 .as_deref()
-                .and_then(|id| peer_keys.get(id).map(|pk| hex::encode(pk.serialize())));
+                .and_then(|id| peer_keys.get(id))
+                .map(|pk| hex::encode(pk.serialize()));
 
             async move {
                 // Bump last_seen for known peers.
@@ -2022,7 +2024,7 @@ async fn finalize_peer_run(
 async fn run_onboarding_peer_listener(
     config: NodeConfig,
     db: SqlitePool,
-    listener_control: Arc<RwLock<ListenerControl>>,
+    listener_control: Arc<AtomicBool>,
     listener_notify: Arc<Notify>,
     onboarding_state: web::Data<Arc<handlers::OnboardingWorkflowState>>,
     onboarding_trigger: Arc<Notify>,
@@ -2129,7 +2131,7 @@ async fn run_onboarding_peer_listener(
 async fn run_kick_peer_listener(
     config: NodeConfig,
     db: SqlitePool,
-    listener_control: Arc<RwLock<ListenerControl>>,
+    listener_control: Arc<AtomicBool>,
     listener_notify: Arc<Notify>,
     kick_state: web::Data<Arc<handlers::KickWorkflowState>>,
     kick_trigger: Arc<Notify>,
@@ -2235,7 +2237,7 @@ async fn run_kick_peer_listener(
 async fn run_contracts_peer_listener(
     config: NodeConfig,
     db: SqlitePool,
-    listener_control: Arc<RwLock<ListenerControl>>,
+    listener_control: Arc<AtomicBool>,
     listener_notify: Arc<Notify>,
     contracts_state: web::Data<Arc<handlers::ContractsWorkflowState>>,
     contracts_trigger: Arc<Notify>,
@@ -2341,7 +2343,7 @@ async fn run_contracts_peer_listener(
 async fn run_dars_peer_listener(
     config: NodeConfig,
     db: SqlitePool,
-    listener_control: Arc<RwLock<ListenerControl>>,
+    listener_control: Arc<AtomicBool>,
     listener_notify: Arc<Notify>,
     dars_state: web::Data<Arc<handlers::DarsWorkflowState>>,
     dars_trigger: Arc<Notify>,

@@ -260,6 +260,13 @@ template GovernanceRules
     -- ════════════════════════════════════════════════════════════════════════
 
     -- | Confirm a governance self-management action.
+    --
+    -- `additionalProposers` may also submit a `GovernanceSelfConfirmation`,
+    -- which gives external admins (e.g. a federation operator) a way to seed
+    -- a self-action proposal on-chain for members to observe and then vote on
+    -- via their own confirmations. Confirmations from non-members are treated
+    -- purely as proposal markers — `ExecuteGovernanceAction` filters them out
+    -- before counting threshold, so voting power stays members-only.
     nonconsuming choice GovernanceRules_ConfirmGovernanceAction
         : GovernanceRules_ConfirmGovernanceActionResult
       with
@@ -267,7 +274,9 @@ template GovernanceRules
         action : GovernanceSelfAction
       controller confirmer
       do
-        require "Confirmer is a governance member" (confirmer `Set.member` members)
+        require "Confirmer is a member or additional proposer"
+          (confirmer `Set.member` members
+            || optional False (Set.member confirmer) additionalProposers)
         now <- getTime
         confirmationCid <- create GovernanceSelfConfirmation with
           governanceParty
@@ -289,18 +298,20 @@ template GovernanceRules
       do
         require "Executor is a governance member" (executor `Set.member` members)
 
-        -- Consume and validate confirmations
+        -- Consume and validate confirmations. Confirmations from
+        -- `additionalProposers` are tolerated in the input list (they exist as
+        -- proposal markers, see `ConfirmGovernanceAction`) but filtered out
+        -- before counting threshold — only member votes count toward N.
         now <- getTime
         fetched <- mapA (\cid -> exercise cid GovernanceSelfConfirmation_Consume) confirmations
         let valid = filter (\c -> c.expiresAt > now) fetched
+        let memberVotes = filter (\c -> c.confirmer `Set.member` members) valid
         require "All confirmations must match the action being executed"
           (all (\c -> c.action == action) valid)
-        require "All confirmers must be current governance members"
-          (all (\c -> c.confirmer `Set.member` members) valid)
-        require "No duplicate confirmers"
-          (unique $ map (.confirmer) valid)
-        require "Enough confirmations to execute action"
-          (length valid >= threshold)
+        require "No duplicate member confirmers"
+          (unique $ map (.confirmer) memberVotes)
+        require "Enough member confirmations to execute action"
+          (length memberVotes >= threshold)
 
         -- Dispatch to the appropriate built-in choice
         governanceRulesCid <- case action of

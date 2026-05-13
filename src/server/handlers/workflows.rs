@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    sync::Arc,
+    sync::{Arc, atomic::Ordering},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -25,9 +25,9 @@ use crate::{
             ContractsRequest, DarsInvitePayload, DarsRequest, ErrorResponse, HttpWorkflowState,
             KickRequest, KickResponse, KickStatus, ListenerPauseGuard, MessageResponse,
             MissingEdgeKind, MissingPeerEdge, OnboardingInvitePayload, OnboardingMeshErrorResponse,
-            OnboardingRequest, OnboardingResponse, OnboardingStatus, SuccessResponse, WorkflowKind,
-            WorkflowProgress, WorkflowResponse, WorkflowRole, WorkflowRun, WorkflowRunsResponse,
-            WorkflowStatusResponse,
+            OnboardingRequest, OnboardingResponse, OnboardingStatus, SuccessResponse,
+            WorkflowInFlightGuard, WorkflowKind, WorkflowProgress, WorkflowResponse, WorkflowRole,
+            WorkflowRun, WorkflowRunsResponse, WorkflowStatusResponse,
         },
     },
     workflow::{self, ContractsStep, DarsStep, KickStep, OnboardingStep, state::WorkflowStep},
@@ -163,6 +163,23 @@ pub async fn start_kick(
         return resp;
     }
 
+    // Cross-workflow mutex: at most one of kick / onboarding / contracts /
+    // dars in flight at a time. The atomic compare-and-swap closes the
+    // start-handler TOCTOU and prevents two workflows from sharing a
+    // `ListenerPauseGuard`. The guard moves into the spawned task below and
+    // drops when the task ends (success, failure, abort, or panic), so the
+    // gate cannot leak.
+    let workflow_guard = match WorkflowInFlightGuard::try_acquire(data.workflow_in_flight.clone()) {
+        Some(g) => g,
+        None => {
+            return HttpResponse::Conflict().json(ErrorResponse {
+                error: "Another workflow is already running; \
+                        wait for it to complete or cancel it first"
+                    .to_string(),
+            });
+        }
+    };
+
     tracing::info!(
         "Kick request received: party={}, participant_to_kick={}, threshold={}",
         body.decentralized_party_id,
@@ -219,20 +236,65 @@ pub async fn start_kick(
         }
     }
 
+    // Load peers once: we use the count to bound `new_threshold` per the
+    // audit finding, then filter into `invitees`. A DB error here is fatal
+    // — we can't safely proceed without knowing how many signers remain.
+    let peers = match data.db.get_all_peers().await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!("Failed to load peers for kick: {e}");
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: "Failed to load peers".to_string(),
+            });
+        }
+    };
+
+    // Preconditions for a kick: there must be at least one peer left
+    // after the kick (so the surviving signer set is non-empty), and the
+    // participant being kicked must be a known peer. Without these checks
+    // the `post_kick_member_count` below could go negative and produce
+    // a "between 1 and -1" error that obscures the real problem.
+    if peers.len() < 2 {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: format!(
+                "Cannot kick: need at least 2 known peers (this node + the target), \
+                 have {n}",
+                n = peers.len(),
+            ),
+        });
+    }
+    if !peers.iter().any(|p| p.participant_id == participant_id) {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: format!("Cannot kick {participant_id}: not in this node's peer list"),
+        });
+    }
+
+    // Validate `new_threshold` before persisting anything. Negative or zero
+    // values corrupt topology submission: DNS `authorize()` accepts a bare
+    // i32 while the subsequent P2P proposal converts via `try_into()` to
+    // u32 and fails partway, leaving the DNS write committed with no
+    // rollback. The upper bound is the post-kick member count — there
+    // must be at least as many remaining signers as the threshold needs.
+    let post_kick_member_count = peers.len() as i32 - 1;
+    if body.new_threshold < 1 || body.new_threshold > post_kick_member_count {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: format!(
+                "new_threshold must be between 1 and {post_kick_member_count} \
+                 (peer count {n}, minus the participant being kicked); got {got}",
+                n = peers.len(),
+                got = body.new_threshold,
+            ),
+        });
+    }
+
     // Compute peers we're going to invite — every peer except self + the kicked participant.
     // Done before the InProgress flip so a concurrent /kick/cancel cannot observe
     // InProgress while we're still preparing.
-    let invitees: Vec<CantonId> = match data.db.get_all_peers().await {
-        Ok(peers) => peers
-            .into_iter()
-            .map(|p| p.participant_id)
-            .filter(|p| p != data.config.participant_id() && p != &participant_id)
-            .collect(),
-        Err(e) => {
-            tracing::warn!("Failed to load peers for cancel-invite tracking: {e}");
-            Vec::new()
-        }
-    };
+    let invitees: Vec<CantonId> = peers
+        .into_iter()
+        .map(|p| p.participant_id)
+        .filter(|p| p != data.config.participant_id() && p != &participant_id)
+        .collect();
 
     // Compute instance name + config up-front so the persisted workflow_runs row
     // can carry the same identifier the coordinator task will use.
@@ -273,7 +335,7 @@ pub async fn start_kick(
     let config = data.config.clone();
     let db = data.db.clone();
     let kick_state_clone = kick_state.get_ref().clone();
-    let listener_control = data.noise_listener_control.clone();
+    let listener_control = data.noise_listener_pause_flag.clone();
     let listener_notify = data.noise_listener_notify.clone();
     let last_seen = data.last_seen.clone();
     let instance_for_task = instance_name.clone();
@@ -286,6 +348,7 @@ pub async fn start_kick(
     let mut error_guard = kick_state.error.write().await;
 
     let join_handle = tokio::spawn(async move {
+        let _workflow_guard = workflow_guard; // dropped at end → releases cross-workflow gate
         let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
 
         // Send kick invites to all peers before starting coordinator workflow
@@ -491,17 +554,36 @@ async fn send_kick_invites(
     request_body = OnboardingRequest,
     responses(
         (status = 202, description = "Onboarding workflow started", body = WorkflowResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
         (status = 409, description = "Workflow already in progress", body = ErrorResponse),
         (status = 422, description = "Selected peers are not mutually meshed", body = OnboardingMeshErrorResponse)
     )
 )]
 #[post("/onboarding")]
 pub async fn start_onboarding(
+    http_req: HttpRequest,
     data: web::Data<AppState>,
     onboarding_state: web::Data<Arc<OnboardingWorkflowState>>,
     body: web::Json<OnboardingRequest>,
 ) -> impl Responder {
-    // Check if an onboarding is already in progress
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
+
+    // Cross-workflow mutex (see `start_kick` for rationale).
+    let workflow_guard = match WorkflowInFlightGuard::try_acquire(data.workflow_in_flight.clone()) {
+        Some(g) => g,
+        None => {
+            return HttpResponse::Conflict().json(ErrorResponse {
+                error: "Another workflow is already running; \
+                        wait for it to complete or cancel it first"
+                    .to_string(),
+            });
+        }
+    };
+    // Belt-and-suspenders: keep the per-workflow status check so /onboarding/status
+    // gives a precise reason when polled mid-start.
     {
         let status = onboarding_state.status.read().await;
         if *status == OnboardingStatus::InProgress {
@@ -587,7 +669,7 @@ pub async fn start_onboarding(
     let config = data.config.clone();
     let db = data.db.clone();
     let onboarding_state_clone = onboarding_state.get_ref().clone();
-    let listener_control = data.noise_listener_control.clone();
+    let listener_control = data.noise_listener_pause_flag.clone();
     let listener_notify = data.noise_listener_notify.clone();
     *onboarding_state.invited_peers.write().await = peer_ids.clone();
     let party_credentials = data.party_credentials.clone();
@@ -604,6 +686,7 @@ pub async fn start_onboarding(
     let mut error_guard = onboarding_state.error.write().await;
 
     let join_handle = tokio::spawn(async move {
+        let _workflow_guard = workflow_guard; // releases cross-workflow gate on drop
         let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
 
         // Send invites to selected peers before starting coordinator workflow
@@ -992,16 +1075,35 @@ async fn verify_peer_mesh(
     request_body = ContractsRequest,
     responses(
         (status = 202, description = "Contracts workflow started", body = WorkflowResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
         (status = 409, description = "Workflow already in progress", body = ErrorResponse)
     )
 )]
 #[post("/contracts")]
 pub async fn start_contracts(
+    http_req: HttpRequest,
     data: web::Data<AppState>,
     contracts_state: web::Data<Arc<ContractsWorkflowState>>,
     body: web::Json<ContractsRequest>,
 ) -> impl Responder {
-    // Check if a contracts workflow is already in progress
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
+
+    // Cross-workflow mutex (see `start_kick` for rationale).
+    let workflow_guard = match WorkflowInFlightGuard::try_acquire(data.workflow_in_flight.clone()) {
+        Some(g) => g,
+        None => {
+            return HttpResponse::Conflict().json(ErrorResponse {
+                error: "Another workflow is already running; \
+                        wait for it to complete or cancel it first"
+                    .to_string(),
+            });
+        }
+    };
+    // Belt-and-suspenders: keep the per-workflow status check so /contracts/status
+    // gives a precise reason when polled mid-start.
     {
         let status = contracts_state.status.read().await;
         if *status == WorkflowProgress::InProgress {
@@ -1062,7 +1164,7 @@ pub async fn start_contracts(
     let workflow_auth = data.auth.read().await.clone();
     let auth_lock = data.auth.clone();
     let contracts_state_clone = contracts_state.get_ref().clone();
-    let listener_control = data.noise_listener_control.clone();
+    let listener_control = data.noise_listener_pause_flag.clone();
     let listener_notify = data.noise_listener_notify.clone();
     let party_credentials = data.party_credentials.clone();
     let last_seen = data.last_seen.clone();
@@ -1078,6 +1180,7 @@ pub async fn start_contracts(
     let mut error_guard = contracts_state.error.write().await;
 
     let join_handle = tokio::spawn(async move {
+        let _workflow_guard = workflow_guard; // releases cross-workflow gate on drop
         let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
 
         // Send invites to all peers before starting coordinator workflow
@@ -1210,14 +1313,20 @@ pub async fn get_contracts_status(
     request_body = DarsRequest,
     responses(
         (status = 200, description = "DARs uploaded to local node", body = SuccessResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
         (status = 500, description = "Upload failed", body = ErrorResponse)
     )
 )]
 #[post("/dars/upload")]
 pub async fn upload_dars_local(
+    http_req: HttpRequest,
     data: web::Data<AppState>,
     body: web::Json<DarsRequest>,
 ) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
     match workflow::contracts::upload_dars(&data.config, &body.dar_files).await {
         Ok(()) => {
             tracing::info!(
@@ -1246,22 +1355,40 @@ pub async fn upload_dars_local(
     responses(
         (status = 202, description = "DARs distribution workflow started", body = WorkflowResponse),
         (status = 400, description = "Bad request (e.g. empty peer_ids)", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
         (status = 409, description = "Workflow already in progress", body = ErrorResponse)
     )
 )]
 #[post("/dars/distribute")]
 pub async fn start_dars(
+    http_req: HttpRequest,
     data: web::Data<AppState>,
     dars_state: web::Data<Arc<DarsWorkflowState>>,
     body: web::Json<DarsRequest>,
 ) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
     if body.peer_ids.is_empty() {
         return HttpResponse::BadRequest().json(ErrorResponse {
             error: "peer_ids must contain at least one peer".to_string(),
         });
     }
 
-    // Check if a DARs workflow is already in progress
+    // Cross-workflow mutex (see `start_kick` for rationale).
+    let workflow_guard = match WorkflowInFlightGuard::try_acquire(data.workflow_in_flight.clone()) {
+        Some(g) => g,
+        None => {
+            return HttpResponse::Conflict().json(ErrorResponse {
+                error: "Another workflow is already running; \
+                        wait for it to complete or cancel it first"
+                    .to_string(),
+            });
+        }
+    };
+    // Belt-and-suspenders: keep the per-workflow status check so /dars/status
+    // gives a precise reason when polled mid-start.
     {
         let status = dars_state.status.read().await;
         if *status == WorkflowProgress::InProgress {
@@ -1300,7 +1427,7 @@ pub async fn start_dars(
     let config = data.config.clone();
     let db = data.db.clone();
     let dars_state_clone = dars_state.get_ref().clone();
-    let listener_control = data.noise_listener_control.clone();
+    let listener_control = data.noise_listener_pause_flag.clone();
     let listener_notify = data.noise_listener_notify.clone();
     let last_seen = data.last_seen.clone();
     let peer_ids = body.peer_ids.clone();
@@ -1325,6 +1452,7 @@ pub async fn start_dars(
     let mut error_guard = dars_state.error.write().await;
 
     let join_handle = tokio::spawn(async move {
+        let _workflow_guard = workflow_guard; // releases cross-workflow gate on drop
         let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
 
         // Send invites to selected peers before starting coordinator workflow
@@ -1534,10 +1662,8 @@ async fn cancel_workflow_state(
     };
     handle.abort();
 
-    {
-        let mut control = data.noise_listener_control.write().await;
-        control.should_pause = false;
-    }
+    data.noise_listener_pause_flag
+        .store(false, Ordering::Release);
     data.noise_listener_notify.notify_one();
 
     let invitees = state.invited_peers.read().await.clone();
@@ -1900,7 +2026,7 @@ pub async fn retry_workflow(
         onboarding_state,
         contracts_state,
         dars_state,
-        data.noise_listener_control.clone(),
+        data.noise_listener_pause_flag.clone(),
         data.noise_listener_notify.clone(),
         data.auth.clone(),
         data.last_seen.clone(),

@@ -1,0 +1,54 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Plugin template that accepts a holder-initiated burn via the
+-- utility-registry's BurnRequest_Accept choice. The BurnRequest must already
+-- exist on-ledger (typically created by the holder by exercising
+-- AllocationFactory_RequestBurn). Accepting the request burns the holding
+-- that the request previously locked.
+module Governance.TokenIssuance.AcceptBurnRequest where
+
+import DA.TextMap qualified as TextMap
+
+import Splice.Api.Token.MetadataV1
+  (AnyValue(..), ChoiceContext(..), ExtraArgs(..), Metadata)
+
+import Utility.Registry.App.V0.Model.Burn (BurnRequest, BurnRequest_Accept(..))
+import Utility.Registry.V0.Configuration.Instrument (InstrumentConfiguration)
+import Utility.Registry.V0.Holding.TokenApiUtils
+  (instrumentConfigurationContextKey, issuerCredentialsContextKey)
+
+import Governance.Action
+
+template AcceptBurnRequest
+  with
+    governanceParty : Party
+    proposer : Party
+    burnRequestCid : ContractId BurnRequest
+    instrumentConfigurationCid : ContractId InstrumentConfiguration
+    description : Text
+    extraArgsMeta : Metadata
+  where
+    signatory proposer
+    observer governanceParty
+
+    interface instance GovernableAction for AcceptBurnRequest where
+      view = GovernableActionView with
+        governanceParty
+        proposer
+        actionLabel = "AcceptBurnRequest"
+        description
+
+      executeImpl = do
+        let context = ChoiceContext with
+              values = TextMap.fromList
+                [ (instrumentConfigurationContextKey,
+                   AV_ContractId $ coerceContractId instrumentConfigurationCid)
+                , (issuerCredentialsContextKey,
+                   AV_List [])
+                ]
+        _ <- exercise burnRequestCid BurnRequest_Accept with
+          extraArgs = ExtraArgs with
+            context
+            meta = extraArgsMeta
+        pure ()

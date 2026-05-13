@@ -97,7 +97,7 @@ pub fn propose_confirm_execute(label: &str, proposal: Value) -> Scenario<Proposa
                     .to_string();
                 let req = json!({
                     "party_id": f.party_id()?, "rules_contract_id": f.rules_contract_id()?,
-                    "action": {"type": "governance_set_threshold", "new_threshold": 0},
+                    "action": {"type": "governance_set_threshold", "new_threshold": 1},
                     "governance_type": "core_domain", "proposal_cid": proposal_cid,
                 });
                 let _: Value = f.post_json(f.p2.http, "/governance/confirm", &req).await?;
@@ -167,7 +167,7 @@ pub fn propose_confirm_execute(label: &str, proposal: Value) -> Scenario<Proposa
                 let confirmation_cids = ctx.confirmation_cids.clone();
                 let req = json!({
                     "party_id": f.party_id()?, "rules_contract_id": f.rules_contract_id()?,
-                    "action": {"type": "governance_set_threshold", "new_threshold": 0},
+                    "action": {"type": "governance_set_threshold", "new_threshold": 1},
                     "confirmation_cids": confirmation_cids, "disclosed_contracts": [],
                     "governance_type": "core_domain", "proposal_cid": proposal_cid,
                 });

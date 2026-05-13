@@ -86,7 +86,7 @@ impl NoiseClient {
 
         // Create Noise initiator
         let initiator = Initiator {
-            psk: &psk,
+            psk: &psk[..],
             identity,
         };
 

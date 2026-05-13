@@ -470,6 +470,18 @@ export type ProposalType =
       type: "accept_free_credential";
       user_service_cid: string;
       credential_offer_cid: string;
+    }
+  | {
+      type: "accept_mint_request";
+      mint_request_cid: string;
+      instrument_configuration_cid: string;
+      description: string;
+    }
+  | {
+      type: "accept_burn_request";
+      burn_request_cid: string;
+      instrument_configuration_cid: string;
+      description: string;
     };
 
 export interface BillingParams {

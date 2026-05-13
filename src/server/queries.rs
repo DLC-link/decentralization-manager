@@ -1094,7 +1094,7 @@ async fn fetch_proposal_descriptions(
     packages: &PackageConfig,
     proposal_descriptions: &mut HashMap<String, Option<String>>,
 ) -> Result {
-    let Some(ref pkg) = packages.governance_core else {
+    let Some(ref pkg) = packages.governance_action else {
         return Ok(());
     };
 
@@ -2503,7 +2503,7 @@ mod tests {
     fn ci(name: &str, version: &str, created_at: &str, contract_id: &str) -> ContractInfo {
         ContractInfo {
             contract_id: contract_id.to_string(),
-            template_id: format!("Mod:{}", name),
+            template_id: format!("Mod:{name}"),
             package_id: format!("pkg-id-of-{name}-{version}"),
             package_name: name.to_string(),
             package_version: version.to_string(),
