@@ -143,7 +143,7 @@ if [ "$TARGET" = "localnet" ]; then
 fi
 
 log_phase "Building release-ci binary (target=$TARGET)"
-cargo build --profile release-ci "${FEATURES_FLAG[@]}"
+cargo build --profile release-ci ${FEATURES_FLAG[@]+"${FEATURES_FLAG[@]}"}
 
 if [ ! -f "$BINARY" ]; then
     echo "ERROR: Binary not found at $BINARY"
@@ -186,7 +186,7 @@ export BINARY
 # $FEATURES_FLAG must match the value used in `cargo build` above to avoid
 # cargo rebuilding the binary under a different feature unification and
 # overwriting the artifact. See the build comment block for full details.
-cargo test --profile release-ci "${FEATURES_FLAG[@]}" --test governance_workflows -- --ignored --nocapture
+cargo test --profile release-ci ${FEATURES_FLAG[@]+"${FEATURES_FLAG[@]}"} --test governance_workflows -- --ignored --nocapture
 
 echo ""
 echo "=========================================="
