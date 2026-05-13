@@ -1,6 +1,9 @@
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
+use reqwest::Client;
+
+const REFRESH_MARGIN: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
 pub struct KeycloakCreds {
@@ -12,9 +15,21 @@ pub struct KeycloakCreds {
 }
 
 #[derive(Debug)]
-pub struct TokenState {
-    pub access_token: String,
-    pub expires_at: Instant,
+pub(crate) struct TokenState {
+    access_token: String,
+    expires_at: Instant,
+}
+
+impl TokenState {
+    /// Construct an initially-expired state so the first .token() call refreshes.
+    pub(crate) fn expired() -> Self {
+        Self {
+            access_token: String::new(),
+            expires_at: Instant::now()
+                .checked_sub(Duration::from_secs(60))
+                .unwrap_or_else(Instant::now),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -23,6 +38,7 @@ pub enum Refresher {
     Static { token: String },
     /// Devnet: re-fetches via Keycloak password grant when expiry is near.
     Keycloak {
+        client: Client,
         creds: KeycloakCreds,
         state: tokio::sync::Mutex<TokenState>,
     },
@@ -32,14 +48,14 @@ impl Refresher {
     pub async fn token(&self) -> anyhow::Result<String> {
         match self {
             Self::Static { token } => Ok(token.clone()),
-            Self::Keycloak { creds, state } => {
+            Self::Keycloak { client, creds, state } => {
                 let mut s = state.lock().await;
                 if s.expires_at
                     .checked_duration_since(Instant::now())
-                    .map(|d| d < Duration::from_secs(30))
+                    .map(|d| d < REFRESH_MARGIN)
                     .unwrap_or(true)
                 {
-                    *s = fetch_token(creds).await?;
+                    *s = fetch_token(client, creds).await?;
                 }
                 Ok(s.access_token.clone())
             }
@@ -47,13 +63,13 @@ impl Refresher {
     }
 }
 
-async fn fetch_token(creds: &KeycloakCreds) -> anyhow::Result<TokenState> {
+async fn fetch_token(client: &Client, creds: &KeycloakCreds) -> anyhow::Result<TokenState> {
     let url = format!(
         "{}/realms/{}/protocol/openid-connect/token",
         creds.url.trim_end_matches('/'),
         creds.realm
     );
-    let resp: serde_json::Value = reqwest::Client::new()
+    let resp: serde_json::Value = client
         .post(&url)
         .form(&[
             ("grant_type", "password"),
@@ -126,14 +142,9 @@ mod tests {
             password: "pass".to_string(),
         };
         let r = Refresher::Keycloak {
+            client: Client::new(),
             creds,
-            state: tokio::sync::Mutex::new(TokenState {
-                access_token: String::new(),
-                // expired: always in the past
-                expires_at: Instant::now()
-                    .checked_sub(Duration::from_secs(1))
-                    .unwrap_or_else(Instant::now),
-            }),
+            state: tokio::sync::Mutex::new(TokenState::expired()),
         };
 
         // First call: fetches from Keycloak.
@@ -185,13 +196,9 @@ mod tests {
             password: "pass".to_string(),
         };
         let r = Refresher::Keycloak {
+            client: Client::new(),
             creds,
-            state: tokio::sync::Mutex::new(TokenState {
-                access_token: String::new(),
-                expires_at: Instant::now()
-                    .checked_sub(Duration::from_secs(1))
-                    .unwrap_or_else(Instant::now),
-            }),
+            state: tokio::sync::Mutex::new(TokenState::expired()),
         };
 
         // First call: expired initial state → fetches → returns "first".

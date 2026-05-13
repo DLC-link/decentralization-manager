@@ -107,6 +107,15 @@ impl Fixture {
             std::env::var("P3_PID").ok().and_then(|s| s.parse().ok()),
         ];
         let target = TestTarget::from_env()?;
+        // Match the bash harness's `curl -s` (no client-side timeout). Some
+        // governance proposes against Canton can take >30s when state has
+        // accumulated across phases; the e2e itself caps total time so a
+        // hung server still fails — we just don't want a per-request 30s
+        // ceiling that's tighter than bash's behavior.
+        let client = Client::builder()
+            .timeout(Duration::from_secs(180))
+            .build()
+            .context("build reqwest client")?;
         let refresher = match target {
             TestTarget::Localnet => Arc::new(auth::Refresher::Static {
                 token: read_env("MOCK_TOKEN")?,
@@ -119,16 +128,10 @@ impl Fixture {
                     username: read_env("DECPM_KEYCLOAK_USERNAME")?,
                     password: read_env("DECPM_KEYCLOAK_PASSWORD")?,
                 };
-                // Initial state is expired so the first `.token()` call triggers a fetch.
-                let initial_state = tokio::sync::Mutex::new(auth::TokenState {
-                    access_token: String::new(),
-                    expires_at: std::time::Instant::now()
-                        .checked_sub(Duration::from_secs(60))
-                        .unwrap_or_else(std::time::Instant::now),
-                });
                 Arc::new(auth::Refresher::Keycloak {
+                    client: client.clone(),
                     creds,
-                    state: initial_state,
+                    state: tokio::sync::Mutex::new(auth::TokenState::expired()),
                 })
             }
         };
@@ -139,15 +142,6 @@ impl Fixture {
                 .unwrap_or(0);
             format!("dpm-it-{ts}-{pid}", pid = std::process::id())
         });
-        // Match the bash harness's `curl -s` (no client-side timeout). Some
-        // governance proposes against Canton can take >30s when state has
-        // accumulated across phases; the e2e itself caps total time so a
-        // hung server still fails — we just don't want a per-request 30s
-        // ceiling that's tighter than bash's behavior.
-        let client = Client::builder()
-            .timeout(Duration::from_secs(180))
-            .build()
-            .context("build reqwest client")?;
         Ok(Fixture {
             client,
             refresher,
