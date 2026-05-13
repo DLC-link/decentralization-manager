@@ -20,9 +20,7 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::Deserialize;
 use tokio::sync::RwLock;
 
-use super::common::{
-    RealmAccess, auth0_issuer_of, collect_roles, extract_issuer, oidc_issuer_of,
-};
+use super::common::{RealmAccess, auth0_issuer_of, collect_roles, extract_issuer, oidc_issuer_of};
 use crate::{
     auth::validator::{Principal, ValidationError},
     config::{Auth0Config, KeycloakConfig, PartyCredentials},

@@ -100,12 +100,14 @@ impl PartyCredentialsRow {
             self.auth0_client_id,
             self.auth0_client_secret,
         ) {
-            (Some(domain), Some(audience), Some(cid_enc), Some(secret_enc)) => Some(Auth0M2MConfig {
-                domain,
-                audience,
-                client_id: crypto::decrypt(&cid_enc)?,
-                client_secret: crypto::decrypt(&secret_enc)?,
-            }),
+            (Some(domain), Some(audience), Some(cid_enc), Some(secret_enc)) => {
+                Some(Auth0M2MConfig {
+                    domain,
+                    audience,
+                    client_id: crypto::decrypt(&cid_enc)?,
+                    client_secret: crypto::decrypt(&secret_enc)?,
+                })
+            }
             _ => None,
         };
         Ok(PartyCredentials {

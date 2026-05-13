@@ -153,16 +153,17 @@ pub async fn get_auth_status(data: web::Data<AppState>) -> impl Responder {
             None
         };
 
-        let (kc_url, kc_realm, auth0_domain, auth0_audience) = if let Some(ref a) = party_creds.auth0 {
-            (None, None, Some(a.domain.clone()), Some(a.audience.clone()))
-        } else {
-            (
-                Some(party_creds.keycloak.url.clone()),
-                Some(party_creds.keycloak.realm.clone()),
-                None,
-                None,
-            )
-        };
+        let (kc_url, kc_realm, auth0_domain, auth0_audience) =
+            if let Some(ref a) = party_creds.auth0 {
+                (None, None, Some(a.domain.clone()), Some(a.audience.clone()))
+            } else {
+                (
+                    Some(party_creds.keycloak.url.clone()),
+                    Some(party_creds.keycloak.realm.clone()),
+                    None,
+                    None,
+                )
+            };
         party_statuses.push(PartyAuthStatus {
             dec_party_id,
             member_party_id,

@@ -86,11 +86,7 @@ pub async fn get_party_config(
                 has_username: false,
                 has_password: false,
                 auth0_domain: data.config.auth0.as_ref().map(|a| a.domain.clone()),
-                auth0_audience: data
-                    .config
-                    .auth0
-                    .as_ref()
-                    .and_then(|a| a.audience.clone()),
+                auth0_audience: data.config.auth0.as_ref().and_then(|a| a.audience.clone()),
                 auth0_client_id: None,
                 has_auth0_client_secret: false,
                 packages,
@@ -161,9 +157,7 @@ pub async fn save_party_config(
         // Mirror the Keycloak URL-change guard: never carry a stored secret
         // forward to a freshly-supplied (potentially attacker-controlled)
         // domain. A new domain means the operator must resupply the secret.
-        let domain_changed = existing_auth0
-            .as_ref()
-            .is_some_and(|e| e.domain != domain);
+        let domain_changed = existing_auth0.as_ref().is_some_and(|e| e.domain != domain);
         let new_secret_is_present = req
             .auth0_client_secret
             .as_deref()
