@@ -15,6 +15,24 @@ use std::{path::PathBuf, sync::Mutex, time::Duration};
 use anyhow::Context;
 use reqwest::Client;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TestTarget {
+    Localnet,
+    Devnet,
+}
+
+impl TestTarget {
+    fn from_env() -> anyhow::Result<Self> {
+        match std::env::var("DPM_IT_TARGET").as_deref() {
+            Ok("localnet") | Err(_) => Ok(TestTarget::Localnet),
+            Ok("devnet") => Ok(TestTarget::Devnet),
+            Ok(other) => anyhow::bail!(
+                "invalid DPM_IT_TARGET value: {other}; expected localnet|devnet"
+            ),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct NodePorts {
     pub http: u16,
@@ -35,6 +53,12 @@ pub struct Fixture {
     /// vars at boot; restart helpers update the slot in place so subsequent
     /// chaos tests target the freshly-spawned process.
     pub current_pids: [Option<u32>; 3],
+
+    pub target: TestTarget,
+    pub run_id: String,
+    pub operator_party: Option<String>,
+    pub dso_party: Option<String>,
+    pub operator_timeout_tripped: bool,
 
     pub party_id: Option<String>,
     pub party_prefix: Option<String>,
@@ -81,6 +105,14 @@ impl Fixture {
             std::env::var("P2_PID").ok().and_then(|s| s.parse().ok()),
             std::env::var("P3_PID").ok().and_then(|s| s.parse().ok()),
         ];
+        let target = TestTarget::from_env()?;
+        let run_id = std::env::var("DPM_IT_RUN_ID").unwrap_or_else(|_| {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            format!("dpm-it-{ts}-{pid}", pid = std::process::id())
+        });
         // Match the bash harness's `curl -s` (no client-side timeout). Some
         // governance proposes against Canton can take >30s when state has
         // accumulated across phases; the e2e itself caps total time so a
@@ -98,6 +130,11 @@ impl Fixture {
             p2,
             p3,
             current_pids,
+            target,
+            run_id,
+            operator_party: None,
+            dso_party: None,
+            operator_timeout_tripped: false,
             party_id: None,
             party_prefix: None,
             rules_contract_id: None,
@@ -168,6 +205,11 @@ impl Fixture {
                 noise: 9003,
                 participant_id: "p3".to_string(),
             },
+            target: TestTarget::Localnet,
+            run_id: "test-run-id".to_string(),
+            operator_party: None,
+            dso_party: None,
+            operator_timeout_tripped: false,
             party_id: None,
             party_prefix: None,
             rules_contract_id: None,
@@ -201,6 +243,8 @@ mod tests {
             std::env::set_var("P3_PARTICIPANT_ID", "p3");
             std::env::set_var("MOCK_TOKEN", "mock-jwt");
             std::env::set_var("DEV_DIR", "/tmp/dpm-it-test");
+            std::env::set_var("DPM_IT_RUN_ID", "test-run-id");
+            // DPM_IT_TARGET intentionally left unset — exercises the default path
         }
     }
 
@@ -218,6 +262,8 @@ mod tests {
                 "P3_PARTICIPANT_ID",
                 "MOCK_TOKEN",
                 "DEV_DIR",
+                "DPM_IT_RUN_ID",
+                "DPM_IT_TARGET",
             ] {
                 std::env::remove_var(k);
             }
@@ -254,5 +300,64 @@ mod tests {
         unsafe { std::env::set_var("P1_NOISE", "not-a-port") };
         let err = Fixture::from_env().unwrap_err();
         assert!(format!("{err:#}").contains("P1_NOISE"));
+    }
+
+    #[test]
+    fn target_defaults_to_localnet_when_unset() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_all_env();
+        set_all_env();
+        let f = Fixture::from_env().unwrap();
+        assert!(matches!(f.target, TestTarget::Localnet));
+    }
+
+    #[test]
+    fn target_parses_devnet() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_all_env();
+        set_all_env();
+        unsafe { std::env::set_var("DPM_IT_TARGET", "devnet") };
+        let f = Fixture::from_env().unwrap();
+        assert!(matches!(f.target, TestTarget::Devnet));
+    }
+
+    #[test]
+    fn target_errors_on_invalid_value() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_all_env();
+        set_all_env();
+        unsafe { std::env::set_var("DPM_IT_TARGET", "stagnet") };
+        let err = Fixture::from_env().unwrap_err();
+        assert!(format!("{err:#}").contains("DPM_IT_TARGET"));
+        assert!(format!("{err:#}").contains("stagnet"));
+    }
+
+    #[test]
+    fn run_id_read_from_env() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_all_env();
+        set_all_env();
+        let f = Fixture::from_env().unwrap();
+        assert_eq!(f.run_id, "test-run-id");
+    }
+
+    #[test]
+    fn run_id_generated_when_unset() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_all_env();
+        set_all_env();
+        unsafe { std::env::remove_var("DPM_IT_RUN_ID") };
+        let f = Fixture::from_env().unwrap();
+        assert!(f.run_id.starts_with("dpm-it-"));
+    }
+
+    #[test]
+    fn for_test_returns_localnet_fixture_with_defaults() {
+        let f = Fixture::for_test();
+        assert!(matches!(f.target, TestTarget::Localnet));
+        assert!(f.operator_party.is_none());
+        assert!(f.dso_party.is_none());
+        assert!(!f.operator_timeout_tripped);
+        assert!(!f.run_id.is_empty());
     }
 }
