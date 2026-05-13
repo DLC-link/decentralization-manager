@@ -92,24 +92,6 @@ export P2_NOISE=9001
 export P3_NOISE=9002
 
 # ---------------------------------------------------------------------------
-# Participant IDs.
-#
-# TODO(participant-id-source): finalize how the IT obtains the three Canton
-# participant IDs on devnet. For now we require them in the environment; a
-# future commit will switch to either reading from the per-participant
-# .env files (once they're populated) or auto-discovery via DPM's identity
-# endpoint at startup.
-# ---------------------------------------------------------------------------
-
-for v in P1_PARTICIPANT_ID P2_PARTICIPANT_ID P3_PARTICIPANT_ID; do
-    if [ -z "${!v:-}" ]; then
-        echo "ERROR: $v not set — see TODO(participant-id-source) in devnet.env.sh" >&2
-        exit 1
-    fi
-done
-export P1_PARTICIPANT_ID P2_PARTICIPANT_ID P3_PARTICIPANT_ID
-
-# ---------------------------------------------------------------------------
 # Localnet no-ops (run.sh calls these unconditionally for the localnet path).
 # ---------------------------------------------------------------------------
 
@@ -142,17 +124,6 @@ stop_nodes() {
 # setup_directories: data is persisted via docker-compose volumes mounted at
 # ./remote/participant-N/data; no temp dirs needed.
 setup_directories() { :; }
-
-# configure_peers: each DPM's persistent SQLite (in the docker-compose volume)
-# carries the prior peer-mesh state from previous runs.
-#
-# KNOWN GAP: on a completely fresh devnet deployment (clean volumes), the
-# SQLite databases will have no peer entries and the first onboarding workflow
-# will fail because P1's DPM does not yet know how to reach P2/P3 via Noise.
-# A manual peer-mesh bootstrap (equivalent to the localnet configure_peers
-# flow) is required once per fresh volume. This is out of scope for this
-# refactor and tracked separately.
-configure_peers() { :; }
 
 # ---------------------------------------------------------------------------
 # Cleanup — called on EXIT by run.sh's trap.
