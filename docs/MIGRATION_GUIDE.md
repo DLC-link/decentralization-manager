@@ -14,9 +14,10 @@ This guide assumes:
 
 1. **Tear down** the old Deployment, ConfigMap, Secret, and LoadBalancer Service.
 2. **Pull the latest image tag** and prepare new manifests (Secret, Deployment + PVC, Service, Ingress).
-3. **Apply the new manifests** and let it start clean.
-4. **Re-share public keys** with the other participants and add them as peers in the new UI.
-5. **Re-enter party credentials** (Keycloak per-party client info) through the new UI.
+3. **Set up the Keycloak client** that gates the admin UI (one public SPA client per deployment).
+4. **Apply the new manifests** and let it start clean.
+5. **Re-share public keys** with the other participants and add them as peers in the new UI.
+6. **Re-enter party credentials** (Keycloak per-party client info) through the new UI.
 
 Total downtime is typically a few minutes per participant. The longer step is the cross-team coordination needed to re-share Noise public keys after everyone redeploys.
 
@@ -52,11 +53,37 @@ kubectl -n <your-namespace> get deploy dec-party-manager -o jsonpath='{.spec.tem
 
 Bumping the tag in the Deployment manifest and re-applying is how you upgrade going forward. The application runs any required SQL migrations against its SQLite database automatically on startup, so a tag bump is the only operator step between releases.
 
-## 3 — Apply the new manifests
+## 3 — Set up the Keycloak client
+
+The admin UI authenticates users through Keycloak using the **Authorization Code flow with PKCE**, so it needs a dedicated **public** client in your realm. The client ID you choose here is what goes into `DECPM_KEYCLOAK_CLIENT_ID` in the Secret below; there is no client secret to copy because public SPA clients don't have one.
+
+In the Keycloak admin console, **Clients → Create client**:
+
+| Setting | Value |
+|---|---|
+| Client type | OpenID Connect |
+| Client ID | `dec-party-manager` (or any value — must match `DECPM_KEYCLOAK_CLIENT_ID`) |
+| Client authentication | **Off** (public client) |
+| Authentication flow | **Standard flow** on; everything else off |
+| Root URL | `https://<your-ui-host>` |
+| Home URL | `https://<your-ui-host>` |
+| Valid redirect URIs | `https://<your-ui-host>/*` |
+| Valid post-logout redirect URIs | `https://<your-ui-host>/*` |
+| Web origins | `https://<your-ui-host>` (or `+` to derive from the redirect URIs) |
+
+**Web Origins** is the one that catches people out: without it, the browser blocks the SPA's token requests with a CORS error and login silently fails. Set it to your UI host explicitly, or use `+` to mirror the redirect URIs.
+
+In **Advanced → Proof Key for Code Exchange Code Challenge Method**, set the value to `S256`. The frontend always sends PKCE; Keycloak rejects the request if the client isn't configured to expect it.
+
+If you set `DECPM_ADMIN_ROLE` in the Secret (recommended for any shared deployment), also create a realm role with that exact name and assign it to whichever users should have admin powers. Without `DECPM_ADMIN_ROLE` set, every authenticated user is treated as admin.
+
+Per-party Keycloak clients used to fetch Canton ledger tokens are **different** — they are confidential clients (with a secret), one per decentralized party, and you wire them up through the admin UI in Step 6, not here.
+
+## 4 — Apply the new manifests
 
 Below is the core single-participant manifest set. Replace every `<...>` placeholder with values for your environment, save as a file, and apply with `kubectl apply -f <file>.yaml`. Public exposure of the Noise port is environment-specific and is covered separately under "Service" below.
 
-### 3a. Namespace (skip if it already exists)
+### 4a. Namespace (skip if it already exists)
 
 ```yaml
 apiVersion: v1
@@ -65,7 +92,7 @@ metadata:
   name: <your-namespace>
 ```
 
-### 3b. Secret (configuration)
+### 4b. Secret (configuration)
 
 ```yaml
 apiVersion: v1
@@ -116,7 +143,7 @@ stringData:
   DECPM_TIMEOUT_RETRY_DELAY: "5"
 ```
 
-### 3c. Deployment + PersistentVolumeClaim
+### 4c. Deployment + PersistentVolumeClaim
 
 ```yaml
 apiVersion: v1
@@ -191,7 +218,7 @@ spec:
             claimName: dec-party-manager-data
 ```
 
-### 3d. Service
+### 4d. Service
 
 ```yaml
 apiVersion: v1
@@ -214,7 +241,7 @@ spec:
 
 The Noise port (9000) must also be reachable from the public internet for peers to connect. Depending on your cluster, you may need a separate `LoadBalancer`-type Service, a `NodePort`, or another mechanism (MetalLB, native cloud load balancer, etc.) for the `noise` port specifically. The HTTP UI does not need to be exposed publicly — it is reached through the Ingress (next).
 
-### 3e. Ingress (Traefik example)
+### 4e. Ingress (Traefik example)
 
 ```yaml
 apiVersion: networking.k8s.io/v1
@@ -248,7 +275,7 @@ kubectl -n <your-namespace> rollout status deploy/dec-party-manager
 
 Once the pod is `Running`, hit `https://<your-ui-host>` in a browser. Keycloak should challenge for login.
 
-## 4 — Re-establish peers
+## 5 — Re-establish peers
 
 The fresh deployment has generated a new Noise keypair on first start. None of the other participants know it yet, and you do not yet know any of theirs (assuming they are also redeploying). The peer list has to be rebuilt from scratch by exchanging public keys out-of-band.
 
@@ -263,7 +290,7 @@ Repeat with every participant. The "Participants Status" indicators turn green w
 
 If a peer is migrating ahead of you, share your old peer data and let them add you with those values temporarily — once you have redeployed, click **Share my data** again and re-send so they can update their entry.
 
-## 5 — Re-enter party credentials
+## 6 — Re-enter party credentials
 
 For each decentralized party your node manages, open the "Party Config" dialog and re-enter the Keycloak settings (URL, realm, client ID, client secret). The application uses these to obtain Canton ledger tokens on behalf of each party.
 
@@ -297,7 +324,7 @@ Most variables have a default that's only useful for local development (loopback
 
 If you would rather not regenerate your Noise keypair (so peers don't have to update their entry for you), you can preserve the keypair file from your old PVC. The keypair is stored as a file in the data directory (not in the SQLite database), so it survives a clean redeploy as long as you keep the same PVC mounted at `/app`.
 
-The peer list and party credentials do **not** carry over: those live in the SQLite database, which the new format introduces. The first time the new application starts on the preserved PVC it will create a fresh database alongside the existing keypair file. You will still need to re-establish peers (Step 4) and re-enter party credentials (Step 5) — the only thing you save is the round-trip with peers having to update their entry for you.
+The peer list and party credentials do **not** carry over: those live in the SQLite database, which the new format introduces. The first time the new application starts on the preserved PVC it will create a fresh database alongside the existing keypair file. You will still need to re-establish peers (Step 5) and re-enter party credentials (Step 6) — the only thing you save is the round-trip with peers having to update their entry for you.
 
 ## Troubleshooting
 
