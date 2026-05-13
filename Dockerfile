@@ -1,7 +1,8 @@
 FROM rust:slim-bookworm AS builder
 
-RUN apt-get update
-RUN apt-get install -y cmake pkg-config libssl-dev git openssh-client protobuf-compiler nodejs npm curl
+RUN apt-get update && apt-get install -y curl ca-certificates
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+RUN apt-get install -y cmake pkg-config libssl-dev git openssh-client protobuf-compiler nodejs
 
 WORKDIR /app
 
