@@ -1,5 +1,8 @@
 #!/bin/bash
 # Devnet target's env-and-bring-up. Sourced by run.sh when --target devnet.
+#
+# DPM lifecycle is managed via docker-compose (development/docker-compose.yml).
+# Bare-process spawning via start_nodes is NOT used on this path.
 
 set -eu
 
@@ -7,33 +10,49 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/common.sh"
 
 # ---------------------------------------------------------------------------
-# Required env vars — fail fast if any are missing.
+# Keycloak config — mandatory secret, optional URL/realm/client_id.
 # ---------------------------------------------------------------------------
-REQUIRED_VARS=(
-    DECPM_KEYCLOAK_URL
-    DECPM_KEYCLOAK_REALM
-    DECPM_KEYCLOAK_CLIENT_ID
-    DECPM_KEYCLOAK_CLIENT_SECRET
-    P1_CANTON_LEDGER P1_CANTON_ADMIN P1_PARTICIPANT_ID
-    P2_CANTON_LEDGER P2_CANTON_ADMIN P2_PARTICIPANT_ID
-    P3_CANTON_LEDGER P3_CANTON_ADMIN P3_PARTICIPANT_ID
-)
-MISSING=()
-for v in "${REQUIRED_VARS[@]}"; do
-    if [ -z "${!v:-}" ]; then
-        MISSING+=("$v")
-    fi
-done
-if [ "${#MISSING[@]}" -gt 0 ]; then
-    echo "ERROR: missing required env vars for devnet target:" >&2
-    printf '  - %s\n' "${MISSING[@]}" >&2
-    echo "See ~/.config/dec-party-manager/devnet.env or the devnet runbook." >&2
+
+# DECPM_KEYCLOAK_CLIENT_SECRET must always be provided explicitly in the
+# environment; it is never read from .env files (it is not stored on disk).
+if [ -z "${DECPM_KEYCLOAK_CLIENT_SECRET:-}" ]; then
+    echo "ERROR: DECPM_KEYCLOAK_CLIENT_SECRET is not set." >&2
+    echo "Export it before running: export DECPM_KEYCLOAK_CLIENT_SECRET=<secret>" >&2
     exit 1
 fi
 
+# URL / realm / client_id are shared across all three participants and live in
+# development/remote/participant-1/.env. If not already in the environment,
+# source them from there (participant-1 is picked by convention; all three are
+# identical for these values).
+PARTICIPANT_1_ENV="$SCRIPT_DIR/../development/remote/participant-1/.env"
+
+_source_keycloak_var() {
+    local var=$1
+    if [ -z "${!var:-}" ]; then
+        if [ ! -f "$PARTICIPANT_1_ENV" ]; then
+            echo "ERROR: $var is not set and $PARTICIPANT_1_ENV does not exist." >&2
+            echo "Either export $var or create the per-participant .env files." >&2
+            exit 1
+        fi
+        local value
+        value=$(grep "^${var}=" "$PARTICIPANT_1_ENV" | cut -d= -f2- | tr -d '\r')
+        if [ -z "$value" ]; then
+            echo "ERROR: $var not found in $PARTICIPANT_1_ENV and not set in environment." >&2
+            exit 1
+        fi
+        export "$var=$value"
+    fi
+}
+
+_source_keycloak_var DECPM_KEYCLOAK_URL
+_source_keycloak_var DECPM_KEYCLOAK_REALM
+_source_keycloak_var DECPM_KEYCLOAK_CLIENT_ID
+
 # ---------------------------------------------------------------------------
-# Fetch Keycloak token via client_credentials and export as MOCK_TOKEN.
+# Fetch Keycloak bearer token via client_credentials.
 # ---------------------------------------------------------------------------
+
 TOKEN_URL="${DECPM_KEYCLOAK_URL%/}/realms/${DECPM_KEYCLOAK_REALM}/protocol/openid-connect/token"
 MOCK_TOKEN=$(curl -s -f -X POST "$TOKEN_URL" \
     -d "grant_type=client_credentials" \
@@ -41,48 +60,104 @@ MOCK_TOKEN=$(curl -s -f -X POST "$TOKEN_URL" \
     -d "client_secret=${DECPM_KEYCLOAK_CLIENT_SECRET}" \
     | jq -r .access_token)
 if [ -z "$MOCK_TOKEN" ] || [ "$MOCK_TOKEN" = "null" ]; then
-    echo "ERROR: Keycloak client_credentials grant failed" >&2
+    echo "ERROR: Keycloak client_credentials grant failed." >&2
+    echo "  TOKEN_URL: $TOKEN_URL" >&2
+    echo "  CLIENT_ID: $DECPM_KEYCLOAK_CLIENT_ID" >&2
+    echo "Check that DECPM_KEYCLOAK_CLIENT_SECRET is correct and the Keycloak server is reachable." >&2
     exit 1
 fi
 export MOCK_TOKEN
 
 # ---------------------------------------------------------------------------
-# Target + run-id + paths.
+# Target + run-id.
 # ---------------------------------------------------------------------------
+
 export DPM_IT_TARGET=devnet
 export DPM_IT_RUN_ID="dpm-it-$(date -u +%Y%m%d-%H%M%S)-$$"
 
-DEV_DIR="$(mktemp -d -t dpm-devnet-it-XXXXXX)"
-export DEV_DIR
+# ---------------------------------------------------------------------------
+# Per-participant ports.
+# HTTP ports come from docker-compose.yml (8081/8082/8083).
+# Noise ports come from the per-participant .env files:
+#   participant-1: DECPM_NOISE_PORT=9000
+#   participant-2: DECPM_NOISE_PORT=9001
+#   participant-3: DECPM_NOISE_PORT=9002
+# ---------------------------------------------------------------------------
+
+export P1_HTTP=8081
+export P2_HTTP=8082
+export P3_HTTP=8083
+export P1_NOISE=9000
+export P2_NOISE=9001
+export P3_NOISE=9002
 
 # ---------------------------------------------------------------------------
-# Localnet no-ops (run.sh calls these unconditionally).
+# Participant IDs.
+#
+# TODO(participant-id-source): finalize how the IT obtains the three Canton
+# participant IDs on devnet. For now we require them in the environment; a
+# future commit will switch to either reading from the per-participant
+# .env files (once they're populated) or auto-discovery via DPM's identity
+# endpoint at startup.
 # ---------------------------------------------------------------------------
+
+for v in P1_PARTICIPANT_ID P2_PARTICIPANT_ID P3_PARTICIPANT_ID; do
+    if [ -z "${!v:-}" ]; then
+        echo "ERROR: $v not set — see TODO(participant-id-source) in devnet.env.sh" >&2
+        exit 1
+    fi
+done
+export P1_PARTICIPANT_ID P2_PARTICIPANT_ID P3_PARTICIPANT_ID
+
+# ---------------------------------------------------------------------------
+# Localnet no-ops (run.sh calls these unconditionally for the localnet path).
+# ---------------------------------------------------------------------------
+
 download_localnet() { :; }
 start_localnet()    { :; }
 stop_localnet()     { :; }
 
-# cleanup runs on EXIT via run.sh trap. Stop nodes if start_nodes ran.
+# ---------------------------------------------------------------------------
+# DPM lifecycle via docker-compose.
+# ---------------------------------------------------------------------------
+
+start_nodes() {
+    log_phase "Starting DPM containers via docker-compose"
+    # NOTE: docker-compose up --build runs `cargo build --release` inside the
+    # container. The local `cargo build --profile release-ci` (in run.sh) also
+    # runs for the test crate. This means the DPM binary is compiled twice on
+    # the first run (once locally for tests, once inside the container). After
+    # the first run the container layer cache keeps subsequent builds fast.
+    (cd "${SCRIPT_DIR}/../development" && docker compose up -d --build)
+    wait_for_server "$P1_HTTP" "participant-1" "$P1_NOISE"
+    wait_for_server "$P2_HTTP" "participant-2" "$P2_NOISE"
+    wait_for_server "$P3_HTTP" "participant-3" "$P3_NOISE"
+}
+
+stop_nodes() {
+    log_phase "Stopping DPM containers"
+    (cd "${SCRIPT_DIR}/../development" && docker compose down) || true
+}
+
+# setup_directories: data is persisted via docker-compose volumes mounted at
+# ./remote/participant-N/data; no temp dirs needed.
+setup_directories() { :; }
+
+# configure_peers: each DPM's persistent SQLite (in the docker-compose volume)
+# carries the prior peer-mesh state from previous runs.
+#
+# KNOWN GAP: on a completely fresh devnet deployment (clean volumes), the
+# SQLite databases will have no peer entries and the first onboarding workflow
+# will fail because P1's DPM does not yet know how to reach P2/P3 via Noise.
+# A manual peer-mesh bootstrap (equivalent to the localnet configure_peers
+# flow) is required once per fresh volume. This is out of scope for this
+# refactor and tracked separately.
+configure_peers() { :; }
+
+# ---------------------------------------------------------------------------
+# Cleanup — called on EXIT by run.sh's trap.
+# ---------------------------------------------------------------------------
+
 cleanup() {
     stop_nodes 2>/dev/null || true
 }
-
-# Per-participant ports for the local DPM processes (separate from the
-# tunneled Canton ports). Match env.sh defaults.
-export P1_HTTP=${P1_HTTP:-8081}
-export P2_HTTP=${P2_HTTP:-8082}
-export P3_HTTP=${P3_HTTP:-8083}
-export P1_NOISE=${P1_NOISE:-9001}
-export P2_NOISE=${P2_NOISE:-9002}
-export P3_NOISE=${P3_NOISE:-9003}
-
-# Tell DPM the network so it picks Devnet defaults internally (DSO URL,
-# Keycloak URL, etc.).
-export DECPM_CANTON_NETWORK=devnet
-
-# Deliberately do NOT set DECPM_ADMIN_ROLE. When unset, DPM's require_admin
-# middleware treats every authenticated caller as admin (src/cli.rs:92-97).
-# Phase 1 is single-user from a developer laptop, so role-gating adds no
-# security and would require provisioning Keycloak role-mappers for the M2M
-# client. Revisit if/when the IT moves to shared CI infra.
-unset DECPM_ADMIN_ROLE

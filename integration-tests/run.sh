@@ -87,7 +87,14 @@ source "$ENV_FILE"
 trap cleanup EXIT
 
 check_prerequisites
-check_dpm_ports_free
+
+# Port-free check is only meaningful for the localnet path where bare DPM
+# processes are spawned. On devnet, docker-compose manages port bindings for
+# 8081-8083 and 9000-9002; checking here would either false-positive (if
+# containers are already running) or be irrelevant.
+if [ "$TARGET" = "localnet" ]; then
+    check_dpm_ports_free
+fi
 
 # ---------------------------------------------------------------------------
 # Verbosity preset

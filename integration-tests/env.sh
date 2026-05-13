@@ -54,17 +54,6 @@ MOCK_TOKEN="eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJodHRwczovL2NhbnRvbi5
 PIDS=()
 
 # ============================================================================
-# Logging
-# ============================================================================
-
-log_phase() {
-    echo ""
-    echo "=========================================="
-    echo "$1"
-    echo "=========================================="
-}
-
-# ============================================================================
 # Cleanup
 # ============================================================================
 
@@ -200,56 +189,6 @@ stop_nodes() {
     done
     wait 2>/dev/null || true
     PIDS=()
-}
-
-wait_for_server() {
-    local port=$1
-    local name=$2
-    local noise_port=$3
-    local max_attempts=30
-    local attempt=0
-
-    echo "Waiting for $name on port $port..."
-    while ! curl -s "http://localhost:$port/node-config" > /dev/null 2>&1; do
-        attempt=$((attempt + 1))
-        if [ $attempt -ge $max_attempts ]; then
-            echo "ERROR: $name failed to start after $max_attempts attempts"
-            exit 1
-        fi
-        sleep 1
-    done
-
-    # Wait for keys to be generated
-    attempt=0
-    while true; do
-        local key
-        key=$(curl -s "http://localhost:$port/keys/status" | jq -r '.public_key // empty')
-        if [ -n "$key" ] && [ "$key" != "null" ]; then
-            break
-        fi
-        attempt=$((attempt + 1))
-        if [ $attempt -ge $max_attempts ]; then
-            echo "ERROR: $name keys not generated after $max_attempts attempts"
-            exit 1
-        fi
-        sleep 1
-    done
-
-    # Wait for Noise listener
-    if [ -n "$noise_port" ]; then
-        attempt=0
-        echo "Waiting for $name Noise listener on port $noise_port..."
-        while ! (echo >/dev/tcp/localhost/"$noise_port") 2>/dev/null; do
-            attempt=$((attempt + 1))
-            if [ $attempt -ge $max_attempts ]; then
-                echo "ERROR: $name Noise listener not ready after $max_attempts attempts"
-                exit 1
-            fi
-            sleep 1
-        done
-    fi
-
-    echo "$name is ready"
 }
 
 # ============================================================================
