@@ -35,7 +35,7 @@ jobs:
       - uses: ./.github/actions/setup-build-env
         with:
           ssh-private-key: ${{ secrets.BOT_SSH_PRIVATE_KEY }}
-          extra-packages: jq bc
+          extra-packages: jq bc curl
       # rust-cache trims target/ to only artifacts referenced by the
       # current Cargo.lock (drops orphaned rlibs, build script junk) and
       # auto-hashes rustc -V, RUSTFLAGS, CARGO_* env vars, and the
@@ -94,7 +94,7 @@ jobs:
       - uses: ./.github/actions/setup-build-env
         with:
           ssh-private-key: ${{ secrets.BOT_SSH_PRIVATE_KEY }}
-          extra-packages: jq
+          extra-packages: jq curl
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
       # `release-ci` profile + test-mode feature produces artifacts
