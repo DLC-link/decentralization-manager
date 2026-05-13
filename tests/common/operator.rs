@@ -66,8 +66,6 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use serde::Deserialize;
     use wiremock::{
         matchers::{method, path},
@@ -169,5 +167,10 @@ mod tests {
         .await
         .unwrap_err();
         assert!(format!("{err:#}").contains("TestAction"));
+
+        // Verify the breaker short-circuited BEFORE any HTTP call — wiremock
+        // received zero requests on the mounted MockServer.
+        let received = server.received_requests().await.unwrap();
+        assert_eq!(received.len(), 0, "expected no HTTP requests but got {}", received.len());
     }
 }
