@@ -56,6 +56,10 @@ pub struct GovernanceState {
 #[derive(Debug, Deserialize)]
 pub struct ProviderServiceItem {
     pub contract_id: String,
+    #[serde(default)]
+    pub operator: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

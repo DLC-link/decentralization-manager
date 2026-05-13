@@ -18,33 +18,80 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     info!("Phase: utility_onboarding");
 
     if f.provider_service_cid.is_none() {
-        propose_confirm_execute(
-            "ProvisionProviderService",
-            json!({"type": "provision_provider_service"}),
-        )
-        .run(f)
-        .await?;
-        Scenario::new("ProviderService visible")
-            .then(
-                "services/provider returns one",
-                Duration::from_secs(30),
-                |f, _| {
-                    Box::pin(async move {
-                        let party_id = match f.party_id() {
-                            Ok(p) => p,
-                            Err(e) => return Some(Err(e)),
-                        };
-                        let path = format!("/services/provider?party_id={party_id}");
-                        let r: ProviderServicesResponse =
-                            f.get_json(f.p1.http, &path).await.ok()?;
-                        let cid = r.services.into_iter().next()?.contract_id;
-                        f.provider_service_cid = Some(cid);
-                        Some(Ok(()))
-                    })
-                },
-            )
-            .run(f)
-            .await?;
+        match f.target {
+            crate::common::TestTarget::Localnet => {
+                propose_confirm_execute(
+                    "ProvisionProviderService",
+                    json!({"type": "provision_provider_service"}),
+                )
+                .run(f)
+                .await?;
+
+                Scenario::new("ProviderService visible")
+                    .then(
+                        "services/provider returns one",
+                        Duration::from_secs(30),
+                        |f, _| {
+                            Box::pin(async move {
+                                let party_id = match f.party_id() {
+                                    Ok(p) => p,
+                                    Err(e) => return Some(Err(e)),
+                                };
+                                let path = format!("/services/provider?party_id={party_id}");
+                                let r: ProviderServicesResponse =
+                                    f.get_json(f.p1.http, &path).await.ok()?;
+                                let cid = r.services.into_iter().next()?.contract_id;
+                                f.provider_service_cid = Some(cid);
+                                Some(Ok(()))
+                            })
+                        },
+                    )
+                    .run(f)
+                    .await?;
+            }
+            crate::common::TestTarget::Devnet => {
+                let operator = f
+                    .operator_party
+                    .clone()
+                    .context("operator_party not set on devnet — discover_network_parties must run first")?;
+                let governance_party = f.party_id()?.to_string();
+                propose_confirm_execute(
+                    "CreateProviderServiceRequest",
+                    json!({
+                        "type": "create_provider_service_request",
+                        "operator": operator,
+                        "provider": governance_party,
+                    }),
+                )
+                .run(f)
+                .await?;
+
+                info!("Awaiting operator-driven ProviderService for {governance_party}");
+                let port = f.p1.http;
+                let path = format!("/services/provider?party_id={governance_party}");
+                let operator_for_match = operator.clone();
+                let governance_for_match = governance_party.clone();
+                let cid = crate::common::operator::await_operator_response::<ProviderServicesResponse, _>(
+                    f,
+                    port,
+                    &path,
+                    "CreateProviderServiceRequest",
+                    "ProviderService",
+                    crate::common::operator::OPERATOR_RESPONSE_TIMEOUT_DEVNET,
+                    move |r| {
+                        r.services
+                            .into_iter()
+                            .find(|s| {
+                                s.operator.as_deref() == Some(operator_for_match.as_str())
+                                    && s.provider.as_deref() == Some(governance_for_match.as_str())
+                            })
+                            .map(|s| s.contract_id)
+                    },
+                )
+                .await?;
+                f.provider_service_cid = Some(cid);
+            }
+        }
     }
 
     let provider_cid = f
