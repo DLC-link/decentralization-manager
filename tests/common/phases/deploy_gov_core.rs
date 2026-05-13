@@ -6,6 +6,7 @@ use tracing::info;
 
 use crate::common::{
     Fixture,
+    MemberCreds,
     http::{probe_workflow_run_visible, probe_workflow_status},
     invitations::{InvitationIds, post_accept_invitation, probe_pending_invitation},
     scenario::Scenario,
@@ -48,14 +49,36 @@ async fn update_party_config(
     party_id: &str,
     member: &str,
     name: &str,
+    member_creds: Option<&MemberCreds>,
 ) -> anyhow::Result<()> {
-    let req = json!({
+    let (user_id, keycloak_url, keycloak_realm, keycloak_client_id, keycloak_client_secret) =
+        if let Some(c) = member_creds {
+            (
+                c.user_id.clone(),
+                std::env::var("DECPM_KEYCLOAK_URL")
+                    .context("DECPM_KEYCLOAK_URL not set on devnet")?,
+                std::env::var("DECPM_KEYCLOAK_REALM")
+                    .context("DECPM_KEYCLOAK_REALM not set on devnet")?,
+                c.keycloak_client_id.clone(),
+                Some(c.keycloak_client_secret.clone()),
+            )
+        } else {
+            (
+                "ledger-api-user".to_string(),
+                String::new(),
+                String::new(),
+                String::new(),
+                None,
+            )
+        };
+
+    let mut req = json!({
         "dec_party_id": party_id,
         "member_party_id": member,
-        "user_id": "ledger-api-user",
-        "keycloak_url": "",
-        "keycloak_realm": "",
-        "keycloak_client_id": "",
+        "user_id": user_id,
+        "keycloak_url": keycloak_url,
+        "keycloak_realm": keycloak_realm,
+        "keycloak_client_id": keycloak_client_id,
         "packages": {
             "governance_action": "#governance-action-v0",
             "governance_core": "#governance-core-v0",
@@ -64,6 +87,10 @@ async fn update_party_config(
             "utility_registry": "#utility-registry-app-v0",
         },
     });
+    if let Some(secret) = keycloak_client_secret {
+        req["keycloak_client_secret"] = serde_json::Value::String(secret);
+    }
+
     let _: Value = f
         .put_json(port, "/party-config", &req)
         .await
@@ -125,9 +152,9 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     grant_rights(&*f, P2_JSON_API, &party_id, "participant-2").await?;
                     grant_rights(&*f, P3_JSON_API, &party_id, "participant-3").await?;
 
-                    update_party_config(&*f, f.p1.http, &party_id, &p1m, "participant-1").await?;
-                    update_party_config(&*f, f.p2.http, &party_id, &p2m, "participant-2").await?;
-                    update_party_config(&*f, f.p3.http, &party_id, &p3m, "participant-3").await?;
+                    update_party_config(&*f, f.p1.http, &party_id, &p1m, "participant-1", f.p1_member_creds.as_ref()).await?;
+                    update_party_config(&*f, f.p2.http, &party_id, &p2m, "participant-2", f.p2_member_creds.as_ref()).await?;
+                    update_party_config(&*f, f.p3.http, &party_id, &p3m, "participant-3", f.p3_member_creds.as_ref()).await?;
 
                     let req = json!({
                         "decentralized_party_id": party_id,

@@ -17,6 +17,14 @@ use std::{path::PathBuf, sync::{Arc, Mutex}, time::Duration};
 use anyhow::Context;
 use reqwest::Client;
 
+#[derive(Debug, Clone)]
+pub struct MemberCreds {
+    pub party_id: String,
+    pub user_id: String,
+    pub keycloak_client_id: String,
+    pub keycloak_client_secret: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TestTarget {
     Localnet,
@@ -71,6 +79,10 @@ pub struct Fixture {
     pub provider_service_cid: Option<String>,
     pub allocation_factory_cid: Option<String>,
     pub instrument_configuration_cid: Option<String>,
+
+    pub p1_member_creds: Option<MemberCreds>,
+    pub p2_member_creds: Option<MemberCreds>,
+    pub p3_member_creds: Option<MemberCreds>,
 }
 
 fn read_env(key: &str) -> anyhow::Result<String> {
@@ -142,6 +154,28 @@ impl Fixture {
                 .unwrap_or(0);
             format!("dpm-it-{ts}-{pid}", pid = std::process::id())
         });
+
+        let (p1_member_creds, p2_member_creds, p3_member_creds) = match target {
+            TestTarget::Devnet => {
+                let read_member_creds = |n: u8| -> anyhow::Result<MemberCreds> {
+                    Ok(MemberCreds {
+                        party_id: read_env(&format!("P{n}_MEMBER_PARTY_ID"))?,
+                        user_id: read_env(&format!("P{n}_MEMBER_USER_ID"))?,
+                        keycloak_client_id: read_env(&format!("P{n}_MEMBER_KEYCLOAK_CLIENT_ID"))?,
+                        keycloak_client_secret: read_env(
+                            &format!("P{n}_MEMBER_KEYCLOAK_CLIENT_SECRET"),
+                        )?,
+                    })
+                };
+                (
+                    Some(read_member_creds(1)?),
+                    Some(read_member_creds(2)?),
+                    Some(read_member_creds(3)?),
+                )
+            }
+            TestTarget::Localnet => (None, None, None),
+        };
+
         Ok(Fixture {
             client,
             refresher,
@@ -164,6 +198,9 @@ impl Fixture {
             provider_service_cid: None,
             allocation_factory_cid: None,
             instrument_configuration_cid: None,
+            p1_member_creds,
+            p2_member_creds,
+            p3_member_creds,
         })
     }
 
@@ -270,6 +307,9 @@ impl Fixture {
             provider_service_cid: None,
             allocation_factory_cid: None,
             instrument_configuration_cid: None,
+            p1_member_creds: None,
+            p2_member_creds: None,
+            p3_member_creds: None,
         }
     }
 }
@@ -307,6 +347,19 @@ mod tests {
             std::env::set_var("DECPM_KEYCLOAK_CLIENT_ID", "test-client");
             std::env::set_var("DECPM_KEYCLOAK_USERNAME", "testuser");
             std::env::set_var("DECPM_KEYCLOAK_PASSWORD", "testpass");
+            // Per-participant member-party credentials
+            std::env::set_var("P1_MEMBER_PARTY_ID", "p1-member-party");
+            std::env::set_var("P1_MEMBER_USER_ID", "p1-user");
+            std::env::set_var("P1_MEMBER_KEYCLOAK_CLIENT_ID", "p1-client-id");
+            std::env::set_var("P1_MEMBER_KEYCLOAK_CLIENT_SECRET", "p1-secret");
+            std::env::set_var("P2_MEMBER_PARTY_ID", "p2-member-party");
+            std::env::set_var("P2_MEMBER_USER_ID", "p2-user");
+            std::env::set_var("P2_MEMBER_KEYCLOAK_CLIENT_ID", "p2-client-id");
+            std::env::set_var("P2_MEMBER_KEYCLOAK_CLIENT_SECRET", "p2-secret");
+            std::env::set_var("P3_MEMBER_PARTY_ID", "p3-member-party");
+            std::env::set_var("P3_MEMBER_USER_ID", "p3-user");
+            std::env::set_var("P3_MEMBER_KEYCLOAK_CLIENT_ID", "p3-client-id");
+            std::env::set_var("P3_MEMBER_KEYCLOAK_CLIENT_SECRET", "p3-secret");
         }
     }
 
@@ -331,6 +384,18 @@ mod tests {
                 "DECPM_KEYCLOAK_CLIENT_ID",
                 "DECPM_KEYCLOAK_USERNAME",
                 "DECPM_KEYCLOAK_PASSWORD",
+                "P1_MEMBER_PARTY_ID",
+                "P1_MEMBER_USER_ID",
+                "P1_MEMBER_KEYCLOAK_CLIENT_ID",
+                "P1_MEMBER_KEYCLOAK_CLIENT_SECRET",
+                "P2_MEMBER_PARTY_ID",
+                "P2_MEMBER_USER_ID",
+                "P2_MEMBER_KEYCLOAK_CLIENT_ID",
+                "P2_MEMBER_KEYCLOAK_CLIENT_SECRET",
+                "P3_MEMBER_PARTY_ID",
+                "P3_MEMBER_USER_ID",
+                "P3_MEMBER_KEYCLOAK_CLIENT_ID",
+                "P3_MEMBER_KEYCLOAK_CLIENT_SECRET",
             ] {
                 std::env::remove_var(k);
             }

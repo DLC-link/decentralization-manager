@@ -28,10 +28,19 @@ if [ -z "${DECPM_KEYCLOAK_PASSWORD:-}" ]; then
 fi
 
 # URL / realm / client_id are shared across all three participants and live in
-# development/remote/participant-1/.env. If not already in the environment,
-# source them from there (participant-1 is picked by convention; all three are
-# identical for these values).
+# development/remote/participant-1/.env. Per-participant member-party credentials
+# (P{N}_MEMBER_*) live in each participant's own .env file. Source all three so
+# all P{N}_MEMBER_* vars are available in the environment.
 PARTICIPANT_1_ENV="$SCRIPT_DIR/../development/remote/participant-1/.env"
+PARTICIPANT_2_ENV="$SCRIPT_DIR/../development/remote/participant-2/.env"
+PARTICIPANT_3_ENV="$SCRIPT_DIR/../development/remote/participant-3/.env"
+
+for _penv in "$PARTICIPANT_1_ENV" "$PARTICIPANT_2_ENV" "$PARTICIPANT_3_ENV"; do
+    if [ -f "$_penv" ]; then
+        set -a; . "$_penv"; set +a
+    fi
+done
+unset _penv
 
 _source_keycloak_var() {
     local var=$1
@@ -54,6 +63,28 @@ _source_keycloak_var() {
 _source_keycloak_var DECPM_KEYCLOAK_URL
 _source_keycloak_var DECPM_KEYCLOAK_REALM
 _source_keycloak_var DECPM_KEYCLOAK_CLIENT_ID
+
+# ---------------------------------------------------------------------------
+# Validate per-participant member-party credentials (defense-in-depth;
+# must be set in development/remote/participant-{1,2,3}/.env before running).
+# ---------------------------------------------------------------------------
+
+MEMBER_VARS=(
+    P1_MEMBER_PARTY_ID  P1_MEMBER_USER_ID  P1_MEMBER_KEYCLOAK_CLIENT_ID  P1_MEMBER_KEYCLOAK_CLIENT_SECRET
+    P2_MEMBER_PARTY_ID  P2_MEMBER_USER_ID  P2_MEMBER_KEYCLOAK_CLIENT_ID  P2_MEMBER_KEYCLOAK_CLIENT_SECRET
+    P3_MEMBER_PARTY_ID  P3_MEMBER_USER_ID  P3_MEMBER_KEYCLOAK_CLIENT_ID  P3_MEMBER_KEYCLOAK_CLIENT_SECRET
+)
+MEMBER_MISSING=()
+for _v in "${MEMBER_VARS[@]}"; do
+    [ -z "${!_v:-}" ] && MEMBER_MISSING+=("$_v")
+done
+if [ "${#MEMBER_MISSING[@]}" -gt 0 ]; then
+    echo "ERROR: missing member-party env vars for devnet target:" >&2
+    printf '  - %s\n' "${MEMBER_MISSING[@]}" >&2
+    echo "Add them to development/remote/participant-{1,2,3}/.env." >&2
+    exit 1
+fi
+unset MEMBER_VARS MEMBER_MISSING _v
 
 # ---------------------------------------------------------------------------
 # Smoke-check Keycloak reachability via password grant.
