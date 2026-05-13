@@ -120,8 +120,70 @@ stop_localnet()     { :; }
 # DPM lifecycle via docker-compose.
 # ---------------------------------------------------------------------------
 
+KUBE_CONTEXT_DEVNET=${KUBE_CONTEXT_DEVNET:-ieu-devnet}
+KUBE_NS_CANTON=${KUBE_NS_CANTON:-catalyst-canton}
+CANTON_TUNNEL_PIDS=()
+
+_canton_forward_loop() {
+    local idx=$1 local_ledger=$2 local_admin=$3
+    while true; do
+        kubectl --context="$KUBE_CONTEXT_DEVNET" port-forward \
+            "svc/participant-ibtc-devnet-$idx" -n "$KUBE_NS_CANTON" \
+            "${local_ledger}:5001" "${local_admin}:5002" >/dev/null 2>&1
+        echo "[P$idx canton-tunnel] port-forward disconnected, restarting in 5s..." >&2
+        sleep 5
+    done
+}
+
+start_canton_tunnels() {
+    log_phase "Opening kubectl port-forwards to Canton participants"
+
+    # Sanity-check the kubectl context exists. If it doesn't, the user
+    # probably hasn't logged in to AWS / hasn't set up kubeconfig yet.
+    if ! kubectl config get-contexts "$KUBE_CONTEXT_DEVNET" >/dev/null 2>&1; then
+        echo "ERROR: kubectl context '$KUBE_CONTEXT_DEVNET' not found." >&2
+        echo "Run 'aws eks update-kubeconfig --name devnet-cluster --region us-east-1 --profile <profile>' first." >&2
+        exit 1
+    fi
+
+    _canton_forward_loop 1 5001 5002 &
+    CANTON_TUNNEL_PIDS+=($!)
+    _canton_forward_loop 2 5011 5012 &
+    CANTON_TUNNEL_PIDS+=($!)
+    _canton_forward_loop 3 5021 5022 &
+    CANTON_TUNNEL_PIDS+=($!)
+
+    # Wait for all 6 ports to actually accept connections.
+    for port in 5001 5002 5011 5012 5021 5022; do
+        local deadline=$(( $(date +%s) + 30 ))
+        until nc -z localhost "$port" >/dev/null 2>&1; do
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+                echo "ERROR: localhost:$port did not open within 30s of starting port-forwards." >&2
+                echo "Check that the kubectl context '$KUBE_CONTEXT_DEVNET' is reachable and svc/participant-ibtc-devnet-* exist in namespace '$KUBE_NS_CANTON'." >&2
+                stop_canton_tunnels
+                exit 1
+            fi
+            sleep 0.5
+        done
+    done
+    echo "All 6 Canton ports forwarded (5001/5002, 5011/5012, 5021/5022 → svc/participant-ibtc-devnet-{1,2,3})."
+}
+
+stop_canton_tunnels() {
+    if [ "${#CANTON_TUNNEL_PIDS[@]}" -gt 0 ]; then
+        log_phase "Stopping Canton port-forwards"
+        for pid in "${CANTON_TUNNEL_PIDS[@]}"; do
+            kill -TERM "$pid" 2>/dev/null || true
+        done
+        # Also kill the kubectl children spawned by the forward loops
+        pkill -P $$ -f "kubectl --context=$KUBE_CONTEXT_DEVNET port-forward" 2>/dev/null || true
+        CANTON_TUNNEL_PIDS=()
+    fi
+}
+
 start_nodes() {
-    log_phase "Starting DPM containers via docker-compose"
+    start_canton_tunnels
+    log_phase "Starting DPM containers via docker compose"
     # NOTE: docker-compose up --build runs `cargo build --release` inside the
     # container. The local `cargo build --profile release-ci` (in run.sh) also
     # runs for the test crate. This means the DPM binary is compiled twice on
@@ -148,4 +210,5 @@ setup_directories() { :; }
 
 cleanup() {
     stop_nodes 2>/dev/null || true
+    stop_canton_tunnels 2>/dev/null || true
 }
