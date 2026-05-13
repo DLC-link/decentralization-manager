@@ -237,4 +237,21 @@ mod tests {
             .await
             .unwrap();
     }
+
+    #[tokio::test]
+    async fn post_expect_status_attaches_bearer() {
+        let (f, server) = fixture_with_jwt("test-jwt").await;
+        Mock::given(method("POST"))
+            .and(path("/ping"))
+            .and(header("authorization", "Bearer test-jwt"))
+            .respond_with(ResponseTemplate::new(422).set_body_string("nope"))
+            .mount(&server)
+            .await;
+
+        let (status, _body) = f
+            .post_expect_status(f.p1.http, "/ping", &serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(status.as_u16(), 422);
+    }
 }
