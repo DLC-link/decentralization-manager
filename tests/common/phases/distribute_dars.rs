@@ -23,19 +23,25 @@ const DAR_FILES: &[&str] = &[
 /// template inside it. A successful `/contracts/query` (200 with `contracts: []`
 /// or `contracts: [...]`) means the package is installed; an error response
 /// means it's missing.
+///
+/// `governance-action` is intentionally absent: it's a library-only package
+/// (exports the `GovernableAction` interface, no templates), so the
+/// "probe a known template" pattern doesn't apply. It's a transitive
+/// build-time dependency of the other three packages — if those install,
+/// `governance-action` necessarily installs too.
 const DAR_PROBES: &[(&str, &str, &str)] = &[
     (
-        "%23governance-core-v0-rc4",
+        "%23governance-core-v0",
         "Governance.Rules",
         "GovernanceRules",
     ),
     (
-        "%23governance-token-custody-v0-rc4",
+        "%23governance-token-custody-v0",
         "Governance.TokenCustody.SetupTokenPreapproval",
         "SetupTokenPreapproval",
     ),
     (
-        "%23governance-utility-onboarding-v0-rc4",
+        "%23governance-utility-onboarding-v0",
         "Governance.UtilityOnboarding.SetupUtility",
         "SetupUtility",
     ),
