@@ -60,7 +60,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             "type": "setup_utility",
             "provider_service_cid": provider_cid,
             "operator": p1_member,
-            "instrument_id_text": "TEST-E2E-TOKEN",
+            "instrument_id_text": format!("{}-TEST-E2E-TOKEN", f.run_id),
             "create_transfer_rule": true,
             "create_allocation_factory": true,
         }),
@@ -128,7 +128,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         json!({
             "type": "mint",
             "allocation_factory_cid": alloc,
-            "instrument_id": {"admin": party_id, "id": "TEST-E2E-TOKEN"},
+            "instrument_id": {"admin": party_id, "id": format!("{}-TEST-E2E-TOKEN", f.run_id)},
             "instrument_configuration_cid": inst,
             "recipient": p1_member,
             "amount": "100.0",
@@ -162,7 +162,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         json!({
             "type": "burn",
             "allocation_factory_cid": alloc,
-            "instrument_id": {"admin": party_id, "id": "TEST-E2E-TOKEN"},
+            "instrument_id": {"admin": party_id, "id": format!("{}-TEST-E2E-TOKEN", f.run_id)},
             "instrument_configuration_cid": inst,
             "holder": p1_member,
             "amount": "10.0",
