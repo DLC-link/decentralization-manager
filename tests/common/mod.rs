@@ -322,6 +322,16 @@ mod tests {
     }
 
     #[test]
+    fn target_parses_localnet_explicitly() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_all_env();
+        set_all_env();
+        unsafe { std::env::set_var("DPM_IT_TARGET", "localnet") };
+        let f = Fixture::from_env().unwrap();
+        assert!(matches!(f.target, TestTarget::Localnet));
+    }
+
+    #[test]
     fn target_errors_on_invalid_value() {
         let _g = ENV_LOCK.lock().unwrap();
         clear_all_env();
@@ -330,6 +340,8 @@ mod tests {
         let err = Fixture::from_env().unwrap_err();
         assert!(format!("{err:#}").contains("DPM_IT_TARGET"));
         assert!(format!("{err:#}").contains("stagnet"));
+        assert!(format!("{err:#}").contains("localnet"));
+        assert!(format!("{err:#}").contains("devnet"));
     }
 
     #[test]
