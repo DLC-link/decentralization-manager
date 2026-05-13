@@ -56,24 +56,34 @@ _source_keycloak_var DECPM_KEYCLOAK_REALM
 _source_keycloak_var DECPM_KEYCLOAK_CLIENT_ID
 
 # ---------------------------------------------------------------------------
-# Fetch Keycloak bearer token via password grant.
+# Smoke-check Keycloak reachability via password grant.
+#
+# The Rust test runner manages its own token lifecycle via KeycloakRefresher
+# (reads DECPM_KEYCLOAK_* env vars directly and re-fetches proactively when the
+# cached token is within 30s of expiry). We still perform a token fetch here as
+# a fail-fast check: if Keycloak is unreachable or the credentials are wrong we
+# want to discover that before spending time on `cargo build` / `docker compose`.
+# The token value fetched here is NOT used by the Rust runner on devnet.
 # ---------------------------------------------------------------------------
 
 TOKEN_URL="${DECPM_KEYCLOAK_URL%/}/realms/${DECPM_KEYCLOAK_REALM}/protocol/openid-connect/token"
-MOCK_TOKEN=$(curl -s -f -X POST "$TOKEN_URL" \
+_SMOKE_TOKEN=$(curl -s -f -X POST "$TOKEN_URL" \
     -d "grant_type=password" \
     -d "client_id=${DECPM_KEYCLOAK_CLIENT_ID}" \
     -d "username=${DECPM_KEYCLOAK_USERNAME}" \
     -d "password=${DECPM_KEYCLOAK_PASSWORD}" \
     | jq -r .access_token)
-if [ -z "$MOCK_TOKEN" ] || [ "$MOCK_TOKEN" = "null" ]; then
+if [ -z "$_SMOKE_TOKEN" ] || [ "$_SMOKE_TOKEN" = "null" ]; then
     echo "ERROR: Keycloak password grant failed." >&2
     echo "  TOKEN_URL: $TOKEN_URL" >&2
     echo "  CLIENT_ID: $DECPM_KEYCLOAK_CLIENT_ID" >&2
     echo "Check that DECPM_KEYCLOAK_USERNAME and DECPM_KEYCLOAK_PASSWORD are correct and the Keycloak server is reachable." >&2
     exit 1
 fi
-export MOCK_TOKEN
+unset _SMOKE_TOKEN
+# NOTE: MOCK_TOKEN is intentionally NOT exported on the devnet path.
+# Fixture::from_env() only reads MOCK_TOKEN when DPM_IT_TARGET=localnet;
+# on devnet it uses the DECPM_KEYCLOAK_* vars via KeycloakRefresher.
 
 # ---------------------------------------------------------------------------
 # Target + run-id.

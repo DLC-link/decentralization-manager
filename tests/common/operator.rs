@@ -86,7 +86,6 @@ mod tests {
 
     async fn fixture_pointed_at(server: &MockServer) -> Fixture {
         let mut f = Fixture::for_test();
-        f.jwt = "test-jwt".to_string();
         f.p1.http = server.address().port();
         f
     }

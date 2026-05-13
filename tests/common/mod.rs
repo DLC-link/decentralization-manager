@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+pub mod auth;
 pub mod chaos;
 pub mod db;
 pub mod governance;
@@ -11,7 +12,7 @@ pub mod processes;
 pub mod scenario;
 pub mod types;
 
-use std::{path::PathBuf, sync::Mutex, time::Duration};
+use std::{path::PathBuf, sync::{Arc, Mutex}, time::Duration};
 
 use anyhow::Context;
 use reqwest::Client;
@@ -44,7 +45,7 @@ pub struct NodePorts {
 #[derive(Debug)]
 pub struct Fixture {
     pub client: Client,
-    pub jwt: String,
+    pub refresher: Arc<auth::Refresher>,
     pub dev_dir: PathBuf,
     pub p1: NodePorts,
     pub p2: NodePorts,
@@ -99,7 +100,6 @@ impl Fixture {
             noise: read_port("P3_NOISE")?,
             participant_id: read_env("P3_PARTICIPANT_ID")?,
         };
-        let jwt = read_env("MOCK_TOKEN")?;
         let dev_dir = PathBuf::from(read_env("DEV_DIR")?);
         let current_pids = [
             std::env::var("P1_PID").ok().and_then(|s| s.parse().ok()),
@@ -107,6 +107,31 @@ impl Fixture {
             std::env::var("P3_PID").ok().and_then(|s| s.parse().ok()),
         ];
         let target = TestTarget::from_env()?;
+        let refresher = match target {
+            TestTarget::Localnet => Arc::new(auth::Refresher::Static {
+                token: read_env("MOCK_TOKEN")?,
+            }),
+            TestTarget::Devnet => {
+                let creds = auth::KeycloakCreds {
+                    url: read_env("DECPM_KEYCLOAK_URL")?,
+                    realm: read_env("DECPM_KEYCLOAK_REALM")?,
+                    client_id: read_env("DECPM_KEYCLOAK_CLIENT_ID")?,
+                    username: read_env("DECPM_KEYCLOAK_USERNAME")?,
+                    password: read_env("DECPM_KEYCLOAK_PASSWORD")?,
+                };
+                // Initial state is expired so the first `.token()` call triggers a fetch.
+                let initial_state = tokio::sync::Mutex::new(auth::TokenState {
+                    access_token: String::new(),
+                    expires_at: std::time::Instant::now()
+                        .checked_sub(Duration::from_secs(60))
+                        .unwrap_or_else(std::time::Instant::now),
+                });
+                Arc::new(auth::Refresher::Keycloak {
+                    creds,
+                    state: initial_state,
+                })
+            }
+        };
         let run_id = std::env::var("DPM_IT_RUN_ID").unwrap_or_else(|_| {
             let ts = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -125,7 +150,7 @@ impl Fixture {
             .context("build reqwest client")?;
         Ok(Fixture {
             client,
-            jwt,
+            refresher,
             dev_dir,
             p1,
             p2,
@@ -206,11 +231,20 @@ impl Fixture {
     /// they only need a `Fixture` instance to pass to step closures.
     #[cfg(test)]
     pub fn for_test() -> Self {
+        Self::for_test_with_jwt("test-jwt")
+    }
+
+    /// Like `for_test()` but with a custom JWT string for tests that assert on
+    /// specific bearer token values in HTTP requests.
+    #[cfg(test)]
+    pub fn for_test_with_jwt(jwt: &str) -> Self {
         Self {
             client: Client::builder()
                 .build()
                 .expect("build reqwest client for test"),
-            jwt: "test-jwt".to_string(),
+            refresher: Arc::new(auth::Refresher::Static {
+                token: jwt.to_string(),
+            }),
             dev_dir: PathBuf::from("/tmp/dpm-it-test"),
             current_pids: [None, None, None],
             p1: NodePorts {
@@ -271,6 +305,17 @@ mod tests {
         }
     }
 
+    fn set_devnet_env() {
+        unsafe {
+            std::env::set_var("DPM_IT_TARGET", "devnet");
+            std::env::set_var("DECPM_KEYCLOAK_URL", "https://keycloak.example.com/auth");
+            std::env::set_var("DECPM_KEYCLOAK_REALM", "test-realm");
+            std::env::set_var("DECPM_KEYCLOAK_CLIENT_ID", "test-client");
+            std::env::set_var("DECPM_KEYCLOAK_USERNAME", "testuser");
+            std::env::set_var("DECPM_KEYCLOAK_PASSWORD", "testpass");
+        }
+    }
+
     fn clear_all_env() {
         unsafe {
             for k in [
@@ -287,22 +332,29 @@ mod tests {
                 "DEV_DIR",
                 "DPM_IT_RUN_ID",
                 "DPM_IT_TARGET",
+                "DECPM_KEYCLOAK_URL",
+                "DECPM_KEYCLOAK_REALM",
+                "DECPM_KEYCLOAK_CLIENT_ID",
+                "DECPM_KEYCLOAK_USERNAME",
+                "DECPM_KEYCLOAK_PASSWORD",
             ] {
                 std::env::remove_var(k);
             }
         }
     }
 
-    #[test]
-    fn from_env_succeeds_when_all_vars_present() {
-        let _g = ENV_LOCK.lock().unwrap();
-        clear_all_env();
-        set_all_env();
-        let f = Fixture::from_env().unwrap();
+    #[tokio::test]
+    async fn from_env_succeeds_when_all_vars_present() {
+        let f = {
+            let _g = ENV_LOCK.lock().unwrap();
+            clear_all_env();
+            set_all_env();
+            Fixture::from_env().unwrap()
+        };
         assert_eq!(f.p1.http, 8081);
         assert_eq!(f.p3.noise, 9003);
         assert_eq!(f.p2.participant_id, "p2");
-        assert_eq!(f.jwt, "mock-jwt");
+        assert_eq!(f.refresher.token().await.unwrap(), "mock-jwt");
     }
 
     #[test]
@@ -339,7 +391,7 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap();
         clear_all_env();
         set_all_env();
-        unsafe { std::env::set_var("DPM_IT_TARGET", "devnet") };
+        set_devnet_env();
         let f = Fixture::from_env().unwrap();
         assert!(matches!(f.target, TestTarget::Devnet));
     }
@@ -394,6 +446,13 @@ mod tests {
         assert!(f.dso_party.is_none());
         assert!(!f.operator_timeout_tripped);
         assert!(!f.run_id.is_empty());
+    }
+
+    #[tokio::test]
+    async fn for_test_refresher_returns_test_jwt() {
+        let f = Fixture::for_test();
+        let token = f.refresher.token().await.unwrap();
+        assert_eq!(token, "test-jwt");
     }
 
     #[tokio::test]

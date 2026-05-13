@@ -10,12 +10,13 @@ impl Fixture {
         B: Serialize + ?Sized,
         R: DeserializeOwned,
     {
+        let jwt = self.refresher.token().await.context("acquire bearer")?;
         let url = format!("http://localhost:{port}{path}");
         let res = self
             .client
             .post(&url)
             .header(CONTENT_TYPE, "application/json")
-            .header(AUTHORIZATION, format!("Bearer {}", self.jwt))
+            .header(AUTHORIZATION, format!("Bearer {jwt}"))
             .json(body)
             .send()
             .await
@@ -43,11 +44,12 @@ impl Fixture {
     where
         R: DeserializeOwned,
     {
+        let jwt = self.refresher.token().await.context("acquire bearer")?;
         let url = format!("http://localhost:{port}{path}");
         let res = self
             .client
             .get(&url)
-            .header(AUTHORIZATION, format!("Bearer {}", self.jwt))
+            .header(AUTHORIZATION, format!("Bearer {jwt}"))
             .send()
             .await
             .with_context(|| format!("GET {url}"))?;
@@ -71,12 +73,13 @@ impl Fixture {
         B: Serialize + ?Sized,
         R: DeserializeOwned,
     {
+        let jwt = self.refresher.token().await.context("acquire bearer")?;
         let url = format!("http://localhost:{port}{path}");
         let res = self
             .client
             .put(&url)
             .header(CONTENT_TYPE, "application/json")
-            .header(AUTHORIZATION, format!("Bearer {}", self.jwt))
+            .header(AUTHORIZATION, format!("Bearer {jwt}"))
             .json(body)
             .send()
             .await
@@ -108,12 +111,13 @@ impl Fixture {
     where
         B: Serialize + ?Sized,
     {
+        let jwt = self.refresher.token().await.context("acquire bearer")?;
         let url = format!("http://localhost:{port}{path}");
         let res = self
             .client
             .post(&url)
             .header(CONTENT_TYPE, "application/json")
-            .header(AUTHORIZATION, format!("Bearer {}", self.jwt))
+            .header(AUTHORIZATION, format!("Bearer {jwt}"))
             .json(body)
             .send()
             .await
@@ -181,8 +185,7 @@ mod tests {
 
     async fn fixture_with_jwt(jwt: &str) -> (Fixture, MockServer) {
         let server = MockServer::start().await;
-        let mut f = Fixture::for_test();
-        f.jwt = jwt.to_string();
+        let mut f = Fixture::for_test_with_jwt(jwt);
         f.p1.http = server.address().port();
         (f, server)
     }
