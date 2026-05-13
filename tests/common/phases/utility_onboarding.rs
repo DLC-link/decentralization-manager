@@ -6,7 +6,9 @@ use tracing::info;
 
 use crate::common::{
     Fixture,
+    TestTarget,
     governance::propose_confirm_execute,
+    operator::{OPERATOR_RESPONSE_TIMEOUT_DEVNET, await_operator_response},
     scenario::Scenario,
     types::{ContractsQueryResponse, ProviderServicesResponse},
 };
@@ -19,7 +21,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
 
     if f.provider_service_cid.is_none() {
         match f.target {
-            crate::common::TestTarget::Localnet => {
+            TestTarget::Localnet => {
                 propose_confirm_execute(
                     "ProvisionProviderService",
                     json!({"type": "provision_provider_service"}),
@@ -49,7 +51,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     .run(f)
                     .await?;
             }
-            crate::common::TestTarget::Devnet => {
+            TestTarget::Devnet => {
                 let operator = f
                     .operator_party
                     .clone()
@@ -71,13 +73,13 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 let path = format!("/services/provider?party_id={governance_party}");
                 let operator_for_match = operator.clone();
                 let governance_for_match = governance_party.clone();
-                let cid = crate::common::operator::await_operator_response::<ProviderServicesResponse, _>(
+                let cid = await_operator_response::<ProviderServicesResponse, _>(
                     f,
                     port,
                     &path,
                     "CreateProviderServiceRequest",
                     "ProviderService",
-                    crate::common::operator::OPERATOR_RESPONSE_TIMEOUT_DEVNET,
+                    OPERATOR_RESPONSE_TIMEOUT_DEVNET,
                     move |r| {
                         r.services
                             .into_iter()
