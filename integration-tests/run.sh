@@ -10,18 +10,28 @@ set -eu
 # Flag parsing
 # ---------------------------------------------------------------------------
 
+TARGET=localnet
 VERBOSE=0
-for arg in "$@"; do
-    case "$arg" in
+while [[ "$#" -gt 0 ]]; do
+    case "$1" in
         -v|--verbose)
             VERBOSE=1
+            shift
+            ;;
+        --target)
+            TARGET="$2"
+            shift 2
+            ;;
+        --target=*)
+            TARGET="${1#*=}"
+            shift
             ;;
         -h|--help)
             cat <<EOF
-Usage: $(basename "$0") [-v|--verbose] [-h|--help]
+Usage: $(basename "$0") [-v|--verbose] [--target <localnet|devnet>] [-h|--help]
 
-Boots a Splice localnet, spawns 3 dec-party-manager instances, and runs
-the governance workflow e2e (cargo test --profile release-ci).
+Boots a Splice localnet (or connects to devnet), spawns 3 dec-party-manager
+instances, and runs the governance workflow e2e (cargo test --profile release-ci).
 
 Output is filtered by default so the Given-When-Then scenario trace stays
 readable. The dec-party-manager processes and Canton/Noise libraries log
@@ -34,6 +44,11 @@ Options:
                   RUST_LOG=dec_party_manager=info,tokio_noise=error,
                           hyper_noise=error,governance_workflows=info
 
+  --target <localnet|devnet>
+                  Which target to test against (default: localnet).
+                  localnet: boots a Splice docker-compose stack.
+                  devnet: requires tunnel setup + ~/.config/dec-party-manager/devnet.env.
+
   -h, --help      Show this help and exit.
 
 If RUST_LOG is already set in the environment, it overrides this preset.
@@ -41,7 +56,7 @@ EOF
             exit 0
             ;;
         *)
-            echo "Unknown argument: $arg" >&2
+            echo "Unknown argument: $1" >&2
             echo "Run $(basename "$0") --help for usage." >&2
             exit 1
             ;;
@@ -49,7 +64,21 @@ EOF
 done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-source "$SCRIPT_DIR/integration-tests/env.sh"
+
+case "$TARGET" in
+    localnet)
+        ENV_FILE="$SCRIPT_DIR/integration-tests/env.sh"
+        ;;
+    devnet)
+        ENV_FILE="$SCRIPT_DIR/integration-tests/devnet.env.sh"
+        ;;
+    *)
+        echo "Unknown --target: $TARGET (expected localnet|devnet)" >&2
+        exit 1
+        ;;
+esac
+
+source "$ENV_FILE"
 
 trap cleanup EXIT
 
@@ -83,15 +112,27 @@ fi
 
 # Build
 #
-# Integration tests run against a permissive `MockValidator` so the test
-# binary needs to be compiled with the `test-mode` Cargo feature. Production
-# builds intentionally omit this feature so a release binary cannot select
-# mock auth at runtime.
+# When TARGET=localnet the binary is compiled with --features test-mode so it
+# can select the permissive MockValidator used by the localnet e2e suite.
+# Production builds (TARGET=devnet) omit this feature so the real JwtValidator
+# is used and no mock auth path is compiled in.
+#
+# IMPORTANT: --features test-mode (or its absence) must match between `cargo
+# build` and `cargo test`. Mismatching causes cargo to rebuild the binary under
+# a different feature unification, overwriting the artifact in
+# target/release-ci/. Chaos phases (G1/G2/G7/G9/G3/G4/P1/P2) that respawn the
+# binary would then launch whichever variant cargo last built, not the one
+# configured for this run.
 #
 # Uses the release-ci profile (release without LTO, codegen-units=16) so CI
 # build time stays low. The shipped release profile is unchanged.
-log_phase "Building release-ci binary (with test-mode feature)"
-cargo build --profile release-ci --features test-mode
+FEATURES_FLAG=""
+if [ "$TARGET" = "localnet" ]; then
+    FEATURES_FLAG="--features test-mode"
+fi
+
+log_phase "Building release-ci binary (target=$TARGET)"
+cargo build --profile release-ci $FEATURES_FLAG
 
 if [ ! -f "$BINARY" ]; then
     echo "ERROR: Binary not found at $BINARY"
@@ -131,13 +172,10 @@ export P1_CANTON_LEDGER P2_CANTON_LEDGER P3_CANTON_LEDGER
 export P1_CANTON_ADMIN P2_CANTON_ADMIN P3_CANTON_ADMIN
 export BINARY
 
-# Pass the test-mode feature here too. Without it, `cargo test` may rebuild
-# the bin under a different feature unification, overwriting the test-mode
-# binary at target/release-ci/dec-party-manager. Chaos phases that respawn
-# the bin (G1/G2/G7/G9/G3/G4/P1/P2) would then spawn a non-test-mode binary
-# that uses the real JwtValidator and 401s on every API call with
-# "missing bearer token".
-cargo test --profile release-ci --features test-mode --test governance_workflows -- --ignored --nocapture
+# $FEATURES_FLAG must match the value used in `cargo build` above to avoid
+# cargo rebuilding the binary under a different feature unification and
+# overwriting the artifact. See the build comment block for full details.
+cargo test --profile release-ci $FEATURES_FLAG --test governance_workflows -- --ignored --nocapture
 
 echo ""
 echo "=========================================="
