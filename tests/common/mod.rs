@@ -149,6 +149,10 @@ impl Fixture {
     }
 
     pub async fn discover_network_parties(&mut self) -> anyhow::Result<()> {
+        // On localnet, the test substitutes p1_member for the DSO party (token_custody)
+        // and never needs a real operator party (utility_onboarding uses the
+        // ProvisionProviderService shortcut). Discovery is only meaningful on devnet
+        // where the DSO and utility-registry operator are real, separate parties.
         if self.target == TestTarget::Localnet {
             return Ok(());
         }
@@ -415,7 +419,6 @@ mod tests {
             .await;
 
         let mut f = Fixture::for_test();
-        f.jwt = "test-jwt".to_string();
         f.p1.http = server.address().port();
         f.target = TestTarget::Devnet;
 
