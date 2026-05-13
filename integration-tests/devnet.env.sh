@@ -10,27 +10,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/common.sh"
 
 # ---------------------------------------------------------------------------
-# Keycloak config — mandatory username and password, optional URL/realm/client_id.
+# Source per-participant .env files. These hold the shared Keycloak URL/realm/
+# client_id, DPM's username + password for password-grant token fetching, and
+# the per-participant P{N}_MEMBER_* credentials for the member-party Canton
+# ledger calls. Sourced first so subsequent validation can rely on the values
+# being present.
 # ---------------------------------------------------------------------------
-
-# DECPM_KEYCLOAK_USERNAME and DECPM_KEYCLOAK_PASSWORD must always be provided
-# explicitly in the environment; they are never read from .env files (not stored on disk).
-if [ -z "${DECPM_KEYCLOAK_USERNAME:-}" ]; then
-    echo "ERROR: DECPM_KEYCLOAK_USERNAME is not set." >&2
-    echo "Export it before running: export DECPM_KEYCLOAK_USERNAME=<username>" >&2
-    exit 1
-fi
-
-if [ -z "${DECPM_KEYCLOAK_PASSWORD:-}" ]; then
-    echo "ERROR: DECPM_KEYCLOAK_PASSWORD is not set." >&2
-    echo "Export it before running: export DECPM_KEYCLOAK_PASSWORD=<password>" >&2
-    exit 1
-fi
-
-# URL / realm / client_id are shared across all three participants and live in
-# development/remote/participant-1/.env. Per-participant member-party credentials
-# (P{N}_MEMBER_*) live in each participant's own .env file. Source all three so
-# all P{N}_MEMBER_* vars are available in the environment.
 PARTICIPANT_1_ENV="$SCRIPT_DIR/../development/remote/participant-1/.env"
 PARTICIPANT_2_ENV="$SCRIPT_DIR/../development/remote/participant-2/.env"
 PARTICIPANT_3_ENV="$SCRIPT_DIR/../development/remote/participant-3/.env"
@@ -42,27 +27,19 @@ for _penv in "$PARTICIPANT_1_ENV" "$PARTICIPANT_2_ENV" "$PARTICIPANT_3_ENV"; do
 done
 unset _penv
 
-_source_keycloak_var() {
-    local var=$1
-    if [ -z "${!var:-}" ]; then
-        if [ ! -f "$PARTICIPANT_1_ENV" ]; then
-            echo "ERROR: $var is not set and $PARTICIPANT_1_ENV does not exist." >&2
-            echo "Either export $var or create the per-participant .env files." >&2
-            exit 1
-        fi
-        local value
-        value=$(grep "^${var}=" "$PARTICIPANT_1_ENV" | cut -d= -f2- | tr -d '\r')
-        if [ -z "$value" ]; then
-            echo "ERROR: $var not found in $PARTICIPANT_1_ENV and not set in environment." >&2
-            exit 1
-        fi
-        export "$var=$value"
+# ---------------------------------------------------------------------------
+# Keycloak config validation (now that .env files have been sourced).
+# Calling-shell values take precedence over .env values; missing in BOTH = error.
+# ---------------------------------------------------------------------------
+for _v in DECPM_KEYCLOAK_URL DECPM_KEYCLOAK_REALM DECPM_KEYCLOAK_CLIENT_ID \
+          DECPM_KEYCLOAK_USERNAME DECPM_KEYCLOAK_PASSWORD; do
+    if [ -z "${!_v:-}" ]; then
+        echo "ERROR: $_v is not set." >&2
+        echo "Add it to one of development/remote/participant-{1,2,3}/.env, or export it." >&2
+        exit 1
     fi
-}
-
-_source_keycloak_var DECPM_KEYCLOAK_URL
-_source_keycloak_var DECPM_KEYCLOAK_REALM
-_source_keycloak_var DECPM_KEYCLOAK_CLIENT_ID
+done
+unset _v
 
 # ---------------------------------------------------------------------------
 # Validate per-participant member-party credentials (defense-in-depth;
