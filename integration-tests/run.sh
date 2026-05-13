@@ -145,7 +145,7 @@ fi
 log_phase "Building release-ci binary (target=$TARGET)"
 cargo build --profile release-ci ${FEATURES_FLAG[@]+"${FEATURES_FLAG[@]}"}
 
-if [ ! -f "$BINARY" ]; then
+if [ "$TARGET" = "localnet" ] && [ ! -f "$BINARY" ]; then
     echo "ERROR: Binary not found at $BINARY"
     exit 1
 fi
@@ -169,19 +169,26 @@ log_phase "Running governance workflow e2e (Rust)"
 export P1_HTTP P2_HTTP P3_HTTP
 export P1_NOISE P2_NOISE P3_NOISE
 export P1_PARTICIPANT_ID P2_PARTICIPANT_ID P3_PARTICIPANT_ID
-export MOCK_TOKEN
 export DEV_DIR
 
-# Export per-node PIDs and canton ports so the chaos phases (G1-G9, P1-P2)
-# can kill and respawn dec-party-manager instances. Restart events append the
-# new PID to $DEV_DIR/restarted-pids so the cleanup() trap can SIGKILL them
-# even if cargo test panics.
-export P1_PID="${PIDS[0]}"
-export P2_PID="${PIDS[1]}"
-export P3_PID="${PIDS[2]}"
-export P1_CANTON_LEDGER P2_CANTON_LEDGER P3_CANTON_LEDGER
-export P1_CANTON_ADMIN P2_CANTON_ADMIN P3_CANTON_ADMIN
-export BINARY
+# The following exports are localnet-only:
+# - MOCK_TOKEN: the hardcoded test JWT. Devnet uses the KeycloakRefresher
+#   instead (reads DECPM_KEYCLOAK_* directly).
+# - P{1,2,3}_PID and BINARY: enable chaos phases (G1-G9, P1-P2) to kill and
+#   respawn the bare DPM binary. Devnet uses docker-compose; chaos respawn
+#   isn't wired up there.
+# - P{1,2,3}_CANTON_LEDGER and _ADMIN: the per-DPM Canton ports used by the
+#   chaos respawn path. Devnet's DPM containers read their own .env files
+#   (each has DECPM_CANTON_LEDGER_PORT etc.) via docker-compose's env_file.
+if [ "$TARGET" = "localnet" ]; then
+    export MOCK_TOKEN
+    export P1_PID="${PIDS[0]}"
+    export P2_PID="${PIDS[1]}"
+    export P3_PID="${PIDS[2]}"
+    export P1_CANTON_LEDGER P2_CANTON_LEDGER P3_CANTON_LEDGER
+    export P1_CANTON_ADMIN P2_CANTON_ADMIN P3_CANTON_ADMIN
+    export BINARY
+fi
 
 # $FEATURES_FLAG must match the value used in `cargo build` above to avoid
 # cargo rebuilding the binary under a different feature unification and
