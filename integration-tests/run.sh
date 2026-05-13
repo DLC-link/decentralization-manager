@@ -19,6 +19,10 @@ while [[ "$#" -gt 0 ]]; do
             shift
             ;;
         --target)
+            if [[ "$#" -lt 2 ]]; then
+                echo "--target requires an argument" >&2
+                exit 1
+            fi
             TARGET="$2"
             shift 2
             ;;
@@ -126,13 +130,13 @@ fi
 #
 # Uses the release-ci profile (release without LTO, codegen-units=16) so CI
 # build time stays low. The shipped release profile is unchanged.
-FEATURES_FLAG=""
+FEATURES_FLAG=()
 if [ "$TARGET" = "localnet" ]; then
-    FEATURES_FLAG="--features test-mode"
+    FEATURES_FLAG=(--features test-mode)
 fi
 
 log_phase "Building release-ci binary (target=$TARGET)"
-cargo build --profile release-ci $FEATURES_FLAG
+cargo build --profile release-ci "${FEATURES_FLAG[@]}"
 
 if [ ! -f "$BINARY" ]; then
     echo "ERROR: Binary not found at $BINARY"
@@ -175,7 +179,7 @@ export BINARY
 # $FEATURES_FLAG must match the value used in `cargo build` above to avoid
 # cargo rebuilding the binary under a different feature unification and
 # overwriting the artifact. See the build comment block for full details.
-cargo test --profile release-ci $FEATURES_FLAG --test governance_workflows -- --ignored --nocapture
+cargo test --profile release-ci "${FEATURES_FLAG[@]}" --test governance_workflows -- --ignored --nocapture
 
 echo ""
 echo "=========================================="
