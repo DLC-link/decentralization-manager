@@ -148,6 +148,24 @@ impl Fixture {
         })
     }
 
+    pub async fn discover_network_parties(&mut self) -> anyhow::Result<()> {
+        if self.target == TestTarget::Localnet {
+            return Ok(());
+        }
+        let net: types::NetworkInfoResponse = self
+            .get_json(self.p1.http, "/network-info")
+            .await
+            .context("GET /network-info")?;
+        self.dso_party = Some(net.dso_party_id);
+
+        let op: types::OperatorInfoResponse = self
+            .get_json(self.p1.http, "/operator-info")
+            .await
+            .context("GET /operator-info")?;
+        self.operator_party = Some(op.party_id);
+        Ok(())
+    }
+
     pub fn party_id(&self) -> anyhow::Result<&str> {
         self.party_id
             .as_deref()
@@ -372,5 +390,47 @@ mod tests {
         assert!(f.dso_party.is_none());
         assert!(!f.operator_timeout_tripped);
         assert!(!f.run_id.is_empty());
+    }
+
+    #[tokio::test]
+    async fn discover_network_parties_populates_devnet_fields() {
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/network-info"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "dso_party_id": "DSO::1220abc"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/operator-info"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "party_id": "Operator::1220def"
+            })))
+            .mount(&server)
+            .await;
+
+        let mut f = Fixture::for_test();
+        f.jwt = "test-jwt".to_string();
+        f.p1.http = server.address().port();
+        f.target = TestTarget::Devnet;
+
+        f.discover_network_parties().await.unwrap();
+        assert_eq!(f.dso_party.as_deref(), Some("DSO::1220abc"));
+        assert_eq!(f.operator_party.as_deref(), Some("Operator::1220def"));
+    }
+
+    #[tokio::test]
+    async fn discover_network_parties_noop_on_localnet() {
+        let mut f = Fixture::for_test();
+        f.target = TestTarget::Localnet;
+        // No mock server — would panic / fail on any HTTP call.
+        f.discover_network_parties().await.unwrap();
+        assert!(f.dso_party.is_none());
+        assert!(f.operator_party.is_none());
     }
 }
