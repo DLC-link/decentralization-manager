@@ -10,14 +10,20 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/common.sh"
 
 # ---------------------------------------------------------------------------
-# Keycloak config — mandatory secret, optional URL/realm/client_id.
+# Keycloak config — mandatory username and password, optional URL/realm/client_id.
 # ---------------------------------------------------------------------------
 
-# DECPM_KEYCLOAK_CLIENT_SECRET must always be provided explicitly in the
-# environment; it is never read from .env files (it is not stored on disk).
-if [ -z "${DECPM_KEYCLOAK_CLIENT_SECRET:-}" ]; then
-    echo "ERROR: DECPM_KEYCLOAK_CLIENT_SECRET is not set." >&2
-    echo "Export it before running: export DECPM_KEYCLOAK_CLIENT_SECRET=<secret>" >&2
+# DECPM_KEYCLOAK_USERNAME and DECPM_KEYCLOAK_PASSWORD must always be provided
+# explicitly in the environment; they are never read from .env files (not stored on disk).
+if [ -z "${DECPM_KEYCLOAK_USERNAME:-}" ]; then
+    echo "ERROR: DECPM_KEYCLOAK_USERNAME is not set." >&2
+    echo "Export it before running: export DECPM_KEYCLOAK_USERNAME=<username>" >&2
+    exit 1
+fi
+
+if [ -z "${DECPM_KEYCLOAK_PASSWORD:-}" ]; then
+    echo "ERROR: DECPM_KEYCLOAK_PASSWORD is not set." >&2
+    echo "Export it before running: export DECPM_KEYCLOAK_PASSWORD=<password>" >&2
     exit 1
 fi
 
@@ -50,20 +56,21 @@ _source_keycloak_var DECPM_KEYCLOAK_REALM
 _source_keycloak_var DECPM_KEYCLOAK_CLIENT_ID
 
 # ---------------------------------------------------------------------------
-# Fetch Keycloak bearer token via client_credentials.
+# Fetch Keycloak bearer token via password grant.
 # ---------------------------------------------------------------------------
 
 TOKEN_URL="${DECPM_KEYCLOAK_URL%/}/realms/${DECPM_KEYCLOAK_REALM}/protocol/openid-connect/token"
 MOCK_TOKEN=$(curl -s -f -X POST "$TOKEN_URL" \
-    -d "grant_type=client_credentials" \
+    -d "grant_type=password" \
     -d "client_id=${DECPM_KEYCLOAK_CLIENT_ID}" \
-    -d "client_secret=${DECPM_KEYCLOAK_CLIENT_SECRET}" \
+    -d "username=${DECPM_KEYCLOAK_USERNAME}" \
+    -d "password=${DECPM_KEYCLOAK_PASSWORD}" \
     | jq -r .access_token)
 if [ -z "$MOCK_TOKEN" ] || [ "$MOCK_TOKEN" = "null" ]; then
-    echo "ERROR: Keycloak client_credentials grant failed." >&2
+    echo "ERROR: Keycloak password grant failed." >&2
     echo "  TOKEN_URL: $TOKEN_URL" >&2
     echo "  CLIENT_ID: $DECPM_KEYCLOAK_CLIENT_ID" >&2
-    echo "Check that DECPM_KEYCLOAK_CLIENT_SECRET is correct and the Keycloak server is reachable." >&2
+    echo "Check that DECPM_KEYCLOAK_USERNAME and DECPM_KEYCLOAK_PASSWORD are correct and the Keycloak server is reachable." >&2
     exit 1
 fi
 export MOCK_TOKEN
