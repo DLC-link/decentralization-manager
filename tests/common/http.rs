@@ -15,6 +15,7 @@ impl Fixture {
             .client
             .post(&url)
             .header(CONTENT_TYPE, "application/json")
+            .header(AUTHORIZATION, format!("Bearer {}", self.jwt))
             .json(body)
             .send()
             .await
@@ -46,6 +47,7 @@ impl Fixture {
         let res = self
             .client
             .get(&url)
+            .header(AUTHORIZATION, format!("Bearer {}", self.jwt))
             .send()
             .await
             .with_context(|| format!("GET {url}"))?;
@@ -74,6 +76,7 @@ impl Fixture {
             .client
             .put(&url)
             .header(CONTENT_TYPE, "application/json")
+            .header(AUTHORIZATION, format!("Bearer {}", self.jwt))
             .json(body)
             .send()
             .await
@@ -110,6 +113,7 @@ impl Fixture {
             .client
             .post(&url)
             .header(CONTENT_TYPE, "application/json")
+            .header(AUTHORIZATION, format!("Bearer {}", self.jwt))
             .json(body)
             .send()
             .await
@@ -120,40 +124,6 @@ impl Fixture {
             .await
             .with_context(|| format!("read body POST {url}"))?;
         Ok((status, String::from_utf8_lossy(&bytes).into_owned()))
-    }
-
-    pub async fn post_json_auth<B, R>(&self, port: u16, path: &str, body: &B) -> anyhow::Result<R>
-    where
-        B: Serialize + ?Sized,
-        R: DeserializeOwned,
-    {
-        let url = format!("http://localhost:{port}{path}");
-        let res = self
-            .client
-            .post(&url)
-            .header(CONTENT_TYPE, "application/json")
-            .header(AUTHORIZATION, format!("Bearer {}", self.jwt))
-            .json(body)
-            .send()
-            .await
-            .with_context(|| format!("POST(auth) {url}"))?;
-        let status = res.status();
-        let bytes = res
-            .bytes()
-            .await
-            .with_context(|| format!("read body POST(auth) {url}"))?;
-        if !status.is_success() {
-            anyhow::bail!(
-                "POST(auth) {url} returned {status}: {}",
-                String::from_utf8_lossy(&bytes)
-            );
-        }
-        serde_json::from_slice::<R>(&bytes).with_context(|| {
-            format!(
-                "deserialize POST(auth) {url}: {}",
-                String::from_utf8_lossy(&bytes)
-            )
-        })
     }
 }
 
@@ -198,4 +168,73 @@ pub async fn probe_workflow_run_visible(
         .iter()
         .any(|w| w.kind == kind && w.role == role && w.status == status)
         .then_some(Ok(()))
+}
+
+#[cfg(test)]
+mod tests {
+    use wiremock::{
+        matchers::{header, method, path},
+        Mock, MockServer, ResponseTemplate,
+    };
+
+    use super::Fixture;
+
+    async fn fixture_with_jwt(jwt: &str) -> (Fixture, MockServer) {
+        let server = MockServer::start().await;
+        let mut f = Fixture::for_test();
+        f.jwt = jwt.to_string();
+        f.p1.http = server.address().port();
+        (f, server)
+    }
+
+    #[tokio::test]
+    async fn get_json_attaches_bearer() {
+        let (f, server) = fixture_with_jwt("test-jwt").await;
+        Mock::given(method("GET"))
+            .and(path("/ping"))
+            .and(header("authorization", "Bearer test-jwt"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})),
+            )
+            .mount(&server)
+            .await;
+
+        let _: serde_json::Value = f.get_json(f.p1.http, "/ping").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn post_json_attaches_bearer() {
+        let (f, server) = fixture_with_jwt("test-jwt").await;
+        Mock::given(method("POST"))
+            .and(path("/ping"))
+            .and(header("authorization", "Bearer test-jwt"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})),
+            )
+            .mount(&server)
+            .await;
+
+        let _: serde_json::Value = f
+            .post_json(f.p1.http, "/ping", &serde_json::json!({}))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn put_json_attaches_bearer() {
+        let (f, server) = fixture_with_jwt("test-jwt").await;
+        Mock::given(method("PUT"))
+            .and(path("/ping"))
+            .and(header("authorization", "Bearer test-jwt"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})),
+            )
+            .mount(&server)
+            .await;
+
+        let _: serde_json::Value = f
+            .put_json(f.p1.http, "/ping", &serde_json::json!({}))
+            .await
+            .unwrap();
+    }
 }

@@ -20,7 +20,7 @@ async fn allocate_party(f: &Fixture, port: u16, hint: &str, name: &str) -> anyho
     info!("Allocating '{hint}' on {name} (port {port})");
     let req = json!({ "party_id_hint": hint, "local_metadata": { "annotations": {} } });
     let r: AllocatePartyResponse = f
-        .post_json_auth(port, "/v2/parties", &req)
+        .post_json(port, "/v2/parties", &req)
         .await
         .with_context(|| format!("allocate {hint} on {name}"))?;
     Ok(r.party_details.party)
@@ -36,7 +36,7 @@ async fn grant_rights(f: &Fixture, port: u16, party: &str, name: &str) -> anyhow
         "identityProviderId": "",
     });
     let _: Value = f
-        .post_json_auth(port, "/v2/users/ledger-api-user/rights", &req)
+        .post_json(port, "/v2/users/ledger-api-user/rights", &req)
         .await
         .with_context(|| format!("grant rights on '{party}' on {name}"))?;
     Ok(())
