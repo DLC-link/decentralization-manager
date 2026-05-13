@@ -1,6 +1,15 @@
-#!/bin/bash
+# shellcheck shell=bash
 # Shared helpers between integration-tests/env.sh (localnet) and devnet.env.sh.
 # Sourced by both. Behavior must be identical to the original env.sh definitions.
+#
+# Caller contract: files that source this script MUST define the following
+# functions before calling any of the helpers below:
+#   - stop_nodes        (called by configure_peers)
+#   - wait_for_server   (called by start_nodes)
+
+# ============================================================================
+# Prerequisites
+# ============================================================================
 
 check_prerequisites() {
     local missing=()
@@ -39,6 +48,10 @@ check_prerequisites() {
     fi
 }
 
+# ============================================================================
+# Port availability
+# ============================================================================
+
 # Checks that the dec-party-manager HTTP and Noise ports are free.
 # A leftover process (e.g. a dpm started by a previous run that didn't clean up,
 # or a different worktree's dpm still running) would silently steal one of these
@@ -64,10 +77,14 @@ check_dpm_ports_free() {
         done
         echo ""
         echo "Stop the offending process(es) (often a dpm leftover from a previous run"
-        echo "or another worktree), then re-run integration-tests/run.sh."
+        echo "or another worktree), then re-run the integration tests."
         exit 1
     fi
 }
+
+# ============================================================================
+# Directory setup
+# ============================================================================
 
 setup_directories() {
     echo "Setting up test directories in $DEV_DIR..."
@@ -75,6 +92,10 @@ setup_directories() {
         mkdir -p "$DEV_DIR/participant-$i"
     done
 }
+
+# ============================================================================
+# dec-party-manager instance management
+# ============================================================================
 
 start_nodes() {
     local http_ports=($P1_HTTP $P2_HTTP $P3_HTTP)
@@ -111,6 +132,10 @@ start_nodes() {
     # noisy networks will still produce some log lines but the storm is short.
     sleep 5
 }
+
+# ============================================================================
+# Peer configuration
+# ============================================================================
 
 configure_peers() {
     echo "Fetching public keys and participant IDs..."
