@@ -309,16 +309,21 @@ Most variables have a default that's only useful for local development (loopback
 | `DECPM_CANTON_LEDGER_PORT` | `5001` | optional | Canton Ledger API port |
 | `DECPM_CANTON_SYNCHRONIZER` | `global` | optional | Synchronizer name |
 | `DECPM_CANTON_NETWORK` | `devnet` | **yes** | `mainnet`, `testnet`, or `devnet` |
-| `DECPM_KEYCLOAK_URL` | unset | **yes** | Keycloak server URL for frontend auth |
-| `DECPM_KEYCLOAK_REALM` | unset | **yes** | Keycloak realm |
-| `DECPM_KEYCLOAK_CLIENT_ID` | unset | **yes** | Keycloak client used by the SPA |
-| `DECPM_ADMIN_ROLE` | unset | recommended | Keycloak role required for privileged endpoints. If unset, every authenticated caller is treated as admin. |
+| `DECPM_KEYCLOAK_URL` | unset | **yes**¹ | Keycloak server URL for frontend auth |
+| `DECPM_KEYCLOAK_REALM` | unset | **yes**¹ | Keycloak realm |
+| `DECPM_KEYCLOAK_CLIENT_ID` | unset | **yes**¹ | Keycloak client used by the SPA |
+| `DECPM_AUTH0_DOMAIN` | unset | **yes**¹ | Auth0 tenant domain for frontend auth (mutually exclusive with `DECPM_KEYCLOAK_*`) |
+| `DECPM_AUTH0_CLIENT_ID` | unset | **yes**¹ | Auth0 SPA client ID |
+| `DECPM_AUTH0_AUDIENCE` | unset | **yes**¹ | Auth0 API audience targeted by SPA tokens |
+| `DECPM_ADMIN_ROLE` | unset | recommended | IdP role required for privileged endpoints. If unset, every authenticated caller is treated as admin. |
 | `DECPM_ALLOWED_ORIGIN` | same-origin | optional | CORS origin if UI host ≠ API host |
 | `DECPM_DB_ENCRYPTION_KEY` | unset | recommended | Random passphrase (hashed via SHA-256) protecting party secrets at rest. If unset, secrets are stored in plaintext in the SQLite DB. |
 | `DECPM_TIMEOUT_HANDSHAKE` | `30` | optional | Noise handshake timeout (seconds) |
 | `DECPM_TIMEOUT_MESSAGE` | `120` | optional | Noise message timeout (seconds) |
 | `DECPM_TIMEOUT_RETRY_ATTEMPTS` | `3` | optional | Connection retry attempts |
 | `DECPM_TIMEOUT_RETRY_DELAY` | `5` | optional | Connection retry delay (seconds) |
+
+¹ Required only for the chosen provider. Set the `DECPM_KEYCLOAK_*` trio **or** the `DECPM_AUTH0_*` trio, not both.
 
 ## Note: keeping the existing Noise keypair
 
@@ -329,6 +334,6 @@ The peer list and party credentials do **not** carry over: those live in the SQL
 ## Troubleshooting
 
 - **Pod is `CrashLoopBackOff`**: `kubectl logs` will usually show a missing required env var. Compare against the configuration reference above.
-- **UI loads but Keycloak login fails**: confirm `<your-ui-host>` is registered as a valid redirect URI on your Keycloak client, and that `DECPM_KEYCLOAK_URL` / `_REALM` / `_CLIENT_ID` match the realm.
+- **UI loads but login fails**: confirm `<your-ui-host>` is registered as a valid redirect URI on your IdP client, and that the `DECPM_KEYCLOAK_*` (or `DECPM_AUTH0_*`) env vars match the IdP. For Auth0, the SPA application must also have the configured audience listed in its Allowed Callback / API Authorization.
 - **Peers shown as unreachable**: check that the Noise port (9000) is exposed publicly, that `DECPM_PUBLIC_ADDRESS` resolves to that endpoint, and that the peer has your current public key.
-- **Privileged endpoints return 403**: you have `DECPM_ADMIN_ROLE` set but the calling user doesn't have that role assigned in Keycloak. Either grant the role or unset the variable.
+- **Privileged endpoints return 403**: you have `DECPM_ADMIN_ROLE` set but the calling user doesn't have that role assigned in the IdP. Either grant the role or unset the variable.
