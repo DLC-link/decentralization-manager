@@ -8,8 +8,8 @@ use keycloak::login::{
 use tokio::sync::RwLock;
 
 use crate::{
-    auth::{AuthRegistry, WorkflowAuth},
-    config::{KeycloakConfig, PartyCredentials, default_package_config},
+    auth::{AuthRegistry, WorkflowAuth, auth0_client_credentials},
+    config::{Auth0M2MConfig, KeycloakConfig, PartyCredentials, default_package_config},
     db::schema::{Commitable, SchemaWrite},
     error::Result,
     participant_id::CantonId,
@@ -63,6 +63,13 @@ pub async fn get_party_config(
             has_client_secret: c.keycloak.client_secret.is_some(),
             has_username: c.keycloak.username.is_some(),
             has_password: c.keycloak.password.is_some(),
+            auth0_domain: c.auth0.as_ref().map(|a| a.domain.clone()),
+            auth0_audience: c.auth0.as_ref().map(|a| a.audience.clone()),
+            auth0_client_id: c.auth0.as_ref().map(|a| a.client_id.clone()),
+            has_auth0_client_secret: c
+                .auth0
+                .as_ref()
+                .is_some_and(|a| !a.client_secret.is_empty()),
             packages: default_package_config(),
         }),
         None => {
@@ -78,6 +85,14 @@ pub async fn get_party_config(
                 has_client_secret: false,
                 has_username: false,
                 has_password: false,
+                auth0_domain: data.config.auth0.as_ref().map(|a| a.domain.clone()),
+                auth0_audience: data
+                    .config
+                    .auth0
+                    .as_ref()
+                    .and_then(|a| a.audience.clone()),
+                auth0_client_id: None,
+                has_auth0_client_secret: false,
                 packages,
             })
         }
@@ -103,12 +118,15 @@ pub async fn save_party_config(
     let req = body.into_inner();
 
     // Credential merge: None = keep existing, Some("") = clear, Some(val) = set
-    let existing_keycloak = {
+    let (existing_keycloak, existing_auth0) = {
         let party_creds = data.party_credentials.read().await;
-        party_creds
+        let existing = party_creds
             .iter()
-            .find(|p| p.dec_party_id == req.dec_party_id)
-            .map(|p| p.keycloak.clone())
+            .find(|p| p.dec_party_id == req.dec_party_id);
+        (
+            existing.map(|p| p.keycloak.clone()),
+            existing.and_then(|p| p.auth0.clone()),
+        )
     };
 
     // Bootstrap exemption: the middleware lets first-run PUT /party-config
@@ -119,6 +137,82 @@ pub async fn save_party_config(
         return resp;
     }
 
+    let auth0_requested = req.auth0_domain.as_deref().is_some_and(|s| !s.is_empty());
+
+    if auth0_requested {
+        // Auth0 path: domain + audience + client_id + client_secret all required
+        // (secret may carry forward when domain is unchanged).
+        let Some(domain) = req.auth0_domain.as_deref().filter(|s| !s.is_empty()) else {
+            return HttpResponse::BadRequest().json(ErrorResponse {
+                error: "auth0_domain is required".to_string(),
+            });
+        };
+        let Some(audience) = req.auth0_audience.as_deref().filter(|s| !s.is_empty()) else {
+            return HttpResponse::BadRequest().json(ErrorResponse {
+                error: "auth0_audience is required".to_string(),
+            });
+        };
+        let Some(client_id) = req.auth0_client_id.as_deref().filter(|s| !s.is_empty()) else {
+            return HttpResponse::BadRequest().json(ErrorResponse {
+                error: "auth0_client_id is required".to_string(),
+            });
+        };
+
+        // Mirror the Keycloak URL-change guard: never carry a stored secret
+        // forward to a freshly-supplied (potentially attacker-controlled)
+        // domain. A new domain means the operator must resupply the secret.
+        let domain_changed = existing_auth0
+            .as_ref()
+            .is_some_and(|e| e.domain != domain);
+        let new_secret_is_present = req
+            .auth0_client_secret
+            .as_deref()
+            .is_some_and(|s| !s.is_empty());
+        if domain_changed && !new_secret_is_present {
+            return HttpResponse::BadRequest().json(ErrorResponse {
+                error: "auth0_domain changed; resubmit with a fresh auth0_client_secret \
+                        in the same request"
+                    .to_string(),
+            });
+        }
+
+        let client_secret = if domain_changed {
+            req.auth0_client_secret.unwrap_or_default()
+        } else {
+            match req.auth0_client_secret {
+                Some(s) if !s.is_empty() => s,
+                Some(_) => String::new(), // explicit clear
+                None => existing_auth0
+                    .as_ref()
+                    .map(|a| a.client_secret.clone())
+                    .unwrap_or_default(),
+            }
+        };
+
+        if client_secret.is_empty() {
+            return HttpResponse::BadRequest().json(ErrorResponse {
+                error: "auth0_client_secret is required for first-time Auth0 setup".to_string(),
+            });
+        }
+
+        let creds = PartyCredentials {
+            dec_party_id: req.dec_party_id.clone(),
+            member_party_id: req.member_party_id.clone(),
+            user_id: req.user_id.clone(),
+            keycloak: KeycloakConfig::default(),
+            auth0: Some(Auth0M2MConfig {
+                domain: domain.to_string(),
+                audience: audience.to_string(),
+                client_id: client_id.to_string(),
+                client_secret,
+            }),
+            packages: default_package_config(),
+        };
+
+        return persist_and_reload(data, creds, &req.dec_party_id).await;
+    }
+
+    // Keycloak path (legacy).
     // When the token-endpoint URL changes, never carry the existing
     // credentials forward — otherwise a redirected `keycloak_url` would
     // cause `reload_auth()` to POST the real client_secret (and any stored
@@ -187,10 +281,18 @@ pub async fn save_party_config(
         member_party_id: req.member_party_id,
         user_id: req.user_id,
         keycloak,
+        auth0: None,
         packages: default_package_config(),
     };
 
-    // Primary write: save to database
+    persist_and_reload(data, creds, &req.dec_party_id).await
+}
+
+async fn persist_and_reload(
+    data: web::Data<AppState>,
+    creds: PartyCredentials,
+    dec_party_id: &CantonId,
+) -> HttpResponse {
     {
         let mut tx = match data.db.begin_transaction().await {
             Ok(tx) => tx,
@@ -214,7 +316,7 @@ pub async fn save_party_config(
 
     {
         let mut pc = data.party_credentials.write().await;
-        if let Some(existing) = pc.iter_mut().find(|p| p.dec_party_id == req.dec_party_id) {
+        if let Some(existing) = pc.iter_mut().find(|p| p.dec_party_id == *dec_party_id) {
             *existing = creds;
         } else {
             pc.push(creds);
@@ -272,8 +374,8 @@ pub async fn reload_auth(
     responses(
         (status = 200, description = "Discovered user record", body = DiscoverMemberPartyResponse),
         (status = 400, description = "Bad request", body = ErrorResponse),
-        (status = 401, description = "Keycloak auth failed", body = ErrorResponse),
-        (status = 500, description = "Canton call failed", body = ErrorResponse)
+        (status = 500, description = "Canton call failed", body = ErrorResponse),
+        (status = 502, description = "Upstream IdP rejected the supplied credentials", body = ErrorResponse)
     )
 )]
 #[post("/party-config/discover-member-party")]
@@ -286,47 +388,88 @@ pub async fn discover_member_party(
         return resp;
     }
 
-    let token_url = password_url(&body.keycloak_url, &body.keycloak_realm);
-
-    let token_result = if let Some(secret) = body
-        .keycloak_client_secret
-        .as_ref()
-        .filter(|s| !s.is_empty())
-    {
-        client_credentials(ClientCredentialsParams {
-            url: token_url,
-            client_id: body.keycloak_client_id.clone(),
-            client_secret: secret.clone(),
-        })
-        .await
-    } else if let (Some(username), Some(pw)) = (
-        body.keycloak_username.as_ref().filter(|s| !s.is_empty()),
-        body.keycloak_password.as_ref().filter(|s| !s.is_empty()),
-    ) {
-        password(PasswordParams {
-            url: token_url,
-            client_id: body.keycloak_client_id.clone(),
-            username: username.clone(),
-            password: pw.clone(),
-        })
-        .await
-    } else {
-        return HttpResponse::BadRequest().json(ErrorResponse {
-            error: "Provide either keycloak_client_secret or keycloak_username + keycloak_password"
-                .to_string(),
-        });
-    };
-
-    let token = match token_result {
-        Ok(resp) => resp.access_token,
-        Err(e) => {
-            // Full chain to logs (keycloak Display can echo request URL or
-            // response body); generic message to clients so we don't surface
-            // reflected creds.
-            tracing::warn!("Keycloak auth failed during member-party discovery: {e:#}");
-            return HttpResponse::Unauthorized().json(ErrorResponse {
-                error: "Keycloak auth failed".into(),
+    // Auth0 path takes precedence when domain is supplied.
+    let token = if let Some(domain) = body.auth0_domain.as_deref().filter(|s| !s.is_empty()) {
+        let Some(audience) = body.auth0_audience.as_deref().filter(|s| !s.is_empty()) else {
+            return HttpResponse::BadRequest().json(ErrorResponse {
+                error: "auth0_audience is required".to_string(),
             });
+        };
+        let Some(client_id) = body.auth0_client_id.as_deref().filter(|s| !s.is_empty()) else {
+            return HttpResponse::BadRequest().json(ErrorResponse {
+                error: "auth0_client_id is required".to_string(),
+            });
+        };
+        let Some(client_secret) = body
+            .auth0_client_secret
+            .as_deref()
+            .filter(|s| !s.is_empty())
+        else {
+            return HttpResponse::BadRequest().json(ErrorResponse {
+                error: "auth0_client_secret is required".to_string(),
+            });
+        };
+
+        let cfg = Auth0M2MConfig {
+            domain: domain.to_string(),
+            audience: audience.to_string(),
+            client_id: client_id.to_string(),
+            client_secret: client_secret.to_string(),
+        };
+        match auth0_client_credentials(&data.http_client, &cfg).await {
+            Ok(resp) => resp.access_token,
+            Err(e) => {
+                tracing::warn!("Auth0 auth failed during member-party discovery: {e:#}");
+                // 502 rather than 401: the *upstream* IdP rejected our M2M
+                // request. Returning 401 would trigger the SPA's session-
+                // wipe-and-reload path (which assumes the caller's own token
+                // went stale) even though their session is fine.
+                return HttpResponse::BadGateway().json(ErrorResponse {
+                    error: "Auth0 auth failed".into(),
+                });
+            }
+        }
+    } else {
+        let token_url = password_url(&body.keycloak_url, &body.keycloak_realm);
+
+        let token_result = if let Some(secret) = body
+            .keycloak_client_secret
+            .as_ref()
+            .filter(|s| !s.is_empty())
+        {
+            client_credentials(ClientCredentialsParams {
+                url: token_url,
+                client_id: body.keycloak_client_id.clone(),
+                client_secret: secret.clone(),
+            })
+            .await
+        } else if let (Some(username), Some(pw)) = (
+            body.keycloak_username.as_ref().filter(|s| !s.is_empty()),
+            body.keycloak_password.as_ref().filter(|s| !s.is_empty()),
+        ) {
+            password(PasswordParams {
+                url: token_url,
+                client_id: body.keycloak_client_id.clone(),
+                username: username.clone(),
+                password: pw.clone(),
+            })
+            .await
+        } else {
+            return HttpResponse::BadRequest().json(ErrorResponse {
+                error: "Provide either keycloak_client_secret, \
+                        keycloak_username + keycloak_password, or the auth0_* fields"
+                    .to_string(),
+            });
+        };
+
+        match token_result {
+            Ok(resp) => resp.access_token,
+            Err(e) => {
+                tracing::warn!("Keycloak auth failed during member-party discovery: {e:#}");
+                return HttpResponse::BadGateway().json(ErrorResponse {
+                    error: "Keycloak auth failed".into(),
+                });
+            }
         }
     };
 
@@ -489,6 +632,7 @@ mod tests {
                 username: None,
                 password: None,
             },
+            auth0: None,
             packages: default_package_config(),
         };
         let party_credentials = Arc::new(RwLock::new(vec![existing]));

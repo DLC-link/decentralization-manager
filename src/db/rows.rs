@@ -3,7 +3,7 @@ use std::str::FromStr;
 use anyhow::Context;
 
 use crate::{
-    config::{KeycloakConfig, PackageConfig, PartyCredentials, Peer},
+    config::{Auth0M2MConfig, KeycloakConfig, PackageConfig, PartyCredentials, Peer},
     db::crypto,
     error::Result,
     participant_id::CantonId,
@@ -58,10 +58,24 @@ pub struct PartyCredentialsRow {
     pub keycloak_client_secret: Option<String>,
     pub keycloak_username: Option<String>,
     pub keycloak_password: Option<String>,
+    pub auth0_domain: Option<String>,
+    pub auth0_audience: Option<String>,
+    pub auth0_client_id: Option<String>,
+    pub auth0_client_secret: Option<String>,
 }
 
 impl PartyCredentialsRow {
     pub fn from_domain(creds: &PartyCredentials) -> Result<Self> {
+        let (auth0_domain, auth0_audience, auth0_client_id, auth0_client_secret) =
+            match &creds.auth0 {
+                Some(a) => (
+                    Some(a.domain.clone()),
+                    Some(a.audience.clone()),
+                    Some(crypto::encrypt(&a.client_id)?),
+                    Some(crypto::encrypt(&a.client_secret)?),
+                ),
+                None => (None, None, None, None),
+            };
         Ok(Self {
             dec_party_id: creds.dec_party_id.to_string(),
             member_party_id: creds.member_party_id.to_string(),
@@ -72,10 +86,28 @@ impl PartyCredentialsRow {
             keycloak_client_secret: crypto::encrypt_opt(&creds.keycloak.client_secret)?,
             keycloak_username: crypto::encrypt_opt(&creds.keycloak.username)?,
             keycloak_password: crypto::encrypt_opt(&creds.keycloak.password)?,
+            auth0_domain,
+            auth0_audience,
+            auth0_client_id,
+            auth0_client_secret,
         })
     }
 
     pub fn into_domain(self) -> Result<PartyCredentials> {
+        let auth0 = match (
+            self.auth0_domain,
+            self.auth0_audience,
+            self.auth0_client_id,
+            self.auth0_client_secret,
+        ) {
+            (Some(domain), Some(audience), Some(cid_enc), Some(secret_enc)) => Some(Auth0M2MConfig {
+                domain,
+                audience,
+                client_id: crypto::decrypt(&cid_enc)?,
+                client_secret: crypto::decrypt(&secret_enc)?,
+            }),
+            _ => None,
+        };
         Ok(PartyCredentials {
             dec_party_id: CantonId::parse(&self.dec_party_id)?,
             member_party_id: CantonId::parse(&self.member_party_id)?,
@@ -88,6 +120,7 @@ impl PartyCredentialsRow {
                 username: crypto::decrypt_opt(self.keycloak_username)?,
                 password: crypto::decrypt_opt(self.keycloak_password)?,
             },
+            auth0,
             packages: PackageConfig::default(),
         })
     }

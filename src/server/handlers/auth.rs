@@ -22,7 +22,11 @@ use crate::{
     utils,
 };
 
-/// Get frontend auth configuration (keycloak details + whether auth is required)
+/// Get frontend auth configuration (provider details + whether auth is required).
+///
+/// Auth0 takes precedence over Keycloak when both are configured — each node
+/// operator is expected to set exactly one of `DECPM_AUTH0_*` or
+/// `DECPM_KEYCLOAK_*`.
 #[utoipa::path(
     tag = "Authentication",
     responses(
@@ -31,18 +35,48 @@ use crate::{
 )]
 #[get("/auth-config")]
 pub async fn get_auth_config(data: web::Data<AppState>) -> impl Responder {
-    match &data.config.keycloak {
-        Some(config) if !data.test_mode => HttpResponse::Ok().json(AuthConfigResponse {
-            auth_required: true,
-            keycloak_host: Some(config.url.clone()),
-            keycloak_realm: Some(config.realm.clone()),
-            keycloak_client_id: Some(config.client_id.clone()),
-        }),
-        _ => HttpResponse::Ok().json(AuthConfigResponse {
+    if data.test_mode {
+        return HttpResponse::Ok().json(AuthConfigResponse {
             auth_required: false,
             keycloak_host: None,
             keycloak_realm: None,
             keycloak_client_id: None,
+            auth0_domain: None,
+            auth0_client_id: None,
+            auth0_audience: None,
+        });
+    }
+
+    if let Some(config) = &data.config.auth0 {
+        return HttpResponse::Ok().json(AuthConfigResponse {
+            auth_required: true,
+            keycloak_host: None,
+            keycloak_realm: None,
+            keycloak_client_id: None,
+            auth0_domain: Some(config.domain.clone()),
+            auth0_client_id: Some(config.client_id.clone()),
+            auth0_audience: config.audience.clone(),
+        });
+    }
+
+    match &data.config.keycloak {
+        Some(config) => HttpResponse::Ok().json(AuthConfigResponse {
+            auth_required: true,
+            keycloak_host: Some(config.url.clone()),
+            keycloak_realm: Some(config.realm.clone()),
+            keycloak_client_id: Some(config.client_id.clone()),
+            auth0_domain: None,
+            auth0_client_id: None,
+            auth0_audience: None,
+        }),
+        None => HttpResponse::Ok().json(AuthConfigResponse {
+            auth_required: false,
+            keycloak_host: None,
+            keycloak_realm: None,
+            keycloak_client_id: None,
+            auth0_domain: None,
+            auth0_client_id: None,
+            auth0_audience: None,
         }),
     }
 }
@@ -73,6 +107,8 @@ pub async fn get_auth_status(data: web::Data<AppState>) -> impl Responder {
             user_id: manager.user_id().to_string(),
             keycloak_url: None,
             keycloak_realm: None,
+            auth0_domain: None,
+            auth0_audience: None,
             status: AuthStatus::Mock,
             rights: None,
         });
@@ -117,12 +153,24 @@ pub async fn get_auth_status(data: web::Data<AppState>) -> impl Responder {
             None
         };
 
+        let (kc_url, kc_realm, auth0_domain, auth0_audience) = if let Some(ref a) = party_creds.auth0 {
+            (None, None, Some(a.domain.clone()), Some(a.audience.clone()))
+        } else {
+            (
+                Some(party_creds.keycloak.url.clone()),
+                Some(party_creds.keycloak.realm.clone()),
+                None,
+                None,
+            )
+        };
         party_statuses.push(PartyAuthStatus {
             dec_party_id,
             member_party_id,
             user_id,
-            keycloak_url: Some(party_creds.keycloak.url.clone()),
-            keycloak_realm: Some(party_creds.keycloak.realm.clone()),
+            keycloak_url: kc_url,
+            keycloak_realm: kc_realm,
+            auth0_domain,
+            auth0_audience,
             status,
             rights,
         });
@@ -257,8 +305,15 @@ pub async fn test_auth(data: web::Data<AppState>) -> impl Responder {
     for party_creds in party_creds_list.iter() {
         let dec_party_id = party_creds.dec_party_id.clone();
 
-        // Attempt fresh authentication
-        let result = test_keycloak_auth(&party_creds.keycloak).await;
+        // Attempt fresh authentication — Auth0 path when configured, else Keycloak.
+        let result = if let Some(ref auth0) = party_creds.auth0 {
+            crate::auth::auth0_client_credentials(&data.http_client, auth0)
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        } else {
+            test_keycloak_auth(&party_creds.keycloak).await
+        };
 
         results.push(AuthTestResult {
             party_id: dec_party_id,

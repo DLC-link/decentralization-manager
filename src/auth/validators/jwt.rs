@@ -20,10 +20,12 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::Deserialize;
 use tokio::sync::RwLock;
 
-use super::common::{RealmAccess, collect_roles, extract_issuer, oidc_issuer_of};
+use super::common::{
+    RealmAccess, auth0_issuer_of, collect_roles, extract_issuer, oidc_issuer_of,
+};
 use crate::{
     auth::validator::{Principal, ValidationError},
-    config::{KeycloakConfig, PartyCredentials},
+    config::{Auth0Config, KeycloakConfig, PartyCredentials},
 };
 
 /// How long JWKS documents stay cached. Keycloak rotates signing keys
@@ -33,6 +35,7 @@ const JWKS_TTL: Duration = Duration::from_secs(3600);
 
 pub struct JwtValidator {
     inbound: Option<KeycloakConfig>,
+    auth0: Option<Auth0Config>,
     party_credentials: Arc<RwLock<Vec<PartyCredentials>>>,
     /// JWKS cache keyed by issuer.
     jwks_cache: RwLock<HashMap<String, CachedJwks>>,
@@ -120,11 +123,13 @@ struct Claims {
 impl JwtValidator {
     pub fn new(
         inbound: Option<KeycloakConfig>,
+        auth0: Option<Auth0Config>,
         party_credentials: Arc<RwLock<Vec<PartyCredentials>>>,
         http: reqwest::Client,
     ) -> Self {
         Self {
             inbound,
+            auth0,
             party_credentials,
             jwks_cache: RwLock::new(HashMap::new()),
             http,
@@ -148,7 +153,7 @@ impl JwtValidator {
         }
 
         let issuer = extract_issuer(token)?;
-        let Some(config) = self.find_trusted_config(&issuer).await else {
+        let Some(expected_client_id) = self.find_trusted_client_id(&issuer).await else {
             tracing::warn!("rejected token from untrusted issuer: {issuer}");
             return Err(ValidationError::UntrustedIssuer(issuer));
         };
@@ -175,7 +180,11 @@ impl JwtValidator {
         }
 
         let mut validation = Validation::new(entry.alg);
-        validation.set_issuer(&[&issuer]);
+        // Accept both `iss` shapes: Keycloak emits no trailing slash, Auth0
+        // emits one. `extract_issuer` normalises by stripping, so add the
+        // slashed variant alongside for the strict in-crate check.
+        let issuer_with_slash = format!("{issuer}/");
+        validation.set_issuer(&[issuer.as_str(), issuer_with_slash.as_str()]);
         // Audience is intentionally not enforced — Keycloak's `aud` claim
         // varies per realm config and often points to a sibling service
         // (e.g. the wallet API) rather than this service. Cross-client
@@ -195,12 +204,12 @@ impl JwtValidator {
 
         // Enforce azp == matched config's client_id.
         match claims.azp.as_deref() {
-            Some(azp) if azp == config.client_id => {}
+            Some(azp) if azp == expected_client_id => {}
             other => {
                 tracing::warn!(
                     "jwt azp {:?} does not match expected client_id {}",
                     other,
-                    config.client_id
+                    expected_client_id
                 );
                 return Err(ValidationError::InactiveToken);
             }
@@ -219,19 +228,32 @@ impl JwtValidator {
         })
     }
 
-    /// Find the `KeycloakConfig` whose canonical OIDC issuer matches
-    /// `issuer`. Mirrors `OidcIntrospectionValidator::find_trusted_config`.
-    async fn find_trusted_config(&self, issuer: &str) -> Option<KeycloakConfig> {
+    /// Find the expected `client_id` (for the `azp` check) corresponding to
+    /// the given issuer. Searches inbound Keycloak, inbound Auth0, and any
+    /// per-party Keycloak or Auth0 configs.
+    async fn find_trusted_client_id(&self, issuer: &str) -> Option<String> {
         if let Some(ref cfg) = self.inbound
             && oidc_issuer_of(cfg) == issuer
         {
-            return Some(cfg.clone());
+            return Some(cfg.client_id.clone());
+        }
+        if let Some(ref cfg) = self.auth0
+            && auth0_issuer_of(cfg) == issuer
+        {
+            return Some(cfg.client_id.clone());
         }
         let creds = self.party_credentials.read().await;
-        creds
-            .iter()
-            .find(|p| oidc_issuer_of(&p.keycloak) == issuer)
-            .map(|p| p.keycloak.clone())
+        for party in creds.iter() {
+            if let Some(ref a) = party.auth0
+                && format!("https://{}", a.domain.trim_end_matches('/')) == issuer
+            {
+                return Some(a.client_id.clone());
+            }
+            if oidc_issuer_of(&party.keycloak) == issuer {
+                return Some(party.keycloak.client_id.clone());
+            }
+        }
+        None
     }
 
     async fn resolve_key(&self, issuer: &str, kid: &str) -> Result<KeyEntry, ValidationError> {

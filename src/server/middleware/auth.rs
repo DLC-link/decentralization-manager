@@ -382,6 +382,7 @@ mod tests {
         let parties = Arc::new(RwLock::new(Vec::new()));
         let validator = TokenValidator::Jwt(Arc::new(JwtValidator::new(
             None,
+            None,
             parties.clone(),
             reqwest::Client::new(),
         )));

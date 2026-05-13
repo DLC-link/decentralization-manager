@@ -513,8 +513,12 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                 keycloak_client_id,
                 keycloak_client_secret,
                 keycloak_username,
-                keycloak_password
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                keycloak_password,
+                auth0_domain,
+                auth0_audience,
+                auth0_client_id,
+                auth0_client_secret
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ",
         )
         .bind(&row.dec_party_id)
@@ -526,6 +530,10 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         .bind(&row.keycloak_client_secret)
         .bind(&row.keycloak_username)
         .bind(&row.keycloak_password)
+        .bind(&row.auth0_domain)
+        .bind(&row.auth0_audience)
+        .bind(&row.auth0_client_id)
+        .bind(&row.auth0_client_secret)
         .execute(&mut **self)
         .await?;
 
@@ -1085,6 +1093,7 @@ mod tests {
                 username: None,
                 password: None,
             },
+            auth0: None,
             packages: PackageConfig {
                 governance_action: Some("#gov-action".to_string()),
                 governance_core: Some("#gov-core".to_string()),

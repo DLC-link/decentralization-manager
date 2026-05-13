@@ -977,6 +977,7 @@ pub async fn start_server(
         }
         TokenValidator::Jwt(Arc::new(JwtValidator::new(
             config.keycloak.clone(),
+            config.auth0.clone(),
             party_credentials.clone(),
             http_client.clone(),
         )))
