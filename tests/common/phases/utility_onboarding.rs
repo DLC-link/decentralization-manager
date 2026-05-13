@@ -97,7 +97,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     let provider_cid = f
         .provider_service_cid
         .clone()
-        .context("provider_service_cid not set after ProvisionProviderService")?;
+        .context("provider_service_cid not set after provider service setup")?;
     let p1_member = f.p1_member_party()?.to_string();
     let party_id = f.party_id()?.to_string();
 
