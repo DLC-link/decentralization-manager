@@ -170,17 +170,17 @@ pub async fn save_party_config(
             });
         }
 
-        let client_secret = if domain_changed {
-            req.auth0_client_secret.unwrap_or_default()
-        } else {
-            match req.auth0_client_secret {
-                Some(s) if !s.is_empty() => s,
-                Some(_) => String::new(), // explicit clear
-                None => existing_auth0
-                    .as_ref()
-                    .map(|a| a.client_secret.clone())
-                    .unwrap_or_default(),
-            }
+        // Either keep the existing secret (omitted/empty input) or use the
+        // new one. "Clearing" doesn't make sense for an Auth0 config — an
+        // empty client_secret produces a 401 on every mint — so empty is
+        // treated the same as omitted. Switching off Auth0 is done by
+        // submitting a Keycloak payload (no auth0_domain).
+        let client_secret = match req.auth0_client_secret.as_deref().filter(|s| !s.is_empty()) {
+            Some(s) => s.to_string(),
+            None => existing_auth0
+                .as_ref()
+                .map(|a| a.client_secret.clone())
+                .unwrap_or_default(),
         };
 
         if client_secret.is_empty() {
@@ -206,7 +206,22 @@ pub async fn save_party_config(
         return persist_and_reload(data, creds, &req.dec_party_id).await;
     }
 
-    // Keycloak path (legacy).
+    // Keycloak path (legacy). Reject empty url/realm/client_id up front —
+    // the request struct accepts these via `#[serde(default)]` for symmetry
+    // with the Auth0 path, but on the Keycloak branch they're load-bearing
+    // and silently persisting empty values would just produce 502s on every
+    // later token mint.
+    if req.keycloak_url.trim().is_empty()
+        || req.keycloak_realm.trim().is_empty()
+        || req.keycloak_client_id.trim().is_empty()
+    {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: "keycloak_url, keycloak_realm, and keycloak_client_id are required \
+                    (or supply auth0_domain to use the Auth0 path)"
+                .to_string(),
+        });
+    }
+
     // When the token-endpoint URL changes, never carry the existing
     // credentials forward — otherwise a redirected `keycloak_url` would
     // cause `reload_auth()` to POST the real client_secret (and any stored
@@ -424,6 +439,17 @@ pub async fn discover_member_party(
             }
         }
     } else {
+        if body.keycloak_url.trim().is_empty()
+            || body.keycloak_realm.trim().is_empty()
+            || body.keycloak_client_id.trim().is_empty()
+        {
+            return HttpResponse::BadRequest().json(ErrorResponse {
+                error: "keycloak_url, keycloak_realm, and keycloak_client_id are required \
+                        (or supply auth0_domain to use the Auth0 path)"
+                    .to_string(),
+            });
+        }
+
         let token_url = password_url(&body.keycloak_url, &body.keycloak_realm);
 
         let token_result = if let Some(secret) = body
