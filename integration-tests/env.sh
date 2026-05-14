@@ -42,6 +42,13 @@ P3_NOISE=9003
 
 # Paths
 DEV_DIR=$(mktemp -d "${TMPDIR:-/tmp}/dpm-it-XXXXXX")
+
+# Owner-key snapshot harness (tests/common/diagnostics.rs). When set, the
+# Rust test runner records P1/P2/P3's view of participants[*].owner_key
+# after each happy-path phase into $DEV_DIR/owner-key-snapshots.jsonl. Used
+# to compare devnet (where P3's owner_key never resolves) against localnet
+# (where it resolves in ms).
+export DPM_IT_OWNER_KEY_SNAPSHOTS=1
 DARS_DIR="$SCRIPT_DIR/releases/v0/rc4"
 BINARY="$SCRIPT_DIR/target/release-ci/dec-party-manager"
 
