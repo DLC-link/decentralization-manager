@@ -453,6 +453,98 @@ verifies these up front and bails with a clear message if any are
 missing or if a previous run leaked a manager process holding one of
 the HTTP/Noise ports (8081–8083, 9001–9003).
 
+### Integration tests on devnet
+
+The same suite can also run against a real Canton devnet cluster, manually
+triggered from a developer laptop. Useful for catching divergences between
+localnet's docker-compose Canton and the clustered Canton that production
+faces — auth shape, topology propagation, namespace ownership, etc.
+
+```bash
+./integration-tests/run.sh --target devnet
+./integration-tests/run.sh --target devnet --verbose   # see DPM INFO trace
+```
+
+The bringup is structurally identical to localnet (three bare-process DPM
+instances, same `wait_for_server` and `configure_peers` flow), except:
+- No Docker localnet — Canton is the production-shaped cluster in `ieu-devnet`.
+- Canton gRPC admin (5002/5012/5022) and ledger (5001/5011/5021) ports are
+  tunneled to localhost via `kubectl port-forward` (managed by
+  `devnet.env.sh`'s `start_canton_tunnels`).
+- DPM auth uses real Keycloak (the `JwtValidator`), not the test-mode
+  `MockValidator` localnet uses. The test runner mints its own bearer token
+  via password grant; per-party workflows use M2M `client_credentials`.
+- Member parties (`P{N}_MEMBER_PARTY_ID`) are pre-provisioned, not allocated
+  during the test. CanActAs grants on the freshly-created dec party are
+  issued via DPM's `POST /auth/grant-rights` (Canton's gRPC
+  `UserManagementService.GrantUserRights`).
+
+#### Prerequisites
+
+Beyond the localnet prerequisites listed above, you'll need:
+
+1. **AWS SSO authenticated** against the account that owns the `ieu-devnet`
+   cluster:
+   ```bash
+   aws sso login --profile bs-np   # or whichever profile your org uses
+   ```
+   Refresh before each run if your SSO session is past its TTL — symptoms
+   are kubectl probes that hang or return "Token has expired"; the
+   `start_canton_tunnels` step prints a clear error in that case.
+
+2. **kubectl configured** with the `ieu-devnet` context:
+   ```bash
+   aws eks update-kubeconfig --name devnet-cluster --region us-east-1        --profile bs-np
+   ```
+   The expected context name (`ieu-devnet`) and namespace (`catalyst-canton`)
+   are overridable via `KUBE_CONTEXT_DEVNET` / `KUBE_NS_CANTON` env vars.
+
+3. **`kubectl` and `nc` on `$PATH`** (in addition to `jq`/`curl`/`lsof`).
+   Docker is **not** required for the devnet path even though the current
+   `check_prerequisites` still asks for it — see [#148][i148] /
+   [Copilot review #6][cprev6] for the cleanup.
+
+4. **Per-participant `.env` files** populated at
+   `development/remote/participant-{1,2,3}/.env`. Each must define:
+   ```
+   # Shared Keycloak (same values across all three files):
+   DECPM_KEYCLOAK_URL=https://<keycloak-host>[/auth]
+   DECPM_KEYCLOAK_REALM=<realm>
+   DECPM_KEYCLOAK_CLIENT_ID=<password-grant client_id>
+   DECPM_KEYCLOAK_USERNAME=<...>
+   DECPM_KEYCLOAK_PASSWORD=<...>
+
+   # Per-participant member party + its M2M client (for the workflow user):
+   P{N}_MEMBER_PARTY_ID=<full party id with namespace>
+   P{N}_MEMBER_USER_ID=<canton user>
+   P{N}_MEMBER_KEYCLOAK_CLIENT_ID=<...>
+   P{N}_MEMBER_KEYCLOAK_CLIENT_SECRET=<...>
+
+   # Per-participant admin Keycloak client (ParticipantAdmin on Canton):
+   P{N}_PARTICIPANT_ADMIN_KEYCLOAK_CLIENT_ID=<...>
+   P{N}_PARTICIPANT_ADMIN_KEYCLOAK_CLIENT_SECRET=<...>
+   ```
+   `DECPM_KEYCLOAK_URL` may be configured with or without the trailing
+   `/auth` servlet path — both forms are tolerated.
+
+The bringup performs a Keycloak password-grant smoke check before spending
+time on `cargo build`, so misconfigured credentials fail fast with a
+human-readable error.
+
+#### Known issues
+
+- **`owner_key_resilience` currently fails on devnet** — `list_my_owner_keys`
+  times out on the kubectl-tunneled Canton admin calls (full diagnosis +
+  fix shape in [#149][i149]). 15 of 16 happy-path scenarios pass; chaos
+  phases beyond happy-path are not yet validated on devnet.
+- **`SignDns` flake** observed once in `create_dec_party` (Canton-side
+  `TOPOLOGY_NO_APPROPRIATE_SIGNING_KEY_IN_STORE`), did not reproduce on
+  retry.
+
+[i148]: https://github.com/DLC-link/dec-party-manager/issues/148
+[i149]: https://github.com/DLC-link/dec-party-manager/issues/149
+[cprev6]: https://github.com/DLC-link/dec-party-manager/pull/142#discussion_r3241693561
+
 ### Frontend Development
 
 ```bash
