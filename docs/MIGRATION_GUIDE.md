@@ -251,7 +251,7 @@ spec:
               mountPath: /app
           resources:
             requests: { memory: "128Mi", cpu: "100m" }
-            limits:   { memory: "512Mi", cpu: "500m" }
+            limits:   { memory: "1Gi", cpu: "500m" }
           env:
             - name: RUST_LOG
               value: dec_party_manager=info,tokio_noise=error,hyper_noise=error

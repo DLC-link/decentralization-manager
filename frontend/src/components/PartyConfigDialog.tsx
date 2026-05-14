@@ -17,11 +17,13 @@ import {
 import { API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
 import type {
+  AuthConfig,
   PartyConfigResponse,
   PartyConfigRequest,
 } from "../types";
 
 type AuthMethod = "client_credentials" | "password";
+type Provider = "keycloak" | "auth0";
 
 interface PartyConfigDialogProps {
   open: boolean;
@@ -43,8 +45,12 @@ export const PartyConfigDialog = ({
   const [discovering, setDiscovering] = useState(false);
   const [discoverInfo, setDiscoverInfo] = useState<string | null>(null);
 
+  const [provider, setProvider] = useState<Provider>("keycloak");
+
   const [memberPartyId, setMemberPartyId] = useState("");
   const [userId, setUserId] = useState("");
+
+  // Keycloak fields
   const [keycloakUrl, setKeycloakUrl] = useState("");
   const [keycloakRealm, setKeycloakRealm] = useState("");
   const [keycloakClientId, setKeycloakClientId] = useState("");
@@ -53,6 +59,13 @@ export const PartyConfigDialog = ({
   const [keycloakPassword, setKeycloakPassword] = useState("");
   const [authMethod, setAuthMethod] =
     useState<AuthMethod>("client_credentials");
+
+  // Auth0 fields
+  const [auth0Domain, setAuth0Domain] = useState("");
+  const [auth0Audience, setAuth0Audience] = useState("");
+  const [auth0ClientId, setAuth0ClientId] = useState("");
+  const [auth0ClientSecret, setAuth0ClientSecret] = useState("");
+  const [hasStoredAuth0Secret, setHasStoredAuth0Secret] = useState(false);
 
   const [canScrollUp, setCanScrollUp] = useState(false);
   const [canScrollDown, setCanScrollDown] = useState(false);
@@ -98,6 +111,19 @@ export const PartyConfigDialog = ({
   const fetchConfig = async () => {
     setLoading(true);
     try {
+      // Find the node-level provider so the dialog shows the matching
+      // form. Falls back to keycloak if /auth-config is unreachable.
+      let nodeProvider: Provider = "keycloak";
+      try {
+        const authRes = await fetch("/auth-config");
+        if (authRes.ok) {
+          const authCfg: AuthConfig = await authRes.json();
+          if (authCfg.auth0_domain) nodeProvider = "auth0";
+        }
+      } catch {
+        /* ignore */
+      }
+
       const res = await authenticatedFetch(
         `${API_BASE}/party-config/${encodeURIComponent(partyId)}`,
       );
@@ -116,6 +142,18 @@ export const PartyConfigDialog = ({
             ? "password"
             : "client_credentials",
         );
+
+        setAuth0Domain(data.auth0_domain ?? "");
+        setAuth0Audience(data.auth0_audience ?? "");
+        setAuth0ClientId(data.auth0_client_id ?? "");
+        setAuth0ClientSecret("");
+        setHasStoredAuth0Secret(data.has_auth0_client_secret);
+
+        // Prefer stored party-level provider, fall back to node-level.
+        if (data.auth0_domain) setProvider("auth0");
+        else setProvider(nodeProvider);
+      } else {
+        setProvider(nodeProvider);
       }
     } catch {
       // Config not found, fields stay empty
@@ -125,6 +163,14 @@ export const PartyConfigDialog = ({
   };
 
   const canDiscover = (() => {
+    if (provider === "auth0") {
+      return (
+        auth0Domain.trim().length > 0 &&
+        auth0Audience.trim().length > 0 &&
+        auth0ClientId.trim().length > 0 &&
+        auth0ClientSecret.length > 0
+      );
+    }
     if (
       !keycloakUrl.trim() ||
       !keycloakRealm.trim() ||
@@ -143,16 +189,22 @@ export const PartyConfigDialog = ({
     setError(null);
     setDiscoverInfo(null);
     try {
-      const body: Record<string, string> = {
-        keycloak_url: keycloakUrl.trim(),
-        keycloak_realm: keycloakRealm.trim(),
-        keycloak_client_id: keycloakClientId.trim(),
-      };
-      if (authMethod === "client_credentials") {
-        body.keycloak_client_secret = keycloakClientSecret;
+      const body: Record<string, string> = {};
+      if (provider === "auth0") {
+        body.auth0_domain = auth0Domain.trim();
+        body.auth0_audience = auth0Audience.trim();
+        body.auth0_client_id = auth0ClientId.trim();
+        body.auth0_client_secret = auth0ClientSecret;
       } else {
-        body.keycloak_username = keycloakUsername;
-        body.keycloak_password = keycloakPassword;
+        body.keycloak_url = keycloakUrl.trim();
+        body.keycloak_realm = keycloakRealm.trim();
+        body.keycloak_client_id = keycloakClientId.trim();
+        if (authMethod === "client_credentials") {
+          body.keycloak_client_secret = keycloakClientSecret;
+        } else {
+          body.keycloak_username = keycloakUsername;
+          body.keycloak_password = keycloakPassword;
+        }
       }
       const res = await authenticatedFetch(
         `${API_BASE}/party-config/discover-member-party`,
@@ -201,20 +253,31 @@ export const PartyConfigDialog = ({
       dec_party_id: partyId,
       member_party_id: memberPartyId,
       user_id: userId,
-      keycloak_url: keycloakUrl,
-      keycloak_realm: keycloakRealm,
-      keycloak_client_id:
-        authMethod === "client_credentials" ? keycloakClientId : "",
     };
 
-    if (authMethod === "client_credentials") {
-      body.keycloak_client_secret = keycloakClientSecret || undefined;
-      body.keycloak_username = "";
-      body.keycloak_password = "";
+    if (provider === "auth0") {
+      body.auth0_domain = auth0Domain.trim();
+      body.auth0_audience = auth0Audience.trim();
+      body.auth0_client_id = auth0ClientId.trim();
+      // Empty input = keep existing when one is stored, otherwise required.
+      if (auth0ClientSecret.length > 0) {
+        body.auth0_client_secret = auth0ClientSecret;
+      }
     } else {
-      body.keycloak_client_secret = "";
-      body.keycloak_username = keycloakUsername || undefined;
-      body.keycloak_password = keycloakPassword || undefined;
+      body.keycloak_url = keycloakUrl;
+      body.keycloak_realm = keycloakRealm;
+      body.keycloak_client_id =
+        authMethod === "client_credentials" ? keycloakClientId : "";
+
+      if (authMethod === "client_credentials") {
+        body.keycloak_client_secret = keycloakClientSecret || undefined;
+        body.keycloak_username = "";
+        body.keycloak_password = "";
+      } else {
+        body.keycloak_client_secret = "";
+        body.keycloak_username = keycloakUsername || undefined;
+        body.keycloak_password = keycloakPassword || undefined;
+      }
     }
 
     try {
@@ -243,6 +306,16 @@ export const PartyConfigDialog = ({
       onClose();
     }
   };
+
+  const canSave =
+    !!memberPartyId &&
+    !!userId &&
+    (provider === "auth0"
+      ? auth0Domain.trim().length > 0 &&
+        auth0Audience.trim().length > 0 &&
+        auth0ClientId.trim().length > 0 &&
+        (auth0ClientSecret.length > 0 || hasStoredAuth0Secret)
+      : true);
 
   return (
     <Dialog open={open} onClose={handleClose} maxWidth="sm" fullWidth>
@@ -301,93 +374,147 @@ export const PartyConfigDialog = ({
 
               <Divider />
 
-              <Typography variant="subtitle2">Keycloak</Typography>
-
-              <TextField
-                label="URL"
-                value={keycloakUrl}
-                onChange={(e) => setKeycloakUrl(e.target.value)}
-                fullWidth
-                size="small"
-                disabled={saving}
-              />
-
-              <TextField
-                label="Realm"
-                value={keycloakRealm}
-                onChange={(e) => setKeycloakRealm(e.target.value)}
-                fullWidth
-                size="small"
-                disabled={saving}
-              />
-
-              <Box>
-                <Typography
-                  variant="body2"
-                  color="text.secondary"
-                  sx={{ mb: 1 }}
-                >
-                  Credentials
-                </Typography>
-                <ToggleButtonGroup
-                  value={authMethod}
-                  exclusive
-                  onChange={(_, val) => val && setAuthMethod(val)}
-                  size="small"
-                  disabled={saving}
-                  fullWidth
-                >
-                  <ToggleButton value="client_credentials">
-                    Client ID + Secret
-                  </ToggleButton>
-                  <ToggleButton value="password">
-                    Username + Password
-                  </ToggleButton>
-                </ToggleButtonGroup>
-              </Box>
-
-              {authMethod === "client_credentials" ? (
+              {provider === "auth0" ? (
                 <>
+                  <Typography variant="subtitle2">Auth0</Typography>
+
+                  <TextField
+                    label="Domain"
+                    value={auth0Domain}
+                    onChange={(e) => setAuth0Domain(e.target.value)}
+                    fullWidth
+                    size="small"
+                    disabled={saving}
+                    placeholder="tenant.us.auth0.com"
+                  />
+
+                  <TextField
+                    label="Audience"
+                    value={auth0Audience}
+                    onChange={(e) => setAuth0Audience(e.target.value)}
+                    fullWidth
+                    size="small"
+                    disabled={saving}
+                    placeholder="https://your-api"
+                  />
+
                   <TextField
                     label="Client ID"
-                    value={keycloakClientId}
-                    onChange={(e) => setKeycloakClientId(e.target.value)}
+                    value={auth0ClientId}
+                    onChange={(e) => setAuth0ClientId(e.target.value)}
                     fullWidth
                     size="small"
                     disabled={saving}
                   />
+
                   <TextField
                     label="Client Secret"
-                    value={keycloakClientSecret}
-                    onChange={(e) => setKeycloakClientSecret(e.target.value)}
+                    value={auth0ClientSecret}
+                    onChange={(e) => setAuth0ClientSecret(e.target.value)}
                     fullWidth
                     size="small"
                     type="password"
                     disabled={saving}
-                    placeholder="Enter new or leave empty to keep existing"
+                    placeholder={
+                      hasStoredAuth0Secret
+                        ? "Leave empty to keep existing"
+                        : "Required"
+                    }
                   />
                 </>
               ) : (
                 <>
+                  <Typography variant="subtitle2">Keycloak</Typography>
+
                   <TextField
-                    label="Username"
-                    value={keycloakUsername}
-                    onChange={(e) => setKeycloakUsername(e.target.value)}
+                    label="URL"
+                    value={keycloakUrl}
+                    onChange={(e) => setKeycloakUrl(e.target.value)}
                     fullWidth
                     size="small"
                     disabled={saving}
-                    placeholder="Enter new or leave empty to keep existing"
                   />
+
                   <TextField
-                    label="Password"
-                    value={keycloakPassword}
-                    onChange={(e) => setKeycloakPassword(e.target.value)}
+                    label="Realm"
+                    value={keycloakRealm}
+                    onChange={(e) => setKeycloakRealm(e.target.value)}
                     fullWidth
                     size="small"
-                    type="password"
                     disabled={saving}
-                    placeholder="Enter new or leave empty to keep existing"
                   />
+
+                  <Box>
+                    <Typography
+                      variant="body2"
+                      color="text.secondary"
+                      sx={{ mb: 1 }}
+                    >
+                      Credentials
+                    </Typography>
+                    <ToggleButtonGroup
+                      value={authMethod}
+                      exclusive
+                      onChange={(_, val) => val && setAuthMethod(val)}
+                      size="small"
+                      disabled={saving}
+                      fullWidth
+                    >
+                      <ToggleButton value="client_credentials">
+                        Client ID + Secret
+                      </ToggleButton>
+                      <ToggleButton value="password">
+                        Username + Password
+                      </ToggleButton>
+                    </ToggleButtonGroup>
+                  </Box>
+
+                  {authMethod === "client_credentials" ? (
+                    <>
+                      <TextField
+                        label="Client ID"
+                        value={keycloakClientId}
+                        onChange={(e) => setKeycloakClientId(e.target.value)}
+                        fullWidth
+                        size="small"
+                        disabled={saving}
+                      />
+                      <TextField
+                        label="Client Secret"
+                        value={keycloakClientSecret}
+                        onChange={(e) =>
+                          setKeycloakClientSecret(e.target.value)
+                        }
+                        fullWidth
+                        size="small"
+                        type="password"
+                        disabled={saving}
+                        placeholder="Enter new or leave empty to keep existing"
+                      />
+                    </>
+                  ) : (
+                    <>
+                      <TextField
+                        label="Username"
+                        value={keycloakUsername}
+                        onChange={(e) => setKeycloakUsername(e.target.value)}
+                        fullWidth
+                        size="small"
+                        disabled={saving}
+                        placeholder="Enter new or leave empty to keep existing"
+                      />
+                      <TextField
+                        label="Password"
+                        value={keycloakPassword}
+                        onChange={(e) => setKeycloakPassword(e.target.value)}
+                        fullWidth
+                        size="small"
+                        type="password"
+                        disabled={saving}
+                        placeholder="Enter new or leave empty to keep existing"
+                      />
+                    </>
+                  )}
                 </>
               )}
 
@@ -436,7 +563,7 @@ export const PartyConfigDialog = ({
         <Button
           onClick={handleSave}
           variant="contained"
-          disabled={saving || !memberPartyId || !userId}
+          disabled={saving || !canSave}
         >
           {saving ? <CircularProgress size={20} /> : "Save"}
         </Button>

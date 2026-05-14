@@ -44,7 +44,7 @@ spec:
               mountPath: /app
       containers:
         - name: dec-party-manager
-          image: public.ecr.aws/dlc-link/canton-decparty-manager:0.0.31
+          image: public.ecr.aws/dlc-link/canton-decparty-manager:v0.1.0
           imagePullPolicy: Always
           command:
             [
@@ -72,7 +72,7 @@ spec:
               memory: "128Mi"
               cpu: "100m"
             limits:
-              memory: "512Mi"
+              memory: "1Gi"
               cpu: "500m"
           env:
             - name: RUST_LOG

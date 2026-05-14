@@ -84,7 +84,7 @@ The HTTP server serves the embedded React frontend and exposes REST endpoints fo
 - Serving the single-page application (embedded at compile time via `build.rs`)
 - Proxying topology and governance queries to Canton APIs
 - Triggering and monitoring multi-party workflows
-- Managing authentication tokens via Keycloak
+- Managing authentication tokens via Keycloak or Auth0
 
 Payload limit: 100 MB (for DAR file uploads).
 

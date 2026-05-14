@@ -26,11 +26,17 @@ Each participant needs:
 
 ### Authentication (Production)
 
-- **Keycloak instance** with a realm configured for your Canton network
-- OAuth2 client with one of:
+Choose one OAuth provider per node:
+
+- **Keycloak** — realm configured for your Canton network, with an OAuth2 client supporting one of:
   - Client credentials (M2M) flow: `client_id` + `client_secret`
   - Password flow: `client_id` + `username` + `password`
-- Ledger API user with `actAs` and `readAs` rights for the relevant parties
+- **Auth0** — tenant with:
+  - A SPA application (for frontend login) with the API audience authorized
+  - A Machine-to-Machine application (for the dec-party-manager's outbound calls to Canton) authorized against the same API
+  - An API registered with the audience identifier Canton accepts
+
+In both cases, the Canton participant must trust the chosen IdP (Keycloak's JWKS is configured in `canton.conf`; Auth0 is registered at runtime via `IdentityProviderConfigService.CreateIdentityProviderConfig`). The Ledger API user needs `actAs` and `readAs` rights for the relevant parties.
 
 ### Network
 
@@ -108,6 +114,10 @@ stringData:
   # DECPM_KEYCLOAK_URL: "https://keycloak.example.com"
   # DECPM_KEYCLOAK_REALM: "canton"
   # DECPM_KEYCLOAK_CLIENT_ID: "dpm-ui"
+  # Optional: Auth0 for frontend auth gating (mutually exclusive with DECPM_KEYCLOAK_*)
+  # DECPM_AUTH0_DOMAIN: "tenant.us.auth0.com"
+  # DECPM_AUTH0_CLIENT_ID: "spa-client-id"
+  # DECPM_AUTH0_AUDIENCE: "https://your-canton-api"
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -252,6 +262,9 @@ CLI options:
 | `--keycloak-url` | `DECPM_KEYCLOAK_URL` | (none) | Keycloak server URL (frontend auth gating) |
 | `--keycloak-realm` | `DECPM_KEYCLOAK_REALM` | (none) | Keycloak realm name (frontend auth gating) |
 | `--keycloak-client-id` | `DECPM_KEYCLOAK_CLIENT_ID` | (none) | OAuth2 client ID (frontend auth gating) |
+| `--auth0-domain` | `DECPM_AUTH0_DOMAIN` | (none) | Auth0 tenant domain (frontend auth gating; mutually exclusive with `--keycloak-*`) |
+| `--auth0-client-id` | `DECPM_AUTH0_CLIENT_ID` | (none) | Auth0 SPA client ID (frontend auth gating) |
+| `--auth0-audience` | `DECPM_AUTH0_AUDIENCE` | (none) | Auth0 API audience (target for SPA access tokens) |
 | `--timeout-handshake` | `DECPM_TIMEOUT_HANDSHAKE` | `30` | Noise handshake timeout (seconds) |
 | `--timeout-message` | `DECPM_TIMEOUT_MESSAGE` | `120` | Noise message timeout (seconds) |
 | `--timeout-retry-attempts` | `DECPM_TIMEOUT_RETRY_ATTEMPTS` | `3` | Connection retry count |
@@ -295,6 +308,9 @@ All node configuration is provided through environment variables (or their equiv
 | `DECPM_KEYCLOAK_URL` | `--keycloak-url` | string | (none) | Keycloak server URL for frontend auth gating |
 | `DECPM_KEYCLOAK_REALM` | `--keycloak-realm` | string | (none) | Keycloak realm name for frontend auth gating |
 | `DECPM_KEYCLOAK_CLIENT_ID` | `--keycloak-client-id` | string | (none) | OAuth2 client ID for frontend auth gating |
+| `DECPM_AUTH0_DOMAIN` | `--auth0-domain` | string | (none) | Auth0 tenant domain for frontend auth gating (mutually exclusive with `DECPM_KEYCLOAK_*`) |
+| `DECPM_AUTH0_CLIENT_ID` | `--auth0-client-id` | string | (none) | Auth0 SPA client ID for frontend auth gating |
+| `DECPM_AUTH0_AUDIENCE` | `--auth0-audience` | string | (none) | Auth0 API audience targeted by SPA access tokens |
 | `DECPM_TIMEOUT_HANDSHAKE` | `--timeout-handshake` | u64 | `30` | Noise handshake timeout in seconds |
 | `DECPM_TIMEOUT_MESSAGE` | `--timeout-message` | u64 | `120` | Noise message timeout in seconds |
 | `DECPM_TIMEOUT_RETRY_ATTEMPTS` | `--timeout-retry-attempts` | u32 | `3` | Max connection retries |
@@ -320,17 +336,27 @@ DECPM_PUBLIC_ADDRESS=dpm.example.com
 
 The SQLite database stores:
 - **Peers** -- Network peer list (participant ID, name, address, port, public key)
-- **Party credentials** -- Per-party authentication credentials (dec party ID, member party ID, user ID, Keycloak config, package IDs)
+- **Party credentials** -- Per-party authentication credentials (dec party ID, member party ID, user ID, Keycloak _or_ Auth0 config, package IDs). Secrets (client secrets, passwords) are encrypted at rest when `DECPM_DB_ENCRYPTION_KEY` is set.
 
 The database is automatically created and migrated on startup. Its default location is `{dir}/data/decpm.db`, overridable with the `--db` flag.
 
 ## Authentication Setup
 
-Party credentials (Keycloak authentication for each decentralized party) are configured at runtime via the `/party-config` API endpoint. They are stored in the SQLite database.
+DPM supports two OAuth providers, picked per-node:
+
+- **Keycloak** — original provider; supports client_credentials (M2M) and password flows.
+- **Auth0** — second provider; supports client_credentials (M2M) only for the outbound Canton tokens; Authorization Code + PKCE is used by the SPA for inbound user login.
+
+The choice is set at two levels:
+
+1. **Frontend gating** — node-level env vars `DECPM_KEYCLOAK_*` *or* `DECPM_AUTH0_*` (mutually exclusive). The frontend reads `/auth-config` and renders the matching login flow.
+2. **Outbound credentials** — per dec-party, configured at runtime via `/party-config`. The submitted shape matches the chosen provider.
 
 ### Configuring Party Credentials via API
 
-Use `PUT /party-config` to save or update credentials for a decentralized party:
+Use `PUT /party-config` to save or update credentials. Either the Keycloak fields or the Auth0 fields are present in the request body — supplying both is not supported.
+
+**Keycloak (M2M / client_credentials):**
 
 ```bash
 curl -X PUT http://localhost:8080/party-config \
@@ -347,35 +373,7 @@ curl -X PUT http://localhost:8080/party-config \
   }'
 ```
 
-Response:
-```json
-{ "success": true }
-```
-
-### M2M Flow (Client Credentials)
-
-Best for automated/service deployments where no interactive user login is needed. Set `keycloak_client_secret` in the request body:
-
-```bash
-curl -X PUT http://localhost:8080/party-config \
-  -H "Content-Type: application/json" \
-  -d '{
-    "dec_party_id": "vault-network::1220abc...",
-    "member_party_id": "member1::1220def...",
-    "user_id": "service-user",
-    "keycloak_url": "https://keycloak.example.com",
-    "keycloak_realm": "canton",
-    "keycloak_client_id": "dpm-service",
-    "keycloak_client_secret": "your-client-secret",
-    "packages": {}
-  }'
-```
-
-The application will automatically obtain and refresh tokens using the `client_credentials` grant type.
-
-### Password Flow
-
-For deployments where a specific user identity is needed. Set `keycloak_username` and `keycloak_password` in the request body:
+**Keycloak (password flow)** — for deployments where a specific user identity is needed:
 
 ```bash
 curl -X PUT http://localhost:8080/party-config \
@@ -393,6 +391,32 @@ curl -X PUT http://localhost:8080/party-config \
   }'
 ```
 
+**Auth0 (M2M / client_credentials):**
+
+```bash
+curl -X PUT http://localhost:8080/party-config \
+  -H "Content-Type: application/json" \
+  -d '{
+    "dec_party_id": "vault-network::1220abc...",
+    "member_party_id": "member1::1220def...",
+    "user_id": "m2m-client-id@clients",
+    "auth0_domain": "tenant.us.auth0.com",
+    "auth0_audience": "https://your-canton-api",
+    "auth0_client_id": "m2m-client-id",
+    "auth0_client_secret": "m2m-client-secret",
+    "packages": {}
+  }'
+```
+
+For Auth0 the `user_id` matches the JWT `sub` claim, which Auth0 sets to `<client_id>@clients` for client_credentials tokens. That user must exist in Canton with the correct rights — see [JWT Requirements](#jwt-requirements) below.
+
+Response (any path):
+```json
+{ "success": true }
+```
+
+The application automatically obtains and refreshes tokens. For both M2M paths there's no refresh token; the manager re-authenticates when the cached token's `exp` is near.
+
 ### Retrieving Party Configuration
 
 Use `GET /party-config/{dec_party_id}` to retrieve the current configuration (secrets are masked):
@@ -401,7 +425,7 @@ Use `GET /party-config/{dec_party_id}` to retrieve the current configuration (se
 curl http://localhost:8080/party-config/vault-network::1220abc...
 ```
 
-Response:
+Response — Keycloak example:
 ```json
 {
   "dec_party_id": "vault-network::1220abc...",
@@ -413,6 +437,7 @@ Response:
   "has_client_secret": true,
   "has_username": false,
   "has_password": false,
+  "has_auth0_client_secret": false,
   "packages": {
     "governance_core": "#governance-core-v0-rc4",
     "governance_token_custody": "#governance-token-custody-v0-rc4",
@@ -424,18 +449,41 @@ Response:
 }
 ```
 
+Response — Auth0 example:
+```json
+{
+  "dec_party_id": "vault-network::1220abc...",
+  "member_party_id": "member1::1220def...",
+  "user_id": "m2m-client-id@clients",
+  "keycloak_url": "",
+  "keycloak_realm": "",
+  "keycloak_client_id": "",
+  "has_client_secret": false,
+  "has_username": false,
+  "has_password": false,
+  "auth0_domain": "tenant.us.auth0.com",
+  "auth0_audience": "https://your-canton-api",
+  "auth0_client_id": "m2m-client-id",
+  "has_auth0_client_secret": true,
+  "packages": { "...": "..." }
+}
+```
+
 ### Credential Update Semantics
 
-When updating party credentials, secret fields (`keycloak_client_secret`, `keycloak_username`, `keycloak_password`) follow merge semantics:
+Secret fields follow merge semantics on `PUT /party-config`:
+
 - **Omitted** (`null` / not present) -- keep the existing value
 - **Empty string** (`""`) -- clear the value
 - **Non-empty string** -- set to the new value
 
-This allows partial updates without re-submitting secrets.
+This applies to `keycloak_client_secret`, `keycloak_username`, `keycloak_password`, and `auth0_client_secret`.
+
+For safety, changing the token endpoint URL (`keycloak_url` or `auth0_domain`) is **only** accepted together with a fresh secret in the same request — otherwise the stored secret might be sent to an attacker-controlled host on the next mint. Requests that change the URL/domain without a fresh secret are rejected with 400.
 
 ### Test Mode
 
-For development and testing without Keycloak:
+For development and testing without any IdP:
 
 ```bash
 dec-party-manager -d ./my-dir serve --test
@@ -450,7 +498,7 @@ Check authentication status:
 curl http://localhost:8080/auth/status
 ```
 
-Response:
+Response (Keycloak party):
 ```json
 {
   "parties": [
@@ -472,6 +520,23 @@ Response:
 }
 ```
 
+Response (Auth0 party) — `keycloak_*` fields are absent, `auth0_*` fields surface instead:
+```json
+{
+  "parties": [
+    {
+      "dec_party_id": "vault-network::1220...",
+      "member_party_id": "member1::1220...",
+      "user_id": "m2m-client-id@clients",
+      "auth0_domain": "tenant.us.auth0.com",
+      "auth0_audience": "https://your-canton-api",
+      "status": "authenticated",
+      "rights": { "...": "..." }
+    }
+  ]
+}
+```
+
 Test authentication explicitly:
 ```bash
 curl -X POST http://localhost:8080/auth/test
@@ -484,6 +549,8 @@ The Ledger API user must match the JWT `sub` claim. The user needs:
 - `readAs` rights for the `member_party_id`
 - `actAs` rights for the `dec_party_id` (decentralized party)
 - `readAs` rights for the `dec_party_id`
+
+For Keycloak the user_id is whatever the Keycloak admin assigned. For Auth0 M2M, the `sub` claim is `<client_id>@clients`, so the Canton user must be created with exactly that id. The user has to live under the IdP that Canton trusts for that issuer — for Auth0 that means registering an IdentityProviderConfig on the participant at runtime via `IdentityProviderConfigService.CreateIdentityProviderConfig` (issuer = `https://<auth0-domain>/`, jwks_url = `https://<auth0-domain>/.well-known/jwks.json`, audience = the API identifier).
 
 ## Peer Network Setup
 
