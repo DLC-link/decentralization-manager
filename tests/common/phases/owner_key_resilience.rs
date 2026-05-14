@@ -33,8 +33,12 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             })
         })
         .then(
+            // Devnet-friendly cap. On localnet the resolution lands in ms;
+            // on devnet the kubectl tunnel + cluster latency mean cache
+            // staleness from earlier phases can take several seconds to
+            // drain. 30s is the worst-case observed in practice.
             "P3 owner_key was resolved in an earlier phase",
-            Duration::from_secs(5),
+            Duration::from_secs(30),
             |f, _| {
                 Box::pin(async move {
                     let prefix = f.party_prefix().ok()?.to_string();
@@ -89,7 +93,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         )
         .then(
             "P3's owner_key in P1's cache is still set",
-            Duration::from_secs(5),
+            Duration::from_secs(30),
             |f, _| Box::pin(async move { Some(assert_owner_key_intact(f).await) }),
         )
         .run(f)
