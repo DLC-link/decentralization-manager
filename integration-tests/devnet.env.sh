@@ -154,6 +154,20 @@ start_canton_tunnels() {
         exit 1
     fi
 
+    # Fail fast on AWS-SSO/kubectl auth issues before kicking off retry loops
+    # that would silently restart kubectl forever and only surface as a
+    # port-forward-timeout 30s later. A single API call probes whether the
+    # current SSO token can reach the cluster.
+    local auth_probe
+    auth_probe=$(kubectl --context="$KUBE_CONTEXT_DEVNET" -n "$KUBE_NS_CANTON" \
+        get svc -o name 2>&1)
+    if [ $? -ne 0 ]; then
+        echo "ERROR: kubectl auth probe failed for context '$KUBE_CONTEXT_DEVNET':" >&2
+        echo "$auth_probe" | sed 's/^/  /' >&2
+        echo "If you see 'Token has expired', refresh AWS SSO: 'aws sso login --profile <profile>'." >&2
+        exit 1
+    fi
+
     _canton_forward_loop 1 5001 5002 &
     CANTON_TUNNEL_PIDS+=($!)
     _canton_forward_loop 2 5011 5012 &
