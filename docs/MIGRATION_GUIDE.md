@@ -79,6 +79,52 @@ If you set `DECPM_ADMIN_ROLE` in the Secret (recommended for any shared deployme
 
 Per-party Keycloak clients used to fetch Canton ledger tokens are **different** — they are confidential clients (with a secret), one per decentralized party, and you wire them up through the admin UI in Step 6, not here.
 
+### Auth0 alternative
+
+If your organization already uses Auth0, you can run the admin UI against Auth0 instead of Keycloak. Set the `DECPM_AUTH0_*` trio in the Secret (and leave the `DECPM_KEYCLOAK_*` trio unset) — the two providers are mutually exclusive at config-load time. The setup mirrors the Keycloak one: a public SPA application for the browser, plus an API resource whose identifier becomes the audience the SPA requests tokens for.
+
+**1. Create the API** (Auth0 dashboard → **Applications → APIs → Create API**):
+
+| Setting | Value |
+|---|---|
+| Name | `Decentralization Manager` (display only) |
+| Identifier | `https://dec-party-manager/api` (or any unique URI — this is `DECPM_AUTH0_AUDIENCE`) |
+| Signing algorithm | `RS256` |
+
+The Identifier never needs to resolve — Auth0 treats it as an opaque string. Pick something stable; changing it later invalidates all issued tokens.
+
+**2. Create the SPA application** (Auth0 dashboard → **Applications → Applications → Create Application**):
+
+| Setting | Value |
+|---|---|
+| Application type | **Single Page Application** |
+| Allowed Callback URLs | `https://<your-ui-host>` |
+| Allowed Logout URLs | `https://<your-ui-host>` |
+| Allowed Web Origins | `https://<your-ui-host>` |
+| Token Endpoint Authentication Method | None (public client) |
+| Grant Types | Authorization Code, Refresh Token |
+
+In the application's **APIs** tab, **authorize** it against the API you just created so the SPA is allowed to request tokens with that audience.
+
+**3. Fill the Secret** using values from the Auth0 dashboard:
+
+- `DECPM_AUTH0_DOMAIN` = the tenant domain shown on the application page (for example `your-tenant.us.auth0.com` — no scheme).
+- `DECPM_AUTH0_CLIENT_ID` = the application's **Client ID**.
+- `DECPM_AUTH0_AUDIENCE` = the API **Identifier** from step 1.
+
+**Allowed Web Origins** plays the same role as Keycloak's Web Origins — without it the browser blocks the SPA's token requests with CORS errors. Set it to your UI host; do not rely on Auth0 deriving it from callback URLs.
+
+**Admin role**: Auth0 does not embed roles in access tokens by default. If you set `DECPM_ADMIN_ROLE`, you must also add an Action under **Actions → Library → Build Custom** that copies the user's role into the token. A minimal Action looks like:
+
+```js
+exports.onExecutePostLogin = async (event, api) => {
+  const roles = event.authorization?.roles || [];
+  api.accessToken.setCustomClaim("roles", roles);
+};
+```
+
+Attach the Action to the Login flow, then create the matching role under **User Management → Roles** and assign it to the appropriate users.
+
 ## 4 — Apply the new manifests
 
 Below is the core single-participant manifest set. Replace every `<...>` placeholder with values for your environment, save as a file, and apply with `kubectl apply -f <file>.yaml`. Public exposure of the Noise port is environment-specific and is covered separately under "Service" below.
