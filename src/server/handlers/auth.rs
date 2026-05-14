@@ -4,7 +4,9 @@ use canton_proto_rs::com::daml::ledger::api::v2::admin::{
     GrantUserRightsRequest, ListUserRightsRequest, Right,
     right::{CanActAs, CanReadAs, Kind},
 };
-use keycloak::login::{ClientCredentialsParams, client_credentials, password_url};
+use keycloak::login::{ClientCredentialsParams, client_credentials};
+
+use crate::auth::token_url;
 
 use crate::{
     auth::WorkflowAuth,
@@ -351,7 +353,7 @@ pub async fn grant_rights(
     let member_party_id = party_creds.member_party_id.clone();
     let dec_party_id = party_creds.dec_party_id.clone();
     let user_id = party_creds.user_id.clone();
-    let token_url = password_url(&party_creds.keycloak.url, &party_creds.keycloak.realm);
+    let token_url = token_url(&party_creds.keycloak.url, &party_creds.keycloak.realm);
 
     drop(party_creds_list);
     drop(auth);
@@ -460,7 +462,7 @@ fn right_read_as(party: &str) -> Right {
 async fn test_keycloak_auth(
     config: &crate::config::KeycloakConfig,
 ) -> std::result::Result<(), String> {
-    let url = keycloak::login::password_url(&config.url, &config.realm);
+    let url = crate::auth::token_url(&config.url, &config.realm);
 
     // Use client_credentials if client_secret is set, otherwise password flow
     if let Some(ref client_secret) = config.client_secret {
