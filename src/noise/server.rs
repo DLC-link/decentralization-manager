@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     marker::PhantomData,
     sync::Arc,
+    time::Instant,
 };
 
 use hyper::{Body, Request, Response, StatusCode};
@@ -18,7 +19,10 @@ use crate::{
         NoiseKeypair, parse_public_key,
     },
     participant_id::CantonId,
-    server::WorkflowProgress,
+    server::{
+        WorkflowProgress,
+        peer_status::{LastSeen, bump},
+    },
     workflow::{WorkflowState, state::WorkflowStep},
 };
 
@@ -39,6 +43,7 @@ pub struct NoiseServer<S: WorkflowStep + 'static> {
     keypair: Arc<NoiseKeypair>,
     peer_keys: HashMap<String, PublicKey>,
     workflow_state: Arc<WorkflowState<S>>,
+    last_seen: LastSeen,
     _p: PhantomData<S>,
 }
 
@@ -62,6 +67,7 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         instance_name: String,
         initial_step: S,
         exclude_participants: Option<Vec<String>>,
+        last_seen: LastSeen,
     ) -> Result<Self, NoiseError> {
         let keypair = NoiseKeypair::from_file(&node_config.key_file_path()).await?;
 
@@ -159,6 +165,7 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
             keypair: Arc::new(keypair),
             peer_keys,
             workflow_state,
+            last_seen,
             _p: PhantomData,
         })
     }
@@ -243,6 +250,12 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
     ) -> Result<Response<Body>, NoiseError> {
         tracing::debug!("Received request from peer: {peer_id}");
 
+        {
+            let now = Instant::now();
+            let mut map = self.last_seen.write().await;
+            bump(&mut map, peer_id.clone(), now);
+        }
+
         // The Noise handshake delivers the peer's identity as a string of the
         // form `prefix::namespace_hex` (set by the client side via
         // `node_config.participant_id().to_string()`). Parse it back into a
@@ -264,6 +277,7 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
 
         // Route message based on type
         let response = match message.msg_type {
+            MessageType::Ping => Message::new_empty(MessageType::Pong),
             MessageType::GetNextCommand => self.handle_get_next_command(peer_id).await?,
             MessageType::GetChunk => self.handle_get_chunk(message.payload).await?,
             MessageType::KeysUpload => {

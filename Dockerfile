@@ -1,11 +1,8 @@
 FROM rust:slim-bookworm AS builder
 
-RUN apt-get update
-# Debian Bookworm ships Node 18; Vite 6+/7+ requires Node 20.19+ or 22.12+.
-# Install Node 20 from NodeSource instead of the distro package.
-RUN apt-get install -y cmake pkg-config libssl-dev git openssh-client protobuf-compiler curl ca-certificates gnupg
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-RUN apt-get install -y nodejs
+RUN apt-get update && apt-get install -y curl ca-certificates
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+RUN apt-get install -y cmake pkg-config libssl-dev git openssh-client protobuf-compiler nodejs
 
 WORKDIR /app
 

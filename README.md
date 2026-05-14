@@ -9,7 +9,7 @@ A web application for managing decentralized parties in Canton blockchain networ
 - **Contract Deployment**: Upload DAR files and deploy governance contracts with multi-party signing
 - **Governance Actions**: View and manage governance confirmations with threshold-based execution
 - **Participant Management**: View party membership, kick participants with threshold-based voting
-- **Keycloak Authentication**: Supports M2M (client_credentials) and password flows for Ledger API access
+- **OAuth Authentication (Keycloak or Auth0)**: Supports M2M (client_credentials) and password flows for Ledger API access; per-node choice of provider for both frontend gating and outbound Canton tokens
 - **Secure P2P Communication**: Noise Protocol Framework for encrypted coordinator-peer communication
 - **Real-time Status**: Live peer connectivity monitoring and workflow progress tracking
 - **Canton Integration**: Native gRPC integration with Canton Admin and Ledger APIs
@@ -136,6 +136,9 @@ The database file path can be overridden with the `--db` CLI flag.
 | `DECPM_KEYCLOAK_URL` | Keycloak server URL for frontend auth | _(none)_ |
 | `DECPM_KEYCLOAK_REALM` | Keycloak realm name for frontend auth | _(none)_ |
 | `DECPM_KEYCLOAK_CLIENT_ID` | Keycloak client ID for frontend auth | _(none)_ |
+| `DECPM_AUTH0_DOMAIN` | Auth0 tenant domain for frontend auth (mutually exclusive with `DECPM_KEYCLOAK_*`) | _(none)_ |
+| `DECPM_AUTH0_CLIENT_ID` | Auth0 SPA client ID for frontend auth | _(none)_ |
+| `DECPM_AUTH0_AUDIENCE` | Auth0 API audience the SPA's access tokens target | _(none)_ |
 | `DECPM_TIMEOUT_HANDSHAKE` | Noise handshake timeout in seconds | `30` |
 | `DECPM_TIMEOUT_MESSAGE` | Noise message timeout in seconds | `120` |
 | `DECPM_TIMEOUT_RETRY_ATTEMPTS` | Connection retry attempts | `3` |
@@ -196,10 +199,10 @@ curl http://localhost:8081/network-config
 
 ### Party Credentials
 
-Party credentials (Keycloak auth, package IDs) are stored in the SQLite database and managed via the `/party-config` API endpoint:
+Per-party credentials (outbound OAuth for Canton, package IDs) are stored in the SQLite database and managed via the `/party-config` API endpoint. Either the Keycloak fields or the Auth0 fields are supplied — whichever matches the node's top-level provider:
 
 ```bash
-# Configure party credentials
+# Keycloak (client_credentials)
 curl -X PUT http://localhost:8081/party-config \
   -H "Content-Type: application/json" \
   -d '{
@@ -210,6 +213,19 @@ curl -X PUT http://localhost:8081/party-config \
     "keycloak_realm": "my-realm",
     "keycloak_client_id": "my-client",
     "keycloak_client_secret": "secret-value"
+  }'
+
+# Auth0 M2M (client_credentials)
+curl -X PUT http://localhost:8081/party-config \
+  -H "Content-Type: application/json" \
+  -d '{
+    "dec_party_id": "decparty::1220abc...",
+    "member_party_id": "participant1::1220abc...",
+    "user_id": "CoordinatorUser",
+    "auth0_domain": "tenant.us.auth0.com",
+    "auth0_audience": "https://your-canton-api",
+    "auth0_client_id": "m2m-client-id",
+    "auth0_client_secret": "m2m-client-secret"
   }'
 
 # Retrieve party config (secrets masked)
@@ -273,7 +289,7 @@ curl http://localhost:8081/party-config/decparty::1220abc...
 | `/invitations/accept` | POST | Accepts a pending invitation |
 | `/invitations/decline` | POST | Declines a pending invitation |
 | `/auth/status` | GET | Returns authentication status for configured parties |
-| `/auth/test` | POST | Tests Keycloak authentication |
+| `/auth/test` | POST | Tests outbound IdP authentication (Keycloak or Auth0, per party) |
 | `/governance/confirmations` | GET | Returns governance confirmations grouped by action |
 | `/governance/state` | GET | Returns governance state (VaultGovernanceRules) |
 | `/governance/confirm` | POST | Submits a governance confirmation |

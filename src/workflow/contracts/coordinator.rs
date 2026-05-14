@@ -7,6 +7,7 @@ use crate::{
     config::{NetworkConfig, NodeConfig},
     error::Result,
     noise::server::NoiseServer,
+    server::peer_status::LastSeen,
     utils,
     workflow::{
         COORDINATOR_STEP_STALENESS_THRESHOLD, StepStalenessWatchdog,
@@ -26,6 +27,7 @@ pub async fn start_coordinator(
     config: ContractsConfig,
     workflow_auth: Option<WorkflowAuth>,
     db: sqlx::SqlitePool,
+    last_seen: LastSeen,
 ) -> Result {
     tracing::info!("Initializing Noise server...");
 
@@ -36,6 +38,7 @@ pub async fn start_coordinator(
         config.instance_name.clone(),
         ContractsStep::WaitingForPeers,
         None, // No excluded participants
+        last_seen,
     )
     .await?;
     let server = Arc::new(server);

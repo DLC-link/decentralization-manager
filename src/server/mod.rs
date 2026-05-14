@@ -7,6 +7,8 @@ mod middleware;
 mod queries;
 mod types;
 
+pub mod peer_status;
+
 use std::{
     collections::{HashMap, HashSet},
     sync::{
@@ -51,6 +53,7 @@ use crate::{
         load_or_generate_keypair, parse_public_key,
     },
     server::middleware::AuthMiddleware,
+    server::peer_status::LastSeen,
     utils::{compute_fingerprint, get_synchronizer_id_from_url},
     workflow::{self, WorkflowType},
 };
@@ -73,6 +76,7 @@ pub struct AppState {
     pub db: SqlitePool,
     pub config: NodeConfig,
     pub peer_status: Arc<RwLock<HashMap<String, bool>>>,
+    pub last_seen: LastSeen,
     pub noise_listener_pause_flag: Arc<AtomicBool>,
     pub noise_listener_notify: Arc<Notify>,
     pub onboarding_trigger: Arc<Notify>,
@@ -185,6 +189,7 @@ async fn recover_in_progress_workflows(
     listener_control: Arc<AtomicBool>,
     listener_notify: Arc<Notify>,
     auth: Arc<RwLock<Option<WorkflowAuth>>>,
+    last_seen: LastSeen,
     onboarding_trigger: Arc<Notify>,
     kick_trigger: Arc<Notify>,
     contracts_trigger: Arc<Notify>,
@@ -221,6 +226,7 @@ async fn recover_in_progress_workflows(
                     listener_control.clone(),
                     listener_notify.clone(),
                     auth.clone(),
+                    last_seen.clone(),
                 )
                 .await;
             }
@@ -256,6 +262,7 @@ pub(crate) async fn respawn_coordinator(
     listener_control: Arc<AtomicBool>,
     listener_notify: Arc<Notify>,
     auth: Arc<RwLock<Option<WorkflowAuth>>>,
+    last_seen: LastSeen,
 ) {
     let instance = run.instance_name.clone();
     let kind = run.kind;
@@ -296,6 +303,7 @@ pub(crate) async fn respawn_coordinator(
                 state_ref,
                 listener_control,
                 listener_notify,
+                last_seen,
             ));
             *abort_guard = Some(join_handle.abort_handle());
             *status_guard = OnboardingStatus::InProgress;
@@ -323,6 +331,7 @@ pub(crate) async fn respawn_coordinator(
                 state_ref,
                 listener_control,
                 listener_notify,
+                last_seen,
             ));
             *abort_guard = Some(join_handle.abort_handle());
             *status_guard = KickStatus::InProgress;
@@ -355,6 +364,7 @@ pub(crate) async fn respawn_coordinator(
                 listener_control,
                 listener_notify,
                 auth_snapshot,
+                last_seen,
             ));
             *abort_guard = Some(join_handle.abort_handle());
             *status_guard = WorkflowProgress::InProgress;
@@ -382,6 +392,7 @@ pub(crate) async fn respawn_coordinator(
                 state_ref,
                 listener_control,
                 listener_notify,
+                last_seen,
             ));
             *abort_guard = Some(join_handle.abort_handle());
             *status_guard = WorkflowProgress::InProgress;
@@ -390,6 +401,7 @@ pub(crate) async fn respawn_coordinator(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn spawn_onboarding_resume(
     config: NodeConfig,
     db: SqlitePool,
@@ -398,6 +410,7 @@ async fn spawn_onboarding_resume(
     state: Arc<HttpWorkflowState<OnboardingStatus>>,
     listener_control: Arc<AtomicBool>,
     listener_notify: Arc<Notify>,
+    last_seen: LastSeen,
 ) {
     let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
     let result = workflow::start_coordinator(
@@ -409,6 +422,7 @@ async fn spawn_onboarding_resume(
         None,
         None,
         None,
+        last_seen,
     )
     .await;
     guard.resume().await;
@@ -440,6 +454,7 @@ async fn spawn_onboarding_resume(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn spawn_kick_resume(
     config: NodeConfig,
     db: SqlitePool,
@@ -448,6 +463,7 @@ async fn spawn_kick_resume(
     state: Arc<HttpWorkflowState<KickStatus>>,
     listener_control: Arc<AtomicBool>,
     listener_notify: Arc<Notify>,
+    last_seen: LastSeen,
 ) {
     let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
     let result = workflow::start_coordinator(
@@ -459,6 +475,7 @@ async fn spawn_kick_resume(
         None,
         None,
         None,
+        last_seen,
     )
     .await;
     guard.resume().await;
@@ -496,6 +513,7 @@ async fn spawn_contracts_resume(
     listener_control: Arc<AtomicBool>,
     listener_notify: Arc<Notify>,
     auth: Option<WorkflowAuth>,
+    last_seen: LastSeen,
 ) {
     let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
     let result = workflow::start_coordinator(
@@ -507,6 +525,7 @@ async fn spawn_contracts_resume(
         Some(contracts_config),
         None,
         auth,
+        last_seen,
     )
     .await;
     guard.resume().await;
@@ -534,6 +553,7 @@ async fn spawn_contracts_resume(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn spawn_dars_resume(
     config: NodeConfig,
     db: SqlitePool,
@@ -542,6 +562,7 @@ async fn spawn_dars_resume(
     state: Arc<HttpWorkflowState<WorkflowProgress>>,
     listener_control: Arc<AtomicBool>,
     listener_notify: Arc<Notify>,
+    last_seen: LastSeen,
 ) {
     let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
     let result = workflow::start_coordinator(
@@ -553,6 +574,7 @@ async fn spawn_dars_resume(
         None,
         Some(dars_config),
         None,
+        last_seen,
     )
     .await;
     guard.resume().await;
@@ -955,12 +977,14 @@ pub async fn start_server(
         }
         TokenValidator::Jwt(Arc::new(JwtValidator::new(
             config.keycloak.clone(),
+            config.auth0.clone(),
             party_credentials.clone(),
             http_client.clone(),
         )))
     };
 
     let peer_status = Arc::new(RwLock::new(HashMap::new()));
+    let last_seen: LastSeen = Arc::new(RwLock::new(HashMap::new()));
     let listener_control = Arc::new(AtomicBool::new(false));
     let listener_notify = Arc::new(Notify::new());
     let onboarding_trigger = Arc::new(Notify::new());
@@ -985,6 +1009,7 @@ pub async fn start_server(
         db: db.clone(),
         config: config.clone(),
         peer_status: peer_status.clone(),
+        last_seen: last_seen.clone(),
         noise_listener_pause_flag: listener_control.clone(),
         noise_listener_notify: listener_notify.clone(),
         onboarding_trigger: onboarding_trigger.clone(),
@@ -1023,6 +1048,7 @@ pub async fn start_server(
         listener_control.clone(),
         listener_notify.clone(),
         app_state.auth.clone(),
+        last_seen.clone(),
         onboarding_trigger.clone(),
         kick_trigger.clone(),
         contracts_trigger.clone(),
@@ -1036,6 +1062,7 @@ pub async fn start_server(
     let heartbeat_config = config.clone();
     let heartbeat_db = db.clone();
     let heartbeat_status = peer_status.clone();
+    let heartbeat_last_seen = last_seen.clone();
     let heartbeat_control = listener_control.clone();
     let heartbeat_notify = listener_notify.clone();
     let heartbeat_triggers = WorkflowTriggers {
@@ -1057,6 +1084,7 @@ pub async fn start_server(
             heartbeat_config,
             heartbeat_db,
             heartbeat_status,
+            heartbeat_last_seen,
             heartbeat_control,
             heartbeat_notify,
             heartbeat_triggers,
@@ -1308,6 +1336,7 @@ async fn run_heartbeat(
     config: NodeConfig,
     db: SqlitePool,
     peer_status: Arc<RwLock<HashMap<String, bool>>>,
+    last_seen: LastSeen,
     listener_control: Arc<AtomicBool>,
     listener_notify: Arc<Notify>,
     triggers: WorkflowTriggers,
@@ -1354,6 +1383,7 @@ async fn run_heartbeat(
     let listener_control_spawn = listener_control.clone();
     let listener_notify_spawn = listener_notify.clone();
     let keypair_spawn = keypair.clone();
+    let last_seen_spawn = last_seen.clone();
     let peer_keys_spawn = peer_keys.clone();
     let triggers_spawn = triggers.clone();
 
@@ -1379,11 +1409,12 @@ async fn run_heartbeat(
                             result = listener.accept() => {
                                 if let Ok((socket, peer_addr)) = result {
                                     let keypair = keypair_spawn.clone();
+                                    let last_seen = last_seen_spawn.clone();
                                     let peer_keys = peer_keys_spawn.clone();
                                     let triggers = triggers_spawn.clone();
 
                                     tokio::spawn(async move {
-                                        handle_incoming_connection(socket, peer_addr, keypair, peer_keys, triggers).await;
+                                        handle_incoming_connection(socket, peer_addr, keypair, peer_keys, triggers, last_seen).await;
                                     });
                                 }
                             }
@@ -1414,7 +1445,7 @@ async fn run_heartbeat(
     });
 
     // Ping peers every 5 seconds
-    run_peer_ping_loop(config, db, peer_status).await;
+    run_peer_ping_loop(config, db, peer_status, last_seen, keypair).await;
 }
 
 /// Handle an incoming Noise connection (either ping or invite)
@@ -1424,6 +1455,7 @@ async fn handle_incoming_connection(
     keypair: Arc<NoiseKeypair>,
     peer_keys: Arc<HashMap<String, secp256k1::PublicKey>>,
     triggers: WorkflowTriggers,
+    last_seen: LastSeen,
 ) {
     let keypair_for_closure = keypair.clone();
     let peer_keys_clone = peer_keys.clone();
@@ -1451,16 +1483,31 @@ async fn handle_incoming_connection(
             let triggers = triggers.clone();
             let our_pubkey = our_public_key_hex.clone();
             let peer_keys = peer_keys.clone();
-            // Resolve peer's hex public key from the allowlist. The
-            // responder only authenticates identities that are valid
-            // participant_id strings present in `peer_keys`, so this
-            // lookup is the same one that already gated the handshake;
-            // a miss here would mean a peer_keys race we won't trust.
-            let peer_pubkey_hex = std::str::from_utf8(peer_id)
-                .ok()
+            let last_seen = last_seen.clone();
+
+            // The responder above only authenticates identities that are
+            // valid utf-8 participant_id strings present in `peer_keys` (the
+            // raw 33-byte fallback was removed in #136 as an audit finding).
+            // We extract `peer_id_str` once so both `peer_pubkey_hex` and the
+            // `last_seen` bump below can reuse it; the conservative
+            // `peer_keys` re-check on the bump path is defensive against any
+            // future responder change.
+            let peer_id_str = std::str::from_utf8(peer_id).ok().map(str::to_owned);
+            let peer_pubkey_hex = peer_id_str
+                .as_deref()
                 .and_then(|id| peer_keys.get(id))
                 .map(|pk| hex::encode(pk.serialize()));
+
             async move {
+                // Bump last_seen for known peers.
+                if let Some(id) = peer_id_str.as_deref()
+                    && peer_keys.contains_key(id)
+                {
+                    let now = std::time::Instant::now();
+                    let mut map = last_seen.write().await;
+                    peer_status::bump(&mut map, id.to_string(), now);
+                }
+
                 let body_bytes = hyper::body::to_bytes(req.into_body()).await?;
 
                 if body_bytes.len() < 6 {
@@ -1841,6 +1888,8 @@ async fn run_peer_ping_loop(
     config: NodeConfig,
     db: SqlitePool,
     peer_status: Arc<RwLock<HashMap<String, bool>>>,
+    last_seen: LastSeen,
+    keypair: Arc<NoiseKeypair>,
 ) {
     let mut interval = tokio::time::interval(Duration::from_secs(5));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1856,24 +1905,63 @@ async fn run_peer_ping_loop(
             }
         };
 
-        let current_participant_id = config.participant_id();
+        let our_canton_id = config.participant_id();
+        let our_id = our_canton_id.to_string();
         let futures: Vec<_> = peers
             .iter()
-            .filter(|p| p.participant_id != *current_participant_id)
+            .filter(|p| &p.participant_id != our_canton_id)
             .map(|peer| {
                 let id = peer.participant_id.to_string();
                 let address = peer.address.clone();
                 let port = peer.port;
+                let public_key_hex = peer.public_key.clone();
+                let last_seen = last_seen.clone();
+                let keypair = keypair.clone();
+                let our_id = our_id.clone();
 
                 async move {
-                    let addr = format!("{address}:{port}");
-                    let active = tokio::time::timeout(
-                        Duration::from_secs(2),
-                        tokio::net::TcpStream::connect(&addr),
+                    // Parse the peer's pubkey from the freshly-loaded DB row.
+                    // (Cannot rely on a startup-only cache: new peers must be probed.)
+                    let peer_pubkey = match parse_public_key(&public_key_hex) {
+                        Ok(pk) => pk,
+                        Err(e) => {
+                            tracing::debug!("Skipping probe of {id}: malformed public_key: {e}");
+                            return (id, false);
+                        }
+                    };
+
+                    let now = std::time::Instant::now();
+                    let stale = {
+                        let map = last_seen.read().await;
+                        peer_status::should_probe(&map, &id, now)
+                    };
+
+                    if !stale {
+                        return (id, true);
+                    }
+
+                    let psk = keypair.derive_psk(&peer_pubkey);
+                    let result = crate::noise::send_noise_message(
+                        &address,
+                        port,
+                        &psk,
+                        our_id.as_bytes(),
+                        &Message::new_empty(MessageType::Ping),
                     )
-                    .await
-                    .map(|r| r.is_ok())
-                    .unwrap_or(false);
+                    .await;
+
+                    let active = matches!(
+                        result,
+                        Ok(ref bytes) if Message::from_bytes(bytes)
+                            .map(|m| m.msg_type == MessageType::Pong)
+                            .unwrap_or(false)
+                    );
+
+                    if active {
+                        let now = std::time::Instant::now();
+                        let mut map = last_seen.write().await;
+                        peer_status::bump(&mut map, id.clone(), now);
+                    }
 
                     (id, active)
                 }

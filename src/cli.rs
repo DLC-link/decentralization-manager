@@ -100,6 +100,21 @@ pub enum Commands {
         #[arg(long, env = "DECPM_KEYCLOAK_CLIENT_ID")]
         keycloak_client_id: Option<String>,
 
+        // Auth0 (top-level, for frontend gating). Env-only: hidden from
+        // --help so operators always configure these via deploy env vars,
+        // mirroring `DECPM_KEYCLOAK_*` but with no CLI flag surface.
+        /// Auth0 tenant domain for frontend auth
+        #[arg(long, env = "DECPM_AUTH0_DOMAIN", hide = true)]
+        auth0_domain: Option<String>,
+
+        /// Auth0 SPA client ID for frontend auth
+        #[arg(long, env = "DECPM_AUTH0_CLIENT_ID", hide = true)]
+        auth0_client_id: Option<String>,
+
+        /// Auth0 API audience for frontend access tokens
+        #[arg(long, env = "DECPM_AUTH0_AUDIENCE", hide = true)]
+        auth0_audience: Option<String>,
+
         /// Role name that gates sensitive endpoints (PUT /party-config,
         /// POST /kick, etc.). Unset (default) skips the role check —
         /// every authenticated caller is treated as admin. Set this to

@@ -337,6 +337,7 @@ pub async fn start_kick(
     let kick_state_clone = kick_state.get_ref().clone();
     let listener_control = data.noise_listener_pause_flag.clone();
     let listener_notify = data.noise_listener_notify.clone();
+    let last_seen = data.last_seen.clone();
     let instance_for_task = instance_name.clone();
 
     // See start_dars below for the rationale: abort_handle, status, and error
@@ -378,6 +379,7 @@ pub async fn start_kick(
             None, // No contracts config
             None, // No dars config
             None, // No auth registry for kick
+            last_seen,
         )
         .await;
 
@@ -672,6 +674,7 @@ pub async fn start_onboarding(
     *onboarding_state.invited_peers.write().await = peer_ids.clone();
     let party_credentials = data.party_credentials.clone();
     let auth_lock = data.auth.clone();
+    let last_seen = data.last_seen.clone();
     let instance_for_task = instance_name.clone();
 
     // See start_dars below for the rationale: abort_handle, status, and error
@@ -715,6 +718,7 @@ pub async fn start_onboarding(
             None, // No contracts config
             None, // No dars config
             None, // No auth registry for onboarding
+            last_seen,
         )
         .await;
 
@@ -1163,6 +1167,7 @@ pub async fn start_contracts(
     let listener_control = data.noise_listener_pause_flag.clone();
     let listener_notify = data.noise_listener_notify.clone();
     let party_credentials = data.party_credentials.clone();
+    let last_seen = data.last_seen.clone();
     *contracts_state.invited_peers.write().await = contracts_invitees;
     let instance_for_task = instance_name_for_run.clone();
 
@@ -1206,6 +1211,7 @@ pub async fn start_contracts(
             Some(contracts_config.clone()),
             None, // No dars config
             workflow_auth,
+            last_seen,
         )
         .await;
 
@@ -1423,6 +1429,7 @@ pub async fn start_dars(
     let dars_state_clone = dars_state.get_ref().clone();
     let listener_control = data.noise_listener_pause_flag.clone();
     let listener_notify = data.noise_listener_notify.clone();
+    let last_seen = data.last_seen.clone();
     let peer_ids = body.peer_ids.clone();
     *dars_state.invited_peers.write().await = peer_ids.clone();
     let instance_for_task = instance_name.clone();
@@ -1483,6 +1490,7 @@ pub async fn start_dars(
             None, // No contracts config
             Some(dars_config),
             None, // No auth
+            last_seen,
         )
         .await;
 
@@ -2021,6 +2029,7 @@ pub async fn retry_workflow(
         data.noise_listener_pause_flag.clone(),
         data.noise_listener_notify.clone(),
         data.auth.clone(),
+        data.last_seen.clone(),
     )
     .await;
 

@@ -6,6 +6,7 @@ import {
   type ReactNode,
 } from "react";
 import Keycloak from "keycloak-js";
+import { useAuth0 } from "@auth0/auth0-react";
 import {
   getToken,
   setToken,
@@ -19,11 +20,32 @@ import { LoginPage } from "../components/LoginPage";
 import type { AuthConfig } from "../types";
 import { AuthContext } from "./AuthContextValue";
 
-export function AuthProvider({ children }: { children: ReactNode }) {
+function AuthenticatingScreen() {
+  return (
+    <div
+      style={{
+        display: "flex",
+        justifyContent: "center",
+        alignItems: "center",
+        height: "100vh",
+        fontFamily: "sans-serif",
+      }}
+    >
+      Authenticating...
+    </div>
+  );
+}
+
+function KeycloakAuthProvider({
+  config,
+  children,
+}: {
+  config: AuthConfig;
+  children: ReactNode;
+}) {
   const [token, setTokenState] = useState<string | null>(getToken());
   const [keycloak, setKeycloak] = useState<Keycloak | null>(null);
   const [loading, setLoading] = useState(true);
-  const [authDisabled, setAuthDisabled] = useState(false);
   const initStarted = useRef(false);
   const refreshTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
 
@@ -33,15 +55,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     async function init() {
       try {
-        const res = await fetch("/auth-config");
-        const config: AuthConfig = await res.json();
-
-        if (!config.auth_required) {
-          setAuthDisabled(true);
-          setLoading(false);
-          return;
-        }
-
         const url = config.keycloak_host!.replace(/\/+$/, "");
 
         const kc = new Keycloak({
@@ -133,7 +146,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     init();
     return () => clearTimeout(refreshTimer.current);
-  }, []);
+  }, [config]);
 
   const logout = useCallback(() => {
     clearToken();
@@ -147,7 +160,83 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     keycloak?.login();
   }, [keycloak]);
 
-  if (authDisabled) {
+  if (loading) return <AuthenticatingScreen />;
+  if (!token) return <LoginPage onLogin={login} />;
+
+  return (
+    <AuthContext.Provider value={{ token, logout }}>
+      {children}
+    </AuthContext.Provider>
+  );
+}
+
+function Auth0AuthProvider({ children }: { children: ReactNode }) {
+  const {
+    isAuthenticated,
+    isLoading,
+    loginWithRedirect,
+    logout: auth0Logout,
+    getAccessTokenSilently,
+  } = useAuth0();
+  const [token, setTokenState] = useState<string | null>(getToken());
+  const [tokenLoading, setTokenLoading] = useState(true);
+
+  useEffect(() => {
+    if (isLoading) return;
+
+    if (!isAuthenticated) {
+      clearToken();
+      setTokenState(null);
+      setTokenLoading(false);
+      return;
+    }
+
+    getAccessTokenSilently()
+      .then((t) => {
+        setToken(t);
+        setTokenState(t);
+      })
+      .catch((err) => {
+        console.error("Auth0 token retrieval failed:", err);
+        clearToken();
+        setTokenState(null);
+      })
+      .finally(() => setTokenLoading(false));
+  }, [isAuthenticated, isLoading, getAccessTokenSilently]);
+
+  const logout = useCallback(() => {
+    clearToken();
+    setTokenState(null);
+    auth0Logout({ logoutParams: { returnTo: window.location.origin } });
+  }, [auth0Logout]);
+
+  const login = useCallback(() => {
+    loginWithRedirect();
+  }, [loginWithRedirect]);
+
+  if (isLoading || tokenLoading) return <AuthenticatingScreen />;
+  if (!token) return <LoginPage onLogin={login} />;
+
+  return (
+    <AuthContext.Provider value={{ token, logout }}>
+      {children}
+    </AuthContext.Provider>
+  );
+}
+
+export function AuthProvider({ children }: { children: ReactNode }) {
+  const [config, setConfig] = useState<AuthConfig | null>(null);
+
+  useEffect(() => {
+    fetch("/auth-config")
+      .then((res) => res.json())
+      .then((c: AuthConfig) => setConfig(c))
+      .catch(() => setConfig({ auth_required: false }));
+  }, []);
+
+  if (!config) return <AuthenticatingScreen />;
+
+  if (!config.auth_required) {
     return (
       <AuthContext.Provider value={{ token: null, logout: () => {} }}>
         {children}
@@ -155,29 +244,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     );
   }
 
-  if (loading) {
-    return (
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "center",
-          alignItems: "center",
-          height: "100vh",
-          fontFamily: "sans-serif",
-        }}
-      >
-        Authenticating...
-      </div>
-    );
-  }
-
-  if (!token) {
-    return <LoginPage onLogin={login} />;
+  if (config.auth0_domain && config.auth0_client_id) {
+    return <Auth0AuthProvider>{children}</Auth0AuthProvider>;
   }
 
   return (
-    <AuthContext.Provider value={{ token, logout }}>
-      {children}
-    </AuthContext.Provider>
+    <KeycloakAuthProvider config={config}>{children}</KeycloakAuthProvider>
   );
 }

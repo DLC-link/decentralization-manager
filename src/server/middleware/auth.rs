@@ -325,6 +325,7 @@ mod tests {
             db,
             config: NodeConfig::default(),
             peer_status: Arc::new(RwLock::new(HashMap::new())),
+            last_seen: Arc::new(RwLock::new(HashMap::new())),
             noise_listener_pause_flag: Arc::new(AtomicBool::new(false)),
             noise_listener_notify: Arc::new(Notify::new()),
             onboarding_trigger: Arc::new(Notify::new()),
@@ -380,6 +381,7 @@ mod tests {
         // bootstrap exemption (neither of which apply to /node-config).
         let parties = Arc::new(RwLock::new(Vec::new()));
         let validator = TokenValidator::Jwt(Arc::new(JwtValidator::new(
+            None,
             None,
             parties.clone(),
             reqwest::Client::new(),
