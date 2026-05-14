@@ -102,13 +102,25 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         .context("provider_service_cid not set after provider service setup")?;
     let p1_member = f.p1_member_party()?.to_string();
     let party_id = f.party_id()?.to_string();
+    // Same operator selection as in deploy_gov_core's /contracts: localnet
+    // uses p1_member, devnet uses the discovered auth0_... operator. The
+    // SetupUtility action looks up WithOperatorProvider {operator, provider}
+    // and fails with "Contract group identifier mismatch" if these don't
+    // line up with what was put on the ledger.
+    let operator = match f.target {
+        TestTarget::Localnet => p1_member.clone(),
+        TestTarget::Devnet => f
+            .operator_party
+            .clone()
+            .context("operator_party not set on devnet — discover_network_parties must run first")?,
+    };
 
     propose_confirm_execute(
         "SetupUtility",
         json!({
             "type": "setup_utility",
             "provider_service_cid": provider_cid,
-            "operator": p1_member,
+            "operator": operator,
             "instrument_id_text": format!("{}-TEST-E2E-TOKEN", f.run_id),
             "create_transfer_rule": true,
             "create_allocation_factory": true,
