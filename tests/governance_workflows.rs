@@ -88,13 +88,22 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     let mut f = Fixture::from_env()?;
     f.discover_network_parties().await?;
     phases::create_dec_party::run(&mut f).await?;
+    common::diagnostics::snapshot_owner_keys(&f, "create_dec_party").await;
     phases::distribute_dars::run(&mut f).await?;
+    common::diagnostics::snapshot_owner_keys(&f, "distribute_dars").await;
     phases::check_peer_dars::run(&mut f).await?;
+    common::diagnostics::snapshot_owner_keys(&f, "check_peer_dars").await;
     phases::deploy_gov_core::run(&mut f).await?;
+    common::diagnostics::snapshot_owner_keys(&f, "deploy_gov_core").await;
     phases::token_custody::run(&mut f).await?;
+    common::diagnostics::snapshot_owner_keys(&f, "token_custody").await;
     phases::utility_onboarding::run(&mut f).await?;
+    common::diagnostics::snapshot_owner_keys(&f, "utility_onboarding").await;
     phases::generic_vote::run(&mut f).await?;
+    common::diagnostics::snapshot_owner_keys(&f, "generic_vote").await;
     phases::notification_feed::run(&mut f).await?;
+    common::diagnostics::snapshot_owner_keys(&f, "notification_feed").await;
+        common::diagnostics::snapshot_owner_keys(&f, "before_owner_key_resilience").await;
     phases::owner_key_resilience::run(&mut f).await?;
     phases::kick::run(&mut f).await?;
 

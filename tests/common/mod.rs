@@ -3,6 +3,7 @@
 pub mod auth;
 pub mod chaos;
 pub mod db;
+pub mod diagnostics;
 pub mod governance;
 pub mod http;
 pub mod invitations;
