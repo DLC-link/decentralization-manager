@@ -1,5 +1,6 @@
 services:
   participant-1:
+    platform: linux/amd64
     build:
       context: ..
       dockerfile: Dockerfile
@@ -17,6 +18,7 @@ services:
       ["dec-party-manager", "-d", "/app", "serve", "--host", "0.0.0.0", "--port", "8081"]
 
   participant-2:
+    platform: linux/amd64
     build:
       context: ..
       dockerfile: Dockerfile
@@ -34,6 +36,7 @@ services:
       ["dec-party-manager", "-d", "/app", "serve", "--host", "0.0.0.0", "--port", "8082"]
 
   participant-3:
+    platform: linux/amd64
     build:
       context: ..
       dockerfile: Dockerfile
