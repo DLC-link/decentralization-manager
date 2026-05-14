@@ -7,6 +7,7 @@ use tracing::info;
 use crate::common::{
     Fixture,
     MemberCreds,
+    ParticipantAdminCreds,
     TestTarget,
     http::{probe_workflow_run_visible, probe_workflow_status},
     invitations::{InvitationIds, post_accept_invitation, probe_pending_invitation},
@@ -26,6 +27,32 @@ async fn allocate_party(f: &Fixture, port: u16, hint: &str, name: &str) -> anyho
         .await
         .with_context(|| format!("allocate {hint} on {name}"))?;
     Ok(r.party_details.party)
+}
+
+/// Devnet-only: drive DPM's POST /auth/grant-rights so it mints an admin
+/// Keycloak token from the participant-admin client creds and calls Canton's
+/// UserManagementService.GrantUserRights via gRPC, granting the coordinator/
+/// attestor user act_as + read_as on both the member party and the freshly-
+/// created decentralized party. Localnet uses [`grant_rights`] (JSON Ledger
+/// API + ledger-api-user) instead — the two flows are mutually exclusive.
+async fn grant_rights_devnet(
+    f: &Fixture,
+    http_port: u16,
+    party_id: &str,
+    admin: &ParticipantAdminCreds,
+    name: &str,
+) -> anyhow::Result<()> {
+    info!("Granting rights via DPM /auth/grant-rights on {name}");
+    let req = json!({
+        "dec_party_id": party_id,
+        "admin_client_id": admin.keycloak_client_id,
+        "admin_client_secret": admin.keycloak_client_secret,
+    });
+    let _: Value = f
+        .post_json(http_port, "/auth/grant-rights", &req)
+        .await
+        .with_context(|| format!("POST /auth/grant-rights on {name}"))?;
+    Ok(())
 }
 
 async fn grant_rights(f: &Fixture, port: u16, party: &str, name: &str) -> anyhow::Result<()> {
@@ -175,6 +202,23 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     update_party_config(&*f, f.p1.http, &party_id, &p1m, "participant-1", f.p1_member_creds.as_ref()).await?;
                     update_party_config(&*f, f.p2.http, &party_id, &p2m, "participant-2", f.p2_member_creds.as_ref()).await?;
                     update_party_config(&*f, f.p3.http, &party_id, &p3m, "participant-3", f.p3_member_creds.as_ref()).await?;
+
+                    // On devnet, the act_as/read_as grants for the freshly-
+                    // created dec party are issued by each DPM via its own
+                    // POST /auth/grant-rights (uses participant-admin creds
+                    // to call Canton's UserManagementService). Must run AFTER
+                    // update_party_config so party_credentials are registered.
+                    if f.target == TestTarget::Devnet {
+                        let p1a = f.p1_participant_admin_creds.as_ref()
+                            .context("P1 participant-admin creds missing on devnet")?;
+                        let p2a = f.p2_participant_admin_creds.as_ref()
+                            .context("P2 participant-admin creds missing on devnet")?;
+                        let p3a = f.p3_participant_admin_creds.as_ref()
+                            .context("P3 participant-admin creds missing on devnet")?;
+                        grant_rights_devnet(&*f, f.p1.http, &party_id, p1a, "participant-1").await?;
+                        grant_rights_devnet(&*f, f.p2.http, &party_id, p2a, "participant-2").await?;
+                        grant_rights_devnet(&*f, f.p3.http, &party_id, p3a, "participant-3").await?;
+                    }
 
                     let req = json!({
                         "decentralized_party_id": party_id,

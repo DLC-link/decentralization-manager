@@ -64,6 +64,33 @@ fi
 unset MEMBER_VARS MEMBER_MISSING _v
 
 # ---------------------------------------------------------------------------
+# Per-participant admin-client credentials validation. The DPM's
+# POST /auth/grant-rights handler uses these (passed per-call from the test
+# runner) to mint an admin Keycloak token via client_credentials, then calls
+# Canton's UserManagementService.GrantUserRights via gRPC to grant
+# CoordinatorUser / attestorUserN the act_as + read_as rights on the freshly-
+# created decentralized party. Replaces the JSON-Ledger-API grant_rights call
+# that the localnet path uses.
+# ---------------------------------------------------------------------------
+ADMIN_VARS=(
+    P1_PARTICIPANT_ADMIN_KEYCLOAK_CLIENT_ID  P1_PARTICIPANT_ADMIN_KEYCLOAK_CLIENT_SECRET
+    P2_PARTICIPANT_ADMIN_KEYCLOAK_CLIENT_ID  P2_PARTICIPANT_ADMIN_KEYCLOAK_CLIENT_SECRET
+    P3_PARTICIPANT_ADMIN_KEYCLOAK_CLIENT_ID  P3_PARTICIPANT_ADMIN_KEYCLOAK_CLIENT_SECRET
+)
+ADMIN_MISSING=()
+for _v in "${ADMIN_VARS[@]}"; do
+    [ -z "${!_v:-}" ] && ADMIN_MISSING+=("$_v")
+done
+if [ "${#ADMIN_MISSING[@]}" -gt 0 ]; then
+    echo "ERROR: missing participant-admin env vars for devnet target:" >&2
+    printf '  - %s
+' "${ADMIN_MISSING[@]}" >&2
+    echo "Add them to development/remote/participant-{1,2,3}/.env." >&2
+    exit 1
+fi
+unset ADMIN_VARS ADMIN_MISSING _v
+
+# ---------------------------------------------------------------------------
 # Smoke-check Keycloak reachability via password grant.
 # The Rust test runner manages its own token lifecycle via KeycloakRefresher;
 # this is a fail-fast check that catches a misconfigured Keycloak client BEFORE

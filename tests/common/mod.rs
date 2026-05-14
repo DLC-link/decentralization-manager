@@ -25,6 +25,19 @@ pub struct MemberCreds {
     pub keycloak_client_secret: String,
 }
 
+/// Keycloak client_credentials for the participant-admin (Canton
+/// ParticipantAdmin) service account. Used on devnet by the test runner to
+/// drive DPM's POST /auth/grant-rights — that handler mints an admin token
+/// from these creds and calls UserManagementService.GrantUserRights to grant
+/// CoordinatorUser/attestorUserN the act_as+read_as rights on the freshly-
+/// created decentralized party. Localnet uses the JSON Ledger API and
+/// ledger-api-user instead, so these are None on that target.
+#[derive(Debug, Clone)]
+pub struct ParticipantAdminCreds {
+    pub keycloak_client_id: String,
+    pub keycloak_client_secret: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TestTarget {
     Localnet,
@@ -83,6 +96,10 @@ pub struct Fixture {
     pub p1_member_creds: Option<MemberCreds>,
     pub p2_member_creds: Option<MemberCreds>,
     pub p3_member_creds: Option<MemberCreds>,
+
+    pub p1_participant_admin_creds: Option<ParticipantAdminCreds>,
+    pub p2_participant_admin_creds: Option<ParticipantAdminCreds>,
+    pub p3_participant_admin_creds: Option<ParticipantAdminCreds>,
 }
 
 fn read_env(key: &str) -> anyhow::Result<String> {
@@ -155,7 +172,10 @@ impl Fixture {
             format!("dpm-it-{ts}-{pid}", pid = std::process::id())
         });
 
-        let (p1_member_creds, p2_member_creds, p3_member_creds) = match target {
+        let (
+            p1_member_creds, p2_member_creds, p3_member_creds,
+            p1_participant_admin_creds, p2_participant_admin_creds, p3_participant_admin_creds,
+        ) = match target {
             TestTarget::Devnet => {
                 let read_member_creds = |n: u8| -> anyhow::Result<MemberCreds> {
                     Ok(MemberCreds {
@@ -167,13 +187,26 @@ impl Fixture {
                         )?,
                     })
                 };
+                let read_admin_creds = |n: u8| -> anyhow::Result<ParticipantAdminCreds> {
+                    Ok(ParticipantAdminCreds {
+                        keycloak_client_id: read_env(
+                            &format!("P{n}_PARTICIPANT_ADMIN_KEYCLOAK_CLIENT_ID"),
+                        )?,
+                        keycloak_client_secret: read_env(
+                            &format!("P{n}_PARTICIPANT_ADMIN_KEYCLOAK_CLIENT_SECRET"),
+                        )?,
+                    })
+                };
                 (
                     Some(read_member_creds(1)?),
                     Some(read_member_creds(2)?),
                     Some(read_member_creds(3)?),
+                    Some(read_admin_creds(1)?),
+                    Some(read_admin_creds(2)?),
+                    Some(read_admin_creds(3)?),
                 )
             }
-            TestTarget::Localnet => (None, None, None),
+            TestTarget::Localnet => (None, None, None, None, None, None),
         };
 
         Ok(Fixture {
@@ -201,6 +234,9 @@ impl Fixture {
             p1_member_creds,
             p2_member_creds,
             p3_member_creds,
+            p1_participant_admin_creds,
+            p2_participant_admin_creds,
+            p3_participant_admin_creds,
         })
     }
 
@@ -310,6 +346,9 @@ impl Fixture {
             p1_member_creds: None,
             p2_member_creds: None,
             p3_member_creds: None,
+            p1_participant_admin_creds: None,
+            p2_participant_admin_creds: None,
+            p3_participant_admin_creds: None,
         }
     }
 }
