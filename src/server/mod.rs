@@ -2405,7 +2405,10 @@ async fn list_my_owner_keys(admin_api_url: &str, synchronizer_alias: &str) -> Re
         "owner-key-debug: list_my_owner_keys vault filter (usage=1 selects namespace keys)"
     );
 
+    tracing::info!("owner-key-debug: about to get_synchronizer_id");
+    let sync_t0 = std::time::Instant::now();
     let synchronizer_id = get_synchronizer_id_from_url(admin_api_url, synchronizer_alias).await?;
+    tracing::info!(elapsed_ms = sync_t0.elapsed().as_millis() as u64, %synchronizer_id, "owner-key-debug: got synchronizer_id");
 
     let base_query = BaseQuery {
         store: Some(StoreId {
@@ -2421,6 +2424,8 @@ async fn list_my_owner_keys(admin_api_url: &str, synchronizer_alias: &str) -> Re
     };
 
     // Get all decentralized namespace definitions
+    tracing::info!("owner-key-debug: about to list_decentralized_namespace_definition");
+    let dns_t0 = std::time::Instant::now();
     let dns_response = topology_client
         .list_decentralized_namespace_definition(tonic::Request::new(
             ListDecentralizedNamespaceDefinitionRequest {
@@ -2430,8 +2435,11 @@ async fn list_my_owner_keys(admin_api_url: &str, synchronizer_alias: &str) -> Re
         ))
         .await?
         .into_inner();
+    tracing::info!(elapsed_ms = dns_t0.elapsed().as_millis() as u64, results = dns_response.results.len(), "owner-key-debug: got dns_response");
 
     // Get P2P mappings to resolve full party_id (prefix::namespace)
+    tracing::info!("owner-key-debug: about to list_party_to_participant");
+    let p2p_t0 = std::time::Instant::now();
     let p2p_response = topology_client
         .list_party_to_participant(tonic::Request::new(ListPartyToParticipantRequest {
             base_query: Some(base_query),
@@ -2440,6 +2448,7 @@ async fn list_my_owner_keys(admin_api_url: &str, synchronizer_alias: &str) -> Re
         }))
         .await?
         .into_inner();
+    tracing::info!(elapsed_ms = p2p_t0.elapsed().as_millis() as u64, results = p2p_response.results.len(), "owner-key-debug: got p2p_response");
 
     // Build namespace → full party_id map from P2P data
     let namespace_to_party: HashMap<String, String> = p2p_response
