@@ -24,8 +24,17 @@ wait_for_server() {
     local max_attempts=30
     local attempt=0
 
+    # Optional bearer token. Required on devnet (real JwtValidator) so the
+    # readiness probes below aren't rejected as "missing bearer token". On
+    # localnet the binary is built with `--features test-mode` (MockValidator)
+    # which accepts any/no token, so DPM_IT_AUTH_TOKEN is left unset.
+    local auth_args=()
+    if [ -n "${DPM_IT_AUTH_TOKEN:-}" ]; then
+        auth_args=(-H "Authorization: Bearer ${DPM_IT_AUTH_TOKEN}")
+    fi
+
     echo "Waiting for $name on port $port..."
-    while ! curl -s "http://localhost:$port/node-config" > /dev/null 2>&1; do
+    while ! curl -s "${auth_args[@]}" "http://localhost:$port/node-config" > /dev/null 2>&1; do
         attempt=$((attempt + 1))
         if [ $attempt -ge $max_attempts ]; then
             echo "ERROR: $name failed to start after $max_attempts attempts"
@@ -38,7 +47,7 @@ wait_for_server() {
     attempt=0
     while true; do
         local key
-        key=$(curl -s "http://localhost:$port/keys/status" | jq -r '.public_key // empty')
+        key=$(curl -s "${auth_args[@]}" "http://localhost:$port/keys/status" | jq -r '.public_key // empty')
         if [ -n "$key" ] && [ "$key" != "null" ]; then
             break
         fi

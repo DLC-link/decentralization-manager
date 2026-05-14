@@ -84,6 +84,9 @@ if [ -z "$_SMOKE_TOKEN" ] || [ "$_SMOKE_TOKEN" = "null" ]; then
     echo "Check that DECPM_KEYCLOAK_USERNAME and DECPM_KEYCLOAK_PASSWORD are correct and Keycloak is reachable." >&2
     exit 1
 fi
+# Reused by common.sh:wait_for_server for the readiness probes against the
+# real JwtValidator. Fresh token (~5min TTL) easily outlives start_nodes.
+export DPM_IT_AUTH_TOKEN="$_SMOKE_TOKEN"
 unset _SMOKE_TOKEN
 
 # ---------------------------------------------------------------------------
