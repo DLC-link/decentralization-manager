@@ -7,6 +7,7 @@ use tracing::info;
 use crate::common::{
     Fixture,
     MemberCreds,
+    TestTarget,
     http::{probe_workflow_run_visible, probe_workflow_status},
     invitations::{InvitationIds, post_accept_invitation, probe_pending_invitation},
     scenario::Scenario,
@@ -138,19 +139,38 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         .map(|p| p.participant_uid.clone())
                         .context("party has no p3")?;
 
-                    let p1m =
-                        allocate_party(&*f, P1_JSON_API, "gov-member-p1", "participant-1").await?;
-                    let p2m =
-                        allocate_party(&*f, P2_JSON_API, "gov-member-p2", "participant-2").await?;
-                    let p3m =
-                        allocate_party(&*f, P3_JSON_API, "gov-member-p3", "participant-3").await?;
-
-                    grant_rights(&*f, P1_JSON_API, &p1m, "participant-1").await?;
-                    grant_rights(&*f, P2_JSON_API, &p2m, "participant-2").await?;
-                    grant_rights(&*f, P3_JSON_API, &p3m, "participant-3").await?;
-                    grant_rights(&*f, P1_JSON_API, &party_id, "participant-1").await?;
-                    grant_rights(&*f, P2_JSON_API, &party_id, "participant-2").await?;
-                    grant_rights(&*f, P3_JSON_API, &party_id, "participant-3").await?;
+                    // On localnet we allocate fresh gov-member-pN parties on each
+                    // participant's JSON Ledger API and grant ledger-api-user the
+                    // rights to act/read as them (and as the decentralized party).
+                    // On devnet the member parties already exist with their rights
+                    // managed via Keycloak/IDP — see development/remote/participant-N/.env
+                    // for the P{N}_MEMBER_PARTY_ID values. We reuse those directly
+                    // and skip both the JSON-API allocate and the ledger-api-user
+                    // grants (the JSON Ledger API isn't tunneled on devnet, and
+                    // ledger-api-user doesn't exist there anyway).
+                    let (p1m, p2m, p3m) = match f.target {
+                        TestTarget::Localnet => {
+                            let p1m = allocate_party(&*f, P1_JSON_API, "gov-member-p1", "participant-1").await?;
+                            let p2m = allocate_party(&*f, P2_JSON_API, "gov-member-p2", "participant-2").await?;
+                            let p3m = allocate_party(&*f, P3_JSON_API, "gov-member-p3", "participant-3").await?;
+                            grant_rights(&*f, P1_JSON_API, &p1m, "participant-1").await?;
+                            grant_rights(&*f, P2_JSON_API, &p2m, "participant-2").await?;
+                            grant_rights(&*f, P3_JSON_API, &p3m, "participant-3").await?;
+                            grant_rights(&*f, P1_JSON_API, &party_id, "participant-1").await?;
+                            grant_rights(&*f, P2_JSON_API, &party_id, "participant-2").await?;
+                            grant_rights(&*f, P3_JSON_API, &party_id, "participant-3").await?;
+                            (p1m, p2m, p3m)
+                        }
+                        TestTarget::Devnet => {
+                            let p1m = f.p1_member_creds.as_ref()
+                                .context("P1 member creds missing on devnet")?.party_id.clone();
+                            let p2m = f.p2_member_creds.as_ref()
+                                .context("P2 member creds missing on devnet")?.party_id.clone();
+                            let p3m = f.p3_member_creds.as_ref()
+                                .context("P3 member creds missing on devnet")?.party_id.clone();
+                            (p1m, p2m, p3m)
+                        }
+                    };
 
                     update_party_config(&*f, f.p1.http, &party_id, &p1m, "participant-1", f.p1_member_creds.as_ref()).await?;
                     update_party_config(&*f, f.p2.http, &party_id, &p2m, "participant-2", f.p2_member_creds.as_ref()).await?;
