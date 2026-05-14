@@ -521,27 +521,27 @@ Beyond the localnet prerequisites listed above, you'll need:
    [Copilot review #6][cprev6] for the cleanup.
 
 4. **Per-participant `.env` files** populated at
-   `development/remote/participant-{1,2,3}/.env`. Each must define:
+   `development/remote/participant-{1,2,3}/.env`. Templates with the full
+   key shape, inline documentation, and sensible defaults for the
+   deployment-config keys are checked in alongside as
+   `participant-{1,2,3}/.env.example`. Copy and fill:
+   ```bash
+   for n in 1 2 3; do
+     cp development/remote/participant-$n/.env{.example,}
+   done
+   # then edit each .env with the real Keycloak URL/realm/credentials and
+   # the per-participant party IDs + M2M client secrets
    ```
-   # Shared Keycloak (same values across all three files):
-   DECPM_KEYCLOAK_URL=https://<keycloak-host>[/auth]
-   DECPM_KEYCLOAK_REALM=<realm>
-   DECPM_KEYCLOAK_CLIENT_ID=<password-grant client_id>
-   DECPM_KEYCLOAK_USERNAME=<...>
-   DECPM_KEYCLOAK_PASSWORD=<...>
-
-   # Per-participant member party + its M2M client (for the workflow user):
-   P{N}_MEMBER_PARTY_ID=<full party id with namespace>
-   P{N}_MEMBER_USER_ID=<canton user>
-   P{N}_MEMBER_KEYCLOAK_CLIENT_ID=<...>
-   P{N}_MEMBER_KEYCLOAK_CLIENT_SECRET=<...>
-
-   # Per-participant admin Keycloak client (ParticipantAdmin on Canton):
-   P{N}_PARTICIPANT_ADMIN_KEYCLOAK_CLIENT_ID=<...>
-   P{N}_PARTICIPANT_ADMIN_KEYCLOAK_CLIENT_SECRET=<...>
-   ```
-   `DECPM_KEYCLOAK_URL` may be configured with or without the trailing
-   `/auth` servlet path — both forms are tolerated.
+   The real `.env` files are gitignored; only `.env.example` is tracked.
+   Keys required by the integration test:
+   - **Shared** (identical across all three): `DECPM_KEYCLOAK_URL`
+     (with or without `/auth` — both forms tolerated by `token_url`),
+     `DECPM_KEYCLOAK_REALM`, `DECPM_KEYCLOAK_CLIENT_ID`,
+     `DECPM_KEYCLOAK_USERNAME`, `DECPM_KEYCLOAK_PASSWORD`.
+   - **Per-participant** (`P{N}_*`): `MEMBER_PARTY_ID`, `MEMBER_USER_ID`,
+     `MEMBER_KEYCLOAK_CLIENT_ID/SECRET` (workflow M2M client),
+     `PARTICIPANT_ADMIN_KEYCLOAK_CLIENT_ID/SECRET` (admin M2M client,
+     required by DPM's `POST /auth/grant-rights`).
 
 The bringup performs a Keycloak password-grant smoke check before spending
 time on `cargo build`, so misconfigured credentials fail fast with a
