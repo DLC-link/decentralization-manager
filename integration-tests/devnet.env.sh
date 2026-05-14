@@ -1,8 +1,11 @@
 #!/bin/bash
 # Devnet target's env-and-bring-up. Sourced by run.sh when --target devnet.
 #
-# DPM lifecycle is managed via docker-compose (development/docker-compose.yml).
-# Bare-process spawning via start_nodes is NOT used on this path.
+# DPM lifecycle: bare processes spawned by common.sh's start_nodes (same model
+# as localnet, with Canton endpoints pointing at tunneled-localhost ports
+# instead of localnet's docker-compose ports). Each DPM picks its
+# DECPM_CANTON_* / DECPM_KEYCLOAK_* / DECPM_NOISE_PORT from the child env that
+# start_nodes assembles.
 
 set -eu
 
@@ -10,11 +13,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/common.sh"
 
 # ---------------------------------------------------------------------------
-# Source per-participant .env files. These hold the shared Keycloak URL/realm/
-# client_id, DPM's username + password for password-grant token fetching, and
-# the per-participant P{N}_MEMBER_* credentials for the member-party Canton
-# ledger calls. Sourced first so subsequent validation can rely on the values
-# being present.
+# Source per-participant .env files for the shared Keycloak vars + per-DPM
+# member-party credentials (P{N}_MEMBER_*). The DECPM_CANTON_*_HOST/PORT and
+# DECPM_NOISE_PORT keys are duplicated across .env files with per-participant
+# values; sourcing all three sequentially leaves the last one's values in env,
+# which is fine since we override them per-DPM via P{N}_CANTON_* exports below.
 # ---------------------------------------------------------------------------
 PARTICIPANT_1_ENV="$SCRIPT_DIR/../development/remote/participant-1/.env"
 PARTICIPANT_2_ENV="$SCRIPT_DIR/../development/remote/participant-2/.env"
@@ -28,8 +31,7 @@ done
 unset _penv
 
 # ---------------------------------------------------------------------------
-# Keycloak config validation (now that .env files have been sourced).
-# Calling-shell values take precedence over .env values; missing in BOTH = error.
+# Keycloak config validation.
 # ---------------------------------------------------------------------------
 for _v in DECPM_KEYCLOAK_URL DECPM_KEYCLOAK_REALM DECPM_KEYCLOAK_CLIENT_ID \
           DECPM_KEYCLOAK_USERNAME DECPM_KEYCLOAK_PASSWORD; do
@@ -42,10 +44,8 @@ done
 unset _v
 
 # ---------------------------------------------------------------------------
-# Validate per-participant member-party credentials (defense-in-depth;
-# must be set in development/remote/participant-{1,2,3}/.env before running).
+# Per-participant member-party credentials validation.
 # ---------------------------------------------------------------------------
-
 MEMBER_VARS=(
     P1_MEMBER_PARTY_ID  P1_MEMBER_USER_ID  P1_MEMBER_KEYCLOAK_CLIENT_ID  P1_MEMBER_KEYCLOAK_CLIENT_SECRET
     P2_MEMBER_PARTY_ID  P2_MEMBER_USER_ID  P2_MEMBER_KEYCLOAK_CLIENT_ID  P2_MEMBER_KEYCLOAK_CLIENT_SECRET
@@ -65,15 +65,11 @@ unset MEMBER_VARS MEMBER_MISSING _v
 
 # ---------------------------------------------------------------------------
 # Smoke-check Keycloak reachability via password grant.
-#
-# The Rust test runner manages its own token lifecycle via KeycloakRefresher
-# (reads DECPM_KEYCLOAK_* env vars directly and re-fetches proactively when the
-# cached token is within 30s of expiry). We still perform a token fetch here as
-# a fail-fast check: if Keycloak is unreachable or the credentials are wrong we
-# want to discover that before spending time on `cargo build` / `docker compose`.
-# The token value fetched here is NOT used by the Rust runner on devnet.
+# The Rust test runner manages its own token lifecycle via KeycloakRefresher;
+# this is a fail-fast check that catches a misconfigured Keycloak client BEFORE
+# we spend time on cargo build / DPM spawn. The fetched token is NOT used by
+# the Rust runner.
 # ---------------------------------------------------------------------------
-
 TOKEN_URL="${DECPM_KEYCLOAK_URL%/}/realms/${DECPM_KEYCLOAK_REALM}/protocol/openid-connect/token"
 _SMOKE_TOKEN=$(curl -s -f -X POST "$TOKEN_URL" \
     -d "grant_type=password" \
@@ -85,49 +81,63 @@ if [ -z "$_SMOKE_TOKEN" ] || [ "$_SMOKE_TOKEN" = "null" ]; then
     echo "ERROR: Keycloak password grant failed." >&2
     echo "  TOKEN_URL: $TOKEN_URL" >&2
     echo "  CLIENT_ID: $DECPM_KEYCLOAK_CLIENT_ID" >&2
-    echo "Check that DECPM_KEYCLOAK_USERNAME and DECPM_KEYCLOAK_PASSWORD are correct and the Keycloak server is reachable." >&2
+    echo "Check that DECPM_KEYCLOAK_USERNAME and DECPM_KEYCLOAK_PASSWORD are correct and Keycloak is reachable." >&2
     exit 1
 fi
 unset _SMOKE_TOKEN
-# NOTE: MOCK_TOKEN is intentionally NOT exported on the devnet path.
-# Fixture::from_env() only reads MOCK_TOKEN when DPM_IT_TARGET=localnet;
-# on devnet it uses the DECPM_KEYCLOAK_* vars via KeycloakRefresher.
 
 # ---------------------------------------------------------------------------
-# Target + run-id.
+# Target + run-id + DEV_DIR.
 # ---------------------------------------------------------------------------
-
 export DPM_IT_TARGET=devnet
 export DPM_IT_RUN_ID="dpm-it-$(date -u +%Y%m%d-%H%M%S)-$$"
+DEV_DIR="$(mktemp -d -t dpm-devnet-it-XXXXXX)"
+export DEV_DIR
 
 # ---------------------------------------------------------------------------
 # Per-participant ports.
-# HTTP ports come from docker-compose.yml (8081/8082/8083).
-# Noise ports come from the per-participant .env files:
-#   participant-1: DECPM_NOISE_PORT=9000
-#   participant-2: DECPM_NOISE_PORT=9001
-#   participant-3: DECPM_NOISE_PORT=9002
+# - HTTP: 8081/8082/8083 (DPM's own HTTP API)
+# - Noise: 9000/9001/9002 (per-DPM Noise listener; matches DECPM_NOISE_PORT
+#   values in the per-participant .env files)
+# - Canton ledger:  5001/5011/5021 (tunneled to participant-ibtc-devnet-{1,2,3}
+#   service port 5001 via kubectl port-forward)
+# - Canton admin:   5002/5012/5022 (tunneled the same way to service port 5002)
+# These are exported (not just shell vars) so chaos phases that respawn DPM
+# inherit them.
 # ---------------------------------------------------------------------------
-
-export P1_HTTP=8081
-export P2_HTTP=8082
-export P3_HTTP=8083
-export P1_NOISE=9000
-export P2_NOISE=9001
-export P3_NOISE=9002
-
-# ---------------------------------------------------------------------------
-# Localnet no-ops (run.sh calls these unconditionally for the localnet path).
-# ---------------------------------------------------------------------------
-
-download_localnet() { :; }
-start_localnet()    { :; }
-stop_localnet()     { :; }
+export P1_HTTP=8081  P2_HTTP=8082  P3_HTTP=8083
+export P1_NOISE=9000 P2_NOISE=9001 P3_NOISE=9002
+export P1_CANTON_LEDGER=5001 P1_CANTON_ADMIN=5002
+export P2_CANTON_LEDGER=5011 P2_CANTON_ADMIN=5012
+export P3_CANTON_LEDGER=5021 P3_CANTON_ADMIN=5022
 
 # ---------------------------------------------------------------------------
-# DPM lifecycle via docker-compose.
+# Binary path — same path the localnet builds also use. run.sh's cargo build
+# produces this on both targets.
 # ---------------------------------------------------------------------------
+export BINARY="$SCRIPT_DIR/../target/release-ci/dec-party-manager"
 
+# ---------------------------------------------------------------------------
+# DPM's own Keycloak + Canton config: ensure these are exported so the DPM
+# child processes spawned by start_nodes inherit them. (They were sourced via
+# the .env files above, but `set -a` only auto-exports during the source; we
+# re-export explicitly for clarity.)
+#
+# DECPM_CANTON_NETWORK=devnet drives DPM's Network::Devnet defaults (DSO URL,
+# Keycloak URL fallback). The per-DPM CANTON_LEDGER_*/CANTON_ADMIN_* values
+# are assembled by start_nodes from the P{N}_CANTON_* exports above.
+# ---------------------------------------------------------------------------
+export DECPM_KEYCLOAK_URL DECPM_KEYCLOAK_REALM DECPM_KEYCLOAK_CLIENT_ID
+export DECPM_CANTON_NETWORK=devnet
+
+# require_admin is a no-op when DECPM_ADMIN_ROLE is unset (single-user
+# laptop setup; not running in shared CI yet).
+unset DECPM_ADMIN_ROLE 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
+# Canton tunnel lifecycle (kubectl port-forward against the catalyst-canton
+# namespace in the ieu-devnet EKS cluster).
+# ---------------------------------------------------------------------------
 KUBE_CONTEXT_DEVNET=${KUBE_CONTEXT_DEVNET:-ieu-devnet}
 KUBE_NS_CANTON=${KUBE_NS_CANTON:-catalyst-canton}
 CANTON_TUNNEL_PIDS=()
@@ -146,18 +156,14 @@ _canton_forward_loop() {
 start_canton_tunnels() {
     log_phase "Opening kubectl port-forwards to Canton participants"
 
-    # Sanity-check the kubectl context exists. If it doesn't, the user
-    # probably hasn't logged in to AWS / hasn't set up kubeconfig yet.
     if ! kubectl config get-contexts "$KUBE_CONTEXT_DEVNET" >/dev/null 2>&1; then
         echo "ERROR: kubectl context '$KUBE_CONTEXT_DEVNET' not found." >&2
         echo "Run 'aws eks update-kubeconfig --name devnet-cluster --region us-east-1 --profile <profile>' first." >&2
         exit 1
     fi
 
-    # Fail fast on AWS-SSO/kubectl auth issues before kicking off retry loops
-    # that would silently restart kubectl forever and only surface as a
-    # port-forward-timeout 30s later. A single API call probes whether the
-    # current SSO token can reach the cluster.
+    # Fail fast on AWS-SSO / kubectl auth issues so retry loops don't silently
+    # restart kubectl forever and only surface 30s later as a port timeout.
     local auth_probe
     auth_probe=$(kubectl --context="$KUBE_CONTEXT_DEVNET" -n "$KUBE_NS_CANTON" \
         get svc -o name 2>&1)
@@ -175,13 +181,11 @@ start_canton_tunnels() {
     _canton_forward_loop 3 5021 5022 &
     CANTON_TUNNEL_PIDS+=($!)
 
-    # Wait for all 6 ports to actually accept connections.
     for port in 5001 5002 5011 5012 5021 5022; do
         local deadline=$(( $(date +%s) + 30 ))
         until nc -z localhost "$port" >/dev/null 2>&1; do
             if [ "$(date +%s)" -ge "$deadline" ]; then
                 echo "ERROR: localhost:$port did not open within 30s of starting port-forwards." >&2
-                echo "Check that the kubectl context '$KUBE_CONTEXT_DEVNET' is reachable and svc/participant-ibtc-devnet-* exist in namespace '$KUBE_NS_CANTON'." >&2
                 stop_canton_tunnels
                 exit 1
             fi
@@ -197,38 +201,26 @@ stop_canton_tunnels() {
         for pid in "${CANTON_TUNNEL_PIDS[@]}"; do
             kill -TERM "$pid" 2>/dev/null || true
         done
-        # Also kill the kubectl children spawned by the forward loops
         pkill -P $$ -f "kubectl --context=$KUBE_CONTEXT_DEVNET port-forward" 2>/dev/null || true
         CANTON_TUNNEL_PIDS=()
     fi
 }
 
-start_nodes() {
-    start_canton_tunnels
-    log_phase "Starting DPM containers via docker compose"
-    # NOTE: docker-compose up --build runs `cargo build --release` inside the
-    # container. The local `cargo build --profile release-ci` (in run.sh) also
-    # runs for the test crate. This means the DPM binary is compiled twice on
-    # the first run (once locally for tests, once inside the container). After
-    # the first run the container layer cache keeps subsequent builds fast.
-    (cd "${SCRIPT_DIR}/../development" && docker compose up -d --build)
-    wait_for_server "$P1_HTTP" "participant-1" "$P1_NOISE"
-    wait_for_server "$P2_HTTP" "participant-2" "$P2_NOISE"
-    wait_for_server "$P3_HTTP" "participant-3" "$P3_NOISE"
-}
-
-stop_nodes() {
-    log_phase "Stopping DPM containers"
-    (cd "${SCRIPT_DIR}/../development" && docker compose down) || true
-}
-
-# setup_directories: data is persisted via docker-compose volumes mounted at
-# ./remote/participant-N/data; no temp dirs needed.
-setup_directories() { :; }
-
 # ---------------------------------------------------------------------------
-# Cleanup — called on EXIT by run.sh's trap.
+# Lifecycle hooks invoked by run.sh.
+# - start_localnet / stop_localnet: the no-op slots that run.sh always calls.
+#   We piggyback on them to start/stop the Canton tunnels, so the tunnels are
+#   up *before* start_nodes spawns DPM and torn down on exit.
+# - download_localnet: no-op (no Splice bundle to fetch).
+# - start_nodes, setup_directories, configure_peers: use common.sh's bare-
+#   process versions unchanged. start_nodes propagates the DECPM_KEYCLOAK_*
+#   we've exported above to each DPM child.
+# - cleanup: stop the DPM processes (stop_nodes from common.sh) AND the
+#   tunnels.
 # ---------------------------------------------------------------------------
+download_localnet() { :; }
+start_localnet()    { start_canton_tunnels; }
+stop_localnet()     { stop_canton_tunnels; }
 
 cleanup() {
     stop_nodes 2>/dev/null || true

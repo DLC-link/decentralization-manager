@@ -145,7 +145,7 @@ fi
 log_phase "Building release-ci binary (target=$TARGET)"
 cargo build --profile release-ci ${FEATURES_FLAG[@]+"${FEATURES_FLAG[@]}"}
 
-if [ "$TARGET" = "localnet" ] && [ ! -f "$BINARY" ]; then
+if [ ! -f "$BINARY" ]; then
     echo "ERROR: Binary not found at $BINARY"
     exit 1
 fi
