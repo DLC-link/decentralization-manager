@@ -203,19 +203,51 @@ start_nodes() {
 }
 
 # ============================================================================
+# Bare-process lifecycle: default stop_nodes
+# ============================================================================
+#
+# Sends SIGTERM, waits 2s, then SIGKILL on anything still alive. Mirrors
+# env.sh's localnet definition (which still overrides this) so devnet's
+# bare-process path has a stop_nodes too without sourcing env.sh. Required
+# by configure_peers' restart cycle and devnet.env.sh's cleanup trap.
+
+stop_nodes() {
+    for pid in "${PIDS[@]+"${PIDS[@]}"}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null || true
+        fi
+    done
+    sleep 2
+    for pid in "${PIDS[@]+"${PIDS[@]}"}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+            kill -9 "$pid" 2>/dev/null || true
+        fi
+    done
+    wait 2>/dev/null || true
+    PIDS=()
+}
+
+# ============================================================================
 # Peer configuration
 # ============================================================================
 
 configure_peers() {
     echo "Fetching public keys and participant IDs..."
 
-    P1_KEY=$(curl -s "http://localhost:$P1_HTTP/keys/status" | jq -r '.public_key')
-    P2_KEY=$(curl -s "http://localhost:$P2_HTTP/keys/status" | jq -r '.public_key')
-    P3_KEY=$(curl -s "http://localhost:$P3_HTTP/keys/status" | jq -r '.public_key')
+    # See wait_for_server for the rationale: devnet's real JwtValidator
+    # requires a bearer; localnet's test-mode MockValidator accepts no token.
+    local auth_args=()
+    if [ -n "${DPM_IT_AUTH_TOKEN:-}" ]; then
+        auth_args=(-H "Authorization: Bearer ${DPM_IT_AUTH_TOKEN}")
+    fi
 
-    P1_PARTICIPANT_ID=$(curl -s "http://localhost:$P1_HTTP/node-config" | jq -r '.node.participant_id')
-    P2_PARTICIPANT_ID=$(curl -s "http://localhost:$P2_HTTP/node-config" | jq -r '.node.participant_id')
-    P3_PARTICIPANT_ID=$(curl -s "http://localhost:$P3_HTTP/node-config" | jq -r '.node.participant_id')
+    P1_KEY=$(curl -s "${auth_args[@]}" "http://localhost:$P1_HTTP/keys/status" | jq -r '.public_key')
+    P2_KEY=$(curl -s "${auth_args[@]}" "http://localhost:$P2_HTTP/keys/status" | jq -r '.public_key')
+    P3_KEY=$(curl -s "${auth_args[@]}" "http://localhost:$P3_HTTP/keys/status" | jq -r '.public_key')
+
+    P1_PARTICIPANT_ID=$(curl -s "${auth_args[@]}" "http://localhost:$P1_HTTP/node-config" | jq -r '.node.participant_id')
+    P2_PARTICIPANT_ID=$(curl -s "${auth_args[@]}" "http://localhost:$P2_HTTP/node-config" | jq -r '.node.participant_id')
+    P3_PARTICIPANT_ID=$(curl -s "${auth_args[@]}" "http://localhost:$P3_HTTP/node-config" | jq -r '.node.participant_id')
 
     echo "Participant 1: $P1_PARTICIPANT_ID (key: ${P1_KEY:0:16}...)"
     echo "Participant 2: $P2_PARTICIPANT_ID (key: ${P2_KEY:0:16}...)"
@@ -232,7 +264,7 @@ EOF
     )
 
     for port in $P1_HTTP $P2_HTTP $P3_HTTP; do
-        curl -s -X POST "http://localhost:$port/network-config" \
+        curl -s -X POST "${auth_args[@]}" "http://localhost:$port/network-config" \
             -H "Content-Type: application/json" \
             -d "$peers_json" > /dev/null
     done

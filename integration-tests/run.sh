@@ -171,20 +171,21 @@ export P1_NOISE P2_NOISE P3_NOISE
 export P1_PARTICIPANT_ID P2_PARTICIPANT_ID P3_PARTICIPANT_ID
 export DEV_DIR
 
-# The following exports are localnet-only:
-# - MOCK_TOKEN: the hardcoded test JWT. Devnet uses the KeycloakRefresher
-#   instead (reads DECPM_KEYCLOAK_* directly).
-# - P{1,2,3}_PID and BINARY: enable chaos phases (G1-G9, P1-P2) to kill and
-#   respawn the bare DPM binary. Devnet uses docker-compose; chaos respawn
-#   isn't wired up there.
-# - P{1,2,3}_CANTON_LEDGER and _ADMIN: the per-DPM Canton ports used by the
-#   chaos respawn path. Devnet's DPM containers read their own .env files
-#   (each has DECPM_CANTON_LEDGER_PORT etc.) via docker-compose's env_file.
+# PIDs are populated by start_nodes after the env file is sourced, so they
+# can only be exported here. Chaos phases (G1-G9, P1-P2) read them on both
+# targets to kill and respawn the bare DPM binary.
+export P1_PID="${PIDS[0]}"
+export P2_PID="${PIDS[1]}"
+export P3_PID="${PIDS[2]}"
+
+# The remaining exports are localnet-only:
+# - MOCK_TOKEN: hardcoded test JWT. Devnet's Rust runner uses
+#   KeycloakRefresher (reads DECPM_KEYCLOAK_* directly) instead.
+# - P{1,2,3}_CANTON_LEDGER/ADMIN and BINARY: env.sh declares these without
+#   exporting; the chaos respawn path needs them in child env. devnet.env.sh
+#   already exports its own values, so this block leaves devnet alone.
 if [ "$TARGET" = "localnet" ]; then
     export MOCK_TOKEN
-    export P1_PID="${PIDS[0]}"
-    export P2_PID="${PIDS[1]}"
-    export P3_PID="${PIDS[2]}"
     export P1_CANTON_LEDGER P2_CANTON_LEDGER P3_CANTON_LEDGER
     export P1_CANTON_ADMIN P2_CANTON_ADMIN P3_CANTON_ADMIN
     export BINARY
