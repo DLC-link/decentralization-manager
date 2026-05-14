@@ -220,11 +220,25 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         grant_rights_devnet(&*f, f.p3.http, &party_id, p3a, "participant-3").await?;
                     }
 
+                    // On localnet, p1m (gov-member-p1) doubles as the operator
+                    // party because nothing distinguishes them. On devnet, the
+                    // operator is a real, separate identity (auth0_...) that was
+                    // discovered earlier via /operator-info; the SetupUtility
+                    // Daml contract enforces the operator identity at execute
+                    // time, so using attestor-1 here would fail with a
+                    // "Contract group identifier mismatch" later.
+                    let operator_party = match f.target {
+                        TestTarget::Localnet => p1m.clone(),
+                        TestTarget::Devnet => f
+                            .operator_party
+                            .clone()
+                            .context("operator_party not set on devnet — discover_network_parties must run first")?,
+                    };
                     let req = json!({
                         "decentralized_party_id": party_id,
                         "participant_ids": [p1_uid, p2_uid, p3_uid],
                         "participant_parties": [&p1m, &p2m, &p3m],
-                        "operator_party": &p1m,
+                        "operator_party": &operator_party,
                         "contracts": [{
                             "id": "governance-rules",
                             "name": "GovernanceRules",
