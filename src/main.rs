@@ -3,7 +3,7 @@ mod cli;
 use std::path::PathBuf;
 
 use dec_party_manager::{
-    config::{KeycloakConfig, NodeConfig},
+    config::{Auth0Config, KeycloakConfig, NodeConfig},
     db,
     error::Result,
     utils,
@@ -70,6 +70,9 @@ async fn main() -> Result {
             keycloak_url,
             keycloak_realm,
             keycloak_client_id,
+            auth0_domain,
+            auth0_client_id,
+            auth0_audience,
             timeout_handshake,
             timeout_message,
             timeout_retry_attempts,
@@ -129,6 +132,14 @@ async fn main() -> Result {
                 if let Some(client_id) = keycloak_client_id {
                     kc.client_id = client_id.clone();
                 }
+            }
+
+            if let (Some(domain), Some(client_id)) = (auth0_domain, auth0_client_id) {
+                config.auth0 = Some(Auth0Config {
+                    domain: domain.clone(),
+                    client_id: client_id.clone(),
+                    audience: auth0_audience.clone(),
+                });
             }
             if let Some(v) = timeout_handshake {
                 config.timeouts.handshake_timeout_secs = *v;

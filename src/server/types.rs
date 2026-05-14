@@ -676,6 +676,10 @@ pub struct PartyAuthStatus {
     pub keycloak_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keycloak_realm: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth0_domain: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth0_audience: Option<String>,
     pub status: AuthStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rights: Option<RightsStatus>,
@@ -717,13 +721,17 @@ pub struct KnownMembersResponse {
     pub members: Vec<KnownMember>,
 }
 
-/// Request body for `POST /party-config/discover-member-party`. Same Keycloak
-/// shape as `PartyConfigRequest`, used to mint a one-shot token and look up
-/// the authenticated user's primary party from Canton's UserManagementService.
+/// Request body for `POST /party-config/discover-member-party`. Mirrors the
+/// `PartyConfigRequest` shape: either Keycloak fields or Auth0 fields are
+/// supplied, used to mint a one-shot token and look up the authenticated
+/// user's primary party from Canton's UserManagementService.
 #[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
 pub struct DiscoverMemberPartyRequest {
+    #[serde(default)]
     pub keycloak_url: String,
+    #[serde(default)]
     pub keycloak_realm: String,
+    #[serde(default)]
     pub keycloak_client_id: String,
     #[serde(default)]
     pub keycloak_client_secret: Option<String>,
@@ -731,6 +739,14 @@ pub struct DiscoverMemberPartyRequest {
     pub keycloak_username: Option<String>,
     #[serde(default)]
     pub keycloak_password: Option<String>,
+    #[serde(default)]
+    pub auth0_domain: Option<String>,
+    #[serde(default)]
+    pub auth0_audience: Option<String>,
+    #[serde(default)]
+    pub auth0_client_id: Option<String>,
+    #[serde(default)]
+    pub auth0_client_secret: Option<String>,
 }
 
 /// Response for `POST /party-config/discover-member-party`. `primary_party`
@@ -1478,7 +1494,10 @@ pub struct ContractQueryResponse {
     pub contracts: Vec<ContractWithBlob>,
 }
 
-/// Request to save or update party configuration
+/// Request to save or update party configuration. Operators submit *either*
+/// the Keycloak shape (url+realm+client_id+...) or the Auth0 shape
+/// (auth0_domain+audience+client_id+secret), matching whichever top-level
+/// provider gates the frontend.
 #[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
 pub struct PartyConfigRequest {
     /// The decentralized party ID
@@ -1488,10 +1507,13 @@ pub struct PartyConfigRequest {
     /// Canton/Ledger API user ID
     pub user_id: String,
     /// Keycloak server URL
+    #[serde(default)]
     pub keycloak_url: String,
     /// Keycloak realm name
+    #[serde(default)]
     pub keycloak_realm: String,
     /// OAuth2 client ID
+    #[serde(default)]
     pub keycloak_client_id: String,
     /// Client secret for M2M flow (None = keep existing, "" = clear)
     #[serde(default)]
@@ -1502,6 +1524,19 @@ pub struct PartyConfigRequest {
     /// Password for password flow (None = keep existing, "" = clear)
     #[serde(default)]
     pub keycloak_password: Option<String>,
+    /// Auth0 tenant domain. When set together with the other auth0_*
+    /// fields, supersedes the Keycloak fields.
+    #[serde(default)]
+    pub auth0_domain: Option<String>,
+    /// Auth0 API audience.
+    #[serde(default)]
+    pub auth0_audience: Option<String>,
+    /// Auth0 M2M client ID.
+    #[serde(default)]
+    pub auth0_client_id: Option<String>,
+    /// Auth0 M2M client secret. None = keep existing, "" = clear.
+    #[serde(default)]
+    pub auth0_client_secret: Option<String>,
     /// Package identifiers for deployed Daml contracts
     #[serde(default)]
     pub packages: PackageConfig,
@@ -1530,6 +1565,17 @@ pub struct PartyConfigResponse {
     pub has_username: bool,
     /// Whether a password is configured
     pub has_password: bool,
+    /// Auth0 tenant domain (None when Auth0 not configured)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth0_domain: Option<String>,
+    /// Auth0 API audience
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth0_audience: Option<String>,
+    /// Auth0 M2M client ID
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth0_client_id: Option<String>,
+    /// Whether an Auth0 client secret is configured
+    pub has_auth0_client_secret: bool,
     /// Package identifiers for deployed Daml contracts
     pub packages: PackageConfig,
 }
@@ -1537,7 +1583,7 @@ pub struct PartyConfigResponse {
 /// Frontend authentication configuration response
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct AuthConfigResponse {
-    /// Whether Keycloak auth is required (false in test mode)
+    /// Whether auth is required (false in test mode or when no provider is configured)
     pub auth_required: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keycloak_host: Option<String>,
@@ -1545,6 +1591,12 @@ pub struct AuthConfigResponse {
     pub keycloak_realm: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keycloak_client_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth0_domain: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth0_client_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth0_audience: Option<String>,
 }
 
 /// Generic error response

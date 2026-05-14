@@ -11,7 +11,10 @@ use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use serde::Deserialize;
 
-use crate::{auth::validator::ValidationError, config::KeycloakConfig};
+use crate::{
+    auth::validator::ValidationError,
+    config::{Auth0Config, KeycloakConfig},
+};
 
 /// Keycloak's nested role carrier. Both `JwtValidator::Claims` and
 /// `OidcIntrospectionValidator::IntrospectionResponse` embed this same
@@ -28,6 +31,13 @@ pub(super) struct RealmAccess {
 /// adding a variant and adjusting this function.
 pub(super) fn oidc_issuer_of(cfg: &KeycloakConfig) -> String {
     format!("{}/realms/{}", cfg.url.trim_end_matches('/'), cfg.realm)
+}
+
+/// Canonical OIDC issuer for an Auth0 tenant. Auth0 issues
+/// `https://{domain}/` in the JWT, but `extract_issuer` strips trailing
+/// slashes — match against the slash-less form so the comparison lines up.
+pub(super) fn auth0_issuer_of(cfg: &Auth0Config) -> String {
+    format!("https://{}", cfg.domain.trim_end_matches('/'))
 }
 
 /// Extract the `iss` claim from a JWT without verifying its signature.

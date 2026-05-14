@@ -3,6 +3,9 @@ export interface AuthConfig {
   keycloak_host?: string;
   keycloak_realm?: string;
   keycloak_client_id?: string;
+  auth0_domain?: string;
+  auth0_client_id?: string;
+  auth0_audience?: string;
 }
 
 export interface ParticipantInfo {
@@ -33,12 +36,16 @@ export interface PartyConfigRequest {
   dec_party_id: string;
   member_party_id: string;
   user_id: string;
-  keycloak_url: string;
-  keycloak_realm: string;
-  keycloak_client_id: string;
+  keycloak_url?: string;
+  keycloak_realm?: string;
+  keycloak_client_id?: string;
   keycloak_client_secret?: string;
   keycloak_username?: string;
   keycloak_password?: string;
+  auth0_domain?: string;
+  auth0_audience?: string;
+  auth0_client_id?: string;
+  auth0_client_secret?: string;
 }
 
 export interface PartyConfigResponse {
@@ -53,6 +60,10 @@ export interface PartyConfigResponse {
   has_client_secret: boolean;
   has_username: boolean;
   has_password: boolean;
+  auth0_domain?: string;
+  auth0_audience?: string;
+  auth0_client_id?: string;
+  has_auth0_client_secret: boolean;
 }
 
 export interface VettedPackageInfo {

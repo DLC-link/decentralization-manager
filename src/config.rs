@@ -50,7 +50,7 @@ impl NetworkConfig {
 /// Supports two authentication methods:
 /// 1. Client credentials (M2M): Set `client_id` and `client_secret`
 /// 2. Password flow: Set `client_id`, `username`, and `password`
-#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct KeycloakConfig {
     /// Keycloak server URL (e.g., "https://keycloak.example.com")
     pub url: String,
@@ -67,6 +67,39 @@ pub struct KeycloakConfig {
     /// Password for password flow
     #[serde(default)]
     pub password: Option<String>,
+}
+
+/// Auth0 authentication configuration for frontend website gating.
+///
+/// Mutually exclusive with [`KeycloakConfig`] at the top level — each node
+/// operator picks one or the other via environment variables at deploy time.
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
+pub struct Auth0Config {
+    /// Auth0 tenant domain (e.g., "tenant.us.auth0.com")
+    pub domain: String,
+    /// Auth0 SPA client ID
+    pub client_id: String,
+    /// API audience identifier. Required for `getAccessTokenSilently()` to
+    /// return a backend-validatable JWT rather than a userinfo-scoped token.
+    #[serde(default)]
+    pub audience: Option<String>,
+}
+
+/// Per-party Auth0 M2M credentials. Used to mint outbound access tokens the
+/// backend sends to Canton when acting as the decentralized party.
+///
+/// Sibling of [`KeycloakConfig`] on [`PartyCredentials`]: when present, this
+/// provider is used in place of Keycloak.
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
+pub struct Auth0M2MConfig {
+    /// Auth0 tenant domain (e.g., "tenant.us.auth0.com")
+    pub domain: String,
+    /// Auth0 API audience (the API identifier the access token targets)
+    pub audience: String,
+    /// Auth0 M2M application client ID
+    pub client_id: String,
+    /// Auth0 M2M application client secret
+    pub client_secret: String,
 }
 
 /// Package identifiers for Daml contracts (configurable per party)
@@ -92,8 +125,12 @@ pub struct PartyCredentials {
     pub member_party_id: CantonId,
     /// Canton/Ledger API user ID (must match JWT 'sub' claim, belongs to member_party)
     pub user_id: String,
-    /// Keycloak authentication configuration
+    /// Keycloak authentication configuration. Empty/unused when `auth0` is set.
+    #[serde(default)]
     pub keycloak: KeycloakConfig,
+    /// Auth0 M2M authentication. When `Some`, used in preference to `keycloak`.
+    #[serde(default)]
+    pub auth0: Option<Auth0M2MConfig>,
     /// Package identifiers for deployed Daml contracts
     #[serde(default)]
     pub packages: PackageConfig,
@@ -162,6 +199,9 @@ pub struct NodeConfig {
     pub noise_retry: NoiseRetryConfig,
     /// Top-level Keycloak config for frontend website gating
     pub keycloak: Option<KeycloakConfig>,
+    /// Top-level Auth0 config for frontend website gating (mutually exclusive
+    /// with `keycloak` — operator picks one via env vars at deploy time).
+    pub auth0: Option<Auth0Config>,
     /// Root directory containing data/ subdirectory
     #[serde(skip)]
     root_dir: PathBuf,
@@ -175,6 +215,7 @@ impl Default for NodeConfig {
             timeouts: Timeouts::default(),
             noise_retry: NoiseRetryConfig::default(),
             keycloak: None,
+            auth0: None,
             root_dir: PathBuf::new(),
         }
     }
