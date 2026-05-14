@@ -34,7 +34,7 @@ wait_for_server() {
     fi
 
     echo "Waiting for $name on port $port..."
-    while ! curl -s "${auth_args[@]}" "http://localhost:$port/node-config" > /dev/null 2>&1; do
+    while ! curl -s "${auth_args[@]+"${auth_args[@]}"}" "http://localhost:$port/node-config" > /dev/null 2>&1; do
         attempt=$((attempt + 1))
         if [ $attempt -ge $max_attempts ]; then
             echo "ERROR: $name failed to start after $max_attempts attempts"
@@ -47,7 +47,7 @@ wait_for_server() {
     attempt=0
     while true; do
         local key
-        key=$(curl -s "${auth_args[@]}" "http://localhost:$port/keys/status" | jq -r '.public_key // empty')
+        key=$(curl -s "${auth_args[@]+"${auth_args[@]}"}" "http://localhost:$port/keys/status" | jq -r '.public_key // empty')
         if [ -n "$key" ] && [ "$key" != "null" ]; then
             break
         fi
@@ -241,13 +241,13 @@ configure_peers() {
         auth_args=(-H "Authorization: Bearer ${DPM_IT_AUTH_TOKEN}")
     fi
 
-    P1_KEY=$(curl -s "${auth_args[@]}" "http://localhost:$P1_HTTP/keys/status" | jq -r '.public_key')
-    P2_KEY=$(curl -s "${auth_args[@]}" "http://localhost:$P2_HTTP/keys/status" | jq -r '.public_key')
-    P3_KEY=$(curl -s "${auth_args[@]}" "http://localhost:$P3_HTTP/keys/status" | jq -r '.public_key')
+    P1_KEY=$(curl -s "${auth_args[@]+"${auth_args[@]}"}" "http://localhost:$P1_HTTP/keys/status" | jq -r '.public_key')
+    P2_KEY=$(curl -s "${auth_args[@]+"${auth_args[@]}"}" "http://localhost:$P2_HTTP/keys/status" | jq -r '.public_key')
+    P3_KEY=$(curl -s "${auth_args[@]+"${auth_args[@]}"}" "http://localhost:$P3_HTTP/keys/status" | jq -r '.public_key')
 
-    P1_PARTICIPANT_ID=$(curl -s "${auth_args[@]}" "http://localhost:$P1_HTTP/node-config" | jq -r '.node.participant_id')
-    P2_PARTICIPANT_ID=$(curl -s "${auth_args[@]}" "http://localhost:$P2_HTTP/node-config" | jq -r '.node.participant_id')
-    P3_PARTICIPANT_ID=$(curl -s "${auth_args[@]}" "http://localhost:$P3_HTTP/node-config" | jq -r '.node.participant_id')
+    P1_PARTICIPANT_ID=$(curl -s "${auth_args[@]+"${auth_args[@]}"}" "http://localhost:$P1_HTTP/node-config" | jq -r '.node.participant_id')
+    P2_PARTICIPANT_ID=$(curl -s "${auth_args[@]+"${auth_args[@]}"}" "http://localhost:$P2_HTTP/node-config" | jq -r '.node.participant_id')
+    P3_PARTICIPANT_ID=$(curl -s "${auth_args[@]+"${auth_args[@]}"}" "http://localhost:$P3_HTTP/node-config" | jq -r '.node.participant_id')
 
     echo "Participant 1: $P1_PARTICIPANT_ID (key: ${P1_KEY:0:16}...)"
     echo "Participant 2: $P2_PARTICIPANT_ID (key: ${P2_KEY:0:16}...)"
@@ -264,7 +264,7 @@ EOF
     )
 
     for port in $P1_HTTP $P2_HTTP $P3_HTTP; do
-        curl -s -X POST "${auth_args[@]}" "http://localhost:$port/network-config" \
+        curl -s -X POST "${auth_args[@]+"${auth_args[@]}"}" "http://localhost:$port/network-config" \
             -H "Content-Type: application/json" \
             -d "$peers_json" > /dev/null
     done
