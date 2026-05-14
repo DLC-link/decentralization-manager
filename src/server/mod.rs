@@ -2380,16 +2380,30 @@ async fn list_my_owner_keys(admin_api_url: &str, synchronizer_alias: &str) -> Re
         .await?
         .into_inner();
 
+    let total_keys = keys_response.private_keys_metadata.len();
     let mut my_fingerprints = Vec::new();
+    let mut usage_seen: std::collections::HashSet<i32> = std::collections::HashSet::new();
+    let mut signing_keys_total = 0;
     for key_meta in keys_response.private_keys_metadata {
         if let Some(pub_key_with_name) = &key_meta.public_key_with_name
             && let Some(pub_key) = &pub_key_with_name.public_key
             && let Some(public_key::Key::SigningPublicKey(signing_key)) = &pub_key.key
-            && signing_key.usage.contains(&1)
         {
-            my_fingerprints.push(compute_fingerprint(signing_key));
+            signing_keys_total += 1;
+            usage_seen.extend(signing_key.usage.iter().copied());
+            if signing_key.usage.contains(&1) {
+                my_fingerprints.push(compute_fingerprint(signing_key));
+            }
         }
     }
+    tracing::info!(
+        total_keys,
+        signing_keys = signing_keys_total,
+        namespace_fingerprints = my_fingerprints.len(),
+        sample = my_fingerprints.first().map(|s| s.chars().take(16).collect::<String>()).unwrap_or_default(),
+        usage_values = ?usage_seen,
+        "owner-key-debug: list_my_owner_keys vault filter (usage=1 selects namespace keys)"
+    );
 
     let synchronizer_id = get_synchronizer_id_from_url(admin_api_url, synchronizer_alias).await?;
 
@@ -2437,12 +2451,33 @@ async fn list_my_owner_keys(admin_api_url: &str, synchronizer_alias: &str) -> Re
             Some((ns, p.party))
         })
         .collect();
+    tracing::info!(
+        dns_results = dns_response.results.len(),
+        namespaces_with_party_mapping = namespace_to_party.len(),
+        "owner-key-debug: list_my_owner_keys topology snapshot"
+    );
 
     // Match this node's fingerprints against each party's owners list
     let mut entries = Vec::new();
+    let mut considered = 0usize;
+    let mut owner_matches = 0usize;
     for result in dns_response.results {
         let Some(item) = result.item else { continue };
-        let Some(full_party_id) = namespace_to_party.get(&item.decentralized_namespace) else {
+        considered += 1;
+        let mapped_party = namespace_to_party.get(&item.decentralized_namespace);
+        let owners_short: Vec<String> = item
+            .owners
+            .iter()
+            .map(|o| o.chars().take(16).collect::<String>())
+            .collect();
+        let mut any_match = false;
+        let Some(full_party_id) = mapped_party else {
+            tracing::info!(
+                namespace = %item.decentralized_namespace,
+                owners_count = item.owners.len(),
+                owners_sample = ?owners_short,
+                "owner-key-debug: dns entry has no party-to-participant mapping (skipped)"
+            );
             continue;
         };
         for owner in &item.owners {
@@ -2451,9 +2486,25 @@ async fn list_my_owner_keys(admin_api_url: &str, synchronizer_alias: &str) -> Re
                     "party_id": full_party_id,
                     "owner_key": owner,
                 }));
+                any_match = true;
+                owner_matches += 1;
             }
         }
+        tracing::info!(
+            namespace = %item.decentralized_namespace,
+            party = %full_party_id,
+            owners_count = item.owners.len(),
+            owners_sample = ?owners_short,
+            any_match,
+            "owner-key-debug: dns entry inspected"
+        );
     }
+    tracing::info!(
+        dns_considered = considered,
+        owner_matches,
+        entries_returned = entries.len(),
+        "owner-key-debug: list_my_owner_keys returning"
+    );
 
     Ok(serde_json::to_vec(&entries)?)
 }
