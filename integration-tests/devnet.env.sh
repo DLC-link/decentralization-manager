@@ -97,7 +97,13 @@ unset ADMIN_VARS ADMIN_MISSING _v
 # we spend time on cargo build / DPM spawn. The fetched token is NOT used by
 # the Rust runner.
 # ---------------------------------------------------------------------------
-TOKEN_URL="${DECPM_KEYCLOAK_URL%/}/realms/${DECPM_KEYCLOAK_REALM}/protocol/openid-connect/token"
+# Normalize the base URL: strip a trailing slash, then strip a trailing
+# `/auth` if present. This lets users configure DECPM_KEYCLOAK_URL either as
+# `https://kc.example.com` or `https://kc.example.com/auth` — same shape as
+# src/auth/mod.rs::token_url uses on the DPM side, so the smoke check
+# composes the same endpoint the DPM's runtime auth path will reach.
+_KC_BASE="${DECPM_KEYCLOAK_URL%/}"; _KC_BASE="${_KC_BASE%/auth}"
+TOKEN_URL="${_KC_BASE}/auth/realms/${DECPM_KEYCLOAK_REALM}/protocol/openid-connect/token"
 _SMOKE_TOKEN=$(curl -s -f -X POST "$TOKEN_URL" \
     -d "grant_type=password" \
     -d "client_id=${DECPM_KEYCLOAK_CLIENT_ID}" \

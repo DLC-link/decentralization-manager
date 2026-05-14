@@ -400,6 +400,13 @@ mod tests {
             std::env::set_var("P3_MEMBER_USER_ID", "p3-user");
             std::env::set_var("P3_MEMBER_KEYCLOAK_CLIENT_ID", "p3-client-id");
             std::env::set_var("P3_MEMBER_KEYCLOAK_CLIENT_SECRET", "p3-secret");
+            // Per-participant admin Keycloak creds (required by Fixture::from_env on devnet).
+            std::env::set_var("P1_PARTICIPANT_ADMIN_KEYCLOAK_CLIENT_ID", "p1-admin-client");
+            std::env::set_var("P1_PARTICIPANT_ADMIN_KEYCLOAK_CLIENT_SECRET", "p1-admin-secret");
+            std::env::set_var("P2_PARTICIPANT_ADMIN_KEYCLOAK_CLIENT_ID", "p2-admin-client");
+            std::env::set_var("P2_PARTICIPANT_ADMIN_KEYCLOAK_CLIENT_SECRET", "p2-admin-secret");
+            std::env::set_var("P3_PARTICIPANT_ADMIN_KEYCLOAK_CLIENT_ID", "p3-admin-client");
+            std::env::set_var("P3_PARTICIPANT_ADMIN_KEYCLOAK_CLIENT_SECRET", "p3-admin-secret");
         }
     }
 
@@ -436,6 +443,12 @@ mod tests {
                 "P3_MEMBER_USER_ID",
                 "P3_MEMBER_KEYCLOAK_CLIENT_ID",
                 "P3_MEMBER_KEYCLOAK_CLIENT_SECRET",
+                "P1_PARTICIPANT_ADMIN_KEYCLOAK_CLIENT_ID",
+                "P1_PARTICIPANT_ADMIN_KEYCLOAK_CLIENT_SECRET",
+                "P2_PARTICIPANT_ADMIN_KEYCLOAK_CLIENT_ID",
+                "P2_PARTICIPANT_ADMIN_KEYCLOAK_CLIENT_SECRET",
+                "P3_PARTICIPANT_ADMIN_KEYCLOAK_CLIENT_ID",
+                "P3_PARTICIPANT_ADMIN_KEYCLOAK_CLIENT_SECRET",
             ] {
                 std::env::remove_var(k);
             }

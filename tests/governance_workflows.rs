@@ -103,7 +103,7 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     common::diagnostics::snapshot_owner_keys(&f, "generic_vote").await;
     phases::notification_feed::run(&mut f).await?;
     common::diagnostics::snapshot_owner_keys(&f, "notification_feed").await;
-        common::diagnostics::snapshot_owner_keys(&f, "before_owner_key_resilience").await;
+    common::diagnostics::snapshot_owner_keys(&f, "before_owner_key_resilience").await;
     phases::owner_key_resilience::run(&mut f).await?;
     phases::kick::run(&mut f).await?;
 

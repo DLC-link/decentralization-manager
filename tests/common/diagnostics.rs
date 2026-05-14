@@ -1,16 +1,21 @@
-//! Diagnostic harness for the P3-owner_key-on-devnet issue.
+//! Diagnostic harness for the owner_key resolution issue tracked in #149.
 //!
-//! Enabled by setting the env var `DPM_IT_OWNER_KEY_SNAPSHOTS=1` (devnet.env.sh
-//! does this automatically; localnet leaves it unset and the harness is a
-//! no-op). Each call records:
+//! Enabled by setting the env var `DPM_IT_OWNER_KEY_SNAPSHOTS=1`. Both
+//! `devnet.env.sh` and `env.sh` (localnet) export this so the same run
+//! produces directly-comparable output on both targets — that side-by-side
+//! diff was how the #149 diagnosis was pinned down. Localnet runs do emit a
+//! file with this flag set; remove the export from `env.sh` if you'd prefer
+//! localnet runs stay quiet.
+//!
+//! Each call records:
 //!
 //! - A one-line `tracing::info!` summary keyed on the calling phase, showing
-//!   whether each of P1/P2/P3 has resolved P3's owner_key in its
+//!   whether each of P1/P2/P3 has resolved every peer's owner_key in its
 //!   `/decentralized-parties` view of the current dec party.
-//! - A JSONL entry appended to `$DEV_DIR/owner-key-snapshots.jsonl` with the
-//!   full participant list as observed from each node. Letting us answer:
-//!   was P3's owner_key never set, or set-then-wiped on a refresh? And did
-//!   resolution succeed on some nodes but not others?
+//! - A JSONL entry appended to
+//!   `/tmp/owner-key-snapshots-{target}-{run_id}.jsonl` (not `$DEV_DIR` —
+//!   `env.sh`'s cleanup() rm -rf's that on localnet at end of run, which
+//!   would wipe the file before inspection).
 //!
 //! Best-effort: errors are logged at WARN and swallowed so this never fails
 //! a test. The caller does `let _ = snapshot_owner_keys(...).await;`.

@@ -287,29 +287,13 @@ pub async fn resolve_owner_keys_from_peers(
             }
         };
 
-        let entries_count = entries.len();
-        let known_party_ids_snippet: Vec<String> = known_party_ids
-            .iter()
-            .take(3)
-            .map(|s| s.chars().take(24).collect())
-            .collect();
-        let returned_party_ids: Vec<String> = entries
-            .iter()
-            .filter_map(|e| e["party_id"].as_str().map(|s| s.chars().take(24).collect()))
-            .collect();
-        tracing::info!(
-            from_peer = %peer_uid,
-            entries_returned = entries_count,
-            returned_party_id_samples = ?returned_party_ids,
-            known_party_id_samples = ?known_party_ids_snippet,
-            known_count = known_party_ids.len(),
-            "owner-key-debug: resolve_owner_keys_from_peers got payload"
+        tracing::debug!(
+            "Received {} owner key entries from {peer_uid}",
+            entries.len()
         );
 
         // Update DB with the owner keys
         let peer_uid = peer.participant_id.to_string();
-        let mut matched_known = 0usize;
-        let mut updated_ok = 0usize;
         if let Ok(mut tx) = db.begin_transaction().await {
             for entry in &entries {
                 let Some(party_id) = entry["party_id"].as_str() else {
@@ -322,43 +306,23 @@ pub async fn resolve_owner_keys_from_peers(
                 if !known_party_ids.contains(party_id) {
                     continue;
                 }
-                matched_known += 1;
                 let Ok(party_id_canton) = CantonId::parse(party_id) else {
-                    tracing::info!(
-                        from_peer = %peer_uid,
-                        party_id,
-                        "owner-key-debug: bad party_id, skipping"
+                    tracing::debug!(
+                        "Skipping owner-key update from {peer_uid}: bad party_id {party_id}"
                     );
                     continue;
                 };
-                match tx
+                if let Err(e) = tx
                     .update_participant_owner_key(&party_id_canton, &peer_uid, owner_key)
                     .await
                 {
-                    Ok(_) => updated_ok += 1,
-                    Err(e) => tracing::info!(
-                        from_peer = %peer_uid,
-                        %party_id,
-                        error = %e,
-                        "owner-key-debug: update_participant_owner_key failed"
-                    ),
+                    tracing::debug!("Failed to update owner key for {peer_uid}: {e}");
                 }
             }
             if let Err(e) = Commitable::commit(tx).await {
-                tracing::info!(
-                    from_peer = %peer_uid,
-                    error = %e,
-                    "owner-key-debug: commit failed"
-                );
+                tracing::debug!("Failed to commit owner key updates: {e}");
             }
         }
-        tracing::info!(
-            from_peer = %peer_uid,
-            entries_returned = entries_count,
-            matched_known,
-            updated_ok,
-            "owner-key-debug: resolve_owner_keys_from_peers processed peer"
-        );
     }
 }
 
