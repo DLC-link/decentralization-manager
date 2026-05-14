@@ -79,8 +79,15 @@ async fn inner(f: &Fixture, phase: &str) -> Result<()> {
         "observations": observations,
     });
 
-    let mut path = f.dev_dir.clone();
-    path.push("owner-key-snapshots.jsonl");
+    // Write to /tmp (not DEV_DIR) because env.sh's cleanup() rm -rf's the
+    // localnet DEV_DIR at end-of-run, wiping the file before we can inspect.
+    // The path encodes target+run_id so concurrent localnet/devnet runs don't
+    // clobber each other.
+    let target = std::env::var("DPM_IT_TARGET").unwrap_or_else(|_| "localnet".into());
+    let path = std::path::PathBuf::from(format!(
+        "/tmp/owner-key-snapshots-{target}-{run_id}.jsonl",
+        run_id = f.run_id
+    ));
     let mut file = tokio::fs::OpenOptions::new()
         .create(true)
         .append(true)
