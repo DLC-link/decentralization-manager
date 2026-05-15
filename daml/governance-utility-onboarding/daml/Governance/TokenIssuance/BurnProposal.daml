@@ -25,6 +25,7 @@ import Governance.Action
 template BurnProposal
   with
     governanceParty : Party
+    governanceId : Text
     proposer : Party
     allocationFactoryCid : ContractId AllocationFactory
     instrumentId : InstrumentId
@@ -45,6 +46,7 @@ template BurnProposal
     interface instance GovernableAction for BurnProposal where
       view = GovernableActionView with
         governanceParty
+        governanceId
         proposer
         actionLabel = "Burn"
         description

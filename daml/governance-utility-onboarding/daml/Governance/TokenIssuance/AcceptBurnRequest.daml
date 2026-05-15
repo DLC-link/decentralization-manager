@@ -23,6 +23,7 @@ import Governance.Action
 template AcceptBurnRequest
   with
     governanceParty : Party
+    governanceId : Text
     proposer : Party
     burnRequestCid : ContractId BurnRequest
     instrumentConfigurationCid : ContractId InstrumentConfiguration
@@ -35,6 +36,7 @@ template AcceptBurnRequest
     interface instance GovernableAction for AcceptBurnRequest where
       view = GovernableActionView with
         governanceParty
+        governanceId
         proposer
         actionLabel = "AcceptBurnRequest"
         description

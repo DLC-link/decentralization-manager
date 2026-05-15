@@ -213,6 +213,7 @@ testRemoveAdditionalProposer = script do
   -- Start with `outsider` already in additionalProposers.
   rulesCid <- submit parties.governanceParty $ createCmd GovernanceRules with
     governanceParty = parties.governanceParty
+    governanceId = testGovernanceId
     members = getMembers parties
     threshold = 2
     actionConfirmationTimeout = minutes 30
@@ -241,6 +242,7 @@ testAdditionalProposerSeedsSelfAction = script do
 
   rulesCid <- submit parties.governanceParty $ createCmd GovernanceRules with
     governanceParty = parties.governanceParty
+    governanceId = testGovernanceId
     members = getMembers parties
     threshold = 2
     actionConfirmationTimeout = minutes 30
@@ -272,6 +274,7 @@ testAdditionalProposerAloneCannotExecute = script do
 
   rulesCid <- submit parties.governanceParty $ createCmd GovernanceRules with
     governanceParty = parties.governanceParty
+    governanceId = testGovernanceId
     members = getMembers parties
     threshold = 2
     actionConfirmationTimeout = minutes 30
@@ -298,6 +301,7 @@ testStrangerCannotConfirmSelfAction = script do
 
   rulesCid <- submit parties.governanceParty $ createCmd GovernanceRules with
     governanceParty = parties.governanceParty
+    governanceId = testGovernanceId
     members = getMembers parties
     threshold = 2
     actionConfirmationTimeout = minutes 30

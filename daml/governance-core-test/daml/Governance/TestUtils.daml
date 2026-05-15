@@ -39,6 +39,12 @@ allocateTestParties = do
 getMembers : TestParties -> Set Party
 getMembers parties = Set.fromList [parties.member1, parties.member2, parties.member3]
 
+-- | Standard test governance instance identifier. Tests that need to model
+-- two coexisting rules contracts (e.g., disambiguation tests) construct
+-- their own distinct strings instead of reusing this one.
+testGovernanceId : Text
+testGovernanceId = "test-governance"
+
 -- | Build the submission context for a member acting with readAs on governance party.
 -- Simulates the Canton topology where members host the governance party.
 memberContext member gp = actAs member <> readAs gp
@@ -49,6 +55,7 @@ createTestGovernance : TestParties -> Script (ContractId GovernanceRules)
 createTestGovernance parties =
   submit parties.governanceParty $ createCmd GovernanceRules with
     governanceParty = parties.governanceParty
+    governanceId = testGovernanceId
     members = getMembers parties
     threshold = 2
     actionConfirmationTimeout = minutes 30

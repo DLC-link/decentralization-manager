@@ -46,6 +46,10 @@ allocateCredentialTestParties = do
 getMembers : CredentialTestParties -> Set Party
 getMembers parties = Set.fromList [parties.member1, parties.member2, parties.member3]
 
+-- | Standard test governance instance identifier.
+testGovernanceId : Text
+testGovernanceId = "test-credential-governance"
+
 -- | Build submission context for a member with readAs on governance party.
 memberContext : Party -> Party -> SubmitOptions
 memberContext member gp = actAs member <> readAs gp
@@ -55,6 +59,7 @@ createTestGovernance : CredentialTestParties -> Script (ContractId GovernanceRul
 createTestGovernance parties =
   submit parties.governanceParty $ createCmd GovernanceRules with
     governanceParty = parties.governanceParty
+    governanceId = testGovernanceId
     members = getMembers parties
     threshold = 2
     actionConfirmationTimeout = minutes 30

@@ -12,6 +12,7 @@ import Governance.Action
 template CreateUserServiceRequest
   with
     governanceParty : Party
+    governanceId : Text
     proposer : Party
     operator : Party
     user : Party
@@ -22,6 +23,7 @@ template CreateUserServiceRequest
     interface instance GovernableAction for CreateUserServiceRequest where
       view = GovernableActionView with
         governanceParty
+        governanceId
         proposer
         actionLabel = "CreateUserServiceRequest"
         description = "Create a UserServiceRequest for onboarding."

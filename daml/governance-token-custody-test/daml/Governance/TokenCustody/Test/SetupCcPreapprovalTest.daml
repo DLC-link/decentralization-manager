@@ -43,6 +43,7 @@ when_full_flow_with_dso : SetupCcFixture -> Script [TransferPreapprovalProposal]
 when_full_flow_with_dso f = do
   proposalCid <- submit f.parties.member1 $ createCmd SetupCcPreapprovalProposal with
     governanceParty = f.parties.governanceParty
+    governanceId = testGovernanceId
     proposer = f.parties.member1
     provider = f.parties.outsider
     expectedDso = Some f.parties.dso
@@ -59,6 +60,7 @@ when_non_member_confirmation_fails : SetupCcFixture -> Script ()
 when_non_member_confirmation_fails f = do
   proposalCid <- submit f.parties.member1 $ createCmd SetupCcPreapprovalProposal with
     governanceParty = f.parties.governanceParty
+    governanceId = testGovernanceId
     proposer = f.parties.member1
     provider = f.parties.outsider
     expectedDso = None
@@ -74,6 +76,7 @@ when_full_flow_without_dso : SetupCcFixture -> Script [TransferPreapprovalPropos
 when_full_flow_without_dso f = do
   proposalCid <- submit f.parties.member1 $ createCmd SetupCcPreapprovalProposal with
     governanceParty = f.parties.governanceParty
+    governanceId = testGovernanceId
     proposer = f.parties.member1
     provider = f.parties.outsider
     expectedDso = None

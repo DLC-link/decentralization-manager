@@ -38,6 +38,8 @@ template TransferProposal
   with
     governanceParty : Party
       -- ^ The governance party whose authority is required.
+    governanceId : Text
+      -- ^ Stable identifier of the targeting GovernanceRules instance.
     proposer : Party
       -- ^ The member proposing this transfer.
     transferFactoryCid : ContractId TransferFactory
@@ -58,6 +60,7 @@ template TransferProposal
     interface instance GovernableAction for TransferProposal where
       view = GovernableActionView with
         governanceParty
+        governanceId
         proposer
         actionLabel = "Transfer"
         description = "Transfer tokens from governance party"

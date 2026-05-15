@@ -14,6 +14,11 @@ template GovernanceConfirmation
   with
     governanceParty : Party
       -- ^ The governance party this confirmation belongs to.
+    governanceId : Text
+      -- ^ Stable identifier of the specific GovernanceRules instance this
+      -- confirmation was created against. Checked at execute time so
+      -- confirmations gathered for one rules instance cannot be replayed
+      -- against a parallel instance with different members / threshold.
     confirmer : Party
       -- ^ The governance member who created this confirmation.
     actionProposalCid : ContractId GovernableAction

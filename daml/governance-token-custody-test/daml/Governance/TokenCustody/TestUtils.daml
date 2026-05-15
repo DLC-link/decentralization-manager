@@ -51,6 +51,10 @@ allocateTokenTestParties = do
 getMembers : TokenTestParties -> Set Party
 getMembers parties = Set.fromList [parties.member1, parties.member2, parties.member3]
 
+-- | Standard test governance instance identifier.
+testGovernanceId : Text
+testGovernanceId = "test-token-custody-governance"
+
 -- | Build submission context for a member with readAs on governance party.
 memberContext : Party -> Party -> SubmitOptions
 memberContext member gp = actAs member <> readAs gp
@@ -60,6 +64,7 @@ createTestGovernance : TokenTestParties -> Script (ContractId GovernanceRules)
 createTestGovernance parties =
   submit parties.governanceParty $ createCmd GovernanceRules with
     governanceParty = parties.governanceParty
+    governanceId = testGovernanceId
     members = getMembers parties
     threshold = 2
     actionConfirmationTimeout = minutes 30

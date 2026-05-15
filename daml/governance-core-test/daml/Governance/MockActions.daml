@@ -23,6 +23,7 @@ template MockActionResult
 template MockProposal
   with
     governanceParty : Party
+    governanceId : Text
     proposer : Party
     label : Text
     payload : Text
@@ -33,6 +34,7 @@ template MockProposal
     interface instance GovernableAction for MockProposal where
       view = GovernableActionView with
         governanceParty
+        governanceId
         proposer
         actionLabel = label
         description = payload
@@ -49,6 +51,7 @@ template MockProposal
 template MockFailingProposal
   with
     governanceParty : Party
+    governanceId : Text
     proposer : Party
   where
     signatory proposer
@@ -57,6 +60,7 @@ template MockFailingProposal
     interface instance GovernableAction for MockFailingProposal where
       view = GovernableActionView with
         governanceParty
+        governanceId
         proposer
         actionLabel = "MockFailing"
         description = "Mock action that always fails"
@@ -84,6 +88,7 @@ template MockProtectedResource
 template MockAuthorityProposal
   with
     governanceParty : Party
+    governanceId : Text
     proposer : Party
     resourceCid : ContractId MockProtectedResource
     newValue : Text
@@ -94,6 +99,7 @@ template MockAuthorityProposal
     interface instance GovernableAction for MockAuthorityProposal where
       view = GovernableActionView with
         governanceParty
+        governanceId
         proposer
         actionLabel = "MockAuthorityTest"
         description = "Mock authority flow test"

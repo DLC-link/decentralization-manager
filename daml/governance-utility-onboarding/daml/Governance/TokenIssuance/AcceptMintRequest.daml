@@ -23,6 +23,7 @@ import Governance.Action
 template AcceptMintRequest
   with
     governanceParty : Party
+    governanceId : Text
     proposer : Party
     mintRequestCid : ContractId MintRequest
     instrumentConfigurationCid : ContractId InstrumentConfiguration
@@ -35,6 +36,7 @@ template AcceptMintRequest
     interface instance GovernableAction for AcceptMintRequest where
       view = GovernableActionView with
         governanceParty
+        governanceId
         proposer
         actionLabel = "AcceptMintRequest"
         description

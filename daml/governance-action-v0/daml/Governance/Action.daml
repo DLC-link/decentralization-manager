@@ -11,6 +11,12 @@ data GovernableActionView = GovernableActionView
   with
     governanceParty : Party
       -- ^ The governance party whose authority is required to execute this action.
+    governanceId : Text
+      -- ^ Stable identifier of the specific GovernanceRules instance this
+      -- proposal targets. Required for strict matching at confirmation /
+      -- execution time so a proposal authored against one rules instance
+      -- cannot be processed by a parallel rules instance that happens to
+      -- share the same `governanceParty`.
     proposer : Party
       -- ^ The party that proposed this action. Used by GovernanceRules to enforce
       -- the on-chain proposer authorization rule (must be a member or an

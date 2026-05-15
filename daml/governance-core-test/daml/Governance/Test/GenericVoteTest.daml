@@ -54,6 +54,7 @@ when_vote_proposed_confirmed_executed : GenericVoteFixture -> Script VoteResult
 when_vote_proposed_confirmed_executed f = do
   proposalCid <- submit f.parties.member1 $ createCmd GenericVoteProposal with
     governanceParty = f.parties.governanceParty
+    governanceId = testGovernanceId
     proposer = f.parties.member1
     description = "We should switch to dark theme for our website"
 
@@ -70,6 +71,7 @@ when_all_members_confirm_and_execute : GenericVoteFixture -> Script VoteResult
 when_all_members_confirm_and_execute f = do
   proposalCid <- submit f.parties.member2 $ createCmd GenericVoteProposal with
     governanceParty = f.parties.governanceParty
+    governanceId = testGovernanceId
     proposer = f.parties.member2
     description = "Allocate budget for new infrastructure"
 
@@ -86,11 +88,13 @@ when_two_votes_proposed_and_executed : GenericVoteFixture -> Script MultiVoteRes
 when_two_votes_proposed_and_executed f = do
   proposalA <- submit f.parties.member1 $ createCmd GenericVoteProposal with
     governanceParty = f.parties.governanceParty
+    governanceId = testGovernanceId
     proposer = f.parties.member1
     description = "Proposal A: expand to new market"
 
   proposalB <- submit f.parties.member2 $ createCmd GenericVoteProposal with
     governanceParty = f.parties.governanceParty
+    governanceId = testGovernanceId
     proposer = f.parties.member2
     description = "Proposal B: hire more developers"
 

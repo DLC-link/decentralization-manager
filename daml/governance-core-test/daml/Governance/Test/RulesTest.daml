@@ -30,6 +30,7 @@ testRejectEmptyMembers = script do
 
   submitMustFail parties.governanceParty $ createCmd GovernanceRules with
     governanceParty = parties.governanceParty
+    governanceId = testGovernanceId
     members = Set.empty
     threshold = 2
     actionConfirmationTimeout = minutes 30
@@ -41,6 +42,7 @@ testCustomConfiguration = script do
 
   _rulesCid <- submit parties.governanceParty $ createCmd GovernanceRules with
     governanceParty = parties.governanceParty
+    governanceId = testGovernanceId
     members = getMembers parties
     threshold = 3
     actionConfirmationTimeout = minutes 60

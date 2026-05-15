@@ -24,6 +24,7 @@ import Governance.Action
 template MintProposal
   with
     governanceParty : Party
+    governanceId : Text
     proposer : Party
     allocationFactoryCid : ContractId AllocationFactory
     instrumentId : InstrumentId
@@ -44,6 +45,7 @@ template MintProposal
     interface instance GovernableAction for MintProposal where
       view = GovernableActionView with
         governanceParty
+        governanceId
         proposer
         actionLabel = "Mint"
         description

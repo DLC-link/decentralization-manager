@@ -58,6 +58,7 @@ createOfferProposal parties result holdingCids amount = do
   now <- getTime
   submit parties.member1 $ createCmd TransferProposal with
     governanceParty = parties.governanceParty
+    governanceId = testGovernanceId
     proposer = parties.member1
     transferFactoryCid = coerceContractId result.allocationFactoryCid
     expectedAdmin = parties.registrar
@@ -86,6 +87,7 @@ when_zero_amount_proposal_creation_fails f = do
   now <- getTime
   submitMustFail f.parties.member1 $ createCmd TransferProposal with
     governanceParty = f.parties.governanceParty
+    governanceId = testGovernanceId
     proposer = f.parties.member1
     transferFactoryCid = coerceContractId f.result.allocationFactoryCid
     expectedAdmin = f.parties.registrar

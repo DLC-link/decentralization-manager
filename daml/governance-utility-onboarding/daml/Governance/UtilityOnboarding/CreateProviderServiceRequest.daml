@@ -12,6 +12,7 @@ import Governance.Action
 template CreateProviderServiceRequest
   with
     governanceParty : Party
+    governanceId : Text
     proposer : Party
     operator : Party
     provider : Party
@@ -22,6 +23,7 @@ template CreateProviderServiceRequest
     interface instance GovernableAction for CreateProviderServiceRequest where
       view = GovernableActionView with
         governanceParty
+        governanceId
         proposer
         actionLabel = "CreateProviderServiceRequest"
         description = "Create a ProviderServiceRequest for onboarding."

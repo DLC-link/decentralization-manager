@@ -80,6 +80,7 @@ when_zero_amount_proposal_creation_fails f = do
   now <- getTime
   submitMustFail f.parties.member1 $ createCmd TransferProposal with
     governanceParty = f.parties.governanceParty
+    governanceId = testGovernanceId
     proposer = f.parties.member1
     transferFactoryCid = coerceContractId preapprovalCid
     expectedAdmin = f.parties.registrar
@@ -94,6 +95,7 @@ when_insufficient_confirmations_fails f = do
   now <- getTime
   proposalCid <- submit f.parties.member1 $ createCmd TransferProposal with
     governanceParty = f.parties.governanceParty
+    governanceId = testGovernanceId
     proposer = f.parties.member1
     transferFactoryCid = coerceContractId preapprovalCid
     expectedAdmin = f.parties.registrar
@@ -116,6 +118,7 @@ when_non_member_confirmation_fails f = do
   now <- getTime
   proposalCid <- submit f.parties.member1 $ createCmd TransferProposal with
     governanceParty = f.parties.governanceParty
+    governanceId = testGovernanceId
     proposer = f.parties.member1
     transferFactoryCid = coerceContractId preapprovalCid
     expectedAdmin = f.parties.registrar
@@ -137,6 +140,7 @@ when_tokens_sent_via_governance f = do
   now <- getTime
   proposalCid <- submit f.parties.member1 $ createCmd TransferProposal with
     governanceParty = f.parties.governanceParty
+    governanceId = testGovernanceId
     proposer = f.parties.member1
     transferFactoryCid = coerceContractId preapprovalCid
     expectedAdmin = f.parties.registrar

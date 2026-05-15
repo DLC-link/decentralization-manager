@@ -46,6 +46,9 @@ allocateOnboardingTestParties = do
 getMembers : OnboardingTestParties -> Set Party
 getMembers parties = Set.fromList [parties.member1, parties.member2, parties.member3]
 
+testGovernanceId : Text
+testGovernanceId = "test-onboarding-governance"
+
 memberContext : Party -> Party -> SubmitOptions
 memberContext member gp = actAs member <> readAs gp
 
@@ -53,6 +56,7 @@ createTestGovernance : OnboardingTestParties -> Script (ContractId GovernanceRul
 createTestGovernance parties =
   submit parties.governanceParty $ createCmd GovernanceRules with
     governanceParty = parties.governanceParty
+    governanceId = testGovernanceId
     members = getMembers parties
     threshold = 2
     actionConfirmationTimeout = minutes 30
@@ -117,6 +121,7 @@ setupUtilityForTest parties rulesCid = do
   providerCid <- initProviderService parties
   proposalCid <- submit parties.member1 $ createCmd SetupUtility with
     governanceParty = parties.governanceParty
+    governanceId = testGovernanceId
     proposer = parties.member1
     providerServiceCid = providerCid
     operator = parties.operator

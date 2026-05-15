@@ -17,6 +17,8 @@ template GenericVoteProposal
   with
     governanceParty : Party
       -- ^ The governance party this vote belongs to.
+    governanceId : Text
+      -- ^ Stable identifier of the targeting GovernanceRules instance.
     proposer : Party
       -- ^ The member who proposed this vote.
     description : Text
@@ -28,6 +30,7 @@ template GenericVoteProposal
     interface instance GovernableAction for GenericVoteProposal where
       view = GovernableActionView with
         governanceParty
+        governanceId
         proposer
         actionLabel = "GenericVote"
         description

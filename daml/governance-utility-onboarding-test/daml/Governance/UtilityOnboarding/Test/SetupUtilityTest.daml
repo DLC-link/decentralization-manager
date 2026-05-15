@@ -35,6 +35,7 @@ when_setup_executed f = do
   providerCid <- initProviderService f.parties
   proposalCid <- submit f.parties.member1 $ createCmd SetupUtility with
     governanceParty = f.parties.governanceParty
+    governanceId = testGovernanceId
     proposer = f.parties.member1
     providerServiceCid = providerCid
     operator = f.parties.operator
@@ -69,6 +70,7 @@ when_setup_without_optional_steps f = do
   providerCid <- initProviderService f.parties
   proposalCid <- submit f.parties.member1 $ createCmd SetupUtility with
     governanceParty = f.parties.governanceParty
+    governanceId = testGovernanceId
     proposer = f.parties.member1
     providerServiceCid = providerCid
     operator = f.parties.operator
@@ -101,6 +103,7 @@ when_non_member_confirms f = do
   providerCid <- initProviderService f.parties
   proposalCid <- submit f.parties.member1 $ createCmd SetupUtility with
     governanceParty = f.parties.governanceParty
+    governanceId = testGovernanceId
     proposer = f.parties.member1
     providerServiceCid = providerCid
     operator = f.parties.operator

@@ -21,6 +21,8 @@ template AcceptTransferProposal
   with
     governanceParty : Party
       -- ^ The governance party whose authority is required.
+    governanceId : Text
+      -- ^ Stable identifier of the targeting GovernanceRules instance.
     proposer : Party
       -- ^ The member proposing to accept this transfer.
     transferInstructionCid : ContractId TransferInstruction
@@ -34,6 +36,7 @@ template AcceptTransferProposal
     interface instance GovernableAction for AcceptTransferProposal where
       view = GovernableActionView with
         governanceParty
+        governanceId
         proposer
         actionLabel = "AcceptTransfer"
         description = "Accept incoming token transfer"

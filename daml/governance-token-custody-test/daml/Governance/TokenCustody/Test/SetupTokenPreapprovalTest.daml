@@ -65,6 +65,7 @@ when_full_flow_executed : PreapprovalFixture -> Script ()
 when_full_flow_executed f = do
   proposalCid <- submit f.parties.member1 $ createCmd SetupTokenPreapprovalProposal with
     governanceParty = f.parties.governanceParty
+    governanceId = testGovernanceId
     proposer = f.parties.member1
     operator = f.parties.outsider
     instrumentAdmin = f.parties.registrar
@@ -78,6 +79,7 @@ when_non_member_confirmation_fails : PreapprovalFixture -> Script ()
 when_non_member_confirmation_fails f = do
   proposalCid <- submit f.parties.member1 $ createCmd SetupTokenPreapprovalProposal with
     governanceParty = f.parties.governanceParty
+    governanceId = testGovernanceId
     proposer = f.parties.member1
     operator = f.parties.outsider
     instrumentAdmin = f.parties.registrar
@@ -92,6 +94,7 @@ when_all_instruments_flow_executed : PreapprovalFixture -> Script ()
 when_all_instruments_flow_executed f = do
   proposalCid <- submit f.parties.member1 $ createCmd SetupTokenPreapprovalProposal with
     governanceParty = f.parties.governanceParty
+    governanceId = testGovernanceId
     proposer = f.parties.member1
     operator = f.parties.outsider
     instrumentAdmin = f.parties.registrar
@@ -106,6 +109,7 @@ when_e2e_tokens_received f = do
   let instrument = testInstrumentId f.parties.registrar
   proposalCid <- submit f.parties.member1 $ createCmd SetupTokenPreapprovalProposal with
     governanceParty = f.parties.governanceParty
+    governanceId = testGovernanceId
     proposer = f.parties.member1
     operator = f.result.operator
     instrumentAdmin = f.parties.registrar
