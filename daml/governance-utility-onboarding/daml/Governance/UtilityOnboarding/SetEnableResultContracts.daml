@@ -13,6 +13,7 @@ import Governance.Action
 template SetEnableResultContracts
   with
     governanceParty : Party
+    governanceId : Text
     proposer : Party
     registrarServiceCid : ContractId RegistrarService
     enableResultContracts : Optional Bool
@@ -23,6 +24,7 @@ template SetEnableResultContracts
     interface instance GovernableAction for SetEnableResultContracts where
       view = GovernableActionView with
         governanceParty
+        governanceId
         proposer
         actionLabel = "SetEnableResultContracts"
         description = "Toggle result-contract emission on RegistrarService."

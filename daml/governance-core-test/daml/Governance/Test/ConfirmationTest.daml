@@ -21,6 +21,7 @@ testMemberCanConfirm = script do
 
   proposalCid <- submit parties.member1 $ createCmd MockProposal with
     governanceParty = parties.governanceParty
+    governanceId = testGovernanceId
     proposer = parties.member1
     label = "TestAction"
     payload = "test"
@@ -43,6 +44,7 @@ testNonMemberCannotConfirm = script do
 
   proposalCid <- submit parties.member1 $ createCmd MockProposal with
     governanceParty = parties.governanceParty
+    governanceId = testGovernanceId
     proposer = parties.member1
     label = "TestAction"
     payload = "test"
@@ -61,6 +63,7 @@ testConfirmerCanCancel = script do
 
   proposalCid <- submit parties.member1 $ createCmd MockProposal with
     governanceParty = parties.governanceParty
+    governanceId = testGovernanceId
     proposer = parties.member1
     label = "TestAction"
     payload = "test"
@@ -83,6 +86,7 @@ testExpireStaleConfirmation = script do
 
   rulesCid <- submit parties.governanceParty $ createCmd GovernanceRules with
     governanceParty = parties.governanceParty
+    governanceId = testGovernanceId
     members = getMembers parties
     threshold = 2
     actionConfirmationTimeout = minutes 3
@@ -90,6 +94,7 @@ testExpireStaleConfirmation = script do
 
   proposalCid <- submit parties.member1 $ createCmd MockProposal with
     governanceParty = parties.governanceParty
+    governanceId = testGovernanceId
     proposer = parties.member1
     label = "TestAction"
     payload = "test"
@@ -118,6 +123,7 @@ testCannotExpireValidConfirmation = script do
 
   proposalCid <- submit parties.member1 $ createCmd MockProposal with
     governanceParty = parties.governanceParty
+    governanceId = testGovernanceId
     proposer = parties.member1
     label = "TestAction"
     payload = "test"
@@ -141,6 +147,7 @@ testNonMemberCannotExpire = script do
 
   proposalCid <- submit parties.member1 $ createCmd MockProposal with
     governanceParty = parties.governanceParty
+    governanceId = testGovernanceId
     proposer = parties.member1
     label = "TestAction"
     payload = "test"
@@ -168,6 +175,7 @@ testRejectWrongGovernanceParty = script do
 
   proposalCid <- submit parties.member1 $ createCmd MockProposal with
     governanceParty = wrongParty
+    governanceId = testGovernanceId
     proposer = parties.member1
     label = "TestAction"
     payload = "test"
@@ -178,3 +186,166 @@ testRejectWrongGovernanceParty = script do
     exerciseCmd rulesCid GovernanceRules_ConfirmAction with
       confirmer = parties.member1
       actionProposalCid = proposalIfaceCid
+
+-- | A proposal whose `governanceId` does not match the rules instance's
+-- `governanceId` is rejected at confirmation time. Both instances share
+-- the same `governanceParty`, so the party-only match used to allow it.
+testRejectWrongGovernanceId = script do
+  parties <- allocateTestParties
+  rulesCidA <- submit parties.governanceParty $ createCmd GovernanceRules with
+    governanceParty = parties.governanceParty
+    governanceId = "instance-A"
+    members = getMembers parties
+    threshold = 2
+    actionConfirmationTimeout = minutes 30
+    additionalProposers = None
+
+  -- Proposal targets instance A.
+  proposalCid <- submit parties.member1 $ createCmd MockProposal with
+    governanceParty = parties.governanceParty
+    governanceId = "instance-A"
+    proposer = parties.member1
+    label = "TestAction"
+    payload = "test"
+
+  let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
+
+  -- Confirmation on instance A succeeds.
+  _ <- submit (memberContext parties.member1 parties.governanceParty) $
+    exerciseCmd rulesCidA GovernanceRules_ConfirmAction with
+      confirmer = parties.member1
+      actionProposalCid = proposalIfaceCid
+
+  -- A second rules contract on the same party but with a different
+  -- governanceId refuses to confirm the proposal authored against A.
+  rulesCidB <- submit parties.governanceParty $ createCmd GovernanceRules with
+    governanceParty = parties.governanceParty
+    governanceId = "instance-B"
+    members = getMembers parties
+    threshold = 2
+    actionConfirmationTimeout = minutes 30
+    additionalProposers = None
+
+  submitMustFail (memberContext parties.member2 parties.governanceParty) $
+    exerciseCmd rulesCidB GovernanceRules_ConfirmAction with
+      confirmer = parties.member2
+      actionProposalCid = proposalIfaceCid
+
+-- | Confirmations gathered against instance A cannot be replayed against
+-- instance B (same `governanceParty`, different `governanceId`).
+testRejectCrossInstanceConfirmationReplay = script do
+  parties <- allocateTestParties
+
+  rulesCidA <- submit parties.governanceParty $ createCmd GovernanceRules with
+    governanceParty = parties.governanceParty
+    governanceId = "instance-A"
+    members = getMembers parties
+    threshold = 2
+    actionConfirmationTimeout = minutes 30
+    additionalProposers = None
+
+  rulesCidB <- submit parties.governanceParty $ createCmd GovernanceRules with
+    governanceParty = parties.governanceParty
+    governanceId = "instance-B"
+    members = getMembers parties
+    threshold = 2
+    actionConfirmationTimeout = minutes 30
+    additionalProposers = None
+
+  proposalCidA <- submit parties.member1 $ createCmd MockProposal with
+    governanceParty = parties.governanceParty
+    governanceId = "instance-A"
+    proposer = parties.member1
+    label = "TestAction"
+    payload = "test"
+
+  let proposalIfaceCidA = toInterfaceContractId @GovernableAction proposalCidA
+
+  conf1 <- submit (memberContext parties.member1 parties.governanceParty) $
+    exerciseCmd rulesCidA GovernanceRules_ConfirmAction with
+      confirmer = parties.member1
+      actionProposalCid = proposalIfaceCidA
+  conf2 <- submit (memberContext parties.member2 parties.governanceParty) $
+    exerciseCmd rulesCidA GovernanceRules_ConfirmAction with
+      confirmer = parties.member2
+      actionProposalCid = proposalIfaceCidA
+
+  submitMustFail (memberContext parties.member1 parties.governanceParty) $
+    exerciseCmd rulesCidB GovernanceRules_ExecuteConfirmedAction with
+      executor = parties.member1
+      actionProposalCid = proposalIfaceCidA
+      confirmations = [conf1.confirmationCid, conf2.confirmationCid]
+
+-- | Self-confirmations gathered against instance A cannot be replayed
+-- against instance B.
+testRejectCrossInstanceSelfConfirmationReplay = script do
+  parties <- allocateTestParties
+
+  rulesCidA <- submit parties.governanceParty $ createCmd GovernanceRules with
+    governanceParty = parties.governanceParty
+    governanceId = "instance-A"
+    members = getMembers parties
+    threshold = 2
+    actionConfirmationTimeout = minutes 30
+    additionalProposers = None
+
+  rulesCidB <- submit parties.governanceParty $ createCmd GovernanceRules with
+    governanceParty = parties.governanceParty
+    governanceId = "instance-B"
+    members = getMembers parties
+    threshold = 2
+    actionConfirmationTimeout = minutes 30
+    additionalProposers = None
+
+  let action = SelfAction_SetThreshold with updatedThreshold = 3
+
+  selfConf1 <- submit (memberContext parties.member1 parties.governanceParty) $
+    exerciseCmd rulesCidA GovernanceRules_ConfirmGovernanceAction with
+      confirmer = parties.member1
+      action
+  selfConf2 <- submit (memberContext parties.member2 parties.governanceParty) $
+    exerciseCmd rulesCidA GovernanceRules_ConfirmGovernanceAction with
+      confirmer = parties.member2
+      action
+
+  submitMustFail (memberContext parties.member1 parties.governanceParty) $
+    exerciseCmd rulesCidB GovernanceRules_ExecuteGovernanceAction with
+      executor = parties.member1
+      action
+      confirmations = [selfConf1.confirmationCid, selfConf2.confirmationCid]
+
+-- | Self-management `create this with ...` preserves `governanceId` across
+-- the rewrite chain (it is not present in the with-record, so it is copied
+-- unchanged). Without this the audit's fix would self-defeat after the
+-- first self-management action.
+testGovernanceIdPreservedAcrossSelfActions = script do
+  parties <- allocateTestParties
+
+  rulesCid <- submit parties.governanceParty $ createCmd GovernanceRules with
+    governanceParty = parties.governanceParty
+    governanceId = "persistent-id"
+    members = getMembers parties
+    threshold = 2
+    actionConfirmationTimeout = minutes 30
+    additionalProposers = None
+
+  let action = SelfAction_SetThreshold with updatedThreshold = 3
+
+  selfConf1 <- submit (memberContext parties.member1 parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ConfirmGovernanceAction with
+      confirmer = parties.member1
+      action
+  selfConf2 <- submit (memberContext parties.member2 parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ConfirmGovernanceAction with
+      confirmer = parties.member2
+      action
+
+  _ <- submit (memberContext parties.member1 parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ExecuteGovernanceAction with
+      executor = parties.member1
+      action
+      confirmations = [selfConf1.confirmationCid, selfConf2.confirmationCid]
+
+  [(_, rules)] <- query @GovernanceRules parties.governanceParty
+  rules.governanceId === "persistent-id"
+  rules.threshold === 3

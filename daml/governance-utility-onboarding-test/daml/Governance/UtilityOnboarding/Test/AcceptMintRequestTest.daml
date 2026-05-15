@@ -87,6 +87,7 @@ when_accept_mint_request_executed : Fixture -> Script ()
 when_accept_mint_request_executed f = do
   proposalCid <- submit f.parties.member1 $ createCmd AcceptMintRequest with
     governanceParty = f.parties.governanceParty
+    governanceId = testGovernanceId
     proposer = f.parties.member1
     mintRequestCid = f.mintRequestCid
     instrumentConfigurationCid = f.artifacts.instrumentConfigurationCid
@@ -119,6 +120,7 @@ when_outsider_confirms_accept_mint : Fixture -> Script ()
 when_outsider_confirms_accept_mint f = do
   proposalCid <- submit f.parties.member1 $ createCmd AcceptMintRequest with
     governanceParty = f.parties.governanceParty
+    governanceId = testGovernanceId
     proposer = f.parties.member1
     mintRequestCid = f.mintRequestCid
     instrumentConfigurationCid = f.artifacts.instrumentConfigurationCid

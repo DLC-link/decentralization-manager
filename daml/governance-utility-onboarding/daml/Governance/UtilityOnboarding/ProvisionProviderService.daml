@@ -29,6 +29,7 @@ import Governance.Action
 template ProvisionProviderService
   with
     governanceParty : Party
+    governanceId : Text
     proposer : Party
   where
     signatory proposer
@@ -37,6 +38,7 @@ template ProvisionProviderService
     interface instance GovernableAction for ProvisionProviderService where
       view = GovernableActionView with
         governanceParty
+        governanceId
         proposer
         actionLabel = "ProvisionProviderService"
         description = "Provision a ProviderService with operator = proposer and provider = governanceParty."

@@ -65,6 +65,7 @@ given_governance_with_operator_as_additional_proposer = do
   parties <- allocateOnboardingTestParties
   rulesCid <- submit parties.governanceParty $ createCmd GovernanceRules with
     governanceParty = parties.governanceParty
+    governanceId = testGovernanceId
     members = getMembers parties
     threshold = 2
     actionConfirmationTimeout = minutes 30
@@ -75,6 +76,7 @@ when_provision_provider_service : GovFixture -> Script ()
 when_provision_provider_service f = do
   proposalCid <- submit f.parties.operator $ createCmd ProvisionProviderService with
     governanceParty = f.parties.governanceParty
+    governanceId = testGovernanceId
     proposer = f.parties.operator
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
   _ <- confirmAndExecute f.parties f.rulesCid proposalInterfaceCid
@@ -98,6 +100,7 @@ when_create_provider_service_request : GovFixture -> Script ()
 when_create_provider_service_request f = do
   proposalCid <- submit f.parties.member1 $ createCmd CreateProviderServiceRequest with
     governanceParty = f.parties.governanceParty
+    governanceId = testGovernanceId
     proposer = f.parties.member1
     operator = f.parties.operator
     provider = f.parties.governanceParty
@@ -123,6 +126,7 @@ when_create_user_service_request : GovFixture -> Script ()
 when_create_user_service_request f = do
   proposalCid <- submit f.parties.member1 $ createCmd CreateUserServiceRequest with
     governanceParty = f.parties.governanceParty
+    governanceId = testGovernanceId
     proposer = f.parties.member1
     operator = f.parties.operator
     user = f.parties.governanceParty
@@ -148,6 +152,7 @@ when_set_beneficiaries : SetupFixture -> Script ()
 when_set_beneficiaries f = do
   proposalCid <- submit f.parties.member1 $ createCmd SetProviderAppRewardBeneficiaries with
     governanceParty = f.parties.governanceParty
+    governanceId = testGovernanceId
     proposer = f.parties.member1
     instrumentConfigurationCid = f.artifacts.instrumentConfigurationCid
     providerAppRewardBeneficiaries = None
@@ -176,6 +181,7 @@ when_set_enable_result_contracts : SetupFixture -> Script ()
 when_set_enable_result_contracts f = do
   proposalCid <- submit f.parties.member1 $ createCmd SetEnableResultContracts with
     governanceParty = f.parties.governanceParty
+    governanceId = testGovernanceId
     proposer = f.parties.member1
     registrarServiceCid = f.artifacts.registrarServiceCid
     enableResultContracts = Some True
@@ -204,6 +210,7 @@ when_create_delegated_proxy : GovFixture -> Script ()
 when_create_delegated_proxy f = do
   proposalCid <- submit f.parties.member1 $ createCmd CreateDelegatedBatchedMarkersProxy with
     governanceParty = f.parties.governanceParty
+    governanceId = testGovernanceId
     proposer = f.parties.member1
     operator = f.parties.operator
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid

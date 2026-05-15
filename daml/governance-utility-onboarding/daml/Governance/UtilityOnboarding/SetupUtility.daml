@@ -20,6 +20,7 @@ import Governance.Action
 template SetupUtility
   with
     governanceParty : Party
+    governanceId : Text
     proposer : Party
     providerServiceCid : ContractId ProviderService
     operator : Party
@@ -33,6 +34,7 @@ template SetupUtility
     interface instance GovernableAction for SetupUtility where
       view = GovernableActionView with
         governanceParty
+        governanceId
         proposer
         actionLabel = "SetupUtility"
         description = "Composite onboarding: register instrument " <> instrumentIdText

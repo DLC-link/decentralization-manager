@@ -20,6 +20,8 @@ template SetupTokenPreapprovalProposal
   with
     governanceParty : Party
       -- ^ The governance party whose authority is required.
+    governanceId : Text
+      -- ^ Stable identifier of the targeting GovernanceRules instance.
     proposer : Party
       -- ^ The member proposing this preapproval setup.
     operator : Party
@@ -35,6 +37,7 @@ template SetupTokenPreapprovalProposal
     interface instance GovernableAction for SetupTokenPreapprovalProposal where
       view = GovernableActionView with
         governanceParty
+        governanceId
         proposer
         actionLabel = "SetupTokenPreapproval"
         description = "Set up utility token transfer preapproval"

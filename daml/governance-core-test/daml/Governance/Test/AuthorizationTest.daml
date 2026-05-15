@@ -28,6 +28,7 @@ testAuthorityFlowsThroughInterface = script do
 
   proposalCid <- submit parties.member1 $ createCmd MockAuthorityProposal with
     governanceParty = parties.governanceParty
+    governanceId = testGovernanceId
     proposer = parties.member1
     resourceCid
     newValue = "updated via governance"
@@ -47,6 +48,7 @@ testNonMemberCanCreateProposal = script do
 
   _proposalCid <- submit parties.outsider $ createCmd MockProposal with
     governanceParty = parties.governanceParty
+    governanceId = testGovernanceId
     proposer = parties.outsider
     label = "OutsiderProposal"
     payload = "from outsider"
@@ -61,6 +63,7 @@ testAdditionalProposerProposalCanBeExecutedByMembers = script do
 
   rulesCid <- submit parties.governanceParty $ createCmd GovernanceRules with
     governanceParty = parties.governanceParty
+    governanceId = testGovernanceId
     members = getMembers parties
     threshold = 2
     actionConfirmationTimeout = minutes 30
@@ -68,6 +71,7 @@ testAdditionalProposerProposalCanBeExecutedByMembers = script do
 
   proposalCid <- submit parties.outsider $ createCmd MockProposal with
     governanceParty = parties.governanceParty
+    governanceId = testGovernanceId
     proposer = parties.outsider
     label = "OutsiderProposal"
     payload = "from outsider"
@@ -88,6 +92,7 @@ testNonMemberCannotUseGovernanceChoices = script do
 
   proposalCid <- submit parties.member1 $ createCmd MockProposal with
     governanceParty = parties.governanceParty
+    governanceId = testGovernanceId
     proposer = parties.member1
     label = "TestAction"
     payload = "test"
@@ -115,6 +120,7 @@ testDuplicateConfirmationsRejected = script do
 
   proposalCid <- submit parties.member1 $ createCmd MockProposal with
     governanceParty = parties.governanceParty
+    governanceId = testGovernanceId
     proposer = parties.member1
     label = "TestAction"
     payload = "test"
@@ -145,6 +151,7 @@ testMemberProposerAcceptedAtConfirm = script do
 
   proposalCid <- submit parties.member1 $ createCmd MockProposal with
     governanceParty = parties.governanceParty
+    governanceId = testGovernanceId
     proposer = parties.member1
     label = "MemberProposed"
     payload = "ok"
@@ -165,6 +172,7 @@ testAdditionalProposerAcceptedAtConfirm = script do
   -- Build governance rules where `outsider` is an additional proposer.
   rulesCid <- submit parties.governanceParty $ createCmd GovernanceRules with
     governanceParty = parties.governanceParty
+    governanceId = testGovernanceId
     members = getMembers parties
     threshold = 2
     actionConfirmationTimeout = minutes 30
@@ -172,6 +180,7 @@ testAdditionalProposerAcceptedAtConfirm = script do
 
   proposalCid <- submit parties.outsider $ createCmd MockProposal with
     governanceParty = parties.governanceParty
+    governanceId = testGovernanceId
     proposer = parties.outsider
     label = "AdditionalProposerProposed"
     payload = "ok"
@@ -194,6 +203,7 @@ testUnauthorizedProposerRejectedAtConfirm = script do
   -- `outsider` is neither a member nor an additional proposer.
   proposalCid <- submit parties.outsider $ createCmd MockProposal with
     governanceParty = parties.governanceParty
+    governanceId = testGovernanceId
     proposer = parties.outsider
     label = "UnauthorizedProposed"
     payload = "should reject"

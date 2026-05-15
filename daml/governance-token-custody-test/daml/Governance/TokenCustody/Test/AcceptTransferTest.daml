@@ -98,6 +98,7 @@ when_transfer_accepted_via_governance f = do
   transferInstructionCid <- createTransferOffer f.parties f.result 75.0
   proposalCid <- submit f.parties.member1 $ createCmd AcceptTransferProposal with
     governanceParty = f.parties.governanceParty
+    governanceId = testGovernanceId
     proposer = f.parties.member1
     transferInstructionCid
     extraArgs = buildAcceptExtraArgs f.result
@@ -112,6 +113,7 @@ when_withdrawn_offer_fails f = do
   transferInstructionCid <- createTransferOffer f.parties f.result 75.0
   proposalCid <- submit f.parties.member1 $ createCmd AcceptTransferProposal with
     governanceParty = f.parties.governanceParty
+    governanceId = testGovernanceId
     proposer = f.parties.member1
     transferInstructionCid
     extraArgs = buildAcceptExtraArgs f.result
@@ -135,6 +137,7 @@ when_non_member_confirmation_fails f = do
   transferInstructionCid <- createTransferOffer f.parties f.result 75.0
   proposalCid <- submit f.parties.member1 $ createCmd AcceptTransferProposal with
     governanceParty = f.parties.governanceParty
+    governanceId = testGovernanceId
     proposer = f.parties.member1
     transferInstructionCid
     extraArgs = buildAcceptExtraArgs f.result

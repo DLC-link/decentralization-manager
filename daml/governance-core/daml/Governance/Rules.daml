@@ -53,6 +53,11 @@ template GovernanceSelfConfirmation
   with
     governanceParty : Party
       -- ^ The governance party this confirmation belongs to.
+    governanceId : Text
+      -- ^ Stable identifier of the specific GovernanceRules instance this
+      -- self-confirmation was created against. Checked at execute time so
+      -- confirmations cannot be replayed across parallel rules instances
+      -- that happen to share the same `governanceParty`.
     confirmer : Party
       -- ^ The governance member who created this confirmation.
     action : GovernanceSelfAction
@@ -142,6 +147,14 @@ template GovernanceRules
     governanceParty : Party
       -- ^ The decentralized governance party. Members host this party on their
       -- participants with readAs rights for visibility.
+    governanceId : Text
+      -- ^ Stable, immutable identifier for this governance instance. Set
+      -- once at bootstrap (e.g., a UUID) and preserved across every
+      -- self-management `create this with ...` rewrite. Lets confirmations,
+      -- self-confirmations, and proposals match a specific rules instance
+      -- rather than relying on `governanceParty` alone — which would
+      -- conflate parallel rules contracts that share a party (e.g., during
+      -- a bootstrap, upgrade, or migration).
     members : Set Party
       -- ^ Set of governance members who can confirm and execute actions.
     threshold : Int
@@ -280,6 +293,7 @@ template GovernanceRules
         now <- getTime
         confirmationCid <- create GovernanceSelfConfirmation with
           governanceParty
+          governanceId
           confirmer
           action
           expiresAt = now `addRelTime` actionConfirmationTimeout
@@ -304,6 +318,8 @@ template GovernanceRules
         -- before counting threshold — only member votes count toward N.
         now <- getTime
         fetched <- mapA (\cid -> exercise cid GovernanceSelfConfirmation_Consume) confirmations
+        require "All confirmations must target this governance instance"
+          (all (\c -> c.governanceId == governanceId) fetched)
         let valid = filter (\c -> c.expiresAt > now) fetched
         let memberVotes = filter (\c -> c.confirmer `Set.member` members) valid
         require "All confirmations must match the action being executed"
@@ -374,8 +390,9 @@ template GovernanceRules
       do
         require "Confirmer is a governance member" (confirmer `Set.member` members)
         actionView <- view <$> fetch actionProposalCid
-        require "Proposal targets this governance"
-          (actionView.governanceParty == governanceParty)
+        require "Proposal targets this governance instance"
+          (actionView.governanceParty == governanceParty
+            && actionView.governanceId == governanceId)
         -- Proposer must be a member or an additional proposer. Canton has
         -- already enforced that the on-chain `proposer` field is authentic
         -- (the submitting participant must `actAs` that party); this check
@@ -383,12 +400,10 @@ template GovernanceRules
         require "Proposer is authorized (member or additional proposer)"
           (actionView.proposer `Set.member` members
             || optional False (Set.member actionView.proposer) additionalProposers)
-        -- TODO: governanceParty match alone doesn't distinguish between multiple
-        -- GovernanceRules instances for the same party. A static governance ID
-        -- field should be added to provide strict matching.
         now <- getTime
         confirmationCid <- create GovernanceConfirmation with
           governanceParty
+          governanceId
           confirmer
           actionProposalCid
           actionLabel = actionView.actionLabel
@@ -410,6 +425,8 @@ template GovernanceRules
         -- Consume and validate confirmations
         now <- getTime
         fetched <- mapA (\cid -> exercise cid GovernanceConfirmation_Consume) confirmations
+        require "All confirmations must target this governance instance"
+          (all (\c -> c.governanceId == governanceId) fetched)
         let valid = filter (\c -> c.expiresAt > now) fetched
         require "All confirmations must reference the same proposal"
           (all (\c -> c.actionProposalCid == actionProposalCid) valid)

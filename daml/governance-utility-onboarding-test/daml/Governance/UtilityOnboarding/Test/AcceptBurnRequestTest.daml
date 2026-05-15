@@ -77,6 +77,7 @@ seedHoldingForRequester parties rulesCid artifacts holder amount = do
         meta = Metadata with values = TextMap.empty
   proposalCid <- submit parties.member1 $ createCmd AcceptMintRequest with
     governanceParty = parties.governanceParty
+    governanceId = testGovernanceId
     proposer = parties.member1
     mintRequestCid = mintResult.mintRequestCid
     instrumentConfigurationCid = artifacts.instrumentConfigurationCid
@@ -130,6 +131,7 @@ when_accept_burn_request_executed : Fixture -> Script ()
 when_accept_burn_request_executed f = do
   proposalCid <- submit f.parties.member1 $ createCmd AcceptBurnRequest with
     governanceParty = f.parties.governanceParty
+    governanceId = testGovernanceId
     proposer = f.parties.member1
     burnRequestCid = f.burnRequestCid
     instrumentConfigurationCid = f.artifacts.instrumentConfigurationCid
@@ -160,6 +162,7 @@ when_outsider_confirms_accept_burn : Fixture -> Script ()
 when_outsider_confirms_accept_burn f = do
   proposalCid <- submit f.parties.member1 $ createCmd AcceptBurnRequest with
     governanceParty = f.parties.governanceParty
+    governanceId = testGovernanceId
     proposer = f.parties.member1
     burnRequestCid = f.burnRequestCid
     instrumentConfigurationCid = f.artifacts.instrumentConfigurationCid

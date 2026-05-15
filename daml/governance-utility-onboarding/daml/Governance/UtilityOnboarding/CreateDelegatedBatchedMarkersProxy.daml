@@ -14,6 +14,7 @@ import Governance.Action
 template CreateDelegatedBatchedMarkersProxy
   with
     governanceParty : Party
+    governanceId : Text
     proposer : Party
     operator : Party
   where
@@ -23,6 +24,7 @@ template CreateDelegatedBatchedMarkersProxy
     interface instance GovernableAction for CreateDelegatedBatchedMarkersProxy where
       view = GovernableActionView with
         governanceParty
+        governanceId
         proposer
         actionLabel = "CreateDelegatedBatchedMarkersProxy"
         description = "Authorize operator to create batched markers for the provider."
