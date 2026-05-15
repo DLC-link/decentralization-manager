@@ -43,3 +43,12 @@ interface GovernableAction where
   choice GovernableAction_Cancel : ()
     controller (view this).governanceParty
     do pure ()
+
+  -- | Proposer-driven cancellation. Lets the original proposer retract a
+  -- proposal they submitted in error without requiring a governance vote.
+  -- Outstanding confirmations against a now-archived proposal are harmless:
+  -- ExecuteConfirmedAction would fetch the proposal and fail, so the only
+  -- effect is that the proposal contract is consumed.
+  choice GovernableAction_ProposerCancel : ()
+    controller (view this).proposer
+    do pure ()
