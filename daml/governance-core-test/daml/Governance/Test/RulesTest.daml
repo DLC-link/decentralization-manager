@@ -6,7 +6,7 @@ module Governance.Test.RulesTest where
 
 import DA.Assert
 import DA.Set as Set hiding (filter)
-import DA.Time (minutes)
+import DA.Time (minutes, seconds)
 import Daml.Script
 
 import Governance.Rules
@@ -49,4 +49,60 @@ testCustomConfiguration = script do
   [(_, rules)] <- query @GovernanceRules parties.governanceParty
   rules.threshold === 3
   rules.actionConfirmationTimeout === minutes 60
+
+-- | Reject creation with threshold of 0.
+testRejectZeroThresholdOnCreate = script do
+  parties <- allocateTestParties
+
+  submitMustFail parties.governanceParty $ createCmd GovernanceRules with
+    governanceParty = parties.governanceParty
+    members = getMembers parties
+    threshold = 0
+    actionConfirmationTimeout = minutes 30
+    additionalProposers = None
+
+-- | Reject creation with a negative threshold.
+testRejectNegativeThresholdOnCreate = script do
+  parties <- allocateTestParties
+
+  submitMustFail parties.governanceParty $ createCmd GovernanceRules with
+    governanceParty = parties.governanceParty
+    members = getMembers parties
+    threshold = -1
+    actionConfirmationTimeout = minutes 30
+    additionalProposers = None
+
+-- | Reject creation with threshold greater than member count.
+testRejectThresholdExceedingMembersOnCreate = script do
+  parties <- allocateTestParties
+
+  submitMustFail parties.governanceParty $ createCmd GovernanceRules with
+    governanceParty = parties.governanceParty
+    members = getMembers parties
+    threshold = 4
+    actionConfirmationTimeout = minutes 30
+    additionalProposers = None
+
+-- | Reject creation with actionConfirmationTimeout shorter than 10 seconds.
+testRejectShortTimeoutOnCreate = script do
+  parties <- allocateTestParties
+
+  submitMustFail parties.governanceParty $ createCmd GovernanceRules with
+    governanceParty = parties.governanceParty
+    members = getMembers parties
+    threshold = 2
+    actionConfirmationTimeout = seconds 5
+    additionalProposers = None
+
+-- | Threshold of exactly 1 with a single member is valid (boundary).
+testAllowMinimumThresholdOnCreate = script do
+  parties <- allocateTestParties
+
+  _rulesCid <- submit parties.governanceParty $ createCmd GovernanceRules with
+    governanceParty = parties.governanceParty
+    members = Set.fromList [parties.member1]
+    threshold = 1
+    actionConfirmationTimeout = seconds 10
+    additionalProposers = None
+  pure ()
 

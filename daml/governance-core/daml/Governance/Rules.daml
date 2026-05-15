@@ -160,6 +160,9 @@ template GovernanceRules
     -- governance party on their participant with readAs rights. This keeps
     -- visibility as a topology concern rather than a contract modeling concern.
     ensure not (Set.null members)
+        && threshold >= 1
+        && threshold <= Set.size members
+        && actionConfirmationTimeout >= seconds 10
 
     -- ════════════════════════════════════════════════════════════════════════
     -- BUILT-IN: Governance self-management choices
