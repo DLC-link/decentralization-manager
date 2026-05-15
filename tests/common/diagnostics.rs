@@ -57,7 +57,10 @@ async fn inner(f: &Fixture, phase: &str) -> Result<()> {
     let mut summary: Vec<String> = Vec::with_capacity(3);
 
     for (label, port) in nodes {
-        let observation = match f.get_json::<DecentralizedPartiesResponse>(port, &path).await {
+        let observation = match f
+            .get_json::<DecentralizedPartiesResponse>(port, &path)
+            .await
+        {
             Ok(r) => observation_for_party(label, prefix, p3_uid, r, &mut summary),
             Err(e) => {
                 summary.push(format!("{label}=err"));
@@ -111,7 +114,11 @@ fn observation_for_party(
     summary: &mut Vec<String>,
 ) -> Value {
     let refreshing = r.refreshing;
-    let Some(party) = r.parties.into_iter().find(|p| p.party_id.starts_with(prefix)) else {
+    let Some(party) = r
+        .parties
+        .into_iter()
+        .find(|p| p.party_id.starts_with(prefix))
+    else {
         summary.push(format!("{label}=none"));
         return json!({"from_node": label, "party_found": false, "refreshing": refreshing});
     };

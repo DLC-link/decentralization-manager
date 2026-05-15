@@ -68,8 +68,8 @@ where
 mod tests {
     use serde::Deserialize;
     use wiremock::{
-        matchers::{method, path},
         Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
     };
 
     use super::*;
@@ -170,6 +170,11 @@ mod tests {
         // Verify the breaker short-circuited BEFORE any HTTP call — wiremock
         // received zero requests on the mounted MockServer.
         let received = server.received_requests().await.unwrap();
-        assert_eq!(received.len(), 0, "expected no HTTP requests but got {}", received.len());
+        assert_eq!(
+            received.len(),
+            0,
+            "expected no HTTP requests but got {}",
+            received.len()
+        );
     }
 }

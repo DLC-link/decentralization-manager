@@ -13,7 +13,11 @@ pub mod processes;
 pub mod scenario;
 pub mod types;
 
-use std::{path::PathBuf, sync::{Arc, Mutex}, time::Duration};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use anyhow::Context;
 use reqwest::Client;
@@ -50,9 +54,9 @@ impl TestTarget {
         match std::env::var("DPM_IT_TARGET").as_deref() {
             Ok("localnet") | Err(_) => Ok(TestTarget::Localnet),
             Ok("devnet") => Ok(TestTarget::Devnet),
-            Ok(other) => anyhow::bail!(
-                "invalid DPM_IT_TARGET value: {other}; expected localnet|devnet"
-            ),
+            Ok(other) => {
+                anyhow::bail!("invalid DPM_IT_TARGET value: {other}; expected localnet|devnet")
+            }
         }
     }
 }
@@ -174,8 +178,12 @@ impl Fixture {
         });
 
         let (
-            p1_member_creds, p2_member_creds, p3_member_creds,
-            p1_participant_admin_creds, p2_participant_admin_creds, p3_participant_admin_creds,
+            p1_member_creds,
+            p2_member_creds,
+            p3_member_creds,
+            p1_participant_admin_creds,
+            p2_participant_admin_creds,
+            p3_participant_admin_creds,
         ) = match target {
             TestTarget::Devnet => {
                 let read_member_creds = |n: u8| -> anyhow::Result<MemberCreds> {
@@ -183,19 +191,19 @@ impl Fixture {
                         party_id: read_env(&format!("P{n}_MEMBER_PARTY_ID"))?,
                         user_id: read_env(&format!("P{n}_MEMBER_USER_ID"))?,
                         keycloak_client_id: read_env(&format!("P{n}_MEMBER_KEYCLOAK_CLIENT_ID"))?,
-                        keycloak_client_secret: read_env(
-                            &format!("P{n}_MEMBER_KEYCLOAK_CLIENT_SECRET"),
-                        )?,
+                        keycloak_client_secret: read_env(&format!(
+                            "P{n}_MEMBER_KEYCLOAK_CLIENT_SECRET"
+                        ))?,
                     })
                 };
                 let read_admin_creds = |n: u8| -> anyhow::Result<ParticipantAdminCreds> {
                     Ok(ParticipantAdminCreds {
-                        keycloak_client_id: read_env(
-                            &format!("P{n}_PARTICIPANT_ADMIN_KEYCLOAK_CLIENT_ID"),
-                        )?,
-                        keycloak_client_secret: read_env(
-                            &format!("P{n}_PARTICIPANT_ADMIN_KEYCLOAK_CLIENT_SECRET"),
-                        )?,
+                        keycloak_client_id: read_env(&format!(
+                            "P{n}_PARTICIPANT_ADMIN_KEYCLOAK_CLIENT_ID"
+                        ))?,
+                        keycloak_client_secret: read_env(&format!(
+                            "P{n}_PARTICIPANT_ADMIN_KEYCLOAK_CLIENT_SECRET"
+                        ))?,
                     })
                 };
                 (
@@ -402,11 +410,20 @@ mod tests {
             std::env::set_var("P3_MEMBER_KEYCLOAK_CLIENT_SECRET", "p3-secret");
             // Per-participant admin Keycloak creds (required by Fixture::from_env on devnet).
             std::env::set_var("P1_PARTICIPANT_ADMIN_KEYCLOAK_CLIENT_ID", "p1-admin-client");
-            std::env::set_var("P1_PARTICIPANT_ADMIN_KEYCLOAK_CLIENT_SECRET", "p1-admin-secret");
+            std::env::set_var(
+                "P1_PARTICIPANT_ADMIN_KEYCLOAK_CLIENT_SECRET",
+                "p1-admin-secret",
+            );
             std::env::set_var("P2_PARTICIPANT_ADMIN_KEYCLOAK_CLIENT_ID", "p2-admin-client");
-            std::env::set_var("P2_PARTICIPANT_ADMIN_KEYCLOAK_CLIENT_SECRET", "p2-admin-secret");
+            std::env::set_var(
+                "P2_PARTICIPANT_ADMIN_KEYCLOAK_CLIENT_SECRET",
+                "p2-admin-secret",
+            );
             std::env::set_var("P3_PARTICIPANT_ADMIN_KEYCLOAK_CLIENT_ID", "p3-admin-client");
-            std::env::set_var("P3_PARTICIPANT_ADMIN_KEYCLOAK_CLIENT_SECRET", "p3-admin-secret");
+            std::env::set_var(
+                "P3_PARTICIPANT_ADMIN_KEYCLOAK_CLIENT_SECRET",
+                "p3-admin-secret",
+            );
         }
     }
 
@@ -570,8 +587,8 @@ mod tests {
     #[tokio::test]
     async fn discover_network_parties_populates_devnet_fields() {
         use wiremock::{
-            matchers::{method, path},
             Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
         };
         let server = MockServer::start().await;
         Mock::given(method("GET"))

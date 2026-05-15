@@ -177,8 +177,8 @@ pub async fn probe_workflow_run_visible(
 #[cfg(test)]
 mod tests {
     use wiremock::{
-        matchers::{header, method, path},
         Mock, MockServer, ResponseTemplate,
+        matchers::{header, method, path},
     };
 
     use super::Fixture;
@@ -196,9 +196,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/ping"))
             .and(header("authorization", "Bearer test-jwt"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
             .mount(&server)
             .await;
 
@@ -211,9 +209,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/ping"))
             .and(header("authorization", "Bearer test-jwt"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
             .mount(&server)
             .await;
 
@@ -229,9 +225,7 @@ mod tests {
         Mock::given(method("PUT"))
             .and(path("/ping"))
             .and(header("authorization", "Bearer test-jwt"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
             .mount(&server)
             .await;
 

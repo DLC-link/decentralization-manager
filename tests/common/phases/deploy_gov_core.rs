@@ -5,10 +5,7 @@ use serde_json::{Value, json};
 use tracing::info;
 
 use crate::common::{
-    Fixture,
-    MemberCreds,
-    ParticipantAdminCreds,
-    TestTarget,
+    Fixture, MemberCreds, ParticipantAdminCreds, TestTarget,
     http::{probe_workflow_run_visible, probe_workflow_status},
     invitations::{InvitationIds, post_accept_invitation, probe_pending_invitation},
     scenario::Scenario,

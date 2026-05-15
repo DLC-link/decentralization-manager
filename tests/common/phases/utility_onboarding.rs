@@ -5,8 +5,7 @@ use serde_json::json;
 use tracing::info;
 
 use crate::common::{
-    Fixture,
-    TestTarget,
+    Fixture, TestTarget,
     governance::propose_confirm_execute,
     operator::{OPERATOR_RESPONSE_TIMEOUT_DEVNET, await_operator_response},
     scenario::Scenario,
@@ -52,10 +51,9 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     .await?;
             }
             TestTarget::Devnet => {
-                let operator = f
-                    .operator_party
-                    .clone()
-                    .context("operator_party not set on devnet — discover_network_parties must run first")?;
+                let operator = f.operator_party.clone().context(
+                    "operator_party not set on devnet — discover_network_parties must run first",
+                )?;
                 let governance_party = f.party_id()?.to_string();
                 propose_confirm_execute(
                     "CreateProviderServiceRequest",
@@ -109,10 +107,9 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     // line up with what was put on the ledger.
     let operator = match f.target {
         TestTarget::Localnet => p1_member.clone(),
-        TestTarget::Devnet => f
-            .operator_party
-            .clone()
-            .context("operator_party not set on devnet — discover_network_parties must run first")?,
+        TestTarget::Devnet => f.operator_party.clone().context(
+            "operator_party not set on devnet — discover_network_parties must run first",
+        )?,
     };
 
     propose_confirm_execute(

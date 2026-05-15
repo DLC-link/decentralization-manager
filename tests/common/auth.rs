@@ -48,7 +48,11 @@ impl Refresher {
     pub async fn token(&self) -> anyhow::Result<String> {
         match self {
             Self::Static { token } => Ok(token.clone()),
-            Self::Keycloak { client, creds, state } => {
+            Self::Keycloak {
+                client,
+                creds,
+                state,
+            } => {
                 let mut s = state.lock().await;
                 if s.expires_at
                     .checked_duration_since(Instant::now())
@@ -105,8 +109,8 @@ async fn fetch_token(client: &Client, creds: &KeycloakCreds) -> anyhow::Result<T
 #[cfg(test)]
 mod tests {
     use wiremock::{
-        matchers::{method, path},
         Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
     };
 
     use super::*;
@@ -127,13 +131,13 @@ mod tests {
         let server = MockServer::start().await;
 
         Mock::given(method("POST"))
-            .and(path("/auth/realms/test-realm/protocol/openid-connect/token"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "access_token": "fresh-1",
-                    "expires_in": 3600
-                })),
-            )
+            .and(path(
+                "/auth/realms/test-realm/protocol/openid-connect/token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "fresh-1",
+                "expires_in": 3600
+            })))
             .expect(1)
             .mount(&server)
             .await;
@@ -169,25 +173,25 @@ mod tests {
 
         // Both calls return immediately-expired tokens (expires_in: 0).
         Mock::given(method("POST"))
-            .and(path("/auth/realms/test-realm/protocol/openid-connect/token"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "access_token": "first",
-                    "expires_in": 0
-                })),
-            )
+            .and(path(
+                "/auth/realms/test-realm/protocol/openid-connect/token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "first",
+                "expires_in": 0
+            })))
             .up_to_n_times(1)
             .mount(&server)
             .await;
 
         Mock::given(method("POST"))
-            .and(path("/auth/realms/test-realm/protocol/openid-connect/token"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "access_token": "second",
-                    "expires_in": 0
-                })),
-            )
+            .and(path(
+                "/auth/realms/test-realm/protocol/openid-connect/token",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "second",
+                "expires_in": 0
+            })))
             .up_to_n_times(1)
             .mount(&server)
             .await;
@@ -215,6 +219,11 @@ mod tests {
 
         // Verify two POSTs were made.
         let received = server.received_requests().await.unwrap();
-        assert_eq!(received.len(), 2, "expected 2 Keycloak POSTs, got {}", received.len());
+        assert_eq!(
+            received.len(),
+            2,
+            "expected 2 Keycloak POSTs, got {}",
+            received.len()
+        );
     }
 }
