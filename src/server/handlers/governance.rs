@@ -1039,11 +1039,6 @@ pub async fn confirm_action(
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
     }
-    if let Err(msg) = body.action.validate() {
-        return HttpResponse::BadRequest().json(ErrorResponse {
-            error: msg.to_string(),
-        });
-    }
 
     let party_id = &body.party_id;
 
@@ -1127,11 +1122,6 @@ pub async fn execute_action(
 ) -> impl Responder {
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
-    }
-    if let Err(msg) = body.action.validate() {
-        return HttpResponse::BadRequest().json(ErrorResponse {
-            error: msg.to_string(),
-        });
     }
 
     let party_id = &body.party_id;
