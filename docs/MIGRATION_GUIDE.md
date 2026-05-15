@@ -266,6 +266,8 @@ spec:
 
 ### 4d. Service
 
+The deployment uses two Services. The first is a `ClusterIP` that backs the Ingress for the HTTP admin UI; the second is a `LoadBalancer` that exposes the Noise port (9000) to the public internet so peers can reach you. Splitting them keeps `DECPM_PUBLIC_ADDRESS` pointed at a stable, dedicated endpoint and avoids putting the admin UI on a raw load balancer.
+
 ```yaml
 apiVersion: v1
 kind: Service
@@ -283,9 +285,28 @@ spec:
       targetPort: 9000
   selector:
     app.kubernetes.io/name: dec-party-manager
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dec-party-manager-noise
+  namespace: <your-namespace>
+  annotations:
+    # AWS EKS example — use the cloud-provider annotation appropriate for
+    # your cluster (or omit for a Classic ELB / on-prem MetalLB).
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+spec:
+  type: LoadBalancer
+  ports:
+    - name: noise
+      port: 9000
+      targetPort: 9000
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: dec-party-manager
 ```
 
-The Noise port (9000) must also be reachable from the public internet for peers to connect. Depending on your cluster, you may need a separate `LoadBalancer`-type Service, a `NodePort`, or another mechanism (MetalLB, native cloud load balancer, etc.) for the `noise` port specifically. The HTTP UI does not need to be exposed publicly — it is reached through the Ingress (next).
+After applying, read the LoadBalancer's external hostname (or IP) with `kubectl -n <your-namespace> get svc dec-party-manager-noise` and set `DECPM_PUBLIC_ADDRESS` in the Secret to that value, then restart the Deployment so the new env is picked up. If you are not on EKS, replace the annotation with whatever your cluster's cloud-provider integration expects, or use a `NodePort` / MetalLB / external load balancer of your choice — the only requirement is that peers can reach port 9000 at `DECPM_PUBLIC_ADDRESS` over raw TCP. The HTTP UI does not need to be exposed publicly — it is reached through the Ingress (next).
 
 ### 4e. Ingress (Traefik example)
 
