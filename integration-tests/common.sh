@@ -223,7 +223,11 @@ stop_nodes() {
             kill -9 "$pid" 2>/dev/null || true
         fi
     done
-    wait 2>/dev/null || true
+    # Reap only the DPM PIDs we just killed. A bare `wait` would block on
+    # every active bg child of the script — on devnet that includes the
+    # `_canton_forward_loop` subshells (while-true kubectl port-forwards),
+    # so `configure_peers`' restart cycle would hang forever.
+    wait "${PIDS[@]+"${PIDS[@]}"}" 2>/dev/null || true
     PIDS=()
 }
 
