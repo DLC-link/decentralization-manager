@@ -7,7 +7,7 @@ use tracing::info;
 use crate::common::{
     Fixture, TestTarget,
     governance::propose_confirm_execute,
-    operator::{OPERATOR_RESPONSE_TIMEOUT_DEVNET, await_operator_response},
+    operator::{await_operator_response, operator_response_timeout_devnet},
     scenario::Scenario,
     types::{ContractsQueryResponse, ProviderServicesResponse},
 };
@@ -77,7 +77,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     &path,
                     "CreateProviderServiceRequest",
                     "ProviderService",
-                    OPERATOR_RESPONSE_TIMEOUT_DEVNET,
+                    operator_response_timeout_devnet(),
                     move |r| {
                         r.services
                             .into_iter()

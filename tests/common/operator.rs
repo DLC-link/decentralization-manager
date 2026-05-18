@@ -6,7 +6,20 @@ use thiserror::Error;
 
 use crate::common::Fixture;
 
-pub const OPERATOR_RESPONSE_TIMEOUT_DEVNET: Duration = Duration::from_secs(300);
+/// Operator-automation response timeout for devnet. Configurable via the
+/// `DPM_IT_OPERATOR_TIMEOUT_S` env var (positive integer, seconds); defaults
+/// to 300. Once the deadline elapses for any `await_operator_response` call
+/// the fixture's circuit breaker trips and the rest of the suite bails
+/// immediately on subsequent operator-waits, so on a sluggish devnet a
+/// single phase that exceeds the default permanently breaks the run — bump
+/// via env when you know that's happening rather than retrying the suite.
+pub fn operator_response_timeout_devnet() -> Duration {
+    let secs = std::env::var("DPM_IT_OPERATOR_TIMEOUT_S")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(300);
+    Duration::from_secs(secs)
+}
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Error)]

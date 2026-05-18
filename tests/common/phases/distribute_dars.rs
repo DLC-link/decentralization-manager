@@ -117,10 +117,20 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         }
                     }
                     let _: Value = upload_res.context("POST /dars/upload")?;
-                    let _: Value = f
+                    let distribute_res: anyhow::Result<Value> = f
                         .post_json(f.p1.http, "/dars/distribute", &distribute_req)
-                        .await
-                        .context("POST /dars/distribute")?;
+                        .await;
+                    if let Err(e) = &distribute_res {
+                        let msg = format!("{e:#}");
+                        if msg.contains("PERMISSION_DENIED") || msg.contains("UNAUTHENTICATED") {
+                            anyhow::bail!(
+                                "test M2M client lacks DAR distribute privileges on participant P1; \
+                                 either distribute the DARs out-of-band or grant the client admin scope \
+                                 on the participant. Underlying error: {msg}"
+                            );
+                        }
+                    }
+                    let _: Value = distribute_res.context("POST /dars/distribute")?;
                     Ok(())
                 })
             }
