@@ -383,9 +383,6 @@ template GovernanceRules
         require "Proposer is authorized (member or additional proposer)"
           (actionView.proposer `Set.member` members
             || optional False (Set.member actionView.proposer) additionalProposers)
-        -- TODO: governanceParty match alone doesn't distinguish between multiple
-        -- GovernanceRules instances for the same party. A static governance ID
-        -- field should be added to provide strict matching.
         now <- getTime
         confirmationCid <- create GovernanceConfirmation with
           governanceParty
