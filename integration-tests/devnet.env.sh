@@ -211,10 +211,18 @@ start_canton_tunnels() {
 
     # Fail fast on AWS-SSO / kubectl auth issues so retry loops don't silently
     # restart kubectl forever and only surface 30s later as a port timeout.
+    #
+    # `if ! cmd` is required here (rather than `cmd; if [ $? -ne 0 ]`) because
+    # run.sh runs under `set -eu`. The old form caused the script to exit
+    # immediately on kubectl failure, before reaching the helpful error
+    # message — the user would see only the "Opening kubectl port-forwards"
+    # header and nothing else. Confirmed lived experience on a run that hit
+    # `aws sso login --profile ieu-sysadmin` token expiry. Originally flagged
+    # by Copilot's review on #142 ("comments suppressed due to low confidence
+    # #2") — this is the followup landing that fix.
     local auth_probe
-    auth_probe=$(kubectl --context="$KUBE_CONTEXT_DEVNET" -n "$KUBE_NS_CANTON" \
-        get svc -o name 2>&1)
-    if [ $? -ne 0 ]; then
+    if ! auth_probe=$(kubectl --context="$KUBE_CONTEXT_DEVNET" -n "$KUBE_NS_CANTON" \
+        get svc -o name 2>&1); then
         echo "ERROR: kubectl auth probe failed for context '$KUBE_CONTEXT_DEVNET':" >&2
         echo "$auth_probe" | sed 's/^/  /' >&2
         echo "If you see 'Token has expired', refresh AWS SSO: 'aws sso login --profile <profile>'." >&2
