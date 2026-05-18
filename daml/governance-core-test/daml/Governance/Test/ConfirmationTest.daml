@@ -8,7 +8,7 @@ import DA.Assert
 import DA.Time (minutes)
 import Daml.Script
 
-import Governance.Action (GovernableAction)
+import Governance.Action (GovernableAction, GovernableAction_Cancel(..), GovernableAction_ProposerCancel(..))
 import Governance.Confirmation
 import Governance.Rules
 import Governance.MockActions
@@ -178,3 +178,59 @@ testRejectWrongGovernanceParty = script do
     exerciseCmd rulesCid GovernanceRules_ConfirmAction with
       confirmer = parties.member1
       actionProposalCid = proposalIfaceCid
+
+-- | Proposer can cancel their own proposal via GovernableAction_ProposerCancel.
+testProposerCanCancelOwnProposal = script do
+  parties <- allocateTestParties
+  _rulesCid <- createTestGovernance parties
+
+  proposalCid <- submit parties.member1 $ createCmd MockProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    label = "TestAction"
+    payload = "test"
+
+  let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
+
+  submit parties.member1 $
+    exerciseCmd proposalIfaceCid GovernableAction_ProposerCancel
+
+  proposals <- query @MockProposal parties.governanceParty
+  proposals === []
+
+-- | A different member cannot cancel via GovernableAction_ProposerCancel —
+-- the choice is gated to the original proposer only.
+testNonProposerCannotProposerCancel = script do
+  parties <- allocateTestParties
+  _rulesCid <- createTestGovernance parties
+
+  proposalCid <- submit parties.member1 $ createCmd MockProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    label = "TestAction"
+    payload = "test"
+
+  let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
+
+  submitMustFail (memberContext parties.member2 parties.governanceParty) $
+    exerciseCmd proposalIfaceCid GovernableAction_ProposerCancel
+
+-- | The governance-party cancel path remains available alongside the new
+-- proposer-cancel path.
+testGovernancePartyCanStillCancel = script do
+  parties <- allocateTestParties
+  _rulesCid <- createTestGovernance parties
+
+  proposalCid <- submit parties.member1 $ createCmd MockProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    label = "TestAction"
+    payload = "test"
+
+  let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
+
+  submit parties.governanceParty $
+    exerciseCmd proposalIfaceCid GovernableAction_Cancel
+
+  proposals <- query @MockProposal parties.governanceParty
+  proposals === []

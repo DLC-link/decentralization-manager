@@ -433,10 +433,13 @@ template GovernanceRules
           executedAt = now
         pure ExecuteConfirmedActionResult with ..
 
-    -- Note: Proposal cancellation is NOT a governance choice. Proposers cancel
-    -- their own proposals directly via template-specific choices. Governance-level
-    -- cancellation (e.g., cleaning up stale proposals) should go through the
-    -- standard vote flow as a GovernableAction itself.
+    -- Note: Proposal cancellation lives on the GovernableAction interface,
+    -- not as a GovernanceRules choice. The interface exposes two paths:
+    --   * GovernableAction_ProposerCancel — controlled by the proposer, lets
+    --     them retract their own proposal without a governance vote.
+    --   * GovernableAction_Cancel — controlled by governanceParty, used when
+    --     governance needs to clean up a stale proposal (typically via the
+    --     standard vote flow as a GovernableAction itself).
 
     -- | Expire a stale action confirmation.
     nonconsuming choice GovernanceRules_ExpireConfirmation : ()
