@@ -128,34 +128,41 @@ pub async fn wait_for_exit(pid: u32, deadline: Duration) -> Result<()> {
     }
 }
 
-/// Block (with deadline) until both the HTTP and Noise listener ports are
-/// accepting TCP connections. Mirrors `wait_for_server` in env.sh.
-pub async fn wait_for_server(http_port: u16, noise_port: u16, deadline: Duration) -> Result<()> {
+/// Block (with deadline) until the HTTP listener port is accepting TCP
+/// connections.
+///
+/// HTTP-only by design — the Noise *invite* listener's bound state is not
+/// a reliable signal that DPM is healthy after a chaos restart. DPM's
+/// restart-resume path (`src/server/mod.rs`) detects in-progress
+/// `workflow_runs` rows and resumes them as coordinators, which pauses the
+/// Noise invite listener and drops its TCP socket — workflow-specific Noise
+/// servers take exclusive control of port 9000 instead. On devnet, where
+/// each workflow step makes a Canton round trip taking 10-30s, the invite
+/// listener can stay paused well past any plausible deadline. Polling for
+/// the Noise port in this state used to false-fail with
+/// "ports not bound: http=true noise=false" on G1 (restart_coordinator_resume).
+///
+/// HTTP listener coming up is the right "DPM completed bootstrap" signal:
+/// it's bound exactly once in src/server/mod.rs after Canton's participant
+/// ID lookup, DB migrations, and the auth/workflow-state init pass. From
+/// that point forward, DPM is reachable on the HTTP plane; the Noise plane
+/// might or might not be bound depending on what workflow_runs were
+/// recovered from disk.
+pub async fn wait_for_server(http_port: u16, deadline: Duration) -> Result<()> {
     let start = Instant::now();
-    let mut waited_http = false;
-    let mut waited_noise = false;
     loop {
-        if !waited_http && TcpStream::connect(("127.0.0.1", http_port)).await.is_ok() {
-            waited_http = true;
-        }
-        if !waited_noise && TcpStream::connect(("127.0.0.1", noise_port)).await.is_ok() {
-            waited_noise = true;
-        }
-        if waited_http && waited_noise {
-            // Settle delay so the OTHER nodes' Noise clients detect the
-            // dropped connection to the (now-respawned) target and
-            // re-handshake. `wait_for_server` only proves the new HTTP/Noise
-            // ports are bound — it doesn't prove every peer-to-peer Noise
-            // session is healthy. Bash harness used 5s here; chaos phases
-            // can restart multiple nodes back-to-back, so we use a longer
-            // settle to keep the next phase's peer-mesh pre-flight green.
+        if TcpStream::connect(("127.0.0.1", http_port)).await.is_ok() {
+            // Settle delay so a freshly-respawned DPM has time to finish
+            // any in-flight workflow-resume work before the next test
+            // step starts pounding it. Bash harness used 5s here; chaos
+            // phases can restart multiple nodes back-to-back, so we use
+            // a longer settle to keep the next phase's peer-mesh
+            // pre-flight green.
             sleep(Duration::from_secs(8)).await;
             return Ok(());
         }
         if start.elapsed() >= deadline {
-            anyhow::bail!(
-                "ports not bound: http={waited_http} noise={waited_noise} (after {deadline:?})"
-            );
+            anyhow::bail!("http port {http_port} not bound after {deadline:?}");
         }
         sleep(Duration::from_millis(200)).await;
     }
@@ -243,7 +250,7 @@ pub async fn restart_node_explicit(
     wait_for_exit(current_pid, Duration::from_secs(15)).await?;
     let restarted_file = fixture.dev_dir.join("restarted-pids");
     let new_pid = spawn_node(spawn, &restarted_file).await?;
-    wait_for_server(spawn.http_port, spawn.noise_port, Duration::from_secs(60)).await?;
+    wait_for_server(spawn.http_port, Duration::from_secs(60)).await?;
     Ok(new_pid)
 }
 
@@ -289,7 +296,7 @@ pub async fn spawn_only(fixture: &mut Fixture, participant: u8) -> Result<u32> {
     let spawn = fixture.node_spawn(participant)?;
     let restarted_file = fixture.dev_dir.join("restarted-pids");
     let new_pid = spawn_node(&spawn, &restarted_file).await?;
-    wait_for_server(spawn.http_port, spawn.noise_port, Duration::from_secs(60)).await?;
+    wait_for_server(spawn.http_port, Duration::from_secs(60)).await?;
     fixture.current_pids[idx] = Some(new_pid);
     Ok(new_pid)
 }
