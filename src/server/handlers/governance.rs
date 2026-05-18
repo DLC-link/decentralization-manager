@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 use anyhow::Context;
 use base64::Engine;
@@ -32,14 +34,19 @@ use crate::{
             get_governance_state as query_governance_state, get_instruments, get_provider_services,
             get_registrar_services, get_user_services, get_vaults, query_contracts_by_template,
         },
+        transfer_context::{
+            fetch as fetch_accept_transfer_context, maybe_fetch_for_proposal,
+            to_proto_disclosed_contracts,
+        },
         types::{
             AuditLogEntry, AuditLogQuery, AuditLogResponse, CancelConfirmationRequest,
             ChainAuditEntry, ChainAuditQuery, ChainAuditResponse, ConfirmActionRequest,
             ContractQueryResponse, ErrorResponse, ExecuteActionRequest, ExpireConfirmationRequest,
             GovernanceResponse, GovernanceStateResponse, GovernanceType, InstrumentsResponse,
             KnownMember, KnownMembersResponse, MessageResponse, NetworkInfo, OperatorInfo,
-            ProposeActionRequest, ProviderServicesResponse, RegistrarServicesResponse,
-            TransferPreapprovalsResponse, UserServicesResponse, VaultsResponse,
+            ProposalType, ProposeActionRequest, ProviderServicesResponse,
+            RegistrarServicesResponse, TransferPreapprovalsResponse, UserServicesResponse,
+            VaultsResponse,
         },
     },
     utils,
@@ -768,12 +775,48 @@ pub async fn propose_action(
 
     let packages = packages();
 
+    // For `AcceptTransfer`, the underlying `TransferInstruction_Accept` choice
+    // requires the token-standard `transfer-rule` choice-context entry. Fetch
+    // the context from the registry now so the on-chain proposal carries the
+    // right `extraArgs.context.values`; without it, execute time fails with
+    // `Missing context entry for utility.digitalasset.com/transfer-rule`.
+    let accept_transfer_context = match &body.proposal {
+        ProposalType::AcceptTransfer {
+            transfer_instruction_cid,
+        } => match fetch_accept_transfer_context(
+            data.config.canton.network,
+            &party_id.to_string(),
+            transfer_instruction_cid,
+        )
+        .await
+        {
+            Ok(ctx) => Some(ctx),
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to fetch AcceptTransfer choice context from registry: {e:#}"
+                );
+                return HttpResponse::BadGateway().json(ErrorResponse {
+                    error: format!("Failed to fetch transfer choice context: {e}"),
+                });
+            }
+        },
+        _ => None,
+    };
+
     let (package_source, module_name, entity_name, create_args) =
-        action_serializer::build_proposal_create_args(
+        match action_serializer::build_proposal_create_args(
             &party_id.to_string(),
             &member_party_id.to_string(),
             &body.proposal,
-        );
+            accept_transfer_context.as_ref().map(|r| &r.context),
+        ) {
+            Ok(args) => args,
+            Err(e) => {
+                return HttpResponse::BadRequest().json(ErrorResponse {
+                    error: format!("Failed to build proposal create arguments: {e}"),
+                });
+            }
+        };
 
     let package_id = match package_source {
         action_serializer::ProposalPackage::GovernanceCore => {
@@ -1793,6 +1836,37 @@ async fn execute_confirmed_action(
         }
     };
 
+    // For `AcceptTransferProposal` execution the executor's submission must
+    // include the registry-supplied disclosed contracts (transfer rule + its
+    // dependencies). Detect that by template id of the on-chain proposal and
+    // fetch the choice context now. Other proposal types pass through.
+    let mut registry_disclosed: Vec<DisclosedContract> = Vec::new();
+    if matches!(request.governance_type, GovernanceType::CoreDomain)
+        && let Some(proposal_cid) = request.proposal_cid.as_deref()
+    {
+        match maybe_fetch_for_proposal(
+            config,
+            Some(token.to_string()),
+            &request.party_id,
+            proposal_cid,
+        )
+        .await
+        {
+            Ok(Some(ctx)) => {
+                registry_disclosed = to_proto_disclosed_contracts(&ctx.disclosed_contracts)?;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                // Don't hard-fail on registry hiccups for non-transfer
+                // proposals; for transfer proposals the Daml choice will
+                // surface a clear `Missing context entry` error.
+                tracing::warn!(
+                    "Failed to fetch transfer choice context for proposal {proposal_cid}: {e:#}"
+                );
+            }
+        }
+    }
+
     let channel = tonic::transport::Channel::from_shared(config.ledger_api_url())?
         .connect()
         .await?;
@@ -1809,6 +1883,32 @@ async fn execute_confirmed_action(
         })),
     };
 
+    let mut disclosed_contracts: Vec<DisclosedContract> = request
+        .disclosed_contracts
+        .iter()
+        .map(|dc| {
+            Ok(DisclosedContract {
+                template_id: None,
+                contract_id: dc.contract_id.clone(),
+                created_event_blob: base64::engine::general_purpose::STANDARD
+                    .decode(&dc.blob)
+                    .context("Invalid base64 in disclosed contract blob")?,
+                synchronizer_id: String::new(),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    // De-dup by contract id — the FE may forward something the registry also
+    // returned; keep the first occurrence (FE-supplied).
+    let seen: HashSet<String> = disclosed_contracts
+        .iter()
+        .map(|d| d.contract_id.clone())
+        .collect();
+    disclosed_contracts.extend(
+        registry_disclosed
+            .into_iter()
+            .filter(|d| !seen.contains(&d.contract_id)),
+    );
+
     let commands = Commands {
         workflow_id: String::new(),
         user_id: String::new(),
@@ -1820,20 +1920,7 @@ async fn execute_confirmed_action(
         act_as: vec![member_party_id.to_string()],
         read_as: vec![request.party_id.to_string()],
         submission_id: String::new(),
-        disclosed_contracts: request
-            .disclosed_contracts
-            .iter()
-            .map(|dc| {
-                Ok(DisclosedContract {
-                    template_id: None,
-                    contract_id: dc.contract_id.clone(),
-                    created_event_blob: base64::engine::general_purpose::STANDARD
-                        .decode(&dc.blob)
-                        .context("Invalid base64 in disclosed contract blob")?,
-                    synchronizer_id: String::new(),
-                })
-            })
-            .collect::<Result<Vec<_>>>()?,
+        disclosed_contracts,
         synchronizer_id: String::new(),
         package_id_selection_preference: vec![],
         prefetch_contract_keys: vec![],

@@ -73,6 +73,7 @@ zeroize = { version = "1.8", features = ["derive"] }
 
 canton-common = { package = "common", git = "ssh://git@github.com/DLC-link/canton-lib", branch = "main" }
 canton-proto-rs = { git = "ssh://git@github.com/DLC-link/canton-lib", branch = "main" }
+canton-registry = { package = "registry", git = "ssh://git@github.com/DLC-link/canton-lib", branch = "main" }
 keycloak = { git = "ssh://git@github.com/DLC-link/canton-lib", branch = "main" }
 
 [dev-dependencies]

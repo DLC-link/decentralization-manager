@@ -4,9 +4,12 @@
 //! and DAML `Value` representations for use with the Ledger API.
 
 use anyhow::Context;
-use canton_common::decimal::DamlDecimal;
+use canton_common::{
+    decimal::DamlDecimal,
+    transfer_factory::{Context as ChoiceContext, ContextValue},
+};
 use canton_proto_rs::com::daml::ledger::api::v2::{
-    List, Optional, Record, RecordField, Value, Variant, value,
+    List, Optional, Record, RecordField, TextMap, Value, Variant, text_map, value,
 };
 
 use crate::{error::Result, participant_id::CantonId};
@@ -89,10 +92,20 @@ fn make_list(values: Vec<Value>) -> Value {
 }
 
 fn make_empty_text_map() -> Value {
+    make_text_map(vec![])
+}
+
+fn make_text_map(entries: Vec<(String, Value)>) -> Value {
     Value {
-        sum: Some(value::Sum::TextMap(
-            canton_proto_rs::com::daml::ledger::api::v2::TextMap { entries: vec![] },
-        )),
+        sum: Some(value::Sum::TextMap(TextMap {
+            entries: entries
+                .into_iter()
+                .map(|(k, v)| text_map::Entry {
+                    key: k,
+                    value: Some(v),
+                })
+                .collect(),
+        })),
     }
 }
 
@@ -105,13 +118,62 @@ fn make_empty_metadata() -> Value {
 }
 
 fn make_empty_extra_args() -> Value {
+    make_extra_args(make_empty_text_map())
+}
+
+fn make_extra_args(context_values: Value) -> Value {
     make_record(vec![
         field(
             "context",
-            make_record(vec![field("values", make_empty_text_map())]),
+            make_record(vec![field("values", context_values)]),
         ),
         field("meta", make_empty_metadata()),
     ])
+}
+
+/// Serialize a `Splice.Api.Token.MetadataV1.AnyValue` constructor as a Daml
+/// `Variant` Value suitable for the Ledger API.
+fn make_any_value(v: &ContextValue) -> Result<Value> {
+    let (ctor, inner) = match v {
+        ContextValue::Text(s) => ("AV_Text", make_text(s)),
+        ContextValue::Int(n) => ("AV_Int", make_int64(*n)),
+        ContextValue::Decimal(d) => ("AV_Decimal", make_numeric(&d.to_string())),
+        ContextValue::Bool(b) => ("AV_Bool", make_bool(*b)),
+        ContextValue::Party(p) => ("AV_Party", make_party(p)),
+        ContextValue::ContractId(cid) => ("AV_ContractId", make_contract_id(cid)),
+        ContextValue::List(items) => {
+            let elements: Result<Vec<Value>> = items.iter().map(make_any_value).collect();
+            ("AV_List", make_list(elements?))
+        }
+        ContextValue::Map(m) => {
+            let mut entries: Vec<(String, Value)> = m
+                .iter()
+                .map(|(k, v)| make_any_value(v).map(|av| (k.clone(), av)))
+                .collect::<Result<_>>()?;
+            // Stable order so wire bytes are deterministic.
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            ("AV_Map", make_text_map(entries))
+        }
+        ContextValue::Date(_) | ContextValue::Time(_) | ContextValue::RelTime(_) => {
+            anyhow::bail!(
+                "AnyValue::{v:?} not supported in choice context: only Text/Int/Decimal/Bool/\
+                 Party/ContractId/List/Map are translated to the Ledger API today",
+            );
+        }
+    };
+    Ok(make_variant(ctor, inner))
+}
+
+/// Build the `extraArgs` record with the choice-context values populated from
+/// a registry response (e.g. `registry::accept_context::get`).
+fn make_extra_args_from_context(ctx: &ChoiceContext) -> Result<Value> {
+    let mut entries: Vec<(String, Value)> = ctx
+        .values
+        .iter()
+        .map(|(k, v)| make_any_value(v).map(|av| (k.clone(), av)))
+        .collect::<Result<_>>()?;
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(make_extra_args(make_text_map(entries)))
 }
 
 // ============================================================================
@@ -791,8 +853,9 @@ pub fn build_proposal_create_args(
     governance_party: &str,
     proposer: &str,
     proposal: &ProposalType,
-) -> (ProposalPackage, &'static str, &'static str, Record) {
-    match proposal {
+    accept_transfer_context: Option<&ChoiceContext>,
+) -> Result<(ProposalPackage, &'static str, &'static str, Record)> {
+    Ok(match proposal {
         ProposalType::SetupCcPreapproval {
             provider,
             expected_dso,
@@ -900,23 +963,38 @@ pub fn build_proposal_create_args(
         }
         ProposalType::AcceptTransfer {
             transfer_instruction_cid,
-        } => (
-            ProposalPackage::GovernanceTokenCustody,
-            "Governance.TokenCustody.AcceptTransfer",
-            "AcceptTransferProposal",
-            Record {
-                record_id: None,
-                fields: vec![
-                    field("governanceParty", make_party(governance_party)),
-                    field("proposer", make_party(proposer)),
-                    field(
-                        "transferInstructionCid",
-                        make_contract_id(transfer_instruction_cid),
-                    ),
-                    field("extraArgs", make_empty_extra_args()),
-                ],
-            },
-        ),
+        } => {
+            // The Daml `TransferInstruction_Accept` choice (invoked through
+            // `AcceptTransferProposal`) looks up
+            // `utility.digitalasset.com/transfer-rule` (and friends) in
+            // `extraArgs.context.values` at execution time. An empty context
+            // would fail with `Missing context entry for
+            // utility.digitalasset.com/transfer-rule`. The handler is
+            // expected to fetch the choice context from the token-standard
+            // registry and pass it in; if it didn't, fall back to an empty
+            // record (legacy callers, e.g. tests).
+            let extra_args = match accept_transfer_context {
+                Some(ctx) => make_extra_args_from_context(ctx)?,
+                None => make_empty_extra_args(),
+            };
+            (
+                ProposalPackage::GovernanceTokenCustody,
+                "Governance.TokenCustody.AcceptTransfer",
+                "AcceptTransferProposal",
+                Record {
+                    record_id: None,
+                    fields: vec![
+                        field("governanceParty", make_party(governance_party)),
+                        field("proposer", make_party(proposer)),
+                        field(
+                            "transferInstructionCid",
+                            make_contract_id(transfer_instruction_cid),
+                        ),
+                        field("extraArgs", extra_args),
+                    ],
+                },
+            )
+        }
         ProposalType::GenericVote { description } => (
             ProposalPackage::GovernanceCore,
             "Governance.GenericVote",
@@ -1267,7 +1345,7 @@ pub fn build_proposal_create_args(
                 ],
             },
         ),
-    }
+    })
 }
 
 /// Build the GovernanceRules_ConfirmAction choice argument for domain actions

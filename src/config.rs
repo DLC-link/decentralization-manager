@@ -264,7 +264,7 @@ pub struct KeycloakDefaults {
 }
 
 /// Canton Network environment
-#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema, clap::ValueEnum)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, utoipa::ToSchema, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum Network {
     Devnet,
@@ -292,6 +292,19 @@ impl Network {
                 "https://api.utilities.digitalasset-staging.com/api/utilities/v0/operator"
             }
             Network::Mainnet => "https://api.utilities.digitalasset.com/api/utilities/v0/operator",
+        }
+    }
+
+    /// Get the DA token-standard registry base URL for this network.
+    ///
+    /// Used to fetch choice contexts and disclosed contracts for token-standard
+    /// transfer flows (e.g. `AcceptTransfer` requires the `transfer-rule`
+    /// context entry, which the registry resolves per `TransferInstruction`).
+    pub fn registry_url(&self) -> &str {
+        match self {
+            Network::Devnet => "https://api.utilities.digitalasset-dev.com",
+            Network::Testnet => "https://api.utilities.digitalasset-staging.com",
+            Network::Mainnet => "https://api.utilities.digitalasset.com",
         }
     }
 

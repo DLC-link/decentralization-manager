@@ -5,6 +5,7 @@ mod chain_audit;
 mod handlers;
 mod middleware;
 mod queries;
+mod transfer_context;
 mod types;
 
 pub mod peer_status;

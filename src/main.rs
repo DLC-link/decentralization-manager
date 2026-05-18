@@ -112,7 +112,7 @@ async fn main() -> Result {
                 config.canton.synchronizer = sync.clone();
             }
             if let Some(net) = canton_network {
-                config.canton.network = net.clone();
+                config.canton.network = *net;
             }
             if keycloak_url.is_some() || keycloak_realm.is_some() || keycloak_client_id.is_some() {
                 let kc = config.keycloak.get_or_insert(KeycloakConfig {
