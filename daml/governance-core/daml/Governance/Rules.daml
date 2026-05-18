@@ -177,6 +177,8 @@ template GovernanceRules
       controller governanceParty
       do
         require "Not yet a member" (member `Set.notMember` members)
+        require "Member must not also be an additional proposer"
+          (optional True (Set.notMember member) additionalProposers)
         let newMembers = Set.insert member members
         validateThresholdForMemberCount (Set.size newMembers) newThreshold
         governanceRulesCid <- create this with
