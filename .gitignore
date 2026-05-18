@@ -1,4 +1,7 @@
 target/
+.worktrees/
+docs/superpowers
+.claude/
 
 # Generated keys and configuration
 
