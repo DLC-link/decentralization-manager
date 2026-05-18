@@ -5,11 +5,38 @@ pub const MIN_PARTICIPANTS: usize = 2;
 /// Requires higher threshold for financial operations
 pub const MIN_PARTICIPANTS_CONTRACTS: usize = 3;
 
-/// Maximum number of retry attempts for topology propagation checks
+/// Maximum number of retry attempts for topology propagation checks.
+/// Default value; the actual budget is read via [`topology_retry_max_attempts`].
 pub const TOPOLOGY_RETRY_MAX_ATTEMPTS: usize = 30;
 
-/// Delay in seconds between retry attempts for topology operations
+/// Delay in seconds between retry attempts for topology operations.
+/// Default value; the actual delay is read via [`topology_retry_delay_secs`].
 pub const TOPOLOGY_RETRY_DELAY_SECS: u64 = 2;
+
+/// Maximum retry attempts for topology propagation, configurable at runtime
+/// via the `DPM_TOPOLOGY_RETRY_MAX_ATTEMPTS` env var. Defaults to
+/// [`TOPOLOGY_RETRY_MAX_ATTEMPTS`] (30) when unset or unparseable.
+///
+/// On devnet, Canton's topology read API response time varies significantly
+/// across runs — a 60s budget (30 × 2s) sometimes covers the worst case,
+/// sometimes doesn't. Operators running against a slow synchronizer can
+/// raise this without recompiling.
+pub fn topology_retry_max_attempts() -> usize {
+    std::env::var("DPM_TOPOLOGY_RETRY_MAX_ATTEMPTS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(TOPOLOGY_RETRY_MAX_ATTEMPTS)
+}
+
+/// Delay between topology-poll attempts, configurable via the
+/// `DPM_TOPOLOGY_RETRY_DELAY_SECS` env var. Defaults to
+/// [`TOPOLOGY_RETRY_DELAY_SECS`] (2) when unset or unparseable.
+pub fn topology_retry_delay_secs() -> u64 {
+    std::env::var("DPM_TOPOLOGY_RETRY_DELAY_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(TOPOLOGY_RETRY_DELAY_SECS)
+}
 
 /// Canton protocol version used for key export and topology operations
 pub const CANTON_PROTOCOL_VERSION: i32 = 34;

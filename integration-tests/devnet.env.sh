@@ -130,6 +130,17 @@ export DPM_IT_RUN_ID="dpm-it-$(date -u +%Y%m%d-%H%M%S)-$$"
 DEV_DIR="$(mktemp -d -t dpm-devnet-it-XXXXXX)"
 export DEV_DIR
 
+# Canton topology poll budget for this run. Defaults baked into the binary
+# are 30 attempts × 2s = 60s (src/consts.rs), tuned for localnet's
+# docker-compose Canton where topology reads return in ms. On devnet the
+# kubectl-tunneled Canton response time varies significantly across runs;
+# one observed devnet run on 9fd91be reached identity_survives_dismiss's
+# re-onboarding step where the P2P-topology poll exhausted 60s. Bumping
+# to 90 attempts × 2s = 180s gives headroom while staying well under the
+# scenario's outer deadline. Override on the CLI if you see further
+# timeouts.
+export DPM_TOPOLOGY_RETRY_MAX_ATTEMPTS=90
+
 # ---------------------------------------------------------------------------
 # Per-participant ports.
 # - HTTP: 8081/8082/8083 (DPM's own HTTP API)
