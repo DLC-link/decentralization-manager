@@ -27,8 +27,8 @@ use canton_proto_rs::com::digitalasset::canton::{
         v30::public_key,
     },
     topology::admin::v30::{
-        BaseQuery, ListDecentralizedNamespaceDefinitionRequest, ListPartyToParticipantRequest,
-        StoreId, Synchronizer, base_query, store_id, synchronizer,
+        BaseQuery, ListDecentralizedNamespaceDefinitionRequest, StoreId, Synchronizer, base_query,
+        store_id, synchronizer,
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
     },
 };
@@ -54,7 +54,7 @@ use crate::{
     },
     server::middleware::AuthMiddleware,
     server::peer_status::LastSeen,
-    utils::{compute_fingerprint, get_synchronizer_id_from_url},
+    utils::{self, compute_fingerprint},
     workflow::{self, WorkflowType},
 };
 
@@ -128,8 +128,11 @@ pub struct AppState {
 #[derive(Clone)]
 struct WorkflowTriggers {
     pending_invitations: Arc<RwLock<Vec<PendingInvitation>>>,
+    /// Full node config — read by handler arms that need the participant
+    /// identity, admin URL, or synchronizer alias as a bundle (e.g.
+    /// `list_my_owner_keys`'s P2P filter, see #149).
+    config: NodeConfig,
     admin_api_url: String,
-    synchronizer: String,
     /// Cache for chunked ListPackages responses, keyed by the requesting
     /// peer's pubkey (hex). Populated when a ListPackages response exceeds
     /// `MAX_PAYLOAD_SIZE`; consumed by subsequent GetChunk requests from the
@@ -1067,8 +1070,8 @@ pub async fn start_server(
     let heartbeat_notify = listener_notify.clone();
     let heartbeat_triggers = WorkflowTriggers {
         pending_invitations: pending_invitations.clone(),
+        config: config.clone(),
         admin_api_url: config.admin_api_url(),
-        synchronizer: config.synchronizer().to_string(),
         list_packages_chunk_cache: Arc::new(Mutex::new(HashMap::new())),
         db: db.clone(),
         party_credentials: party_credentials.clone(),
@@ -1716,16 +1719,24 @@ async fn handle_incoming_connection(
                         }
                         MessageType::RequestOwnerKeys => {
                             tracing::debug!("Received RequestOwnerKeys request");
-                            let admin_url = triggers.admin_api_url.clone();
-                            let synchronizer = triggers.synchronizer.clone();
-                            let payload = match list_my_owner_keys(&admin_url, &synchronizer).await
-                            {
-                                Ok(data) => data,
-                                Err(e) => {
-                                    tracing::error!("Failed to list owner keys: {e}");
-                                    b"[]".to_vec()
-                                }
-                            };
+                            // Payload is a JSON array of decentralized party_ids
+                            // the caller wants this node's owner_keys for (see
+                            // #149: peer no longer enumerates the synchronizer).
+                            // A malformed or absent payload is treated as
+                            // "nothing requested" — return an empty list rather
+                            // than fall back to a slow whole-synchronizer scan.
+                            let requested_party_ids: Vec<String> =
+                                serde_json::from_slice(&msg.payload).unwrap_or_default();
+                            let payload =
+                                match list_my_owner_keys(&triggers.config, &requested_party_ids)
+                                    .await
+                                {
+                                    Ok(data) => data,
+                                    Err(e) => {
+                                        tracing::error!("Failed to list owner keys: {e}");
+                                        b"[]".to_vec()
+                                    }
+                                };
                             let response_msg = Message::new(MessageType::OwnerKeys, payload);
                             return Ok(Response::builder()
                                 .status(StatusCode::OK)
@@ -2452,10 +2463,41 @@ async fn run_dars_peer_listener(
     }
 }
 
-/// Query Canton for this node's owner keys across all decentralized parties.
-/// Returns JSON: `[{"party_id": "prefix::namespace", "owner_key": "fingerprint"}, ...]`
-async fn list_my_owner_keys(admin_api_url: &str, synchronizer_alias: &str) -> Result<Vec<u8>> {
-    let channel = tonic::transport::Channel::from_shared(admin_api_url.to_string())?
+/// Query Canton for this node's owner keys across a caller-supplied set of
+/// decentralized parties. Returns JSON:
+/// `[{"party_id": "prefix::namespace", "owner_key": "fingerprint"}, ...]`.
+///
+/// `requested_party_ids` is the list of parties the caller cares about, sent
+/// in the Noise `RequestOwnerKeys` payload by `resolve_owner_keys_from_peers`.
+/// Building the `namespace → party_id` map directly from this list lets us
+/// skip the unfiltered `list_party_to_participant` call that previously
+/// scanned every party on the synchronizer — that scan does not complete
+/// within the Noise budget against a kubectl-tunneled Canton admin API on
+/// devnet (~170 parties, never returns within 60s; see #149).
+async fn list_my_owner_keys(
+    config: &NodeConfig,
+    requested_party_ids: &[String],
+) -> Result<Vec<u8>> {
+    if requested_party_ids.is_empty() {
+        return Ok(b"[]".to_vec());
+    }
+
+    // Caller provides full party_ids ("prefix::namespace_fingerprint"). The
+    // namespace is the suffix after the final "::"; we use it to look up the
+    // matching `DecentralizedNamespaceDefinition` entry. Party IDs without
+    // "::" are dropped (malformed; nothing we could match against).
+    let namespace_to_party: HashMap<String, &str> = requested_party_ids
+        .iter()
+        .filter_map(|pid| {
+            pid.rsplit_once("::")
+                .map(|(_, ns)| (ns.to_string(), pid.as_str()))
+        })
+        .collect();
+    if namespace_to_party.is_empty() {
+        return Ok(b"[]".to_vec());
+    }
+
+    let channel = tonic::transport::Channel::from_shared(config.admin_api_url())?
         .connect()
         .await?;
 
@@ -2479,7 +2521,8 @@ async fn list_my_owner_keys(admin_api_url: &str, synchronizer_alias: &str) -> Re
         }
     }
 
-    let synchronizer_id = get_synchronizer_id_from_url(admin_api_url, synchronizer_alias).await?;
+    // Cached after first call (`get_synchronizer_id` memoises via OnceCell).
+    let synchronizer_id = utils::get_synchronizer_id(config).await?;
 
     let base_query = BaseQuery {
         store: Some(StoreId {
@@ -2494,39 +2537,21 @@ async fn list_my_owner_keys(admin_api_url: &str, synchronizer_alias: &str) -> Re
         protocol_version: None,
     };
 
-    // Get all decentralized namespace definitions
+    // Get all decentralized namespace definitions. The response is bounded by
+    // the number of decentralized parties allocated on the synchronizer
+    // (49 entries observed on devnet — completes in <1s).
     let dns_response = topology_client
         .list_decentralized_namespace_definition(tonic::Request::new(
             ListDecentralizedNamespaceDefinitionRequest {
-                base_query: Some(base_query.clone()),
+                base_query: Some(base_query),
                 filter_namespace: String::new(),
             },
         ))
         .await?
         .into_inner();
 
-    // Get P2P mappings to resolve full party_id (prefix::namespace)
-    let p2p_response = topology_client
-        .list_party_to_participant(tonic::Request::new(ListPartyToParticipantRequest {
-            base_query: Some(base_query),
-            filter_party: String::new(),
-            filter_participant: String::new(),
-        }))
-        .await?
-        .into_inner();
-
-    // Build namespace → full party_id map from P2P data
-    let namespace_to_party: HashMap<String, String> = p2p_response
-        .results
-        .into_iter()
-        .filter_map(|r| {
-            let p = r.item?;
-            let ns = p.party.rsplit_once("::")?.1.to_string();
-            Some((ns, p.party))
-        })
-        .collect();
-
-    // Match this node's fingerprints against each party's owners list
+    // Match this node's fingerprints against each party's owners list, but
+    // only for namespaces the caller asked about.
     let mut entries = Vec::new();
     for result in dns_response.results {
         let Some(item) = result.item else { continue };

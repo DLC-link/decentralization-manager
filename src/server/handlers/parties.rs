@@ -241,7 +241,23 @@ pub async fn resolve_owner_keys_from_peers(
         };
 
         let psk = keypair.derive_psk(&peer_pub_key);
-        let msg = Message::new_empty(MessageType::RequestOwnerKeys);
+        // Tell the peer which parties we want owner_keys for. See #149: peer
+        // used to enumerate the whole synchronizer to build a namespace→party
+        // map; we now pass the namespaces (via the full party_ids) directly so
+        // the peer can skip that scan.
+        let request_payload = match serde_json::to_vec(
+            &parties
+                .iter()
+                .map(|p| p.party_id.to_string())
+                .collect::<Vec<_>>(),
+        ) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!("Failed to serialise RequestOwnerKeys payload: {e}");
+                continue;
+            }
+        };
+        let msg = Message::new(MessageType::RequestOwnerKeys, request_payload);
 
         tracing::debug!("Requesting owner keys from {peer_uid}");
         let response = match tokio::time::timeout(
