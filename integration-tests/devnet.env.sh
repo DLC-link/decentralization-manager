@@ -260,5 +260,22 @@ stop_localnet()     { stop_canton_tunnels; }
 
 cleanup() {
     stop_nodes 2>/dev/null || true
+
+    # Also reap any PIDs that Rust chaos phases respawned during the run.
+    # `tests/common/processes.rs::spawn_node` appends each respawned PID to
+    # `$DEV_DIR/restarted-pids`. The localnet `cleanup` in `env.sh` already
+    # does this; devnet's override missed the equivalent step, leaking the
+    # chaos-respawned DPMs after every run that exercised G1-P2. Those
+    # leftovers then trip `check_dpm_ports_free` on the next bringup or
+    # (worse, pre-port-check fix) silently steal `wait_for_server`'s TCP
+    # readiness probes.
+    if [ -n "${DEV_DIR:-}" ] && [ -f "$DEV_DIR/restarted-pids" ]; then
+        while IFS= read -r pid; do
+            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+                kill -9 "$pid" 2>/dev/null || true
+            fi
+        done < "$DEV_DIR/restarted-pids"
+    fi
+
     stop_canton_tunnels 2>/dev/null || true
 }
