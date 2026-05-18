@@ -60,7 +60,13 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
 
     chaos::say("G1", "waiting for resumed run to reach completed");
     let p1_db = f.db_path(1);
-    chaos::poll_until(Duration::from_secs(240), || async {
+    // 360s budget: a devnet run on post-#158 tip a1b29f0 exhausted the
+    // previous 240s deadline waiting for the workflow_run to flip to
+    // `completed` after the P1 restart + both peer Accepts. Localnet
+    // completes here in milliseconds, so the budget bump is harmless on
+    // localnet but gives the kubectl-tunneled devnet Canton a realistic
+    // window for the post-restart resume path. Tracked in #161.
+    chaos::poll_until(Duration::from_secs(360), || async {
         Ok(matches!(
             db::workflow_run_status(&p1_db, &instance, "Coordinator")
                 .await?
