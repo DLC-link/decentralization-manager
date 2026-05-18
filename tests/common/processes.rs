@@ -8,6 +8,7 @@
 //! `cleanup()` trap kills them even if the cargo test panics.
 
 use std::{
+    fs::OpenOptions as StdOpenOptions,
     path::PathBuf,
     process::Stdio,
     time::{Duration, Instant},
@@ -166,6 +167,18 @@ pub async fn wait_for_server(http_port: u16, noise_port: u16, deadline: Duration
 pub async fn spawn_node(spawn: &NodeSpawn, restarted_pids_file: &PathBuf) -> Result<u32> {
     let rust_log = std::env::var("RUST_LOG")
         .unwrap_or_else(|_| "dec_party_manager=info,tokio_noise=error,hyper_noise=error".into());
+    // Same per-participant log file as bash bringup (integration-tests/common.sh::start_nodes).
+    // Open in append mode so chaos-phase respawns accumulate into one timeline
+    // per participant, matching the bash side's `>> "$log_file" 2>&1`.
+    let log_path = spawn.data_dir.join("stderr.log");
+    let log_file = StdOpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("opening {} for write", log_path.display()))?;
+    let log_clone = log_file
+        .try_clone()
+        .with_context(|| format!("cloning {} for stderr after stdout", log_path.display()))?;
     let child = Command::new(&spawn.binary)
         .arg("-d")
         .arg(&spawn.data_dir)
@@ -186,8 +199,8 @@ pub async fn spawn_node(spawn: &NodeSpawn, restarted_pids_file: &PathBuf) -> Res
         )
         .env("DECPM_CANTON_NETWORK", "devnet")
         .env("DECPM_NOISE_PORT", spawn.noise_port.to_string())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::from(log_file))
+        .stderr(Stdio::from(log_clone))
         .kill_on_drop(false)
         .spawn()
         .with_context(|| {

@@ -174,7 +174,11 @@ start_nodes() {
 
     for i in 1 2 3; do
         local idx=$((i - 1))
-        echo "Starting participant-$i..."
+        # Per-participant stderr file: makes "what did P1 see" answerable
+        # without grepping a 3-way-interleaved unified log. Appended (>>) so
+        # configure_peers' restart cycle accumulates rather than truncates.
+        local log_file="$DEV_DIR/participant-$i/stderr.log"
+        echo "Starting participant-$i (log: $log_file)..."
         RUST_LOG="${RUST_LOG:-dec_party_manager=info,tokio_noise=error,hyper_noise=error}" \
         DECPM_CANTON_ADMIN_HOST=127.0.0.1 \
         DECPM_CANTON_ADMIN_PORT="${canton_admin_ports[$idx]}" \
@@ -183,7 +187,8 @@ start_nodes() {
         DECPM_CANTON_NETWORK=devnet \
         DECPM_NOISE_PORT="${noise_ports[$idx]}" \
         "$BINARY" -d "$DEV_DIR/participant-$i" serve \
-            --host 0.0.0.0 --port "${http_ports[$idx]}" &
+            --host 0.0.0.0 --port "${http_ports[$idx]}" \
+            >> "$log_file" 2>&1 &
         PIDS+=($!)
     done
 
