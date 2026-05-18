@@ -88,13 +88,19 @@ trap cleanup EXIT
 
 check_prerequisites
 
-# Port-free check is only meaningful for the localnet path where bare DPM
-# processes are spawned. On devnet, docker-compose manages port bindings for
-# 8081-8083 and 9000-9002; checking here would either false-positive (if
-# containers are already running) or be irrelevant.
-if [ "$TARGET" = "localnet" ]; then
-    check_dpm_ports_free
-fi
+# Port-free check applies to both targets: PR #142 moved devnet to a
+# bare-process bringup (no longer docker-compose), so the same 6 ports
+# (8081-8083 HTTP + 9000-9002 Noise) are bound directly by DPM on devnet
+# too. An orphan DPM from a previous run (especially from another worktree
+# of the same repo) would otherwise:
+#   - hold the port,
+#   - silently steal the bash bringup's `wait_for_server` TCP readiness probe
+#     (so the new DPM's EADDRINUSE death is invisible),
+#   - and respond to subsequent traffic with its own (stale, possibly
+#     wrong-revision) Noise keys — producing peer-decrypt errors that look
+#     like the new DPM is misconfigured.
+# Fail fast here instead.
+check_dpm_ports_free
 
 # ---------------------------------------------------------------------------
 # Verbosity preset
