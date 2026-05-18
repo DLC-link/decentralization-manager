@@ -549,22 +549,11 @@ human-readable error.
 
 #### Known issues
 
-- **`owner_key_resilience` currently fails on devnet** — peer-side
-  `list_my_owner_keys` is cancelled by the Noise server's
-  `NOISE_REQUEST_TIMEOUT` because `list_party_to_participant` with empty
-  filter does not return within 60s against the kubectl-tunneled Canton
-  admin API (full diagnosis + fix shape in [#149][i149]). 15 of 16
-  happy-path scenarios pass (verified end-to-end on `ieu-devnet`); the
-  16th — `owner_key survives a cache refresh` — is the known failure.
-  Chaos phases (those after `owner_key_resilience` in the e2e flow) are
-  not yet validated on devnet because the e2e test stops at the first
-  failing scenario.
 - **`SignDns` flake** observed once in `create_dec_party` (Canton-side
   `TOPOLOGY_NO_APPROPRIATE_SIGNING_KEY_IN_STORE`), did not reproduce on
   retry.
 
 [i148]: https://github.com/DLC-link/dec-party-manager/issues/148
-[i149]: https://github.com/DLC-link/dec-party-manager/issues/149
 [cprev6]: https://github.com/DLC-link/dec-party-manager/pull/142#discussion_r3241693561
 
 ### Frontend Development

@@ -126,11 +126,6 @@ unset _SMOKE_TOKEN
 # Target + run-id + DEV_DIR.
 # ---------------------------------------------------------------------------
 export DPM_IT_TARGET=devnet
-# Enable the owner_key snapshot harness (tests/common/diagnostics.rs). Each
-# happy-path phase will record P1/P2/P3's view of the current dec party's
-# participants[*].owner_key into $DEV_DIR/owner-key-snapshots.jsonl, with a
-# one-line tracing summary per phase. Unset on localnet (harness is a no-op).
-export DPM_IT_OWNER_KEY_SNAPSHOTS=1
 export DPM_IT_RUN_ID="dpm-it-$(date -u +%Y%m%d-%H%M%S)-$$"
 DEV_DIR="$(mktemp -d -t dpm-devnet-it-XXXXXX)"
 export DEV_DIR
