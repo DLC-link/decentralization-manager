@@ -80,14 +80,21 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     // run. Instead we poll until the response settles on
                     // `refreshing == false` and let the final assertion
                     // (owner_key intact) prove the invariant.
-                    for _ in 0..30 {
+                    //
+                    // 30s budget (150 × 200ms). Localnet refreshes in
+                    // milliseconds; devnet's `resolve_owner_keys_from_peers`
+                    // makes a Noise round trip per peer plus the Canton
+                    // `list_my_owner_keys` admin-gRPC calls (post-#158 fix
+                    // ≈3s/peer worst case on the kubectl tunnel). A run on
+                    // 9fd91be exhausted the original 6s budget here.
+                    for _ in 0..150 {
                         let r: DecentralizedPartiesResponse = f.get_json(f.p1.http, &path).await?;
                         if !r.refreshing {
                             return Ok(());
                         }
                         sleep(Duration::from_millis(200)).await;
                     }
-                    anyhow::bail!("refresh did not complete within 6s")
+                    anyhow::bail!("refresh did not complete within 30s")
                 })
             },
         )
