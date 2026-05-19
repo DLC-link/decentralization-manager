@@ -80,6 +80,11 @@ interface PartyDetailProps {
   party: DecentralizedParty;
   onBack: () => void;
   onRefresh: () => void;
+  /// Switch the app to the notifications tab. Called after the kick /
+  /// contract-deployment workflows complete and after a governance action or
+  /// proposal is submitted, so the user lands on the queue showing the
+  /// resulting entry.
+  onNavigateToNotifications: () => void;
   selfParticipantId?: string;
   authStatus?: PartyAuthStatus;
   onAuthRefresh?: () => void;
@@ -91,6 +96,7 @@ export const PartyDetail = ({
   party,
   onBack,
   onRefresh,
+  onNavigateToNotifications,
   selfParticipantId,
   authStatus,
   onAuthRefresh,
@@ -509,7 +515,10 @@ export const PartyDetail = ({
       <KickDialog
         open={kickDialogOpen}
         onClose={() => setKickDialogOpen(false)}
-        onKickComplete={onRefresh}
+        onKickComplete={() => {
+          onRefresh();
+          onNavigateToNotifications();
+        }}
         partyId={party.party_id}
         participantUid={selectedParticipant}
         participantOwnerKey={
@@ -524,7 +533,10 @@ export const PartyDetail = ({
       <ContractsDialog
         open={contractsDialogOpen}
         onClose={() => setContractsDialogOpen(false)}
-        onComplete={onRefresh}
+        onComplete={() => {
+          onRefresh();
+          onNavigateToNotifications();
+        }}
         partyId={party.party_id}
         participantIds={party.participants.map((p) => p.participant_uid)}
         defaultOperatorParty={operatorParty}
@@ -553,7 +565,10 @@ export const PartyDetail = ({
           defaultOperatorParty={operatorParty}
           network={network}
           governanceType={governanceTypeFor(editingContract.template_id)}
-          onAfterAction={() => setGovernanceRefreshNonce((n) => n + 1)}
+          onAfterAction={() => {
+            setGovernanceRefreshNonce((n) => n + 1);
+            onNavigateToNotifications();
+          }}
           view={govDialogView}
         />
       )}
