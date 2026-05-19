@@ -1877,12 +1877,12 @@ async fn execute_confirmed_action(
 
     // For `AcceptTransferProposal` execution the executor's submission must
     // include the registry-supplied disclosed contracts (transfer rule + its
-    // dependencies). Detect that by template id of the on-chain proposal and
-    // fetch the choice context now. Other proposal types pass through.
+    // dependencies). `maybe_fetch_for_proposal` template-id-checks the
+    // on-chain proposal and returns `Ok(None)` for anything else, so we don't
+    // gate on `governance_type` here — that would silently drop the fetch on
+    // any non-CoreDomain path that happens to carry an AcceptTransferProposal.
     let mut registry_disclosed: Vec<DisclosedContract> = Vec::new();
-    if matches!(request.governance_type, GovernanceType::CoreDomain)
-        && let Some(proposal_cid) = request.proposal_cid.as_deref()
-    {
+    if let Some(proposal_cid) = request.proposal_cid.as_deref() {
         match maybe_fetch_for_proposal(
             config,
             Some(token.to_string()),

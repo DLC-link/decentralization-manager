@@ -1818,3 +1818,93 @@ pub fn deserialize_action(value: &Value) -> Result<ActionType> {
         other => anyhow::bail!("Unknown action constructor: {other}"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+
+    // Locks the AV_* constructor strings against the on-ledger
+    // `Splice.Api.Token.MetadataV1.AnyValue` definition. A typo here would
+    // surface as a runtime interpretation error far from the source, so the
+    // mapping for every supported `ContextValue` variant is asserted explicitly.
+    #[test]
+    fn make_any_value_maps_each_variant_to_expected_ctor() {
+        let cases: Vec<(ContextValue, &str)> = vec![
+            (ContextValue::Text("hi".to_string()), "AV_Text"),
+            (ContextValue::Int(42), "AV_Int"),
+            (
+                ContextValue::Decimal(DamlDecimal::parse("1.5").unwrap()),
+                "AV_Decimal",
+            ),
+            (ContextValue::Bool(true), "AV_Bool"),
+            (ContextValue::Party("alice::pid".to_string()), "AV_Party"),
+            (
+                ContextValue::ContractId("cid-1".to_string()),
+                "AV_ContractId",
+            ),
+            (
+                ContextValue::List(vec![ContextValue::Int(1)]),
+                "AV_List",
+            ),
+            (
+                ContextValue::Map(HashMap::from([(
+                    "k".to_string(),
+                    ContextValue::Text("v".to_string()),
+                )])),
+                "AV_Map",
+            ),
+        ];
+
+        for (input, expected_ctor) in cases {
+            let value = make_any_value(&input).expect("make_any_value succeeded");
+            match value.sum {
+                Some(value::Sum::Variant(v)) => assert_eq!(
+                    v.constructor, expected_ctor,
+                    "wrong constructor for {input:?}",
+                ),
+                other => panic!("expected Variant for {input:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn make_any_value_recurses_into_nested_map() {
+        let nested = ContextValue::Map(HashMap::from([
+            ("text".to_string(), ContextValue::Text("hi".to_string())),
+            (
+                "cid".to_string(),
+                ContextValue::ContractId("cid-1".to_string()),
+            ),
+            (
+                "nested".to_string(),
+                ContextValue::Map(HashMap::from([(
+                    "n".to_string(),
+                    ContextValue::Int(7),
+                )])),
+            ),
+        ]));
+
+        let value = make_any_value(&nested).expect("nested map serializes");
+        let Some(value::Sum::Variant(v)) = value.sum else {
+            panic!("expected Variant");
+        };
+        assert_eq!(v.constructor, "AV_Map");
+    }
+
+    #[test]
+    fn make_any_value_rejects_unsupported_time_variants() {
+        for unsupported in [
+            ContextValue::Date("2026-05-19".to_string()),
+            ContextValue::Time("2026-05-19T00:00:00Z".to_string()),
+            ContextValue::RelTime("PT1H".to_string()),
+        ] {
+            let err = make_any_value(&unsupported).expect_err("must reject");
+            assert!(
+                err.to_string().contains("ContextValue::"),
+                "error should reference the Rust type, got: {err}",
+            );
+        }
+    }
+}

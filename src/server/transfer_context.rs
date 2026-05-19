@@ -54,6 +54,9 @@ pub async fn fetch(
     let response = canton_registry::accept_context::get(canton_registry::accept_context::Params {
         registry_url: network.registry_url().to_string(),
         decentralized_party_id: decentralized_party_id.to_string(),
+        // Upstream field is named `transfer_offer_contract_id` but the
+        // registry endpoint actually keys on the TransferInstruction cid.
+        // Naming mismatch is in canton-lib, not here.
         transfer_offer_contract_id: transfer_instruction_cid.to_string(),
         request: canton_registry::accept_context::Request {
             meta: canton_registry::accept_context::Meta {
