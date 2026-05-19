@@ -2925,11 +2925,8 @@ mod tests {
     fn extract_transfer_instruction_info_drops_expired() {
         // Epoch is comfortably in the past.
         assert!(
-            extract_transfer_instruction_info(&make_event(
-                TRANSFER_PENDING_RECEIVER_ACCEPTANCE,
-                0
-            ))
-            .is_none(),
+            extract_transfer_instruction_info(&make_event(TRANSFER_PENDING_RECEIVER_ACCEPTANCE, 0))
+                .is_none(),
         );
     }
 }

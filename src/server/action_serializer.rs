@@ -1844,10 +1844,7 @@ mod tests {
                 ContextValue::ContractId("cid-1".to_string()),
                 "AV_ContractId",
             ),
-            (
-                ContextValue::List(vec![ContextValue::Int(1)]),
-                "AV_List",
-            ),
+            (ContextValue::List(vec![ContextValue::Int(1)]), "AV_List"),
             (
                 ContextValue::Map(HashMap::from([(
                     "k".to_string(),
@@ -1879,10 +1876,7 @@ mod tests {
             ),
             (
                 "nested".to_string(),
-                ContextValue::Map(HashMap::from([(
-                    "n".to_string(),
-                    ContextValue::Int(7),
-                )])),
+                ContextValue::Map(HashMap::from([("n".to_string(), ContextValue::Int(7))])),
             ),
         ]));
 
