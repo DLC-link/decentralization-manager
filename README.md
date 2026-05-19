@@ -549,9 +549,18 @@ human-readable error.
 
 #### Known issues
 
-- **`SignDns` flake** observed once in `create_dec_party` (Canton-side
-  `TOPOLOGY_NO_APPROPRIATE_SIGNING_KEY_IN_STORE`), did not reproduce on
-  retry.
+- **Canton-side `TOPOLOGY_NO_APPROPRIATE_SIGNING_KEY_IN_STORE` transient**
+  fires intermittently on devnet — most reliably during chaos-phase
+  restart-resume windows, when the kubectl-tunneled Canton synchronizer
+  hasn't fully reconciled a just-restarted participant's signing keys.
+  Transparently absorbed by the workflow step-retry budget
+  ([`MAX_CONSECUTIVE_STEP_FAILURES`][step-retry] = 6 attempts × 2s = 12s);
+  a single devnet IT run typically sees 4–6 such errors across 3 nodes
+  and still passes end-to-end. If you raise the chaos phase count or
+  see more than ~10 of these per run, consider bumping the const
+  further or filing as a Canton-side performance regression.
+
+[step-retry]: https://github.com/DLC-link/dec-party-manager/blob/main/src/consts.rs
 
 [i148]: https://github.com/DLC-link/dec-party-manager/issues/148
 [cprev6]: https://github.com/DLC-link/dec-party-manager/pull/142#discussion_r3241693561
