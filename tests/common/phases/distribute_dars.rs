@@ -19,8 +19,63 @@ const DAR_FILES: &[&str] = &[
     "governance-utility-onboarding-v0-0.1.0.dar",
 ];
 
+/// Map of expected package_id → (module_name, entity_name) of a well-known
+/// template inside it. A successful `/contracts/query` (200 with `contracts: []`
+/// or `contracts: [...]`) means the package is installed; an error response
+/// means it's missing.
+///
+/// `governance-action` is intentionally absent: it's a library-only package
+/// (exports the `GovernableAction` interface, no templates), so the
+/// "probe a known template" pattern doesn't apply. It's a transitive
+/// build-time dependency of the other three packages — if those install,
+/// `governance-action` necessarily installs too.
+const DAR_PROBES: &[(&str, &str, &str)] = &[
+    (
+        "%23governance-core-v0",
+        "Governance.Rules",
+        "GovernanceRules",
+    ),
+    (
+        "%23governance-token-custody-v0",
+        "Governance.TokenCustody.SetupTokenPreapproval",
+        "SetupTokenPreapproval",
+    ),
+    (
+        "%23governance-utility-onboarding-v0",
+        "Governance.UtilityOnboarding.SetupUtility",
+        "SetupUtility",
+    ),
+];
+
+async fn dar_present_on(f: &Fixture, port: u16, pkg: &str, module: &str, entity: &str) -> bool {
+    let party_id = match f.party_id() {
+        Ok(p) => p.to_string(),
+        Err(_) => return false,
+    };
+    let path = format!(
+        "/contracts/query?party_id={party_id}&package_id={pkg}\
+         &module_name={module}&entity_name={entity}"
+    );
+    f.get_json::<serde_json::Value>(port, &path).await.is_ok()
+}
+
+async fn all_dars_present(f: &Fixture) -> bool {
+    for (pkg, module, entity) in DAR_PROBES {
+        for port in [f.p1.http, f.p2.http, f.p3.http] {
+            if !dar_present_on(f, port, pkg, module, entity).await {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     info!("Phase: distribute_dars");
+    if all_dars_present(f).await {
+        info!("All expected DARs already present on all participants; skipping distribute_dars");
+        return Ok(());
+    }
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let dars_dir = Path::new(manifest_dir).join("releases/v0/release");
 
@@ -48,14 +103,34 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     "peer_ids": [&f.p2.participant_id, &f.p3.participant_id],
                 });
                 Box::pin(async move {
-                    let _: Value = f
+                    let upload_res: anyhow::Result<Value> = f
                         .post_json(f.p1.http, "/dars/upload", &upload_req)
-                        .await
-                        .context("POST /dars/upload")?;
-                    let _: Value = f
+                        .await;
+                    if let Err(e) = &upload_res {
+                        let msg = format!("{e:#}");
+                        if msg.contains("PERMISSION_DENIED") || msg.contains("UNAUTHENTICATED") {
+                            anyhow::bail!(
+                                "test M2M client lacks DAR upload privileges on participant P1; \
+                                 either upload the DARs out-of-band or grant the client admin scope \
+                                 on the participant. Underlying error: {msg}"
+                            );
+                        }
+                    }
+                    let _: Value = upload_res.context("POST /dars/upload")?;
+                    let distribute_res: anyhow::Result<Value> = f
                         .post_json(f.p1.http, "/dars/distribute", &distribute_req)
-                        .await
-                        .context("POST /dars/distribute")?;
+                        .await;
+                    if let Err(e) = &distribute_res {
+                        let msg = format!("{e:#}");
+                        if msg.contains("PERMISSION_DENIED") || msg.contains("UNAUTHENTICATED") {
+                            anyhow::bail!(
+                                "test M2M client lacks DAR distribute privileges on participant P1; \
+                                 either distribute the DARs out-of-band or grant the client admin scope \
+                                 on the participant. Underlying error: {msg}"
+                            );
+                        }
+                    }
+                    let _: Value = distribute_res.context("POST /dars/distribute")?;
                     Ok(())
                 })
             }

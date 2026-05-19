@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use tracing::info;
 
 use crate::common::{
-    Fixture,
+    Fixture, MemberCreds, ParticipantAdminCreds, TestTarget,
     http::{probe_workflow_run_visible, probe_workflow_status},
     invitations::{InvitationIds, post_accept_invitation, probe_pending_invitation},
     scenario::Scenario,
@@ -20,10 +20,36 @@ async fn allocate_party(f: &Fixture, port: u16, hint: &str, name: &str) -> anyho
     info!("Allocating '{hint}' on {name} (port {port})");
     let req = json!({ "party_id_hint": hint, "local_metadata": { "annotations": {} } });
     let r: AllocatePartyResponse = f
-        .post_json_auth(port, "/v2/parties", &req)
+        .post_json(port, "/v2/parties", &req)
         .await
         .with_context(|| format!("allocate {hint} on {name}"))?;
     Ok(r.party_details.party)
+}
+
+/// Devnet-only: drive DPM's POST /auth/grant-rights so it mints an admin
+/// Keycloak token from the participant-admin client creds and calls Canton's
+/// UserManagementService.GrantUserRights via gRPC, granting the coordinator/
+/// attestor user act_as + read_as on both the member party and the freshly-
+/// created decentralized party. Localnet uses [`grant_rights`] (JSON Ledger
+/// API + ledger-api-user) instead — the two flows are mutually exclusive.
+async fn grant_rights_devnet(
+    f: &Fixture,
+    http_port: u16,
+    party_id: &str,
+    admin: &ParticipantAdminCreds,
+    name: &str,
+) -> anyhow::Result<()> {
+    info!("Granting rights via DPM /auth/grant-rights on {name}");
+    let req = json!({
+        "dec_party_id": party_id,
+        "admin_client_id": admin.keycloak_client_id,
+        "admin_client_secret": admin.keycloak_client_secret,
+    });
+    let _: Value = f
+        .post_json(http_port, "/auth/grant-rights", &req)
+        .await
+        .with_context(|| format!("POST /auth/grant-rights on {name}"))?;
+    Ok(())
 }
 
 async fn grant_rights(f: &Fixture, port: u16, party: &str, name: &str) -> anyhow::Result<()> {
@@ -36,7 +62,7 @@ async fn grant_rights(f: &Fixture, port: u16, party: &str, name: &str) -> anyhow
         "identityProviderId": "",
     });
     let _: Value = f
-        .post_json_auth(port, "/v2/users/ledger-api-user/rights", &req)
+        .post_json(port, "/v2/users/ledger-api-user/rights", &req)
         .await
         .with_context(|| format!("grant rights on '{party}' on {name}"))?;
     Ok(())
@@ -48,14 +74,36 @@ async fn update_party_config(
     party_id: &str,
     member: &str,
     name: &str,
+    member_creds: Option<&MemberCreds>,
 ) -> anyhow::Result<()> {
-    let req = json!({
+    let (user_id, keycloak_url, keycloak_realm, keycloak_client_id, keycloak_client_secret) =
+        if let Some(c) = member_creds {
+            (
+                c.user_id.clone(),
+                std::env::var("DECPM_KEYCLOAK_URL")
+                    .context("DECPM_KEYCLOAK_URL not set on devnet")?,
+                std::env::var("DECPM_KEYCLOAK_REALM")
+                    .context("DECPM_KEYCLOAK_REALM not set on devnet")?,
+                c.keycloak_client_id.clone(),
+                Some(c.keycloak_client_secret.clone()),
+            )
+        } else {
+            (
+                "ledger-api-user".to_string(),
+                String::new(),
+                String::new(),
+                String::new(),
+                None,
+            )
+        };
+
+    let mut req = json!({
         "dec_party_id": party_id,
         "member_party_id": member,
-        "user_id": "ledger-api-user",
-        "keycloak_url": "",
-        "keycloak_realm": "",
-        "keycloak_client_id": "",
+        "user_id": user_id,
+        "keycloak_url": keycloak_url,
+        "keycloak_realm": keycloak_realm,
+        "keycloak_client_id": keycloak_client_id,
         "packages": {
             "governance_action": "#governance-action-v0",
             "governance_core": "#governance-core-v0",
@@ -64,6 +112,10 @@ async fn update_party_config(
             "utility_registry": "#utility-registry-app-v0",
         },
     });
+    if let Some(secret) = keycloak_client_secret {
+        req["keycloak_client_secret"] = serde_json::Value::String(secret);
+    }
+
     let _: Value = f
         .put_json(port, "/party-config", &req)
         .await
@@ -111,29 +163,79 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         .map(|p| p.participant_uid.clone())
                         .context("party has no p3")?;
 
-                    let p1m =
-                        allocate_party(&*f, P1_JSON_API, "gov-member-p1", "participant-1").await?;
-                    let p2m =
-                        allocate_party(&*f, P2_JSON_API, "gov-member-p2", "participant-2").await?;
-                    let p3m =
-                        allocate_party(&*f, P3_JSON_API, "gov-member-p3", "participant-3").await?;
+                    // On localnet we allocate fresh gov-member-pN parties on each
+                    // participant's JSON Ledger API and grant ledger-api-user the
+                    // rights to act/read as them (and as the decentralized party).
+                    // On devnet the member parties already exist with their rights
+                    // managed via Keycloak/IDP — see development/remote/participant-N/.env
+                    // for the P{N}_MEMBER_PARTY_ID values. We reuse those directly
+                    // and skip both the JSON-API allocate and the ledger-api-user
+                    // grants (the JSON Ledger API isn't tunneled on devnet, and
+                    // ledger-api-user doesn't exist there anyway).
+                    let (p1m, p2m, p3m) = match f.target {
+                        TestTarget::Localnet => {
+                            let p1m = allocate_party(&*f, P1_JSON_API, "gov-member-p1", "participant-1").await?;
+                            let p2m = allocate_party(&*f, P2_JSON_API, "gov-member-p2", "participant-2").await?;
+                            let p3m = allocate_party(&*f, P3_JSON_API, "gov-member-p3", "participant-3").await?;
+                            grant_rights(&*f, P1_JSON_API, &p1m, "participant-1").await?;
+                            grant_rights(&*f, P2_JSON_API, &p2m, "participant-2").await?;
+                            grant_rights(&*f, P3_JSON_API, &p3m, "participant-3").await?;
+                            grant_rights(&*f, P1_JSON_API, &party_id, "participant-1").await?;
+                            grant_rights(&*f, P2_JSON_API, &party_id, "participant-2").await?;
+                            grant_rights(&*f, P3_JSON_API, &party_id, "participant-3").await?;
+                            (p1m, p2m, p3m)
+                        }
+                        TestTarget::Devnet => {
+                            let p1m = f.p1_member_creds.as_ref()
+                                .context("P1 member creds missing on devnet")?.party_id.clone();
+                            let p2m = f.p2_member_creds.as_ref()
+                                .context("P2 member creds missing on devnet")?.party_id.clone();
+                            let p3m = f.p3_member_creds.as_ref()
+                                .context("P3 member creds missing on devnet")?.party_id.clone();
+                            (p1m, p2m, p3m)
+                        }
+                    };
 
-                    grant_rights(&*f, P1_JSON_API, &p1m, "participant-1").await?;
-                    grant_rights(&*f, P2_JSON_API, &p2m, "participant-2").await?;
-                    grant_rights(&*f, P3_JSON_API, &p3m, "participant-3").await?;
-                    grant_rights(&*f, P1_JSON_API, &party_id, "participant-1").await?;
-                    grant_rights(&*f, P2_JSON_API, &party_id, "participant-2").await?;
-                    grant_rights(&*f, P3_JSON_API, &party_id, "participant-3").await?;
+                    update_party_config(&*f, f.p1.http, &party_id, &p1m, "participant-1", f.p1_member_creds.as_ref()).await?;
+                    update_party_config(&*f, f.p2.http, &party_id, &p2m, "participant-2", f.p2_member_creds.as_ref()).await?;
+                    update_party_config(&*f, f.p3.http, &party_id, &p3m, "participant-3", f.p3_member_creds.as_ref()).await?;
 
-                    update_party_config(&*f, f.p1.http, &party_id, &p1m, "participant-1").await?;
-                    update_party_config(&*f, f.p2.http, &party_id, &p2m, "participant-2").await?;
-                    update_party_config(&*f, f.p3.http, &party_id, &p3m, "participant-3").await?;
+                    // On devnet, the act_as/read_as grants for the freshly-
+                    // created dec party are issued by each DPM via its own
+                    // POST /auth/grant-rights (uses participant-admin creds
+                    // to call Canton's UserManagementService). Must run AFTER
+                    // update_party_config so party_credentials are registered.
+                    if f.target == TestTarget::Devnet {
+                        let p1a = f.p1_participant_admin_creds.as_ref()
+                            .context("P1 participant-admin creds missing on devnet")?;
+                        let p2a = f.p2_participant_admin_creds.as_ref()
+                            .context("P2 participant-admin creds missing on devnet")?;
+                        let p3a = f.p3_participant_admin_creds.as_ref()
+                            .context("P3 participant-admin creds missing on devnet")?;
+                        grant_rights_devnet(&*f, f.p1.http, &party_id, p1a, "participant-1").await?;
+                        grant_rights_devnet(&*f, f.p2.http, &party_id, p2a, "participant-2").await?;
+                        grant_rights_devnet(&*f, f.p3.http, &party_id, p3a, "participant-3").await?;
+                    }
 
+                    // On localnet, p1m (gov-member-p1) doubles as the operator
+                    // party because nothing distinguishes them. On devnet, the
+                    // operator is a real, separate identity (auth0_...) that was
+                    // discovered earlier via /operator-info; the SetupUtility
+                    // Daml contract enforces the operator identity at execute
+                    // time, so using attestor-1 here would fail with a
+                    // "Contract group identifier mismatch" later.
+                    let operator_party = match f.target {
+                        TestTarget::Localnet => p1m.clone(),
+                        TestTarget::Devnet => f
+                            .operator_party
+                            .clone()
+                            .context("operator_party not set on devnet — discover_network_parties must run first")?,
+                    };
                     let req = json!({
                         "decentralized_party_id": party_id,
                         "participant_ids": [p1_uid, p2_uid, p3_uid],
                         "participant_parties": [&p1m, &p2m, &p3m],
-                        "operator_party": &p1m,
+                        "operator_party": &operator_party,
                         "contracts": [{
                             "id": "governance-rules",
                             "name": "GovernanceRules",

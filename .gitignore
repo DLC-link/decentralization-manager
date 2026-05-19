@@ -5,7 +5,9 @@ docs/superpowers
 
 # Generated keys and configuration
 
-/development/remote
+/development/remote/**
+!/development/remote/participant-*/
+!/development/remote/participant-*/.env.example
 /configs
 .localnet/
 .DS_Store

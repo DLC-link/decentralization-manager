@@ -13,7 +13,7 @@ use tokio::time;
 use crate::{
     config::NodeConfig,
     consts::{
-        TOPOLOGY_PROPAGATION_DELAY_SECS, TOPOLOGY_RETRY_DELAY_SECS, TOPOLOGY_RETRY_MAX_ATTEMPTS,
+        TOPOLOGY_PROPAGATION_DELAY_SECS, topology_retry_delay_secs, topology_retry_max_attempts,
     },
     error::Result,
     participant_id::CantonId,
@@ -119,8 +119,8 @@ async fn wait_for_dns_in_topology(
     let mut topology_read_client =
         TopologyManagerReadServiceClient::connect(config.admin_api_url()).await?;
 
-    let max_attempts = TOPOLOGY_RETRY_MAX_ATTEMPTS;
-    let retry_delay = time::Duration::from_secs(TOPOLOGY_RETRY_DELAY_SECS);
+    let max_attempts = topology_retry_max_attempts();
+    let retry_delay = time::Duration::from_secs(topology_retry_delay_secs());
 
     for attempt in 1..=max_attempts {
         let request = tonic::Request::new(ListDecentralizedNamespaceDefinitionRequest {
@@ -311,8 +311,8 @@ async fn wait_for_p2p_in_topology(
     let mut topology_read_client =
         TopologyManagerReadServiceClient::connect(config.admin_api_url()).await?;
 
-    let max_attempts = TOPOLOGY_RETRY_MAX_ATTEMPTS;
-    let retry_delay = time::Duration::from_secs(TOPOLOGY_RETRY_DELAY_SECS);
+    let max_attempts = topology_retry_max_attempts();
+    let retry_delay = time::Duration::from_secs(topology_retry_delay_secs());
 
     for attempt in 1..=max_attempts {
         let request = tonic::Request::new(ListPartyToParticipantRequest {
