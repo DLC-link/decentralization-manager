@@ -87,6 +87,10 @@ interface GovernanceSectionProps {
   /// execute / revoke / expire / domain confirm / domain execute) so the
   /// parent can refresh sibling views (e.g. the audit trail tab).
   onAfterAction?: () => void;
+  /// Called after a domain proposal is successfully created. The hosting
+  /// dialog wires this to its `onClose` so the modal disappears on success;
+  /// fires after `onAfterAction` so refreshes still run.
+  onProposalCreated?: () => void;
   /// Which half of the section to render:
   /// - "actions"   = governance-action confirmations + new-action form (default)
   /// - "proposals" = domain-proposal list + new-proposal form (core_self only)
@@ -121,6 +125,7 @@ export const GovernanceSection = ({
   network,
   governanceType = "vault",
   onAfterAction,
+  onProposalCreated,
   view,
 }: GovernanceSectionProps) => {
   const showActionsHalf = view !== "proposals";
@@ -1187,11 +1192,13 @@ export const GovernanceSection = ({
         throw new Error(errData.error || "Failed to create proposal");
       }
 
-      // Clear fields, keep the form visible. The created proposal shows up
-      // in the notification queue — no separate success message needed.
+      // Clear fields and let the host close the dialog. The created proposal
+      // shows up in the notification queue — no separate success message
+      // needed.
       resetProposalForm();
       await fetchGovernance();
       onAfterAction?.();
+      onProposalCreated?.();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to create proposal");
     } finally {
