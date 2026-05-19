@@ -21,25 +21,6 @@ pub use validator::{Principal, TokenValidator, ValidationError};
 pub use validators::MockValidator;
 pub use validators::{JwtValidator, OidcIntrospectionValidator};
 
-/// Compose Keycloak's OIDC token endpoint URL, tolerating both forms of the
-/// configured base URL.
-///
-/// canton-lib's `keycloak::login::password_url` (and `client_credentials_url`)
-/// unconditionally append `/auth/realms/{realm}/protocol/openid-connect/token`
-/// to whatever host is passed in. Production `.env`s typically include the
-/// legacy `/auth` servlet path in `DECPM_KEYCLOAK_URL` (because
-/// `crate::auth::validators` constructs the issuer claim as
-/// `{url}/realms/{realm}` and the realm lives at `/auth/realms/<realm>`).
-/// Passing such a URL straight into `password_url` yields `/auth/auth/realms/...`
-/// (HTTP 404 "Unable to find matching target resource method"). This helper
-/// strips one trailing `/auth` segment so both `https://kc.example.com` and
-/// `https://kc.example.com/auth` produce the correct token endpoint.
-pub(crate) fn token_url(base: &str, realm: &str) -> String {
-    let trimmed = base.trim_end_matches('/');
-    let host = trimmed.strip_suffix("/auth").unwrap_or(trimmed);
-    keycloak::login::password_url(host, realm)
-}
-
 use crate::{
     config::{Auth0M2MConfig, KeycloakConfig, PartyCredentials},
     participant_id::CantonId,
@@ -179,10 +160,7 @@ impl TokenManager {
     }
 
     async fn authenticate_keycloak(config: &KeycloakConfig) -> Result<TokenState> {
-        // Use token_url (see helper above) instead of canton-lib's
-        // password_url directly so a trailing `/auth` in config.url doesn't
-        // produce the `/auth/auth/realms/...` 404 case.
-        let url = token_url(&config.url, &config.realm);
+        let url = keycloak::login::token_url(&config.url, &config.realm);
 
         // Choose auth method: client_credentials (M2M) if client_secret is set, otherwise password flow
         let (response, is_m2m) = if let Some(ref client_secret) = config.client_secret {
@@ -258,7 +236,7 @@ impl TokenManager {
             return Ok(());
         };
 
-        let url = token_url(&config.url, &config.realm);
+        let url = keycloak::login::token_url(&config.url, &config.realm);
 
         match keycloak::login::refresh(RefreshParams {
             client_id: config.client_id.clone(),

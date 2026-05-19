@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, put, web};
 use canton_proto_rs::com::daml::ledger::api::v2::admin::GetUserRequest;
-use keycloak::login::{ClientCredentialsParams, PasswordParams, client_credentials, password};
-
-use crate::auth::token_url;
+use keycloak::login::{
+    ClientCredentialsParams, PasswordParams, client_credentials, password, token_url,
+};
 use tokio::sync::RwLock;
 
 use crate::{
@@ -453,7 +453,7 @@ pub async fn discover_member_party(
             });
         }
 
-        let token_url = token_url(&body.keycloak_url, &body.keycloak_realm);
+        let token_endpoint = token_url(&body.keycloak_url, &body.keycloak_realm);
 
         let token_result = if let Some(secret) = body
             .keycloak_client_secret
@@ -461,7 +461,7 @@ pub async fn discover_member_party(
             .filter(|s| !s.is_empty())
         {
             client_credentials(ClientCredentialsParams {
-                url: token_url,
+                url: token_endpoint,
                 client_id: body.keycloak_client_id.clone(),
                 client_secret: secret.clone(),
             })
@@ -471,7 +471,7 @@ pub async fn discover_member_party(
             body.keycloak_password.as_ref().filter(|s| !s.is_empty()),
         ) {
             password(PasswordParams {
-                url: token_url,
+                url: token_endpoint,
                 client_id: body.keycloak_client_id.clone(),
                 username: username.clone(),
                 password: pw.clone(),

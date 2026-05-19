@@ -309,3 +309,29 @@ testStrangerCannotConfirmSelfAction = script do
     exerciseCmd rulesCid GovernanceRules_ConfirmGovernanceAction with
       confirmer = parties.outsider
       action
+
+-- | Reject promoting an existing `additionalProposer` to member; the
+-- `members` and `additionalProposers` sets must remain disjoint.
+testRejectAddMemberWhoIsAdditionalProposer = script do
+  parties <- allocateTestParties
+
+  -- Start with `outsider` already in additionalProposers.
+  rulesCid <- submit parties.governanceParty $ createCmd GovernanceRules with
+    governanceParty = parties.governanceParty
+    members = getMembers parties
+    threshold = 2
+    actionConfirmationTimeout = minutes 30
+    additionalProposers = Some (Set.singleton parties.outsider)
+
+  let action = SelfAction_AddMemberAndSetThreshold with
+        newMember = parties.outsider
+        newThresholdAfterAdd = 3
+
+  confirmationCids <- submitSelfConfirmations parties.governanceParty rulesCid action
+    [parties.member1, parties.member2]
+
+  submitMustFail (memberContext parties.member1 parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ExecuteGovernanceAction with
+      executor = parties.member1
+      action
+      confirmations = confirmationCids

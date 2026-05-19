@@ -160,6 +160,9 @@ template GovernanceRules
     -- governance party on their participant with readAs rights. This keeps
     -- visibility as a topology concern rather than a contract modeling concern.
     ensure not (Set.null members)
+        && threshold >= 1
+        && threshold <= Set.size members
+        && actionConfirmationTimeout >= seconds 10
 
     -- ════════════════════════════════════════════════════════════════════════
     -- BUILT-IN: Governance self-management choices
@@ -177,6 +180,8 @@ template GovernanceRules
       controller governanceParty
       do
         require "Not yet a member" (member `Set.notMember` members)
+        require "Member must not also be an additional proposer"
+          (optional True (Set.notMember member) additionalProposers)
         let newMembers = Set.insert member members
         validateThresholdForMemberCount (Set.size newMembers) newThreshold
         governanceRulesCid <- create this with
@@ -383,9 +388,6 @@ template GovernanceRules
         require "Proposer is authorized (member or additional proposer)"
           (actionView.proposer `Set.member` members
             || optional False (Set.member actionView.proposer) additionalProposers)
-        -- TODO: governanceParty match alone doesn't distinguish between multiple
-        -- GovernanceRules instances for the same party. A static governance ID
-        -- field should be added to provide strict matching.
         now <- getTime
         confirmationCid <- create GovernanceConfirmation with
           governanceParty
@@ -436,10 +438,13 @@ template GovernanceRules
           executedAt = now
         pure ExecuteConfirmedActionResult with ..
 
-    -- Note: Proposal cancellation is NOT a governance choice. Proposers cancel
-    -- their own proposals directly via template-specific choices. Governance-level
-    -- cancellation (e.g., cleaning up stale proposals) should go through the
-    -- standard vote flow as a GovernableAction itself.
+    -- Note: Proposal cancellation lives on the GovernableAction interface,
+    -- not as a GovernanceRules choice. The interface exposes two paths:
+    --   * GovernableAction_ProposerCancel — controlled by the proposer, lets
+    --     them retract their own proposal without a governance vote.
+    --   * GovernableAction_Cancel — controlled by governanceParty, used when
+    --     governance needs to clean up a stale proposal (typically via the
+    --     standard vote flow as a GovernableAction itself).
 
     -- | Expire a stale action confirmation.
     nonconsuming choice GovernanceRules_ExpireConfirmation : ()

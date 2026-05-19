@@ -4,7 +4,7 @@ set -e
 
 aws sso login
 
-TAG="v0.1.0"
+TAG="0.1.2"
 IMAGE="public.ecr.aws/dlc-link/canton-decparty-manager"
 DEPLOY_DIR="zarf/deployments/devnet"
 
