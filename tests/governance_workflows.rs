@@ -86,6 +86,7 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     init_tracing();
 
     let mut f = Fixture::from_env()?;
+    f.discover_network_parties().await?;
     phases::create_dec_party::run(&mut f).await?;
     phases::distribute_dars::run(&mut f).await?;
     phases::check_peer_dars::run(&mut f).await?;

@@ -33,8 +33,12 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             })
         })
         .then(
+            // Devnet-friendly cap. On localnet the resolution lands in ms;
+            // on devnet the kubectl tunnel + cluster latency mean cache
+            // staleness from earlier phases can take several seconds to
+            // drain. 30s is the worst-case observed in practice.
             "P3 owner_key was resolved in an earlier phase",
-            Duration::from_secs(5),
+            Duration::from_secs(30),
             |f, _| {
                 Box::pin(async move {
                     let prefix = f.party_prefix().ok()?.to_string();
@@ -76,20 +80,27 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     // run. Instead we poll until the response settles on
                     // `refreshing == false` and let the final assertion
                     // (owner_key intact) prove the invariant.
-                    for _ in 0..30 {
+                    //
+                    // 30s budget (150 × 200ms). Localnet refreshes in
+                    // milliseconds; devnet's `resolve_owner_keys_from_peers`
+                    // makes a Noise round trip per peer plus the Canton
+                    // `list_my_owner_keys` admin-gRPC calls (post-#158 fix
+                    // ≈3s/peer worst case on the kubectl tunnel). A run on
+                    // 9fd91be exhausted the original 6s budget here.
+                    for _ in 0..150 {
                         let r: DecentralizedPartiesResponse = f.get_json(f.p1.http, &path).await?;
                         if !r.refreshing {
                             return Ok(());
                         }
                         sleep(Duration::from_millis(200)).await;
                     }
-                    anyhow::bail!("refresh did not complete within 6s")
+                    anyhow::bail!("refresh did not complete within 30s")
                 })
             },
         )
         .then(
             "P3's owner_key in P1's cache is still set",
-            Duration::from_secs(5),
+            Duration::from_secs(30),
             |f, _| Box::pin(async move { Some(assert_owner_key_intact(f).await) }),
         )
         .run(f)

@@ -2,7 +2,7 @@ use std::path::Path;
 
 use bytes::{Buf, BufMut, BytesMut};
 use prost::Message;
-use tokio::fs;
+use tokio::{fs, sync::OnceCell};
 
 use anyhow::Context;
 use canton_proto_rs::com::{
@@ -272,12 +272,30 @@ pub fn compute_fingerprint(key: &SigningPublicKey) -> String {
     fingerprint
 }
 
-/// Get synchronizer ID from config
+/// Process-wide cache for the resolved physical synchronizer ID.
 ///
-/// Queries the participant's synchronizer connectivity service to get the physical
-/// synchronizer ID for the configured synchronizer alias.
+/// The ID is stable for the lifetime of a DPM process (it only changes if the
+/// node is reprovisioned against a different synchronizer, which requires a
+/// restart). Resolving it costs a fresh gRPC channel + a one-shot
+/// `get_synchronizer_id` call against the Canton admin API — observed at
+/// ~4.3s median over a kubectl-tunneled devnet (see #149). Caching it
+/// eliminates that cost from every call site that previously resolved it
+/// per request.
+static SYNCHRONIZER_ID_CACHE: OnceCell<String> = OnceCell::const_new();
+
+/// Get synchronizer ID from config (cached after first successful resolution).
+///
+/// Queries the participant's synchronizer connectivity service to get the
+/// physical synchronizer ID for the configured synchronizer alias. The result
+/// is memoised in a process-wide [`SYNCHRONIZER_ID_CACHE`]; subsequent calls
+/// return the cached value without any network round trip.
 pub async fn get_synchronizer_id(config: &NodeConfig) -> Result<String> {
-    get_synchronizer_id_from_url(&config.admin_api_url(), config.synchronizer()).await
+    SYNCHRONIZER_ID_CACHE
+        .get_or_try_init(|| async {
+            get_synchronizer_id_from_url(&config.admin_api_url(), config.synchronizer()).await
+        })
+        .await
+        .cloned()
 }
 
 /// Get the physical synchronizer ID from a Canton Admin API URL and alias

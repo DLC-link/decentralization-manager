@@ -56,6 +56,10 @@ pub struct GovernanceState {
 #[derive(Debug, Deserialize)]
 pub struct ProviderServiceItem {
     pub contract_id: String,
+    #[serde(default)]
+    pub operator: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -139,4 +143,14 @@ pub struct WorkflowRun {
 pub struct WorkflowRunsResponse {
     #[serde(default)]
     pub runs: Vec<WorkflowRun>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct NetworkInfoResponse {
+    pub dso_party_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OperatorInfoResponse {
+    pub party_id: String,
 }

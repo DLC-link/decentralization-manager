@@ -5,8 +5,9 @@ use serde_json::json;
 use tracing::info;
 
 use crate::common::{
-    Fixture,
+    Fixture, TestTarget,
     governance::propose_confirm_execute,
+    operator::{await_operator_response, operator_response_timeout_devnet},
     scenario::Scenario,
     types::{ContractsQueryResponse, ProviderServicesResponse},
 };
@@ -18,49 +19,106 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     info!("Phase: utility_onboarding");
 
     if f.provider_service_cid.is_none() {
-        propose_confirm_execute(
-            "ProvisionProviderService",
-            json!({"type": "provision_provider_service"}),
-        )
-        .run(f)
-        .await?;
-        Scenario::new("ProviderService visible")
-            .then(
-                "services/provider returns one",
-                Duration::from_secs(30),
-                |f, _| {
-                    Box::pin(async move {
-                        let party_id = match f.party_id() {
-                            Ok(p) => p,
-                            Err(e) => return Some(Err(e)),
-                        };
-                        let path = format!("/services/provider?party_id={party_id}");
-                        let r: ProviderServicesResponse =
-                            f.get_json(f.p1.http, &path).await.ok()?;
-                        let cid = r.services.into_iter().next()?.contract_id;
-                        f.provider_service_cid = Some(cid);
-                        Some(Ok(()))
-                    })
-                },
-            )
-            .run(f)
-            .await?;
+        match f.target {
+            TestTarget::Localnet => {
+                propose_confirm_execute(
+                    "ProvisionProviderService",
+                    json!({"type": "provision_provider_service"}),
+                )
+                .run(f)
+                .await?;
+
+                Scenario::new("ProviderService visible")
+                    .then(
+                        "services/provider returns one",
+                        Duration::from_secs(30),
+                        |f, _| {
+                            Box::pin(async move {
+                                let party_id = match f.party_id() {
+                                    Ok(p) => p,
+                                    Err(e) => return Some(Err(e)),
+                                };
+                                let path = format!("/services/provider?party_id={party_id}");
+                                let r: ProviderServicesResponse =
+                                    f.get_json(f.p1.http, &path).await.ok()?;
+                                let cid = r.services.into_iter().next()?.contract_id;
+                                f.provider_service_cid = Some(cid);
+                                Some(Ok(()))
+                            })
+                        },
+                    )
+                    .run(f)
+                    .await?;
+            }
+            TestTarget::Devnet => {
+                let operator = f.operator_party.clone().context(
+                    "operator_party not set on devnet — discover_network_parties must run first",
+                )?;
+                let governance_party = f.party_id()?.to_string();
+                propose_confirm_execute(
+                    "CreateProviderServiceRequest",
+                    json!({
+                        "type": "create_provider_service_request",
+                        "operator": operator,
+                        "provider": governance_party,
+                    }),
+                )
+                .run(f)
+                .await?;
+
+                info!("Awaiting operator-driven ProviderService for {governance_party}");
+                let port = f.p1.http;
+                let path = format!("/services/provider?party_id={governance_party}");
+                let operator_for_match = operator.clone();
+                let governance_for_match = governance_party.clone();
+                let cid = await_operator_response::<ProviderServicesResponse, _>(
+                    f,
+                    port,
+                    &path,
+                    "CreateProviderServiceRequest",
+                    "ProviderService",
+                    operator_response_timeout_devnet(),
+                    move |r| {
+                        r.services
+                            .into_iter()
+                            .find(|s| {
+                                s.operator.as_deref() == Some(operator_for_match.as_str())
+                                    && s.provider.as_deref() == Some(governance_for_match.as_str())
+                            })
+                            .map(|s| s.contract_id)
+                    },
+                )
+                .await?;
+                f.provider_service_cid = Some(cid);
+            }
+        }
     }
 
     let provider_cid = f
         .provider_service_cid
         .clone()
-        .context("provider_service_cid not set after ProvisionProviderService")?;
+        .context("provider_service_cid not set after provider service setup")?;
     let p1_member = f.p1_member_party()?.to_string();
     let party_id = f.party_id()?.to_string();
+    // Same operator selection as in deploy_gov_core's /contracts: localnet
+    // uses p1_member, devnet uses the discovered auth0_... operator. The
+    // SetupUtility action looks up WithOperatorProvider {operator, provider}
+    // and fails with "Contract group identifier mismatch" if these don't
+    // line up with what was put on the ledger.
+    let operator = match f.target {
+        TestTarget::Localnet => p1_member.clone(),
+        TestTarget::Devnet => f.operator_party.clone().context(
+            "operator_party not set on devnet — discover_network_parties must run first",
+        )?,
+    };
 
     propose_confirm_execute(
         "SetupUtility",
         json!({
             "type": "setup_utility",
             "provider_service_cid": provider_cid,
-            "operator": p1_member,
-            "instrument_id_text": "TEST-E2E-TOKEN",
+            "operator": operator,
+            "instrument_id_text": format!("{}-TEST-E2E-TOKEN", f.run_id),
             "create_transfer_rule": true,
             "create_allocation_factory": true,
         }),
@@ -128,7 +186,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         json!({
             "type": "mint",
             "allocation_factory_cid": alloc,
-            "instrument_id": {"admin": party_id, "id": "TEST-E2E-TOKEN"},
+            "instrument_id": {"admin": party_id, "id": format!("{}-TEST-E2E-TOKEN", f.run_id)},
             "instrument_configuration_cid": inst,
             "recipient": p1_member,
             "amount": "100.0",
@@ -162,7 +220,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         json!({
             "type": "burn",
             "allocation_factory_cid": alloc,
-            "instrument_id": {"admin": party_id, "id": "TEST-E2E-TOKEN"},
+            "instrument_id": {"admin": party_id, "id": format!("{}-TEST-E2E-TOKEN", f.run_id)},
             "instrument_configuration_cid": inst,
             "holder": p1_member,
             "amount": "10.0",

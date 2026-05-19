@@ -21,6 +21,7 @@ use sqlx::SqlitePool;
 use crate::{
     auth::WorkflowAuth,
     config::{NetworkConfig, NodeConfig, Peer},
+    consts::MAX_CONSECUTIVE_STEP_FAILURES,
     db::schema::{Commitable, SchemaRead, SchemaWrite},
     error::Result,
     noise::{MessageType, client::NoiseClient, server::NoiseServer},
@@ -348,18 +349,21 @@ pub async fn start_peer(
                 // the prefix for namespace_key_name / daml_key_name; the
                 // config's `instance_name` is the coordinator's view and is
                 // intentionally unused here).
-                let onboarding_config: onboarding::OnboardingConfig =
-                    match serde_json::from_slice(&payload) {
-                        Ok(config) => config,
-                        Err(e) => {
-                            tracing::error!("Failed to deserialize onboarding config: {e}");
-                            consecutive_step_failures += 1;
-                            if consecutive_step_failures >= 3 {
-                                anyhow::bail!("Aborting peer: 3 consecutive step failures");
-                            }
-                            continue;
+                let onboarding_config: onboarding::OnboardingConfig = match serde_json::from_slice(
+                    &payload,
+                ) {
+                    Ok(config) => config,
+                    Err(e) => {
+                        tracing::error!("Failed to deserialize onboarding config: {e}");
+                        consecutive_step_failures += 1;
+                        if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                            anyhow::bail!(
+                                "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures"
+                            );
                         }
-                    };
+                        continue;
+                    }
+                };
 
                 if let Err(e) =
                     onboarding::generate_keys(&node_config, &db, &instance_name, &onboarding_config)
@@ -367,8 +371,10 @@ pub async fn start_peer(
                 {
                     tracing::error!("Step execution failed: {e}");
                     consecutive_step_failures += 1;
-                    if consecutive_step_failures >= 3 {
-                        anyhow::bail!("Aborting peer: 3 consecutive step failures: {e}");
+                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                        anyhow::bail!(
+                            "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {e}"
+                        );
                     }
                     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                     continue;
@@ -397,8 +403,10 @@ pub async fn start_peer(
                 {
                     tracing::error!("Step execution failed: {e}");
                     consecutive_step_failures += 1;
-                    if consecutive_step_failures >= 3 {
-                        anyhow::bail!("Aborting peer: 3 consecutive step failures: {e}");
+                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                        anyhow::bail!(
+                            "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {e}"
+                        );
                     }
                     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                     continue;
@@ -427,8 +435,10 @@ pub async fn start_peer(
                 {
                     tracing::error!("Step execution failed: {e}");
                     consecutive_step_failures += 1;
-                    if consecutive_step_failures >= 3 {
-                        anyhow::bail!("Aborting peer: 3 consecutive step failures: {e}");
+                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                        anyhow::bail!(
+                            "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {e}"
+                        );
                     }
                     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                     continue;
@@ -506,8 +516,10 @@ pub async fn start_peer(
                 {
                     tracing::error!("Failed to save prepared submissions from coordinator: {e}");
                     consecutive_step_failures += 1;
-                    if consecutive_step_failures >= 3 {
-                        anyhow::bail!("Aborting peer: 3 consecutive step failures: {e}");
+                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                        anyhow::bail!(
+                            "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {e}"
+                        );
                     }
                     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                     continue;
@@ -519,8 +531,10 @@ pub async fn start_peer(
                 {
                     tracing::error!("Step execution failed: {e:#}");
                     consecutive_step_failures += 1;
-                    if consecutive_step_failures >= 3 {
-                        anyhow::bail!("Aborting peer: 3 consecutive step failures: {e}");
+                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                        anyhow::bail!(
+                            "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {e}"
+                        );
                     }
                     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                     continue;
@@ -566,8 +580,10 @@ pub async fn start_peer(
                 {
                     tracing::error!("Step execution failed: {e}");
                     consecutive_step_failures += 1;
-                    if consecutive_step_failures >= 3 {
-                        anyhow::bail!("Aborting peer: 3 consecutive step failures: {e}");
+                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                        anyhow::bail!(
+                            "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {e}"
+                        );
                     }
                     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                     continue;

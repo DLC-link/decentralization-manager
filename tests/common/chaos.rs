@@ -41,7 +41,7 @@ pub async fn post_onboarding(f: &Fixture, prefix: &str) -> anyhow::Result<()> {
         "party_id_prefix": prefix,
         "peer_ids": [&f.p2.participant_id, &f.p3.participant_id],
     });
-    let max_attempts = 8;
+    let max_attempts = 12;
     for attempt in 1..=max_attempts {
         let (status, body) = f
             .post_expect_status(f.p1.http, "/onboarding", &req)
@@ -53,13 +53,25 @@ pub async fn post_onboarding(f: &Fixture, prefix: &str) -> anyhow::Result<()> {
                 .with_context(|| format!("deserialize POST /onboarding response: {body}"))?;
             return Ok(());
         }
-        // 422 = peer-mesh pre-flight — wait for noise sessions to settle
-        // and try again. Other failures are not transient.
-        if status.as_u16() == 422 && attempt < max_attempts {
-            info!(
-                "post_onboarding attempt {attempt}/{max_attempts}: 422 peer-mesh \
-                 pre-flight not yet converged, retrying"
-            );
+        // Two retryable 4xx classes:
+        //   422 = peer-mesh pre-flight not yet converged after a chaos
+        //         restart; Noise sessions need a few seconds to settle.
+        //   409 = previous chaos phase's workflow_runs row is still
+        //         "active" from the server's perspective. Cleanup is
+        //         async (Disconnect commands to peers must ACK before
+        //         the coordinator marks its run completed). On localnet
+        //         this is sub-second; on devnet the per-peer Noise round
+        //         trip plus Canton submission acknowledgments push it
+        //         into the seconds range.
+        // Everything else is treated as fatal.
+        let s = status.as_u16();
+        if (s == 422 || s == 409) && attempt < max_attempts {
+            let reason = if s == 409 {
+                "409 previous workflow still cleaning up"
+            } else {
+                "422 peer-mesh pre-flight not yet converged"
+            };
+            info!("post_onboarding attempt {attempt}/{max_attempts}: {reason}, retrying");
             sleep(Duration::from_secs(3)).await;
             continue;
         }

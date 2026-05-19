@@ -16,7 +16,7 @@ use canton_proto_rs::com::{
 
 use crate::{
     config::NodeConfig,
-    consts::{TOPOLOGY_RETRY_DELAY_SECS, TOPOLOGY_RETRY_MAX_ATTEMPTS},
+    consts::{topology_retry_delay_secs, topology_retry_max_attempts},
     error::Result,
     utils,
     workflow::{
@@ -194,8 +194,8 @@ pub async fn execute_submissions(
     tracing::info!("Waiting for contracts to appear in ledger...");
     let mut state_client = utils::create_state_client(config, token_opt).await?;
 
-    let max_attempts = TOPOLOGY_RETRY_MAX_ATTEMPTS;
-    let retry_delay = tokio::time::Duration::from_secs(TOPOLOGY_RETRY_DELAY_SECS);
+    let max_attempts = topology_retry_max_attempts();
+    let retry_delay = tokio::time::Duration::from_secs(topology_retry_delay_secs());
 
     for attempt in 1..=max_attempts {
         // Get current ledger end
