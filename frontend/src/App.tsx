@@ -130,6 +130,12 @@ const App = () => {
     [],
   );
 
+  // Jump to the notifications tab after a successful workflow / governance
+  // action so the user lands on the queue showing what they just produced.
+  const goToNotifications = useCallback(() => {
+    navigate(TAB_HASHES.indexOf("notifications"));
+  }, [navigate]);
+
   // Once parties are loaded, resolve pending slug → exact match opens detail
   useEffect(() => {
     if (loading || !pendingSlug.current) return;
@@ -737,6 +743,7 @@ const App = () => {
               onComplete={() => {
                 refreshParties(true);
                 setPackagesRefreshNonce((n) => n + 1);
+                goToNotifications();
               }}
               mode="distribute"
             />
@@ -754,7 +761,10 @@ const App = () => {
             <OnboardingDialog
               open={onboardingDialogOpen}
               onClose={() => setOnboardingDialogOpen(false)}
-              onComplete={() => refreshParties(true)}
+              onComplete={() => {
+                refreshParties(true);
+                goToNotifications();
+              }}
             />
 
           </>
@@ -773,6 +783,7 @@ const App = () => {
                 window.scrollTo(0, savedScrollY.current);
               }}
               onRefresh={() => refreshParties(true)}
+              onNavigateToNotifications={goToNotifications}
               selfParticipantId={nodeConfig?.node.participant_id}
               authStatus={authStatuses.find(
                 (a) => a.dec_party_id === selectedPartyId,

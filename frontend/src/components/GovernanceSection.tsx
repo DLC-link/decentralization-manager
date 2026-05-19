@@ -69,6 +69,8 @@ import type {
   InstrumentAllowance,
   InstrumentInfo,
   InstrumentsResponse,
+  TransferInstructionInfo,
+  TransferInstructionsResponse,
   TransferPreapprovalsResponse,
 } from "../types";
 
@@ -85,6 +87,10 @@ interface GovernanceSectionProps {
   /// execute / revoke / expire / domain confirm / domain execute) so the
   /// parent can refresh sibling views (e.g. the audit trail tab).
   onAfterAction?: () => void;
+  /// Called after a domain proposal is successfully created. The hosting
+  /// dialog wires this to its `onClose` so the modal disappears on success;
+  /// fires after `onAfterAction` so refreshes still run.
+  onProposalCreated?: () => void;
   /// Which half of the section to render:
   /// - "actions"   = governance-action confirmations + new-action form (default)
   /// - "proposals" = domain-proposal list + new-proposal form (core_self only)
@@ -119,6 +125,7 @@ export const GovernanceSection = ({
   network,
   governanceType = "vault",
   onAfterAction,
+  onProposalCreated,
   view,
 }: GovernanceSectionProps) => {
   const showActionsHalf = view !== "proposals";
@@ -272,6 +279,12 @@ export const GovernanceSection = ({
   // dropdown without the frontend having to decode contract blobs.
   const [availableInstruments, setAvailableInstruments] = useState<InstrumentInfo[]>([]);
   const [instrumentsLoading, setInstrumentsLoading] = useState(false);
+  // Open TransferInstruction contracts addressed to this dec-party. Powers the
+  // Accept Transfer proposal dropdown.
+  const [openTransferInstructions, setOpenTransferInstructions] = useState<
+    TransferInstructionInfo[]
+  >([]);
+  const [transferInstructionsLoading, setTransferInstructionsLoading] = useState(false);
   // Counts of active TransferPreapproval contracts the gov party already has
   // (CC + Token). Used to warn before issuing a Setup*Preapproval proposal
   // that would be a no-op when executed.
@@ -465,6 +478,32 @@ export const GovernanceSection = ({
       fetchInstruments();
     }
   }, [proposalType, fetchInstruments]);
+
+  // Fetch open `TransferInstruction` contracts for the Accept Transfer
+  // proposal dropdown so operators can pick a transfer offer instead of
+  // pasting a contract id.
+  const fetchOpenTransferInstructions = useCallback(async () => {
+    setTransferInstructionsLoading(true);
+    try {
+      const res = await authenticatedFetch(
+        `${API_BASE}/governance/transfer-instructions?party_id=${encodeURIComponent(partyId)}`,
+      );
+      if (res.ok) {
+        const response: TransferInstructionsResponse = await res.json();
+        setOpenTransferInstructions(response.transfer_instructions);
+      }
+    } catch (e) {
+      console.error("Failed to fetch transfer instructions:", e);
+    } finally {
+      setTransferInstructionsLoading(false);
+    }
+  }, [partyId]);
+
+  useEffect(() => {
+    if (proposalType === "accept_transfer") {
+      fetchOpenTransferInstructions();
+    }
+  }, [proposalType, fetchOpenTransferInstructions]);
 
   // Mint/Burn always use the decparty as the instrument admin — seed the field
   // unconditionally so it's populated even before (or without) an Instrument
@@ -1153,11 +1192,13 @@ export const GovernanceSection = ({
         throw new Error(errData.error || "Failed to create proposal");
       }
 
-      // Clear fields, keep the form visible. The created proposal shows up
-      // in the notification queue — no separate success message needed.
+      // Clear fields and let the host close the dialog. The created proposal
+      // shows up in the notification queue — no separate success message
+      // needed.
       resetProposalForm();
       await fetchGovernance();
       onAfterAction?.();
+      onProposalCreated?.();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to create proposal");
     } finally {
@@ -2809,7 +2850,58 @@ export const GovernanceSection = ({
               )}
 
               {proposalType === "accept_transfer" && (
-                <TextField size="small" label="TransferInstruction Contract ID" value={proposalTransferInstructionCid} onChange={(e) => setProposalTransferInstructionCid(e.target.value)} fullWidth required />
+                <Autocomplete
+                  size="small"
+                  freeSolo
+                  options={openTransferInstructions}
+                  value={proposalTransferInstructionCid}
+                  loading={transferInstructionsLoading}
+                  onChange={(_event, value) => {
+                    if (typeof value === "string" || value === null) {
+                      setProposalTransferInstructionCid(value ?? "");
+                    } else {
+                      setProposalTransferInstructionCid(value.contract_id);
+                    }
+                  }}
+                  onInputChange={(_event, value, reason) => {
+                    // Keep the field in sync when the user types a cid by
+                    // hand (freeSolo fallback). `reset` fires when an option
+                    // is selected; we already handled that via `onChange`.
+                    if (reason === "input") {
+                      setProposalTransferInstructionCid(value);
+                    }
+                  }}
+                  getOptionLabel={(option) => {
+                    if (typeof option === "string") return option;
+                    // Strip the `::1220…` fingerprint suffix from the party
+                    // id so the label fits in the dropdown; show a short cid
+                    // tail for disambiguation when multiple transfers share
+                    // a sender/amount.
+                    const senderName = option.sender.split("::")[0];
+                    const amount = option.amount.replace(/\.?0+$/, "");
+                    const cidTail = option.contract_id.slice(-8);
+                    return `${senderName} → ${amount} ${option.instrument_id} (…${cidTail})`;
+                  }}
+                  isOptionEqualToValue={(option, value) =>
+                    typeof value === "string"
+                      ? option.contract_id === value
+                      : option.contract_id === value.contract_id
+                  }
+                  renderInput={(params) => (
+                    <TextField
+                      {...params}
+                      label="TransferInstruction Contract ID"
+                      required
+                      helperText={
+                        transferInstructionsLoading
+                          ? "Loading open transfers…"
+                          : openTransferInstructions.length === 0
+                            ? "No open transfers visible — paste a contract id directly if you have one"
+                            : "Pick an open transfer, or paste a contract id"
+                      }
+                    />
+                  )}
+                />
               )}
 
               {proposalType === "provision_provider_service" && (
