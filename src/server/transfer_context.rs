@@ -15,7 +15,8 @@ use std::collections::HashMap;
 use anyhow::Context as _;
 use base64::Engine as _;
 use canton_common::{
-    transfer::DisclosedContract as RegistryDisclosedContract, transfer_factory::Context,
+    transfer::DisclosedContract as RegistryDisclosedContract,
+    transfer_factory::{Context, ContextValue},
 };
 use canton_proto_rs::com::daml::ledger::api::v2::{
     CumulativeFilter, DisclosedContract, EventFormat, Filters, GetEventsByContractIdRequest,
@@ -63,11 +64,16 @@ pub async fn fetch(
     .await
     .map_err(|e| anyhow::anyhow!("registry accept-context request failed: {e}"))?;
 
-    let context: Context = serde_json::from_value(response.choice_context_data.values)
-        .context("Failed to deserialize registry choice_context_data.values as Context")?;
+    // The registry's `choiceContextData` JSON is `{"values": {<key>: <AnyValue>, ...}}`.
+    // `canton_registry::accept_context::Response` already strips the outer wrapper into
+    // `ChoiceContextData { values: serde_json::Value }`, so `response.choice_context_data.values`
+    // is the inner key→AnyValue map. Deserialize it directly into the map type and wrap.
+    let values: HashMap<String, ContextValue> =
+        serde_json::from_value(response.choice_context_data.values)
+            .context("Failed to deserialize registry choice_context_data.values")?;
 
     Ok(AcceptTransferContext {
-        context,
+        context: Context { values },
         disclosed_contracts: response.disclosed_contracts,
     })
 }
