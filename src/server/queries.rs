@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 
+use canton_common::decimal::DamlDecimal;
 use canton_proto_rs::com::{
     daml::ledger::api::v2::{
         CreatedEvent, CumulativeFilter, EventFormat, Filters, GetActiveContractsRequest,
-        GetLedgerEndRequest, Identifier, InterfaceFilter, TemplateFilter, Value, WildcardFilter,
-        admin::ListKnownPartiesRequest, cumulative_filter,
+        GetLedgerEndRequest, Identifier, InterfaceFilter, Record, TemplateFilter, Value,
+        WildcardFilter, admin::ListKnownPartiesRequest, cumulative_filter,
         get_active_contracts_response::ContractEntry, value,
     },
     digitalasset::canton::admin::participant::v30::{
@@ -24,7 +25,8 @@ use super::{
     types::{
         ActionType, ContractInfo, ContractWithBlob, DomainGovernanceAction, GovernanceAction,
         GovernanceConfirmation, GovernanceState, InstrumentInfo, PartyMetadata,
-        ProviderServiceInfo, RegistrarServiceInfo, UserServiceInfo, VaultInfo,
+        ProviderServiceInfo, RegistrarServiceInfo, TransferInstructionInfo, UserServiceInfo,
+        VaultInfo,
     },
 };
 
@@ -2494,6 +2496,182 @@ pub async fn query_contracts_by_template(
     }
 
     Ok(contracts)
+}
+
+// ============================================================================
+// Token-standard TransferInstruction Query (for Accept Transfer dropdown)
+// ============================================================================
+
+/// Fetch open `TransferInstruction` contracts (status
+/// `TransferPendingReceiverAcceptance`) whose `receiver` is `party_id`.
+///
+/// The token-standard registry models `TransferInstruction` as an interface
+/// (`Splice.Api.Token.TransferInstructionV1:TransferInstruction`), so this
+/// uses an `InterfaceFilter` and reads the computed `TransferInstructionView`
+/// to surface sender / receiver / amount / instrument for the UI dropdown.
+pub async fn get_open_transfer_instructions(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+) -> Result<Vec<TransferInstructionInfo>> {
+    let mut state_client = utils::create_state_client(config, token).await?;
+
+    let ledger_end = state_client
+        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
+        .await?
+        .into_inner()
+        .offset;
+
+    let mut filters_by_party = HashMap::new();
+    filters_by_party.insert(
+        party_id.to_string(),
+        Filters {
+            cumulative: vec![CumulativeFilter {
+                identifier_filter: Some(cumulative_filter::IdentifierFilter::InterfaceFilter(
+                    InterfaceFilter {
+                        interface_id: Some(Identifier {
+                            package_id: "#splice-api-token-transfer-instruction-v1".to_string(),
+                            module_name: "Splice.Api.Token.TransferInstructionV1".to_string(),
+                            entity_name: "TransferInstruction".to_string(),
+                        }),
+                        include_interface_view: true,
+                        include_created_event_blob: false,
+                    },
+                )),
+            }],
+        },
+    );
+
+    let acs_request = GetActiveContractsRequest {
+        active_at_offset: ledger_end,
+        event_format: Some(EventFormat {
+            filters_by_party,
+            filters_for_any_party: None,
+            verbose: true,
+        }),
+    };
+
+    let mut stream = state_client
+        .get_active_contracts(tonic::Request::new(acs_request))
+        .await?
+        .into_inner();
+
+    let receiver_str = party_id.to_string();
+    let mut instructions = Vec::new();
+    while let Some(response) = stream.message().await? {
+        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
+            && let Some(created) = active.created_event
+            && let Some(info) = extract_transfer_instruction_info(&created)
+            && info.receiver.to_string() == receiver_str
+        {
+            instructions.push(info);
+        }
+    }
+
+    Ok(instructions)
+}
+
+/// Pull sender / receiver / amount / instrument out of a `TransferInstruction`
+/// interface view. Returns `None` if the view is missing, the status is not
+/// `TransferPendingReceiverAcceptance`, or any expected field is absent.
+fn extract_transfer_instruction_info(created: &CreatedEvent) -> Option<TransferInstructionInfo> {
+    // The view is delivered under `interface_views` (not `create_arguments`).
+    // Pick the first one matching the TransferInstruction interface; there's
+    // typically only one for this filter shape.
+    let view = created.interface_views.iter().find(|v| {
+        v.interface_id.as_ref().is_some_and(|id| {
+            id.module_name == "Splice.Api.Token.TransferInstructionV1"
+                && id.entity_name == "TransferInstruction"
+        })
+    })?;
+    let view_record = view.view_value.as_ref()?;
+
+    // Filter out already-progressing instructions; only pending-acceptance
+    // ones can be Accepted.
+    let status = view_record
+        .fields
+        .iter()
+        .find(|f| f.label == "status")
+        .and_then(|f| f.value.as_ref())?;
+    let is_pending_acceptance = matches!(
+        &status.sum,
+        Some(value::Sum::Variant(v)) if v.constructor == "TransferPendingReceiverAcceptance"
+    );
+    if !is_pending_acceptance {
+        return None;
+    }
+
+    let transfer_record = view_record
+        .fields
+        .iter()
+        .find(|f| f.label == "transfer")
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Record(r)) => Some(r),
+            _ => None,
+        })?;
+
+    let sender: CantonId = field_party(transfer_record, "sender")?.parse().ok()?;
+    let receiver: CantonId = field_party(transfer_record, "receiver")?.parse().ok()?;
+    let amount =
+        field_numeric(transfer_record, "amount").and_then(|s| DamlDecimal::parse(&s).ok())?;
+
+    let instrument_record = transfer_record
+        .fields
+        .iter()
+        .find(|f| f.label == "instrumentId")
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Record(r)) => Some(r),
+            _ => None,
+        })?;
+    let instrument_admin: CantonId = field_party(instrument_record, "admin")?.parse().ok()?;
+    let instrument_id = field_text(instrument_record, "id")?;
+
+    Some(TransferInstructionInfo {
+        contract_id: created.contract_id.clone(),
+        sender,
+        receiver,
+        amount,
+        instrument_admin,
+        instrument_id,
+    })
+}
+
+fn field_party(record: &Record, label: &str) -> Option<String> {
+    record
+        .fields
+        .iter()
+        .find(|f| f.label == label)
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Party(p)) => Some(p.clone()),
+            _ => None,
+        })
+}
+
+fn field_text(record: &Record, label: &str) -> Option<String> {
+    record
+        .fields
+        .iter()
+        .find(|f| f.label == label)
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Text(t)) => Some(t.clone()),
+            _ => None,
+        })
+}
+
+fn field_numeric(record: &Record, label: &str) -> Option<String> {
+    record
+        .fields
+        .iter()
+        .find(|f| f.label == label)
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Numeric(n)) => Some(n.clone()),
+            _ => None,
+        })
 }
 
 #[cfg(test)]

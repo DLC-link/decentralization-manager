@@ -31,8 +31,9 @@ use crate::{
         middleware::require_admin,
         queries::{
             ContractQueryParams as QueryContractParams, get_governance_confirmations,
-            get_governance_state as query_governance_state, get_instruments, get_provider_services,
-            get_registrar_services, get_user_services, get_vaults, query_contracts_by_template,
+            get_governance_state as query_governance_state, get_instruments,
+            get_open_transfer_instructions, get_provider_services, get_registrar_services,
+            get_user_services, get_vaults, query_contracts_by_template,
         },
         transfer_context::{
             fetch as fetch_accept_transfer_context, maybe_fetch_for_proposal,
@@ -45,8 +46,8 @@ use crate::{
             GovernanceResponse, GovernanceStateResponse, GovernanceType, InstrumentsResponse,
             KnownMember, KnownMembersResponse, MessageResponse, NetworkInfo, OperatorInfo,
             ProposalType, ProposeActionRequest, ProviderServicesResponse,
-            RegistrarServicesResponse, TransferPreapprovalsResponse, UserServicesResponse,
-            VaultsResponse,
+            RegistrarServicesResponse, TransferInstructionsResponse, TransferPreapprovalsResponse,
+            UserServicesResponse, VaultsResponse,
         },
     },
     utils,
@@ -410,6 +411,44 @@ pub async fn get_registrar_services_handler(
             tracing::error!("Failed to fetch registrar services: {e}");
             HttpResponse::InternalServerError().json(ErrorResponse {
                 error: format!("Failed to fetch registrar services: {e}"),
+            })
+        }
+    }
+}
+
+/// List open `TransferInstruction` contracts (status
+/// `TransferPendingReceiverAcceptance`) addressed to this dec-party. Used by
+/// the Accept Transfer proposal form to populate a dropdown of acceptable
+/// transfers — operators pick from this list instead of pasting the contract
+/// id.
+#[utoipa::path(
+    tag = "Services",
+    params(GovernanceQuery),
+    responses(
+        (
+            status = 200,
+            description = "Open transfer instructions",
+            body = TransferInstructionsResponse,
+        ),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    )
+)]
+#[get("/governance/transfer-instructions")]
+pub async fn get_transfer_instructions_handler(
+    data: web::Data<AppState>,
+    query: web::Query<GovernanceQuery>,
+) -> impl Responder {
+    let party_id = &query.party_id;
+    let token = get_party_token(&data, party_id).await;
+
+    match get_open_transfer_instructions(&data.config, party_id, token).await {
+        Ok(transfer_instructions) => HttpResponse::Ok().json(TransferInstructionsResponse {
+            transfer_instructions,
+        }),
+        Err(e) => {
+            tracing::error!("Failed to fetch transfer instructions: {e}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch transfer instructions: {e}"),
             })
         }
     }

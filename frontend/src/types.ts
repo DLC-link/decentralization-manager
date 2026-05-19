@@ -773,6 +773,21 @@ export interface InstrumentsResponse {
   instruments: InstrumentInfo[];
 }
 
+/** An open `TransferInstruction` awaiting receiver acceptance, surfaced for
+ *  the Accept Transfer proposal dropdown. */
+export interface TransferInstructionInfo {
+  contract_id: string;
+  sender: string;
+  receiver: string;
+  amount: string;
+  instrument_admin: string;
+  instrument_id: string;
+}
+
+export interface TransferInstructionsResponse {
+  transfer_instructions: TransferInstructionInfo[];
+}
+
 /** Count of active TransferPreapproval contracts the gov party already has,
  *  split by direction (CC = Canton Coin via Splice; token = via Utility). */
 export interface TransferPreapprovalsResponse {
