@@ -253,10 +253,23 @@ start_canton_tunnels() {
 stop_canton_tunnels() {
     if [ "${#CANTON_TUNNEL_PIDS[@]}" -gt 0 ]; then
         log_phase "Stopping Canton port-forwards"
+        # Stop the retry loops first so they don't respawn kubectl while
+        # we're trying to clean it up.
         for pid in "${CANTON_TUNNEL_PIDS[@]}"; do
             kill -TERM "$pid" 2>/dev/null || true
         done
-        pkill -P $$ -f "kubectl --context=$KUBE_CONTEXT_DEVNET port-forward" 2>/dev/null || true
+        # Then kill the kubectl port-forward processes themselves. They are
+        # GRANDCHILDREN of run.sh's $$ (subshell -> kubectl), so the
+        # previous `pkill -P $$ -f ...` form required both `-P $$` (direct
+        # children of $$) AND the kubectl-matching command pattern to
+        # match — kubectl isn't a direct child, so nothing ever matched
+        # and the forwards leaked between runs (observed 2026-05-19 after
+        # an EXIT_RUNSH=0 run #9 left three svc/participant-ibtc-devnet-*
+        # port-forwards alive). When the loop subshell above dies, kubectl
+        # is reparented to init and stays alive until killed explicitly.
+        # The -f pattern is scoped to our devnet context + ibtc-devnet
+        # service so it won't affect unrelated kubectl invocations.
+        pkill -f "kubectl --context=$KUBE_CONTEXT_DEVNET port-forward svc/participant-ibtc-devnet" 2>/dev/null || true
         CANTON_TUNNEL_PIDS=()
     fi
 }
