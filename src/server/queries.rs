@@ -1,4 +1,7 @@
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use canton_common::decimal::DamlDecimal;
 use canton_proto_rs::com::{
@@ -2611,6 +2614,18 @@ fn extract_transfer_instruction_info(created: &CreatedEvent) -> Option<TransferI
             _ => None,
         })?;
 
+    // Drop instructions whose `executeBefore` deadline has already passed —
+    // accepting them would fail at interpretation with `deadline-exceeded`,
+    // so they have no business in the dropdown.
+    let execute_before_micros = field_timestamp(transfer_record, "executeBefore")?;
+    let now_micros = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_micros() as i64;
+    if execute_before_micros <= now_micros {
+        return None;
+    }
+
     let sender: CantonId = field_party(transfer_record, "sender")?.parse().ok()?;
     let receiver: CantonId = field_party(transfer_record, "receiver")?.parse().ok()?;
     let amount =
@@ -2670,6 +2685,18 @@ fn field_numeric(record: &Record, label: &str) -> Option<String> {
         .and_then(|f| f.value.as_ref())
         .and_then(|v| match &v.sum {
             Some(value::Sum::Numeric(n)) => Some(n.clone()),
+            _ => None,
+        })
+}
+
+fn field_timestamp(record: &Record, label: &str) -> Option<i64> {
+    record
+        .fields
+        .iter()
+        .find(|f| f.label == label)
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Timestamp(t)) => Some(*t),
             _ => None,
         })
 }
