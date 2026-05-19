@@ -670,7 +670,7 @@ dependencies = [
 [[package]]
 name = "canton-proto-rs"
 version = "3.4.0"
-source = "git+ssh://git@github.com/DLC-link/canton-lib?branch=main#e5b459f62715ee903d9cd8fdd0c4411252356e4e"
+source = "git+ssh://git@github.com/DLC-link/canton-lib?branch=main#305ad23d92a27450df2c99b93d2123ff952d9a47"
 dependencies = [
  "prost",
  "prost-types",
@@ -839,7 +839,7 @@ dependencies = [
 [[package]]
 name = "common"
 version = "0.5.0"
-source = "git+ssh://git@github.com/DLC-link/canton-lib?branch=main#e5b459f62715ee903d9cd8fdd0c4411252356e4e"
+source = "git+ssh://git@github.com/DLC-link/canton-lib?branch=main#305ad23d92a27450df2c99b93d2123ff952d9a47"
 dependencies = [
  "canton-api-client",
  "rust_decimal",
@@ -2186,7 +2186,7 @@ dependencies = [
 [[package]]
 name = "keycloak"
 version = "0.5.0"
-source = "git+ssh://git@github.com/DLC-link/canton-lib?branch=main#e5b459f62715ee903d9cd8fdd0c4411252356e4e"
+source = "git+ssh://git@github.com/DLC-link/canton-lib?branch=main#305ad23d92a27450df2c99b93d2123ff952d9a47"
 dependencies = [
  "base64",
  "reqwest 0.12.28",

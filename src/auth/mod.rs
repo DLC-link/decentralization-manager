@@ -160,7 +160,7 @@ impl TokenManager {
     }
 
     async fn authenticate_keycloak(config: &KeycloakConfig) -> Result<TokenState> {
-        let url = keycloak::login::password_url(&config.url, &config.realm);
+        let url = keycloak::login::token_url(&config.url, &config.realm);
 
         // Choose auth method: client_credentials (M2M) if client_secret is set, otherwise password flow
         let (response, is_m2m) = if let Some(ref client_secret) = config.client_secret {
@@ -236,7 +236,7 @@ impl TokenManager {
             return Ok(());
         };
 
-        let url = keycloak::login::password_url(&config.url, &config.realm);
+        let url = keycloak::login::token_url(&config.url, &config.realm);
 
         match keycloak::login::refresh(RefreshParams {
             client_id: config.client_id.clone(),
