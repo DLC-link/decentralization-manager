@@ -1417,6 +1417,26 @@ pub struct UserServiceInfo {
     pub user: CantonId,
 }
 
+/// An open `TransferInstruction` awaiting receiver acceptance. Populates the
+/// Accept Transfer proposal form's dropdown so operators don't have to paste
+/// the contract id by hand.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct TransferInstructionInfo {
+    pub contract_id: String,
+    pub sender: CantonId,
+    pub receiver: CantonId,
+    #[schema(value_type = String)]
+    pub amount: DamlDecimal,
+    pub instrument_admin: CantonId,
+    pub instrument_id: String,
+}
+
+/// Response for the transfer instructions endpoint.
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct TransferInstructionsResponse {
+    pub transfer_instructions: Vec<TransferInstructionInfo>,
+}
+
 /// Information about an InstrumentConfiguration contract (one "token" the
 /// governance party can mint/burn against). `instrument_admin` and
 /// `instrument_id` are read off the contract's `defaultIdentifier` field and

@@ -52,6 +52,7 @@ export const GovernanceActionsDialog = ({
             network={network}
             governanceType={governanceType}
             onAfterAction={onAfterAction}
+            onProposalCreated={onClose}
             view={view}
           />
         </Box>

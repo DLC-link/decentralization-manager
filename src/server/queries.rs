@@ -1,10 +1,14 @@
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
+use canton_common::decimal::DamlDecimal;
 use canton_proto_rs::com::{
     daml::ledger::api::v2::{
         CreatedEvent, CumulativeFilter, EventFormat, Filters, GetActiveContractsRequest,
-        GetLedgerEndRequest, Identifier, InterfaceFilter, TemplateFilter, Value, WildcardFilter,
-        admin::ListKnownPartiesRequest, cumulative_filter,
+        GetLedgerEndRequest, Identifier, InterfaceFilter, Record, TemplateFilter, Value,
+        WildcardFilter, admin::ListKnownPartiesRequest, cumulative_filter,
         get_active_contracts_response::ContractEntry, value,
     },
     digitalasset::canton::admin::participant::v30::{
@@ -24,7 +28,8 @@ use super::{
     types::{
         ActionType, ContractInfo, ContractWithBlob, DomainGovernanceAction, GovernanceAction,
         GovernanceConfirmation, GovernanceState, InstrumentInfo, PartyMetadata,
-        ProviderServiceInfo, RegistrarServiceInfo, UserServiceInfo, VaultInfo,
+        ProviderServiceInfo, RegistrarServiceInfo, TransferInstructionInfo, UserServiceInfo,
+        VaultInfo,
     },
 };
 
@@ -2496,6 +2501,215 @@ pub async fn query_contracts_by_template(
     Ok(contracts)
 }
 
+// ============================================================================
+// Token-standard TransferInstruction Query (for Accept Transfer dropdown)
+// ============================================================================
+
+/// The only `TransferInstructionStatus` constructor that can be Accepted —
+/// see `Splice.Api.Token.TransferInstructionV1` in the token-standard package.
+/// Lifted here so a grep surfaces every place that depends on the spelling.
+const TRANSFER_PENDING_RECEIVER_ACCEPTANCE: &str = "TransferPendingReceiverAcceptance";
+
+/// Fetch open `TransferInstruction` contracts (status
+/// `TransferPendingReceiverAcceptance`) whose `receiver` is `party_id`.
+///
+/// The token-standard registry models `TransferInstruction` as an interface
+/// (`Splice.Api.Token.TransferInstructionV1:TransferInstruction`), so this
+/// uses an `InterfaceFilter` and reads the computed `TransferInstructionView`
+/// to surface sender / receiver / amount / instrument for the UI dropdown.
+pub async fn get_open_transfer_instructions(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+) -> Result<Vec<TransferInstructionInfo>> {
+    let mut state_client = utils::create_state_client(config, token).await?;
+
+    let ledger_end = state_client
+        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
+        .await?
+        .into_inner()
+        .offset;
+
+    let mut filters_by_party = HashMap::new();
+    filters_by_party.insert(
+        party_id.to_string(),
+        Filters {
+            cumulative: vec![CumulativeFilter {
+                identifier_filter: Some(cumulative_filter::IdentifierFilter::InterfaceFilter(
+                    InterfaceFilter {
+                        interface_id: Some(Identifier {
+                            package_id: "#splice-api-token-transfer-instruction-v1".to_string(),
+                            module_name: "Splice.Api.Token.TransferInstructionV1".to_string(),
+                            entity_name: "TransferInstruction".to_string(),
+                        }),
+                        include_interface_view: true,
+                        include_created_event_blob: false,
+                    },
+                )),
+            }],
+        },
+    );
+
+    let acs_request = GetActiveContractsRequest {
+        active_at_offset: ledger_end,
+        event_format: Some(EventFormat {
+            filters_by_party,
+            filters_for_any_party: None,
+            verbose: true,
+        }),
+    };
+
+    let mut stream = state_client
+        .get_active_contracts(tonic::Request::new(acs_request))
+        .await?
+        .into_inner();
+
+    let receiver_str = party_id.to_string();
+    let mut instructions = Vec::new();
+    while let Some(response) = stream.message().await? {
+        // The InterfaceFilter only enforces party visibility — this party can
+        // see the contract as sender, receiver, or an instrument-admin
+        // stakeholder. Keep only the ones where it's the *receiver*, since
+        // those are the only ones it can Accept.
+        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
+            && let Some(created) = active.created_event
+            && let Some(info) = extract_transfer_instruction_info(&created)
+            && info.receiver.to_string() == receiver_str
+        {
+            instructions.push(info);
+        }
+    }
+
+    Ok(instructions)
+}
+
+/// Pull sender / receiver / amount / instrument out of a `TransferInstruction`
+/// interface view. Returns `None` if the view is missing, the status is not
+/// `TransferPendingReceiverAcceptance`, or any expected field is absent.
+fn extract_transfer_instruction_info(created: &CreatedEvent) -> Option<TransferInstructionInfo> {
+    // The view is delivered under `interface_views` (not `create_arguments`).
+    // Pick the first one matching the TransferInstruction interface; there's
+    // typically only one for this filter shape.
+    let view = created.interface_views.iter().find(|v| {
+        v.interface_id.as_ref().is_some_and(|id| {
+            id.module_name == "Splice.Api.Token.TransferInstructionV1"
+                && id.entity_name == "TransferInstruction"
+        })
+    })?;
+    let view_record = view.view_value.as_ref()?;
+
+    // Filter out already-progressing instructions; only pending-acceptance
+    // ones can be Accepted.
+    let status = view_record
+        .fields
+        .iter()
+        .find(|f| f.label == "status")
+        .and_then(|f| f.value.as_ref())?;
+    let is_pending_acceptance = matches!(
+        &status.sum,
+        Some(value::Sum::Variant(v)) if v.constructor == TRANSFER_PENDING_RECEIVER_ACCEPTANCE
+    );
+    if !is_pending_acceptance {
+        return None;
+    }
+
+    let transfer_record = view_record
+        .fields
+        .iter()
+        .find(|f| f.label == "transfer")
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Record(r)) => Some(r),
+            _ => None,
+        })?;
+
+    // Drop instructions whose `executeBefore` deadline has already passed —
+    // accepting them would fail at interpretation with `deadline-exceeded`,
+    // so they have no business in the dropdown.
+    let execute_before_micros = field_timestamp(transfer_record, "executeBefore")?;
+    let now_micros = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_micros() as i64;
+    if execute_before_micros <= now_micros {
+        return None;
+    }
+
+    let sender: CantonId = field_party(transfer_record, "sender")?.parse().ok()?;
+    let receiver: CantonId = field_party(transfer_record, "receiver")?.parse().ok()?;
+    let amount =
+        field_numeric(transfer_record, "amount").and_then(|s| DamlDecimal::parse(&s).ok())?;
+
+    let instrument_record = transfer_record
+        .fields
+        .iter()
+        .find(|f| f.label == "instrumentId")
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Record(r)) => Some(r),
+            _ => None,
+        })?;
+    let instrument_admin: CantonId = field_party(instrument_record, "admin")?.parse().ok()?;
+    let instrument_id = field_text(instrument_record, "id")?;
+
+    Some(TransferInstructionInfo {
+        contract_id: created.contract_id.clone(),
+        sender,
+        receiver,
+        amount,
+        instrument_admin,
+        instrument_id,
+    })
+}
+
+fn field_party(record: &Record, label: &str) -> Option<String> {
+    record
+        .fields
+        .iter()
+        .find(|f| f.label == label)
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Party(p)) => Some(p.clone()),
+            _ => None,
+        })
+}
+
+fn field_text(record: &Record, label: &str) -> Option<String> {
+    record
+        .fields
+        .iter()
+        .find(|f| f.label == label)
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Text(t)) => Some(t.clone()),
+            _ => None,
+        })
+}
+
+fn field_numeric(record: &Record, label: &str) -> Option<String> {
+    record
+        .fields
+        .iter()
+        .find(|f| f.label == label)
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Numeric(n)) => Some(n.clone()),
+            _ => None,
+        })
+}
+
+fn field_timestamp(record: &Record, label: &str) -> Option<i64> {
+    record
+        .fields
+        .iter()
+        .find(|f| f.label == label)
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Timestamp(t)) => Some(*t),
+            _ => None,
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2565,5 +2779,154 @@ mod tests {
         assert_eq!(compare_versions("1.0.0", "0.99.99"), Ordering::Greater);
         assert_eq!(compare_versions("1.0.0", "1.0.0"), Ordering::Equal);
         assert_eq!(compare_versions("1.0", "1.0.0"), Ordering::Less);
+    }
+
+    // ------------------------------------------------------------------------
+    // extract_transfer_instruction_info
+    //
+    // Locks the two filters that are easy to break by accident: the status
+    // constructor match and the `executeBefore` deadline check.
+    // ------------------------------------------------------------------------
+
+    use canton_proto_rs::com::daml::ledger::api::v2::{InterfaceView, RecordField, Variant};
+
+    fn field(label: &str, value: Value) -> RecordField {
+        RecordField {
+            label: label.to_string(),
+            value: Some(value),
+        }
+    }
+
+    fn text_value(s: &str) -> Value {
+        Value {
+            sum: Some(value::Sum::Text(s.to_string())),
+        }
+    }
+
+    fn party_value(p: &str) -> Value {
+        Value {
+            sum: Some(value::Sum::Party(p.to_string())),
+        }
+    }
+
+    fn numeric_value(n: &str) -> Value {
+        Value {
+            sum: Some(value::Sum::Numeric(n.to_string())),
+        }
+    }
+
+    fn timestamp_value(micros: i64) -> Value {
+        Value {
+            sum: Some(value::Sum::Timestamp(micros)),
+        }
+    }
+
+    fn variant_value(constructor: &str, inner: Value) -> Value {
+        Value {
+            sum: Some(value::Sum::Variant(Box::new(Variant {
+                variant_id: None,
+                constructor: constructor.to_string(),
+                value: Some(Box::new(inner)),
+            }))),
+        }
+    }
+
+    fn record_value(fields: Vec<RecordField>) -> Value {
+        Value {
+            sum: Some(value::Sum::Record(Record {
+                record_id: None,
+                fields,
+            })),
+        }
+    }
+
+    fn unit_value() -> Value {
+        record_value(vec![])
+    }
+
+    /// Build a `CreatedEvent` carrying a `TransferInstructionView` interface
+    /// view. `status_ctor` is the variant constructor on the status field;
+    /// `execute_before_micros` populates the transfer record's
+    /// `executeBefore` field.
+    fn make_event(status_ctor: &str, execute_before_micros: i64) -> CreatedEvent {
+        // Canton party id format: `<prefix>::<34-byte-multihash-hex>`.
+        // `CantonId::parse` rejects anything else, so use a real-shaped fingerprint.
+        const FP: &str = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
+        let transfer = record_value(vec![
+            field("sender", party_value(&format!("alice::{FP}"))),
+            field("receiver", party_value(&format!("bob::{FP}"))),
+            field("amount", numeric_value("10.0")),
+            field(
+                "instrumentId",
+                record_value(vec![
+                    field("admin", party_value(&format!("admin::{FP}"))),
+                    field("id", text_value("CBTC")),
+                ]),
+            ),
+            field("executeBefore", timestamp_value(execute_before_micros)),
+        ]);
+        let view = InterfaceView {
+            interface_id: Some(Identifier {
+                package_id: "#splice-api-token-transfer-instruction-v1".to_string(),
+                module_name: "Splice.Api.Token.TransferInstructionV1".to_string(),
+                entity_name: "TransferInstruction".to_string(),
+            }),
+            view_status: None,
+            view_value: Some(Record {
+                record_id: None,
+                fields: vec![
+                    field("status", variant_value(status_ctor, unit_value())),
+                    field("transfer", transfer),
+                ],
+            }),
+        };
+        CreatedEvent {
+            offset: 0,
+            node_id: 0,
+            contract_id: "cid-1".to_string(),
+            template_id: None,
+            contract_key: None,
+            create_arguments: None,
+            created_event_blob: vec![],
+            interface_views: vec![view],
+            witness_parties: vec![],
+            signatories: vec![],
+            observers: vec![],
+            created_at: None,
+            package_name: String::new(),
+            representative_package_id: String::new(),
+            acs_delta: false,
+        }
+    }
+
+    #[test]
+    fn extract_transfer_instruction_info_accepts_pending_in_future() {
+        let future_micros = i64::MAX / 4;
+        let info = extract_transfer_instruction_info(&make_event(
+            TRANSFER_PENDING_RECEIVER_ACCEPTANCE,
+            future_micros,
+        ))
+        .expect("pending + in-future should yield info");
+        assert_eq!(info.contract_id, "cid-1");
+        assert!(info.sender.to_string().starts_with("alice::"));
+        assert!(info.receiver.to_string().starts_with("bob::"));
+    }
+
+    #[test]
+    fn extract_transfer_instruction_info_drops_non_pending_status() {
+        let future_micros = i64::MAX / 4;
+        assert!(
+            extract_transfer_instruction_info(&make_event("TransferInProgress", future_micros))
+                .is_none(),
+        );
+    }
+
+    #[test]
+    fn extract_transfer_instruction_info_drops_expired() {
+        // Epoch is comfortably in the past.
+        assert!(
+            extract_transfer_instruction_info(&make_event(TRANSFER_PENDING_RECEIVER_ACCEPTANCE, 0))
+                .is_none(),
+        );
     }
 }
