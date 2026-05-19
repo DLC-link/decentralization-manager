@@ -1891,9 +1891,16 @@ async fn execute_confirmed_action(
         )
         .await
         {
-            Ok(Some(ctx)) => {
-                registry_disclosed = to_proto_disclosed_contracts(&ctx.disclosed_contracts)?;
-            }
+            Ok(Some(ctx)) => match to_proto_disclosed_contracts(&ctx.disclosed_contracts) {
+                Ok(dcs) => registry_disclosed = dcs,
+                Err(e) => {
+                    // A malformed blob from the registry shouldn't 500 the
+                    // execute call — mirror the non-fatal handling below.
+                    tracing::warn!(
+                        "Failed to decode registry disclosed contracts for proposal {proposal_cid}: {e:#}"
+                    );
+                }
+            },
             Ok(None) => {}
             Err(e) => {
                 // Don't hard-fail on registry hiccups for non-transfer

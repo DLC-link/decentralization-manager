@@ -466,6 +466,22 @@ mod tests {
     }
 
     #[test]
+    fn test_registry_url_per_network() {
+        assert_eq!(
+            Network::Devnet.registry_url(),
+            "https://api.utilities.digitalasset-dev.com",
+        );
+        assert_eq!(
+            Network::Testnet.registry_url(),
+            "https://api.utilities.digitalasset-staging.com",
+        );
+        assert_eq!(
+            Network::Mainnet.registry_url(),
+            "https://api.utilities.digitalasset.com",
+        );
+    }
+
+    #[test]
     fn test_keycloak_defaults_devnet() {
         let defaults = Network::Devnet.keycloak_defaults();
         assert_eq!(defaults.url, "https://keycloak.dev.canton.ibtc.network");

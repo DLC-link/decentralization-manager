@@ -156,8 +156,8 @@ fn make_any_value(v: &ContextValue) -> Result<Value> {
         }
         ContextValue::Date(_) | ContextValue::Time(_) | ContextValue::RelTime(_) => {
             anyhow::bail!(
-                "AnyValue::{v:?} not supported in choice context: only Text/Int/Decimal/Bool/\
-                 Party/ContractId/List/Map are translated to the Ledger API today",
+                "ContextValue::{v:?} not supported in choice context: only Text, Int, Decimal, \
+                 Bool, Party, ContractId, List, and Map are translated to the Ledger API today",
             );
         }
     };
