@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   Autocomplete,
   Box,
@@ -76,6 +76,8 @@ import type {
   TransferFactoriesResponse,
   Holding,
   HoldingsResponse,
+  GovernanceState,
+  GovernanceStateResponse,
 } from "../types";
 
 type ActionTypeKey = ActionType["type"];
@@ -210,6 +212,17 @@ export const GovernanceSection = ({
   const [memberParty, setMemberParty] = useState("");
   const [newThreshold, setNewThreshold] = useState(2);
   const [timeoutMicroseconds, setTimeoutMicroseconds] = useState(3600000000);
+  // Latest applied governance values (threshold from /governance/confirmations,
+  // timeout from /governance/state). Used to prefill the new-action form so it
+  // opens with the current values, not hardcoded 2 / 1h.
+  const [governanceState, setGovernanceState] =
+    useState<GovernanceState | null>(null);
+  // Once the user types into a threshold/timeout field we stop auto-seeding
+  // from server state — otherwise the 10s poll would clobber their input.
+  // `resetActionForm` flips these back to false so the next form opening
+  // re-seeds from the latest applied values.
+  const userEditedThresholdRef = useRef(false);
+  const userEditedTimeoutRef = useRef(false);
   const [vaultName, setVaultName] = useState(defaultVaultName);
   const [shareSymbol, setShareSymbol] = useState(defaultShareSymbol);
   const [assetInstrumentId, setAssetInstrumentId] =
@@ -362,6 +375,50 @@ export const GovernanceSection = ({
     const interval = setInterval(fetchGovernance, 10000); // Poll every 10 seconds
     return () => clearInterval(interval);
   }, [fetchGovernance]);
+
+  // Fetch governance state for action_confirmation_timeout_microseconds.
+  // Threshold also comes back here, but the form already uses the threshold
+  // from `data` (the confirmations payload) — `governanceState` is primarily
+  // for the timeout field's prefill.
+  const fetchGovernanceStateForPrefill = useCallback(async () => {
+    try {
+      const res = await authenticatedFetch(
+        `${API_BASE}/governance/state?party_id=${encodeURIComponent(partyId)}`,
+      );
+      if (!res.ok) return;
+      const body: GovernanceStateResponse = await res.json();
+      setGovernanceState(body.state);
+    } catch {
+      /* fall back to hardcoded defaults */
+    }
+  }, [partyId]);
+
+  useEffect(() => {
+    fetchGovernanceStateForPrefill();
+  }, [fetchGovernanceStateForPrefill]);
+
+  // Seed `newThreshold` from the active GovernanceRules contract once state
+  // arrives. NOTE: do not use `data.threshold` here — that field on the
+  // `/governance/confirmations` response is the decentralized-namespace
+  // topology threshold (e.g. 2-of-3 owners), not the governance-rules
+  // threshold. They are usually different numbers. The ref guard prevents
+  // polling/refreshes from clobbering the user's typed value mid-edit.
+  useEffect(() => {
+    if (
+      governanceState?.threshold != null &&
+      !userEditedThresholdRef.current
+    ) {
+      setNewThreshold(Number(governanceState.threshold));
+    }
+  }, [governanceState?.threshold]);
+
+  // Same pattern for the action confirmation timeout.
+  useEffect(() => {
+    const us = governanceState?.action_confirmation_timeout_microseconds;
+    if (us != null && !userEditedTimeoutRef.current) {
+      setTimeoutMicroseconds(us);
+    }
+  }, [governanceState?.action_confirmation_timeout_microseconds]);
 
   // Fetch available vaults from ACS
   const fetchVaults = useCallback(async () => {
@@ -936,8 +993,20 @@ export const GovernanceSection = ({
   // submissions of the same dialog session.
   const resetActionForm = () => {
     setMemberParty("");
-    setNewThreshold(2);
-    setTimeoutMicroseconds(3600000000);
+    // Reset to latest applied governance values rather than hardcoded
+    // 2 / 1h — the next form opening should reflect on-chain state. Clearing
+    // the edit refs also lets the auto-seed effects fire again for any
+    // values that haven't loaded yet at reset time.
+    userEditedThresholdRef.current = false;
+    userEditedTimeoutRef.current = false;
+    setNewThreshold(
+      governanceState?.threshold != null
+        ? Number(governanceState.threshold)
+        : 2,
+    );
+    setTimeoutMicroseconds(
+      governanceState?.action_confirmation_timeout_microseconds ?? 3600000000,
+    );
     setVaultName(defaultVaultName);
     setShareSymbol(defaultShareSymbol);
     setAssetInstrumentId(defaultInstrumentId);
@@ -1023,7 +1092,7 @@ export const GovernanceSection = ({
       // Clear fields, keep the form visible. The created action shows up
       // in the notification queue — no separate success message needed.
       resetActionForm();
-      await fetchGovernance();
+      await Promise.all([fetchGovernance(), fetchGovernanceStateForPrefill()]);
       onAfterAction?.();
     } catch (e) {
       setError(
@@ -1306,7 +1375,10 @@ export const GovernanceSection = ({
               label="New Threshold"
               type="number"
               value={newThreshold}
-              onChange={(e) => setNewThreshold(parseInt(e.target.value) || 2)}
+              onChange={(e) => {
+                userEditedThresholdRef.current = true;
+                setNewThreshold(parseInt(e.target.value) || 2);
+              }}
               size="small"
               fullWidth
             />
@@ -1318,7 +1390,10 @@ export const GovernanceSection = ({
             label="New Threshold"
             type="number"
             value={newThreshold}
-            onChange={(e) => setNewThreshold(parseInt(e.target.value) || 2)}
+            onChange={(e) => {
+              userEditedThresholdRef.current = true;
+              setNewThreshold(parseInt(e.target.value) || 2);
+            }}
             size="small"
             fullWidth
           />
@@ -1329,9 +1404,10 @@ export const GovernanceSection = ({
             label="Timeout (microseconds)"
             type="number"
             value={timeoutMicroseconds}
-            onChange={(e) =>
-              setTimeoutMicroseconds(parseInt(e.target.value) || 0)
-            }
+            onChange={(e) => {
+              userEditedTimeoutRef.current = true;
+              setTimeoutMicroseconds(parseInt(e.target.value) || 0);
+            }}
             size="small"
             fullWidth
             helperText="1 hour = 3,600,000,000 microseconds"
