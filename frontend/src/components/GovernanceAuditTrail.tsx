@@ -23,6 +23,7 @@ import { JSONTree } from "react-json-tree";
 import { API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
 import { zebraRow } from "../styles";
+import { CopyableText } from "./CopyableText";
 import type { ChainAuditEntry, ChainAuditResponse } from "../types";
 
 interface GovernanceAuditTrailProps {
@@ -61,11 +62,6 @@ const eventTypeColor = (
     default:
       return "default";
   }
-};
-
-const truncateMiddle = (text: string, start = 8, end = 8): string => {
-  if (text.length <= start + end + 3) return text;
-  return `${text.slice(0, start)}…${text.slice(-end)}`;
 };
 
 const useJsonTreeTheme = () => {
@@ -245,7 +241,7 @@ export const GovernanceAuditTrail = ({
           No on-chain governance events found for this party.
         </Typography>
       ) : (
-        <Box sx={{ position: "relative", mx: -3 }}>
+        <Box sx={{ position: "relative" }}>
           <Box
             sx={{
               position: "absolute",
@@ -277,11 +273,13 @@ export const GovernanceAuditTrail = ({
             <TableHead>
               <TableRow>
                 <TableCell sx={{ py: 1, width: 32 }} />
-                <TableCell sx={{ py: 1 }}>Time</TableCell>
-                <TableCell sx={{ py: 1 }}>Event</TableCell>
-                <TableCell sx={{ py: 1 }}>Action</TableCell>
-                <TableCell sx={{ py: 1 }}>Type</TableCell>
-                <TableCell sx={{ py: 1 }}>Contract</TableCell>
+                <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>Time</TableCell>
+                <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>Event</TableCell>
+                <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>Action</TableCell>
+                <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>Type</TableCell>
+                <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>
+                  Contract
+                </TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
@@ -307,39 +305,47 @@ export const GovernanceAuditTrail = ({
                           </IconButton>
                         </Tooltip>
                       </TableCell>
-                      <TableCell sx={{ py: 1, fontSize: "0.8rem" }}>
+                      <TableCell
+                        sx={{ py: 1, fontSize: "0.8rem", whiteSpace: "nowrap" }}
+                      >
                         {entry.timestamp > 0
                           ? formatTimestamp(entry.timestamp)
                           : "—"}
                       </TableCell>
-                      <TableCell sx={{ py: 1 }}>
+                      <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>
                         <Chip
                           label={entry.event_type}
                           size="small"
                           color={eventTypeColor(entry.event_type)}
                         />
                       </TableCell>
-                      <TableCell sx={{ py: 1 }}>
-                        <Typography
-                          variant="body2"
-                          sx={{ fontFamily: "monospace", fontSize: "0.8rem" }}
-                        >
-                          {entry.action_summary}
-                        </Typography>
-                      </TableCell>
-                      <TableCell sx={{ py: 1, fontSize: "0.8rem" }}>
-                        {entry.governance_type}
+                      <TableCell sx={{ py: 1, maxWidth: 320 }}>
+                        <Tooltip title={entry.action_summary}>
+                          <Typography
+                            variant="body2"
+                            sx={{
+                              fontFamily: "monospace",
+                              fontSize: "0.8rem",
+                              whiteSpace: "nowrap",
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                            }}
+                          >
+                            {entry.action_summary}
+                          </Typography>
+                        </Tooltip>
                       </TableCell>
                       <TableCell
-                        sx={{
-                          py: 1,
-                          fontFamily: "monospace",
-                          fontSize: "0.75rem",
-                        }}
+                        sx={{ py: 1, fontSize: "0.8rem", whiteSpace: "nowrap" }}
                       >
-                        <Tooltip title={entry.contract_id}>
-                          <span>{truncateMiddle(entry.contract_id)}</span>
-                        </Tooltip>
+                        {entry.governance_type}
+                      </TableCell>
+                      <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>
+                        <CopyableText
+                          text={entry.contract_id}
+                          truncate={{ start: 8, end: 8 }}
+                          variant="caption"
+                        />
                       </TableCell>
                     </TableRow>
                     <TableRow>
