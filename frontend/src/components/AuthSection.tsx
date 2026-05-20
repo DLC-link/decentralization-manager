@@ -8,6 +8,7 @@ import {
   Alert,
   Tooltip,
 } from "@mui/material";
+import CancelIcon from "@mui/icons-material/Cancel";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import ErrorIcon from "@mui/icons-material/Error";
 import ScienceIcon from "@mui/icons-material/Science";
@@ -38,16 +39,39 @@ const isRightsValid = (rights: RightsStatus | undefined): boolean => {
   );
 };
 
-export const getAuthStatusIcon = (authStatus: PartyAuthStatus) => {
+export const getAuthStatusIcon = (authStatus: PartyAuthStatus | undefined) => {
+  if (!authStatus) {
+    return (
+      <Tooltip title="Not authenticated">
+        <CancelIcon color="error" fontSize="small" />
+      </Tooltip>
+    );
+  }
   switch (authStatus.status.status) {
     case "authenticated":
-      return <CheckCircleIcon color="success" fontSize="small" />;
+      return (
+        <Tooltip title="Authenticated">
+          <CheckCircleIcon color="success" fontSize="small" />
+        </Tooltip>
+      );
     case "mock":
-      return <ScienceIcon color="warning" fontSize="small" />;
+      return (
+        <Tooltip title="Test mode (mock authentication)">
+          <ScienceIcon color="warning" fontSize="small" />
+        </Tooltip>
+      );
     case "failed":
-      return <ErrorIcon color="error" fontSize="small" />;
+      return (
+        <Tooltip title="Authentication failed">
+          <ErrorIcon color="error" fontSize="small" />
+        </Tooltip>
+      );
     case "notconfigured":
-      return null;
+      return (
+        <Tooltip title="Not authenticated">
+          <CancelIcon color="error" fontSize="small" />
+        </Tooltip>
+      );
   }
 };
 

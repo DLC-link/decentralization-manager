@@ -31,6 +31,38 @@ import { zebraRow } from "../styles";
 import { ADMIN_ACCESS } from "../constants";
 import type { DecentralizedParty, Network, PartyAuthStatus } from "../types";
 
+const StatCard = ({ label, value }: { label: string; value: number | string }) => (
+  <Box
+    sx={(theme) => ({
+      display: "flex",
+      flexDirection: "column",
+      alignItems: "center",
+      justifyContent: "center",
+      px: 2,
+      py: 1,
+      borderRadius: 1,
+      minWidth: 96,
+      border: 1,
+      borderColor: "divider",
+      background:
+        theme.palette.mode === "light"
+          ? "linear-gradient(180deg, #ffffff 0%, #f4f4f4 100%)"
+          : "linear-gradient(180deg, #3a3a3a 0%, #262626 100%)",
+      boxShadow:
+        theme.palette.mode === "light"
+          ? "inset 0 1px 0 rgba(255,255,255,0.9), 0 1px 1px rgba(0,0,0,0.06)"
+          : "inset 0 1px 0 rgba(255,255,255,0.07), 0 1px 1px rgba(0,0,0,0.35)",
+    })}
+  >
+    <Typography variant="caption" color="text.secondary" sx={{ lineHeight: 1.2 }}>
+      {label}
+    </Typography>
+    <Typography variant="h6" sx={{ lineHeight: 1.2, fontWeight: 800 }}>
+      {value}
+    </Typography>
+  </Box>
+);
+
 interface CollapsibleSectionProps {
   title: string;
   expanded: boolean;
@@ -204,18 +236,11 @@ export const PartyDetail = ({
           alignItems: "center",
         }}
       >
-        <Chip label={`Threshold: ${party.threshold}`} size="small" />
-        <Chip label={`Owners: ${party.owners.length}`} size="small" />
-        <Chip
-          label={`Participants: ${party.participants.length}`}
-          size="small"
-        />
+        <StatCard label="Threshold" value={party.threshold} />
+        <StatCard label="Owners" value={party.owners.length} />
+        <StatCard label="Participants" value={party.participants.length} />
         {party.contracts && (
-          <Chip
-            label={`Contracts: ${party.contracts.length}`}
-            size="small"
-            color="primary"
-          />
+          <StatCard label="Contracts" value={party.contracts.length} />
         )}
         {isOwner && (
           <Button
@@ -259,11 +284,9 @@ export const PartyDetail = ({
         expanded={authExpanded}
         onToggle={() => setAuthExpanded(!authExpanded)}
         badge={
-          authStatus && (
-            <Box sx={{ display: "flex", alignItems: "center", ml: 1 }}>
-              {getAuthStatusIcon(authStatus)}
-            </Box>
-          )
+          <Box sx={{ display: "flex", alignItems: "center", ml: 1 }}>
+            {getAuthStatusIcon(authStatus)}
+          </Box>
         }
       >
         <Box sx={{ px: 3 }}>
@@ -502,14 +525,12 @@ export const PartyDetail = ({
             </>
           }
         >
-          <Box sx={{ pl: 3 }}>
-            <GovernanceAuditTrail
-              partyId={party.party_id}
-              refreshNonce={governanceRefreshNonce}
-              onCountChange={setAuditTrailCount}
-              onLoadingChange={setAuditTrailLoading}
-            />
-          </Box>
+          <GovernanceAuditTrail
+            partyId={party.party_id}
+            refreshNonce={governanceRefreshNonce}
+            onCountChange={setAuditTrailCount}
+            onLoadingChange={setAuditTrailLoading}
+          />
         </CollapsibleSection>
       )}
 
