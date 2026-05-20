@@ -11,7 +11,7 @@ pub use auth::{get_auth_config, get_auth_status, grant_rights, test_auth};
 pub use config::{get_network_config, get_node_config, save_network_config};
 pub use governance::{
     cancel_confirmation, confirm_action, execute_action, expire_confirmation, get_governance,
-    get_governance_audit, get_governance_chain_audit, get_governance_state,
+    get_governance_audit, get_governance_chain_audit, get_governance_state, get_holdings_handler,
     get_instruments_handler, get_known_members, get_network_info, get_operator_info, get_packages,
     get_provider_services_handler, get_registrar_services_handler, get_token_standard_contracts,
     get_transfer_instructions_handler, get_transfer_preapprovals_handler,
