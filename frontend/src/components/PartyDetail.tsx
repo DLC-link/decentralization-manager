@@ -20,14 +20,13 @@ import PersonRemoveIcon from "@mui/icons-material/PersonRemove";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import RefreshIcon from "@mui/icons-material/Refresh";
-import SettingsIcon from "@mui/icons-material/Settings";
 import { CopyableText } from "./CopyableText";
 import { KickDialog } from "./KickDialog";
 import { ContractsDialog } from "./ContractsDialog";
 import { PartyConfigDialog } from "./PartyConfigDialog";
 import { GovernanceActionsDialog } from "./GovernanceActionsDialog";
 import { GovernanceAuditTrail, CHAIN_LIMIT } from "./GovernanceAuditTrail";
-import { AuthSection } from "./AuthSection";
+import { AuthSection, getAuthStatusIcon } from "./AuthSection";
 import { zebraRow } from "../styles";
 import { ADMIN_ACCESS } from "../constants";
 import type { DecentralizedParty, Network, PartyAuthStatus } from "../types";
@@ -108,9 +107,9 @@ export const PartyDetail = ({
   const [configDialogOpen, setConfigDialogOpen] = useState(false);
   const [selectedParticipant, setSelectedParticipant] = useState("");
   const [participantsExpanded, setParticipantsExpanded] = useState(true);
-  const [contractsExpanded, setContractsExpanded] = useState(true);
-  const [authExpanded, setAuthExpanded] = useState(true);
-  const [governanceExpanded, setGovernanceExpanded] = useState(true);
+  const [contractsExpanded, setContractsExpanded] = useState(false);
+  const [authExpanded, setAuthExpanded] = useState(false);
+  const [governanceExpanded, setGovernanceExpanded] = useState(false);
   const [editGovContractId, setEditGovContractId] = useState<string | null>(
     null,
   );
@@ -218,14 +217,6 @@ export const PartyDetail = ({
             color="primary"
           />
         )}
-        <Tooltip title="Party configuration">
-          <IconButton
-            size="small"
-            onClick={() => setConfigDialogOpen(true)}
-          >
-            <SettingsIcon fontSize="small" />
-          </IconButton>
-        </Tooltip>
         {isOwner && (
           <Button
             variant="outlined"
@@ -262,11 +253,41 @@ export const PartyDetail = ({
         </Box>
       )}
 
+      {/* Authentication */}
+      <CollapsibleSection
+        title="Authentication"
+        expanded={authExpanded}
+        onToggle={() => setAuthExpanded(!authExpanded)}
+        badge={
+          authStatus && (
+            <Box sx={{ display: "flex", alignItems: "center", ml: 1 }}>
+              {getAuthStatusIcon(authStatus)}
+            </Box>
+          )
+        }
+      >
+        <Box sx={{ px: 3 }}>
+          <AuthSection
+            partyId={party.party_id}
+            authStatus={authStatus}
+            onRefresh={onAuthRefresh}
+            onConfigure={() => setConfigDialogOpen(true)}
+          />
+        </Box>
+      </CollapsibleSection>
+
       {/* Participants */}
       <CollapsibleSection
         title="Participants"
         expanded={participantsExpanded}
         onToggle={() => setParticipantsExpanded(!participantsExpanded)}
+        badge={
+          <Chip
+            label={party.participants.length}
+            size="small"
+            sx={{ ml: 1 }}
+          />
+        }
       >
         <Box sx={{ overflowX: "auto" }}>
           <Table size="small">
@@ -339,7 +360,6 @@ export const PartyDetail = ({
               label={party.contracts.length}
               size="small"
               sx={{ ml: 1 }}
-              color="primary"
             />
           }
         >
@@ -448,23 +468,6 @@ export const PartyDetail = ({
         </CollapsibleSection>
       )}
 
-      {/* Authentication */}
-      {authStatus && (
-        <CollapsibleSection
-          title="Authentication"
-          expanded={authExpanded}
-          onToggle={() => setAuthExpanded(!authExpanded)}
-        >
-          <Box sx={{ px: 3 }}>
-            <AuthSection
-              partyId={party.party_id}
-              authStatus={authStatus}
-              onRefresh={onAuthRefresh}
-            />
-          </Box>
-        </CollapsibleSection>
-      )}
-
       {/* Audit Trail */}
       {authStatus?.rights?.dec_party_act_as && (
         <CollapsibleSection
@@ -478,7 +481,6 @@ export const PartyDetail = ({
                   label={`${auditTrailCount}${auditTrailCount === CHAIN_LIMIT ? "+" : ""}`}
                   size="small"
                   sx={{ ml: 1 }}
-                  color="primary"
                 />
               )}
               <Tooltip title="Refresh audit trail">
