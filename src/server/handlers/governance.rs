@@ -31,7 +31,7 @@ use crate::{
         middleware::require_admin,
         queries::{
             ContractQueryParams as QueryContractParams, get_governance_confirmations,
-            get_governance_state as query_governance_state, get_instruments,
+            get_governance_state as query_governance_state, get_holdings, get_instruments,
             get_open_transfer_instructions, get_provider_services, get_registrar_services,
             get_user_services, get_vaults, query_contracts_by_template,
         },
@@ -43,9 +43,9 @@ use crate::{
             AuditLogEntry, AuditLogQuery, AuditLogResponse, CancelConfirmationRequest,
             ChainAuditEntry, ChainAuditQuery, ChainAuditResponse, ConfirmActionRequest,
             ContractQueryResponse, ErrorResponse, ExecuteActionRequest, ExpireConfirmationRequest,
-            GovernanceResponse, GovernanceStateResponse, GovernanceType, InstrumentsResponse,
-            KnownMember, KnownMembersResponse, MessageResponse, NetworkInfo, OperatorInfo,
-            ProposalType, ProposeActionRequest, ProviderServicesResponse,
+            GovernanceResponse, GovernanceStateResponse, GovernanceType, HoldingsResponse,
+            InstrumentsResponse, KnownMember, KnownMembersResponse, MessageResponse, NetworkInfo,
+            OperatorInfo, ProposalType, ProposeActionRequest, ProviderServicesResponse,
             RegistrarServicesResponse, TransferInstructionsResponse, TransferPreapprovalsResponse,
             UserServicesResponse, VaultsResponse,
         },
@@ -580,6 +580,38 @@ pub async fn get_instruments_handler(
             tracing::error!("Failed to fetch instruments: {e}");
             HttpResponse::InternalServerError().json(ErrorResponse {
                 error: format!("Failed to fetch instruments: {e}"),
+            })
+        }
+    }
+}
+
+/// Get token-standard `Holding` contracts owned by a party, aggregated by
+/// `(instrument_admin, instrument_id)`. Each row also reports whether a
+/// `TransferPreapproval` is in place for that instrument so the frontend can
+/// render a Yes/No badge without a second round-trip.
+#[utoipa::path(
+    tag = "Services",
+    params(GovernanceQuery),
+    responses(
+        (status = 200, description = "Party holdings", body = HoldingsResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+#[get("/holdings")]
+pub async fn get_holdings_handler(
+    data: web::Data<AppState>,
+    query: web::Query<GovernanceQuery>,
+) -> impl Responder {
+    let party_id = &query.party_id;
+    let token = get_party_token(&data, party_id).await;
+    let test_mode = data.test_mode;
+
+    match get_holdings(&data.config, party_id, token, test_mode).await {
+        Ok(holdings) => HttpResponse::Ok().json(HoldingsResponse { holdings }),
+        Err(e) => {
+            tracing::error!("Failed to fetch holdings: {e}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch holdings: {e}"),
             })
         }
     }

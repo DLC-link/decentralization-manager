@@ -1437,6 +1437,29 @@ pub struct TransferInstructionsResponse {
     pub transfer_instructions: Vec<TransferInstructionInfo>,
 }
 
+/// A token-standard Holding owned by a decentralized party, aggregated across
+/// every active `Splice.Api.Token.HoldingV1:Holding` contract that shares the
+/// same `(instrument_admin, instrument_id)` pair.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct HoldingInfo {
+    pub instrument_admin: CantonId,
+    pub instrument_id: String,
+    #[schema(value_type = String)]
+    pub amount: DamlDecimal,
+    /// True if a `TransferPreapproval` is in place for this party for this
+    /// instrument. CC (Amulet) holdings match when any
+    /// `Splice.AmuletRules:TransferPreapproval` exists; utility-token holdings
+    /// match by `(instrument_admin, instrument_id)` against
+    /// `Utility.Registry.App.V0.Model.TransferPreapproval` contracts.
+    pub preapproval_set_up: bool,
+}
+
+/// Response for the holdings endpoint.
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct HoldingsResponse {
+    pub holdings: Vec<HoldingInfo>,
+}
+
 /// Information about an InstrumentConfiguration contract (one "token" the
 /// governance party can mint/burn against). `instrument_admin` and
 /// `instrument_id` are read off the contract's `defaultIdentifier` field and

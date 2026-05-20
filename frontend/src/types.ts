@@ -795,6 +795,17 @@ export interface TransferPreapprovalsResponse {
   token: number;
 }
 
+export interface Holding {
+  instrument_admin: string;
+  instrument_id: string;
+  amount: string;
+  preapproval_set_up: boolean;
+}
+
+export interface HoldingsResponse {
+  holdings: Holding[];
+}
+
 export type Network = "devnet" | "testnet" | "mainnet";
 
 // Governance audit trail types

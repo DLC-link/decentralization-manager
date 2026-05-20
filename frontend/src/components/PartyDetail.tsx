@@ -26,6 +26,7 @@ import { ContractsDialog } from "./ContractsDialog";
 import { PartyConfigDialog } from "./PartyConfigDialog";
 import { GovernanceActionsDialog } from "./GovernanceActionsDialog";
 import { GovernanceAuditTrail, CHAIN_LIMIT } from "./GovernanceAuditTrail";
+import { HoldingsSection } from "./HoldingsSection";
 import { AuthSection, getAuthStatusIcon } from "./AuthSection";
 import { zebraRow } from "../styles";
 import { ADMIN_ACCESS } from "../constants";
@@ -34,30 +35,26 @@ import type { DecentralizedParty, Network, PartyAuthStatus } from "../types";
 const StatCard = ({ label, value }: { label: string; value: number | string }) => (
   <Box
     sx={(theme) => ({
-      display: "flex",
-      flexDirection: "column",
-      alignItems: "center",
-      justifyContent: "center",
-      px: 2,
-      py: 1,
-      borderRadius: 1,
-      minWidth: 96,
-      border: 1,
-      borderColor: "divider",
-      background:
+      display: "inline-flex",
+      alignItems: "baseline",
+      gap: 0.75,
+      px: 1.5,
+      py: 0.5,
+      borderRadius: 999,
+      backgroundColor:
         theme.palette.mode === "light"
-          ? "linear-gradient(180deg, #ffffff 0%, #f4f4f4 100%)"
-          : "linear-gradient(180deg, #3a3a3a 0%, #262626 100%)",
-      boxShadow:
-        theme.palette.mode === "light"
-          ? "inset 0 1px 0 rgba(255,255,255,0.9), 0 1px 1px rgba(0,0,0,0.06)"
-          : "inset 0 1px 0 rgba(255,255,255,0.07), 0 1px 1px rgba(0,0,0,0.35)",
+          ? "rgba(0, 0, 0, 0.04)"
+          : "rgba(255, 255, 255, 0.06)",
     })}
   >
-    <Typography variant="caption" color="text.secondary" sx={{ lineHeight: 1.2 }}>
+    <Typography
+      variant="caption"
+      color="text.secondary"
+      sx={{ textTransform: "uppercase", letterSpacing: 0.6, fontWeight: 500 }}
+    >
       {label}
     </Typography>
-    <Typography variant="h6" sx={{ lineHeight: 1.2, fontWeight: 800 }}>
+    <Typography variant="body2" sx={{ fontWeight: 700 }}>
       {value}
     </Typography>
   </Box>
@@ -81,13 +78,19 @@ const CollapsibleSection = ({
   <>
     <Divider />
     <Box
-      sx={{
+      sx={(theme) => ({
         display: "flex",
         alignItems: "center",
         cursor: "pointer",
         py: 1,
         px: 3,
-      }}
+        backgroundColor: expanded
+          ? "transparent"
+          : theme.palette.mode === "light"
+            ? "rgba(0, 0, 0, 0.03)"
+            : "rgba(255, 255, 255, 0.04)",
+        transition: "background-color 0.2s ease",
+      })}
       onClick={onToggle}
     >
       <ExpandMoreIcon
@@ -140,8 +143,12 @@ export const PartyDetail = ({
   const [selectedParticipant, setSelectedParticipant] = useState("");
   const [participantsExpanded, setParticipantsExpanded] = useState(true);
   const [contractsExpanded, setContractsExpanded] = useState(false);
+  const [holdingsExpanded, setHoldingsExpanded] = useState(false);
   const [authExpanded, setAuthExpanded] = useState(false);
   const [governanceExpanded, setGovernanceExpanded] = useState(false);
+  const [holdingsCount, setHoldingsCount] = useState(0);
+  const [holdingsLoading, setHoldingsLoading] = useState(false);
+  const [holdingsRefreshNonce, setHoldingsRefreshNonce] = useState(0);
   const [editGovContractId, setEditGovContractId] = useState<string | null>(
     null,
   );
@@ -238,10 +245,6 @@ export const PartyDetail = ({
       >
         <StatCard label="Threshold" value={party.threshold} />
         <StatCard label="Owners" value={party.owners.length} />
-        <StatCard label="Participants" value={party.participants.length} />
-        {party.contracts && (
-          <StatCard label="Contracts" value={party.contracts.length} />
-        )}
         {isOwner && (
           <Button
             variant="outlined"
@@ -490,6 +493,46 @@ export const PartyDetail = ({
           </Box>
         </CollapsibleSection>
       )}
+
+      {/* Holdings */}
+      <CollapsibleSection
+        title="Holdings"
+        expanded={holdingsExpanded}
+        onToggle={() => setHoldingsExpanded(!holdingsExpanded)}
+        badge={
+          <>
+            {holdingsCount > 0 && (
+              <Chip
+                label={holdingsCount}
+                size="small"
+                sx={{ ml: 1 }}
+              />
+            )}
+            <Tooltip title="Refresh holdings">
+              <span>
+                <IconButton
+                  size="small"
+                  sx={{ ml: 0.5 }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setHoldingsRefreshNonce((n) => n + 1);
+                  }}
+                  disabled={holdingsLoading}
+                >
+                  <RefreshIcon fontSize="small" />
+                </IconButton>
+              </span>
+            </Tooltip>
+          </>
+        }
+      >
+        <HoldingsSection
+          partyId={party.party_id}
+          refreshNonce={holdingsRefreshNonce}
+          onCountChange={setHoldingsCount}
+          onLoadingChange={setHoldingsLoading}
+        />
+      </CollapsibleSection>
 
       {/* Audit Trail */}
       {authStatus?.rights?.dec_party_act_as && (

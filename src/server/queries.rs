@@ -27,7 +27,7 @@ use super::{
     action_serializer,
     types::{
         ActionType, ContractInfo, ContractWithBlob, DomainGovernanceAction, GovernanceAction,
-        GovernanceConfirmation, GovernanceState, InstrumentInfo, PartyMetadata,
+        GovernanceConfirmation, GovernanceState, HoldingInfo, InstrumentInfo, PartyMetadata,
         ProviderServiceInfo, RegistrarServiceInfo, TransferInstructionInfo, UserServiceInfo,
         VaultInfo,
     },
@@ -2708,6 +2708,320 @@ fn field_timestamp(record: &Record, label: &str) -> Option<i64> {
             Some(value::Sum::Timestamp(t)) => Some(*t),
             _ => None,
         })
+}
+
+// ============================================================================
+// Token-standard Holding Query (for the Holdings section in PartyDetail)
+// ============================================================================
+
+/// Standard `instrumentId.id` for Canton Coin holdings — used to route the
+/// preapproval check to `Splice.AmuletRules:TransferPreapproval` (which has no
+/// explicit instrument field) instead of the per-instrument Utility registry.
+const AMULET_INSTRUMENT_ID: &str = "Amulet";
+
+/// Fetch all token-standard holdings owned by `party_id`, aggregated by
+/// instrument. Each returned `HoldingInfo` represents one
+/// `(instrument_admin, instrument_id)` pair with the summed amount across
+/// every active `Holding` contract.
+///
+/// `preapproval_set_up` reflects whether the party has a `TransferPreapproval`
+/// in place for that instrument: CC holdings match any
+/// `Splice.AmuletRules:TransferPreapproval`, other instruments match by
+/// `(admin, id)` against `Utility.Registry.App.V0.Model.TransferPreapproval`.
+pub async fn get_holdings(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    test_mode: bool,
+) -> Result<Vec<HoldingInfo>> {
+    let raw = fetch_holding_views(config, party_id, token.clone()).await?;
+
+    // Aggregate amounts by (admin, id). A party can own many Holding contracts
+    // for the same instrument (one per UTXO-style entry).
+    let mut totals: HashMap<(String, String), (CantonId, String, DamlDecimal)> = HashMap::new();
+    for raw_holding in raw {
+        let key = (
+            raw_holding.instrument_admin.to_string(),
+            raw_holding.instrument_id.clone(),
+        );
+        totals
+            .entry(key)
+            .and_modify(|(_, _, total)| {
+                *total += raw_holding.amount;
+            })
+            .or_insert((
+                raw_holding.instrument_admin,
+                raw_holding.instrument_id,
+                raw_holding.amount,
+            ));
+    }
+
+    if totals.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Look up preapprovals once and join.
+    let preapprovals = fetch_preapproved_instruments(config, party_id, token, test_mode).await?;
+
+    let mut holdings: Vec<HoldingInfo> = totals
+        .into_values()
+        .map(|(instrument_admin, instrument_id, amount)| {
+            let preapproval_set_up = if instrument_id == AMULET_INSTRUMENT_ID {
+                preapprovals.has_amulet
+            } else {
+                preapprovals
+                    .utility
+                    .contains(&(instrument_admin.to_string(), instrument_id.clone()))
+            };
+            HoldingInfo {
+                instrument_admin,
+                instrument_id,
+                amount,
+                preapproval_set_up,
+            }
+        })
+        .collect();
+
+    // Stable display order: admin ascending, then id ascending.
+    holdings.sort_by(|a, b| {
+        a.instrument_admin
+            .to_string()
+            .cmp(&b.instrument_admin.to_string())
+            .then_with(|| a.instrument_id.cmp(&b.instrument_id))
+    });
+
+    Ok(holdings)
+}
+
+/// Run the ACS query with `InterfaceFilter` for `Holding` and return one
+/// parsed view per active contract owned by `party_id`.
+async fn fetch_holding_views(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+) -> Result<Vec<HoldingView>> {
+    let mut state_client = utils::create_state_client(config, token).await?;
+
+    let ledger_end = state_client
+        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
+        .await?
+        .into_inner()
+        .offset;
+
+    let mut filters_by_party = HashMap::new();
+    filters_by_party.insert(
+        party_id.to_string(),
+        Filters {
+            cumulative: vec![CumulativeFilter {
+                identifier_filter: Some(cumulative_filter::IdentifierFilter::InterfaceFilter(
+                    InterfaceFilter {
+                        interface_id: Some(Identifier {
+                            package_id: "#splice-api-token-holding-v1".to_string(),
+                            module_name: "Splice.Api.Token.HoldingV1".to_string(),
+                            entity_name: "Holding".to_string(),
+                        }),
+                        include_interface_view: true,
+                        include_created_event_blob: false,
+                    },
+                )),
+            }],
+        },
+    );
+
+    let acs_request = GetActiveContractsRequest {
+        active_at_offset: ledger_end,
+        event_format: Some(EventFormat {
+            filters_by_party,
+            filters_for_any_party: None,
+            verbose: true,
+        }),
+    };
+
+    let mut stream = state_client
+        .get_active_contracts(tonic::Request::new(acs_request))
+        .await?
+        .into_inner();
+
+    let owner_str = party_id.to_string();
+    let mut holdings = Vec::new();
+    while let Some(response) = stream.message().await? {
+        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
+            && let Some(created) = active.created_event
+            && let Some(view) = extract_holding_view(&created)
+            && view.owner == owner_str
+        {
+            holdings.push(view);
+        }
+    }
+    Ok(holdings)
+}
+
+/// Intermediate parse result that retains `owner` so callers can drop holdings
+/// the party can see (via interface visibility) but doesn't actually own.
+struct HoldingView {
+    owner: String,
+    instrument_admin: CantonId,
+    instrument_id: String,
+    amount: DamlDecimal,
+}
+
+fn extract_holding_view(created: &CreatedEvent) -> Option<HoldingView> {
+    let view = created.interface_views.iter().find(|v| {
+        v.interface_id.as_ref().is_some_and(|id| {
+            id.module_name == "Splice.Api.Token.HoldingV1" && id.entity_name == "Holding"
+        })
+    })?;
+    let view_record = view.view_value.as_ref()?;
+
+    let owner = field_party(view_record, "owner")?;
+    let amount = field_numeric(view_record, "amount").and_then(|s| DamlDecimal::parse(&s).ok())?;
+
+    let instrument_record = view_record
+        .fields
+        .iter()
+        .find(|f| f.label == "instrumentId")
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Record(r)) => Some(r),
+            _ => None,
+        })?;
+    let instrument_admin: CantonId = field_party(instrument_record, "admin")?.parse().ok()?;
+    let instrument_id = field_text(instrument_record, "id")?;
+
+    Some(HoldingView {
+        owner,
+        instrument_admin,
+        instrument_id,
+        amount,
+    })
+}
+
+/// Result of the per-party preapproval lookup. `utility` is the set of
+/// instruments (`(admin, id)`) that have an active utility-registry
+/// `TransferPreapproval`; `has_amulet` is true iff at least one Amulet
+/// `TransferPreapproval` exists.
+struct PartyPreapprovals {
+    has_amulet: bool,
+    utility: std::collections::HashSet<(String, String)>,
+}
+
+async fn fetch_preapproved_instruments(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    test_mode: bool,
+) -> Result<PartyPreapprovals> {
+    let amulet_params = ContractQueryParams {
+        package_id: "#splice-amulet".to_string(),
+        module_name: "Splice.AmuletRules".to_string(),
+        entity_name: "TransferPreapproval".to_string(),
+        use_interface_filter: false,
+    };
+    let has_amulet = match query_contracts_by_template(
+        config,
+        party_id,
+        token.clone(),
+        test_mode,
+        &amulet_params,
+    )
+    .await
+    {
+        Ok(rows) => !rows.is_empty(),
+        Err(e) => {
+            tracing::warn!("Failed to query Amulet TransferPreapproval: {e}");
+            false
+        }
+    };
+
+    // Utility preapprovals carry their instrument on the create-arguments
+    // payload, so re-fetch with a TemplateFilter to get create_arguments and
+    // parse `instrumentId.{admin,id}` out.
+    let utility = match fetch_utility_preapproval_instruments(config, party_id, token).await {
+        Ok(set) => set,
+        Err(e) => {
+            tracing::warn!("Failed to parse utility TransferPreapproval instruments: {e}");
+            std::collections::HashSet::new()
+        }
+    };
+
+    Ok(PartyPreapprovals {
+        has_amulet,
+        utility,
+    })
+}
+
+async fn fetch_utility_preapproval_instruments(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+) -> Result<std::collections::HashSet<(String, String)>> {
+    let mut state_client = utils::create_state_client(config, token).await?;
+    let ledger_end = state_client
+        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
+        .await?
+        .into_inner()
+        .offset;
+
+    let mut filters_by_party = HashMap::new();
+    filters_by_party.insert(
+        party_id.to_string(),
+        Filters {
+            cumulative: vec![CumulativeFilter {
+                identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
+                    TemplateFilter {
+                        template_id: Some(Identifier {
+                            package_id: "#utility-registry-app-v0".to_string(),
+                            module_name: "Utility.Registry.App.V0.Model.TransferPreapproval"
+                                .to_string(),
+                            entity_name: "TransferPreapproval".to_string(),
+                        }),
+                        include_created_event_blob: false,
+                    },
+                )),
+            }],
+        },
+    );
+
+    let acs_request = GetActiveContractsRequest {
+        active_at_offset: ledger_end,
+        event_format: Some(EventFormat {
+            filters_by_party,
+            filters_for_any_party: None,
+            verbose: true,
+        }),
+    };
+
+    let mut stream = state_client
+        .get_active_contracts(tonic::Request::new(acs_request))
+        .await?
+        .into_inner();
+
+    let mut set = std::collections::HashSet::new();
+    while let Some(response) = stream.message().await? {
+        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
+            && let Some(created) = active.created_event
+            && let Some(args) = created.create_arguments
+            && let Some((admin, id)) = extract_preapproval_instrument(&args)
+        {
+            set.insert((admin, id));
+        }
+    }
+    Ok(set)
+}
+
+fn extract_preapproval_instrument(args: &Record) -> Option<(String, String)> {
+    let instrument_record = args
+        .fields
+        .iter()
+        .find(|f| f.label == "instrumentId")
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Record(r)) => Some(r),
+            _ => None,
+        })?;
+    let admin = field_party(instrument_record, "admin")?;
+    let id = field_text(instrument_record, "id")?;
+    Some((admin, id))
 }
 
 #[cfg(test)]
