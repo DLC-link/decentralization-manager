@@ -1,4 +1,10 @@
-import { useState, useRef, useEffect, useCallback, type ReactNode } from "react";
+import {
+  useState,
+  useRef,
+  useEffect,
+  useCallback,
+  type ReactNode,
+} from "react";
 import {
   Box,
   Button,
@@ -29,10 +35,24 @@ import { GovernanceAuditTrail, CHAIN_LIMIT } from "./GovernanceAuditTrail";
 import { HoldingsSection } from "./HoldingsSection";
 import { AuthSection, getAuthStatusIcon } from "./AuthSection";
 import { zebraRow } from "../styles";
-import { ADMIN_ACCESS } from "../constants";
-import type { DecentralizedParty, Network, PartyAuthStatus } from "../types";
+import { ADMIN_ACCESS, API_BASE } from "../constants";
+import { authenticatedFetch } from "../api";
+import { formatMicroseconds } from "../governanceFormat";
+import type {
+  DecentralizedParty,
+  GovernanceState,
+  GovernanceStateResponse,
+  Network,
+  PartyAuthStatus,
+} from "../types";
 
-const StatCard = ({ label, value }: { label: string; value: number | string }) => (
+const StatCard = ({
+  label,
+  value,
+}: {
+  label: string;
+  value: number | string;
+}) => (
   <Box
     sx={(theme) => ({
       display: "inline-flex",
@@ -101,9 +121,7 @@ const CollapsibleSection = ({
           transition: "transform 0.2s ease",
         }}
       />
-      <Typography variant="subtitle2">
-        {title}
-      </Typography>
+      <Typography variant="subtitle2">{title}</Typography>
       {badge}
     </Box>
     <Collapse in={expanded}>{children}</Collapse>
@@ -149,6 +167,8 @@ export const PartyDetail = ({
   const [holdingsCount, setHoldingsCount] = useState(0);
   const [holdingsLoading, setHoldingsLoading] = useState(false);
   const [holdingsRefreshNonce, setHoldingsRefreshNonce] = useState(0);
+  const [governanceState, setGovernanceState] =
+    useState<GovernanceState | null>(null);
   const [editGovContractId, setEditGovContractId] = useState<string | null>(
     null,
   );
@@ -204,6 +224,29 @@ export const PartyDetail = ({
     }
   }, [party.contracts, updateScrollShadows]);
 
+  // Fetch governance state (threshold + action_confirmation_timeout) so the
+  // contracts table can show these values on the row of the active rules
+  // contract. Cancellation guards against a stale response landing after the
+  // user has switched to a different party.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await authenticatedFetch(
+          `${API_BASE}/governance/state?party_id=${encodeURIComponent(party.party_id)}`,
+        );
+        if (!res.ok) return;
+        const data: GovernanceStateResponse = await res.json();
+        if (!cancelled) setGovernanceState(data.state);
+      } catch {
+        /* leave columns blank on failure */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [party.party_id]);
+
   const handleKickClick = (participantUid: string) => {
     setSelectedParticipant(participantUid);
     setKickDialogOpen(true);
@@ -243,8 +286,22 @@ export const PartyDetail = ({
           alignItems: "center",
         }}
       >
-        <StatCard label="Threshold" value={party.threshold} />
         <StatCard label="Owners" value={party.owners.length} />
+        <StatCard label="Threshold" value={party.threshold} />
+        {governanceState && (
+          <>
+            <StatCard label="Gov Threshold" value={governanceState.threshold} />
+            {governanceState.action_confirmation_timeout_microseconds !=
+              null && (
+              <StatCard
+                label="Action Timeout"
+                value={formatMicroseconds(
+                  governanceState.action_confirmation_timeout_microseconds,
+                )}
+              />
+            )}
+          </>
+        )}
         {isOwner && (
           <Button
             variant="outlined"
@@ -269,7 +326,9 @@ export const PartyDetail = ({
 
       {/* Owner Key */}
       {party.my_owner_key && (
-        <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: 2, px: 3 }}>
+        <Box
+          sx={{ display: "flex", alignItems: "center", gap: 1, mb: 2, px: 3 }}
+        >
           <Typography variant="body2" color="text.secondary">
             <strong>My Owner Key:</strong>
           </Typography>
@@ -308,11 +367,7 @@ export const PartyDetail = ({
         expanded={participantsExpanded}
         onToggle={() => setParticipantsExpanded(!participantsExpanded)}
         badge={
-          <Chip
-            label={party.participants.length}
-            size="small"
-            sx={{ ml: 1 }}
-          />
+          <Chip label={party.participants.length} size="small" sx={{ ml: 1 }} />
         }
       >
         <Box sx={{ overflowX: "auto" }}>
@@ -382,11 +437,7 @@ export const PartyDetail = ({
           expanded={contractsExpanded}
           onToggle={() => setContractsExpanded(!contractsExpanded)}
           badge={
-            <Chip
-              label={party.contracts.length}
-              size="small"
-              sx={{ ml: 1 }}
-            />
+            <Chip label={party.contracts.length} size="small" sx={{ ml: 1 }} />
           }
         >
           <Box sx={{ position: "relative" }}>
@@ -433,9 +484,7 @@ export const PartyDetail = ({
                       <TableCell sx={{ py: 1 }}>
                         {c.package_version || "—"}
                       </TableCell>
-                      <TableCell sx={{ py: 1 }}>
-                        {c.template_id}
-                      </TableCell>
+                      <TableCell sx={{ py: 1 }}>{c.template_id}</TableCell>
                       <TableCell sx={{ py: 1 }}>
                         {c.created_at
                           ? new Date(c.created_at).toLocaleString(undefined, {
@@ -502,11 +551,7 @@ export const PartyDetail = ({
         badge={
           <>
             {holdingsCount > 0 && (
-              <Chip
-                label={holdingsCount}
-                size="small"
-                sx={{ ml: 1 }}
-              />
+              <Chip label={holdingsCount} size="small" sx={{ ml: 1 }} />
             )}
             <Tooltip title="Refresh holdings">
               <span>

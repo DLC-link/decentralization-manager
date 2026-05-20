@@ -806,6 +806,18 @@ export interface HoldingsResponse {
   holdings: Holding[];
 }
 
+export interface GovernanceState {
+  contract_id: string;
+  vault_manager: string;
+  members: string[];
+  threshold: number;
+  action_confirmation_timeout_microseconds?: number;
+}
+
+export interface GovernanceStateResponse {
+  state: GovernanceState | null;
+}
+
 export type Network = "devnet" | "testnet" | "mainnet";
 
 // Governance audit trail types
