@@ -533,7 +533,11 @@ export const PartyConfigDialog = ({
               </Box>
               {discoverInfo && <Alert severity="success">{discoverInfo}</Alert>}
 
-              {error && <Alert severity="error">{error}</Alert>}
+              {error && (
+                <Alert severity="error" onClose={() => setError(null)}>
+                  {error}
+                </Alert>
+              )}
               {success && (
                 <Alert severity="success">Configuration saved.</Alert>
               )}

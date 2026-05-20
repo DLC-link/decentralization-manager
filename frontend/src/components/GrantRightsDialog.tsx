@@ -116,7 +116,11 @@ export const GrantRightsDialog = ({
             autoComplete="off"
           />
 
-          {error && <Alert severity="error">{error}</Alert>}
+          {error && (
+            <Alert severity="error" onClose={() => setError(null)}>
+              {error}
+            </Alert>
+          )}
         </Box>
       </DialogContent>
       <DialogActions>

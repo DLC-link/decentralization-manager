@@ -234,11 +234,12 @@ const App = () => {
           const data: DecentralizedPartiesResponse = await res.json();
           setParties(data.parties);
         } else {
-          showSnackbar("Failed to refresh parties");
+          showSnackbar("Failed to refresh parties", "error");
         }
       } catch (err) {
         showSnackbar(
           err instanceof Error ? err.message : "Failed to refresh parties",
+          "error",
         );
       } finally {
         setRefreshingParties(false);
@@ -452,7 +453,10 @@ const App = () => {
       if (prior === "inprogress" && run.status !== "inprogress") {
         const label = `${run.kind} workflow`;
         if (run.status === "failed") {
-          showSnackbar(`${label} failed: ${run.error || "Unknown error"}`);
+          showSnackbar(
+            `${label} failed: ${run.error || "Unknown error"}`,
+            "error",
+          );
         } else if (run.status === "completed") {
           showSnackbar(`${label} completed`);
         } else if (run.status === "cancelled") {
@@ -695,7 +699,9 @@ const App = () => {
 
       {!loading && error && (
         <Container maxWidth="md" sx={{ pt: isLargeScreen ? 4 : 16 }}>
-          <Alert severity="error">{error}</Alert>
+          <Alert severity="error" onClose={() => setError(null)}>
+            {error}
+          </Alert>
         </Container>
       )}
 
@@ -762,7 +768,9 @@ const App = () => {
         ) : loading ? (
           <LoadingSkeleton />
         ) : error ? (
-          <Alert severity="error">{error}</Alert>
+          <Alert severity="error" onClose={() => setError(null)}>
+            {error}
+          </Alert>
         ) : (
           <>
             {/* Tab 0 & 1: rendered outside Container below */}

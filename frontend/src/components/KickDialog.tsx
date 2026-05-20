@@ -250,7 +250,11 @@ export const KickDialog = ({
             helperText={`Threshold after kick (suggested: ${suggestedThreshold}, max: ${remainingOwners})`}
           />
 
-          {error && <Alert severity="error">{error}</Alert>}
+          {error && (
+            <Alert severity="error" onClose={() => setError(null)}>
+              {error}
+            </Alert>
+          )}
 
           {status?.status === "inprogress" && (
             <Alert severity="info" icon={<CircularProgress size={20} />}>

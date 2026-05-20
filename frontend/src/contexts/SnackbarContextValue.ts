@@ -1,7 +1,12 @@
 import { createContext, useContext } from "react";
 
+export type SnackbarSeverity = "info" | "error";
+
 export interface SnackbarContextType {
-  showSnackbar: (message: string) => void;
+  /// Errors (`severity: "error"`) stay open until dismissed and render with
+  /// red styling + a close button. Everything else uses the lightweight
+  /// auto-hiding toast.
+  showSnackbar: (message: string, severity?: SnackbarSeverity) => void;
 }
 
 export const SnackbarContext = createContext<SnackbarContextType | undefined>(

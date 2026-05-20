@@ -234,7 +234,11 @@ export const AuthSection = ({
         </Alert>
       )}
       {testError && (
-        <Alert severity="error" sx={{ mt: 1 }}>
+        <Alert
+          severity="error"
+          sx={{ mt: 1 }}
+          onClose={() => setTestError(null)}
+        >
           {testError}
         </Alert>
       )}

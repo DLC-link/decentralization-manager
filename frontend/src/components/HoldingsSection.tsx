@@ -87,7 +87,11 @@ export const HoldingsSection = ({
   if (error) {
     return (
       <Box sx={{ py: 2 }}>
-        <Alert severity="error" sx={{ mb: 2 }}>
+        <Alert
+          severity="error"
+          sx={{ mb: 2 }}
+          onClose={() => setError(null)}
+        >
           {error}
         </Alert>
         <Button
