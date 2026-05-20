@@ -1460,6 +1460,22 @@ pub struct HoldingsResponse {
     pub holdings: Vec<HoldingInfo>,
 }
 
+/// Active `Splice.Api.Token.TransferInstructionV1:TransferFactory` contract
+/// visible to the party. The frontend joins these to the party's holdings by
+/// `expected_admin == holding.instrument_admin` to prefill the TransferFactory
+/// CID and expected-admin fields on the Transfer Proposal form.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct TransferFactoryInfo {
+    pub contract_id: String,
+    pub expected_admin: CantonId,
+}
+
+/// Response for the transfer-factories endpoint.
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct TransferFactoriesResponse {
+    pub transfer_factories: Vec<TransferFactoryInfo>,
+}
+
 /// Information about an InstrumentConfiguration contract (one "token" the
 /// governance party can mint/burn against). `instrument_admin` and
 /// `instrument_id` are read off the contract's `defaultIdentifier` field and

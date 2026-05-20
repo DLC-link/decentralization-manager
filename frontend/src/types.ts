@@ -806,6 +806,15 @@ export interface HoldingsResponse {
   holdings: Holding[];
 }
 
+export interface TransferFactoryInfo {
+  contract_id: string;
+  expected_admin: string;
+}
+
+export interface TransferFactoriesResponse {
+  transfer_factories: TransferFactoryInfo[];
+}
+
 export interface GovernanceState {
   contract_id: string;
   vault_manager: string;

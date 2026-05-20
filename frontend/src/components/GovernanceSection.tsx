@@ -72,6 +72,10 @@ import type {
   TransferInstructionInfo,
   TransferInstructionsResponse,
   TransferPreapprovalsResponse,
+  TransferFactoryInfo,
+  TransferFactoriesResponse,
+  Holding,
+  HoldingsResponse,
 } from "../types";
 
 type ActionTypeKey = ActionType["type"];
@@ -285,6 +289,22 @@ export const GovernanceSection = ({
     TransferInstructionInfo[]
   >([]);
   const [transferInstructionsLoading, setTransferInstructionsLoading] = useState(false);
+  // Holdings + TransferFactory contracts power the Transfer Proposal form's
+  // instrument dropdown. Holdings define which instruments the user can pick
+  // (and the available balance); factories prefill the factory contract id +
+  // expected admin once an instrument is selected (joined by
+  // factory.expected_admin == holding.instrument_admin).
+  const [transferHoldings, setTransferHoldings] = useState<Holding[]>([]);
+  const [transferFactories, setTransferFactories] = useState<TransferFactoryInfo[]>([]);
+  const [transferPrefillLoading, setTransferPrefillLoading] = useState(false);
+  // Key into `transferHoldings` for the currently-selected instrument:
+  // `${instrument_admin}::${instrument_id}`. Empty string = none selected.
+  const [selectedHoldingKey, setSelectedHoldingKey] = useState("");
+  // Hides the explicit `Input Holding CIDs` field by default — Daml's
+  // TransferFactory choice auto-selects matching holdings up to `amount`, so
+  // typical users don't need it. Power users can reveal it to pin specific
+  // UTXO holdings.
+  const [showTransferAdvanced, setShowTransferAdvanced] = useState(false);
   // Counts of active TransferPreapproval contracts the gov party already has
   // (CC + Token). Used to warn before issuing a Setup*Preapproval proposal
   // that would be a no-op when executed.
@@ -504,6 +524,65 @@ export const GovernanceSection = ({
       fetchOpenTransferInstructions();
     }
   }, [proposalType, fetchOpenTransferInstructions]);
+
+  // Fetch holdings + transfer factories for the Transfer Proposal dropdown.
+  // Both endpoints are cheap (one ACS query each) and we need them together
+  // to render the dropdown + prefill, so fetch them in parallel.
+  const fetchTransferPrefillData = useCallback(async () => {
+    setTransferPrefillLoading(true);
+    try {
+      const [hRes, fRes] = await Promise.all([
+        authenticatedFetch(
+          `${API_BASE}/holdings?party_id=${encodeURIComponent(partyId)}`,
+        ),
+        authenticatedFetch(
+          `${API_BASE}/transfer-factories?party_id=${encodeURIComponent(partyId)}`,
+        ),
+      ]);
+      if (hRes.ok) {
+        const data: HoldingsResponse = await hRes.json();
+        setTransferHoldings(data.holdings);
+      }
+      if (fRes.ok) {
+        const data: TransferFactoriesResponse = await fRes.json();
+        setTransferFactories(data.transfer_factories);
+      }
+    } catch (e) {
+      console.error("Failed to fetch transfer prefill data:", e);
+    } finally {
+      setTransferPrefillLoading(false);
+    }
+  }, [partyId]);
+
+  useEffect(() => {
+    if (proposalType === "transfer") {
+      fetchTransferPrefillData();
+    }
+  }, [proposalType, fetchTransferPrefillData]);
+
+  // Whenever the user picks an instrument from the dropdown, push its
+  // identifiers and the matching factory into the (still-required) submission
+  // fields. We keep those state vars so the existing submit path is
+  // untouched — the form is just driven by `selectedHoldingKey` now.
+  useEffect(() => {
+    if (!selectedHoldingKey) return;
+    const holding = transferHoldings.find(
+      (h) => `${h.instrument_admin}::${h.instrument_id}` === selectedHoldingKey,
+    );
+    if (!holding) return;
+    setProposalInstrumentIdAdmin(holding.instrument_admin);
+    setProposalInstrumentIdId(holding.instrument_id);
+    const factory = transferFactories.find(
+      (f) => f.expected_admin === holding.instrument_admin,
+    );
+    if (factory) {
+      setProposalTransferFactoryCid(factory.contract_id);
+      setProposalExpectedAdmin(factory.expected_admin);
+    } else {
+      setProposalTransferFactoryCid("");
+      setProposalExpectedAdmin(holding.instrument_admin);
+    }
+  }, [selectedHoldingKey, transferHoldings, transferFactories]);
 
   // Mint/Burn always use the decparty as the instrument admin — seed the field
   // unconditionally so it's populated even before (or without) an Instrument
@@ -970,6 +1049,8 @@ export const GovernanceSection = ({
     setProposalExpectedAdmin("");
     setProposalReceiver("");
     setProposalAmount("");
+    setSelectedHoldingKey("");
+    setShowTransferAdvanced(false);
     setProposalInstrumentIdAdmin(
       proposalType === "mint" || proposalType === "burn" ? partyId : "",
     );
@@ -2839,13 +2920,133 @@ export const GovernanceSection = ({
 
               {proposalType === "transfer" && (
                 <>
-                  <TextField size="small" label="TransferFactory Contract ID" value={proposalTransferFactoryCid} onChange={(e) => setProposalTransferFactoryCid(e.target.value)} fullWidth required />
-                  <TextField size="small" label="Expected Admin Party" value={proposalExpectedAdmin} onChange={(e) => setProposalExpectedAdmin(e.target.value)} fullWidth required />
-                  <TextField size="small" label="Receiver Party" value={proposalReceiver} onChange={(e) => setProposalReceiver(e.target.value)} fullWidth required />
-                  <TextField size="small" label="Amount" value={proposalAmount} onChange={(e) => setProposalAmount(e.target.value)} fullWidth required />
-                  <TextField size="small" label="Instrument Admin" value={proposalInstrumentIdAdmin} onChange={(e) => setProposalInstrumentIdAdmin(e.target.value)} fullWidth required />
-                  <TextField size="small" label="Instrument ID" value={proposalInstrumentIdId} onChange={(e) => setProposalInstrumentIdId(e.target.value)} fullWidth required />
-                  <TextField size="small" label="Input Holding CIDs (comma-separated)" value={proposalInputHoldingCids} onChange={(e) => setProposalInputHoldingCids(e.target.value)} fullWidth helperText="Leave empty for auto-selection" />
+                  <TextField
+                    select
+                    size="small"
+                    label="Instrument"
+                    value={selectedHoldingKey}
+                    onChange={(e) => setSelectedHoldingKey(e.target.value)}
+                    fullWidth
+                    required
+                    disabled={transferPrefillLoading}
+                    helperText={
+                      transferPrefillLoading
+                        ? "Loading holdings…"
+                        : transferHoldings.length === 0
+                          ? "No holdings available for this party"
+                          : "Pick an instrument — admin, ID, factory CID and expected admin will be prefilled"
+                    }
+                  >
+                    {transferHoldings.map((h) => {
+                      const key = `${h.instrument_admin}::${h.instrument_id}`;
+                      const hasFactory = transferFactories.some(
+                        (f) => f.expected_admin === h.instrument_admin,
+                      );
+                      return (
+                        <MenuItem
+                          key={key}
+                          value={key}
+                          disabled={!hasFactory}
+                        >
+                          {h.instrument_id} — balance {h.amount}
+                          {!hasFactory && " (no factory available)"}
+                        </MenuItem>
+                      );
+                    })}
+                  </TextField>
+                  {selectedHoldingKey &&
+                    (() => {
+                      const holding = transferHoldings.find(
+                        (h) =>
+                          `${h.instrument_admin}::${h.instrument_id}` ===
+                          selectedHoldingKey,
+                      );
+                      return holding ? (
+                        <Box
+                          sx={{
+                            display: "flex",
+                            gap: 1,
+                            flexWrap: "wrap",
+                            alignItems: "center",
+                          }}
+                        >
+                          <Chip
+                            size="small"
+                            label={`Available balance: ${holding.amount}`}
+                            color="primary"
+                          />
+                          <Chip
+                            size="small"
+                            label={`Admin: ${holding.instrument_admin}`}
+                            variant="outlined"
+                          />
+                        </Box>
+                      ) : null;
+                    })()}
+                  <TextField
+                    size="small"
+                    label="Receiver Party"
+                    value={proposalReceiver}
+                    onChange={(e) => setProposalReceiver(e.target.value)}
+                    fullWidth
+                    required
+                  />
+                  <TextField
+                    size="small"
+                    label="Amount"
+                    value={proposalAmount}
+                    onChange={(e) => setProposalAmount(e.target.value)}
+                    fullWidth
+                    required
+                    type="number"
+                    slotProps={{ htmlInput: { min: 0, step: "any" } }}
+                    error={(() => {
+                      if (!proposalAmount) return false;
+                      const n = Number(proposalAmount);
+                      if (!Number.isFinite(n) || n <= 0) return true;
+                      const holding = transferHoldings.find(
+                        (h) =>
+                          `${h.instrument_admin}::${h.instrument_id}` ===
+                          selectedHoldingKey,
+                      );
+                      return holding ? n > Number(holding.amount) : false;
+                    })()}
+                    helperText={(() => {
+                      if (!proposalAmount) return "";
+                      const n = Number(proposalAmount);
+                      if (!Number.isFinite(n) || n <= 0)
+                        return "Enter a positive amount";
+                      const holding = transferHoldings.find(
+                        (h) =>
+                          `${h.instrument_admin}::${h.instrument_id}` ===
+                          selectedHoldingKey,
+                      );
+                      if (holding && n > Number(holding.amount)) {
+                        return `Exceeds available balance (${holding.amount})`;
+                      }
+                      return "";
+                    })()}
+                  />
+                  <Button
+                    size="small"
+                    variant="text"
+                    onClick={() => setShowTransferAdvanced((v) => !v)}
+                    sx={{ alignSelf: "flex-start", textTransform: "none" }}
+                  >
+                    {showTransferAdvanced ? "Hide advanced" : "Show advanced"}
+                  </Button>
+                  {showTransferAdvanced && (
+                    <TextField
+                      size="small"
+                      label="Input Holding CIDs (comma-separated)"
+                      value={proposalInputHoldingCids}
+                      onChange={(e) =>
+                        setProposalInputHoldingCids(e.target.value)
+                      }
+                      fullWidth
+                      helperText="Optional — pin specific Holding contracts to spend. Leave empty to let Canton auto-select holdings of the chosen instrument up to the amount."
+                    />
+                  )}
                 </>
               )}
 

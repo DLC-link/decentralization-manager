@@ -33,7 +33,7 @@ use crate::{
             ContractQueryParams as QueryContractParams, get_governance_confirmations,
             get_governance_state as query_governance_state, get_holdings, get_instruments,
             get_open_transfer_instructions, get_provider_services, get_registrar_services,
-            get_user_services, get_vaults, query_contracts_by_template,
+            get_transfer_factories, get_user_services, get_vaults, query_contracts_by_template,
         },
         transfer_context::{
             fetch as fetch_accept_transfer_context, maybe_fetch_for_proposal,
@@ -46,8 +46,8 @@ use crate::{
             GovernanceResponse, GovernanceStateResponse, GovernanceType, HoldingsResponse,
             InstrumentsResponse, KnownMember, KnownMembersResponse, MessageResponse, NetworkInfo,
             OperatorInfo, ProposalType, ProposeActionRequest, ProviderServicesResponse,
-            RegistrarServicesResponse, TransferInstructionsResponse, TransferPreapprovalsResponse,
-            UserServicesResponse, VaultsResponse,
+            RegistrarServicesResponse, TransferFactoriesResponse, TransferInstructionsResponse,
+            TransferPreapprovalsResponse, UserServicesResponse, VaultsResponse,
         },
     },
     utils,
@@ -591,6 +591,38 @@ pub async fn get_instruments_handler(
             tracing::error!("Failed to fetch instruments: {e}");
             HttpResponse::InternalServerError().json(ErrorResponse {
                 error: format!("Failed to fetch instruments: {e}"),
+            })
+        }
+    }
+}
+
+/// List active `TransferFactory` contracts visible to the party. Used by the
+/// Transfer Proposal form to prefill the factory contract id and expected
+/// admin once the user picks an instrument from the dropdown.
+#[utoipa::path(
+    tag = "Services",
+    params(GovernanceQuery),
+    responses(
+        (status = 200, description = "Transfer factories", body = TransferFactoriesResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+#[get("/transfer-factories")]
+pub async fn get_transfer_factories_handler(
+    data: web::Data<AppState>,
+    query: web::Query<GovernanceQuery>,
+) -> impl Responder {
+    let party_id = &query.party_id;
+    let token = get_party_token(&data, party_id).await;
+
+    match get_transfer_factories(&data.config, party_id, token).await {
+        Ok(transfer_factories) => HttpResponse::Ok().json(TransferFactoriesResponse {
+            transfer_factories,
+        }),
+        Err(e) => {
+            tracing::error!("Failed to fetch transfer factories: {e}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch transfer factories: {e}"),
             })
         }
     }

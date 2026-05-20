@@ -28,8 +28,8 @@ use super::{
     types::{
         ActionType, ContractInfo, ContractWithBlob, DomainGovernanceAction, GovernanceAction,
         GovernanceConfirmation, GovernanceState, HoldingInfo, InstrumentInfo, PartyMetadata,
-        ProviderServiceInfo, RegistrarServiceInfo, TransferInstructionInfo, UserServiceInfo,
-        VaultInfo,
+        ProviderServiceInfo, RegistrarServiceInfo, TransferFactoryInfo, TransferInstructionInfo,
+        UserServiceInfo, VaultInfo,
     },
 };
 
@@ -2708,6 +2708,92 @@ fn field_timestamp(record: &Record, label: &str) -> Option<i64> {
             Some(value::Sum::Timestamp(t)) => Some(*t),
             _ => None,
         })
+}
+
+// ============================================================================
+// Token-standard TransferFactory Query (for Transfer Proposal form prefill)
+// ============================================================================
+
+/// Fetch active `Splice.Api.Token.TransferInstructionV1:TransferFactory`
+/// contracts visible to `party_id`. Used by the Transfer Proposal form's
+/// instrument dropdown to prefill the factory CID and expected-admin once the
+/// user picks an instrument — joined on
+/// `expected_admin == holding.instrument_admin`.
+pub async fn get_transfer_factories(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+) -> Result<Vec<TransferFactoryInfo>> {
+    let mut state_client = utils::create_state_client(config, token).await?;
+
+    let ledger_end = state_client
+        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
+        .await?
+        .into_inner()
+        .offset;
+
+    let mut filters_by_party = HashMap::new();
+    filters_by_party.insert(
+        party_id.to_string(),
+        Filters {
+            cumulative: vec![CumulativeFilter {
+                identifier_filter: Some(cumulative_filter::IdentifierFilter::InterfaceFilter(
+                    InterfaceFilter {
+                        interface_id: Some(Identifier {
+                            package_id: "#splice-api-token-transfer-instruction-v1".to_string(),
+                            module_name: "Splice.Api.Token.TransferInstructionV1".to_string(),
+                            entity_name: "TransferFactory".to_string(),
+                        }),
+                        include_interface_view: true,
+                        include_created_event_blob: false,
+                    },
+                )),
+            }],
+        },
+    );
+
+    let acs_request = GetActiveContractsRequest {
+        active_at_offset: ledger_end,
+        event_format: Some(EventFormat {
+            filters_by_party,
+            filters_for_any_party: None,
+            verbose: true,
+        }),
+    };
+
+    let mut stream = state_client
+        .get_active_contracts(tonic::Request::new(acs_request))
+        .await?
+        .into_inner();
+
+    let mut factories = Vec::new();
+    while let Some(response) = stream.message().await? {
+        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
+            && let Some(created) = active.created_event
+            && let Some(info) = extract_transfer_factory_info(&created)
+        {
+            factories.push(info);
+        }
+    }
+    Ok(factories)
+}
+
+/// Pull `admin` (the instrument admin / expected admin) out of the
+/// `TransferFactory` interface view. The view is the standard
+/// `TransferFactoryView` which contains an `admin: Party` field.
+fn extract_transfer_factory_info(created: &CreatedEvent) -> Option<TransferFactoryInfo> {
+    let view = created.interface_views.iter().find(|v| {
+        v.interface_id.as_ref().is_some_and(|id| {
+            id.module_name == "Splice.Api.Token.TransferInstructionV1"
+                && id.entity_name == "TransferFactory"
+        })
+    })?;
+    let view_record = view.view_value.as_ref()?;
+    let admin: CantonId = field_party(view_record, "admin")?.parse().ok()?;
+    Some(TransferFactoryInfo {
+        contract_id: created.contract_id.clone(),
+        expected_admin: admin,
+    })
 }
 
 // ============================================================================
