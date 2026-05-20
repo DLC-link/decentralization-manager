@@ -2905,6 +2905,19 @@ struct PartyPreapprovals {
     utility: std::collections::HashSet<(String, String)>,
 }
 
+/// `NO_TEMPLATES_FOR_PACKAGE_NAME_AND_QUALIFIED_NAME` means the template
+/// simply isn't uploaded on this participant — there's nothing to count, not
+/// a failure. Demote those to debug so the logs don't fill with red herrings
+/// on participants without splice-amulet / utility-registry packages.
+fn log_preapproval_lookup_error(label: &str, e: &anyhow::Error) {
+    let msg = e.to_string();
+    if msg.contains("NO_TEMPLATES_FOR_PACKAGE_NAME_AND_QUALIFIED_NAME") {
+        tracing::debug!("No {label} templates on this participant; treating as 0");
+    } else {
+        tracing::warn!("Failed to query {label}: {e}");
+    }
+}
+
 async fn fetch_preapproved_instruments(
     config: &NodeConfig,
     party_id: &CantonId,
@@ -2928,7 +2941,7 @@ async fn fetch_preapproved_instruments(
     {
         Ok(rows) => !rows.is_empty(),
         Err(e) => {
-            tracing::warn!("Failed to query Amulet TransferPreapproval: {e}");
+            log_preapproval_lookup_error("Amulet TransferPreapproval", &e);
             false
         }
     };
@@ -2939,7 +2952,7 @@ async fn fetch_preapproved_instruments(
     let utility = match fetch_utility_preapproval_instruments(config, party_id, token).await {
         Ok(set) => set,
         Err(e) => {
-            tracing::warn!("Failed to parse utility TransferPreapproval instruments: {e}");
+            log_preapproval_lookup_error("utility TransferPreapproval", &e);
             std::collections::HashSet::new()
         }
     };

@@ -511,7 +511,18 @@ pub async fn get_transfer_preapprovals_handler(
         match query_contracts_by_template(config, party, token, test_mode, params).await {
             Ok(c) => c.len(),
             Err(e) => {
-                tracing::warn!("Failed to query {label}: {e}");
+                // Template-not-uploaded means there are simply no such
+                // contracts on this participant — a legitimate 0, not a
+                // failure worth a WARN.
+                if e.to_string()
+                    .contains("NO_TEMPLATES_FOR_PACKAGE_NAME_AND_QUALIFIED_NAME")
+                {
+                    tracing::debug!(
+                        "No {label} templates uploaded on this participant; counting as 0",
+                    );
+                } else {
+                    tracing::warn!("Failed to query {label}: {e}");
+                }
                 0
             }
         }
