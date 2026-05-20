@@ -92,6 +92,8 @@ where
         expected_peers: invitees.to_vec(),
         completed_peers: Vec::new(),
         dec_party_id,
+        prefix: None,
+        participants: Vec::new(),
         error: None,
         dismissed: false,
         created_at: now,
@@ -1828,11 +1830,53 @@ pub async fn list_workflows(data: web::Data<AppState>) -> impl Responder {
             if let Some(pk) = r.coordinator_pubkey.as_deref() {
                 r.coordinator_name = pubkey_to_name.get(pk).cloned();
             }
+            enrich_from_config_json(&mut r);
             r
         })
         .collect();
 
     HttpResponse::Ok().json(WorkflowRunsResponse { runs: resolved })
+}
+
+/// Pull `prefix` + `participants` out of the run's `config_json` and lift
+/// them onto the response struct so the frontend can show them without
+/// parsing JSON blobs. Coordinator configs spell the prefix field
+/// `party_id_prefix` (e.g. `OnboardingConfig`) while the peer-side payload
+/// uses `prefix`; we accept either. For participants we fall back to
+/// `expected_peers` when the config doesn't carry a list of its own — that
+/// way Kick / Contracts / Dars runs (whose configs don't include a peer
+/// list) still surface their participants.
+fn enrich_from_config_json(run: &mut WorkflowRun) {
+    #[derive(serde::Deserialize)]
+    struct ConfigShape {
+        #[serde(default)]
+        prefix: Option<String>,
+        #[serde(default)]
+        party_id_prefix: Option<String>,
+        #[serde(default)]
+        participants: Vec<String>,
+    }
+    if let Ok(shape) = serde_json::from_str::<ConfigShape>(&run.config_json) {
+        let prefix = shape.prefix.or(shape.party_id_prefix);
+        if let Some(p) = prefix
+            && !p.is_empty()
+        {
+            run.prefix = Some(p);
+        }
+        if !shape.participants.is_empty() {
+            run.participants = shape
+                .participants
+                .into_iter()
+                .filter_map(|s| CantonId::parse(&s).ok())
+                .collect();
+        }
+    }
+    // Fallback: if config_json didn't expose a participants list (e.g. Kick /
+    // Contracts / Dars), surface the run's `expected_peers` instead so the
+    // card still shows who was involved.
+    if run.participants.is_empty() && !run.expected_peers.is_empty() {
+        run.participants = run.expected_peers.clone();
+    }
 }
 
 /// Mark a terminal-state workflow run as dismissed so it disappears from the

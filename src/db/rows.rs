@@ -378,6 +378,10 @@ impl WorkflowRunRow {
             expected_peers,
             completed_peers,
             dec_party_id,
+            // `prefix` + `participants` are derived from `config_json` at the
+            // API layer; the DB doesn't store them as columns.
+            prefix: None,
+            participants: Vec::new(),
             error: self.error,
             dismissed: self.dismissed != 0,
             created_at: self.created_at,

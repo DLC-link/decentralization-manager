@@ -520,6 +520,15 @@ pub struct WorkflowRun {
     pub completed_peers: Vec<CantonId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dec_party_id: Option<CantonId>,
+    /// Dec party prefix associated with this run (e.g. "UAT"). Populated by
+    /// the API layer from `config_json` so the frontend can display a chip
+    /// without parsing JSON blobs itself. Not persisted as a column.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+    /// Participants involved in this run (same source as `prefix`). Empty
+    /// when missing from the config payload.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub participants: Vec<CantonId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub dismissed: bool,
@@ -1837,6 +1846,8 @@ mod tests {
             expected_peers: vec![peer_a.clone(), peer_b.clone()],
             completed_peers: vec![peer_a],
             dec_party_id: Some(CantonId::parse(&dec_party_id_str).unwrap()),
+            prefix: None,
+            participants: Vec::new(),
             error: None,
             dismissed: false,
             created_at: 1_700_000_000,
