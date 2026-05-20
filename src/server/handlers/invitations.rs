@@ -85,6 +85,8 @@ async fn insert_peer_run(
         expected_peers: invitation.participants.clone(),
         completed_peers: Vec::new(),
         dec_party_id: None,
+        prefix: None,
+        participants: Vec::new(),
         error: None,
         dismissed: false,
         created_at: now,

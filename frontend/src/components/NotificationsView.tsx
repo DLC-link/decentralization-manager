@@ -6,6 +6,7 @@ import {
   Chip,
   CircularProgress,
   IconButton,
+  LinearProgress,
   Skeleton,
   Tooltip,
   Typography,
@@ -1169,18 +1170,6 @@ const WorkflowRunCard = ({
         ? `from ${run.coordinator_pubkey.slice(0, 12)}…${run.coordinator_pubkey.slice(-6)}`
         : null;
 
-  const completedCount = run.completed_peers.length;
-  const totalCount = run.expected_peers.length;
-  // Per-kind label for the peer progress counter. DARs distribution
-  // doesn't sign anything — peers just upload the dar locally and
-  // signal completion. Other kinds collect DAML signatures.
-  const peerVerb = run.kind === "Dars" ? "uploaded" : "signed";
-  // Step counters are only meaningful on the coordinator side — the
-  // peer's `current_step` is always "Active" with step_index=0,
-  // step_total=N (see invitations.rs `upsert_peer_run`), so rendering
-  // it as "Active (1/N)" is misleading. Hide step + peer count rows
-  // entirely for peer-side cards.
-  const isCoordinator = run.role === "Coordinator";
 
   return (
     <Box
@@ -1203,9 +1192,19 @@ const WorkflowRunCard = ({
         }}
       >
         <Box>
-          <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
-            {run.kind} workflow
-          </Typography>
+          <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
+            <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
+              {run.kind} workflow
+            </Typography>
+            {run.prefix && (
+              <Chip
+                label={run.prefix}
+                size="small"
+                variant="outlined"
+                sx={{ height: 20 }}
+              />
+            )}
+          </Box>
           {fromLine && (
             <Typography variant="caption" color="text.secondary">
               {fromLine}
@@ -1227,7 +1226,10 @@ const WorkflowRunCard = ({
         </Box>
       </Box>
 
-      {(isInProgress || run.error) && (
+      {(isInProgress ||
+        run.error ||
+        run.dec_party_id ||
+        (run.participants && run.participants.length > 0)) && (
         <Box
           sx={{
             display: "flex",
@@ -1239,32 +1241,38 @@ const WorkflowRunCard = ({
             borderRadius: 1,
           }}
         >
-          {isInProgress && (
-            <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
-              <Typography
-                variant="caption"
-                color="text.secondary"
-                sx={{ minWidth: 96 }}
+          {isInProgress && run.step_total > 0 && (
+            <Box
+              sx={{
+                display: "flex",
+                flexDirection: "column",
+                gap: 0.5,
+              }}
+            >
+              <Box
+                sx={{
+                  display: "flex",
+                  alignItems: "baseline",
+                  gap: 1,
+                  justifyContent: "space-between",
+                }}
               >
-                Step
-              </Typography>
-              <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                {run.current_step} ({run.step_index + 1}/{run.step_total})
-              </Typography>
-            </Box>
-          )}
-          {isInProgress && isCoordinator && totalCount > 0 && (
-            <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
-              <Typography
-                variant="caption"
-                color="text.secondary"
-                sx={{ minWidth: 96 }}
-              >
-                Peers
-              </Typography>
-              <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                {completedCount} / {totalCount} {peerVerb}
-              </Typography>
+                <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                  {run.current_step}
+                </Typography>
+                <Typography variant="caption" color="text.secondary">
+                  {run.step_index + 1} / {run.step_total}
+                </Typography>
+              </Box>
+              <LinearProgress
+                variant="determinate"
+                value={Math.min(
+                  100,
+                  ((run.step_index + 1) / run.step_total) * 100,
+                )}
+                color="primary"
+                sx={{ height: 6, borderRadius: 3 }}
+              />
             </Box>
           )}
           {run.dec_party_id && (
@@ -1289,6 +1297,27 @@ const WorkflowRunCard = ({
               >
                 {truncatePartyId(run.dec_party_id)}
               </Typography>
+            </Box>
+          )}
+          {run.participants && run.participants.length > 0 && (
+            <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ minWidth: 96 }}
+              >
+                Participants ({run.participants.length})
+              </Typography>
+              <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
+                {run.participants.map((id) => (
+                  <Chip
+                    key={id}
+                    size="small"
+                    variant="outlined"
+                    label={truncatePartyId(id)}
+                  />
+                ))}
+              </Box>
             </Box>
           )}
           {run.error && (

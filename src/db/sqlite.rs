@@ -1867,6 +1867,8 @@ mod tests {
             ],
             completed_peers: Vec::new(),
             dec_party_id: None,
+            prefix: None,
+            participants: Vec::new(),
             error: None,
             dismissed: false,
             created_at: 1000,
