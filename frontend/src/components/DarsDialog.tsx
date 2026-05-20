@@ -273,7 +273,11 @@ export const DarsDialog = ({
       </DialogTitle>
       <DialogContent>
         <Box sx={{ display: "flex", flexDirection: "column", gap: 2, mt: 1 }}>
-          {error && <Alert severity="error">{error}</Alert>}
+          {error && (
+            <Alert severity="error" onClose={() => setError(null)}>
+              {error}
+            </Alert>
+          )}
 
           {isInProgress && (
             <Alert severity="info" icon={<CircularProgress size={20} />}>

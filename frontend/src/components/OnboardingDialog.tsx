@@ -332,7 +332,11 @@ export const OnboardingDialog = ({
             )}
           </Box>
 
-          {error && !meshErrors && <Alert severity="error">{error}</Alert>}
+          {error && !meshErrors && (
+            <Alert severity="error" onClose={() => setError(null)}>
+              {error}
+            </Alert>
+          )}
 
           {meshErrors && (
             <Alert severity="error">

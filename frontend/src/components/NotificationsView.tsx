@@ -143,7 +143,10 @@ const InvitationCard = ({
       );
       onAfter();
     } catch (err) {
-      showSnackbar(err instanceof Error ? err.message : `Failed to ${path}`);
+      showSnackbar(
+        err instanceof Error ? err.message : `Failed to ${path}`,
+        "error",
+      );
     } finally {
       setBusy(false);
     }
@@ -363,6 +366,7 @@ const ActionCard = ({
     } catch (err) {
       showSnackbar(
         err instanceof Error ? err.message : `Failed: ${endpoint}`,
+        "error",
       );
       return false;
     } finally {
@@ -372,7 +376,7 @@ const ActionCard = ({
 
   const handleConfirm = async () => {
     if (!party.rulesContractId) {
-      showSnackbar("Governance rules contract is not set");
+      showSnackbar("Governance rules contract is not set", "error");
       return;
     }
     const body: ConfirmActionRequest = {
@@ -396,7 +400,7 @@ const ActionCard = ({
 
   const handleExpire = async (confirmationCid: string) => {
     if (!party.rulesContractId) {
-      showSnackbar("Governance rules contract is not set");
+      showSnackbar("Governance rules contract is not set", "error");
       return;
     }
     const body: ExpireConfirmationRequest = {
@@ -683,6 +687,7 @@ const ActionCard = ({
         action={action}
         loading={executeLoading}
         error={executeError}
+        onErrorDismiss={() => setExecuteError(null)}
       />
     </Box>
   );
@@ -720,7 +725,7 @@ const DomainActionCard = ({
     successMsg: string,
   ): Promise<void> => {
     if (!party.rulesContractId) {
-      showSnackbar("Governance rules contract is not set");
+      showSnackbar("Governance rules contract is not set", "error");
       return;
     }
     setBusy(true);
@@ -737,7 +742,10 @@ const DomainActionCard = ({
       showSnackbar(successMsg);
       onAfter();
     } catch (err) {
-      showSnackbar(err instanceof Error ? err.message : `Failed: ${endpoint}`);
+      showSnackbar(
+        err instanceof Error ? err.message : `Failed: ${endpoint}`,
+        "error",
+      );
     } finally {
       setBusy(false);
     }
@@ -1079,7 +1087,10 @@ const WorkflowRunCard = ({
       showSnackbar(`${run.kind} workflow cancelled`);
       onAfter();
     } catch (err) {
-      showSnackbar(err instanceof Error ? err.message : "Failed to cancel");
+      showSnackbar(
+        err instanceof Error ? err.message : "Failed to cancel",
+        "error",
+      );
     } finally {
       setBusy(false);
     }
@@ -1098,7 +1109,10 @@ const WorkflowRunCard = ({
       }
       onAfter();
     } catch (err) {
-      showSnackbar(err instanceof Error ? err.message : "Failed to dismiss");
+      showSnackbar(
+        err instanceof Error ? err.message : "Failed to dismiss",
+        "error",
+      );
     } finally {
       setBusy(false);
     }
@@ -1118,7 +1132,10 @@ const WorkflowRunCard = ({
       showSnackbar(`Retrying ${run.kind} workflow`);
       onAfter();
     } catch (err) {
-      showSnackbar(err instanceof Error ? err.message : "Failed to retry");
+      showSnackbar(
+        err instanceof Error ? err.message : "Failed to retry",
+        "error",
+      );
     } finally {
       setBusy(false);
     }

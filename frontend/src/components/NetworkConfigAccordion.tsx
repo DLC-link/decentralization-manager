@@ -176,7 +176,10 @@ export const NetworkConfigAccordion = ({
       const text = await navigator.clipboard.readText();
       const parts = text.trim().split(",");
       if (parts.length < 5) {
-        showSnackbar("Invalid CSV format. Expected: participant_id,name,address,port,public_key");
+        showSnackbar(
+          "Invalid CSV format. Expected: participant_id,name,address,port,public_key",
+          "error",
+        );
         return;
       }
       const [participant_id, name, address, portStr, public_key] = parts;
@@ -185,7 +188,7 @@ export const NetworkConfigAccordion = ({
       setEditedPeers((peers) => [...peers, newPeer]);
       showSnackbar("Peer added from clipboard");
     } catch {
-      showSnackbar("Failed to read clipboard");
+      showSnackbar("Failed to read clipboard", "error");
     }
   };
 

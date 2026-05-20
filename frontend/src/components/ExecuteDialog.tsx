@@ -87,6 +87,9 @@ interface ExecuteDialogProps {
   action: GovernanceAction | null;
   loading: boolean;
   error: string | null;
+  /// Optional dismiss callback — when provided, the inline error Alert
+  /// gets an X button that calls this to clear the message.
+  onErrorDismiss?: () => void;
   blobMap?: Record<string, string>;
 }
 
@@ -95,6 +98,7 @@ interface ExecuteFormProps {
   fullBlobMap: Record<string, string>;
   loading: boolean;
   error: string | null;
+  onErrorDismiss?: () => void;
   onClose: () => void;
   onExecute: (disclosedContracts: DisclosedContractInput[]) => void;
 }
@@ -106,6 +110,7 @@ const ExecuteForm = ({
   fullBlobMap,
   loading,
   error,
+  onErrorDismiss,
   onClose,
   onExecute,
 }: ExecuteFormProps) => {
@@ -254,7 +259,14 @@ const ExecuteForm = ({
             )}
           </Box>
 
-          {error && <Alert severity="error">{error}</Alert>}
+          {error && (
+            <Alert
+              severity="error"
+              onClose={onErrorDismiss ? () => onErrorDismiss() : undefined}
+            >
+              {error}
+            </Alert>
+          )}
         </Box>
       </DialogContent>
       <DialogActions>
@@ -281,6 +293,7 @@ export const ExecuteDialog = ({
   action,
   loading,
   error,
+  onErrorDismiss,
   blobMap = {},
 }: ExecuteDialogProps) => {
   const fullBlobMap = useMemo(
@@ -297,6 +310,7 @@ export const ExecuteDialog = ({
           fullBlobMap={fullBlobMap}
           loading={loading}
           error={error}
+          onErrorDismiss={onErrorDismiss}
           onClose={onClose}
           onExecute={onExecute}
         />

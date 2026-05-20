@@ -219,7 +219,11 @@ export const GovernanceAuditTrail = ({
   if (error) {
     return (
       <Box sx={{ mt: 2, mb: 2 }}>
-        <Alert severity="error" sx={{ mb: 2 }}>
+        <Alert
+          severity="error"
+          sx={{ mb: 2 }}
+          onClose={() => setError(null)}
+        >
           {error}
         </Alert>
         <Button
