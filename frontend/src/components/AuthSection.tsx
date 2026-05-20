@@ -13,6 +13,7 @@ import ErrorIcon from "@mui/icons-material/Error";
 import ScienceIcon from "@mui/icons-material/Science";
 import WarningIcon from "@mui/icons-material/Warning";
 import RefreshIcon from "@mui/icons-material/Refresh";
+import SettingsIcon from "@mui/icons-material/Settings";
 import VpnKeyIcon from "@mui/icons-material/VpnKey";
 import { CopyableText } from "./CopyableText";
 import { GrantRightsDialog } from "./GrantRightsDialog";
@@ -24,6 +25,7 @@ interface AuthSectionProps {
   partyId: string;
   authStatus?: PartyAuthStatus;
   onRefresh?: () => void;
+  onConfigure?: () => void;
 }
 
 const isRightsValid = (rights: RightsStatus | undefined): boolean => {
@@ -36,7 +38,7 @@ const isRightsValid = (rights: RightsStatus | undefined): boolean => {
   );
 };
 
-const getAuthStatusIcon = (authStatus: PartyAuthStatus) => {
+export const getAuthStatusIcon = (authStatus: PartyAuthStatus) => {
   switch (authStatus.status.status) {
     case "authenticated":
       return <CheckCircleIcon color="success" fontSize="small" />;
@@ -49,26 +51,33 @@ const getAuthStatusIcon = (authStatus: PartyAuthStatus) => {
   }
 };
 
-const getAuthStatusChip = (authStatus: PartyAuthStatus) => {
-  switch (authStatus.status.status) {
-    case "authenticated":
-      return <Chip label="Authenticated" color="success" size="small" />;
-    case "mock":
-      return <Chip label="Test Mode" color="warning" size="small" />;
-    case "failed":
-      return <Chip label="Failed" color="error" size="small" />;
-    case "notconfigured":
-      return <Chip label="Not Configured" color="default" size="small" />;
-  }
-};
-
-export const AuthSection = ({ partyId, authStatus, onRefresh }: AuthSectionProps) => {
+export const AuthSection = ({
+  partyId,
+  authStatus,
+  onRefresh,
+  onConfigure,
+}: AuthSectionProps) => {
   const [testing, setTesting] = useState(false);
   const [testError, setTestError] = useState<string | null>(null);
   const [grantDialogOpen, setGrantDialogOpen] = useState(false);
 
   if (!authStatus) {
-    return null;
+    return (
+      <Box sx={{ py: 2 }}>
+        <Alert severity="info" sx={{ mb: 2 }}>
+          Authentication is not configured for this party.
+        </Alert>
+        <Button
+          variant="contained"
+          size="small"
+          startIcon={<VpnKeyIcon />}
+          onClick={onConfigure}
+          disabled={!onConfigure}
+        >
+          Login
+        </Button>
+      </Box>
+    );
   }
 
   const canGrant =
@@ -100,11 +109,6 @@ export const AuthSection = ({ partyId, authStatus, onRefresh }: AuthSectionProps
 
   return (
     <Box sx={{ py: 2 }}>
-      <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: 1.5 }}>
-        {getAuthStatusIcon(authStatus)}
-        {getAuthStatusChip(authStatus)}
-      </Box>
-
       <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: 1 }}>
         <Typography variant="body2" color="text.secondary">
           <strong>Member Party:</strong>
@@ -221,6 +225,16 @@ export const AuthSection = ({ partyId, authStatus, onRefresh }: AuthSectionProps
         >
           {testing ? "Testing..." : "Test Auth"}
         </Button>
+        {onConfigure && (
+          <Button
+            variant="outlined"
+            size="small"
+            startIcon={<SettingsIcon />}
+            onClick={onConfigure}
+          >
+            Edit Credentials
+          </Button>
+        )}
         {canGrant && (
           <Button
             variant="contained"
