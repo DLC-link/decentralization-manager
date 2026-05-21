@@ -1,8 +1,9 @@
 use std::{
     collections::{HashMap, HashSet},
+    io,
     marker::PhantomData,
     sync::Arc,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use hyper::{Body, Request, Response, StatusCode};
@@ -184,9 +185,65 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
 
         tracing::info!("Starting Noise server on {listen_addr}");
 
-        let listener = TcpListener::bind(&listen_addr)
-            .await
-            .map_err(NoiseError::Io)?;
+        // Tight poll-bind loop on `AddrInUse`, bounded by a wall-clock
+        // deadline rather than a fixed attempt count.
+        //
+        // After a node restart, the prior process's `ESTABLISHED` Noise
+        // connections to peers enter `TIME_WAIT` on SIGKILL. On macOS this
+        // can hold the port for ~60s before the kernel releases it — even
+        // with `SO_REUSEADDR` (Rust's default), an in-flight `TIME_WAIT`
+        // socket on the same `(local_ip, local_port, remote_ip,
+        // remote_port)` 4-tuple blocks the new bind. The previous
+        // `ListenerPauseGuard` hardcoded 500ms sleep is far shorter than
+        // this; without retrying, `spawn_*_resume` bails out as
+        // `"Resumed … workflow failed: Address already in use"` and the
+        // run cascades into the 90s `WaitingForPeers` workflow deadline.
+        //
+        // We poll on a 100ms cadence (succeeds the moment the kernel
+        // releases the port, no extra latency on the common path) up to a
+        // 180s ceiling. Empirically a chaos-restart-then-resume cycle on
+        // macOS devnet has used up to ~89s of polling; 180s gives 2× that
+        // headroom for tail-end TIME_WAIT. Logging is throttled to every
+        // 10th failed attempt (~1s) to avoid log spam during long waits.
+        // Non-`AddrInUse` errors surface immediately.
+        const BIND_POLL_INTERVAL: Duration = Duration::from_millis(100);
+        const BIND_POLL_DEADLINE: Duration = Duration::from_secs(180);
+        let listener = {
+            let start = Instant::now();
+            let mut attempt = 0usize;
+            let mut last_err: Option<io::Error> = None;
+            loop {
+                attempt += 1;
+                match TcpListener::bind(&listen_addr).await {
+                    Ok(l) => {
+                        if attempt > 1 {
+                            tracing::info!(
+                                "NoiseServer bound {listen_addr} on attempt {attempt} \
+                                 (waited {:?})",
+                                start.elapsed(),
+                            );
+                        }
+                        break l;
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::AddrInUse => {
+                        if start.elapsed() >= BIND_POLL_DEADLINE {
+                            return Err(NoiseError::Io(last_err.unwrap_or(e)));
+                        }
+                        if attempt == 1 || attempt.is_multiple_of(10) {
+                            tracing::warn!(
+                                "NoiseServer bind to {listen_addr} still AddrInUse \
+                                 after {:?} ({attempt} attempts); waiting on kernel \
+                                 socket release",
+                                start.elapsed(),
+                            );
+                        }
+                        last_err = Some(e);
+                        tokio::time::sleep(BIND_POLL_INTERVAL).await;
+                    }
+                    Err(e) => return Err(NoiseError::Io(e)),
+                }
+            }
+        };
 
         let make_responder = {
             let keypair = self.keypair.clone();

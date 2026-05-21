@@ -41,22 +41,20 @@ pub fn topology_retry_delay_secs() -> u64 {
 /// Maximum number of consecutive failures before a peer-side workflow step
 /// aborts the whole workflow.
 ///
-/// The peer event loop in `src/workflow/mod.rs` retries each step on
-/// Canton-side errors (the most common being
-/// `TOPOLOGY_NO_APPROPRIATE_SIGNING_KEY_IN_STORE` when the synchronizer
-/// hasn't fully reconciled a freshly-restarted participant's signing keys
-/// yet). The previous hardcoded 3-attempt × 2s budget (6s window) was
-/// tuned for localnet's docker-compose Canton, which reconciles in ms.
-/// On devnet's kubectl-tunneled Canton — especially right after a chaos
-/// phase restart — the reconciliation can take 10–20s; all three attempts
-/// can land inside the same slow window and the peer aborts unnecessarily.
+/// The peer event loop in `src/workflow/mod.rs` increments this counter on
+/// any step-execution error and aborts the workflow once the threshold is
+/// hit. The threshold is deliberately tight (3 strikes × 2s sleep = 6s) so
+/// real failures — malformed payloads, auth misconfiguration, programming
+/// bugs — surface quickly with one easy-to-find abort line in the logs.
 ///
-/// 6 attempts × 2s = 12s gives the same retry cadence with twice the
-/// total window, which has comfortably covered the observed Canton
-/// reconciliation lag in lived devnet runs. Production behavior on a
-/// healthy synchronizer is unchanged because the first attempt continues
-/// to succeed the vast majority of the time.
-pub const MAX_CONSECUTIVE_STEP_FAILURES: usize = 6;
+/// The Canton-side `TOPOLOGY_NO_APPROPRIATE_SIGNING_KEY_IN_STORE` transient
+/// (observed when a freshly-restarted participant's local topology store
+/// hasn't yet reconciled its signing keys) is **not** what this counter is
+/// for: it is absorbed at the `sign_transactions` call site with its own
+/// env-configurable budget (`DPM_TOPOLOGY_RETRY_MAX_ATTEMPTS` ×
+/// `DPM_TOPOLOGY_RETRY_DELAY_SECS`, defaults 30 × 2s = 60s). See
+/// [`sign_transactions_with_topology_retry`](crate::workflow::onboarding::steps::proposals::sign::sign_transactions_with_topology_retry).
+pub const MAX_CONSECUTIVE_STEP_FAILURES: usize = 3;
 
 /// Canton protocol version used for key export and topology operations
 pub const CANTON_PROTOCOL_VERSION: i32 = 34;
