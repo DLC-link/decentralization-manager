@@ -605,6 +605,16 @@ pub struct OnboardingInvitePayload {
     pub participants: Vec<CantonId>,
 }
 
+/// Payload sent inside a `DeclineInvitation` Noise message — peer telling
+/// the coordinator that it has rejected an outstanding invitation so the
+/// coordinator can fail its matching in-progress run with a clear error.
+#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct DeclineInvitationPayload {
+    pub kind: WorkflowKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 /// Payload sent inside an `InviteDars` Noise message.
 #[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct DarsInvitePayload {
