@@ -103,19 +103,28 @@ pub fn say(label: &str, msg: &str) {
     info!("[{label}] {msg}");
 }
 
-/// Verify all three nodes' HTTP + Noise ports are reachable; if any are
-/// not, respawn that node via `processes::spawn_only`. Used at the start of
+/// Verify all three nodes' HTTP ports are reachable; if any are not,
+/// respawn that node via `processes::restart_node`. Used at the start of
 /// chaos phases to repair any state left by an earlier phase (or by an
 /// in-process race between cancel/abort and a CancelInvite delivery that
 /// leaves a Noise listener in a bad state).
+///
+/// HTTP-only by design — the Noise *invite* listener's bound state is not
+/// a reliable signal that DPM is healthy after a chaos restart. DPM's
+/// restart-resume path detects in-progress `workflow_runs` rows and resumes
+/// them as coordinators, which pauses the Noise invite listener and drops
+/// its TCP socket — workflow-specific Noise servers take exclusive control
+/// of the noise port instead. Probing for the noise port in this state
+/// used to false-fail with "P{idx} unreachable (http=true, noise=false)",
+/// triggering an unnecessary `restart_node` that orphans the in-flight
+/// workflow_runs row on the coordinator — the next phase's
+/// `POST /onboarding` then collides with the orphaned row and gets a
+/// `409 An onboarding workflow is already in progress`. Mirrors the fix
+/// already applied to `wait_for_server` in `tests/common/processes.rs`.
 pub async fn ensure_nodes_healthy(f: &mut Fixture) -> anyhow::Result<()> {
     use tokio::net::TcpStream;
-    let probes = [
-        (1u8, f.p1.http, f.p1.noise),
-        (2, f.p2.http, f.p2.noise),
-        (3, f.p3.http, f.p3.noise),
-    ];
-    for (idx, http_port, noise_port) in probes {
+    let probes = [(1u8, f.p1.http), (2, f.p2.http), (3, f.p3.http)];
+    for (idx, http_port) in probes {
         // Only repair nodes the fixture believes should be alive. A
         // `current_pids[idx] = None` slot means a chaos phase intentionally
         // killed this node and is expecting it to stay dead — respawning
@@ -128,14 +137,10 @@ pub async fn ensure_nodes_healthy(f: &mut Fixture) -> anyhow::Result<()> {
             continue;
         }
         let http_ok = TcpStream::connect(("127.0.0.1", http_port)).await.is_ok();
-        let noise_ok = TcpStream::connect(("127.0.0.1", noise_port)).await.is_ok();
-        if http_ok && noise_ok {
+        if http_ok {
             continue;
         }
-        tracing::warn!(
-            "ensure_nodes_healthy: P{idx} unreachable (http={http_ok}, noise={noise_ok}); \
-             respawning"
-        );
+        tracing::warn!("ensure_nodes_healthy: P{idx} unreachable (http={http_ok}); respawning");
         crate::common::processes::restart_node(f, idx).await?;
     }
     Ok(())
