@@ -318,7 +318,8 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                 self.handle_status_update(peer_id, message.payload).await?
             }
             MessageType::DeclineInvitation => {
-                self.handle_decline_invitation(peer_id, message.payload).await
+                self.handle_decline_invitation(peer_id, message.payload)
+                    .await
             }
             _ => {
                 tracing::warn!("Unhandled message type: {:?}", message.msg_type);
@@ -457,16 +458,10 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
     /// remaining peers so their pending invites / in-flight peer runs roll
     /// back instead of hanging. Always replies with `Ack` — the declining
     /// peer treats the send as fire-and-forget.
-    async fn handle_decline_invitation(
-        &self,
-        peer_id: CantonId,
-        payload: Vec<u8>,
-    ) -> Message {
-        let reason = serde_json::from_slice::<
-            crate::server::DeclineInvitationPayload,
-        >(&payload)
-        .ok()
-        .and_then(|p| p.reason);
+    async fn handle_decline_invitation(&self, peer_id: CantonId, payload: Vec<u8>) -> Message {
+        let reason = serde_json::from_slice::<crate::server::DeclineInvitationPayload>(&payload)
+            .ok()
+            .and_then(|p| p.reason);
 
         let msg = match &reason {
             Some(r) => format!("Peer {peer_id} declined the invitation: {r}"),
@@ -502,14 +497,8 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                 continue;
             };
             let psk = self.keypair.derive_psk(&peer_pub_key);
-            if let Err(e) = send_noise_message(
-                &peer.address,
-                peer.port,
-                &psk,
-                identity_bytes,
-                &message,
-            )
-            .await
+            if let Err(e) =
+                send_noise_message(&peer.address, peer.port, &psk, identity_bytes, &message).await
             {
                 tracing::warn!(
                     "Best-effort CancelInvite to {} after decline failed: {e}",

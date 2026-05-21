@@ -22,7 +22,13 @@ fn parse_positive_usize(s: &str) -> std::result::Result<usize, String> {
 #[command(about = "Canton decentralized party onboarding workflow automation", long_about = None)]
 pub struct Cli {
     /// Path to root directory containing config/ and data/ subdirectories
-    #[arg(short, long, value_name = "DIR", default_value = ".", env = "DECPM_DIR")]
+    #[arg(
+        short,
+        long,
+        value_name = "DIR",
+        default_value = ".",
+        env = "DECPM_DIR"
+    )]
     pub dir: PathBuf,
 
     #[command(subcommand)]

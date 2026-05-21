@@ -194,10 +194,7 @@ impl NoiseClient {
     /// can fail its in-progress run with a descriptive error instead of
     /// hanging until timeout. Payload is the JSON-encoded
     /// `DeclineInvitationPayload`.
-    pub async fn send_decline_invitation(
-        &self,
-        payload: Vec<u8>,
-    ) -> Result<(), NoiseError> {
+    pub async fn send_decline_invitation(&self, payload: Vec<u8>) -> Result<(), NoiseError> {
         self.send_and_verify_ack(
             MessageType::DeclineInvitation,
             payload,

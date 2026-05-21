@@ -625,9 +625,9 @@ pub async fn get_transfer_factories_handler(
     let token = get_party_token(&data, party_id).await;
 
     match get_transfer_factories(&data.config, party_id, token).await {
-        Ok(transfer_factories) => HttpResponse::Ok().json(TransferFactoriesResponse {
-            transfer_factories,
-        }),
+        Ok(transfer_factories) => {
+            HttpResponse::Ok().json(TransferFactoriesResponse { transfer_factories })
+        }
         Err(e) => {
             tracing::error!("Failed to fetch transfer factories: {e}");
             HttpResponse::InternalServerError().json(ErrorResponse {
