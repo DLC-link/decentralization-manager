@@ -651,6 +651,27 @@ pub async fn start_onboarding(
     let onboarding_config =
         workflow::OnboardingConfig::new(party_id_prefix.clone(), instance_name.clone());
 
+    // Refuse onboarding when a party with this prefix already exists. The
+    // human-readable prefix is the only piece of the party id the operator
+    // chooses; allowing duplicates makes the parties list ambiguous and —
+    // when the participant set also matches — the workflow silently
+    // converges onto the existing party (Canton's DNS hash is deterministic
+    // from owners + threshold). Surface a clear 409 upfront instead.
+    match find_party_with_prefix(&data.db, &party_id_prefix).await {
+        Ok(Some(existing_party_id)) => {
+            return HttpResponse::Conflict().json(ErrorResponse {
+                error: format!(
+                    "A decentralized party with the prefix '{party_id_prefix}' already exists \
+                     ({existing_party_id}). Choose a different prefix."
+                ),
+            });
+        }
+        Ok(None) => {}
+        Err(e) => {
+            tracing::warn!("Failed to check for duplicate-prefix party: {e:#}");
+        }
+    }
+
     if let Err(e) = insert_coordinator_run(
         &data.db,
         &instance_name,
@@ -2087,6 +2108,19 @@ pub async fn retry_workflow(
 
 /// Best-effort: notify previously-invited peers that the workflow is cancelled
 /// so they can drop the matching pending invitation.
+/// Look for an existing decentralized party whose human-readable prefix
+/// equals `prefix`. Returns the matching `party_id` if found — used by the
+/// onboarding pre-flight to refuse duplicate-prefix runs.
+async fn find_party_with_prefix(
+    db: &SqlitePool,
+    prefix: &str,
+) -> Result<Option<String>> {
+    use crate::db::schema::SchemaRead;
+
+    let parties = db.get_dec_parties_by_prefix(prefix).await?;
+    Ok(parties.into_iter().next().map(|p| p.party_id))
+}
+
 async fn send_cancel_invites(
     config: &NodeConfig,
     db: &SqlitePool,

@@ -541,40 +541,42 @@ export const PartyDetail = ({
       )}
 
       {/* Holdings */}
-      <CollapsibleSection
-        title="Holdings"
-        expanded={holdingsExpanded}
-        onToggle={() => setHoldingsExpanded(!holdingsExpanded)}
-        badge={
-          <>
-            {holdingsCount > 0 && (
-              <Chip label={holdingsCount} size="small" sx={{ ml: 1 }} />
-            )}
-            <Tooltip title="Refresh holdings">
-              <span>
-                <IconButton
-                  size="small"
-                  sx={{ ml: 0.5 }}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setHoldingsRefreshNonce((n) => n + 1);
-                  }}
-                  disabled={holdingsLoading}
-                >
-                  <RefreshIcon fontSize="small" />
-                </IconButton>
-              </span>
-            </Tooltip>
-          </>
-        }
-      >
-        <HoldingsSection
-          partyId={party.party_id}
-          refreshNonce={holdingsRefreshNonce}
-          onCountChange={setHoldingsCount}
-          onLoadingChange={setHoldingsLoading}
-        />
-      </CollapsibleSection>
+      {authStatus?.rights?.dec_party_act_as && (
+        <CollapsibleSection
+          title="Holdings"
+          expanded={holdingsExpanded}
+          onToggle={() => setHoldingsExpanded(!holdingsExpanded)}
+          badge={
+            <>
+              {holdingsCount > 0 && (
+                <Chip label={holdingsCount} size="small" sx={{ ml: 1 }} />
+              )}
+              <Tooltip title="Refresh holdings">
+                <span>
+                  <IconButton
+                    size="small"
+                    sx={{ ml: 0.5 }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setHoldingsRefreshNonce((n) => n + 1);
+                    }}
+                    disabled={holdingsLoading}
+                  >
+                    <RefreshIcon fontSize="small" />
+                  </IconButton>
+                </span>
+              </Tooltip>
+            </>
+          }
+        >
+          <HoldingsSection
+            partyId={party.party_id}
+            refreshNonce={holdingsRefreshNonce}
+            onCountChange={setHoldingsCount}
+            onLoadingChange={setHoldingsLoading}
+          />
+        </CollapsibleSection>
+      )}
 
       {/* Audit Trail */}
       {authStatus?.rights?.dec_party_act_as && (
