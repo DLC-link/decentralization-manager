@@ -33,7 +33,7 @@ const navItems = [
   { label: "Parties", icon: <GroupsIcon />, index: 0 },
   { label: "Packages", icon: <Inventory2Icon />, index: 1 },
   { label: "Configuration", icon: <SettingsIcon />, index: 2 },
-  { label: "Notifications", icon: <NotificationsIcon />, index: 3 },
+  { label: "Pending approvals", icon: <NotificationsIcon />, index: 3 },
 ];
 
 export const Sidebar = ({
