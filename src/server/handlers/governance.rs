@@ -98,22 +98,31 @@ pub async fn get_governance(
     let token = get_party_token(&data, party_id).await;
     let test_mode = data.test_mode;
 
-    let threshold = get_party_threshold(&data, party_id).await.unwrap_or(2);
-
     let member_party_id = get_member_party_id(&data, party_id).await;
     let packages = packages();
 
-    let rules_contract_id =
+    // Pull `(rules_contract_id, threshold)` off the active GovernanceRules /
+    // VaultGovernanceRules contract. The Daml `ExecuteGovernanceAction`
+    // choice gates on THIS threshold ("Enough member confirmations to
+    // execute action") — not the decentralized-namespace topology
+    // threshold, which is a separate value used for signing
+    // PartyToParticipant updates. Falling back to the DNS threshold for
+    // historical compatibility only when the gov state isn't reachable.
+    let (rules_contract_id, gov_state_threshold) =
         match query_governance_state(&data.config, party_id, token.clone(), test_mode, &packages)
             .await
         {
-            Ok(Some(state)) => Some(state.contract_id),
-            Ok(None) => None,
+            Ok(Some(state)) => (Some(state.contract_id), Some(state.threshold as usize)),
+            Ok(None) => (None, None),
             Err(e) => {
-                tracing::warn!("Failed to fetch active rules contract id: {e}");
-                None
+                tracing::warn!("Failed to fetch active rules contract: {e}");
+                (None, None)
             }
         };
+    let threshold = match gov_state_threshold {
+        Some(t) => t,
+        None => get_party_threshold(&data, party_id).await.unwrap_or(2),
+    };
 
     match get_governance_confirmations(
         &data.config,

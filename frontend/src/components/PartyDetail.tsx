@@ -322,6 +322,20 @@ export const PartyDetail = ({
               : "Deploy Contracts"}
           </Button>
         )}
+        {isOwner && rulesContract && (
+          <Button
+            variant="outlined"
+            size="small"
+            startIcon={<EditIcon />}
+            onClick={() => {
+              setGovDialogView("actions");
+              setEditGovContractId(rulesContract.contract_id);
+            }}
+            disabled={!authStatus?.rights?.dec_party_act_as}
+          >
+            Governance Actions
+          </Button>
+        )}
       </Box>
 
       {/* Owner Key */}
@@ -472,7 +486,6 @@ export const PartyDetail = ({
                     <TableCell sx={{ py: 1 }}>Template</TableCell>
                     <TableCell sx={{ py: 1 }}>Created</TableCell>
                     <TableCell sx={{ py: 1 }}>Contract ID</TableCell>
-                    <TableCell sx={{ py: 1, width: 40 }} />
                   </TableRow>
                 </TableHead>
                 <TableBody>
@@ -502,22 +515,6 @@ export const PartyDetail = ({
                           truncate={{ start: 12, end: 12 }}
                           variant="caption"
                         />
-                      </TableCell>
-                      <TableCell sx={{ py: 1 }} align="right">
-                        {isGovRulesContract(c.template_id) && (
-                          <Tooltip title="Edit governance actions">
-                            <IconButton
-                              size="small"
-                              onClick={() => {
-                                setGovDialogView("actions");
-                                setEditGovContractId(c.contract_id);
-                              }}
-                              disabled={!authStatus?.rights?.dec_party_act_as}
-                            >
-                              <EditIcon fontSize="small" />
-                            </IconButton>
-                          </Tooltip>
-                        )}
                       </TableCell>
                     </TableRow>
                   ))}
