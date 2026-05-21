@@ -15,7 +15,13 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use tokio::{fs::OpenOptions, io::AsyncWriteExt, net::TcpStream, process::Command, time::sleep};
+use tokio::{
+    fs::OpenOptions,
+    io::AsyncWriteExt,
+    net::{TcpListener, TcpStream},
+    process::Command,
+    time::sleep,
+};
 
 use super::Fixture;
 
@@ -128,6 +134,47 @@ pub async fn wait_for_exit(pid: u32, deadline: Duration) -> Result<()> {
     }
 }
 
+/// Block (with deadline) until both `http_port` and `noise_port` can be
+/// bound as a listening socket — i.e., the kernel has released the previous
+/// process's sockets.
+///
+/// `kill_pid` + `wait_for_exit` confirm the process is gone, but a SIGKILL'd
+/// process's listening socket can linger in `TIME_WAIT` (or similar transitional
+/// state) for tens of seconds on macOS depending on the connection state at
+/// kill time. Spawning the replacement DPM before the kernel releases the
+/// ports produces `EADDRINUSE` ("Address already in use") which DPM's own
+/// listener-bind loop then retries on a 5s cadence for ~50s before
+/// succeeding. That delay is invisible (it just inflates phase time) until
+/// it interacts with workflow deadlines like
+/// `Coordinator stalled in step WaitingForPeers for 90s`, at which point
+/// the chaos phase fails.
+///
+/// Probing via `TcpListener::bind` and immediately dropping the listener is
+/// safe — a never-accepted listening socket does not enter `TIME_WAIT` on
+/// close, so the probe doesn't itself contend with the about-to-be-spawned
+/// DPM.
+pub async fn wait_for_ports_free(
+    http_port: u16,
+    noise_port: u16,
+    deadline: Duration,
+) -> Result<()> {
+    let start = Instant::now();
+    loop {
+        let http_free = TcpListener::bind(("127.0.0.1", http_port)).await.is_ok();
+        let noise_free = TcpListener::bind(("127.0.0.1", noise_port)).await.is_ok();
+        if http_free && noise_free {
+            return Ok(());
+        }
+        if start.elapsed() >= deadline {
+            anyhow::bail!(
+                "ports still bound after {deadline:?}: \
+                 http={http_port}(free={http_free}) noise={noise_port}(free={noise_free})",
+            );
+        }
+        sleep(Duration::from_millis(200)).await;
+    }
+}
+
 /// Block (with deadline) until the HTTP listener port is accepting TCP
 /// connections.
 ///
@@ -171,7 +218,24 @@ pub async fn wait_for_server(http_port: u16, deadline: Duration) -> Result<()> {
 /// Spawn a fresh dec-party-manager with the same args env.sh used at boot.
 /// Returns the new PID; also appends it to `$DEV_DIR/restarted-pids` so the
 /// bash cleanup trap can SIGKILL it if cargo test exits abnormally.
+///
+/// Waits for `spawn.http_port` and `spawn.noise_port` to be free (deadline
+/// 60s) before invoking the binary, so that a chaos-restart sequence
+/// (`kill_pid` → `wait_for_exit` → `spawn_node`) doesn't race the kernel's
+/// release of the prior process's listening sockets. Without this, the
+/// fresh DPM hits `EADDRINUSE` on its initial bind and spins on its own
+/// 5s-cadence retry loop for ~50s before succeeding — long enough to trip
+/// the coordinator's 90s `WaitingForPeers` workflow deadline.
 pub async fn spawn_node(spawn: &NodeSpawn, restarted_pids_file: &PathBuf) -> Result<u32> {
+    wait_for_ports_free(spawn.http_port, spawn.noise_port, Duration::from_secs(60))
+        .await
+        .with_context(|| {
+            format!(
+                "waiting for participant-{} ports to be released before respawn",
+                spawn.participant
+            )
+        })?;
+
     let rust_log = std::env::var("RUST_LOG")
         .unwrap_or_else(|_| "dec_party_manager=info,tokio_noise=error,hyper_noise=error".into());
     // Same per-participant log file as bash bringup (integration-tests/common.sh::start_nodes).

@@ -1516,7 +1516,12 @@ async fn handle_incoming_connection(
                 let body_bytes = hyper::body::to_bytes(req.into_body()).await?;
 
                 if body_bytes.len() < 6 {
-                    return Ok::<_, hyper::Error>(Response::new(Body::empty()));
+                    return Ok::<_, hyper::Error>(
+                        Response::builder()
+                            .status(StatusCode::SERVICE_UNAVAILABLE)
+                            .body(Body::empty())
+                            .unwrap(),
+                    );
                 }
 
                 if let Ok(msg) = Message::from_bytes(&body_bytes) {
@@ -1879,7 +1884,18 @@ async fn handle_incoming_connection(
                     }
                 }
 
-                Ok(Response::new(Body::empty()))
+                // Fall-through: either `Message::from_bytes` rejected the body
+                // (corrupted/truncated request) or `msg.msg_type` is one the
+                // invite listener doesn't handle (a workflow-scoped type like
+                // `GetNextCommand` arrived during the brief window between
+                // process start and `WorkflowServer` taking over port 9000).
+                // Return 503 so the peer's poll loop sees a meaningful
+                // `BadStatusCode(503)` instead of `InvalidMessage` (which
+                // looks like wire corruption and is treated as a hard error).
+                Ok(Response::builder()
+                    .status(StatusCode::SERVICE_UNAVAILABLE)
+                    .body(Body::empty())
+                    .unwrap())
             }
         },
         Some(Duration::from_secs(5)),
