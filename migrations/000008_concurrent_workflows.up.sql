@@ -1,0 +1,11 @@
+-- Drop the "one InProgress run per (kind, role)" partial unique index.
+--
+-- The original constraint enforced single-tenant orchestration: only one
+-- onboarding / contracts / kick / dars workflow could be InProgress at a
+-- time per role. The runtime guards (in-memory `WorkflowInFlightGuard`,
+-- per-kind state singletons) added the same restriction in code; this
+-- migration drops the DB-side enforcement so multiple rows can sit
+-- InProgress simultaneously. Runtime guards are loosened in companion
+-- changes; persisting more than one InProgress row was previously
+-- impossible.
+DROP INDEX IF EXISTS idx_workflow_runs_inprogress_per_kind;

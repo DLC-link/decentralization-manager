@@ -818,9 +818,11 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         let row = WorkflowRunRow::from_domain(run)?;
 
         // ON CONFLICT(instance_name) so re-saving the same run (resume,
-        // step advance, etc.) replaces in place. Conflicts on the partial
-        // unique index `idx_workflow_runs_inprogress_per_kind` propagate as
-        // an error — that's what enforces "one InProgress run per (kind, role)".
+        // step advance, etc.) replaces in place. The "one InProgress per
+        // (kind, role)" partial unique index was dropped in migration
+        // 000008 — multiple InProgress runs of the same kind are now legal
+        // on the DB side; concurrency is governed by the in-memory
+        // workflow state map instead.
         sqlx::query(
             r"
             INSERT INTO workflow_runs (
@@ -1937,32 +1939,23 @@ mod tests {
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]
-    async fn test_workflow_runs_unique_inprogress_per_kind(pool: SqlitePool) -> Result {
-        let mut a = test_run("alpha", "Onboarding", "Coordinator");
-        let mut b = test_run("beta", "Onboarding", "Coordinator");
+    async fn test_workflow_runs_concurrent_inprogress_same_kind(pool: SqlitePool) -> Result {
+        // Migration 000008 dropped the partial unique index that previously
+        // forbade two InProgress runs of the same (kind, role). The DB now
+        // accepts them; runtime concurrency is governed elsewhere.
+        let a = test_run("alpha", "Onboarding", "Coordinator");
+        let b = test_run("beta", "Onboarding", "Coordinator");
 
         let mut tx = pool.begin_transaction().await?;
         tx.upsert_workflow_run(&a).await?;
         Commitable::commit(tx).await?;
 
-        // A second InProgress run of the same (kind, role) must fail.
-        let mut tx = pool.begin_transaction().await?;
-        let err = tx.upsert_workflow_run(&b).await;
-        assert!(err.is_err(), "expected unique-partial-index violation");
-        // tx is poisoned — drop it
-        drop(tx);
-
-        // Once A is terminal, B can start.
-        let mut tx = pool.begin_transaction().await?;
-        tx.set_workflow_run_status(&a.instance_name, WorkflowProgress::Completed, None, 2000)
-            .await?;
-        Commitable::commit(tx).await?;
-
-        a.status = WorkflowProgress::Completed;
-        b.status = WorkflowProgress::InProgress;
         let mut tx = pool.begin_transaction().await?;
         tx.upsert_workflow_run(&b).await?;
         Commitable::commit(tx).await?;
+
+        let visible = pool.get_visible_workflow_runs().await?;
+        assert_eq!(visible.len(), 2, "expected both InProgress runs to persist");
 
         Ok(())
     }
