@@ -2111,10 +2111,7 @@ pub async fn retry_workflow(
 /// Look for an existing decentralized party whose human-readable prefix
 /// equals `prefix`. Returns the matching `party_id` if found — used by the
 /// onboarding pre-flight to refuse duplicate-prefix runs.
-async fn find_party_with_prefix(
-    db: &SqlitePool,
-    prefix: &str,
-) -> Result<Option<String>> {
+async fn find_party_with_prefix(db: &SqlitePool, prefix: &str) -> Result<Option<String>> {
     use crate::db::schema::SchemaRead;
 
     let parties = db.get_dec_parties_by_prefix(prefix).await?;

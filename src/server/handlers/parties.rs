@@ -413,9 +413,7 @@ async fn supplement_owner_keys_from_topology(
                 {
                     Ok(r) => r.into_inner(),
                     Err(e) => {
-                        tracing::debug!(
-                            "ListNamespaceDelegation for {namespace} failed: {e}"
-                        );
+                        tracing::debug!("ListNamespaceDelegation for {namespace} failed: {e}");
                         // Cache empty set so we don't retry on every party.
                         delegated_fingerprints.insert(namespace.clone(), HashSet::new());
                         continue;
@@ -436,17 +434,14 @@ async fn supplement_owner_keys_from_topology(
                 Some(s) if !s.is_empty() => s,
                 _ => continue,
             };
-            let Some(owner_key) = party.owners.iter().find(|o| fingerprints.contains(*o))
-            else {
+            let Some(owner_key) = party.owners.iter().find(|o| fingerprints.contains(*o)) else {
                 continue;
             };
 
             let mut tx = match db.begin_transaction().await {
                 Ok(t) => t,
                 Err(e) => {
-                    tracing::debug!(
-                        "Topology fallback: begin_transaction failed: {e}"
-                    );
+                    tracing::debug!("Topology fallback: begin_transaction failed: {e}");
                     continue;
                 }
             };
@@ -454,9 +449,7 @@ async fn supplement_owner_keys_from_topology(
                 .update_participant_owner_key(&party.party_id, &uid, owner_key)
                 .await
             {
-                tracing::debug!(
-                    "Topology fallback: update_participant_owner_key for {uid}: {e}"
-                );
+                tracing::debug!("Topology fallback: update_participant_owner_key for {uid}: {e}");
                 continue;
             }
             if let Err(e) = Commitable::commit(tx).await {

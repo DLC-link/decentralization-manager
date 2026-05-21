@@ -272,10 +272,7 @@ pub async fn decline_invitation(
 /// Best-effort: open a Noise client to the coordinator and send a
 /// `DeclineInvitation` message. Logs (but does not propagate) failures —
 /// callers treat this as fire-and-forget.
-async fn notify_coordinator_of_decline(
-    data: &web::Data<AppState>,
-    invitation: &PendingInvitation,
-) {
+async fn notify_coordinator_of_decline(data: &web::Data<AppState>, invitation: &PendingInvitation) {
     let coordinator = match find_coordinator_peer(data, &invitation.coordinator_pubkey).await {
         Some(p) => p,
         None => {
@@ -308,9 +305,7 @@ async fn notify_coordinator_of_decline(
     };
 
     if let Err(e) = client.send_decline_invitation(payload_bytes).await {
-        tracing::warn!(
-            "Best-effort decline notification to coordinator failed: {e}"
-        );
+        tracing::warn!("Best-effort decline notification to coordinator failed: {e}");
     }
 }
 
