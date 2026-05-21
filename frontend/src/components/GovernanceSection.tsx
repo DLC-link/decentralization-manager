@@ -20,6 +20,7 @@ import {
   FormControlLabel,
   FormGroup,
   ListSubheader,
+  Portal,
 } from "@mui/material";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import ExpandLessIcon from "@mui/icons-material/ExpandLess";
@@ -103,6 +104,11 @@ interface GovernanceSectionProps {
   /// - "proposals" = domain-proposal list + new-proposal form (core_self only)
   /// - undefined   = both (legacy, used when rendered inline on the party page)
   view?: "actions" | "proposals";
+  /// When provided, the inline Submit Confirmation / Submit Proposal button
+  /// is rendered into this DOM node (via `Portal`) instead of inline at the
+  /// bottom of the form. Used by `GovernanceActionsDialog` to lift the
+  /// primary action into its `DialogActions` footer next to Close.
+  submitPortalEl?: HTMLElement | null;
 }
 
 // Default values for action form
@@ -134,6 +140,7 @@ export const GovernanceSection = ({
   onAfterAction,
   onProposalCreated,
   view,
+  submitPortalEl,
 }: GovernanceSectionProps) => {
   const showActionsHalf = view !== "proposals";
   const showProposalsHalf = view !== "actions";
@@ -3328,30 +3335,50 @@ export const GovernanceSection = ({
 
               {renderActionFormFields()}
 
-              <Box sx={{ mt: 2, display: "flex", gap: 1 }}>
-                <Button
-                  variant="contained"
-                  onClick={handleSubmitAction}
-                  disabled={formLoading || !rulesContractId}
-                  startIcon={
-                    formLoading ? (
-                      <CircularProgress size={16} />
-                    ) : (
-                      <CheckCircleIcon />
-                    )
-                  }
-                >
-                  Submit Confirmation
-                </Button>
-                {view !== "actions" && (
+              {(() => {
+                const inlineSubmitBtn = (
                   <Button
-                    variant="outlined"
-                    onClick={() => setShowNewActionForm(false)}
+                    variant="contained"
+                    onClick={handleSubmitAction}
+                    disabled={formLoading || !rulesContractId}
+                    startIcon={
+                      formLoading ? (
+                        <CircularProgress size={16} />
+                      ) : (
+                        <CheckCircleIcon />
+                      )
+                    }
                   >
-                    Cancel
+                    Submit Confirmation
                   </Button>
-                )}
-              </Box>
+                );
+                const portalSubmitBtn = (
+                  <Button
+                    onClick={handleSubmitAction}
+                    disabled={formLoading || !rulesContractId}
+                    startIcon={
+                      formLoading ? <CircularProgress size={16} /> : undefined
+                    }
+                  >
+                    Submit Confirmation
+                  </Button>
+                );
+                return submitPortalEl ? (
+                  <Portal container={submitPortalEl}>{portalSubmitBtn}</Portal>
+                ) : (
+                  <Box sx={{ mt: 2, display: "flex", gap: 1 }}>
+                    {inlineSubmitBtn}
+                    {view !== "actions" && (
+                      <Button
+                        variant="outlined"
+                        onClick={() => setShowNewActionForm(false)}
+                      >
+                        Cancel
+                      </Button>
+                    )}
+                  </Box>
+                );
+              })()}
             </Box>
           </Collapse>
         </Box>
@@ -4567,9 +4594,46 @@ export const GovernanceSection = ({
                 </Typography>
               )}
 
-              <Button variant="contained" size="small" onClick={handleSubmitProposal} disabled={proposalLoading || proposalType === "offer_paid_credential"}>
-                {proposalLoading ? <CircularProgress size={16} /> : "Submit Proposal"}
-              </Button>
+              {(() => {
+                const inlineSubmitBtn = (
+                  <Button
+                    variant="contained"
+                    onClick={handleSubmitProposal}
+                    disabled={
+                      proposalLoading ||
+                      proposalType === "offer_paid_credential"
+                    }
+                    startIcon={
+                      proposalLoading ? (
+                        <CircularProgress size={16} />
+                      ) : (
+                        <CheckCircleIcon />
+                      )
+                    }
+                  >
+                    Submit Proposal
+                  </Button>
+                );
+                const portalSubmitBtn = (
+                  <Button
+                    onClick={handleSubmitProposal}
+                    disabled={
+                      proposalLoading ||
+                      proposalType === "offer_paid_credential"
+                    }
+                    startIcon={
+                      proposalLoading ? <CircularProgress size={16} /> : undefined
+                    }
+                  >
+                    Submit Proposal
+                  </Button>
+                );
+                return submitPortalEl ? (
+                  <Portal container={submitPortalEl}>{portalSubmitBtn}</Portal>
+                ) : (
+                  inlineSubmitBtn
+                );
+              })()}
             </Box>
           </Collapse>
         </Box>
