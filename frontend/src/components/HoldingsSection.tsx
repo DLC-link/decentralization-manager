@@ -147,7 +147,10 @@ export const HoldingsSection = ({
               <TableCell
                 sx={{ py: 1, fontFamily: "monospace", fontSize: "0.85rem" }}
               >
-                {h.instrument_id}
+                {/* Canton Coin's instrument id on the Splice token-standard
+                  * is the literal "Amulet" — display it as "CC" since that's
+                  * what users actually call it everywhere else in the UI. */}
+                {h.instrument_id === "Amulet" ? "CC" : h.instrument_id}
               </TableCell>
               <TableCell sx={{ py: 1 }}>
                 <CopyableText

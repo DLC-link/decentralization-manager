@@ -175,8 +175,13 @@ export const GovernanceSection = ({
   const [proposalCreateAllocationFactory, setProposalCreateAllocationFactory] = useState(true);
   const [proposalUser, setProposalUser] = useState("");
   const [proposalInstrumentConfigurationCid, setProposalInstrumentConfigurationCid] = useState("");
-  const [proposalBeneficiariesText, setProposalBeneficiariesText] = useState("");
   const [proposalClearBeneficiaries, setProposalClearBeneficiaries] = useState(false);
+  // Row-based beneficiary entry, same shape as the vault FAR beneficiaries
+  // form. Each row is { beneficiary, weight } — weights are decimals that
+  // must sum to 1.0 (validated client-side + by Daml on submit).
+  const [proposalBeneficiaries, setProposalBeneficiaries] = useState<
+    { beneficiary: string; weight: string }[]
+  >([]);
   const [proposalRegistrarServiceCid, setProposalRegistrarServiceCid] = useState("");
   const [proposalEnableResultContracts, setProposalEnableResultContracts] = useState<"true" | "false" | "clear">("true");
   const [proposalAllocationFactoryCid, setProposalAllocationFactoryCid] = useState("");
@@ -649,6 +654,18 @@ export const GovernanceSection = ({
   useEffect(() => {
     if (proposalType === "mint" || proposalType === "burn") {
       setProposalInstrumentIdAdmin(partyId);
+    }
+  }, [proposalType, partyId]);
+
+  // The CreateUserServiceRequest / CreateProviderServiceRequest proposals
+  // always use the dec party itself as the user / provider — the field
+  // exists because the Daml choice still asks for it, but every operator
+  // ends up typing the same value. Seed it once when the form opens.
+  useEffect(() => {
+    if (proposalType === "create_user_service_request") {
+      setProposalUser(partyId);
+    } else if (proposalType === "create_provider_service_request") {
+      setProposalProvider(partyId);
     }
   }, [proposalType, partyId]);
 
@@ -1133,7 +1150,7 @@ export const GovernanceSection = ({
     setProposalCreateAllocationFactory(true);
     setProposalUser("");
     setProposalInstrumentConfigurationCid("");
-    setProposalBeneficiariesText("");
+    setProposalBeneficiaries([]);
     setProposalClearBeneficiaries(false);
     setProposalRegistrarServiceCid("");
     setProposalEnableResultContracts("true");
@@ -1225,18 +1242,15 @@ export const GovernanceSection = ({
         case "set_provider_app_reward_beneficiaries": {
           let beneficiaries: AppRewardBeneficiary[] | null = null;
           if (!proposalClearBeneficiaries) {
-            const lines = proposalBeneficiariesText
-              .split("\n")
-              .map((line) => line.trim())
-              .filter(Boolean);
-            beneficiaries = lines.map((line, idx) => {
-              const parts = line.split(",").map((s) => s.trim());
-              if (parts.length !== 2 || !parts[0] || !parts[1]) {
+            beneficiaries = proposalBeneficiaries.map((b, idx) => {
+              const party = b.beneficiary.trim();
+              const weight = b.weight.trim();
+              if (!party || !weight) {
                 throw new Error(
-                  `Beneficiary line ${idx + 1}: expected "<party>,<weight>", got "${line}"`,
+                  `Beneficiary row ${idx + 1}: party and weight are required`,
                 );
               }
-              return { beneficiary: parts[0], weight: parts[1] };
+              return { beneficiary: party, weight };
             });
           }
           proposal = {
@@ -3332,17 +3346,98 @@ export const GovernanceSection = ({
                     label="Clear beneficiaries (set to None)"
                   />
                   {!proposalClearBeneficiaries && (
-                    <TextField
-                      size="small"
-                      label="Beneficiaries (one per line: party,weight)"
-                      value={proposalBeneficiariesText}
-                      onChange={(e) => setProposalBeneficiariesText(e.target.value)}
-                      fullWidth
-                      multiline
-                      minRows={2}
-                      maxRows={6}
-                      helperText="Each line: <party>,<weight>"
-                    />
+                    <>
+                      <Typography
+                        variant="caption"
+                        color="text.secondary"
+                        sx={{ display: "block" }}
+                      >
+                        Beneficiaries (add party + weight)
+                      </Typography>
+                      {proposalBeneficiaries.map((b, idx) => (
+                        <Box
+                          key={idx}
+                          sx={{ display: "flex", gap: 1, mb: 1 }}
+                        >
+                          <TextField
+                            label="Beneficiary Party"
+                            value={b.beneficiary}
+                            onChange={(e) => {
+                              const updated = [...proposalBeneficiaries];
+                              updated[idx] = {
+                                ...b,
+                                beneficiary: e.target.value,
+                              };
+                              setProposalBeneficiaries(updated);
+                            }}
+                            size="small"
+                            sx={{ flex: 2 }}
+                          />
+                          <TextField
+                            label="Weight"
+                            value={b.weight}
+                            onChange={(e) => {
+                              const updated = [...proposalBeneficiaries];
+                              updated[idx] = { ...b, weight: e.target.value };
+                              setProposalBeneficiaries(updated);
+                            }}
+                            size="small"
+                            sx={{ flex: 1 }}
+                          />
+                          <Button
+                            size="small"
+                            color="error"
+                            onClick={() =>
+                              setProposalBeneficiaries(
+                                proposalBeneficiaries.filter(
+                                  (_, i) => i !== idx,
+                                ),
+                              )
+                            }
+                          >
+                            Remove
+                          </Button>
+                        </Box>
+                      ))}
+                      <Box
+                        sx={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 2,
+                        }}
+                      >
+                        <Button
+                          size="small"
+                          onClick={() =>
+                            setProposalBeneficiaries([
+                              ...proposalBeneficiaries,
+                              { beneficiary: "", weight: "1" },
+                            ])
+                          }
+                        >
+                          Add Beneficiary
+                        </Button>
+                        {proposalBeneficiaries.length > 0 &&
+                          (() => {
+                            const sum = proposalBeneficiaries.reduce(
+                              (acc, b) => acc + (parseFloat(b.weight) || 0),
+                              0,
+                            );
+                            const isValid = Math.abs(sum - 1.0) < 1e-9;
+                            return (
+                              <Typography
+                                variant="caption"
+                                color={
+                                  isValid ? "success.main" : "error.main"
+                                }
+                              >
+                                Sum: {sum.toFixed(4)}{" "}
+                                {isValid ? "" : "(must be 1.0)"}
+                              </Typography>
+                            );
+                          })()}
+                      </Box>
+                    </>
                   )}
                 </>
               )}
