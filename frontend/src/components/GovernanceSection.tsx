@@ -2966,8 +2966,6 @@ export const GovernanceSection = ({
                   <MenuItem value="provision_provider_service">Provision Provider Service</MenuItem>
                   */}
                   <ListSubheader sx={{ fontStyle: "italic", lineHeight: 1.5, pl: 4 }}>Actions</ListSubheader>
-                  <MenuItem value="mint">Offer Mint</MenuItem>
-                  <MenuItem value="burn">Offer Burn</MenuItem>
                   <MenuItem value="accept_mint_request">Accept Mint Request</MenuItem>
                   <MenuItem value="accept_burn_request">Accept Burn Request</MenuItem>
                   <Divider />
