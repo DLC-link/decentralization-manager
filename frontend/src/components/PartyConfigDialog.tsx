@@ -16,6 +16,7 @@ import {
 } from "@mui/material";
 import { API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
+import { fieldHelpAdornment, FieldHelp } from "./FieldHelp";
 import type {
   AuthConfig,
   PartyConfigResponse,
@@ -361,6 +362,14 @@ export const PartyConfigDialog = ({
                 fullWidth
                 size="small"
                 disabled={saving}
+                slotProps={{
+                  input: {
+                    endAdornment: fieldHelpAdornment(
+                      "The participant-local party that acts as this node's member of the decentralized party. Use Discover Member Party below to auto-fill it from the user's primary party.",
+                      "Help for Member Party ID",
+                    ),
+                  },
+                }}
               />
 
               <TextField
@@ -370,6 +379,14 @@ export const PartyConfigDialog = ({
                 fullWidth
                 size="small"
                 disabled={saving}
+                slotProps={{
+                  input: {
+                    endAdornment: fieldHelpAdornment(
+                      "The IdP user id (Keycloak or Auth0) that will hold actAs and readAs rights for the member party. Usually matches the subject claim of tokens issued for this user.",
+                      "Help for User ID",
+                    ),
+                  },
+                }}
               />
 
               <Divider />
@@ -386,6 +403,14 @@ export const PartyConfigDialog = ({
                     size="small"
                     disabled={saving}
                     placeholder="tenant.us.auth0.com"
+                    slotProps={{
+                      input: {
+                        endAdornment: fieldHelpAdornment(
+                          "Your Auth0 tenant domain, e.g. tenant.us.auth0.com. Found in the Auth0 dashboard under Settings, or as the host of any application's domain URL.",
+                          "Help for Auth0 Domain",
+                        ),
+                      },
+                    }}
                   />
 
                   <TextField
@@ -396,6 +421,14 @@ export const PartyConfigDialog = ({
                     size="small"
                     disabled={saving}
                     placeholder="https://your-api"
+                    slotProps={{
+                      input: {
+                        endAdornment: fieldHelpAdornment(
+                          "The API identifier the access token is issued for. Found in the Auth0 dashboard under Applications, APIs, on your Canton API's Identifier field.",
+                          "Help for Auth0 Audience",
+                        ),
+                      },
+                    }}
                   />
 
                   <TextField
@@ -405,6 +438,14 @@ export const PartyConfigDialog = ({
                     fullWidth
                     size="small"
                     disabled={saving}
+                    slotProps={{
+                      input: {
+                        endAdornment: fieldHelpAdornment(
+                          "The Client ID of a machine-to-machine application authorized for your API. Found in the Auth0 dashboard under Applications, on the application's Settings tab.",
+                          "Help for Auth0 Client ID",
+                        ),
+                      },
+                    }}
                   />
 
                   <TextField
@@ -420,6 +461,14 @@ export const PartyConfigDialog = ({
                         ? "Leave empty to keep existing"
                         : "Required"
                     }
+                    slotProps={{
+                      input: {
+                        endAdornment: fieldHelpAdornment(
+                          "The Client Secret paired with the Client ID above. Found on the same Auth0 application Settings tab; if a secret is already stored you can leave this empty to keep it.",
+                          "Help for Auth0 Client Secret",
+                        ),
+                      },
+                    }}
                   />
                 </>
               ) : (
@@ -433,6 +482,14 @@ export const PartyConfigDialog = ({
                     fullWidth
                     size="small"
                     disabled={saving}
+                    slotProps={{
+                      input: {
+                        endAdornment: fieldHelpAdornment(
+                          "Base URL of the Keycloak server, e.g. https://keycloak.example.com. This is the host you load in a browser to reach the Keycloak admin console.",
+                          "Help for Keycloak URL",
+                        ),
+                      },
+                    }}
                   />
 
                   <TextField
@@ -442,16 +499,33 @@ export const PartyConfigDialog = ({
                     fullWidth
                     size="small"
                     disabled={saving}
+                    slotProps={{
+                      input: {
+                        endAdornment: fieldHelpAdornment(
+                          "The Keycloak realm that contains the user and client used for Canton. Visible as the realm selector in the top-left of the Keycloak admin console.",
+                          "Help for Keycloak Realm",
+                        ),
+                      },
+                    }}
                   />
 
                   <Box>
-                    <Typography
-                      variant="body2"
-                      color="text.secondary"
-                      sx={{ mb: 1 }}
+                    <Box
+                      sx={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 0.5,
+                        mb: 1,
+                      }}
                     >
-                      Credentials
-                    </Typography>
+                      <Typography variant="body2" color="text.secondary">
+                        Credentials
+                      </Typography>
+                      <FieldHelp
+                        text="How this node authenticates to Keycloak. Choose Client ID + Secret for a confidential client (service account flow), or Username + Password to sign in as a specific Keycloak user via the password grant."
+                        ariaLabel="Help for Keycloak credentials method"
+                      />
+                    </Box>
                     <ToggleButtonGroup
                       value={authMethod}
                       exclusive
@@ -478,6 +552,14 @@ export const PartyConfigDialog = ({
                         fullWidth
                         size="small"
                         disabled={saving}
+                        slotProps={{
+                          input: {
+                            endAdornment: fieldHelpAdornment(
+                              "The Client ID of a confidential Keycloak client with a service account. Found in the Keycloak admin console under Clients, on the client's Settings tab.",
+                              "Help for Keycloak Client ID",
+                            ),
+                          },
+                        }}
                       />
                       <TextField
                         label="Client Secret"
@@ -490,6 +572,14 @@ export const PartyConfigDialog = ({
                         type="password"
                         disabled={saving}
                         placeholder="Enter new or leave empty to keep existing"
+                        slotProps={{
+                          input: {
+                            endAdornment: fieldHelpAdornment(
+                              "The secret for the Keycloak client above. Found in the Keycloak admin console on the same client's Credentials tab; leave empty to keep the previously stored secret.",
+                              "Help for Keycloak Client Secret",
+                            ),
+                          },
+                        }}
                       />
                     </>
                   ) : (
@@ -502,6 +592,14 @@ export const PartyConfigDialog = ({
                         size="small"
                         disabled={saving}
                         placeholder="Enter new or leave empty to keep existing"
+                        slotProps={{
+                          input: {
+                            endAdornment: fieldHelpAdornment(
+                              "Username of a Keycloak account in this realm that has rights on the member party. Found in the Keycloak admin console under Users; leave empty to keep the previously stored username.",
+                              "Help for Keycloak Username",
+                            ),
+                          },
+                        }}
                       />
                       <TextField
                         label="Password"
@@ -512,6 +610,14 @@ export const PartyConfigDialog = ({
                         type="password"
                         disabled={saving}
                         placeholder="Enter new or leave empty to keep existing"
+                        slotProps={{
+                          input: {
+                            endAdornment: fieldHelpAdornment(
+                              "Password for the Keycloak user above. Set or reset it in the Keycloak admin console on the user's Credentials tab; leave empty to keep the previously stored password.",
+                              "Help for Keycloak Password",
+                            ),
+                          },
+                        }}
                       />
                     </>
                   )}

@@ -14,6 +14,7 @@ import {
 import { API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
 import { useSnackbar } from "../contexts";
+import { fieldHelpAdornment } from "./FieldHelp";
 import type {
   DecentralizedPartiesResponse,
   KickRequest,
@@ -226,6 +227,14 @@ export const KickDialog = ({
             disabled
             fullWidth
             size="small"
+            slotProps={{
+              input: {
+                endAdornment: fieldHelpAdornment(
+                  "The decentralized party the participant is being removed from. Pre-filled from the party you opened — not editable.",
+                  "Help for Decentralized Party ID",
+                ),
+              },
+            }}
           />
 
           <TextField
@@ -234,6 +243,14 @@ export const KickDialog = ({
             disabled
             fullWidth
             size="small"
+            slotProps={{
+              input: {
+                endAdornment: fieldHelpAdornment(
+                  "The participant being removed from the party. Pre-filled from the row you clicked Kick on.",
+                  "Help for Participant ID to Kick",
+                ),
+              },
+            }}
           />
 
           <TextField
@@ -247,6 +264,14 @@ export const KickDialog = ({
                 ? "The DNS owner key that will be removed"
                 : "Owner key not yet known — waiting for cache resolution"
             }
+            slotProps={{
+              input: {
+                endAdornment: fieldHelpAdornment(
+                  "The participant's namespace fingerprint, looked up automatically from the participant via Noise or from Canton's topology. This is the key that gets removed from the decentralized namespace.",
+                  "Help for Namespace Fingerprint",
+                ),
+              },
+            }}
           />
 
           <TextField
@@ -257,7 +282,15 @@ export const KickDialog = ({
             fullWidth
             size="small"
             disabled={loading}
-            slotProps={{ htmlInput: { min: 1, max: remainingOwners } }}
+            slotProps={{
+              htmlInput: { min: 1, max: remainingOwners },
+              input: {
+                endAdornment: fieldHelpAdornment(
+                  "Number of remaining owners that must sign topology changes for this party after the kick. Must be between 1 and the number of owners left.",
+                  "Help for New Threshold",
+                ),
+              },
+            }}
             helperText={`Threshold after kick (suggested: ${suggestedThreshold}, max: ${remainingOwners})`}
           />
 

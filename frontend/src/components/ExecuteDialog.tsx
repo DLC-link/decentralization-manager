@@ -19,6 +19,7 @@ import {
   DEVNET_VAULT_RULES,
   DEVNET_VAULT_PROCESSOR_RULES,
 } from "../constants";
+import { fieldHelpAdornment } from "./FieldHelp";
 import type {
   GovernanceAction,
   DisclosedContractInput,
@@ -250,6 +251,14 @@ const ExecuteForm = ({
                       size="small"
                       disabled={loading}
                       sx={{ mb: 1 }}
+                      slotProps={{
+                        input: {
+                          endAdornment: fieldHelpAdornment(
+                            "The Canton contract ID this action depends on. Usually comes from the active contract set (ACS) on the registry or a previous step in the workflow.",
+                            "Help for Contract ID",
+                          ),
+                        },
+                      }}
                     />
                     <TextField
                       label="Blob (base64)"
@@ -263,6 +272,14 @@ const ExecuteForm = ({
                       multiline
                       minRows={2}
                       maxRows={4}
+                      slotProps={{
+                        input: {
+                          endAdornment: fieldHelpAdornment(
+                            "The base64-encoded created_event_blob that proves the contract exists on the ledger. Pulled from the ACS lookup or returned alongside the contract ID.",
+                            "Help for Blob",
+                          ),
+                        },
+                      }}
                     />
                   </Box>
                 ))}
