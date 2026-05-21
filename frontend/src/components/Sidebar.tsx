@@ -7,6 +7,7 @@ import {
   ListItemIcon,
   ListItemText,
   Tooltip,
+  Typography,
   useTheme,
 } from "@mui/material";
 import GroupsIcon from "@mui/icons-material/Groups";
@@ -15,7 +16,11 @@ import NotificationsIcon from "@mui/icons-material/Notifications";
 import SettingsIcon from "@mui/icons-material/Settings";
 import LogoutIcon from "@mui/icons-material/Logout";
 
+import BitSafeLogoDark from "../assets/bitsafe-logo-dark.svg";
+import BitSafeLogoLight from "../assets/bitsafe-logo-light.svg";
+
 import { useAuth } from "../contexts";
+import { BITSAFE_BRANDING } from "../constants";
 import { Logo } from "./Logo";
 import { ThemeSwitcher } from "./ThemeSwitcher";
 
@@ -45,6 +50,8 @@ export const Sidebar = ({
 }: SidebarProps) => {
   const theme = useTheme();
   const { token, logout } = useAuth();
+  const poweredByLogo =
+    theme.palette.mode === "light" ? BitSafeLogoDark : BitSafeLogoLight;
 
   return (
     <Box
@@ -117,11 +124,42 @@ export const Sidebar = ({
         ))}
       </List>
 
+      {/* Powered-by footer (only when running under a co-brand). */}
+      {!BITSAFE_BRANDING && (
+        <Box
+          sx={{
+            px: 2,
+            pt: 1.5,
+            pb: 1,
+            borderTop: `1px solid ${theme.palette.divider}`,
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            gap: 0.5,
+          }}
+        >
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            sx={{ lineHeight: 1 }}
+          >
+            Powered by
+          </Typography>
+          <img
+            src={poweredByLogo}
+            alt="BitSafe"
+            style={{ height: 18, opacity: 0.85 }}
+          />
+        </Box>
+      )}
+
       {/* Bottom: Theme switcher + Logout */}
       <Box
         sx={{
           p: 2,
-          borderTop: `1px solid ${theme.palette.divider}`,
+          ...(BITSAFE_BRANDING && {
+            borderTop: `1px solid ${theme.palette.divider}`,
+          }),
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
