@@ -27,6 +27,7 @@ import UploadFileIcon from "@mui/icons-material/UploadFile";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import { CopyableText } from "./CopyableText";
+import { TextHelp } from "./FieldHelp";
 import { KickDialog } from "./KickDialog";
 import { ContractsDialog } from "./ContractsDialog";
 import { PartyConfigDialog } from "./PartyConfigDialog";
@@ -49,24 +50,15 @@ import type {
 const StatCard = ({
   label,
   value,
+  helpText,
 }: {
   label: string;
   value: number | string;
-}) => (
-  <Box
-    sx={(theme) => ({
-      display: "inline-flex",
-      alignItems: "baseline",
-      gap: 0.75,
-      px: 1.5,
-      py: 0.5,
-      borderRadius: 999,
-      backgroundColor:
-        theme.palette.mode === "light"
-          ? "rgba(0, 0, 0, 0.04)"
-          : "rgba(255, 255, 255, 0.06)",
-    })}
-  >
+  /// Optional plain-English explanation rendered as a tooltip on hover
+  /// of the pill's label. No inline icon — keeps the chip compact.
+  helpText?: string;
+}) => {
+  const labelNode = (
     <Typography
       variant="caption"
       color="text.secondary"
@@ -74,17 +66,40 @@ const StatCard = ({
     >
       {label}
     </Typography>
-    <Typography variant="body2" sx={{ fontWeight: 700 }}>
-      {value}
-    </Typography>
-  </Box>
-);
+  );
+  return (
+    <Box
+      sx={(theme) => ({
+        display: "inline-flex",
+        alignItems: "baseline",
+        gap: 0.75,
+        px: 1.5,
+        py: 0.5,
+        borderRadius: 999,
+        backgroundColor:
+          theme.palette.mode === "light"
+            ? "rgba(0, 0, 0, 0.04)"
+            : "rgba(255, 255, 255, 0.06)",
+      })}
+    >
+      {helpText ? <TextHelp text={helpText}>{labelNode}</TextHelp> : labelNode}
+      <Typography variant="body2" sx={{ fontWeight: 700 }}>
+        {value}
+      </Typography>
+    </Box>
+  );
+};
 
 interface CollapsibleSectionProps {
   title: string;
   expanded: boolean;
   onToggle: () => void;
   badge?: ReactNode;
+  /// Optional plain-English explanation of the section's title word.
+  /// Rendered as a small `(?)` icon next to the title. Stop-propagation on
+  /// the wrapping span keeps clicks on the help icon from collapsing the
+  /// section.
+  helpText?: string;
   children: ReactNode;
 }
 
@@ -93,6 +108,7 @@ const CollapsibleSection = ({
   expanded,
   onToggle,
   badge,
+  helpText,
   children,
 }: CollapsibleSectionProps) => (
   <>
@@ -121,7 +137,15 @@ const CollapsibleSection = ({
           transition: "transform 0.2s ease",
         }}
       />
-      <Typography variant="subtitle2">{title}</Typography>
+      {helpText ? (
+        <TextHelp text={helpText}>
+          <Typography variant="subtitle2" component="span">
+            {title}
+          </Typography>
+        </TextHelp>
+      ) : (
+        <Typography variant="subtitle2">{title}</Typography>
+      )}
       {badge}
     </Box>
     <Collapse in={expanded}>{children}</Collapse>
@@ -286,11 +310,23 @@ export const PartyDetail = ({
           alignItems: "center",
         }}
       >
-        <StatCard label="Owners" value={party.owners.length} />
-        <StatCard label="Threshold" value={party.threshold} />
+        <StatCard
+          label="Owners"
+          value={party.owners.length}
+          helpText="Owner keys that jointly control the party's decentralized namespace. Topology changes need a quorum of these — see Threshold."
+        />
+        <StatCard
+          label="Threshold"
+          value={party.threshold}
+          helpText="Number of decentralized-namespace owners that must sign topology changes for this party (separate from the governance threshold below)."
+        />
         {governanceState && (
           <>
-            <StatCard label="Gov Threshold" value={governanceState.threshold} />
+            <StatCard
+              label="Gov Threshold"
+              value={governanceState.threshold}
+              helpText="Number of governance-member confirmations required to execute a governance action on this party."
+            />
             {governanceState.action_confirmation_timeout_microseconds !=
               null && (
               <StatCard
@@ -298,6 +334,7 @@ export const PartyDetail = ({
                 value={formatMicroseconds(
                   governanceState.action_confirmation_timeout_microseconds,
                 )}
+                helpText="How long an unexecuted action confirmation stays valid before it expires."
               />
             )}
           </>
@@ -359,6 +396,7 @@ export const PartyDetail = ({
         title="Authentication"
         expanded={authExpanded}
         onToggle={() => setAuthExpanded(!authExpanded)}
+        helpText="Credentials this node uses to act on the party's behalf via the Canton ledger API."
         badge={
           <Box sx={{ display: "flex", alignItems: "center", ml: 1 }}>
             {getAuthStatusIcon(authStatus)}
@@ -380,6 +418,7 @@ export const PartyDetail = ({
         title="Participants"
         expanded={participantsExpanded}
         onToggle={() => setParticipantsExpanded(!participantsExpanded)}
+        helpText="Canton participants hosting this party. One participant per row, with its permission level."
         badge={
           <Chip label={party.participants.length} size="small" sx={{ ml: 1 }} />
         }
@@ -450,6 +489,7 @@ export const PartyDetail = ({
           title="Contracts"
           expanded={contractsExpanded}
           onToggle={() => setContractsExpanded(!contractsExpanded)}
+          helpText="Daml contracts associated with the party — typically governance rules, vaults, registrar services, etc."
           badge={
             <Chip label={party.contracts.length} size="small" sx={{ ml: 1 }} />
           }
@@ -546,6 +586,7 @@ export const PartyDetail = ({
           title="Holdings"
           expanded={holdingsExpanded}
           onToggle={() => setHoldingsExpanded(!holdingsExpanded)}
+          helpText="Token-standard balances the party holds, aggregated by instrument."
           badge={
             <>
               {holdingsCount > 0 && (
@@ -584,6 +625,7 @@ export const PartyDetail = ({
           title="Audit Trail"
           expanded={governanceExpanded}
           onToggle={() => setGovernanceExpanded(!governanceExpanded)}
+          helpText="On-chain history of governance actions and proposals for this party."
           badge={
             <>
               {auditTrailCount > 0 && (

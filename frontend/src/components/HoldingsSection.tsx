@@ -14,6 +14,7 @@ import {
 } from "@mui/material";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import { CopyableText } from "./CopyableText";
+import { TextHelp } from "./FieldHelp";
 import { API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
 import { zebraRow } from "../styles";
@@ -130,12 +131,26 @@ export const HoldingsSection = ({
       <Table size="small">
         <TableHead>
           <TableRow>
-            <TableCell sx={{ py: 1 }}>Asset</TableCell>
-            <TableCell sx={{ py: 1 }}>Admin</TableCell>
-            <TableCell sx={{ py: 1 }} align="right">
-              Amount
+            <TableCell sx={{ py: 1 }}>
+              <TextHelp text="The token's id (for Canton Coin this is 'Amulet', displayed as 'CC' here).">
+                Asset
+              </TextHelp>
             </TableCell>
-            <TableCell sx={{ py: 1 }}>Preapproval set up</TableCell>
+            <TableCell sx={{ py: 1 }}>
+              <TextHelp text="The party that issues / administers the token.">
+                Admin
+              </TextHelp>
+            </TableCell>
+            <TableCell sx={{ py: 1 }} align="right">
+              <TextHelp text="Total amount this party holds for the asset, summed across all Holding contracts.">
+                Amount
+              </TextHelp>
+            </TableCell>
+            <TableCell sx={{ py: 1 }}>
+              <TextHelp text="Whether a TransferPreapproval exists for this party on this instrument — needed to receive transfers without manual accept.">
+                Preapproval set up
+              </TextHelp>
+            </TableCell>
           </TableRow>
         </TableHead>
         <TableBody>
