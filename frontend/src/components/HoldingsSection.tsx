@@ -86,7 +86,7 @@ export const HoldingsSection = ({
 
   if (error) {
     return (
-      <Box sx={{ py: 2 }}>
+      <Box sx={{ py: 2, px: 3 }}>
         <Alert
           severity="error"
           sx={{ mb: 2 }}

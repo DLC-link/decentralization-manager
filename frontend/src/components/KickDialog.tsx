@@ -63,10 +63,21 @@ export const KickDialog = ({
     const partyPrefix = partyId.split("::")[0];
     if (!partyPrefix) return;
     let cancelled = false;
+    // On the first poll, force a server-side refresh — the cached
+    // `/decentralized-parties` response can be missing the owner_key if
+    // the previous resolve happened while the participant being kicked
+    // was offline. Force=true triggers a fresh peer-Noise round-trip plus
+    // the topology-derived fallback so the next poll usually has the key.
+    let firstFetch = true;
     const fetchOwnerKey = async () => {
       try {
+        const params = new URLSearchParams({ prefix: partyPrefix });
+        if (firstFetch) {
+          params.set("refresh", "true");
+          firstFetch = false;
+        }
         const res = await authenticatedFetch(
-          `${API_BASE}/decentralized-parties?prefix=${encodeURIComponent(partyPrefix)}`,
+          `${API_BASE}/decentralized-parties?${params}`,
         );
         if (!res.ok) return;
         const data: DecentralizedPartiesResponse = await res.json();
