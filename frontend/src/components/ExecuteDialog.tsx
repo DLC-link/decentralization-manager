@@ -80,6 +80,17 @@ const getRequiredContractIds = (action: ActionType): string[] => {
   }
 };
 
+/// Heuristic for "this error came from the Canton ledger" — those messages
+/// carry Canton's gRPC error envelope (`code: '...', message: "..."`) and
+/// usually a `DAML_*` error category from the Daml interpreter. Operators
+/// can't fix these from the UI, so we tell them to forward to the BitSafe
+/// team.
+const isChainError = (msg: string): boolean =>
+  msg.includes("DAML_") ||
+  msg.includes("code: ") ||
+  msg.includes("INVALID_GIVEN_CURRENT_SYSTEM_STATE") ||
+  msg.includes("CONTRACT_NOT_FOUND");
+
 interface ExecuteDialogProps {
   open: boolean;
   onClose: () => void;
@@ -264,7 +275,15 @@ const ExecuteForm = ({
               severity="error"
               onClose={onErrorDismiss ? () => onErrorDismiss() : undefined}
             >
-              {error}
+              <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+                <span>{error}</span>
+                {isChainError(error) && (
+                  <Typography variant="caption">
+                    This is a chain error message — please forward the issue
+                    to the BitSafe team.
+                  </Typography>
+                )}
+              </Box>
             </Alert>
           )}
         </Box>
