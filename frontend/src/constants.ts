@@ -2,6 +2,11 @@ import type { DisclosedContract } from "./types";
 
 export const API_BASE = "";
 export const ADMIN_ACCESS = import.meta.env.VITE_ADMIN_ACCESS === "true";
+/// When true (default), show the full BitSafe wordmark everywhere.
+/// When false, show only the "B" mark + "Decentralization Manager" as the
+/// app name, with a small "Powered by BitSafe" footer in the sidebar.
+export const BITSAFE_BRANDING =
+  (import.meta.env.VITE_BITSAFE_BRANDING ?? "true") === "true";
 
 /** Zebra stripe sx for table rows — subtle alternating background like Apple lists */
 export const zebraRow = (index: number) => ({
