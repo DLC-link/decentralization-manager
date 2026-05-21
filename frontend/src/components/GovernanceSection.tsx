@@ -1360,7 +1360,6 @@ export const GovernanceSection = ({
   const renderActionFormFields = () => {
     switch (selectedActionType) {
       case "governance_add_member":
-      case "governance_remove_member":
         return (
           <>
             <TextField
@@ -1384,6 +1383,56 @@ export const GovernanceSection = ({
             />
           </>
         );
+      case "governance_remove_member": {
+        // Source of truth for the current member list is the active rules
+        // contract — `governanceState.members` is populated by the
+        // /governance/state fetch. If it hasn't loaded yet (or for some
+        // reason returns empty), fall back to the freeform text field so
+        // the user isn't blocked.
+        const members = governanceState?.members ?? [];
+        return (
+          <>
+            {members.length > 0 ? (
+              <TextField
+                select
+                label="Member to remove"
+                value={memberParty}
+                onChange={(e) => setMemberParty(e.target.value)}
+                size="small"
+                fullWidth
+                sx={{ mb: 2 }}
+              >
+                {members.map((id) => (
+                  <MenuItem key={id} value={id}>
+                    {id}
+                  </MenuItem>
+                ))}
+              </TextField>
+            ) : (
+              <TextField
+                label="Member Party ID"
+                value={memberParty}
+                onChange={(e) => setMemberParty(e.target.value)}
+                size="small"
+                fullWidth
+                sx={{ mb: 2 }}
+                helperText="Members list not loaded — paste the party id directly"
+              />
+            )}
+            <TextField
+              label="New Threshold"
+              type="number"
+              value={newThreshold}
+              onChange={(e) => {
+                userEditedThresholdRef.current = true;
+                setNewThreshold(parseInt(e.target.value) || 2);
+              }}
+              size="small"
+              fullWidth
+            />
+          </>
+        );
+      }
       case "governance_set_threshold":
         return (
           <TextField
