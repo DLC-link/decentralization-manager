@@ -23,7 +23,9 @@ pub trait WorkflowStatus: Default + Copy + Send + Sync {}
 
 /// Generic state for tracking HTTP-triggered workflows. Holds enough context
 /// for the matching `/cancel` endpoint to abort the spawn and notify the
-/// peers that received an invite.
+/// peers that received an invite. Now scoped to a single workflow instance
+/// — the per-kind singletons were replaced with `WorkflowRegistry` so the
+/// orchestrator can run multiple workflows of the same kind concurrently.
 pub struct HttpWorkflowState<S: WorkflowStatus> {
     pub status: RwLock<S>,
     pub error: RwLock<Option<String>>,
@@ -45,6 +47,70 @@ impl<S: WorkflowStatus> Default for HttpWorkflowState<S> {
 impl<S: WorkflowStatus> HttpWorkflowState<S> {
     pub fn new() -> Self {
         Self::default()
+    }
+}
+
+/// Per-kind registry that maps a workflow `instance_name` to its in-memory
+/// `HttpWorkflowState`. Replaces the single-tenant per-kind singletons so
+/// multiple workflows of the same kind can run concurrently. Lookups,
+/// inserts and removals are async-locked via an internal `RwLock`.
+pub struct WorkflowRegistry<S: WorkflowStatus> {
+    inner: RwLock<std::collections::HashMap<String, Arc<HttpWorkflowState<S>>>>,
+}
+
+impl<S: WorkflowStatus> Default for WorkflowRegistry<S> {
+    fn default() -> Self {
+        Self {
+            inner: RwLock::new(std::collections::HashMap::new()),
+        }
+    }
+}
+
+impl<S: WorkflowStatus> WorkflowRegistry<S> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Atomically create a new state slot for `instance_name`. Returns the
+    /// fresh state on success, or `None` if a state for that name is
+    /// already registered (caller can decide whether to reuse / error).
+    pub async fn insert_new(&self, instance_name: &str) -> Option<Arc<HttpWorkflowState<S>>> {
+        let mut guard = self.inner.write().await;
+        if guard.contains_key(instance_name) {
+            return None;
+        }
+        let state = Arc::new(HttpWorkflowState::<S>::new());
+        guard.insert(instance_name.to_string(), state.clone());
+        Some(state)
+    }
+
+    /// Insert (or replace) the state for `instance_name`. Used by resume
+    /// paths that rehydrate persisted runs from the DB after a restart.
+    pub async fn upsert(&self, instance_name: &str, state: Arc<HttpWorkflowState<S>>) {
+        self.inner
+            .write()
+            .await
+            .insert(instance_name.to_string(), state);
+    }
+
+    pub async fn get(&self, instance_name: &str) -> Option<Arc<HttpWorkflowState<S>>> {
+        self.inner.read().await.get(instance_name).cloned()
+    }
+
+    pub async fn remove(&self, instance_name: &str) -> Option<Arc<HttpWorkflowState<S>>> {
+        self.inner.write().await.remove(instance_name)
+    }
+
+    /// Snapshot every active `(instance_name, state)` pair. Used by the
+    /// noise listener pause logic and by retry-on-startup to iterate every
+    /// run that survived a restart.
+    pub async fn snapshot(&self) -> Vec<(String, Arc<HttpWorkflowState<S>>)> {
+        self.inner
+            .read()
+            .await
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
     }
 }
 
