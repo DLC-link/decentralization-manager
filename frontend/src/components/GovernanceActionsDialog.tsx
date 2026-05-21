@@ -1,3 +1,4 @@
+import { useState } from "react";
 import {
   Dialog,
   DialogTitle,
@@ -37,6 +38,14 @@ export const GovernanceActionsDialog = ({
   onAfterAction,
   view = "actions",
 }: GovernanceActionsDialogProps) => {
+  // Host node for `GovernanceSection`'s primary submit button. Pushing the
+  // button into `DialogActions` keeps it inline with the Close button so
+  // the dialog footer feels uniform — `GovernanceSection` portals it here
+  // when `submitPortalEl` is non-null.
+  const [submitHostEl, setSubmitHostEl] = useState<HTMLDivElement | null>(
+    null,
+  );
+
   return (
     <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
       <DialogTitle>
@@ -54,10 +63,16 @@ export const GovernanceActionsDialog = ({
             onAfterAction={onAfterAction}
             onProposalCreated={onClose}
             view={view}
+            submitPortalEl={submitHostEl}
           />
         </Box>
       </DialogContent>
       <DialogActions>
+        {/* Submit goes first so it sits on the left of Close (primary
+            action takes the visually-leading position). GovernanceSection
+            portals its Submit Confirmation / Submit Proposal button into
+            this slot. */}
+        <Box ref={setSubmitHostEl} sx={{ display: "inline-flex" }} />
         <Button onClick={onClose}>Close</Button>
       </DialogActions>
     </Dialog>

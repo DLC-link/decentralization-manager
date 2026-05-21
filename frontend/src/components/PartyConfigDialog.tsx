@@ -295,6 +295,11 @@ export const PartyConfigDialog = ({
 
       setSuccess(true);
       onSave();
+      // Close the dialog automatically on a successful save — no
+      // post-success state worth keeping the modal open for. The
+      // `success` flag stays set in case the close handler dismisses
+      // before this returns; it's harmless after unmount.
+      onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error");
     } finally {
@@ -667,15 +672,15 @@ export const PartyConfigDialog = ({
         )}
       </DialogContent>
       <DialogActions>
-        <Button onClick={handleClose} disabled={saving}>
-          {success ? "Close" : "Cancel"}
-        </Button>
         <Button
           onClick={handleSave}
-          variant="contained"
           disabled={saving || !canSave}
+          startIcon={saving ? <CircularProgress size={16} /> : undefined}
         >
-          {saving ? <CircularProgress size={20} /> : "Save"}
+          Save
+        </Button>
+        <Button onClick={handleClose} disabled={saving}>
+          Cancel
         </Button>
       </DialogActions>
     </Dialog>
