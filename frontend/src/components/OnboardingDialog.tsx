@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
 import {
   Dialog,
   DialogTitle,
@@ -19,7 +19,7 @@ import { API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
 import { useSnackbar } from "../contexts";
 import { fieldHelpAdornment } from "./FieldHelp";
-import type { OnboardingStatusResponse, Peer, NodeConfig } from "../types";
+import type { Peer, NodeConfig } from "../types";
 
 interface OnboardingDialogProps {
   open: boolean;
@@ -30,7 +30,6 @@ interface OnboardingDialogProps {
 export const OnboardingDialog = ({
   open,
   onClose,
-  onComplete,
 }: OnboardingDialogProps) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -43,7 +42,6 @@ export const OnboardingDialog = ({
       kind?: "unreachable_from_coordinator" | "mesh_hole";
     }> | null
   >(null);
-  const [status, setStatus] = useState<OnboardingStatusResponse | null>(null);
   const [partyIdPrefix, setPartyIdPrefix] = useState("");
   const [peers, setPeers] = useState<Peer[]>([]);
   const [selfNodeId, setSelfNodeId] = useState<string | null>(null);
@@ -95,7 +93,6 @@ export const OnboardingDialog = ({
     if (!open) {
       setError(null);
       setMeshErrors(null);
-      setStatus(null);
       setLoading(false);
       setPartyIdPrefix("");
       setSelectedPeerIds(new Set());
@@ -118,43 +115,6 @@ export const OnboardingDialog = ({
   const selectablePeers = peers.filter(
     (p) => p.participant_id !== selfNodeId,
   );
-
-  const pollStatus = useCallback(async () => {
-    try {
-      const res = await authenticatedFetch(`${API_BASE}/onboarding/status`);
-      if (res.ok) {
-        const data: OnboardingStatusResponse = await res.json();
-        if (data.status === "cancelled") {
-          showSnackbar("Onboarding workflow cancelled");
-          onClose();
-          return;
-        }
-        setStatus(data);
-        if (data.status !== "inprogress") {
-          setLoading(false);
-          if (data.status === "completed") {
-            onComplete();
-          }
-        }
-      }
-    } catch {
-      // Ignore polling errors
-    }
-  }, [onComplete, onClose, showSnackbar]);
-
-  useEffect(() => {
-    let interval: number | undefined;
-
-    if (status?.status === "inprogress") {
-      // Poll immediately, then every 2 seconds
-      pollStatus();
-      interval = window.setInterval(pollStatus, 2000);
-    }
-
-    return () => {
-      if (interval) clearInterval(interval);
-    };
-  }, [status?.status, pollStatus]);
 
   const handleStart = async () => {
     if (!partyIdPrefix.trim()) {
@@ -201,27 +161,6 @@ export const OnboardingDialog = ({
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error");
       setLoading(false);
-    }
-  };
-
-  const [cancelling, setCancelling] = useState(false);
-  const handleCancelWorkflow = async () => {
-    setCancelling(true);
-    try {
-      const res = await authenticatedFetch(`${API_BASE}/onboarding/cancel`, {
-        method: "POST",
-      });
-      if (res.ok) {
-        showSnackbar("Onboarding workflow cancelled");
-        onClose();
-      } else {
-        const data = await res.json().catch(() => ({}));
-        setError(data.error || "Failed to cancel workflow");
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to cancel workflow");
-    } finally {
-      setCancelling(false);
     }
   };
 
@@ -286,7 +225,7 @@ export const OnboardingDialog = ({
             onChange={(e) => setPartyIdPrefix(e.target.value)}
             placeholder="e.g., my-network"
             fullWidth
-            disabled={loading || status?.status === "inprogress"}
+            disabled={loading}
             helperText="A unique identifier prefix for the decentralized party"
             slotProps={{
               input: {
@@ -322,7 +261,7 @@ export const OnboardingDialog = ({
                       <Checkbox
                         checked={selectedPeerIds.has(peer.participant_id)}
                         onChange={() => togglePeer(peer.participant_id)}
-                        disabled={loading || status?.status === "inprogress"}
+                        disabled={loading}
                       />
                     }
                     label={
@@ -414,58 +353,22 @@ export const OnboardingDialog = ({
             </Alert>
           )}
 
-          {status?.status === "inprogress" && (
-            <Alert severity="info" icon={<CircularProgress size={20} />}>
-              Onboarding workflow in progress... This may take a few minutes.
-            </Alert>
-          )}
-
-          {status?.status === "completed" && (
-            <Alert severity="success">
-              Decentralized party has been successfully created!
-            </Alert>
-          )}
-
-          {status?.status === "failed" && (
-            <Alert severity="error">
-              Onboarding workflow failed: {status.error || "Unknown error"}
-            </Alert>
-          )}
         </Box>
       </DialogContent>
       <DialogActions>
         <Button onClick={handleClose} disabled={loading}>
-          {status?.status === "completed" ||
-          status?.status === "failed" ||
-          status?.status === "inprogress"
-            ? "Close"
-            : "Cancel"}
+          Cancel
         </Button>
-        {status?.status === "inprogress" && (
-          <Button
-            onClick={handleCancelWorkflow}
-            variant="outlined"
-            color="error"
-            disabled={cancelling}
-            startIcon={cancelling ? <CircularProgress size={16} /> : undefined}
-          >
-            {cancelling ? "Cancelling…" : "Cancel Workflow"}
-          </Button>
-        )}
-        {!status?.status ||
-        status.status === "idle" ||
-        status.status === "failed" ? (
-          <Button
-            onClick={handleStart}
-            variant="contained"
-            color="primary"
-            disabled={
-              loading || !partyIdPrefix.trim() || selectedPeerIds.size === 0
-            }
-          >
-            {loading ? <CircularProgress size={20} /> : "Start Onboarding"}
-          </Button>
-        ) : null}
+        <Button
+          onClick={handleStart}
+          variant="contained"
+          color="primary"
+          disabled={
+            loading || !partyIdPrefix.trim() || selectedPeerIds.size === 0
+          }
+        >
+          {loading ? <CircularProgress size={20} /> : "Start Onboarding"}
+        </Button>
       </DialogActions>
     </Dialog>
   );

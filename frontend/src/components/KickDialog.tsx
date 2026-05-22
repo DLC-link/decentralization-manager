@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
 import {
   Dialog,
   DialogTitle,
@@ -18,7 +18,6 @@ import { fieldHelpAdornment } from "./FieldHelp";
 import type {
   DecentralizedPartiesResponse,
   KickRequest,
-  KickStatusResponse,
 } from "../types";
 
 interface KickDialogProps {
@@ -35,7 +34,6 @@ interface KickDialogProps {
 export const KickDialog = ({
   open,
   onClose,
-  onKickComplete,
   partyId,
   participantUid,
   participantOwnerKey,
@@ -45,7 +43,6 @@ export const KickDialog = ({
   const [newThreshold, setNewThreshold] = useState(1);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [status, setStatus] = useState<KickStatusResponse | null>(null);
   const { showSnackbar } = useSnackbar();
   // Local owner-key state. Initialized from the prop, but kept fresh by
   // polling /decentralized-parties while the dialog is open and the key is
@@ -112,47 +109,9 @@ export const KickDialog = ({
   useEffect(() => {
     if (!open) {
       setError(null);
-      setStatus(null);
       setLoading(false);
     }
   }, [open]);
-
-  const pollStatus = useCallback(async () => {
-    try {
-      const res = await authenticatedFetch(`${API_BASE}/kick/status`);
-      if (res.ok) {
-        const data: KickStatusResponse = await res.json();
-        if (data.status === "cancelled") {
-          showSnackbar("Kick workflow cancelled");
-          onClose();
-          return;
-        }
-        setStatus(data);
-        if (data.status !== "inprogress") {
-          setLoading(false);
-          if (data.status === "completed") {
-            onKickComplete();
-          }
-        }
-      }
-    } catch {
-      // Ignore polling errors
-    }
-  }, [onKickComplete, onClose, showSnackbar]);
-
-  useEffect(() => {
-    let interval: number | undefined;
-
-    if (status?.status === "inprogress") {
-      // Poll immediately, then every 2 seconds
-      pollStatus();
-      interval = window.setInterval(pollStatus, 2000);
-    }
-
-    return () => {
-      if (interval) clearInterval(interval);
-    };
-  }, [status?.status, pollStatus]);
 
   const handleKick = async () => {
     setLoading(true);
@@ -181,27 +140,6 @@ export const KickDialog = ({
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error");
       setLoading(false);
-    }
-  };
-
-  const [cancelling, setCancelling] = useState(false);
-  const handleCancelWorkflow = async () => {
-    setCancelling(true);
-    try {
-      const res = await authenticatedFetch(`${API_BASE}/kick/cancel`, {
-        method: "POST",
-      });
-      if (res.ok) {
-        showSnackbar("Kick workflow cancelled");
-        onClose();
-      } else {
-        const data = await res.json().catch(() => ({}));
-        setError(data.error || "Failed to cancel workflow");
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to cancel workflow");
-    } finally {
-      setCancelling(false);
     }
   };
 
@@ -299,57 +237,20 @@ export const KickDialog = ({
               {error}
             </Alert>
           )}
-
-          {status?.status === "inprogress" && (
-            <Alert severity="info" icon={<CircularProgress size={20} />}>
-              Kick workflow in progress... This may take a few minutes.
-            </Alert>
-          )}
-
-          {status?.status === "completed" && (
-            <Alert severity="success">
-              Participant has been successfully kicked from the party.
-            </Alert>
-          )}
-
-          {status?.status === "failed" && (
-            <Alert severity="error">
-              Kick workflow failed: {status.error || "Unknown error"}
-            </Alert>
-          )}
         </Box>
       </DialogContent>
       <DialogActions>
         <Button onClick={handleClose} disabled={loading}>
-          {status?.status === "completed" ||
-          status?.status === "failed" ||
-          status?.status === "inprogress"
-            ? "Close"
-            : "Cancel"}
+          Cancel
         </Button>
-        {status?.status === "inprogress" && (
-          <Button
-            onClick={handleCancelWorkflow}
-            variant="outlined"
-            color="error"
-            disabled={cancelling}
-            startIcon={cancelling ? <CircularProgress size={16} /> : undefined}
-          >
-            {cancelling ? "Cancelling…" : "Cancel Workflow"}
-          </Button>
-        )}
-        {!status?.status ||
-        status.status === "idle" ||
-        status.status === "failed" ? (
-          <Button
-            onClick={handleKick}
-            variant="contained"
-            color="error"
-            disabled={loading || newThreshold < 1 || newThreshold > remainingOwners || !resolvedOwnerKey}
-          >
-            {loading ? <CircularProgress size={20} /> : "Kick Participant"}
-          </Button>
-        ) : null}
+        <Button
+          onClick={handleKick}
+          variant="contained"
+          color="error"
+          disabled={loading || newThreshold < 1 || newThreshold > remainingOwners || !resolvedOwnerKey}
+        >
+          {loading ? <CircularProgress size={20} /> : "Kick Participant"}
+        </Button>
       </DialogActions>
     </Dialog>
   );

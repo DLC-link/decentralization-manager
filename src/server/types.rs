@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -21,11 +21,12 @@ use crate::{
 /// Trait for workflow status types that can be used with HttpWorkflowState
 pub trait WorkflowStatus: Default + Copy + Send + Sync {}
 
-/// Generic state for tracking HTTP-triggered workflows. Holds enough context
-/// for the matching `/cancel` endpoint to abort the spawn and notify the
-/// peers that received an invite. Now scoped to a single workflow instance
-/// — the per-kind singletons were replaced with `WorkflowRegistry` so the
-/// orchestrator can run multiple workflows of the same kind concurrently.
+/// Per-instance state for an HTTP-triggered workflow. Holds enough context
+/// for the matching `/workflows/{instance_name}/cancel` endpoint to abort
+/// the spawn and notify the peers that received an invite. Owned by a
+/// `WorkflowRegistry`, keyed by `instance_name` — multiple workflows of the
+/// same kind can sit side-by-side, each with its own abort handle and
+/// invitee list.
 pub struct HttpWorkflowState<S: WorkflowStatus> {
     pub status: RwLock<S>,
     pub error: RwLock<Option<String>>,
@@ -114,25 +115,29 @@ impl<S: WorkflowStatus> WorkflowRegistry<S> {
     }
 }
 
-/// Guard that pauses the Noise listener while held and resumes it when dropped.
-///
-/// `should_pause` is an `AtomicBool` rather than a `bool` behind a lock so that
-/// the `Drop` impl can reset it synchronously. The earlier `Arc<RwLock<bool>>`
-/// design left the listener stuck in the paused state on task abort or panic
-/// (the captured guard was dropped but the async reset never ran), forcing the
-/// cancel handler to clean up manually.
+/// Ref-counted guard that keeps the Noise heartbeat listener paused while
+/// any workflow is running locally. Multiple concurrent workflows each
+/// acquire their own guard; the listener stays paused until the last guard
+/// drops. The counter is an `AtomicUsize` so `Drop` can decrement
+/// synchronously even when the task is aborted or panics — the listener
+/// can never be stuck paused past the lifetime of all running workflows.
 pub struct ListenerPauseGuard {
-    listener_pause_flag: Arc<AtomicBool>,
+    counter: Arc<AtomicUsize>,
     listener_notify: Arc<Notify>,
 }
 
 impl ListenerPauseGuard {
-    /// Pause the listener and return a guard that will resume it when dropped.
-    pub async fn pause(listener_pause_flag: Arc<AtomicBool>, listener_notify: Arc<Notify>) -> Self {
-        listener_pause_flag.store(true, Ordering::Release);
-        tokio::time::sleep(Duration::from_millis(500)).await;
+    /// Increment the pause counter and return a guard that decrements it on
+    /// drop. If we are the first guard the heartbeat listener is asked to
+    /// stop; we sleep 500ms so any in-flight `accept` call has time to
+    /// unwind before the workflow's own `NoiseServer` binds the port.
+    pub async fn pause(counter: Arc<AtomicUsize>, listener_notify: Arc<Notify>) -> Self {
+        let prev = counter.fetch_add(1, Ordering::AcqRel);
+        if prev == 0 {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
         Self {
-            listener_pause_flag,
+            counter,
             listener_notify,
         }
     }
@@ -149,39 +154,49 @@ impl ListenerPauseGuard {
 
 impl Drop for ListenerPauseGuard {
     fn drop(&mut self) {
-        self.listener_pause_flag.store(false, Ordering::Release);
-        self.listener_notify.notify_one();
+        let prev = self.counter.fetch_sub(1, Ordering::AcqRel);
+        if prev == 1 {
+            self.listener_notify.notify_one();
+        }
     }
 }
 
-/// Cross-workflow mutual exclusion.
-///
-/// At most one workflow (kick / onboarding / contracts / dars) may run at
-/// a time. Each `start_*` handler must `try_acquire` this gate before
-/// spawning its coordinator task, then move the returned guard into the
-/// spawned task's async block. The guard drops at the end of the task
-/// — on success, failure, cancellation, OR panic — so the gate cannot
-/// leak past a workflow's lifetime.
-///
-/// This replaces the previous read-then-write TOCTOU on each per-workflow
-/// status `RwLock`: two concurrent `start_kick` calls would both observe
-/// `status != InProgress` and both proceed; with this gate, the second
-/// `try_acquire` fails and the second caller gets a 409.
-pub struct WorkflowInFlightGuard(Arc<AtomicBool>);
-
-impl WorkflowInFlightGuard {
-    /// Returns `Some(guard)` if the gate was free and is now held; `None`
-    /// if another workflow already holds it.
-    pub fn try_acquire(flag: Arc<AtomicBool>) -> Option<Self> {
-        flag.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .ok()
-            .map(|_| Self(flag))
-    }
+/// A peer-side workflow job: emitted by `accept_invitation` / `refire_peer`
+/// onto the per-kind `mpsc::UnboundedSender` and consumed by the matching
+/// peer listener which spawns `workflow::start_peer` for it. Carrying both
+/// `instance_name` and `coordinator_pubkey` on the message means concurrent
+/// accepts can no longer race over global slots.
+#[derive(Clone, Debug)]
+pub struct PeerJob {
+    pub instance_name: String,
+    pub coordinator_pubkey: String,
 }
 
-impl Drop for WorkflowInFlightGuard {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
+/// All four coordinator-side workflow registries, bundled together. They live
+/// on `AppState` rather than as separate `web::Data` slots because the
+/// underlying `WorkflowRegistry<WorkflowProgress>` type is the same for every
+/// kind (the per-kind status enums all collapse to `WorkflowProgress`), so
+/// actix's TypeId-keyed extractor would alias them.
+#[derive(Clone, Default)]
+pub struct WorkflowRegistries {
+    pub kick: Arc<WorkflowRegistry<WorkflowProgress>>,
+    pub onboarding: Arc<WorkflowRegistry<WorkflowProgress>>,
+    pub contracts: Arc<WorkflowRegistry<WorkflowProgress>>,
+    pub dars: Arc<WorkflowRegistry<WorkflowProgress>>,
+}
+
+impl WorkflowRegistries {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn for_kind(&self, kind: WorkflowKind) -> &Arc<WorkflowRegistry<WorkflowProgress>> {
+        match kind {
+            WorkflowKind::Kick => &self.kick,
+            WorkflowKind::Onboarding => &self.onboarding,
+            WorkflowKind::Contracts => &self.contracts,
+            WorkflowKind::Dars => &self.dars,
+        }
     }
 }
 
@@ -462,11 +477,14 @@ impl WorkflowStatus for WorkflowProgress {}
 pub type KickStatus = WorkflowProgress;
 pub type OnboardingStatus = WorkflowProgress;
 
-/// Response for workflow initiation (kick, onboarding, etc.)
+/// Response for workflow initiation (kick, onboarding, etc.). `instance_name`
+/// is the per-run identifier; clients poll status and cancel via
+/// `/workflows/{instance_name}` and `/workflows/{instance_name}/cancel`.
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct WorkflowResponse {
     pub status: WorkflowProgress,
     pub message: String,
+    pub instance_name: String,
 }
 
 /// Type aliases for backwards compatibility

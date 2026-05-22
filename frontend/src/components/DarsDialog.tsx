@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
 import {
   Dialog,
   DialogTitle,
@@ -22,7 +22,7 @@ import { API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
 import { useSnackbar } from "../contexts";
 import { TextHelp } from "./FieldHelp";
-import type { DarsStatusResponse, DarFile, Peer, NodeConfig } from "../types";
+import type { DarFile, Peer, NodeConfig } from "../types";
 
 interface DarsDialogProps {
   open: boolean;
@@ -40,7 +40,10 @@ export const DarsDialog = ({
 }: DarsDialogProps) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [status, setStatus] = useState<DarsStatusResponse | null>(null);
+  // Local-only "upload finished" flag for synchronous upload mode. Distribute
+  // mode does not use this — its progress is followed in the notifications
+  // feed via /workflows.
+  const [uploadCompleted, setUploadCompleted] = useState(false);
   const [darFiles, setDarFiles] = useState<DarFile[]>([]);
   const [peers, setPeers] = useState<Peer[]>([]);
   const [selfNodeId, setSelfNodeId] = useState<string | null>(null);
@@ -91,7 +94,7 @@ export const DarsDialog = ({
   useEffect(() => {
     if (!open) {
       setError(null);
-      setStatus(null);
+      setUploadCompleted(false);
       setLoading(false);
       setDarFiles([]);
       setPeers([]);
@@ -115,42 +118,6 @@ export const DarsDialog = ({
   const selectablePeers = peers.filter(
     (p) => p.participant_id !== selfNodeId,
   );
-
-  const pollStatus = useCallback(async () => {
-    try {
-      const res = await authenticatedFetch(`${API_BASE}/dars/distribute/status`);
-      if (res.ok) {
-        const data: DarsStatusResponse = await res.json();
-        if (data.status === "cancelled") {
-          showSnackbar(`${workflowLabel} workflow cancelled`);
-          onClose();
-          return;
-        }
-        setStatus(data);
-        if (data.status !== "inprogress") {
-          setLoading(false);
-          if (data.status === "completed") {
-            onComplete();
-          }
-        }
-      }
-    } catch {
-      // Ignore polling errors
-    }
-  }, [onComplete, onClose, showSnackbar, workflowLabel]);
-
-  useEffect(() => {
-    let interval: number | undefined;
-
-    if (status?.status === "inprogress") {
-      pollStatus();
-      interval = window.setInterval(pollStatus, 2000);
-    }
-
-    return () => {
-      if (interval) clearInterval(interval);
-    };
-  }, [status?.status, pollStatus]);
 
   const handleFileSelect = async (
     event: React.ChangeEvent<HTMLInputElement>,
@@ -223,7 +190,7 @@ export const DarsDialog = ({
 
       if (mode === "upload") {
         // Local upload is synchronous — done immediately
-        setStatus({ status: "completed" });
+        setUploadCompleted(true);
         setLoading(false);
         onComplete();
       } else {
@@ -236,36 +203,11 @@ export const DarsDialog = ({
     }
   };
 
-  const [cancelling, setCancelling] = useState(false);
-  const handleCancelWorkflow = async () => {
-    setCancelling(true);
-    try {
-      const res = await authenticatedFetch(`${API_BASE}/dars/cancel`, {
-        method: "POST",
-      });
-      if (res.ok) {
-        showSnackbar(`${workflowLabel} workflow cancelled`);
-        onClose();
-      } else {
-        const data = await res.json().catch(() => ({}));
-        setError(data.error || "Failed to cancel workflow");
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to cancel workflow");
-    } finally {
-      setCancelling(false);
-    }
-  };
-
   const handleClose = () => {
     if (!loading) {
       onClose();
     }
   };
-
-  const isInProgress = status?.status === "inprogress";
-  const isCompleted = status?.status === "completed";
-  const isFailed = status?.status === "failed";
 
   return (
     <Dialog open={open} onClose={handleClose} maxWidth="sm" fullWidth>
@@ -280,30 +222,13 @@ export const DarsDialog = ({
             </Alert>
           )}
 
-          {isInProgress && (
-            <Alert severity="info" icon={<CircularProgress size={20} />}>
-              {mode === "upload"
-                ? "Uploading DARs to this node..."
-                : "Distributing DARs to selected peers..."}
-            </Alert>
-          )}
-
-          {isCompleted && (
+          {uploadCompleted && mode === "upload" && (
             <Alert severity="success">
-              {mode === "upload"
-                ? "DARs uploaded to this node successfully!"
-                : "DARs distributed to selected peers successfully!"}
+              DARs uploaded to this node successfully!
             </Alert>
           )}
 
-          {isFailed && (
-            <Alert severity="error">
-              {mode === "upload" ? "Upload" : "Distribution"} failed:{" "}
-              {status.error || "Unknown error"}
-            </Alert>
-          )}
-
-          {!isInProgress && !isCompleted && (
+          {!uploadCompleted && (
             <>
               <Typography variant="body2" color="text.secondary">
                 {mode === "upload"
@@ -428,20 +353,9 @@ export const DarsDialog = ({
       </DialogContent>
       <DialogActions>
         <Button onClick={handleClose} disabled={loading}>
-          {isCompleted || isFailed || isInProgress ? "Close" : "Cancel"}
+          {uploadCompleted ? "Close" : "Cancel"}
         </Button>
-        {isInProgress && mode === "distribute" && (
-          <Button
-            onClick={handleCancelWorkflow}
-            variant="outlined"
-            color="error"
-            disabled={cancelling}
-            startIcon={cancelling ? <CircularProgress size={16} /> : undefined}
-          >
-            {cancelling ? "Cancelling…" : "Cancel Workflow"}
-          </Button>
-        )}
-        {(!status?.status || status.status === "idle" || isFailed) ? (
+        {!uploadCompleted && (
           <Button
             onClick={handleStart}
             variant="contained"
@@ -460,7 +374,7 @@ export const DarsDialog = ({
               "Distribute DARs"
             )}
           </Button>
-        ) : null}
+        )}
       </DialogActions>
     </Dialog>
   );

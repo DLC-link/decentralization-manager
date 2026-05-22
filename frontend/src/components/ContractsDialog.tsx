@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useMemo } from "react";
 import {
   Autocomplete,
   Dialog,
@@ -38,7 +38,6 @@ import { authenticatedFetch } from "../api";
 import { useSnackbar } from "../contexts";
 import { TextHelp, fieldHelpAdornment } from "./FieldHelp";
 import type {
-  ContractsStatusResponse,
   ContractsRequest,
   ContractDefinition,
   ContractInfo,
@@ -1270,7 +1269,6 @@ const ContractTypeSelection = ({
 export const ContractsDialog = ({
   open,
   onClose,
-  onComplete,
   partyId,
   participantIds,
   defaultOperatorParty,
@@ -1292,7 +1290,6 @@ export const ContractsDialog = ({
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [status, setStatus] = useState<ContractsStatusResponse | null>(null);
   const [contractType, setContractType] = useState<ContractType>(null);
   const { showSnackbar } = useSnackbar();
 
@@ -1361,7 +1358,6 @@ export const ContractsDialog = ({
   useEffect(() => {
     if (!open) {
       setError(null);
-      setStatus(null);
       setLoading(false);
       setContractType(null);
       setContracts([]);
@@ -1416,42 +1412,6 @@ export const ContractsDialog = ({
       cancelled = true;
     };
   }, [contractType, partyId, packages]);
-
-  const pollStatus = useCallback(async () => {
-    try {
-      const res = await authenticatedFetch(`${API_BASE}/contracts/status`);
-      if (res.ok) {
-        const data: ContractsStatusResponse = await res.json();
-        if (data.status === "cancelled") {
-          showSnackbar("Contracts workflow cancelled");
-          onClose();
-          return;
-        }
-        setStatus(data);
-        if (data.status !== "inprogress") {
-          setLoading(false);
-          if (data.status === "completed") {
-            onComplete();
-          }
-        }
-      }
-    } catch {
-      // Ignore polling errors
-    }
-  }, [onComplete, onClose, showSnackbar]);
-
-  useEffect(() => {
-    let interval: number | undefined;
-
-    if (status?.status === "inprogress") {
-      pollStatus();
-      interval = window.setInterval(pollStatus, 2000);
-    }
-
-    return () => {
-      if (interval) clearInterval(interval);
-    };
-  }, [status?.status, pollStatus]);
 
   const handleAddContract = () => {
     setContracts([...contracts, createEmptyContract()]);
@@ -1533,29 +1493,6 @@ export const ContractsDialog = ({
     }
   };
 
-  const [cancelling, setCancelling] = useState(false);
-  const handleCancelWorkflow = async () => {
-    setCancelling(true);
-    try {
-      const res = await authenticatedFetch(`${API_BASE}/contracts/cancel`, {
-        method: "POST",
-      });
-      if (res.ok) {
-        showSnackbar("Contracts workflow cancelled");
-        onClose();
-      } else {
-        const data = await res.json().catch(() => ({}));
-        setError(data.error || "Failed to cancel workflow");
-      }
-    } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Failed to cancel workflow",
-      );
-    } finally {
-      setCancelling(false);
-    }
-  };
-
   const handleClose = () => {
     if (!loading) {
       onClose();
@@ -1566,10 +1503,6 @@ export const ContractsDialog = ({
     setContractType(null);
     setContracts([]);
   };
-
-  const isInProgress = status?.status === "inprogress";
-  const isCompleted = status?.status === "completed";
-  const isFailed = status?.status === "failed";
 
   const getDialogTitle = () => {
     if (!contractType)
@@ -1583,7 +1516,7 @@ export const ContractsDialog = ({
     <Dialog open={open} onClose={handleClose} maxWidth="md" fullWidth>
       <DialogTitle>
         <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-          {contractType && !isInProgress && !isCompleted && (
+          {contractType && (
             <IconButton size="small" onClick={handleBack} sx={{ mr: 1 }}>
               <ArrowBackIcon />
             </IconButton>
@@ -1599,25 +1532,7 @@ export const ContractsDialog = ({
             </Alert>
           )}
 
-          {isInProgress && (
-            <Alert severity="info" icon={<CircularProgress size={20} />}>
-              Contracts workflow in progress... This may take a few minutes.
-            </Alert>
-          )}
-
-          {isCompleted && (
-            <Alert severity="success">
-              Contracts have been successfully deployed!
-            </Alert>
-          )}
-
-          {isFailed && (
-            <Alert severity="error">
-              Contracts workflow failed: {status.error || "Unknown error"}
-            </Alert>
-          )}
-
-          {!isInProgress && !isCompleted && !contractType && (
+          {!contractType && (
             <ContractTypeSelection
               onSelect={setContractType}
               isGovernanceCoreDeployed={isGovernanceCoreDeployed}
@@ -1629,7 +1544,7 @@ export const ContractsDialog = ({
             />
           )}
 
-          {!isInProgress && !isCompleted && contractType && (
+          {contractType && (
             <>
               <Typography variant="body2" color="text.secondary">
                 Configure and deploy contracts for the decentralized party. This
@@ -1828,21 +1743,9 @@ export const ContractsDialog = ({
       </DialogContent>
       <DialogActions>
         <Button onClick={handleClose} disabled={loading}>
-          {isCompleted || isFailed || isInProgress ? "Close" : "Cancel"}
+          Cancel
         </Button>
-        {isInProgress && (
-          <Button
-            onClick={handleCancelWorkflow}
-            variant="outlined"
-            color="error"
-            disabled={cancelling}
-            startIcon={cancelling ? <CircularProgress size={16} /> : undefined}
-          >
-            {cancelling ? "Cancelling…" : "Cancel Workflow"}
-          </Button>
-        )}
-        {contractType &&
-        (!status?.status || status.status === "idle" || isFailed) ? (
+        {contractType && (
           <Button
             onClick={handleStart}
             variant="contained"
@@ -1851,7 +1754,7 @@ export const ContractsDialog = ({
           >
             {loading ? <CircularProgress size={20} /> : "Deploy Contracts"}
           </Button>
-        ) : null}
+        )}
       </DialogActions>
     </Dialog>
   );

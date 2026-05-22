@@ -1062,25 +1062,13 @@ const WorkflowRunCard = ({
     run.status === "failed" ||
     run.status === "cancelled";
 
-  const cancelEndpointForKind = () => {
-    switch (run.kind) {
-      case "Onboarding":
-        return `${API_BASE}/onboarding/cancel`;
-      case "Kick":
-        return `${API_BASE}/kick/cancel`;
-      case "Contracts":
-        return `${API_BASE}/contracts/cancel`;
-      case "Dars":
-        return `${API_BASE}/dars/cancel`;
-    }
-  };
-
   const cancel = async () => {
     setBusy(true);
     try {
-      const res = await authenticatedFetch(cancelEndpointForKind(), {
-        method: "POST",
-      });
+      const res = await authenticatedFetch(
+        `${API_BASE}/workflows/${encodeURIComponent(run.instance_name)}/cancel`,
+        { method: "POST" },
+      );
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         throw new Error(data.error || "Failed to cancel");

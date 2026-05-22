@@ -172,15 +172,11 @@ export type WorkflowProgress =
 export type KickStatus = WorkflowProgress;
 export type OnboardingStatus = WorkflowProgress;
 
-export interface WorkflowStatusResponse {
+export interface WorkflowStartResponse {
   status: WorkflowProgress;
-  error?: string;
+  message: string;
+  instance_name: string;
 }
-
-// Type aliases for backwards compatibility
-export type KickStatusResponse = WorkflowStatusResponse;
-export type OnboardingStatusResponse = WorkflowStatusResponse;
-export type ContractsStatusResponse = WorkflowStatusResponse;
 
 export interface KeyStatusResponse {
   has_keys: boolean;
@@ -231,8 +227,6 @@ export interface ContractsRequest {
 export interface DarsRequest {
   dar_files: DarFile[];
 }
-
-export type DarsStatusResponse = WorkflowStatusResponse;
 
 // Invitation types
 export type InvitationType = "Onboarding" | "Kick" | "Contracts" | "Dars";

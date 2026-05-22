@@ -11,7 +11,7 @@ use crate::{
         middleware::require_admin,
         types::{
             DeclineInvitationPayload, ErrorResponse, InvitationActionRequest, InvitationType,
-            MessageResponse, PendingInvitation, PendingInvitationsResponse, WorkflowKind,
+            MessageResponse, PeerJob, PendingInvitation, PendingInvitationsResponse, WorkflowKind,
             WorkflowProgress, WorkflowRole, WorkflowRun,
         },
     },
@@ -182,39 +182,43 @@ pub async fn accept_invitation(
 
     delete_persisted_invitation(&data, &invitation.id).await;
 
-    // Persist an peer-side workflow_runs row so the operator's feed shows
-    // "I'm participating in <kind>" until completion. The trigger listener
-    // reads `peer_run_instance` to know which row to flip on terminal status.
-    let peer_instance = insert_peer_run(&data, &invitation).await;
-    {
-        let mut slot = data.peer_run_instance.write().await;
-        *slot = peer_instance;
+    // Persist a peer-side workflow_runs row so the operator's feed shows
+    // "I'm participating in <kind>" until completion. The instance_name we
+    // mint here is the one we push onto the peer-job channel.
+    let instance_name = match insert_peer_run(&data, &invitation).await {
+        Some(name) => name,
+        None => {
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to persist peer workflow run"
+            }));
+        }
+    };
+
+    let job = PeerJob {
+        instance_name,
+        coordinator_pubkey: invitation.coordinator_pubkey.clone(),
+    };
+
+    let sender = match invitation.invitation_type {
+        InvitationType::Onboarding => &data.onboarding_peer_sender,
+        InvitationType::Kick => &data.kick_peer_sender,
+        InvitationType::Contracts => &data.contracts_peer_sender,
+        InvitationType::Dars => &data.dars_peer_sender,
+    };
+    if sender.send(job).is_err() {
+        tracing::error!(
+            "Peer listener channel for {:?} closed; cannot dispatch invite",
+            invitation.invitation_type
+        );
+        return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": "Peer listener unavailable; restart the server"
+        }));
     }
 
-    // Store coordinator's public key and trigger the appropriate workflow
-    {
-        let mut coordinator_pubkey = data.coordinator_pubkey.write().await;
-        *coordinator_pubkey = Some(invitation.coordinator_pubkey.clone());
-    }
-
-    match invitation.invitation_type {
-        InvitationType::Onboarding => {
-            tracing::info!("Accepting onboarding invitation, triggering peer workflow");
-            data.onboarding_trigger.notify_one();
-        }
-        InvitationType::Kick => {
-            tracing::info!("Accepting kick invitation, triggering peer workflow");
-            data.kick_trigger.notify_one();
-        }
-        InvitationType::Contracts => {
-            tracing::info!("Accepting contracts invitation, triggering peer workflow");
-            data.contracts_trigger.notify_one();
-        }
-        InvitationType::Dars => {
-            tracing::info!("Accepting DARs invitation, triggering peer workflow");
-            data.dars_trigger.notify_one();
-        }
-    }
+    tracing::info!(
+        "Accepted {:?} invitation, dispatched peer workflow job",
+        invitation.invitation_type
+    );
 
     HttpResponse::Ok().json(serde_json::json!({
         "message": "Invitation accepted"

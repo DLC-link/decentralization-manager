@@ -282,7 +282,7 @@ mod tests {
 
     use std::{
         collections::{HashMap, HashSet},
-        sync::{Arc, atomic::AtomicBool},
+        sync::{Arc, atomic::AtomicUsize},
     };
 
     use actix_web::{
@@ -298,7 +298,7 @@ mod tests {
     use crate::{
         auth::{JwtValidator, MockValidator, TokenValidator},
         config::{NodeConfig, PartyCredentials},
-        server::AppState,
+        server::{AppState, WorkflowRegistries},
     };
 
     /// Stub handler for any path — returns 200 with the matched path so the
@@ -321,26 +321,28 @@ mod tests {
             .await
             .expect("in-memory sqlite");
         let party_credentials = Arc::new(RwLock::new(parties));
+        let (onboarding_peer_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let (kick_peer_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let (contracts_peer_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let (dars_peer_tx, _) = tokio::sync::mpsc::unbounded_channel();
         Data::new(AppState {
             db,
             config: NodeConfig::default(),
             peer_status: Arc::new(RwLock::new(HashMap::new())),
             last_seen: Arc::new(RwLock::new(HashMap::new())),
-            noise_listener_pause_flag: Arc::new(AtomicBool::new(false)),
+            noise_listener_pause_count: Arc::new(AtomicUsize::new(0)),
             noise_listener_notify: Arc::new(Notify::new()),
-            onboarding_trigger: Arc::new(Notify::new()),
-            kick_trigger: Arc::new(Notify::new()),
-            contracts_trigger: Arc::new(Notify::new()),
-            dars_trigger: Arc::new(Notify::new()),
-            coordinator_pubkey: Arc::new(RwLock::new(None)),
-            peer_run_instance: Arc::new(RwLock::new(None)),
+            onboarding_peer_sender: onboarding_peer_tx,
+            kick_peer_sender: kick_peer_tx,
+            contracts_peer_sender: contracts_peer_tx,
+            dars_peer_sender: dars_peer_tx,
+            workflow_registries: WorkflowRegistries::new(),
             pending_invitations: Arc::new(RwLock::new(Vec::new())),
             auth: Arc::new(RwLock::new(None)),
             token_validator: validator,
             admin_role: Some("decman-admin".to_string()),
             party_credentials,
             bootstrap_mu: Arc::new(Mutex::new(())),
-            workflow_in_flight: Arc::new(AtomicBool::new(false)),
             test_mode: true,
             refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
             http_client: reqwest::Client::new(),
