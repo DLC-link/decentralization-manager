@@ -1533,7 +1533,8 @@ pub async fn cancel_workflow(
 
     let Some(handle) = state.abort_handle.lock().await.take() else {
         tracing::warn!(
-            "{} cancel for {instance_name} arrived before the workflow finished initializing — refusing",
+            "{} cancel for {instance_name} arrived before the workflow finished \
+             initializing — refusing",
             run.kind
         );
         return HttpResponse::Conflict().json(ErrorResponse {

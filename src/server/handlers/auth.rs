@@ -565,7 +565,7 @@ mod tests {
     };
     use serde_json::{Value, json};
     use sqlx::SqlitePool;
-    use tokio::sync::{Mutex, Notify, RwLock};
+    use tokio::sync::{Mutex, Notify, RwLock, mpsc::unbounded_channel};
 
     use super::grant_rights;
     use crate::{
@@ -584,10 +584,10 @@ mod tests {
             .await
             .expect("in-memory sqlite");
         let party_credentials = Arc::new(RwLock::new(Vec::new()));
-        let (onboarding_peer_tx, _) = tokio::sync::mpsc::unbounded_channel();
-        let (kick_peer_tx, _) = tokio::sync::mpsc::unbounded_channel();
-        let (contracts_peer_tx, _) = tokio::sync::mpsc::unbounded_channel();
-        let (dars_peer_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let (onboarding_peer_tx, _) = unbounded_channel();
+        let (kick_peer_tx, _) = unbounded_channel();
+        let (contracts_peer_tx, _) = unbounded_channel();
+        let (dars_peer_tx, _) = unbounded_channel();
         Data::new(AppState {
             db,
             config: NodeConfig::default(),

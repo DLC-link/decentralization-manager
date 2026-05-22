@@ -562,26 +562,29 @@ mod tests {
     };
     use serde_json::json;
     use sqlx::SqlitePool;
-    use tokio::sync::{Mutex, Notify, RwLock};
+    use tokio::sync::{
+        Mutex, Notify, RwLock,
+        mpsc::{UnboundedSender, unbounded_channel},
+    };
 
     use super::{discover_member_party, save_party_config};
     use crate::{
         auth::{MockAuthRegistry, MockValidator, TokenValidator, WorkflowAuth},
         config::{KeycloakConfig, NodeConfig, PartyCredentials, default_package_config},
         participant_id::CantonId,
-        server::{AppState, WorkflowRegistries, middleware::AuthMiddleware},
+        server::{AppState, PeerJob, WorkflowRegistries, middleware::AuthMiddleware},
     };
 
     fn fresh_peer_senders() -> (
-        tokio::sync::mpsc::UnboundedSender<crate::server::PeerJob>,
-        tokio::sync::mpsc::UnboundedSender<crate::server::PeerJob>,
-        tokio::sync::mpsc::UnboundedSender<crate::server::PeerJob>,
-        tokio::sync::mpsc::UnboundedSender<crate::server::PeerJob>,
+        UnboundedSender<PeerJob>,
+        UnboundedSender<PeerJob>,
+        UnboundedSender<PeerJob>,
+        UnboundedSender<PeerJob>,
     ) {
-        let (a, _) = tokio::sync::mpsc::unbounded_channel();
-        let (b, _) = tokio::sync::mpsc::unbounded_channel();
-        let (c, _) = tokio::sync::mpsc::unbounded_channel();
-        let (d, _) = tokio::sync::mpsc::unbounded_channel();
+        let (a, _) = unbounded_channel();
+        let (b, _) = unbounded_channel();
+        let (c, _) = unbounded_channel();
+        let (d, _) = unbounded_channel();
         (a, b, c, d)
     }
 

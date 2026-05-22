@@ -1,10 +1,15 @@
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
+use sqlx::SqlitePool;
 
 use crate::{
     config::Peer,
     db::schema::{Commitable, SchemaRead, SchemaWrite},
+    error::Result,
     noise::client::NoiseClient,
     server::{
         AppState,
@@ -21,13 +26,9 @@ use crate::{
 /// Best-effort: flip a peer-side `workflow_runs` row to Failed with a
 /// caller-supplied reason. Used by `accept_invitation` when the peer-job
 /// channel is closed so the feed doesn't keep a stuck InProgress row.
-async fn mark_peer_run_failed(
-    db: &sqlx::SqlitePool,
-    instance_name: &str,
-    reason: &str,
-) -> Result<(), anyhow::Error> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+async fn mark_peer_run_failed(db: &SqlitePool, instance_name: &str, reason: &str) -> Result {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     let mut tx = db.begin_transaction().await?;
@@ -67,8 +68,8 @@ async fn insert_peer_run(
     invitation: &PendingInvitation,
 ) -> Option<String> {
     let kind: WorkflowKind = invitation.invitation_type.into();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     let pubkey_short =
