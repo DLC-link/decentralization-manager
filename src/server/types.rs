@@ -52,6 +52,8 @@ impl<S: WorkflowStatus> Default for HttpWorkflowState<S> {
 }
 
 impl<S: WorkflowStatus> HttpWorkflowState<S> {
+    /// Build a fresh per-instance state with `Idle` status, no error, no
+    /// abort handle, and an empty invitee list.
     pub fn new() -> Self {
         Self::default()
     }
@@ -74,6 +76,7 @@ impl<S: WorkflowStatus> Default for WorkflowRegistry<S> {
 }
 
 impl<S: WorkflowStatus> WorkflowRegistry<S> {
+    /// Build an empty registry. Equivalent to `Self::default()`.
     pub fn new() -> Self {
         Self::default()
     }
@@ -100,10 +103,15 @@ impl<S: WorkflowStatus> WorkflowRegistry<S> {
             .insert(instance_name.to_string(), state);
     }
 
+    /// Look up the per-instance state for `instance_name`. Returns `None` if
+    /// no run is currently registered under that name.
     pub async fn get(&self, instance_name: &str) -> Option<Arc<HttpWorkflowState<S>>> {
         self.inner.read().await.get(instance_name).cloned()
     }
 
+    /// Remove and return the per-instance state for `instance_name`. Called
+    /// by the spawned task once the run reaches a terminal status so the
+    /// registry doesn't accumulate stale entries.
     pub async fn remove(&self, instance_name: &str) -> Option<Arc<HttpWorkflowState<S>>> {
         self.inner.write().await.remove(instance_name)
     }
@@ -192,10 +200,12 @@ pub struct WorkflowRegistries {
 }
 
 impl WorkflowRegistries {
+    /// Build an empty bundle with all four registries initialized to empty.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Pick the per-kind registry that owns runs of the given `kind`.
     pub fn for_kind(&self, kind: WorkflowKind) -> &Arc<WorkflowRegistry<WorkflowProgress>> {
         match kind {
             WorkflowKind::Kick => &self.kick,

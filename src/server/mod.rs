@@ -1097,7 +1097,7 @@ pub async fn start_server(
         kick_peer_rx,
     ));
 
-    // Start peer trigger listener for contracts (starts peer workflow when contracts invite received)
+    // Start peer trigger listener for contracts (starts peer workflow on invite)
     tokio::spawn(run_contracts_peer_listener(
         config.clone(),
         db.clone(),
