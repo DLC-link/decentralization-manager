@@ -2069,7 +2069,7 @@ async fn run_dars_peer_listener(
 /// scanned every party on the synchronizer — that scan does not complete
 /// within the Noise budget against a kubectl-tunneled Canton admin API on
 /// devnet (~170 parties, never returns within 60s; see #149).
-async fn list_my_owner_keys(
+pub(crate) async fn list_my_owner_keys(
     config: &NodeConfig,
     requested_party_ids: &[String],
 ) -> Result<Vec<u8>> {

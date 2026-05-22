@@ -48,6 +48,12 @@ pub struct NoiseServer<S: WorkflowStep + 'static> {
     peers: Vec<Peer>,
     workflow_state: Arc<WorkflowState<S>>,
     last_seen: LastSeen,
+    /// SQLite pool kept around so the server can answer management-plane
+    /// queries (currently `ListPeers`) while the workflow protocol is in
+    /// flight on the same port. Without this, a peer mid-workflow would
+    /// reject mesh-checks from other coordinators with "Unsupported message
+    /// type" and look offline.
+    db: SqlitePool,
     _p: PhantomData<S>,
 }
 
@@ -136,7 +142,7 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                             run.expected_peers.len()
                         );
                         WorkflowState::from_persisted(
-                            db,
+                            db.clone(),
                             instance_name,
                             step,
                             expected_peers,
@@ -150,17 +156,17 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                             run.current_step,
                             kind = std::any::type_name::<S>()
                         );
-                        WorkflowState::new(db, instance_name, initial_step, expected_peers)
+                        WorkflowState::new(db.clone(), instance_name, initial_step, expected_peers)
                     }
                 }
             }
-            Ok(_) => WorkflowState::new(db, instance_name, initial_step, expected_peers),
+            Ok(_) => WorkflowState::new(db.clone(), instance_name, initial_step, expected_peers),
             Err(e) => {
                 tracing::warn!(
                     "Failed to look up persisted workflow_runs row for {instance_name}: {e}; \
                      starting fresh"
                 );
-                WorkflowState::new(db, instance_name, initial_step, expected_peers)
+                WorkflowState::new(db.clone(), instance_name, initial_step, expected_peers)
             }
         };
 
@@ -180,6 +186,7 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
             peers,
             workflow_state,
             last_seen,
+            db,
             _p: PhantomData,
         })
     }
@@ -321,6 +328,16 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                 self.handle_decline_invitation(peer_id, message.payload)
                     .await
             }
+            // Management-plane RPCs that the heartbeat listener normally
+            // answers — re-served here so a node mid-workflow doesn't look
+            // offline to other nodes running mesh-checks or owner-key
+            // resolution. Anything else (Invite*, CancelInvite,
+            // RetryWorkflow, ListPackages, RequestMemberParty) still falls
+            // through to "Unsupported" since the workflow doesn't carry the
+            // context needed to handle them — peers retry once this node
+            // completes and the heartbeat listener resumes.
+            MessageType::ListPeers => self.handle_list_peers().await,
+            MessageType::RequestOwnerKeys => self.handle_request_owner_keys(message.payload).await,
             _ => {
                 tracing::warn!("Unhandled message type: {:?}", message.msg_type);
                 Message::new(MessageType::Error, b"Unsupported message type".to_vec())
@@ -450,6 +467,48 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         self.workflow_state.peer_completed(peer_id).await;
 
         Ok(Message::new_empty(MessageType::Ack))
+    }
+
+    /// Mirror of the heartbeat listener's `ListPeers` handler: returns a
+    /// JSON array of this node's known peer participant_ids. Lets a peer
+    /// mid-workflow keep answering mesh-checks from other coordinators
+    /// (the workflow's `NoiseServer` is bound to the same port the
+    /// heartbeat would otherwise serve).
+    async fn handle_list_peers(&self) -> Message {
+        let payload = match self.db.get_all_peers().await {
+            Ok(peers) => {
+                let ids: Vec<String> = peers
+                    .into_iter()
+                    .map(|p| p.participant_id.to_string())
+                    .collect();
+                serde_json::to_vec(&ids).unwrap_or_else(|_| b"[]".to_vec())
+            }
+            Err(e) => {
+                tracing::error!("Failed to list peers from workflow noise server: {e}");
+                b"[]".to_vec()
+            }
+        };
+        Message::new(MessageType::PeerList, payload)
+    }
+
+    /// Mirror of the heartbeat listener's `RequestOwnerKeys` handler.
+    /// Lets a peer mid-workflow answer owner-key queries from other nodes
+    /// (e.g. parties resolve after onboarding) instead of looking offline.
+    async fn handle_request_owner_keys(&self, payload: Vec<u8>) -> Message {
+        let requested_party_ids: Vec<String> = serde_json::from_slice(&payload).unwrap_or_default();
+        let payload = match crate::server::list_my_owner_keys(
+            &self.node_config,
+            &requested_party_ids,
+        )
+        .await
+        {
+            Ok(data) => data,
+            Err(e) => {
+                tracing::error!("Failed to list owner keys from workflow noise server: {e}");
+                b"[]".to_vec()
+            }
+        };
+        Message::new(MessageType::OwnerKeys, payload)
     }
 
     /// Handle a peer-initiated decline of an outstanding invitation. Fails
