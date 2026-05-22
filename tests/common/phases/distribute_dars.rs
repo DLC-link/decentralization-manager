@@ -182,13 +182,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(240),
             |f, _| {
                 Box::pin(async move {
-                    probe_workflow_status(
-                        &*f,
-                        f.p1.http,
-                        "/dars/distribute/status",
-                        "dars/distribute",
-                    )
-                    .await
+                    probe_workflow_status(&*f, f.p1.http, "Dars", "dars/distribute").await
                 })
             },
         )

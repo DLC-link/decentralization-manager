@@ -92,9 +92,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             "kick workflow reaches completed",
             Duration::from_secs(240),
             |f, _| {
-                Box::pin(async move {
-                    probe_workflow_status(&*f, f.p1.http, "/kick/status", "kick").await
-                })
+                Box::pin(async move { probe_workflow_status(&*f, f.p1.http, "Kick", "kick").await })
             },
         )
         .then(

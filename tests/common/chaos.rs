@@ -36,7 +36,12 @@ pub fn fresh_prefix(label: &str) -> String {
 /// take a few seconds to re-converge across all three nodes. We retry a
 /// handful of times before giving up, since this is a precondition rather
 /// than the actual property under test.
-pub async fn post_onboarding(f: &Fixture, prefix: &str) -> anyhow::Result<()> {
+/// Returns the freshly-minted `instance_name` from the server response so
+/// callers can address the new run via `/workflows/{instance_name}/*`. The
+/// per-kind status endpoints were dropped when multi-instance workflows
+/// landed, so the instance_name is the only handle a test has on its own
+/// run.
+pub async fn post_onboarding(f: &Fixture, prefix: &str) -> anyhow::Result<String> {
     let req = json!({
         "party_id_prefix": prefix,
         "peer_ids": [&f.p2.participant_id, &f.p3.participant_id],
@@ -48,10 +53,16 @@ pub async fn post_onboarding(f: &Fixture, prefix: &str) -> anyhow::Result<()> {
             .await
             .context("POST /onboarding (chaos)")?;
         if status.is_success() {
-            // Parse the body to validate JSON shape, mirroring post_json.
-            let _: Value = serde_json::from_str(&body)
+            let parsed: Value = serde_json::from_str(&body)
                 .with_context(|| format!("deserialize POST /onboarding response: {body}"))?;
-            return Ok(());
+            let instance_name = parsed
+                .get("instance_name")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .with_context(|| {
+                    format!("POST /onboarding response missing instance_name: {body}")
+                })?;
+            return Ok(instance_name);
         }
         // Two retryable 4xx classes:
         //   422 = peer-mesh pre-flight not yet converged after a chaos

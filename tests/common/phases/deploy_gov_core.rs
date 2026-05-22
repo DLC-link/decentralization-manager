@@ -310,7 +310,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(240),
             |f, _| {
                 Box::pin(async move {
-                    probe_workflow_status(&*f, f.p1.http, "/contracts/status", "contracts").await
+                    probe_workflow_status(&*f, f.p1.http, "Contracts", "contracts").await
                 })
             },
         )

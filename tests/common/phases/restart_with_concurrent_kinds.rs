@@ -12,61 +12,65 @@ use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use serde_json::{Value, json};
 
 use crate::common::{
-    Fixture, chaos, db, invitations::post_accept_invitation, processes,
-    types::PendingInvitationsResponse,
+    Fixture, chaos, db,
+    invitations::post_accept_invitation,
+    processes,
+    types::{PendingInvitationsResponse, WorkflowRunsResponse},
 };
 
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     chaos::ensure_nodes_healthy(f).await?;
 
     // Defensive: an earlier chaos phase that crashed/respawned P1 mid-flight
-    // can leave dars_state pinned to InProgress with no task driving it
-    // forward yet (recover_in_progress_workflows re-hydrates from the DB row,
-    // and there is a brief window after respawn where status=InProgress but
-    // abort_handle=None — /dars/cancel returns 409 "still initializing" in
-    // that window, and the staleness watchdog hasn't yet flipped the row to
-    // Failed). Poll until the API reports any non-InProgress status, retrying
-    // the cancel each iteration. Bails after the deadline so the test fails
-    // here with a clear message rather than later with a confusing 409.
-    #[derive(serde::Deserialize, Debug)]
-    struct DarsStatus {
-        #[serde(default)]
-        status: Option<String>,
-    }
+    // can leave a Dars coordinator row pinned to InProgress with no task
+    // driving it forward (recover_in_progress_workflows re-hydrates from the
+    // DB row; there is a brief window after respawn where the row is
+    // InProgress but `abort_handle=None`, so `/workflows/{id}/cancel` returns
+    // 409 "still initializing"). Loop until every InProgress Dars coordinator
+    // run on P1 is gone, cancelling each by instance_name on every pass.
     let cancel_deadline = Duration::from_secs(120);
     let cancel_started = std::time::Instant::now();
     loop {
-        let in_progress = match f
-            .get_json::<DarsStatus>(f.p1.http, "/dars/distribute/status")
-            .await
-        {
-            Ok(s) => matches!(s.status.as_deref(), Some("inprogress" | "InProgress")),
-            // Transient HTTP failure (e.g., respawn settle) — retry until deadline.
-            Err(_) => true,
-        };
-        if !in_progress {
+        let runs: WorkflowRunsResponse = f.get_json(f.p1.http, "/workflows").await?;
+        let stuck: Vec<String> = runs
+            .runs
+            .iter()
+            .filter(|w| {
+                w.kind == "Dars"
+                    && w.role == "Coordinator"
+                    && matches!(w.status.as_str(), "inprogress" | "InProgress")
+            })
+            .map(|w| w.instance_name.clone())
+            .collect();
+        if stuck.is_empty() {
             break;
         }
         if cancel_started.elapsed() >= cancel_deadline {
             anyhow::bail!(
-                "G9 pre-test cleanup: dars_state stuck at InProgress on P1 after {cancel_deadline:?}; \
-                 stale recovery never settled and cancel never landed"
+                "G9 pre-test cleanup: {} Dars coordinator run(s) still InProgress on P1 after \
+                 {cancel_deadline:?}; stale recovery never settled and cancel never landed",
+                stuck.len()
             );
         }
-        chaos::say(
-            "G9",
-            "cancelling stale in-progress Dars (will retry until cleared)",
-        );
-        let _ = f
-            .post_expect_status(f.p1.http, "/dars/cancel", &json!({}))
-            .await;
+        for instance in &stuck {
+            chaos::say(
+                "G9",
+                &format!("cancelling stale in-progress Dars run {instance}"),
+            );
+            let _ = f
+                .post_expect_status(
+                    f.p1.http,
+                    &format!("/workflows/{instance}/cancel"),
+                    &json!({}),
+                )
+                .await;
+        }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 
     let prefix = chaos::fresh_prefix("concurrent-kinds");
-    let onboarding_instance = format!("{prefix}-creation");
     chaos::say("G9", &format!("starting onboarding with prefix {prefix}"));
-    chaos::post_onboarding(f, &prefix).await?;
+    let onboarding_instance = chaos::post_onboarding(f, &prefix).await?;
 
     chaos::say("G9", "starting parallel DARs distribute");
     let manifest_dir = env!("CARGO_MANIFEST_DIR");

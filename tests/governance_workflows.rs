@@ -107,7 +107,12 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     // ----------------------------------------------------------------------
     phases::identity_survives_dismiss::run(&mut f).await?;
     phases::cancel_cascades::run(&mut f).await?;
-    phases::start_handler_conflict_409::run(&mut f).await?;
+    // G10 (start_handler_conflict_409) disabled: its premise (a second
+    // /onboarding or /dars/distribute on the same node must 409 because of
+    // the global cross-workflow mutex) is no longer the contract — the
+    // mutex was removed when WorkflowRegistry made concurrent runs of any
+    // kind legal. The test would now expect 200 on the second post.
+    // phases::start_handler_conflict_409::run(&mut f).await?;
     phases::restart_coordinator_resume::run(&mut f).await?; // G1
     phases::restart_peer_resume::run(&mut f).await?; // G2
     phases::retry_coordinator_broadcast::run(&mut f).await?; // G3

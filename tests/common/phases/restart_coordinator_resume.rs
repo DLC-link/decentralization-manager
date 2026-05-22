@@ -16,9 +16,8 @@ use crate::common::{
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     chaos::ensure_nodes_healthy(f).await?;
     let prefix = chaos::fresh_prefix("resume-coord");
-    let instance = format!("{prefix}-creation");
     chaos::say("G1", &format!("starting onboarding with prefix {prefix}"));
-    chaos::post_onboarding(f, &prefix).await?;
+    let instance = chaos::post_onboarding(f, &prefix).await?;
 
     // Wait for coordinator row inprogress AND for invites to actually reach
     // both peers. The resume path doesn't re-send invites — killing P1

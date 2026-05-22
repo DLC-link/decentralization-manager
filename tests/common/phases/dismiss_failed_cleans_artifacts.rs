@@ -13,9 +13,8 @@ use crate::common::{Fixture, chaos, db, invitations::post_accept_invitation, pro
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     chaos::ensure_nodes_healthy(f).await?;
     let prefix = chaos::fresh_prefix("dismiss-fail");
-    let instance = format!("{prefix}-creation");
     chaos::say("G4", &format!("starting onboarding with prefix {prefix}"));
-    chaos::post_onboarding(f, &prefix).await?;
+    let instance = chaos::post_onboarding(f, &prefix).await?;
 
     let p2_inv =
         chaos::wait_for_invite(f, f.p2.http, "Onboarding", Duration::from_secs(60)).await?;
@@ -89,12 +88,11 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
 
     // Fresh onboarding of same kind should now succeed.
     let next_prefix = chaos::fresh_prefix("dismiss-fresh");
-    let next_instance = format!("{next_prefix}-creation");
     chaos::say(
         "G4",
         &format!("starting fresh onboarding {next_prefix} to prove (kind, role) slot freed"),
     );
-    chaos::post_onboarding(f, &next_prefix).await?;
+    let next_instance = chaos::post_onboarding(f, &next_prefix).await?;
 
     // Drive to completion.
     let next_p2 =

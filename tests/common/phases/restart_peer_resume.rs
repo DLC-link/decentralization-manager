@@ -12,9 +12,8 @@ use crate::common::{Fixture, chaos, db, invitations::post_accept_invitation, pro
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     chaos::ensure_nodes_healthy(f).await?;
     let prefix = chaos::fresh_prefix("resume-peer");
-    let instance = format!("{prefix}-creation");
     chaos::say("G2", &format!("starting onboarding with prefix {prefix}"));
-    chaos::post_onboarding(f, &prefix).await?;
+    let instance = chaos::post_onboarding(f, &prefix).await?;
 
     // Both peers accept up front (so P2 is mid-flight when we kill it).
     let p2_inv =

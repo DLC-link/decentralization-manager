@@ -115,6 +115,15 @@ jobs:
       - name: Run integration tests
         run: ./integration-tests/run.sh
 
+      - name: Upload participant logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: participant-logs
+          path: /tmp/dpm-it-*/participant-*/stderr.log
+          retention-days: 3
+          if-no-files-found: warn
+
   cargo-audit:
     name: Cargo Audit
     runs-on: ubuntu-latest

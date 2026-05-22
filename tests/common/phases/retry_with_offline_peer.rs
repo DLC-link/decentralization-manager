@@ -18,9 +18,8 @@ use crate::common::{
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     chaos::ensure_nodes_healthy(f).await?;
     let prefix = chaos::fresh_prefix("retry-offline");
-    let instance = format!("{prefix}-creation");
     chaos::say("P2", &format!("starting onboarding with prefix {prefix}"));
-    chaos::post_onboarding(f, &prefix).await?;
+    let instance = chaos::post_onboarding(f, &prefix).await?;
 
     let p2_inv =
         chaos::wait_for_invite(f, f.p2.http, "Onboarding", Duration::from_secs(60)).await?;

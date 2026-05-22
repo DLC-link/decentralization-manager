@@ -1,6 +1,6 @@
 use anyhow::Context;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Serialize, de::DeserializeOwned};
 
 use super::{Fixture, types::WorkflowRunsResponse};
 
@@ -131,26 +131,33 @@ impl Fixture {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct WorkflowStatusResponse {
-    #[serde(default)]
-    status: Option<String>,
-    #[serde(default)]
-    error: Option<String>,
-}
-
+/// Probe `/workflows` until a coordinator-side run of `kind` reaches a
+/// terminal state. The per-kind `/{kind}/status` endpoints were dropped in
+/// favour of the generic `/workflows[/{instance_name}]` endpoints when
+/// concurrent multi-instance workflows landed — `kind` here is the
+/// `WorkflowKind` JSON enum value (e.g. "Onboarding", "Kick", "Contracts",
+/// "Dars"). Picks the most recently-updated coordinator run of that kind so
+/// stale terminal rows from earlier scenario phases don't pin the probe.
 pub async fn probe_workflow_status(
     f: &Fixture,
     port: u16,
-    path: &str,
+    kind: &str,
     label: &str,
 ) -> Option<anyhow::Result<()>> {
-    let s: WorkflowStatusResponse = f.get_json(port, path).await.ok()?;
-    match s.status.as_deref() {
-        Some("completed") | Some("Completed") => Some(Ok(())),
-        Some("failed") | Some("Failed") => Some(Err(anyhow::anyhow!(
+    let r: WorkflowRunsResponse = f.get_json(port, "/workflows").await.ok()?;
+    // Pick the latest coordinator run of this kind. `/workflows` returns runs
+    // in DB insertion order; for a one-workflow-at-a-time test scenario the
+    // last match is the one this phase just started.
+    let run = r
+        .runs
+        .iter()
+        .rev()
+        .find(|w| w.kind == kind && w.role == "Coordinator")?;
+    match run.status.as_str() {
+        "completed" | "Completed" => Some(Ok(())),
+        "failed" | "Failed" => Some(Err(anyhow::anyhow!(
             "{label} failed: {}",
-            s.error.unwrap_or_else(|| "unknown".into())
+            run.error.clone().unwrap_or_else(|| "unknown".into())
         ))),
         _ => None,
     }
