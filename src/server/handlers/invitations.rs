@@ -18,6 +18,24 @@ use crate::{
     workflow::{ContractsStep, DarsStep, KickStep, OnboardingStep, state::WorkflowStep},
 };
 
+/// Best-effort: flip a peer-side `workflow_runs` row to Failed with a
+/// caller-supplied reason. Used by `accept_invitation` when the peer-job
+/// channel is closed so the feed doesn't keep a stuck InProgress row.
+async fn mark_peer_run_failed(
+    db: &sqlx::SqlitePool,
+    instance_name: &str,
+    reason: &str,
+) -> Result<(), anyhow::Error> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let mut tx = db.begin_transaction().await?;
+    tx.set_workflow_run_status(instance_name, WorkflowProgress::Failed, Some(reason), now)
+        .await?;
+    Commitable::commit(tx).await
+}
+
 async fn delete_persisted_invitation(data: &web::Data<AppState>, id: &str) {
     match data.db.begin_transaction().await {
         Ok(mut tx) => {
@@ -205,11 +223,24 @@ pub async fn accept_invitation(
         InvitationType::Contracts => &data.contracts_peer_sender,
         InvitationType::Dars => &data.dars_peer_sender,
     };
-    if sender.send(job).is_err() {
+    if let Err(send_err) = sender.send(job) {
+        // Recover the instance_name we moved into the PeerJob and flip the
+        // just-persisted peer row to Failed; otherwise the feed would show a
+        // permanently-stuck "InProgress" run with no listener to finalize it.
+        let stuck_instance = send_err.0.instance_name;
         tracing::error!(
-            "Peer listener channel for {:?} closed; cannot dispatch invite",
+            "Peer listener channel for {:?} closed; cannot dispatch invite for {stuck_instance}",
             invitation.invitation_type
         );
+        if let Err(e) = mark_peer_run_failed(
+            &data.db,
+            &stuck_instance,
+            "Peer listener channel closed before the job could be dispatched",
+        )
+        .await
+        {
+            tracing::warn!("Failed to mark stuck peer run {stuck_instance} as Failed: {e:#}");
+        }
         return HttpResponse::InternalServerError().json(serde_json::json!({
             "error": "Peer listener unavailable; restart the server"
         }));

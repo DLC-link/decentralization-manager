@@ -43,6 +43,15 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
+/// Suffix for an `instance_name`: the current second (so runs are sortable
+/// and the operator can read the start time from the id) followed by 8
+/// random hex chars so two workflows of the same kind+prefix started inside
+/// the same second cannot collide on `WorkflowRegistry::insert_new`.
+fn instance_suffix() -> String {
+    let uuid = uuid::Uuid::new_v4().simple().to_string();
+    format!("{}-{}", now_secs(), &uuid[..8])
+}
+
 /// Insert the coordinator-side `workflow_runs` row for a freshly-started run.
 /// The schema lets any number of InProgress runs sit side-by-side (the old
 /// per-(kind, role) unique index was dropped in migration 000008); a
@@ -257,8 +266,11 @@ pub async fn start_kick(
 
     // Compute instance name + config up-front so the persisted workflow_runs row
     // can carry the same identifier the coordinator task will use.
-    let timestamp = now_secs();
-    let instance_name = format!("{}-kick-{timestamp}", decentralized_party_id.prefix);
+    let instance_name = format!(
+        "{}-kick-{}",
+        decentralized_party_id.prefix,
+        instance_suffix()
+    );
     let kick_config = workflow::KickConfig::new(
         decentralized_party_id.clone(),
         participant_id.clone(),
@@ -555,12 +567,12 @@ pub async fn start_onboarding(
 
     // Build instance + config up-front so the persisted workflow_runs row
     // can carry the same identifier as the spawned coordinator task. The
-    // timestamp suffix lets two onboardings of the same prefix coexist
-    // (rare but possible if the first failed and the operator retries).
+    // `instance_suffix` mix of seconds + random hex lets two onboardings of
+    // the same prefix coexist (rare but possible if the first failed and the
+    // operator retries) without colliding on the registry key.
     let party_id_prefix = body.party_id_prefix.clone();
     let peer_ids = body.peer_ids.clone();
-    let timestamp = now_secs();
-    let instance_name = format!("{party_id_prefix}-creation-{timestamp}");
+    let instance_name = format!("{party_id_prefix}-creation-{}", instance_suffix());
     let onboarding_config =
         workflow::OnboardingConfig::new(party_id_prefix.clone(), instance_name.clone());
 
@@ -1002,10 +1014,10 @@ pub async fn start_contracts(
     }
 
     // Create contracts config from request
-    let timestamp = now_secs();
     let instance_name = format!(
-        "{}-contracts-{timestamp}",
-        body.decentralized_party_id.prefix
+        "{}-contracts-{}",
+        body.decentralized_party_id.prefix,
+        instance_suffix()
     );
     let contracts_config = workflow::ContractsConfig::new(
         body.decentralized_party_id.clone(),
@@ -1240,8 +1252,7 @@ pub async fn start_dars(
     }
 
     // Create DARs config from request
-    let timestamp = now_secs();
-    let instance_name = format!("dars-distribute-{timestamp}");
+    let instance_name = format!("dars-distribute-{}", instance_suffix());
     let dars_config = workflow::DarsConfig {
         dar_files: body.dar_files.clone(),
         instance_name: instance_name.clone(),
@@ -1567,10 +1578,13 @@ pub async fn cancel_workflow(
     })
 }
 
-/// Get a single workflow run by instance_name. Surfaces both the durable
-/// `workflow_runs` row and (when present) the in-memory `error` from the
-/// matching registry entry so the dialog can show why a fresh failure
-/// happened before the row is fully written.
+/// Get a single workflow run by instance_name. Returns the persisted
+/// `workflow_runs` row enriched with `coordinator_name` (joined from the
+/// peers table) and `prefix` / `participants` lifted out of `config_json`.
+/// The DB row is the canonical source: the spawned task writes a terminal
+/// status to it immediately after flipping the in-memory registry entry,
+/// so a poll that arrives between the two updates just sees the previous
+/// state and picks up the new one on the next tick.
 #[utoipa::path(
     tag = "Workflows",
     params(("instance_name" = String, Path, description = "Workflow run identifier")),
