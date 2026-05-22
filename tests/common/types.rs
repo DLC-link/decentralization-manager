@@ -81,6 +81,11 @@ pub struct ContractsQueryResponse {
 pub struct PendingInvitation {
     pub id: String,
     pub invitation_type: String,
+    /// Onboarding-only: prefix the coordinator chose. Lets a test that
+    /// expects multiple concurrent Onboarding invites disambiguate which
+    /// one is which without having to derive it from the coordinator pubkey.
+    #[serde(default)]
+    pub prefix: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

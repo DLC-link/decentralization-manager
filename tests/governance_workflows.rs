@@ -128,5 +128,9 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     // phases::restart_with_concurrent_kinds::run(&mut f).await?; // G9
     phases::failed_step_bounded_time::run(&mut f).await?; // P1
     phases::retry_with_offline_peer::run(&mut f).await?; // P2
+    // G11: three coordinators in parallel, every node accepts the other
+    // two — exercises the cross-acceptance scenario the concurrent
+    // workflows refactor is supposed to enable.
+    phases::concurrent_three_coordinators::run(&mut f).await?;
     Ok(())
 }
