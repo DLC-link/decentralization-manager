@@ -326,6 +326,7 @@ pub async fn start_kick(
     let listener_pause_count = data.noise_listener_pause_count.clone();
     let listener_notify = data.noise_listener_notify.clone();
     let last_seen = data.last_seen.clone();
+    let pending_invitations = data.pending_invitations.clone();
     let registry = data.workflow_registries.kick.clone();
     let instance_for_task = instance_name.clone();
 
@@ -352,6 +353,7 @@ pub async fn start_kick(
         let result = workflow::start_coordinator(
             config,
             db.clone(),
+            pending_invitations,
             workflow::WorkflowType::Kick,
             None, // No onboarding config
             Some(kick_config),
@@ -642,6 +644,7 @@ pub async fn start_onboarding(
     let party_credentials = data.party_credentials.clone();
     let auth_lock = data.auth.clone();
     let last_seen = data.last_seen.clone();
+    let pending_invitations = data.pending_invitations.clone();
     let registry = data.workflow_registries.onboarding.clone();
     let instance_for_task = instance_name.clone();
 
@@ -669,6 +672,7 @@ pub async fn start_onboarding(
         let result = workflow::start_coordinator(
             config.clone(),
             db.clone(),
+            pending_invitations,
             workflow::WorkflowType::Onboarding,
             Some(onboarding_config),
             None, // No kick config
@@ -1089,6 +1093,7 @@ pub async fn start_contracts(
     let listener_notify = data.noise_listener_notify.clone();
     let party_credentials = data.party_credentials.clone();
     let last_seen = data.last_seen.clone();
+    let pending_invitations = data.pending_invitations.clone();
     let registry = data.workflow_registries.contracts.clone();
     let instance_for_task = instance_name_for_run.clone();
 
@@ -1115,6 +1120,7 @@ pub async fn start_contracts(
         let result = workflow::start_coordinator(
             config.clone(),
             db.clone(),
+            pending_invitations,
             workflow::WorkflowType::Contracts,
             None, // No onboarding config
             None, // No kick config
@@ -1300,6 +1306,7 @@ pub async fn start_dars(
     let listener_pause_count = data.noise_listener_pause_count.clone();
     let listener_notify = data.noise_listener_notify.clone();
     let last_seen = data.last_seen.clone();
+    let pending_invitations = data.pending_invitations.clone();
     let registry = data.workflow_registries.dars.clone();
     let instance_for_task = instance_name.clone();
 
@@ -1331,6 +1338,7 @@ pub async fn start_dars(
         let result = workflow::start_coordinator(
             config,
             db.clone(),
+            pending_invitations,
             workflow::WorkflowType::Dars,
             None, // No onboarding config
             None, // No kick config
@@ -1893,6 +1901,7 @@ pub async fn retry_workflow(
         data.noise_listener_pause_count.clone(),
         data.noise_listener_notify.clone(),
         data.auth.clone(),
+        data.pending_invitations.clone(),
         data.last_seen.clone(),
     )
     .await;

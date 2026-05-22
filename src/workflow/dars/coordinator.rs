@@ -18,6 +18,7 @@ pub async fn start_coordinator(
     network_config: NetworkConfig,
     config: DarsConfig,
     db: sqlx::SqlitePool,
+    pending_invitations: Arc<tokio::sync::RwLock<Vec<crate::server::PendingInvitation>>>,
     last_seen: LastSeen,
 ) -> Result {
     tracing::info!("Initializing Noise server for DARs upload...");
@@ -34,6 +35,7 @@ pub async fn start_coordinator(
         node_config.clone(),
         network_config,
         db,
+        pending_invitations,
         config.instance_name.clone(),
         DarsStep::WaitingForPeers,
         Some(excluded),

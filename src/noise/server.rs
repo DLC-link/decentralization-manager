@@ -8,7 +8,7 @@ use std::{
 use hyper::{Body, Request, Response, StatusCode};
 use secp256k1::PublicKey;
 use sqlx::SqlitePool;
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, sync::RwLock};
 use tokio_noise::handshakes::nn_psk2::Responder;
 
 use crate::{
@@ -20,7 +20,7 @@ use crate::{
     },
     participant_id::CantonId,
     server::{
-        WorkflowProgress,
+        InvitationType, PendingInvitation, WorkflowProgress,
         peer_status::{LastSeen, bump},
     },
     workflow::{WorkflowState, state::WorkflowStep},
@@ -49,11 +49,16 @@ pub struct NoiseServer<S: WorkflowStep + 'static> {
     workflow_state: Arc<WorkflowState<S>>,
     last_seen: LastSeen,
     /// SQLite pool kept around so the server can answer management-plane
-    /// queries (currently `ListPeers`) while the workflow protocol is in
-    /// flight on the same port. Without this, a peer mid-workflow would
-    /// reject mesh-checks from other coordinators with "Unsupported message
-    /// type" and look offline.
+    /// queries (`ListPeers`, `RequestOwnerKeys`, plus invite recording)
+    /// while the workflow protocol is in flight on the same port. Without
+    /// this, a peer mid-workflow would reject mesh-checks and drop incoming
+    /// invites for other workflows on the floor.
     db: SqlitePool,
+    /// Shared in-memory list of pending invitations. The workflow server
+    /// appends to this when it receives an `InviteX` message so that the
+    /// operator's notifications feed surfaces concurrent invites that
+    /// arrive while another workflow is holding the port.
+    pending_invitations: Arc<RwLock<Vec<PendingInvitation>>>,
     _p: PhantomData<S>,
 }
 
@@ -74,6 +79,7 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         node_config: NodeConfig,
         network_config: NetworkConfig,
         db: SqlitePool,
+        pending_invitations: Arc<RwLock<Vec<PendingInvitation>>>,
         instance_name: String,
         initial_step: S,
         exclude_participants: Option<Vec<String>>,
@@ -187,6 +193,7 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
             workflow_state,
             last_seen,
             db,
+            pending_invitations,
             _p: PhantomData,
         })
     }
@@ -330,14 +337,28 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
             }
             // Management-plane RPCs that the heartbeat listener normally
             // answers — re-served here so a node mid-workflow doesn't look
-            // offline to other nodes running mesh-checks or owner-key
-            // resolution. Anything else (Invite*, CancelInvite,
-            // RetryWorkflow, ListPackages, RequestMemberParty) still falls
-            // through to "Unsupported" since the workflow doesn't carry the
-            // context needed to handle them — peers retry once this node
-            // completes and the heartbeat listener resumes.
+            // offline to other nodes running mesh-checks, owner-key
+            // resolution, or inviting it into a new concurrent workflow.
+            // Anything else (CancelInvite, RetryWorkflow, ListPackages,
+            // RequestMemberParty) still falls through to "Unsupported".
             MessageType::ListPeers => self.handle_list_peers().await,
             MessageType::RequestOwnerKeys => self.handle_request_owner_keys(message.payload).await,
+            MessageType::InviteOnboarding => {
+                self.handle_invite(InvitationType::Onboarding, &peer_id, message.payload)
+                    .await
+            }
+            MessageType::InviteKick => {
+                self.handle_invite(InvitationType::Kick, &peer_id, message.payload)
+                    .await
+            }
+            MessageType::InviteContracts => {
+                self.handle_invite(InvitationType::Contracts, &peer_id, message.payload)
+                    .await
+            }
+            MessageType::InviteDars => {
+                self.handle_invite(InvitationType::Dars, &peer_id, message.payload)
+                    .await
+            }
             _ => {
                 tracing::warn!("Unhandled message type: {:?}", message.msg_type);
                 Message::new(MessageType::Error, b"Unsupported message type".to_vec())
@@ -489,6 +510,40 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
             }
         };
         Message::new(MessageType::PeerList, payload)
+    }
+
+    /// Mirror of the heartbeat listener's `InviteX` handler: record the
+    /// invitation in the local pending-invitations list (DB + in-memory)
+    /// so the operator sees it even if this node is mid-workflow. The
+    /// sender's pubkey is looked up from `peer_keys` since the message
+    /// itself doesn't carry it on the wire.
+    async fn handle_invite(
+        &self,
+        invitation_type: InvitationType,
+        peer_id: &CantonId,
+        payload: Vec<u8>,
+    ) -> Message {
+        tracing::info!(
+            "Received {invitation_type} invite mid-workflow, recording as pending invitation"
+        );
+        let Some(pub_key) = self.peer_keys.get(&peer_id.to_string()) else {
+            tracing::warn!(
+                "Received {invitation_type} invite from unknown peer {peer_id}; cannot key the \
+                 pending invitation, dropping"
+            );
+            return Message::new_empty(MessageType::Ack);
+        };
+        let coordinator_pubkey_hex = hex::encode(pub_key.serialize());
+        let meta = crate::server::parse_invite_meta(invitation_type, &payload);
+        crate::server::record_invitation_for(
+            &self.db,
+            &self.pending_invitations,
+            invitation_type,
+            &coordinator_pubkey_hex,
+            meta,
+        )
+        .await;
+        Message::new_empty(MessageType::Ack)
     }
 
     /// Mirror of the heartbeat listener's `RequestOwnerKeys` handler.

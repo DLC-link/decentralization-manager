@@ -100,6 +100,7 @@ pub async fn start_coordinator(
     network_config: NetworkConfig,
     onboarding_config: OnboardingConfig,
     db: SqlitePool,
+    pending_invitations: Arc<tokio::sync::RwLock<Vec<crate::server::PendingInvitation>>>,
     last_seen: LastSeen,
 ) -> Result<CantonId> {
     tracing::info!("Initializing Noise server...");
@@ -108,6 +109,7 @@ pub async fn start_coordinator(
         node_config.clone(),
         network_config.clone(),
         db.clone(),
+        pending_invitations,
         onboarding_config.instance_name.clone(),
         OnboardingStep::WaitingForPeers,
         None, // No excluded participants

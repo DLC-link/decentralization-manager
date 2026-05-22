@@ -25,6 +25,7 @@ pub async fn start_coordinator(
     network_config: NetworkConfig,
     kick_config: KickConfig,
     db: sqlx::SqlitePool,
+    pending_invitations: Arc<tokio::sync::RwLock<Vec<crate::server::PendingInvitation>>>,
     last_seen: LastSeen,
 ) -> Result {
     tracing::info!("Initializing Noise server...");
@@ -36,6 +37,7 @@ pub async fn start_coordinator(
         node_config.clone(),
         network_config.clone(),
         db.clone(),
+        pending_invitations,
         kick_config.instance_name.clone(),
         KickStep::WaitingForPeers,
         Some(excluded_participants),

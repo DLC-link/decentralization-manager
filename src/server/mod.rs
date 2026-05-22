@@ -157,7 +157,7 @@ struct WorkflowTriggers {
     dars_peer_sender: mpsc::UnboundedSender<PeerJob>,
 }
 
-enum InvitationMeta {
+pub(crate) enum InvitationMeta {
     None,
     Onboarding(OnboardingInvitePayload),
     Dars(DarsInvitePayload),
@@ -193,6 +193,7 @@ async fn recover_in_progress_workflows(
     listener_pause_count: Arc<AtomicUsize>,
     listener_notify: Arc<Notify>,
     auth: Arc<RwLock<Option<WorkflowAuth>>>,
+    pending_invitations: Arc<RwLock<Vec<PendingInvitation>>>,
     last_seen: LastSeen,
     onboarding_peer_sender: mpsc::UnboundedSender<PeerJob>,
     kick_peer_sender: mpsc::UnboundedSender<PeerJob>,
@@ -225,6 +226,7 @@ async fn recover_in_progress_workflows(
                     listener_pause_count.clone(),
                     listener_notify.clone(),
                     auth.clone(),
+                    pending_invitations.clone(),
                     last_seen.clone(),
                 )
                 .await;
@@ -257,6 +259,7 @@ pub(crate) async fn respawn_coordinator(
     listener_pause_count: Arc<AtomicUsize>,
     listener_notify: Arc<Notify>,
     auth: Arc<RwLock<Option<WorkflowAuth>>>,
+    pending_invitations: Arc<RwLock<Vec<PendingInvitation>>>,
     last_seen: LastSeen,
 ) {
     let instance = run.instance_name.clone();
@@ -294,6 +297,7 @@ pub(crate) async fn respawn_coordinator(
                 instance.clone(),
                 state.clone(),
                 registries.onboarding.clone(),
+                pending_invitations.clone(),
                 listener_pause_count,
                 listener_notify,
                 last_seen,
@@ -321,6 +325,7 @@ pub(crate) async fn respawn_coordinator(
                 instance.clone(),
                 state.clone(),
                 registries.kick.clone(),
+                pending_invitations.clone(),
                 listener_pause_count,
                 listener_notify,
                 last_seen,
@@ -352,6 +357,7 @@ pub(crate) async fn respawn_coordinator(
                 instance.clone(),
                 state.clone(),
                 registries.contracts.clone(),
+                pending_invitations.clone(),
                 listener_pause_count,
                 listener_notify,
                 auth_snapshot,
@@ -380,6 +386,7 @@ pub(crate) async fn respawn_coordinator(
                 instance.clone(),
                 state.clone(),
                 registries.dars.clone(),
+                pending_invitations,
                 listener_pause_count,
                 listener_notify,
                 last_seen,
@@ -397,6 +404,7 @@ async fn spawn_onboarding_resume(
     instance: String,
     state: Arc<HttpWorkflowState<OnboardingStatus>>,
     registry: Arc<WorkflowRegistry<OnboardingStatus>>,
+    pending_invitations: Arc<RwLock<Vec<PendingInvitation>>>,
     listener_pause_count: Arc<AtomicUsize>,
     listener_notify: Arc<Notify>,
     last_seen: LastSeen,
@@ -405,6 +413,7 @@ async fn spawn_onboarding_resume(
     let result = workflow::start_coordinator(
         config,
         db.clone(),
+        pending_invitations,
         WorkflowType::Onboarding,
         Some(onboarding_config),
         None,
@@ -453,6 +462,7 @@ async fn spawn_kick_resume(
     instance: String,
     state: Arc<HttpWorkflowState<KickStatus>>,
     registry: Arc<WorkflowRegistry<KickStatus>>,
+    pending_invitations: Arc<RwLock<Vec<PendingInvitation>>>,
     listener_pause_count: Arc<AtomicUsize>,
     listener_notify: Arc<Notify>,
     last_seen: LastSeen,
@@ -461,6 +471,7 @@ async fn spawn_kick_resume(
     let result = workflow::start_coordinator(
         config,
         db.clone(),
+        pending_invitations,
         WorkflowType::Kick,
         None,
         Some(kick_config),
@@ -504,6 +515,7 @@ async fn spawn_contracts_resume(
     instance: String,
     state: Arc<HttpWorkflowState<WorkflowProgress>>,
     registry: Arc<WorkflowRegistry<WorkflowProgress>>,
+    pending_invitations: Arc<RwLock<Vec<PendingInvitation>>>,
     listener_pause_count: Arc<AtomicUsize>,
     listener_notify: Arc<Notify>,
     auth: Option<WorkflowAuth>,
@@ -513,6 +525,7 @@ async fn spawn_contracts_resume(
     let result = workflow::start_coordinator(
         config,
         db.clone(),
+        pending_invitations,
         WorkflowType::Contracts,
         None,
         None,
@@ -556,6 +569,7 @@ async fn spawn_dars_resume(
     instance: String,
     state: Arc<HttpWorkflowState<WorkflowProgress>>,
     registry: Arc<WorkflowRegistry<WorkflowProgress>>,
+    pending_invitations: Arc<RwLock<Vec<PendingInvitation>>>,
     listener_pause_count: Arc<AtomicUsize>,
     listener_notify: Arc<Notify>,
     last_seen: LastSeen,
@@ -564,6 +578,7 @@ async fn spawn_dars_resume(
     let result = workflow::start_coordinator(
         config,
         db.clone(),
+        pending_invitations,
         WorkflowType::Dars,
         None,
         None,
@@ -674,6 +689,95 @@ async fn set_run_status(
     Commitable::commit(tx).await
 }
 
+/// Shared by the heartbeat listener (in `WorkflowTriggers::record_invitation`)
+/// and the workflow `NoiseServer` (so a node mid-workflow can still record
+/// new invites it receives while its heartbeat listener is paused). Persists
+/// the row in DB and bumps the in-memory list — the receiver is expected to
+/// supply a non-empty `coordinator_pubkey` (callers without one bail
+/// silently, since invites need an identifiable sender).
+pub(crate) async fn record_invitation_for(
+    db: &SqlitePool,
+    pending_invitations: &Arc<RwLock<Vec<PendingInvitation>>>,
+    invitation_type: InvitationType,
+    coordinator_pubkey: &str,
+    meta: InvitationMeta,
+) {
+    let mut prefix = None;
+    let mut participants = Vec::new();
+    let mut dar_filenames = Vec::new();
+    match meta {
+        InvitationMeta::None => {}
+        InvitationMeta::Onboarding(p) => {
+            prefix = Some(p.prefix);
+            participants = p.participants;
+        }
+        InvitationMeta::Dars(p) => {
+            dar_filenames = p.dar_filenames;
+        }
+    }
+    let invitation = PendingInvitation {
+        id: format!(
+            "{}-{}",
+            invitation_type.as_str().to_lowercase(),
+            &coordinator_pubkey[..16]
+        ),
+        invitation_type,
+        coordinator_pubkey: coordinator_pubkey.to_string(),
+        coordinator_name: None,
+        received_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0),
+        prefix,
+        participants,
+        dar_filenames,
+    };
+
+    match db.begin_transaction().await {
+        Ok(mut tx) => {
+            if let Err(e) = tx.upsert_pending_invitation(&invitation).await {
+                tracing::warn!("Failed to persist pending invitation: {e}");
+            } else if let Err(e) = Commitable::commit(tx).await {
+                tracing::warn!("Failed to commit pending invitation: {e}");
+            }
+        }
+        Err(e) => tracing::warn!("Failed to begin tx for pending invitation: {e}"),
+    }
+
+    let mut invitations = pending_invitations.write().await;
+    invitations.retain(|i| i.id != invitation.id);
+    invitations.push(invitation);
+}
+
+/// Parse an `InviteX` payload into the matching `InvitationMeta`. Shared
+/// between the heartbeat listener and the workflow `NoiseServer` so both
+/// surface the same fields (prefix, participants, dar_filenames) on the
+/// recorded `PendingInvitation`.
+pub(crate) fn parse_invite_meta(invitation_type: InvitationType, payload: &[u8]) -> InvitationMeta {
+    if payload.is_empty() {
+        return InvitationMeta::None;
+    }
+    match invitation_type {
+        InvitationType::Onboarding => {
+            match serde_json::from_slice::<OnboardingInvitePayload>(payload) {
+                Ok(p) => InvitationMeta::Onboarding(p),
+                Err(e) => {
+                    tracing::warn!("Onboarding invite payload was unparseable: {e}");
+                    InvitationMeta::None
+                }
+            }
+        }
+        InvitationType::Dars => match serde_json::from_slice::<DarsInvitePayload>(payload) {
+            Ok(p) => InvitationMeta::Dars(p),
+            Err(e) => {
+                tracing::warn!("Dars invite payload was unparseable: {e}");
+                InvitationMeta::None
+            }
+        },
+        _ => InvitationMeta::None,
+    }
+}
+
 impl WorkflowTriggers {
     async fn record_invitation(
         &self,
@@ -681,51 +785,14 @@ impl WorkflowTriggers {
         coordinator_pubkey: &str,
         meta: InvitationMeta,
     ) {
-        let mut prefix = None;
-        let mut participants = Vec::new();
-        let mut dar_filenames = Vec::new();
-        match meta {
-            InvitationMeta::None => {}
-            InvitationMeta::Onboarding(p) => {
-                prefix = Some(p.prefix);
-                participants = p.participants;
-            }
-            InvitationMeta::Dars(p) => {
-                dar_filenames = p.dar_filenames;
-            }
-        }
-        let invitation = PendingInvitation {
-            id: format!(
-                "{}-{}",
-                invitation_type.as_str().to_lowercase(),
-                &coordinator_pubkey[..16]
-            ),
+        record_invitation_for(
+            &self.db,
+            &self.pending_invitations,
             invitation_type,
-            coordinator_pubkey: coordinator_pubkey.to_string(),
-            coordinator_name: None,
-            received_at: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0),
-            prefix,
-            participants,
-            dar_filenames,
-        };
-
-        match self.db.begin_transaction().await {
-            Ok(mut tx) => {
-                if let Err(e) = tx.upsert_pending_invitation(&invitation).await {
-                    tracing::warn!("Failed to persist pending invitation: {e}");
-                } else if let Err(e) = Commitable::commit(tx).await {
-                    tracing::warn!("Failed to commit pending invitation: {e}");
-                }
-            }
-            Err(e) => tracing::warn!("Failed to begin tx for pending invitation: {e}"),
-        }
-
-        let mut invitations = self.pending_invitations.write().await;
-        invitations.retain(|i| i.id != invitation.id);
-        invitations.push(invitation);
+            coordinator_pubkey,
+            meta,
+        )
+        .await;
     }
 
     async fn drop_invitations_from(&self, coordinator_pubkey: &str) {
@@ -1039,6 +1106,7 @@ pub async fn start_server(
         listener_pause_count.clone(),
         listener_notify.clone(),
         app_state.auth.clone(),
+        pending_invitations.clone(),
         last_seen.clone(),
         onboarding_peer_tx.clone(),
         kick_peer_tx.clone(),
@@ -1708,39 +1776,7 @@ async fn handle_incoming_connection(
                             tracing::info!(
                                 "Received {invitation_type} invite, storing as pending invitation"
                             );
-                            let meta = if msg.payload.is_empty() {
-                                InvitationMeta::None
-                            } else {
-                                match invitation_type {
-                                    InvitationType::Onboarding => {
-                                        match serde_json::from_slice::<OnboardingInvitePayload>(
-                                            &msg.payload,
-                                        ) {
-                                            Ok(p) => InvitationMeta::Onboarding(p),
-                                            Err(e) => {
-                                                tracing::warn!(
-                                                    "Onboarding invite payload was unparseable: {e}"
-                                                );
-                                                InvitationMeta::None
-                                            }
-                                        }
-                                    }
-                                    InvitationType::Dars => {
-                                        match serde_json::from_slice::<DarsInvitePayload>(
-                                            &msg.payload,
-                                        ) {
-                                            Ok(p) => InvitationMeta::Dars(p),
-                                            Err(e) => {
-                                                tracing::warn!(
-                                                    "Dars invite payload was unparseable: {e}"
-                                                );
-                                                InvitationMeta::None
-                                            }
-                                        }
-                                    }
-                                    _ => InvitationMeta::None,
-                                }
-                            };
+                            let meta = parse_invite_meta(invitation_type, &msg.payload);
                             if let Some(ref pubkey) = peer_pubkey_hex {
                                 triggers
                                     .record_invitation(invitation_type, pubkey, meta)

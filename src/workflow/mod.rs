@@ -55,11 +55,17 @@ pub struct CoordinatorResult {
     pub created_party_id: Option<CantonId>,
 }
 
-/// Start a coordinator workflow (called when this node initiates the workflow from UI)
+/// Start a coordinator workflow (called when this node initiates the workflow from UI).
+///
+/// `pending_invitations` is plumbed all the way down to the workflow
+/// `NoiseServer` so a node mid-coordinator-workflow can still record
+/// `InviteX` messages sent by other coordinators (other concurrent
+/// workflows) while it holds the noise port.
 #[allow(clippy::too_many_arguments)]
 pub async fn start_coordinator(
     node_config: NodeConfig,
     db: SqlitePool,
+    pending_invitations: Arc<tokio::sync::RwLock<Vec<crate::server::PendingInvitation>>>,
     workflow_type: WorkflowType,
     onboarding_config: Option<OnboardingConfig>,
     kick_config: Option<KickConfig>,
@@ -83,6 +89,7 @@ pub async fn start_coordinator(
                 network_config,
                 config,
                 db,
+                pending_invitations,
                 last_seen,
             )
             .await?;
@@ -100,6 +107,7 @@ pub async fn start_coordinator(
                 config,
                 workflow_auth,
                 db,
+                pending_invitations,
                 last_seen,
             )
             .await?;
@@ -115,6 +123,7 @@ pub async fn start_coordinator(
                 network_config,
                 config,
                 db,
+                pending_invitations,
                 last_seen,
             )
             .await?;
@@ -130,6 +139,7 @@ pub async fn start_coordinator(
                 network_config,
                 config,
                 db,
+                pending_invitations,
                 last_seen,
             )
             .await?;
