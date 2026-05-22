@@ -12,11 +12,13 @@ pub mod peer_status;
 
 use std::{
     collections::{HashMap, HashSet},
+    net::SocketAddr,
+    str::from_utf8,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use actix_cors::Cors;
@@ -35,7 +37,11 @@ use canton_proto_rs::com::digitalasset::canton::{
 };
 use hyper::{Body, Response, StatusCode};
 use sqlx::SqlitePool;
-use tokio::sync::{Mutex, Notify, RwLock, mpsc};
+use tokio::{
+    net::TcpListener,
+    sync::{Mutex, Notify, RwLock, mpsc},
+    time::{MissedTickBehavior, interval, sleep},
+};
 use tokio_noise::handshakes::nn_psk2::Responder;
 use utoipa_actix_web::AppExt;
 use utoipa_swagger_ui::SwaggerUi;
@@ -658,8 +664,8 @@ async fn set_run_status(
     status: WorkflowProgress,
     error: Option<String>,
 ) -> Result {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     let mut tx = db.begin_transaction().await?;
@@ -697,8 +703,8 @@ impl WorkflowTriggers {
             invitation_type,
             coordinator_pubkey: coordinator_pubkey.to_string(),
             coordinator_name: None,
-            received_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            received_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0),
             prefix,
@@ -754,8 +760,8 @@ impl WorkflowTriggers {
                 return;
             }
         };
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         for run in runs.into_iter().filter(|r| {
@@ -811,8 +817,8 @@ impl WorkflowTriggers {
                 return;
             }
         };
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         for run in runs.into_iter().filter(|r| {
@@ -941,7 +947,7 @@ pub async fn start_server(
     // HTTPS traffic goes through the same connection pool / TLS session
     // cache and inherits the same 10s timeout.
     let http_client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(Duration::from_secs(10))
         .build()
         .expect("reqwest client build");
 
@@ -1116,7 +1122,7 @@ pub async fn start_server(
     let sync_party_creds = app_state.party_credentials.clone();
     tokio::spawn(async move {
         // Delay to let Canton stabilize after startup
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        sleep(Duration::from_secs(5)).await;
         tracing::info!("Starting background sync of decentralized parties from Canton...");
 
         let auth_snapshot = sync_auth.read().await.clone();
@@ -1263,8 +1269,6 @@ async fn run_heartbeat(
     listener_notify: Arc<Notify>,
     triggers: WorkflowTriggers,
 ) {
-    use tokio::net::TcpListener;
-
     let listen_addr = format!(
         "{addr}:{port}",
         addr = config.node.listen_address,
@@ -1343,7 +1347,7 @@ async fn run_heartbeat(
                             }
                             _ = async {
                                 loop {
-                                    tokio::time::sleep(Duration::from_millis(100)).await;
+                                    sleep(Duration::from_millis(100)).await;
                                     if listener_pause_count_spawn
                                         .load(Ordering::Acquire) > 0
                                     {
@@ -1361,7 +1365,7 @@ async fn run_heartbeat(
                     tracing::warn!(
                         "Failed to bind invite listener on {listen_addr}: {e}, retrying in 5s"
                     );
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    sleep(Duration::from_secs(5)).await;
                 }
             }
         }
@@ -1374,7 +1378,7 @@ async fn run_heartbeat(
 /// Handle an incoming Noise connection (either ping or invite)
 async fn handle_incoming_connection(
     socket: tokio::net::TcpStream,
-    peer_addr: std::net::SocketAddr,
+    peer_addr: SocketAddr,
     keypair: Arc<NoiseKeypair>,
     peer_keys: Arc<HashMap<String, secp256k1::PublicKey>>,
     triggers: WorkflowTriggers,
@@ -1394,7 +1398,7 @@ async fn handle_incoming_connection(
     // removed: it bypassed the allowlist, letting any keypair-holder
     // complete the handshake and inject Invite* messages (audit finding).
     let responder = Responder::new(move |identity: &[u8]| -> Option<[u8; 32]> {
-        let peer_id = std::str::from_utf8(identity).ok()?;
+        let peer_id = from_utf8(identity).ok()?;
         let peer_pub_key = peer_keys_clone.get(peer_id)?;
         Some(*keypair_for_closure.derive_psk(peer_pub_key))
     });
@@ -1415,7 +1419,7 @@ async fn handle_incoming_connection(
             // `last_seen` bump below can reuse it; the conservative
             // `peer_keys` re-check on the bump path is defensive against any
             // future responder change.
-            let peer_id_str = std::str::from_utf8(peer_id).ok().map(str::to_owned);
+            let peer_id_str = from_utf8(peer_id).ok().map(str::to_owned);
             let peer_pubkey_hex = peer_id_str
                 .as_deref()
                 .and_then(|id| peer_keys.get(id))
@@ -1426,7 +1430,7 @@ async fn handle_incoming_connection(
                 if let Some(id) = peer_id_str.as_deref()
                     && peer_keys.contains_key(id)
                 {
-                    let now = std::time::Instant::now();
+                    let now = Instant::now();
                     let mut map = last_seen.write().await;
                     peer_status::bump(&mut map, id.to_string(), now);
                 }
@@ -1685,8 +1689,7 @@ async fn handle_incoming_connection(
                                 .unwrap());
                         }
                         MessageType::RequestMemberParty => {
-                            let dec_party_id =
-                                std::str::from_utf8(&msg.payload).unwrap_or("").to_string();
+                            let dec_party_id = from_utf8(&msg.payload).unwrap_or("").to_string();
                             tracing::debug!("Received RequestMemberParty for {dec_party_id}",);
                             let payload = {
                                 let creds = triggers.party_credentials.read().await;
@@ -1822,11 +1825,11 @@ async fn run_peer_ping_loop(
     last_seen: LastSeen,
     keypair: Arc<NoiseKeypair>,
 ) {
-    let mut interval = tokio::time::interval(Duration::from_secs(5));
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut ticker = interval(Duration::from_secs(5));
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
-        interval.tick().await;
+        ticker.tick().await;
 
         let peers = match db.get_all_peers().await {
             Ok(p) => p,
@@ -1861,7 +1864,7 @@ async fn run_peer_ping_loop(
                         }
                     };
 
-                    let now = std::time::Instant::now();
+                    let now = Instant::now();
                     let stale = {
                         let map = last_seen.read().await;
                         peer_status::should_probe(&map, &id, now)
@@ -1889,7 +1892,7 @@ async fn run_peer_ping_loop(
                     );
 
                     if active {
-                        let now = std::time::Instant::now();
+                        let now = Instant::now();
                         let mut map = last_seen.write().await;
                         peer_status::bump(&mut map, id.clone(), now);
                     }
@@ -1916,8 +1919,8 @@ async fn finalize_peer_run(
     success: bool,
     error_msg: Option<String>,
 ) {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     let mut tx = match db.begin_transaction().await {

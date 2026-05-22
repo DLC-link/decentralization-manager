@@ -5,8 +5,8 @@ use std::{
 };
 
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
-
 use sqlx::SqlitePool;
+use tokio::time::sleep;
 
 use super::parties::{
     fetch_decentralized_parties, resolve_owner_keys_from_peers, store_parties_to_db,
@@ -347,7 +347,7 @@ pub async fn start_kick(
         }
 
         // Give peers time to start their peer workflows
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        sleep(Duration::from_secs(2)).await;
 
         let result = workflow::start_coordinator(
             config,
@@ -664,7 +664,7 @@ pub async fn start_onboarding(
         }
 
         // Give peers time to start their peer workflows
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        sleep(Duration::from_secs(2)).await;
 
         let result = workflow::start_coordinator(
             config.clone(),
@@ -1110,7 +1110,7 @@ pub async fn start_contracts(
         }
 
         // Give peers time to start their peer workflows
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        sleep(Duration::from_secs(2)).await;
 
         let result = workflow::start_coordinator(
             config.clone(),
@@ -1326,7 +1326,7 @@ pub async fn start_dars(
         }
 
         // Give peers time to start their peer workflows
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        sleep(Duration::from_secs(2)).await;
 
         let result = workflow::start_coordinator(
             config,
@@ -1909,8 +1909,6 @@ pub async fn retry_workflow(
 /// equals `prefix`. Returns the matching `party_id` if found — used by the
 /// onboarding pre-flight to refuse duplicate-prefix runs.
 async fn find_party_with_prefix(db: &SqlitePool, prefix: &str) -> Result<Option<String>> {
-    use crate::db::schema::SchemaRead;
-
     let parties = db.get_dec_parties_by_prefix(prefix).await?;
     Ok(parties.into_iter().next().map(|p| p.party_id))
 }

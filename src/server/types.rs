@@ -1,5 +1,7 @@
 use std::{
     collections::HashMap,
+    fmt,
+    str::FromStr,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -10,7 +12,11 @@ use std::{
 use canton_common::decimal::DamlDecimal;
 use canton_proto_rs::com::digitalasset::canton::protocol::v30::enums::ParticipantPermission;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Notify, RwLock};
+use tokio::{
+    sync::{Mutex, Notify, RwLock},
+    task::AbortHandle,
+    time::sleep,
+};
 
 use crate::{
     config::PackageConfig,
@@ -30,7 +36,7 @@ pub trait WorkflowStatus: Default + Copy + Send + Sync {}
 pub struct HttpWorkflowState<S: WorkflowStatus> {
     pub status: RwLock<S>,
     pub error: RwLock<Option<String>>,
-    pub abort_handle: tokio::sync::Mutex<Option<tokio::task::AbortHandle>>,
+    pub abort_handle: Mutex<Option<AbortHandle>>,
     pub invited_peers: RwLock<Vec<CantonId>>,
 }
 
@@ -39,7 +45,7 @@ impl<S: WorkflowStatus> Default for HttpWorkflowState<S> {
         Self {
             status: RwLock::new(S::default()),
             error: RwLock::new(None),
-            abort_handle: tokio::sync::Mutex::new(None),
+            abort_handle: Mutex::new(None),
             invited_peers: RwLock::new(Vec::new()),
         }
     }
@@ -56,13 +62,13 @@ impl<S: WorkflowStatus> HttpWorkflowState<S> {
 /// multiple workflows of the same kind can run concurrently. Lookups,
 /// inserts and removals are async-locked via an internal `RwLock`.
 pub struct WorkflowRegistry<S: WorkflowStatus> {
-    inner: RwLock<std::collections::HashMap<String, Arc<HttpWorkflowState<S>>>>,
+    inner: RwLock<HashMap<String, Arc<HttpWorkflowState<S>>>>,
 }
 
 impl<S: WorkflowStatus> Default for WorkflowRegistry<S> {
     fn default() -> Self {
         Self {
-            inner: RwLock::new(std::collections::HashMap::new()),
+            inner: RwLock::new(HashMap::new()),
         }
     }
 }
@@ -134,7 +140,7 @@ impl ListenerPauseGuard {
     pub async fn pause(counter: Arc<AtomicUsize>, listener_notify: Arc<Notify>) -> Self {
         let prev = counter.fetch_add(1, Ordering::AcqRel);
         if prev == 0 {
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            sleep(Duration::from_millis(500)).await;
         }
         Self {
             counter,
@@ -513,15 +519,15 @@ impl WorkflowKind {
     }
 }
 
-impl std::fmt::Display for WorkflowKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for WorkflowKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
 }
 
-impl std::str::FromStr for WorkflowKind {
+impl FromStr for WorkflowKind {
     type Err = anyhow::Error;
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "Onboarding" => Ok(Self::Onboarding),
             "Kick" => Ok(Self::Kick),
@@ -561,15 +567,15 @@ impl WorkflowRole {
     }
 }
 
-impl std::fmt::Display for WorkflowRole {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for WorkflowRole {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
 }
 
-impl std::str::FromStr for WorkflowRole {
+impl FromStr for WorkflowRole {
     type Err = anyhow::Error;
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "Coordinator" => Ok(Self::Coordinator),
             "Peer" => Ok(Self::Peer),
@@ -662,16 +668,16 @@ impl InvitationType {
     }
 }
 
-impl std::fmt::Display for InvitationType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for InvitationType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
 }
 
-impl std::str::FromStr for InvitationType {
+impl FromStr for InvitationType {
     type Err = anyhow::Error;
 
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "Onboarding" => Ok(Self::Onboarding),
             "Kick" => Ok(Self::Kick),
