@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { IconButton, InputAdornment, Tooltip } from "@mui/material";
+import { Box, IconButton, InputAdornment, Tooltip } from "@mui/material";
 import HelpOutlineIcon from "@mui/icons-material/HelpOutlineRounded";
 
 interface FieldHelpProps {
@@ -63,10 +63,25 @@ interface TextHelpProps {
 /// where the icon would feel cluttered. The wrapped text gets a help
 /// cursor and is keyboard-focusable so the tooltip is reachable from
 /// keyboard + screen readers.
+///
+/// Uses `:focus-visible` so the focus ring shows up for keyboard users but
+/// not on mouse / touch interactions where it would just be visual noise.
 export const TextHelp = ({ text, children }: TextHelpProps) => (
   <Tooltip title={text} placement="top" arrow enterTouchDelay={0}>
-    <span tabIndex={0} style={{ cursor: "help", outline: "none" }}>
+    <Box
+      component="span"
+      tabIndex={0}
+      sx={{
+        cursor: "help",
+        outline: "none",
+        borderRadius: 0.5,
+        "&:focus-visible": {
+          outline: (theme) => `2px solid ${theme.palette.primary.main}`,
+          outlineOffset: 2,
+        },
+      }}
+    >
       {children}
-    </span>
+    </Box>
   </Tooltip>
 );
