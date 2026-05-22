@@ -74,19 +74,46 @@ pub async fn submit_dns_proposals(
     let mut topology_write_client =
         TopologyManagerWriteServiceClient::connect(config.admin_api_url()).await?;
 
-    let request = tonic::Request::new(AddTransactionsRequest {
-        transactions: vec![dns_transaction],
-        force_changes: vec![],
-        store: Some(StoreId {
-            store: Some(store_id::Store::Synchronizer(Synchronizer {
-                kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.clone())),
-            })),
-        }),
-        wait_to_become_effective: None,
-    });
-
-    topology_write_client.add_transactions(request).await?;
-    tracing::info!("DNS proposal submitted to topology");
+    // Retry the submission on TOPOLOGY_INVALID_MAPPING. Concurrent onboardings
+    // generate many namespace_delegations whose synchronizer propagation can
+    // arrive after our coord-side 3s wait — Canton then rejects DNS submission
+    // with "No root certificate found for <fingerprint>". Wait + retry covers
+    // the propagation window without blowing up the workflow.
+    const SUBMIT_DNS_MAX_ATTEMPTS: u32 = 6;
+    const SUBMIT_DNS_BACKOFF_SECS: u64 = 5;
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        let request = tonic::Request::new(AddTransactionsRequest {
+            transactions: vec![dns_transaction.clone()],
+            force_changes: vec![],
+            store: Some(StoreId {
+                store: Some(store_id::Store::Synchronizer(Synchronizer {
+                    kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.clone())),
+                })),
+            }),
+            wait_to_become_effective: None,
+        });
+        match topology_write_client.add_transactions(request).await {
+            Ok(_) => {
+                tracing::info!("DNS proposal submitted to topology (attempt {attempt})");
+                break;
+            }
+            Err(status)
+                if status.message().contains("TOPOLOGY_INVALID_MAPPING")
+                    && attempt < SUBMIT_DNS_MAX_ATTEMPTS =>
+            {
+                tracing::warn!(
+                    "Attempt {attempt}/{SUBMIT_DNS_MAX_ATTEMPTS}: Canton rejected DNS submission \
+                     because a peer's namespace_delegation hasn't propagated yet; sleeping \
+                     {SUBMIT_DNS_BACKOFF_SECS}s and retrying: {}",
+                    status.message()
+                );
+                tokio::time::sleep(tokio::time::Duration::from_secs(SUBMIT_DNS_BACKOFF_SECS)).await;
+            }
+            Err(status) => return Err(status.into()),
+        }
+    }
 
     let namespace_bytes = storage
         .read_artifact(instance_name, artifact_kinds::NAMESPACE_DEF, None)

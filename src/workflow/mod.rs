@@ -277,8 +277,18 @@ pub async fn start_peer(
         }
     };
 
-    // Command polling loop
-    let mut consecutive_errors = 0;
+    // Command polling loop.
+    //
+    // Retry budget: 8 consecutive failures × 5s gap = 40s tolerance. The
+    // jump from 3 → 8 covers the coordinator-bind window in concurrent
+    // workflow scenarios — when this node accepts the invite faster than
+    // the coordinator's `start_coordinator` task finishes pausing the
+    // heartbeat and binding the workflow `NoiseServer` to the same port,
+    // the first attempt(s) hit `connection refused`. Three attempts isn't
+    // enough margin once the coordinator is also juggling its own peer
+    // workflows for other coordinators' parallel onboardings.
+    const MAX_CONSECUTIVE_ERRORS: u32 = 8;
+    let mut consecutive_errors = 0u32;
     let mut consecutive_step_failures = 0;
     loop {
         // Poll coordinator for next command (with payload for commands that need data)
@@ -296,13 +306,16 @@ pub async fn start_peer(
                 // bail is logged at ERROR. This keeps test logs readable when
                 // a known restart cycle produces one or two retries that
                 // succeed on the next attempt.
-                tracing::warn!("Attempt {consecutive_errors}/3: failed to get next command: {e}");
+                tracing::warn!(
+                    "Attempt {consecutive_errors}/{MAX_CONSECUTIVE_ERRORS}: failed to get next command: {e}"
+                );
 
                 // If we get multiple connection refused errors in a row,
                 // the coordinator has likely shut down or there's a persistent error
-                if consecutive_errors >= 3 {
+                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
                     tracing::error!(
-                        "Failed to communicate with coordinator after 3 attempts. Aborting."
+                        "Failed to communicate with coordinator after \
+                         {MAX_CONSECUTIVE_ERRORS} attempts. Aborting."
                     );
                     anyhow::bail!("Peer failed: persistent communication errors with coordinator");
                 }
