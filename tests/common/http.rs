@@ -146,12 +146,12 @@ pub async fn probe_workflow_status(
 ) -> Option<anyhow::Result<()>> {
     let r: WorkflowRunsResponse = f.get_json(port, "/workflows").await.ok()?;
     // Pick the latest coordinator run of this kind. `/workflows` returns runs
-    // in DB insertion order; for a one-workflow-at-a-time test scenario the
-    // last match is the one this phase just started.
+    // ordered by `updated_at DESC` (newest first), so the first match in
+    // iteration order is the freshly-started run for this phase rather than
+    // a stale Completed row from an earlier phase.
     let run = r
         .runs
         .iter()
-        .rev()
         .find(|w| w.kind == kind && w.role == "Coordinator")?;
     match run.status.as_str() {
         "completed" | "Completed" => Some(Ok(())),
