@@ -2106,8 +2106,6 @@ pub async fn retry_workflow(
     })
 }
 
-/// Best-effort: notify previously-invited peers that the workflow is cancelled
-/// so they can drop the matching pending invitation.
 /// Look for an existing decentralized party whose human-readable prefix
 /// equals `prefix`. Returns the matching `party_id` if found — used by the
 /// onboarding pre-flight to refuse duplicate-prefix runs.

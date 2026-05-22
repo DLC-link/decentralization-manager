@@ -41,7 +41,6 @@ export const HoldingsSection = ({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [holdings, setHoldings] = useState<Holding[]>([]);
-  const [loaded, setLoaded] = useState(false);
 
   const fetchHoldings = useCallback(async () => {
     setLoading(true);
@@ -65,12 +64,14 @@ export const HoldingsSection = ({
     }
   }, [partyId]);
 
+  // Re-fetch whenever the selected party changes. `fetchHoldings` is keyed
+  // on `partyId`, so depending on it here is equivalent to depending on
+  // `partyId` directly. Clear the previous party's rows so the section
+  // doesn't briefly show stale balances while the new fetch is in flight.
   useEffect(() => {
-    if (!loaded) {
-      setLoaded(true);
-      fetchHoldings();
-    }
-  }, [loaded, fetchHoldings]);
+    setHoldings([]);
+    fetchHoldings();
+  }, [fetchHoldings]);
 
   useEffect(() => {
     if (refreshNonce === undefined || refreshNonce === 0) return;

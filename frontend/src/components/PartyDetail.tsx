@@ -96,9 +96,9 @@ interface CollapsibleSectionProps {
   onToggle: () => void;
   badge?: ReactNode;
   /// Optional plain-English explanation of the section's title word.
-  /// Rendered as a small `(?)` icon next to the title. Stop-propagation on
-  /// the wrapping span keeps clicks on the help icon from collapsing the
-  /// section.
+  /// Wraps the title in a `TextHelp` so hovering / focusing the title
+  /// reveals a tooltip — no inline icon, since the title text itself is
+  /// the trigger.
   helpText?: string;
   children: ReactNode;
 }

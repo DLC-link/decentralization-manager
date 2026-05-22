@@ -139,6 +139,7 @@ export const PartyList = ({
                   <Tooltip title={hidden ? "Unhide party" : "Hide party"}>
                     <IconButton
                       size="small"
+                      aria-label={hidden ? "Unhide party" : "Hide party"}
                       onClick={(e) => {
                         e.stopPropagation();
                         onToggleHidden(party.party_id);
