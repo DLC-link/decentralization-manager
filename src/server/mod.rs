@@ -1079,39 +1079,27 @@ pub async fn start_server(
         .await;
     });
 
-    // Start peer trigger listener for onboarding (starts peer workflow when invite received)
+    // Start peer trigger listener for onboarding (starts peer workflow when invite received).
+    // Peer listeners do NOT take a pause-guard: outbound-only workflows must
+    // not silence the heartbeat — see `run_peer_listener_loop`.
     tokio::spawn(run_onboarding_peer_listener(
         config.clone(),
         db.clone(),
-        listener_pause_count.clone(),
-        listener_notify.clone(),
         onboarding_peer_rx,
     ));
-
-    // Start peer trigger listener for kick (starts peer workflow when kick invite received)
     tokio::spawn(run_kick_peer_listener(
         config.clone(),
         db.clone(),
-        listener_pause_count.clone(),
-        listener_notify.clone(),
         kick_peer_rx,
     ));
-
-    // Start peer trigger listener for contracts (starts peer workflow on invite)
     tokio::spawn(run_contracts_peer_listener(
         config.clone(),
         db.clone(),
-        listener_pause_count.clone(),
-        listener_notify.clone(),
         contracts_peer_rx,
     ));
-
-    // Start peer trigger listener for DARs (starts peer workflow when DARs invite received)
     tokio::spawn(run_dars_peer_listener(
         config.clone(),
         db.clone(),
-        listener_pause_count.clone(),
-        listener_notify.clone(),
         dars_peer_rx,
     ));
 
@@ -2011,15 +1999,17 @@ async fn run_peer_job(config: NodeConfig, db: SqlitePool, kind_label: &'static s
 
 /// Generic peer-listener loop: pull `PeerJob`s off the per-kind channel and
 /// dispatch each into its own spawned task so concurrent invites do not
-/// serialize behind one job. Each task acquires its own `ListenerPauseGuard`
-/// so the noise heartbeat listener stays paused while *any* job is running
-/// and resumes only when the last one finishes (see `ListenerPauseGuard`).
+/// serialize behind one job.
+///
+/// Peer-side workflows do NOT pause the heartbeat listener: `start_peer`
+/// only opens outbound `NoiseClient` connections, so the local port stays
+/// free for the heartbeat to keep answering `Ping` / `ListPeers` / etc.
+/// Pausing it here used to make a peer-mid-workflow look offline to other
+/// nodes, which broke mesh-checks for concurrent onboardings.
 async fn run_peer_listener_loop(
     kind_label: &'static str,
     config: NodeConfig,
     db: SqlitePool,
-    listener_pause_count: Arc<AtomicUsize>,
-    listener_notify: Arc<Notify>,
     mut rx: mpsc::UnboundedReceiver<PeerJob>,
 ) {
     while let Some(job) = rx.recv().await {
@@ -2029,12 +2019,8 @@ async fn run_peer_listener_loop(
         );
         let config = config.clone();
         let db = db.clone();
-        let pause_count = listener_pause_count.clone();
-        let notify = listener_notify.clone();
         tokio::spawn(async move {
-            let guard = ListenerPauseGuard::pause(pause_count, notify).await;
             run_peer_job(config, db, kind_label, job).await;
-            guard.resume().await;
         });
     }
     tracing::warn!("{kind_label} peer listener channel closed");
@@ -2043,73 +2029,33 @@ async fn run_peer_listener_loop(
 async fn run_onboarding_peer_listener(
     config: NodeConfig,
     db: SqlitePool,
-    listener_pause_count: Arc<AtomicUsize>,
-    listener_notify: Arc<Notify>,
     rx: mpsc::UnboundedReceiver<PeerJob>,
 ) {
-    run_peer_listener_loop(
-        "Onboarding",
-        config,
-        db,
-        listener_pause_count,
-        listener_notify,
-        rx,
-    )
-    .await;
+    run_peer_listener_loop("Onboarding", config, db, rx).await;
 }
 
 async fn run_kick_peer_listener(
     config: NodeConfig,
     db: SqlitePool,
-    listener_pause_count: Arc<AtomicUsize>,
-    listener_notify: Arc<Notify>,
     rx: mpsc::UnboundedReceiver<PeerJob>,
 ) {
-    run_peer_listener_loop(
-        "Kick",
-        config,
-        db,
-        listener_pause_count,
-        listener_notify,
-        rx,
-    )
-    .await;
+    run_peer_listener_loop("Kick", config, db, rx).await;
 }
 
 async fn run_contracts_peer_listener(
     config: NodeConfig,
     db: SqlitePool,
-    listener_pause_count: Arc<AtomicUsize>,
-    listener_notify: Arc<Notify>,
     rx: mpsc::UnboundedReceiver<PeerJob>,
 ) {
-    run_peer_listener_loop(
-        "Contracts",
-        config,
-        db,
-        listener_pause_count,
-        listener_notify,
-        rx,
-    )
-    .await;
+    run_peer_listener_loop("Contracts", config, db, rx).await;
 }
 
 async fn run_dars_peer_listener(
     config: NodeConfig,
     db: SqlitePool,
-    listener_pause_count: Arc<AtomicUsize>,
-    listener_notify: Arc<Notify>,
     rx: mpsc::UnboundedReceiver<PeerJob>,
 ) {
-    run_peer_listener_loop(
-        "DARs",
-        config,
-        db,
-        listener_pause_count,
-        listener_notify,
-        rx,
-    )
-    .await;
+    run_peer_listener_loop("DARs", config, db, rx).await;
 }
 
 /// Query Canton for this node's owner keys across a caller-supplied set of
