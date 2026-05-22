@@ -174,16 +174,19 @@ daml build --all
 
 DecMan provides two endpoints for getting a DAR onto Canton:
 
-- `POST /dars/upload` — uploads the DAR to *this node only*.
-- `POST /dars/distribute` — runs a multi-party workflow that uploads the DAR to every participant.
+- `POST /dars/upload` — uploads the DAR to *this node only*. Accepts `DarsRequest` with `peer_ids` ignored.
+- `POST /dars/distribute` — runs a multi-party workflow that uploads the DAR to every participant. Requires `peer_ids` to be **non-empty**; the handler rejects an empty array with 400.
 
-For production, always use `/dars/distribute`. The request body is the same — a base64-encoded DAR — but it runs through the standard coordinator/peer flow so every node has the same package vetted at the same time:
+For production, always use `/dars/distribute` so every node has the same package vetted at the same time:
 
 ```bash
 BASE64=$(base64 -i daml/my-package/.daml/dist/my-package-v0-0.1.0.dar)
 curl -X POST http://localhost:8080/dars/distribute \
   -H 'Content-Type: application/json' \
-  -d "{\"dar_files\":[{\"filename\":\"my-package-v0-0.1.0.dar\",\"data\":\"${BASE64}\"}]}"
+  -d "{
+    \"dar_files\": [{\"filename\":\"my-package-v0-0.1.0.dar\",\"data\":\"${BASE64}\"}],
+    \"peer_ids\":  [\"node2::1220...\", \"node3::1220...\"]
+  }"
 
 # poll status
 curl http://localhost:8080/dars/distribute/status
@@ -217,12 +220,14 @@ If your decentralized party doesn't yet have a `GovernanceRules` contract, creat
 | # | Field | DAML type | Field-type JSON |
 |---|---|---|---|
 | 1 | `governanceParty` | `Party` | `{ "type": "decentralized_party" }` |
-| 2 | `members` | `Set Party` | `{ "type": "party_set", "parties": [...] }` (or `{ "type": "attestors_set" }` to use every participant) |
+| 2 | `members` | `Set Party` | `{ "type": "party_set", "parties": [...] }` |
 | 3 | `threshold` | `Int` | `{ "type": "int64", "value": N }` (or `{ "type": "governance_threshold" }` for the calculated majority) |
 | 4 | `actionConfirmationTimeout` | `RelTime` | `{ "type": "rel_time", "microseconds": ... }` |
 | 5 | `additionalProposers` | `Optional (Set Party)` | `{ "type": "none" }` (start empty; grow later via the self-action below) |
 
-Minimal request — 3 members, threshold 2, 30-minute confirmation window:
+> ⚠️ Do **not** use `{ "type": "attestors_set" }` for `members`. Despite the name, that variant emits a raw `GenMap<Party, Unit>` (used by some CBTC-style templates), not the `DA.Set.Types:Set Party` record wrapper that `members` expects. Always use `party_set` for `Set Party` fields. See the field-type table below.
+
+Minimal request — 3 members, threshold 2, 30-minute confirmation window. The DAR for `governance-core` must already be uploaded (via `/dars/distribute`) before this call; `POST /contracts` does **not** take a `dar_files` field:
 
 ```bash
 curl -X POST http://coordinator:8080/contracts \
@@ -232,7 +237,6 @@ curl -X POST http://coordinator:8080/contracts \
     "participant_ids":   ["node1::1220...", "node2::1220...", "node3::1220..."],
     "participant_parties": ["member1::1220...", "member2::1220...", "member3::1220..."],
     "operator_party":    "operator::1220...",
-    "dar_files":         [],
     "contracts": [{
       "id":           "governance-rules",
       "name":         "GovernanceRules",
@@ -271,17 +275,19 @@ Use this when every field on your template maps to one of the variants of [`Fiel
 | `int64` | `{ "type": "int64", "value": 42 }` | `Int` |
 | `bool` | `{ "type": "bool", "value": true }` | `Bool` |
 | `instrument` | `{ "type": "instrument", "id": "..." }` | `InstrumentId` (record `{ admin = dec-party, id = ... }`) |
-| `attestors_set` | `{ "type": "attestors_set" }` | `Set Party` of *all* participant parties |
-| `party_set` | `{ "type": "party_set", "parties": [...] }` | `Set Party` |
+| `attestors_set` | `{ "type": "attestors_set" }` | raw `GenMap<Party, Unit>` populated from every participant party (CBTC-style templates). **Not** `DA.Set.Types:Set Party` — use `party_set` for that. |
+| `party_set` | `{ "type": "party_set", "parties": [...] }` | `DA.Set.Types:Set Party` (record-wrapped `GenMap<Party, Unit>`) — this is what `Set Party` means in `daml-stdlib`. |
 | `rel_time` | `{ "type": "rel_time", "microseconds": 86400000000 }` | `RelTime` |
 | `optional` | `{ "type": "optional", "inner": { ... } }` | `Some <inner>` |
 | `none` | `{ "type": "none" }` | `None` |
 | `record` | `{ "type": "record", "fields": [...] }` | nested record |
-| `governance_threshold` | `{ "type": "governance_threshold" }` (or `{"value": N}`) | `Int` |
+| `governance_threshold` | `{ "type": "governance_threshold" }` (calculated majority) or `{ "type": "governance_threshold", "value": N }` (explicit) | `Int` |
 
 The serializer is defined at [`src/workflow/contracts/steps/prepare.rs:212`](../src/workflow/contracts/steps/prepare.rs). Field order in the JSON must match the field order in the DAML template.
 
 Example body for the `PauseProposal` template above (instantiated as a proposal — note that proposals are usually created by a single party, so a dedicated multi-party `/contracts` workflow is overkill; this path is mainly for the *infrastructure* contracts a custom package ships with — `GovernanceRules`-style admin templates, configuration contracts, etc.):
+
+DARs must be uploaded ahead of this call via `/dars/distribute`; `POST /contracts` itself takes no `dar_files` field.
 
 ```bash
 curl -X POST http://localhost:8080/contracts \
@@ -291,7 +297,6 @@ curl -X POST http://localhost:8080/contracts \
     "participant_ids": ["node1::1220...", "node2::1220...", "node3::1220..."],
     "participant_parties": ["member1::1220...", "member2::1220...", "member3::1220..."],
     "operator_party": "operator::1220...",
-    "dar_files": [],
     "contracts": [
       {
         "id": "my-admin-contract",
@@ -302,7 +307,7 @@ curl -X POST http://localhost:8080/contracts \
         "fields": [
           { "type": "decentralized_party" },
           { "type": "operator_party" },
-          { "type": "attestors_set" },
+          { "type": "party_set", "parties": ["member1::1220...", "member2::1220...", "member3::1220..."] },
           { "type": "governance_threshold" },
           { "type": "rel_time", "microseconds": 86400000000 }
         ]
@@ -373,19 +378,18 @@ curl -X POST http://localhost:8080/governance/execute \
 
 If your `executeImpl` exercises a choice on a contract that the governance party can't see by default (typically choice-context entries from an external registry — Canton Coin transfer rules are the canonical case), populate `disclosed_contracts` with the relevant blobs. The standard transfer / accept-transfer proposal paths fetch these from the network registry automatically; bespoke executions need to pass them explicitly.
 
-The shape is the Ledger API `DisclosedContract` projected into JSON — `contract_id`, `template_id` (qualified name `<pkg>:<module>:<entity>`), and the `created_event_blob` base64-encoded:
+The wire shape — defined as `DisclosedContractInput` in [`src/server/types.rs`](../src/server/types.rs) — is just `contract_id` plus the base64-encoded `created_event_blob` under the key `blob`. The template id is recovered from the blob server-side; you do not pass it:
 
 ```json
 "disclosed_contracts": [
   {
-    "contract_id":         "00abc123...",
-    "template_id":         "#my-registry-v0:MyRegistry.Rule:TransferRule",
-    "created_event_blob":  "CgQI..."
+    "contract_id": "00abc123...",
+    "blob":        "CgQI..."
   }
 ]
 ```
 
-You typically obtain `created_event_blob` from your registry's HTTP endpoint at execute time (DPM does this for the token-standard flows in `maybe_fetch_for_proposal`). If your custom domain has its own off-chain registry, the caller — your backend, a daml-script, or a CLI — is responsible for fetching the blob and threading it into the `/governance/execute` call.
+You typically obtain `blob` (the `created_event_blob`) from your registry's HTTP endpoint at execute time — DPM does this for the token-standard flows in `maybe_fetch_for_proposal`. If your custom domain has its own off-chain registry, the caller — your backend, a daml-script, or a CLI — is responsible for fetching the blob and threading it into the `/governance/execute` call.
 
 ### Granting propose-only rights to non-members
 
@@ -429,10 +433,13 @@ Additional proposers can **only propose** — they cannot confirm or execute, ev
 ```bash
 # member revokes their own confirmation
 curl -X POST http://localhost:8080/governance/cancel \
+  -H 'Content-Type: application/json' \
   -d '{ "party_id": "...", "confirmation_cid": "...", "governance_type": "core_domain" }'
 
-# anyone clears a stale confirmation past expiry
+# any member clears a stale confirmation past expiry
+# (GovernanceRules_ExpireConfirmation enforces `member ∈ members`)
 curl -X POST http://localhost:8080/governance/expire \
+  -H 'Content-Type: application/json' \
   -d '{ "party_id": "...", "rules_contract_id": "...", "confirmation_cid": "...", "governance_type": "core_domain" }'
 ```
 
@@ -509,12 +516,15 @@ Practical implication for custom templates: prefer short `actionConfirmationTime
 A consolidated trace of the lifecycle for the `PauseProposal` template introduced above:
 
 ```bash
-# 0. Build and distribute the DAR
+# 0. Build and distribute the DAR (peer_ids must be non-empty for /dars/distribute)
 (cd daml && daml build --all)
 BASE64=$(base64 -i daml/my-package/.daml/dist/my-package-v0-0.1.0.dar)
 curl -X POST http://coordinator:8080/dars/distribute \
   -H 'Content-Type: application/json' \
-  -d "{\"dar_files\":[{\"filename\":\"my-package-v0-0.1.0.dar\",\"data\":\"${BASE64}\"}]}"
+  -d "{
+    \"dar_files\": [{\"filename\":\"my-package-v0-0.1.0.dar\",\"data\":\"${BASE64}\"}],
+    \"peer_ids\":  [\"node2::1220...\", \"node3::1220...\"]
+  }"
 
 # 1. Alice creates a proposal (off-DecMan, via daml-script / her own backend)
 #    -> obtains proposalCid
