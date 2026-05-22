@@ -95,7 +95,11 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     chaos::say("P2", "restarting P3 to unblock subsequent phases");
     processes::spawn_only(f, 3).await?;
     let _ = f
-        .post_expect_status(f.p1.http, "/onboarding/cancel", &json!({}))
+        .post_expect_status(
+            f.p1.http,
+            &format!("/workflows/{instance}/cancel"),
+            &json!({}),
+        )
         .await;
     sleep(Duration::from_secs(3)).await;
     chaos::dismiss_p1(f, &instance).await;

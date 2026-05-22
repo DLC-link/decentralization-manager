@@ -36,25 +36,30 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             .map(|d| d.as_secs())
             .unwrap_or_default()
     );
-    let instance_name = format!("{prefix}-creation");
 
     Scenario::with_ctx(
         format!("dec_party_identity preserved across dismiss ({prefix})"),
-        Ctx {
-            instance_name: instance_name.clone(),
-            ..Default::default()
-        },
+        Ctx::default(),
     )
     .when("P1 posts /onboarding", {
         let prefix = prefix.clone();
-        move |f, _ctx| {
+        move |f, ctx| {
             let prefix = prefix.clone();
             Box::pin(async move {
                 let req = json!({
                     "party_id_prefix": prefix,
                     "peer_ids": [&f.p2.participant_id, &f.p3.participant_id],
                 });
-                let _: Value = f.post_json(f.p1.http, "/onboarding", &req).await?;
+                let resp: Value = f.post_json(f.p1.http, "/onboarding", &req).await?;
+                // Capture the server-minted instance_name (includes a uuid
+                // suffix now that multi-instance is allowed) so later steps
+                // can dismiss/look it up.
+                let instance_name = resp
+                    .get("instance_name")
+                    .and_then(Value::as_str)
+                    .context("POST /onboarding response missing instance_name")?
+                    .to_string();
+                ctx.instance_name = instance_name;
                 Ok(())
             })
         }

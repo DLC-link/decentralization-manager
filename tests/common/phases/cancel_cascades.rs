@@ -40,25 +40,28 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             .map(|d| d.as_secs())
             .unwrap_or_default()
     );
-    let instance_name = format!("{prefix}-creation");
 
     Scenario::with_ctx(
         format!("cancel cascades to in-flight peer ({prefix})"),
-        Ctx {
-            instance_name: instance_name.clone(),
-            ..Default::default()
-        },
+        Ctx::default(),
     )
     .when("P1 posts /onboarding (P3 will not accept)", {
         let prefix = prefix.clone();
-        move |f, _| {
+        move |f, ctx| {
             let prefix = prefix.clone();
             Box::pin(async move {
                 let req = json!({
                     "party_id_prefix": prefix,
                     "peer_ids": [&f.p2.participant_id, &f.p3.participant_id],
                 });
-                let _: Value = f.post_json(f.p1.http, "/onboarding", &req).await?;
+                let resp: Value = f.post_json(f.p1.http, "/onboarding", &req).await?;
+                // Capture server-minted instance_name (includes uuid suffix
+                // after the concurrent-workflows refactor).
+                ctx.instance_name = resp
+                    .get("instance_name")
+                    .and_then(Value::as_str)
+                    .context("POST /onboarding response missing instance_name")?
+                    .to_string();
                 Ok(())
             })
         }
@@ -117,12 +120,18 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             })
         },
     )
-    .when("P1 cancels", |f, _| {
+    .when("P1 cancels", |f, ctx| {
         Box::pin(async move {
+            let instance = ctx.instance_name.clone();
+            anyhow::ensure!(
+                !instance.is_empty(),
+                "ctx.instance_name not set before P1 cancel step"
+            );
+            let path = format!("/workflows/{instance}/cancel");
             let _: Value = f
-                .post_json(f.p1.http, "/onboarding/cancel", &json!({}))
+                .post_json(f.p1.http, &path, &json!({}))
                 .await
-                .context("POST /onboarding/cancel on P1")?;
+                .with_context(|| format!("POST {path} on P1"))?;
             Ok(())
         })
     })
