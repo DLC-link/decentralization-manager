@@ -13,8 +13,8 @@ use crate::{
     error::Result,
     utils,
     workflow::{
-        onboarding::steps::proposals::sign::sign_transactions_with_topology_retry,
         storage::{WorkflowStorage, artifact_kinds},
+        topology::sign_transactions_with_topology_retry,
     },
 };
 
