@@ -4,6 +4,7 @@ pub mod kick;
 pub mod onboarding;
 pub mod state;
 pub mod storage;
+pub mod topology;
 
 use std::{
     sync::Arc,

@@ -149,10 +149,15 @@ pub async fn wait_for_exit(pid: u32, deadline: Duration) -> Result<()> {
 /// `Coordinator stalled in step WaitingForPeers for 90s`, at which point
 /// the chaos phase fails.
 ///
-/// Probing via `TcpListener::bind` and immediately dropping the listener is
-/// safe — a never-accepted listening socket does not enter `TIME_WAIT` on
-/// close, so the probe doesn't itself contend with the about-to-be-spawned
-/// DPM.
+/// The probe binds the same wildcard address DPM itself uses (`0.0.0.0`,
+/// matching the `--host 0.0.0.0` passed in `integration-tests/run.sh`).
+/// A loopback-only probe (`127.0.0.1`) would be strictly weaker than the
+/// production bind — if some interface-specific listener happened to be
+/// holding the port, the wildcard bind that DPM is about to do would still
+/// fail. Probing via `TcpListener::bind` and immediately dropping the
+/// listener is safe: a never-accepted listening socket does not enter
+/// `TIME_WAIT` on close, so the probe doesn't itself contend with the
+/// about-to-be-spawned DPM.
 pub async fn wait_for_ports_free(
     http_port: u16,
     noise_port: u16,
@@ -160,8 +165,8 @@ pub async fn wait_for_ports_free(
 ) -> Result<()> {
     let start = Instant::now();
     loop {
-        let http_free = TcpListener::bind(("127.0.0.1", http_port)).await.is_ok();
-        let noise_free = TcpListener::bind(("127.0.0.1", noise_port)).await.is_ok();
+        let http_free = TcpListener::bind(("0.0.0.0", http_port)).await.is_ok();
+        let noise_free = TcpListener::bind(("0.0.0.0", noise_port)).await.is_ok();
         if http_free && noise_free {
             return Ok(());
         }
