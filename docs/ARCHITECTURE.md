@@ -415,7 +415,7 @@ Self-management actions modify the `GovernanceRules` contract itself. They use a
 Choices on `GovernanceRules` for self-management:
 - `GovernanceRules_ConfirmGovernanceAction` -- Submit a self-action confirmation
 - `GovernanceRules_ExecuteGovernanceAction` -- Execute when threshold is met (returns new `GovernanceRules`)
-- `GovernanceRules_ExpireGovernanceConfirmation` -- Remove a stale self-confirmation
+- `GovernanceRules_ExpireGovernanceSelfConfirmation` -- Remove a stale self-confirmation
 
 Self-confirmations are stored as `GovernanceSelfConfirmation` contracts, matched by value equality on the `GovernanceSelfAction` data.
 
