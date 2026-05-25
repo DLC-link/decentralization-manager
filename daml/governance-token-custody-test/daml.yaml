@@ -7,9 +7,9 @@ dependencies:
   - daml-stdlib
   - daml-script
 data-dependencies:
-  - ../governance-action-v0/.daml/dist/governance-action-v0-0.1.0.dar
-  - ../governance-core/.daml/dist/governance-core-v0-0.1.0.dar
-  - ../governance-token-custody/.daml/dist/governance-token-custody-v0-0.1.0.dar
+  - ../governance-action-v1-rc1/.daml/dist/governance-action-v1-rc1-0.1.0.dar
+  - ../governance-core/.daml/dist/governance-core-v1-rc1-0.1.0.dar
+  - ../governance-token-custody/.daml/dist/governance-token-custody-v1-rc1-0.1.0.dar
   - ../dars/testlib-0.1.0.dar
   - ../dars/splice-amulet-0.1.17.dar
   - ../dars/splice-api-featured-app-v1-1.0.0.dar
