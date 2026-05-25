@@ -92,8 +92,11 @@ cleanup() {
     # Stop localnet
     stop_localnet
 
-    # Remove temp directory
-    if [ -n "$DEV_DIR" ] && [ -d "$DEV_DIR" ]; then
+    # Remove temp directory. In CI we keep it so the `upload-artifact` step
+    # can grab `$DEV_DIR/participant-*/stderr.log` — the runner is torn down
+    # after the job so leaving the dir behind has no cost, and it's the only
+    # way to actually diagnose hangs that fire the trap before upload runs.
+    if [ -z "${CI:-}" ] && [ -n "$DEV_DIR" ] && [ -d "$DEV_DIR" ]; then
         rm -rf "$DEV_DIR"
     fi
 
