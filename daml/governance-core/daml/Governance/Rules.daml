@@ -356,7 +356,7 @@ template GovernanceRules
         pure GovernanceRules_ExecuteGovernanceActionResult with ..
 
     -- | Expire a stale self-management confirmation.
-    nonconsuming choice GovernanceRules_ExpireGovernanceConfirmation : ()
+    nonconsuming choice GovernanceRules_ExpireGovernanceSelfConfirmation : ()
       with
         member : Party
         staleConfirmationCid : ContractId GovernanceSelfConfirmation
