@@ -23,8 +23,7 @@ template GovernanceConfirmation
     expiresAt : Time
       -- ^ When this confirmation becomes invalid.
   where
-    signatory confirmer
-    observer governanceParty
+    signatory confirmer, governanceParty
 
     -- | Consume this confirmation during action execution.
     -- Returns the confirmation data for validation.
