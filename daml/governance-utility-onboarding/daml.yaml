@@ -1,12 +1,12 @@
 sdk-version: 3.4.11
-name: governance-utility-onboarding-v0
+name: governance-utility-onboarding-v1-rc1
 version: 0.1.0
 source: daml
 dependencies:
   - daml-prim
   - daml-stdlib
 data-dependencies:
-  - ../governance-action-v0/.daml/dist/governance-action-v0-0.1.0.dar
+  - ../governance-action-v1-rc1/.daml/dist/governance-action-v1-rc1-0.1.0.dar
   - ../dars/splice-api-featured-app-v1-1.0.0.dar
   - ../dars/splice-api-token-burn-mint-v1-1.0.0.dar
   - ../dars/splice-api-token-holding-v1-1.0.0.dar
