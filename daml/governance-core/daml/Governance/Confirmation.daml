@@ -5,6 +5,8 @@
 -- Each confirmation represents a single member's approval of a specific action proposal.
 module Governance.Confirmation where
 
+import Splice.Util (require)
+
 import Governance.Action (GovernableAction)
 
 -- | A confirmation that a governance member has approved an action proposal.
@@ -23,6 +25,7 @@ template GovernanceConfirmation
     expiresAt : Time
       -- ^ When this confirmation becomes invalid.
   where
+    ensure actionLabel /= ""
     signatory confirmer, governanceParty
 
     -- | Consume this confirmation during action execution.
@@ -31,7 +34,7 @@ template GovernanceConfirmation
       controller governanceParty
       do
         now <- getTime
-        assertMsg "Confirmation has expired" (now < expiresAt)
+        require "Confirmation has expired" (now < expiresAt)
         pure this
 
     -- | Expire a stale confirmation that has passed its expiry time.
@@ -39,7 +42,7 @@ template GovernanceConfirmation
       controller governanceParty
       do
         now <- getTime
-        assertMsg "Confirmation has not expired yet" (now > expiresAt)
+        require "Confirmation has not expired yet" (now > expiresAt)
 
     -- | Allow the confirmer to cancel their own confirmation.
     choice GovernanceConfirmation_Cancel : ()
