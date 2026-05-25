@@ -17,3 +17,11 @@ This is an operational constraint, not an on-chain one. Production deployments a
 **Rationale for deferring.** Typed execution artifacts are slated for the planned decman HTTP delegation layer, where governance execution result shape is owned outside the on-chain interface. The auditor offered two paths: (1) extend the `GovernableAction` interface to return typed results, or (2) introduce a standardized execution-artifact contract that implementations populate. Both bake a result-shape decision into the on-chain interface — a decision that the delegation work is intended to make at a different layer.
 
 Introducing either pattern in this batch would foreclose design space in the delegation work. The audit-trail half of this concern is partially addressed by the DLC-3 description-enrichment commit, which embeds salient parameter data (amounts, instrument ids, counterparty parties, related contract ids) into the `description` fields of nine first-round `GovernableAction` implementations so the on-chain `GovernanceExecutionResult` is meaningful without external lookup.
+
+## S4 — Missing archive actions
+
+**Auditor finding.** Governance templates can be created but cannot be archived through governance choices. The auditor suggested adding a generic `AnyTypeCid` archive action that accepts an arbitrary `ContractId` and calls `archive cid`, which works for any contract where `governanceParty` is the sole signatory.
+
+**Rationale for not adopting the broad-sweep pattern.** A single governance choice with authority to archive *any* `governanceParty`-signed contract is too broad. It would let one passed vote sweep arbitrary contracts (existing or future) — a blast radius wider than any single audit-trail entry could meaningfully describe.
+
+We prefer the explicit alternative: when a specific cleanup capability is needed (e.g. archiving stale `GovernanceConfirmation`s after a member is removed), the corresponding template grows a dedicated `GovernableAction` implementation behind a normal vote. This is more boilerplate but keeps each archive capability narrowly scoped, auditable on its own terms, and visible in the governance action catalog.
