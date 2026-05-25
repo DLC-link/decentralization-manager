@@ -11,7 +11,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Context;
 use serde_json::{Value, json};
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 use tracing::info;
 
 use super::{Fixture, invitations::probe_pending_invitation};
@@ -121,6 +121,11 @@ pub fn say(label: &str, msg: &str) {
 /// leaves a Noise listener in a bad state).
 pub async fn ensure_nodes_healthy(f: &mut Fixture) -> anyhow::Result<()> {
     use tokio::net::TcpStream;
+    // Bound every probe — a wedged Noise listener (bound socket, accept loop
+    // hung) lets the SYN complete but never services the connection, and an
+    // unbounded `TcpStream::connect` will silently sit forever while CI dies
+    // with no log line to point at.
+    const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
     let probes = [
         (1u8, f.p1.http, f.p1.noise),
         (2, f.p2.http, f.p2.noise),
@@ -138,8 +143,14 @@ pub async fn ensure_nodes_healthy(f: &mut Fixture) -> anyhow::Result<()> {
         if !has_pid {
             continue;
         }
-        let http_ok = TcpStream::connect(("127.0.0.1", http_port)).await.is_ok();
-        let noise_ok = TcpStream::connect(("127.0.0.1", noise_port)).await.is_ok();
+        let http_ok = matches!(
+            timeout(PROBE_TIMEOUT, TcpStream::connect(("127.0.0.1", http_port))).await,
+            Ok(Ok(_))
+        );
+        let noise_ok = matches!(
+            timeout(PROBE_TIMEOUT, TcpStream::connect(("127.0.0.1", noise_port))).await,
+            Ok(Ok(_))
+        );
         if http_ok && noise_ok {
             continue;
         }
