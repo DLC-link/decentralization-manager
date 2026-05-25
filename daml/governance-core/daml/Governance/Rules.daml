@@ -65,7 +65,10 @@ template GovernanceSelfConfirmation
     -- | Consume this confirmation during action execution.
     choice GovernanceSelfConfirmation_Consume : GovernanceSelfConfirmation
       controller governanceParty
-      do pure this
+      do
+        now <- getTime
+        require "Self-confirmation has expired" (now < expiresAt)
+        pure this
 
     -- | Expire a stale confirmation.
     choice GovernanceSelfConfirmation_Expire : ()

@@ -29,7 +29,10 @@ template GovernanceConfirmation
     -- Returns the confirmation data for validation.
     choice GovernanceConfirmation_Consume : GovernanceConfirmation
       controller governanceParty
-      do pure this
+      do
+        now <- getTime
+        assertMsg "Confirmation has expired" (now < expiresAt)
+        pure this
 
     -- | Expire a stale confirmation that has passed its expiry time.
     choice GovernanceConfirmation_Expire : ()
