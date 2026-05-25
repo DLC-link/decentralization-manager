@@ -60,8 +60,7 @@ template GovernanceSelfConfirmation
     expiresAt : Time
       -- ^ When this confirmation becomes invalid.
   where
-    signatory confirmer
-    observer governanceParty
+    signatory confirmer, governanceParty
 
     -- | Consume this confirmation during action execution.
     choice GovernanceSelfConfirmation_Consume : GovernanceSelfConfirmation
