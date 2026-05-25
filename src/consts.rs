@@ -43,18 +43,22 @@ pub fn topology_retry_delay_secs() -> u64 {
 ///
 /// The peer event loop in `src/workflow/mod.rs` increments this counter on
 /// any step-execution error and aborts the workflow once the threshold is
-/// hit. The threshold is deliberately tight (3 strikes × 2s sleep = 6s) so
-/// real failures — malformed payloads, auth misconfiguration, programming
-/// bugs — surface quickly with one easy-to-find abort line in the logs.
+/// hit. 6 strikes × 2s sleep = 12s; introduced by PR #142 (raised from a
+/// previously-hardcoded 3) because the localnet chaos suite's
+/// cancel/decline/dismiss cleanup paths empirically need that headroom —
+/// not just the Canton SignDns flake. Restoring the 3-strike value broke
+/// the G10→G1 chaos boundary in CI (the post-cleanup workflow row
+/// remained `InProgress` long enough for the next phase to collide with
+/// it), so 6 stays.
 ///
 /// The Canton-side `TOPOLOGY_NO_APPROPRIATE_SIGNING_KEY_IN_STORE` transient
-/// (observed when a freshly-restarted participant's local topology store
-/// hasn't yet reconciled its signing keys) is **not** what this counter is
-/// for: it is absorbed at the `sign_transactions` call site with its own
-/// env-configurable budget (`DPM_TOPOLOGY_RETRY_MAX_ATTEMPTS` ×
+/// is handled separately at the `sign_transactions` call site with its
+/// own env-configurable budget (`DPM_TOPOLOGY_RETRY_MAX_ATTEMPTS` ×
 /// `DPM_TOPOLOGY_RETRY_DELAY_SECS`, defaults 30 × 2s = 60s). See
 /// [`sign_transactions_with_topology_retry`](crate::workflow::onboarding::steps::proposals::sign::sign_transactions_with_topology_retry).
-pub const MAX_CONSECUTIVE_STEP_FAILURES: usize = 3;
+/// So this counter is now load-bearing for non-Canton transients only,
+/// not for SignDns.
+pub const MAX_CONSECUTIVE_STEP_FAILURES: usize = 6;
 
 /// Canton protocol version used for key export and topology operations
 pub const CANTON_PROTOCOL_VERSION: i32 = 34;
