@@ -1,12 +1,11 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 use sqlx::SqlitePool;
-use tokio::time::sleep;
 
 use super::parties::{
     fetch_decentralized_parties, resolve_owner_keys_from_peers, store_parties_to_db,
@@ -353,13 +352,17 @@ pub async fn start_kick(
     let mut abort_guard = state.abort_handle.lock().await;
 
     let join_handle = tokio::spawn(async move {
-        let guard = ListenerPauseGuard::pause(listener_pause_count, listener_notify).await;
-
-        // Send kick invites to all peers before starting coordinator workflow
+        // Send invites BEFORE pausing the heartbeat listener. In a concurrent
+        // multi-coordinator scenario every node spawns this task at roughly
+        // the same time; if each pauses its heartbeat first, every node's
+        // listener is down for the duration of every node's invite send and
+        // the cross-invites fan-out fails with `Connection refused`. Sending
+        // first means heartbeats stay up across the cohort while invites are
+        // in flight; the pause then drops the heartbeat just before the
+        // workflow `NoiseServer` binds.
         let invite_result = send_kick_invites(&config, &db, &participant_id).await;
         if let Err(e) = invite_result {
             tracing::error!("Failed to send kick invites: {e}");
-            guard.resume().await;
             let msg = format!("Failed to send invites: {e}");
             set_state_failed(&state_for_task, &msg).await;
             mark_run_failed(&db, &instance_for_task, &msg).await;
@@ -367,8 +370,7 @@ pub async fn start_kick(
             return;
         }
 
-        // Give peers time to start their peer workflows
-        sleep(Duration::from_secs(2)).await;
+        let guard = ListenerPauseGuard::pause(listener_pause_count, listener_notify).await;
 
         let result = workflow::start_coordinator(
             config,
@@ -672,14 +674,15 @@ pub async fn start_onboarding(
     let mut abort_guard = state.abort_handle.lock().await;
 
     let join_handle = tokio::spawn(async move {
-        let guard = ListenerPauseGuard::pause(listener_pause_count, listener_notify).await;
-
-        // Send invites to selected peers before starting coordinator workflow
+        // Send invites BEFORE pausing the heartbeat (see send-before-pause
+        // comment in `kick_workflow` for the rationale — concurrent
+        // coordinators across the cohort need every node's heartbeat up
+        // while invites are in flight, otherwise the cross-invite fan-out
+        // fails with `Connection refused`).
         let invite_result =
             send_onboarding_invites(&config, &db, &peer_ids, &party_id_prefix).await;
         if let Err(e) = invite_result {
             tracing::error!("Failed to send onboarding invites: {e}");
-            guard.resume().await;
             let msg = format!("Failed to send invites: {e}");
             set_state_failed(&state_for_task, &msg).await;
             mark_run_failed(&db, &instance_for_task, &msg).await;
@@ -687,8 +690,7 @@ pub async fn start_onboarding(
             return;
         }
 
-        // Give peers time to start their peer workflows
-        sleep(Duration::from_secs(2)).await;
+        let guard = ListenerPauseGuard::pause(listener_pause_count, listener_notify).await;
 
         let result = workflow::start_coordinator(
             config.clone(),
@@ -1122,13 +1124,11 @@ pub async fn start_contracts(
     let mut abort_guard = state.abort_handle.lock().await;
 
     let join_handle = tokio::spawn(async move {
-        let guard = ListenerPauseGuard::pause(listener_pause_count, listener_notify).await;
-
-        // Send invites to all peers before starting coordinator workflow
+        // Send invites BEFORE pausing the heartbeat (see send-before-pause
+        // comment in `kick_workflow` for the cross-coordinator rationale).
         let invite_result = send_contracts_invites(&config, &db).await;
         if let Err(e) = invite_result {
             tracing::error!("Failed to send contracts invites: {e}");
-            guard.resume().await;
             let msg = format!("Failed to send invites: {e}");
             set_state_failed(&state_for_task, &msg).await;
             mark_run_failed(&db, &instance_for_task, &msg).await;
@@ -1136,8 +1136,7 @@ pub async fn start_contracts(
             return;
         }
 
-        // Give peers time to start their peer workflows
-        sleep(Duration::from_secs(2)).await;
+        let guard = ListenerPauseGuard::pause(listener_pause_count, listener_notify).await;
 
         let result = workflow::start_coordinator(
             config.clone(),
@@ -1335,9 +1334,8 @@ pub async fn start_dars(
     let mut abort_guard = state.abort_handle.lock().await;
 
     let join_handle = tokio::spawn(async move {
-        let guard = ListenerPauseGuard::pause(listener_pause_count, listener_notify).await;
-
-        // Send invites to selected peers before starting coordinator workflow
+        // Send invites BEFORE pausing the heartbeat (see send-before-pause
+        // comment in `kick_workflow` for the cross-coordinator rationale).
         let dar_filenames: Vec<String> = dars_config
             .dar_files
             .iter()
@@ -1346,7 +1344,6 @@ pub async fn start_dars(
         let invite_result = send_dars_invites(&config, &db, &peer_ids, &dar_filenames).await;
         if let Err(e) = invite_result {
             tracing::error!("Failed to send DARs invites: {e}");
-            guard.resume().await;
             let msg = format!("Failed to send invites: {e}");
             set_state_failed(&state_for_task, &msg).await;
             mark_run_failed(&db, &instance_for_task, &msg).await;
@@ -1354,8 +1351,7 @@ pub async fn start_dars(
             return;
         }
 
-        // Give peers time to start their peer workflows
-        sleep(Duration::from_secs(2)).await;
+        let guard = ListenerPauseGuard::pause(listener_pause_count, listener_notify).await;
 
         let result = workflow::start_coordinator(
             config,
