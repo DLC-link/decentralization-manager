@@ -1412,15 +1412,18 @@ async fn run_heartbeat(
                     loop {
                         tokio::select! {
                             result = listener.accept() => {
-                                if let Ok((socket, peer_addr)) = result {
-                                    let keypair = keypair_spawn.clone();
-                                    let last_seen = last_seen_spawn.clone();
-                                    let peer_keys = peer_keys_spawn.clone();
-                                    let triggers = triggers_spawn.clone();
+                                match result {
+                                    Ok((socket, peer_addr)) => {
+                                        let keypair = keypair_spawn.clone();
+                                        let last_seen = last_seen_spawn.clone();
+                                        let peer_keys = peer_keys_spawn.clone();
+                                        let triggers = triggers_spawn.clone();
 
-                                    tokio::spawn(async move {
-                                        handle_incoming_connection(socket, peer_addr, keypair, peer_keys, triggers, last_seen).await;
-                                    });
+                                        tokio::spawn(async move {
+                                            handle_incoming_connection(socket, peer_addr, keypair, peer_keys, triggers, last_seen).await;
+                                        });
+                                    }
+                                    Err(e) => tracing::warn!("Invite listener accept error: {e}"),
                                 }
                             }
                             _ = async {
