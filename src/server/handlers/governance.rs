@@ -74,6 +74,12 @@ pub struct ContractQueryParams {
     /// Use InterfaceFilter instead of TemplateFilter (for querying by interface)
     #[serde(default)]
     pub interface: bool,
+    /// Drop contracts whose `executeBefore` deadline has already passed.
+    /// Used by Accept Mint/Burn Request dropdowns so the user doesn't pick
+    /// a contract that would fail at interpretation. No-op on templates
+    /// without an `executeBefore` field.
+    #[serde(default)]
+    pub active_only: bool,
 }
 
 // ============================================================================
@@ -496,18 +502,21 @@ pub async fn get_transfer_preapprovals_handler(
         module_name: "Splice.AmuletRules".to_string(),
         entity_name: "TransferPreapproval".to_string(),
         use_interface_filter: false,
+        active_only: false,
     };
     let cc_proposal = QueryContractParams {
         package_id: "#splice-amulet".to_string(),
         module_name: "Splice.Wallet.TransferPreapproval".to_string(),
         entity_name: "TransferPreapprovalProposal".to_string(),
         use_interface_filter: false,
+        active_only: false,
     };
     let token_params = QueryContractParams {
         package_id: "#utility-registry-app-v0".to_string(),
         module_name: "Utility.Registry.App.V0.Model.TransferPreapproval".to_string(),
         entity_name: "TransferPreapproval".to_string(),
         use_interface_filter: false,
+        active_only: false,
     };
 
     async fn count(
@@ -741,6 +750,7 @@ pub async fn query_contracts_handler(
         module_name: query.module_name.clone(),
         entity_name: query.entity_name.clone(),
         use_interface_filter: query.interface,
+        active_only: query.active_only,
     };
 
     match query_contracts_by_template(&data.config, party_id, token, test_mode, &contract_params)

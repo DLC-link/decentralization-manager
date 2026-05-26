@@ -679,12 +679,15 @@ export const GovernanceSection = ({
 
   // Fetch contracts by template (returns CID + blob)
   const fetchContractsByTemplate = useCallback(
-    async (template: {
-      package_ref: string;
-      module: string;
-      entity: string;
-      interface?: boolean;
-    }) => {
+    async (
+      template: {
+        package_ref: string;
+        module: string;
+        entity: string;
+        interface?: boolean;
+      },
+      options?: { activeOnly?: boolean },
+    ) => {
       const params = new URLSearchParams({
         party_id: partyId,
         package_id: template.package_ref,
@@ -692,6 +695,7 @@ export const GovernanceSection = ({
         entity_name: template.entity,
       });
       if (template.interface) params.set("interface", "true");
+      if (options?.activeOnly) params.set("active_only", "true");
       const res = await authenticatedFetch(`${API_BASE}/contracts/query?${params}`);
       if (res.ok) {
         const data: ContractQueryResponse = await res.json();
@@ -712,10 +716,14 @@ export const GovernanceSection = ({
       fetchContractsByTemplate(TEMPLATE_REGISTRAR_SERVICE).then(setRegistrarServiceContracts);
     }
     if (proposalType === "accept_mint_request") {
-      fetchContractsByTemplate(TEMPLATE_MINT_REQUEST).then(setMintRequestContracts);
+      fetchContractsByTemplate(TEMPLATE_MINT_REQUEST, { activeOnly: true }).then(
+        setMintRequestContracts,
+      );
     }
     if (proposalType === "accept_burn_request") {
-      fetchContractsByTemplate(TEMPLATE_BURN_REQUEST).then(setBurnRequestContracts);
+      fetchContractsByTemplate(TEMPLATE_BURN_REQUEST, { activeOnly: true }).then(
+        setBurnRequestContracts,
+      );
     }
   }, [proposalType, fetchContractsByTemplate]);
 

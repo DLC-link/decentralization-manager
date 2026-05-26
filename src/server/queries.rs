@@ -2407,6 +2407,9 @@ pub struct ContractQueryParams {
     pub module_name: String,
     pub entity_name: String,
     pub use_interface_filter: bool,
+    /// When true, drop contracts whose `executeBefore` field is already in
+    /// the past. No-op for templates that don't carry an `executeBefore`.
+    pub active_only: bool,
 }
 
 /// Uses WildcardFilter in test mode, TemplateFilter or InterfaceFilter in production.
@@ -2488,6 +2491,13 @@ pub async fn query_contracts_by_template(
             };
 
             if matches {
+                // QA flagged the Accept Mint Request dropdown for surfacing
+                // contracts whose `executeBefore` has already passed —
+                // accepting them would fail at interpretation with
+                // deadline-exceeded. Drop them here when the caller opts in.
+                if params.active_only && is_execute_before_expired(&created) {
+                    continue;
+                }
                 let blob =
                     base64::engine::general_purpose::STANDARD.encode(&created.created_event_blob);
                 contracts.push(ContractWithBlob {
@@ -2696,6 +2706,23 @@ fn field_numeric(record: &Record, label: &str) -> Option<String> {
             Some(value::Sum::Numeric(n)) => Some(n.clone()),
             _ => None,
         })
+}
+
+/// Returns true if the contract's create-arguments carry an `executeBefore`
+/// Time field whose value is in the past. Returns false when no such field
+/// exists, so templates without a deadline are kept as-is.
+fn is_execute_before_expired(created: &CreatedEvent) -> bool {
+    let Some(record) = created.create_arguments.as_ref() else {
+        return false;
+    };
+    let Some(execute_before_micros) = field_timestamp(record, "executeBefore") else {
+        return false;
+    };
+    let now_micros = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_micros() as i64)
+        .unwrap_or(0);
+    execute_before_micros <= now_micros
 }
 
 fn field_timestamp(record: &Record, label: &str) -> Option<i64> {
@@ -3015,6 +3042,7 @@ async fn fetch_preapproved_instruments(
         module_name: "Splice.AmuletRules".to_string(),
         entity_name: "TransferPreapproval".to_string(),
         use_interface_filter: false,
+        active_only: false,
     };
     let has_amulet = match query_contracts_by_template(
         config,
