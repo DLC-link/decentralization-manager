@@ -2,13 +2,13 @@ use std::{
     collections::{HashMap, HashSet},
     marker::PhantomData,
     sync::Arc,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use hyper::{Body, Request, Response, StatusCode};
 use secp256k1::PublicKey;
 use sqlx::SqlitePool;
-use tokio::{net::TcpListener, sync::RwLock};
+use tokio::{net::TcpListener, sync::RwLock, time::sleep};
 use tokio_noise::handshakes::nn_psk2::Responder;
 
 use crate::{
@@ -212,9 +212,7 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
 
         tracing::info!("Starting Noise server on {listen_addr}");
 
-        let listener = TcpListener::bind(&listen_addr)
-            .await
-            .map_err(NoiseError::Io)?;
+        let listener = bind_with_retry(&listen_addr).await?;
 
         let make_responder = {
             let keypair = self.keypair.clone();
@@ -619,6 +617,57 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                     peer.participant_id
                 );
             }
+        }
+    }
+}
+
+/// Total time we'll keep retrying the Noise listener bind when the OS reports
+/// `EADDRINUSE`. Sized to cover the race window between one coordinator
+/// workflow's `NoiseServer` dropping its listener and the next coordinator
+/// workflow (or the heartbeat loop) trying to bind the same port. Stays well
+/// under the peer-side `get_next_command` retry budget (~40s) so a coordinator
+/// that takes a few seconds to acquire the port doesn't push connecting peers
+/// past their own deadline.
+const BIND_RETRY_DEADLINE: Duration = Duration::from_secs(20);
+
+/// Bind a TCP listener on `addr`, retrying with backoff while the OS reports
+/// the port is in use. Used by `NoiseServer::start` to absorb the short race
+/// between a previous workflow's listener being dropped and its FD actually
+/// being released by the kernel — without retry, a coordinator workflow that
+/// starts immediately after another finishes can fail with EADDRINUSE before
+/// the port has actually been freed.
+async fn bind_with_retry(addr: &str) -> Result<TcpListener, NoiseError> {
+    let start = Instant::now();
+    let mut attempt: u32 = 0;
+    loop {
+        match TcpListener::bind(addr).await {
+            Ok(listener) => {
+                if attempt > 0 {
+                    tracing::info!(
+                        "Noise listener bound on {addr} after {attempt} retries ({:?})",
+                        start.elapsed()
+                    );
+                }
+                return Ok(listener);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                if start.elapsed() >= BIND_RETRY_DEADLINE {
+                    return Err(NoiseError::Io(e));
+                }
+                attempt += 1;
+                // Backoff capped at 1s — first few retries fire fast to catch
+                // the common sub-second handoff, then settle into a steady
+                // polling cadence.
+                let backoff = Duration::from_millis(50u64.saturating_mul(1 << attempt.min(5)));
+                let backoff = backoff.min(Duration::from_secs(1));
+                tracing::warn!(
+                    "Noise listener bind on {addr}: address in use (attempt {attempt}); \
+                     retrying in {:?}",
+                    backoff
+                );
+                sleep(backoff).await;
+            }
+            Err(e) => return Err(NoiseError::Io(e)),
         }
     }
 }
