@@ -31,6 +31,9 @@ use crate::{
     server::{WorkflowKind, peer_status::LastSeen},
     utils,
     workflow::{
+        peer_tolerance::{
+            ConnectionClassDeadline, PeerStepError, classify, peer_connection_class_deadline,
+        },
         state::WorkflowStep,
         storage::{WorkflowStorage, artifact_kinds},
     },
@@ -272,6 +275,8 @@ pub async fn start_peer(
     // Command polling loop
     let mut consecutive_errors = 0;
     let mut consecutive_step_failures = 0;
+    let mut connection_class_deadline =
+        ConnectionClassDeadline::new(peer_connection_class_deadline());
     loop {
         // Poll coordinator for next command (with payload for commands that need data)
         let message = match client.get_next_command_with_payload().await {
@@ -356,12 +361,33 @@ pub async fn start_peer(
                 ) {
                     Ok(config) => config,
                     Err(e) => {
+                        let e = anyhow::Error::from(e);
                         tracing::error!("Failed to deserialize onboarding config: {e}");
-                        consecutive_step_failures += 1;
-                        if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
-                            anyhow::bail!(
-                                "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures"
-                            );
+                        match classify(e) {
+                            PeerStepError::ConnectionClass(orig) => {
+                                tracing::debug!("Peer step transient (connection-class): {orig}");
+                                if connection_class_deadline
+                                    .record_failure(std::time::Instant::now())
+                                {
+                                    tracing::info!(
+                                        "Peer step connection-class budget exhausted; aborting"
+                                    );
+                                    anyhow::bail!(
+                                        "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures"
+                                    );
+                                }
+                            }
+                            PeerStepError::Real(orig) => {
+                                consecutive_step_failures += 1;
+                                tracing::debug!(
+                                    "Peer step real error ({consecutive_step_failures}/{MAX_CONSECUTIVE_STEP_FAILURES}): {orig}"
+                                );
+                                if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                                    anyhow::bail!(
+                                        "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures"
+                                    );
+                                }
+                            }
                         }
                         continue;
                     }
@@ -371,17 +397,36 @@ pub async fn start_peer(
                     onboarding::generate_keys(&node_config, &db, &instance_name, &onboarding_config)
                         .await
                 {
-                    tracing::error!("Step execution failed: {e}");
-                    consecutive_step_failures += 1;
-                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
-                        anyhow::bail!(
-                            "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {e}"
-                        );
+                    match classify(e) {
+                        PeerStepError::ConnectionClass(orig) => {
+                            tracing::debug!("Peer step transient (connection-class): {orig}");
+                            if connection_class_deadline.record_failure(std::time::Instant::now()) {
+                                tracing::info!(
+                                    "Peer step connection-class budget exhausted; aborting"
+                                );
+                                anyhow::bail!(
+                                    "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {orig}"
+                                );
+                            }
+                        }
+                        PeerStepError::Real(orig) => {
+                            tracing::error!("Step execution failed: {orig}");
+                            consecutive_step_failures += 1;
+                            tracing::debug!(
+                                "Peer step real error ({consecutive_step_failures}/{MAX_CONSECUTIVE_STEP_FAILURES}): {orig}"
+                            );
+                            if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                                anyhow::bail!(
+                                    "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {orig}"
+                                );
+                            }
+                        }
                     }
                     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                     continue;
                 }
                 consecutive_step_failures = 0;
+                connection_class_deadline.reset();
                 if let Err(e) = onboarding::peer::send_keys_to_coordinator(
                     &client,
                     &db,
@@ -403,17 +448,36 @@ pub async fn start_peer(
                     onboarding::sign_dns_proposals(&node_config, &db, &instance_name, &payload)
                         .await
                 {
-                    tracing::error!("Step execution failed: {e}");
-                    consecutive_step_failures += 1;
-                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
-                        anyhow::bail!(
-                            "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {e}"
-                        );
+                    match classify(e) {
+                        PeerStepError::ConnectionClass(orig) => {
+                            tracing::debug!("Peer step transient (connection-class): {orig}");
+                            if connection_class_deadline.record_failure(std::time::Instant::now()) {
+                                tracing::info!(
+                                    "Peer step connection-class budget exhausted; aborting"
+                                );
+                                anyhow::bail!(
+                                    "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {orig}"
+                                );
+                            }
+                        }
+                        PeerStepError::Real(orig) => {
+                            tracing::error!("Step execution failed: {orig}");
+                            consecutive_step_failures += 1;
+                            tracing::debug!(
+                                "Peer step real error ({consecutive_step_failures}/{MAX_CONSECUTIVE_STEP_FAILURES}): {orig}"
+                            );
+                            if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                                anyhow::bail!(
+                                    "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {orig}"
+                                );
+                            }
+                        }
                     }
                     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                     continue;
                 }
                 consecutive_step_failures = 0;
+                connection_class_deadline.reset();
                 if let Err(e) = onboarding::peer::send_dns_signature_to_coordinator(
                     &client,
                     &db,
@@ -435,17 +499,36 @@ pub async fn start_peer(
                     onboarding::sign_p2p_proposals(&node_config, &db, &instance_name, &payload)
                         .await
                 {
-                    tracing::error!("Step execution failed: {e}");
-                    consecutive_step_failures += 1;
-                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
-                        anyhow::bail!(
-                            "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {e}"
-                        );
+                    match classify(e) {
+                        PeerStepError::ConnectionClass(orig) => {
+                            tracing::debug!("Peer step transient (connection-class): {orig}");
+                            if connection_class_deadline.record_failure(std::time::Instant::now()) {
+                                tracing::info!(
+                                    "Peer step connection-class budget exhausted; aborting"
+                                );
+                                anyhow::bail!(
+                                    "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {orig}"
+                                );
+                            }
+                        }
+                        PeerStepError::Real(orig) => {
+                            tracing::error!("Step execution failed: {orig}");
+                            consecutive_step_failures += 1;
+                            tracing::debug!(
+                                "Peer step real error ({consecutive_step_failures}/{MAX_CONSECUTIVE_STEP_FAILURES}): {orig}"
+                            );
+                            if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                                anyhow::bail!(
+                                    "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {orig}"
+                                );
+                            }
+                        }
                     }
                     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                     continue;
                 }
                 consecutive_step_failures = 0;
+                connection_class_deadline.reset();
                 if let Err(e) = onboarding::peer::send_p2p_signatures_to_coordinator(
                     &client,
                     &db,
@@ -516,12 +599,32 @@ pub async fn start_peer(
                 if let Err(e) =
                     save_prepared_submissions_from_payload(&items[1], &db, &instance_name).await
                 {
-                    tracing::error!("Failed to save prepared submissions from coordinator: {e}");
-                    consecutive_step_failures += 1;
-                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
-                        anyhow::bail!(
-                            "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {e}"
-                        );
+                    match classify(e) {
+                        PeerStepError::ConnectionClass(orig) => {
+                            tracing::debug!("Peer step transient (connection-class): {orig}");
+                            if connection_class_deadline.record_failure(std::time::Instant::now()) {
+                                tracing::info!(
+                                    "Peer step connection-class budget exhausted; aborting"
+                                );
+                                anyhow::bail!(
+                                    "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {orig}"
+                                );
+                            }
+                        }
+                        PeerStepError::Real(orig) => {
+                            tracing::error!(
+                                "Failed to save prepared submissions from coordinator: {orig}"
+                            );
+                            consecutive_step_failures += 1;
+                            tracing::debug!(
+                                "Peer step real error ({consecutive_step_failures}/{MAX_CONSECUTIVE_STEP_FAILURES}): {orig}"
+                            );
+                            if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                                anyhow::bail!(
+                                    "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {orig}"
+                                );
+                            }
+                        }
                     }
                     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                     continue;
@@ -531,17 +634,36 @@ pub async fn start_peer(
                     contracts::sign_submissions(&node_config, &db, &instance_name, &dec_party_id)
                         .await
                 {
-                    tracing::error!("Step execution failed: {e:#}");
-                    consecutive_step_failures += 1;
-                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
-                        anyhow::bail!(
-                            "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {e}"
-                        );
+                    match classify(e) {
+                        PeerStepError::ConnectionClass(orig) => {
+                            tracing::debug!("Peer step transient (connection-class): {orig}");
+                            if connection_class_deadline.record_failure(std::time::Instant::now()) {
+                                tracing::info!(
+                                    "Peer step connection-class budget exhausted; aborting"
+                                );
+                                anyhow::bail!(
+                                    "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {orig}"
+                                );
+                            }
+                        }
+                        PeerStepError::Real(orig) => {
+                            tracing::error!("Step execution failed: {orig:#}");
+                            consecutive_step_failures += 1;
+                            tracing::debug!(
+                                "Peer step real error ({consecutive_step_failures}/{MAX_CONSECUTIVE_STEP_FAILURES}): {orig}"
+                            );
+                            if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                                anyhow::bail!(
+                                    "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {orig}"
+                                );
+                            }
+                        }
                     }
                     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                     continue;
                 }
                 consecutive_step_failures = 0;
+                connection_class_deadline.reset();
                 if let Err(e) = contracts::peer::send_submission_signatures_to_coordinator(
                     &client,
                     &db,
@@ -580,17 +702,36 @@ pub async fn start_peer(
                 if let Err(e) =
                     kick::sign_proposals(&node_config, &db, &instance_name, &kick_data).await
                 {
-                    tracing::error!("Step execution failed: {e}");
-                    consecutive_step_failures += 1;
-                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
-                        anyhow::bail!(
-                            "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {e}"
-                        );
+                    match classify(e) {
+                        PeerStepError::ConnectionClass(orig) => {
+                            tracing::debug!("Peer step transient (connection-class): {orig}");
+                            if connection_class_deadline.record_failure(std::time::Instant::now()) {
+                                tracing::info!(
+                                    "Peer step connection-class budget exhausted; aborting"
+                                );
+                                anyhow::bail!(
+                                    "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {orig}"
+                                );
+                            }
+                        }
+                        PeerStepError::Real(orig) => {
+                            tracing::error!("Step execution failed: {orig}");
+                            consecutive_step_failures += 1;
+                            tracing::debug!(
+                                "Peer step real error ({consecutive_step_failures}/{MAX_CONSECUTIVE_STEP_FAILURES}): {orig}"
+                            );
+                            if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                                anyhow::bail!(
+                                    "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {orig}"
+                                );
+                            }
+                        }
                     }
                     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                     continue;
                 }
                 consecutive_step_failures = 0;
+                connection_class_deadline.reset();
                 if let Err(e) = kick::peer::send_kick_signatures_to_coordinator(
                     &client,
                     &db,
