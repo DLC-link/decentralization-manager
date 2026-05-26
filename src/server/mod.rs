@@ -2127,35 +2127,48 @@ async fn run_onboarding_peer_listener(
             *error = None;
         }
 
-        let guard =
-            types::ListenerPauseGuard::pause(listener_control.clone(), listener_notify.clone())
-                .await;
+        let listener_control_inner = listener_control.clone();
+        let listener_notify_inner = listener_notify.clone();
         let workflow_config = config.clone();
-        let result =
-            workflow::start_peer(workflow_config, coordinator, db.clone(), local_instance).await;
+        let db_inner = db.clone();
+        let outcome = guarded_await(async move {
+            let _guard =
+                types::ListenerPauseGuard::pause(listener_control_inner, listener_notify_inner)
+                    .await;
+            workflow::start_peer(workflow_config, coordinator, db_inner, local_instance).await
+        })
+        .await;
 
-        guard.resume().await;
-
-        // Update status
-        let mut status = onboarding_state.status.write().await;
-        let mut error = onboarding_state.error.write().await;
-
-        let success = result.is_ok();
-        let err_msg = result.as_ref().err().map(|e| format!("{e}"));
-        match result {
-            Ok(()) => {
+        match outcome {
+            Ok(Ok(())) => {
+                // Update status
+                let mut status = onboarding_state.status.write().await;
+                let error = onboarding_state.error.write().await;
                 *status = types::OnboardingStatus::Completed;
                 tracing::info!("Onboarding peer workflow completed successfully");
+                drop(status);
+                drop(error);
+                finalize_peer_run(&db, &peer_run_instance, true, None).await;
             }
-            Err(e) => {
+            Ok(Err(e)) => {
+                // Update status
+                let mut status = onboarding_state.status.write().await;
+                let mut error = onboarding_state.error.write().await;
                 *status = types::OnboardingStatus::Failed;
                 *error = Some(format!("{e}"));
                 tracing::error!("Onboarding peer workflow failed: {e}");
+                let err_msg = Some(format!("{e}"));
+                drop(status);
+                drop(error);
+                finalize_peer_run(&db, &peer_run_instance, false, err_msg).await;
+            }
+            Err(GuardedAwaitTimeout) => {
+                tracing::info!(
+                    "Guarded await timed out (30s) on peer listener step; releasing listener pause and continuing"
+                );
+                continue;
             }
         }
-        drop(status);
-        drop(error);
-        finalize_peer_run(&db, &peer_run_instance, success, err_msg).await;
     }
 }
 
@@ -2233,35 +2246,48 @@ async fn run_kick_peer_listener(
             *error = None;
         }
 
-        let guard =
-            types::ListenerPauseGuard::pause(listener_control.clone(), listener_notify.clone())
-                .await;
+        let listener_control_inner = listener_control.clone();
+        let listener_notify_inner = listener_notify.clone();
         let workflow_config = config.clone();
-        let result =
-            workflow::start_peer(workflow_config, coordinator, db.clone(), local_instance).await;
+        let db_inner = db.clone();
+        let outcome = guarded_await(async move {
+            let _guard =
+                types::ListenerPauseGuard::pause(listener_control_inner, listener_notify_inner)
+                    .await;
+            workflow::start_peer(workflow_config, coordinator, db_inner, local_instance).await
+        })
+        .await;
 
-        guard.resume().await;
-
-        // Update status
-        let mut status = kick_state.status.write().await;
-        let mut error = kick_state.error.write().await;
-
-        let success = result.is_ok();
-        let err_msg = result.as_ref().err().map(|e| format!("{e}"));
-        match result {
-            Ok(()) => {
+        match outcome {
+            Ok(Ok(())) => {
+                // Update status
+                let mut status = kick_state.status.write().await;
+                let error = kick_state.error.write().await;
                 *status = types::KickStatus::Completed;
                 tracing::info!("Kick peer workflow completed successfully");
+                drop(status);
+                drop(error);
+                finalize_peer_run(&db, &peer_run_instance, true, None).await;
             }
-            Err(e) => {
+            Ok(Err(e)) => {
+                // Update status
+                let mut status = kick_state.status.write().await;
+                let mut error = kick_state.error.write().await;
                 *status = types::KickStatus::Failed;
                 *error = Some(format!("{e}"));
                 tracing::error!("Kick peer workflow failed: {e}");
+                let err_msg = Some(format!("{e}"));
+                drop(status);
+                drop(error);
+                finalize_peer_run(&db, &peer_run_instance, false, err_msg).await;
+            }
+            Err(GuardedAwaitTimeout) => {
+                tracing::info!(
+                    "Guarded await timed out (30s) on peer listener step; releasing listener pause and continuing"
+                );
+                continue;
             }
         }
-        drop(status);
-        drop(error);
-        finalize_peer_run(&db, &peer_run_instance, success, err_msg).await;
     }
 }
 
@@ -2339,35 +2365,48 @@ async fn run_contracts_peer_listener(
             *error = None;
         }
 
-        let guard =
-            types::ListenerPauseGuard::pause(listener_control.clone(), listener_notify.clone())
-                .await;
+        let listener_control_inner = listener_control.clone();
+        let listener_notify_inner = listener_notify.clone();
         let workflow_config = config.clone();
-        let result =
-            workflow::start_peer(workflow_config, coordinator, db.clone(), local_instance).await;
+        let db_inner = db.clone();
+        let outcome = guarded_await(async move {
+            let _guard =
+                types::ListenerPauseGuard::pause(listener_control_inner, listener_notify_inner)
+                    .await;
+            workflow::start_peer(workflow_config, coordinator, db_inner, local_instance).await
+        })
+        .await;
 
-        guard.resume().await;
-
-        // Update status
-        let mut status = contracts_state.status.write().await;
-        let mut error = contracts_state.error.write().await;
-
-        let success = result.is_ok();
-        let err_msg = result.as_ref().err().map(|e| format!("{e}"));
-        match result {
-            Ok(()) => {
+        match outcome {
+            Ok(Ok(())) => {
+                // Update status
+                let mut status = contracts_state.status.write().await;
+                let error = contracts_state.error.write().await;
                 *status = types::WorkflowProgress::Completed;
                 tracing::info!("Contracts peer workflow completed successfully");
+                drop(status);
+                drop(error);
+                finalize_peer_run(&db, &peer_run_instance, true, None).await;
             }
-            Err(e) => {
+            Ok(Err(e)) => {
+                // Update status
+                let mut status = contracts_state.status.write().await;
+                let mut error = contracts_state.error.write().await;
                 *status = types::WorkflowProgress::Failed;
                 *error = Some(format!("{e}"));
                 tracing::error!("Contracts peer workflow failed: {e}");
+                let err_msg = Some(format!("{e}"));
+                drop(status);
+                drop(error);
+                finalize_peer_run(&db, &peer_run_instance, false, err_msg).await;
+            }
+            Err(GuardedAwaitTimeout) => {
+                tracing::info!(
+                    "Guarded await timed out (30s) on peer listener step; releasing listener pause and continuing"
+                );
+                continue;
             }
         }
-        drop(status);
-        drop(error);
-        finalize_peer_run(&db, &peer_run_instance, success, err_msg).await;
     }
 }
 
@@ -2452,35 +2491,48 @@ async fn run_dars_peer_listener(
             *error = None;
         }
 
-        let guard =
-            types::ListenerPauseGuard::pause(listener_control.clone(), listener_notify.clone())
-                .await;
+        let listener_control_inner = listener_control.clone();
+        let listener_notify_inner = listener_notify.clone();
         let workflow_config = config.clone();
-        let result =
-            workflow::start_peer(workflow_config, coordinator, db.clone(), local_instance).await;
+        let db_inner = db.clone();
+        let outcome = guarded_await(async move {
+            let _guard =
+                types::ListenerPauseGuard::pause(listener_control_inner, listener_notify_inner)
+                    .await;
+            workflow::start_peer(workflow_config, coordinator, db_inner, local_instance).await
+        })
+        .await;
 
-        guard.resume().await;
-
-        // Update status
-        let mut status = dars_state.status.write().await;
-        let mut error = dars_state.error.write().await;
-
-        let success = result.is_ok();
-        let err_msg = result.as_ref().err().map(|e| format!("{e}"));
-        match result {
-            Ok(()) => {
+        match outcome {
+            Ok(Ok(())) => {
+                // Update status
+                let mut status = dars_state.status.write().await;
+                let error = dars_state.error.write().await;
                 *status = types::WorkflowProgress::Completed;
                 tracing::info!("DARs peer workflow completed successfully");
+                drop(status);
+                drop(error);
+                finalize_peer_run(&db, &peer_run_instance, true, None).await;
             }
-            Err(e) => {
+            Ok(Err(e)) => {
+                // Update status
+                let mut status = dars_state.status.write().await;
+                let mut error = dars_state.error.write().await;
                 *status = types::WorkflowProgress::Failed;
                 *error = Some(format!("{e}"));
                 tracing::error!("DARs peer workflow failed: {e}");
+                let err_msg = Some(format!("{e}"));
+                drop(status);
+                drop(error);
+                finalize_peer_run(&db, &peer_run_instance, false, err_msg).await;
+            }
+            Err(GuardedAwaitTimeout) => {
+                tracing::info!(
+                    "Guarded await timed out (30s) on peer listener step; releasing listener pause and continuing"
+                );
+                continue;
             }
         }
-        drop(status);
-        drop(error);
-        finalize_peer_run(&db, &peer_run_instance, success, err_msg).await;
     }
 }
 
