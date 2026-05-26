@@ -3666,13 +3666,18 @@ export const GovernanceSection = ({
                       const hasFactory = transferFactories.some(
                         (f) => f.expected_admin === h.instrument_admin,
                       );
+                      // Canton Coin's token-standard instrument_id is the
+                      // literal "Amulet" — display it as "CC" to match the
+                      // Holdings section.
+                      const label =
+                        h.instrument_id === "Amulet" ? "CC" : h.instrument_id;
                       return (
                         <MenuItem
                           key={key}
                           value={key}
                           disabled={!hasFactory}
                         >
-                          {h.instrument_id} — balance {h.amount}
+                          {label} — balance {h.amount}
                           {!hasFactory && " (no factory available)"}
                         </MenuItem>
                       );

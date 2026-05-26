@@ -46,8 +46,9 @@ use crate::{
             GovernanceResponse, GovernanceStateResponse, GovernanceType, HoldingsResponse,
             InstrumentsResponse, KnownMember, KnownMembersResponse, MessageResponse, NetworkInfo,
             OperatorInfo, ProposalType, ProposeActionRequest, ProviderServicesResponse,
-            RegistrarServicesResponse, TransferFactoriesResponse, TransferInstructionsResponse,
-            TransferPreapprovalsResponse, UserServicesResponse, VaultsResponse,
+            RegistrarServicesResponse, TransferFactoriesResponse, TransferFactoryInfo,
+            TransferInstructionsResponse, TransferPreapprovalsResponse, UserServicesResponse,
+            VaultsResponse,
         },
     },
     utils,
@@ -625,7 +626,22 @@ pub async fn get_transfer_factories_handler(
     let token = get_party_token(&data, party_id).await;
 
     match get_transfer_factories(&data.config, party_id, token).await {
-        Ok(transfer_factories) => {
+        Ok(mut transfer_factories) => {
+            // Canton Coin's TransferFactory implementation is the system
+            // `Splice.AmuletRules:AmuletRules` contract, which the ledger
+            // interface query above doesn't surface to feature parties. The
+            // DSO API publishes its contract id; expose it as a synthetic
+            // factory keyed on the DSO party so the Transfer Proposal form's
+            // existing `expected_admin == holding.instrument_admin` join
+            // matches CC holdings (whose instrument_admin is the DSO).
+            if let Some((dso_party_id, amulet_rules_cid)) =
+                fetch_amulet_rules_factory(&data.http_client, &data.config).await
+            {
+                transfer_factories.push(TransferFactoryInfo {
+                    contract_id: amulet_rules_cid,
+                    expected_admin: dso_party_id,
+                });
+            }
             HttpResponse::Ok().json(TransferFactoriesResponse { transfer_factories })
         }
         Err(e) => {
@@ -635,6 +651,38 @@ pub async fn get_transfer_factories_handler(
             })
         }
     }
+}
+
+/// Pull the DSO party id and AmuletRules contract id from the DSO API. Returns
+/// `None` (with a logged warning) on any failure so callers can degrade
+/// gracefully — the only consumer is `/transfer-factories`, which omits CC
+/// rather than failing the whole response when the DSO API is unreachable.
+async fn fetch_amulet_rules_factory(
+    http_client: &reqwest::Client,
+    config: &NodeConfig,
+) -> Option<(CantonId, String)> {
+    let url = config.canton.network.dso_url();
+    let res = match http_client.get(url).send().await {
+        Ok(res) if res.status().is_success() => res,
+        Ok(res) => {
+            tracing::warn!("DSO API returned {} fetching AmuletRules", res.status());
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!("Failed to reach DSO API for AmuletRules: {e}");
+            return None;
+        }
+    };
+    let json: serde_json::Value = res
+        .json()
+        .await
+        .inspect_err(|e| tracing::warn!("Failed to parse DSO response: {e}"))
+        .ok()?;
+    let dso = json.pointer("/dso_party_id").and_then(|v| v.as_str())?;
+    let cid = json
+        .pointer("/amulet_rules/contract/contract_id")
+        .and_then(|v| v.as_str())?;
+    Some((dso.parse().ok()?, cid.to_string()))
 }
 
 /// Get token-standard `Holding` contracts owned by a party, aggregated by
