@@ -1432,6 +1432,16 @@ async fn run_heartbeat(
     let peer_keys_spawn = peer_keys.clone();
     let triggers_spawn = triggers.clone();
 
+    // Layer 3b: pause-flag watchdog (backstop). Runs alongside the invite listener.
+    {
+        let pause_flag = listener_control.clone();
+        let notify_flag = listener_notify.clone();
+        let deadline = crate::server::types::listener_pause_watchdog_deadline();
+        tokio::spawn(async move {
+            run_listener_pause_watchdog(pause_flag, notify_flag, deadline).await;
+        });
+    }
+
     tokio::spawn(async move {
         loop {
             // Wait for permission to bind
@@ -2684,6 +2694,43 @@ async fn list_my_owner_keys(
     Ok(serde_json::to_vec(&entries)?)
 }
 
+/// Layer 3b: backstop for the listener pause flag. Polls the flag once per
+/// second; if it stays `true` for longer than `deadline`, logs WARN and
+/// force-clears the flag + calls `notify_one()`.
+///
+/// `deadline` must be strictly larger than layer 3a's `guarded_await_timeout`
+/// so that 3a wins races under normal recovery and 3b only fires when 3a
+/// failed to. See https://github.com/DLC-link/dec-party-manager/issues/176
+/// §4 Layer 3b.
+async fn run_listener_pause_watchdog(
+    pause_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    notify: std::sync::Arc<tokio::sync::Notify>,
+    deadline: std::time::Duration,
+) {
+    let mut paused_since: Option<tokio::time::Instant> = None;
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        tick.tick().await;
+        let paused = pause_flag.load(Ordering::Acquire);
+        match (paused, paused_since) {
+            (true, None) => paused_since = Some(tokio::time::Instant::now()),
+            (false, Some(_)) => paused_since = None,
+            (true, Some(since)) if since.elapsed() > deadline => {
+                tracing::warn!(
+                    "Listener pause watchdog fired: pause held for {elapsed:?}",
+                    elapsed = since.elapsed()
+                );
+                pause_flag.store(false, Ordering::Release);
+                notify.notify_one();
+                paused_since = None;
+            }
+            _ => {}
+        }
+    }
+}
+
 async fn list_local_packages(admin_api_url: &str) -> Result<Vec<u8>> {
     let mut client = PackageServiceClient::connect(admin_api_url.to_string()).await?;
     let response = client
@@ -2707,4 +2754,132 @@ async fn list_local_packages(admin_api_url: &str) -> Result<Vec<u8>> {
         .collect();
 
     Ok(serde_json::to_vec(&packages)?)
+}
+
+#[cfg(test)]
+mod watchdog_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    use tokio::sync::Notify;
+
+    use super::run_listener_pause_watchdog;
+    use crate::server::types::{GuardedAwaitTimeout, ListenerPauseGuard, guarded_await};
+
+    #[tokio::test(start_paused = true)]
+    async fn listener_pause_watchdog_force_resumes() {
+        let flag = Arc::new(AtomicBool::new(true)); // start paused
+        let notify = Arc::new(Notify::new());
+        let waiter = notify.clone();
+        let wake = tokio::spawn(async move {
+            waiter.notified().await;
+            true
+        });
+
+        let _watchdog = tokio::spawn(run_listener_pause_watchdog(
+            flag.clone(),
+            notify.clone(),
+            Duration::from_secs(60),
+        ));
+
+        // Yield to let the spawned tasks run to their first await point.
+        tokio::task::yield_now().await;
+
+        // Advance past deadline + one more tick interval so the watchdog fires.
+        tokio::time::advance(Duration::from_secs(62)).await;
+        tokio::task::yield_now().await;
+
+        assert!(
+            !flag.load(Ordering::Acquire),
+            "watchdog must clear pause flag"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), wake)
+                .await
+                .is_ok(),
+            "watchdog must call notify_one"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn listener_pause_watchdog_quiet_when_normal() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let notify = Arc::new(Notify::new());
+
+        let _watchdog = tokio::spawn(run_listener_pause_watchdog(
+            flag.clone(),
+            notify.clone(),
+            Duration::from_secs(60),
+        ));
+
+        // Toggle the flag inside the 60s window — watchdog must not fire.
+        flag.store(true, Ordering::Release);
+        tokio::time::advance(Duration::from_secs(30)).await;
+        flag.store(false, Ordering::Release);
+        notify.notify_one();
+        tokio::time::advance(Duration::from_secs(60)).await;
+        tokio::task::yield_now().await;
+
+        assert!(!flag.load(Ordering::Acquire));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn watchdog_quiet_when_guarded_await_unwinds() {
+        // Layer 3a present: guard owned by inner future of guarded_await.
+        // Advance past 30s; guard drops; watchdog (60s) never fires.
+        let flag = Arc::new(AtomicBool::new(false));
+        let notify = Arc::new(Notify::new());
+
+        let _watchdog = tokio::spawn(run_listener_pause_watchdog(
+            flag.clone(),
+            notify.clone(),
+            Duration::from_secs(60),
+        ));
+
+        let flag_inner = flag.clone();
+        let notify_inner = notify.clone();
+        let guarded: tokio::task::JoinHandle<Result<(), GuardedAwaitTimeout>> =
+            tokio::spawn(async move {
+                guarded_await(async move {
+                    let _guard = ListenerPauseGuard::pause(flag_inner, notify_inner).await;
+                    std::future::pending::<()>().await;
+                })
+                .await
+            });
+
+        tokio::time::advance(Duration::from_secs(31)).await;
+        tokio::task::yield_now().await;
+        let _ = guarded.await;
+        // After 3a fires, the flag is back to false. Now advance another 60s
+        // to give the watchdog a chance to fire — it must not.
+        tokio::time::advance(Duration::from_secs(60)).await;
+        tokio::task::yield_now().await;
+
+        assert!(!flag.load(Ordering::Acquire));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn watchdog_fires_when_3a_absent() {
+        // No guarded_await wrapper — guard is held forever, watchdog must fire at 60s.
+        let flag = Arc::new(AtomicBool::new(false));
+        let notify = Arc::new(Notify::new());
+
+        let _watchdog = tokio::spawn(run_listener_pause_watchdog(
+            flag.clone(),
+            notify.clone(),
+            Duration::from_secs(60),
+        ));
+
+        let _guard = ListenerPauseGuard::pause(flag.clone(), notify.clone()).await;
+        tokio::time::advance(Duration::from_secs(61)).await;
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+
+        assert!(
+            !flag.load(Ordering::Acquire),
+            "watchdog must fire when 3a is absent"
+        );
+    }
 }
