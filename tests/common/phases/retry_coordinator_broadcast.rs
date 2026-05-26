@@ -81,14 +81,17 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     })
     .await?;
 
-    // Now wait for completion on the persisted row.
+    // Now wait for completion on the persisted row. Fail-fast on `failed`
+    // so the actual workflow error surfaces instead of waiting out the full
+    // 240s deadline — the chaos suite has bitten us once where a 240s
+    // timeout hid a 90s `WaitingForPeers` stall behind a generic
+    // `poll_until exhausted` message.
     chaos::poll_until(Duration::from_secs(240), || async {
-        Ok(matches!(
-            db::workflow_run_status(&p1_db, &instance, "Coordinator")
-                .await?
-                .as_deref(),
-            Some("completed")
-        ))
+        let s = db::workflow_run_status(&p1_db, &instance, "Coordinator").await?;
+        if s.as_deref() == Some("failed") {
+            anyhow::bail!("P1 coordinator workflow flipped to failed during retry");
+        }
+        Ok(s.as_deref() == Some("completed"))
     })
     .await?;
 
@@ -97,6 +100,11 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     chaos::poll_until(Duration::from_secs(240), || async {
         let s2 = db::workflow_run_status(&p2_db, &p2_inst, "Peer").await?;
         let s3 = db::workflow_run_status(&p3_db, &p3_inst, "Peer").await?;
+        for (label, st) in [("P2", &s2), ("P3", &s3)] {
+            if st.as_deref() == Some("failed") {
+                anyhow::bail!("{label} peer workflow flipped to failed during retry");
+            }
+        }
         Ok(s2.as_deref() == Some("completed") && s3.as_deref() == Some("completed"))
     })
     .await?;
