@@ -27,9 +27,17 @@ fn init_tracing() {
     let full_log =
         std::env::var("CI").is_ok() || std::env::var("INTEGRATION_TEST_FULL_LOG").is_ok();
 
+    // Write to stderr instead of the default stdout. Stdout is block-buffered
+    // when cargo test pipes the runner's output through GitHub Actions, so
+    // sparse phases (chaos suites emit only a handful of `[Gx]` lines) never
+    // fill the 8KB buffer and the CI log goes silent for minutes — exactly
+    // what bit us diagnosing the post-`cancel_cascades` hang. Stderr is
+    // line-buffered/unbuffered in the same context, so every event reaches
+    // the log immediately.
     if full_log {
         let _ = tracing_subscriber::fmt()
             .with_env_filter(env_filter)
+            .with_writer(std::io::stderr)
             .try_init();
     } else {
         let _ = tracing_subscriber::fmt()
@@ -37,6 +45,7 @@ fn init_tracing() {
             .with_target(false)
             .with_level(false)
             .without_time()
+            .with_writer(std::io::stderr)
             .fmt_fields(MessageOnlyFields)
             .try_init();
     }
