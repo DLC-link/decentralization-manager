@@ -12,10 +12,13 @@ use super::parties::{
     fetch_decentralized_parties, resolve_owner_keys_from_peers, store_parties_to_db,
 };
 use crate::{
-    config::{NetworkConfig, NodeConfig},
+    config::{NetworkConfig, NodeConfig, NoiseRetryConfig},
     db::schema::{Commitable, SchemaRead, SchemaWrite},
     error::Result,
-    noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
+    noise::{
+        Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message,
+        send_noise_message_with_retry,
+    },
     participant_id::CantonId,
     server::{
         AppState,
@@ -31,6 +34,23 @@ use crate::{
     },
     workflow::{self, ContractsStep, DarsStep, KickStep, OnboardingStep, state::WorkflowStep},
 };
+
+/// Retry budget used when a coordinator-side workflow sends invites to its
+/// peer cohort. The default `NoiseRetryConfig` (2 attempts × 250ms = ~500ms
+/// total) is too short for concurrent multi-coordinator scenarios: every
+/// node acquiring its `ListenerPauseGuard` simultaneously drops its
+/// heartbeat listener for a few hundred ms before its workflow `NoiseServer`
+/// binds, and any peer trying to deliver an invite during that window gets
+/// `Connection refused`. ~4s of retry budget (8 × 500ms) comfortably bridges
+/// the gap on every node we've measured under CI load — the longest
+/// observed pause→bind window is ~2.5s.
+fn invite_retry_config() -> NoiseRetryConfig {
+    NoiseRetryConfig {
+        per_attempt_timeout_secs: 5,
+        max_attempts: 8,
+        backoff_ms: 500,
+    }
+}
 
 // ============================================================================
 // Workflow run persistence helpers
@@ -462,12 +482,13 @@ async fn send_kick_invites(
             peer.port
         );
 
-        match send_noise_message(
+        match send_noise_message_with_retry(
             &peer.address,
             peer.port,
             &psk,
             identity.as_bytes(),
             &invite_message,
+            &invite_retry_config(),
         )
         .await
         {
@@ -812,12 +833,13 @@ async fn send_onboarding_invites(
             port = peer.port
         );
 
-        match send_noise_message(
+        match send_noise_message_with_retry(
             &peer.address,
             peer.port,
             &psk,
             identity.as_bytes(),
             &invite_message,
+            &invite_retry_config(),
         )
         .await
         {
@@ -1429,12 +1451,13 @@ async fn send_dars_invites(
             port = peer.port
         );
 
-        match send_noise_message(
+        match send_noise_message_with_retry(
             &peer.address,
             peer.port,
             &psk,
             identity.as_bytes(),
             &invite_message,
+            &invite_retry_config(),
         )
         .await
         {
@@ -2040,12 +2063,13 @@ async fn send_contracts_invites(config: &NodeConfig, db: &SqlitePool) -> Result 
             peer.port
         );
 
-        match send_noise_message(
+        match send_noise_message_with_retry(
             &peer.address,
             peer.port,
             &psk,
             identity.as_bytes(),
             &invite_message,
+            &invite_retry_config(),
         )
         .await
         {
