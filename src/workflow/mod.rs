@@ -2,6 +2,7 @@ pub mod contracts;
 pub mod dars;
 pub mod kick;
 pub mod onboarding;
+pub mod peer_tolerance;
 pub mod state;
 pub mod storage;
 pub mod topology;
