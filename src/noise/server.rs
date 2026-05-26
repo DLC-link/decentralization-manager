@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    io,
     marker::PhantomData,
     net::SocketAddr,
     sync::Arc,
@@ -184,10 +185,14 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
 
         tracing::info!("Starting Noise server on {listen_addr}");
 
-        let addr: SocketAddr = listen_addr.parse().map_err(|e: std::net::AddrParseError| {
-            NoiseError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
-        })?;
-        let socket = tokio::net::TcpSocket::new_v4().map_err(NoiseError::Io)?;
+        let addr: SocketAddr = listen_addr
+            .parse()
+            .map_err(|e| NoiseError::Io(io::Error::new(io::ErrorKind::InvalidInput, e)))?;
+        let socket = match addr {
+            SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4(),
+            SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6(),
+        }
+        .map_err(NoiseError::Io)?;
         socket.set_reuseaddr(true).map_err(NoiseError::Io)?;
         socket.bind(addr).map_err(NoiseError::Io)?;
         let listener = socket.listen(1024).map_err(NoiseError::Io)?;
