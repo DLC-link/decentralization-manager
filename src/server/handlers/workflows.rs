@@ -22,12 +22,13 @@ use crate::{
         middleware::require_admin,
         respawn_coordinator,
         types::{
-            ContractsRequest, DarsInvitePayload, DarsRequest, ErrorResponse, HttpWorkflowState,
-            KickRequest, KickResponse, KickStatus, ListenerPauseGuard, MessageResponse,
-            MissingEdgeKind, MissingPeerEdge, OnboardingInvitePayload, OnboardingMeshErrorResponse,
-            OnboardingRequest, OnboardingResponse, OnboardingStatus, SuccessResponse,
-            WorkflowInFlightGuard, WorkflowKind, WorkflowProgress, WorkflowResponse, WorkflowRole,
-            WorkflowRun, WorkflowRunsResponse, WorkflowStatusResponse,
+            ContractsRequest, DarsInvitePayload, DarsRequest, ErrorResponse, GuardedAwaitTimeout,
+            HttpWorkflowState, KickRequest, KickResponse, KickStatus, ListenerPauseGuard,
+            MessageResponse, MissingEdgeKind, MissingPeerEdge, OnboardingInvitePayload,
+            OnboardingMeshErrorResponse, OnboardingRequest, OnboardingResponse, OnboardingStatus,
+            SuccessResponse, WorkflowInFlightGuard, WorkflowKind, WorkflowProgress,
+            WorkflowResponse, WorkflowRole, WorkflowRun, WorkflowRunsResponse,
+            WorkflowStatusResponse, guarded_await,
         },
     },
     workflow::{self, ContractsStep, DarsStep, KickStep, OnboardingStep, state::WorkflowStep},
@@ -349,48 +350,45 @@ pub async fn start_kick(
 
     let join_handle = tokio::spawn(async move {
         let _workflow_guard = workflow_guard; // dropped at end → releases cross-workflow gate
-        let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
 
-        // Send kick invites to all peers before starting coordinator workflow
-        let invite_result = send_kick_invites(&config, &db, &participant_id).await;
-        if let Err(e) = invite_result {
-            tracing::error!("Failed to send kick invites: {e}");
-            guard.resume().await;
-            let msg = format!("Failed to send invites: {e}");
-            {
-                let mut status = kick_state_clone.status.write().await;
-                let mut error = kick_state_clone.error.write().await;
-                *status = KickStatus::Failed;
-                *error = Some(msg.clone());
-            }
-            mark_run_failed(&db, &instance_for_task, &msg).await;
-            return;
-        }
+        let listener_control_inner = listener_control.clone();
+        let listener_notify_inner = listener_notify.clone();
+        let db_inner = db.clone();
+        let outcome = guarded_await(async move {
+            let _guard =
+                ListenerPauseGuard::pause(listener_control_inner, listener_notify_inner).await;
 
-        // Give peers time to start their peer workflows
-        tokio::time::sleep(Duration::from_secs(2)).await;
+            // Send kick invites to all peers before starting coordinator workflow
+            send_kick_invites(&config, &db_inner, &participant_id)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to send invites: {e}"))?;
 
-        let result = workflow::start_coordinator(
-            config,
-            db.clone(),
-            workflow::WorkflowType::Kick,
-            None, // No onboarding config
-            Some(kick_config),
-            None, // No contracts config
-            None, // No dars config
-            None, // No auth registry for kick
-            last_seen,
-        )
+            // Give peers time to start their peer workflows
+            tokio::time::sleep(Duration::from_secs(2)).await;
+
+            workflow::start_coordinator(
+                config,
+                db_inner,
+                workflow::WorkflowType::Kick,
+                None, // No onboarding config
+                Some(kick_config),
+                None, // No contracts config
+                None, // No dars config
+                None, // No auth registry for kick
+                last_seen,
+            )
+            .await?;
+
+            Ok::<_, anyhow::Error>(())
+        })
         .await;
-
-        guard.resume().await;
 
         // Update in-memory state in tight scopes — never hold the RwLock
         // across a DB await. /kick/status acquires a read lock to serve
         // every poll; if a writer holds the lock during the DB write, every
         // concurrent read blocks for that duration on a slow runner.
-        match result {
-            Ok(_) => {
+        match outcome {
+            Ok(Ok(())) => {
                 {
                     let mut status = kick_state_clone.status.write().await;
                     *status = KickStatus::Completed;
@@ -398,7 +396,7 @@ pub async fn start_kick(
                 tracing::info!("Kick workflow completed successfully");
                 mark_run_completed(&db, &instance_for_task).await;
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 let msg = format!("{e}");
                 {
                     let mut status = kick_state_clone.status.write().await;
@@ -408,6 +406,11 @@ pub async fn start_kick(
                 }
                 tracing::error!("Kick workflow failed: {e}");
                 mark_run_failed(&db, &instance_for_task, &msg).await;
+            }
+            Err(GuardedAwaitTimeout) => {
+                tracing::warn!(
+                    "Guarded await timed out (30s) on start_kick handler; peer mesh may be unresponsive"
+                );
             }
         }
     });
@@ -687,49 +690,46 @@ pub async fn start_onboarding(
 
     let join_handle = tokio::spawn(async move {
         let _workflow_guard = workflow_guard; // releases cross-workflow gate on drop
-        let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
 
-        // Send invites to selected peers before starting coordinator workflow
-        let invite_result =
-            send_onboarding_invites(&config, &db, &peer_ids, &party_id_prefix).await;
-        if let Err(e) = invite_result {
-            tracing::error!("Failed to send onboarding invites: {e}");
-            guard.resume().await;
-            let msg = format!("Failed to send invites: {e}");
-            {
-                let mut status = onboarding_state_clone.status.write().await;
-                let mut error = onboarding_state_clone.error.write().await;
-                *status = OnboardingStatus::Failed;
-                *error = Some(msg.clone());
-            }
-            mark_run_failed(&db, &instance_for_task, &msg).await;
-            return;
-        }
+        let listener_control_inner = listener_control.clone();
+        let listener_notify_inner = listener_notify.clone();
+        let db_inner = db.clone();
+        let config_inner = config.clone();
+        let outcome = guarded_await(async move {
+            let _guard =
+                ListenerPauseGuard::pause(listener_control_inner, listener_notify_inner).await;
 
-        // Give peers time to start their peer workflows
-        tokio::time::sleep(Duration::from_secs(2)).await;
+            // Send invites to selected peers before starting coordinator workflow
+            send_onboarding_invites(&config_inner, &db_inner, &peer_ids, &party_id_prefix)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to send invites: {e}"))?;
 
-        let result = workflow::start_coordinator(
-            config.clone(),
-            db.clone(),
-            workflow::WorkflowType::Onboarding,
-            Some(onboarding_config),
-            None, // No kick config
-            None, // No contracts config
-            None, // No dars config
-            None, // No auth registry for onboarding
-            last_seen,
-        )
+            // Give peers time to start their peer workflows
+            tokio::time::sleep(Duration::from_secs(2)).await;
+
+            workflow::start_coordinator(
+                config_inner.clone(),
+                db_inner,
+                workflow::WorkflowType::Onboarding,
+                Some(onboarding_config),
+                None, // No kick config
+                None, // No contracts config
+                None, // No dars config
+                None, // No auth registry for onboarding
+                last_seen,
+            )
+            .await?;
+
+            Ok::<_, anyhow::Error>(())
+        })
         .await;
-
-        guard.resume().await;
 
         // Update in-memory state in tight scopes — never hold the RwLock
         // across a DB await. /onboarding/status acquires a read lock to
         // serve every poll; if a writer holds the lock during the DB write,
         // every concurrent read blocks for that duration on a slow runner.
-        match result {
-            Ok(_) => {
+        match outcome {
+            Ok(Ok(())) => {
                 {
                     let mut status = onboarding_state_clone.status.write().await;
                     *status = OnboardingStatus::Completed;
@@ -786,7 +786,7 @@ pub async fn start_onboarding(
                     }
                 });
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 let msg = format!("{e}");
                 {
                     let mut status = onboarding_state_clone.status.write().await;
@@ -796,6 +796,11 @@ pub async fn start_onboarding(
                 }
                 tracing::error!("Onboarding workflow failed: {e}");
                 mark_run_failed(&db, &instance_for_task, &msg).await;
+            }
+            Err(GuardedAwaitTimeout) => {
+                tracing::warn!(
+                    "Guarded await timed out (30s) on start_onboarding handler; peer mesh may be unresponsive"
+                );
             }
         }
     });
@@ -1181,48 +1186,46 @@ pub async fn start_contracts(
 
     let join_handle = tokio::spawn(async move {
         let _workflow_guard = workflow_guard; // releases cross-workflow gate on drop
-        let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
 
-        // Send invites to all peers before starting coordinator workflow
-        let invite_result = send_contracts_invites(&config, &db).await;
-        if let Err(e) = invite_result {
-            tracing::error!("Failed to send contracts invites: {e}");
-            guard.resume().await;
-            let msg = format!("Failed to send invites: {e}");
-            {
-                let mut status = contracts_state_clone.status.write().await;
-                let mut error = contracts_state_clone.error.write().await;
-                *status = WorkflowProgress::Failed;
-                *error = Some(msg.clone());
-            }
-            mark_run_failed(&db, &instance_for_task, &msg).await;
-            return;
-        }
+        let listener_control_inner = listener_control.clone();
+        let listener_notify_inner = listener_notify.clone();
+        let db_inner = db.clone();
+        let config_inner = config.clone();
+        let outcome = guarded_await(async move {
+            let _guard =
+                ListenerPauseGuard::pause(listener_control_inner, listener_notify_inner).await;
 
-        // Give peers time to start their peer workflows
-        tokio::time::sleep(Duration::from_secs(2)).await;
+            // Send invites to all peers before starting coordinator workflow
+            send_contracts_invites(&config_inner, &db_inner)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to send invites: {e}"))?;
 
-        let result = workflow::start_coordinator(
-            config.clone(),
-            db.clone(),
-            workflow::WorkflowType::Contracts,
-            None, // No onboarding config
-            None, // No kick config
-            Some(contracts_config.clone()),
-            None, // No dars config
-            workflow_auth,
-            last_seen,
-        )
+            // Give peers time to start their peer workflows
+            tokio::time::sleep(Duration::from_secs(2)).await;
+
+            workflow::start_coordinator(
+                config_inner.clone(),
+                db_inner,
+                workflow::WorkflowType::Contracts,
+                None, // No onboarding config
+                None, // No kick config
+                Some(contracts_config.clone()),
+                None, // No dars config
+                workflow_auth,
+                last_seen,
+            )
+            .await?;
+
+            Ok::<_, anyhow::Error>(())
+        })
         .await;
-
-        guard.resume().await;
 
         // Update in-memory state in tight scopes — never hold the RwLock
         // across a DB await. /contracts/status acquires a read lock to
         // serve every poll; if a writer holds the lock during the DB write,
         // every concurrent read blocks for that duration on a slow runner.
-        match result {
-            Ok(_) => {
+        match outcome {
+            Ok(Ok(())) => {
                 {
                     let mut status = contracts_state_clone.status.write().await;
                     *status = WorkflowProgress::Completed;
@@ -1257,7 +1260,7 @@ pub async fn start_contracts(
                     }
                 });
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 let msg = format!("{e}");
                 {
                     let mut status = contracts_state_clone.status.write().await;
@@ -1267,6 +1270,11 @@ pub async fn start_contracts(
                 }
                 tracing::error!("Contracts workflow failed: {e}");
                 mark_run_failed(&db, &instance_for_task, &msg).await;
+            }
+            Err(GuardedAwaitTimeout) => {
+                tracing::warn!(
+                    "Guarded await timed out (30s) on start_contracts handler; peer mesh may be unresponsive"
+                );
             }
         }
     });
@@ -1453,53 +1461,48 @@ pub async fn start_dars(
 
     let join_handle = tokio::spawn(async move {
         let _workflow_guard = workflow_guard; // releases cross-workflow gate on drop
-        let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
 
-        // Send invites to selected peers before starting coordinator workflow
-        let dar_filenames: Vec<String> = dars_config
-            .dar_files
-            .iter()
-            .map(|f| f.filename.clone())
-            .collect();
-        let invite_result = send_dars_invites(&config, &db, &peer_ids, &dar_filenames).await;
-        if let Err(e) = invite_result {
-            tracing::error!("Failed to send DARs invites: {e}");
-            guard.resume().await;
-            let mut status = dars_state_clone.status.write().await;
-            let mut error = dars_state_clone.error.write().await;
-            *status = WorkflowProgress::Failed;
-            *error = Some(format!("Failed to send invites: {e}"));
-            mark_run_failed(
-                &db,
-                &instance_for_task,
-                &format!("Failed to send invites: {e}"),
+        let listener_control_inner = listener_control.clone();
+        let listener_notify_inner = listener_notify.clone();
+        let db_inner = db.clone();
+        let outcome = guarded_await(async move {
+            let _guard =
+                ListenerPauseGuard::pause(listener_control_inner, listener_notify_inner).await;
+
+            // Send invites to selected peers before starting coordinator workflow
+            let dar_filenames: Vec<String> = dars_config
+                .dar_files
+                .iter()
+                .map(|f| f.filename.clone())
+                .collect();
+            send_dars_invites(&config, &db_inner, &peer_ids, &dar_filenames)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to send invites: {e}"))?;
+
+            // Give peers time to start their peer workflows
+            tokio::time::sleep(Duration::from_secs(2)).await;
+
+            workflow::start_coordinator(
+                config,
+                db_inner,
+                workflow::WorkflowType::Dars,
+                None, // No onboarding config
+                None, // No kick config
+                None, // No contracts config
+                Some(dars_config),
+                None, // No auth
+                last_seen,
             )
-            .await;
-            return;
-        }
+            .await?;
 
-        // Give peers time to start their peer workflows
-        tokio::time::sleep(Duration::from_secs(2)).await;
-
-        let result = workflow::start_coordinator(
-            config,
-            db.clone(),
-            workflow::WorkflowType::Dars,
-            None, // No onboarding config
-            None, // No kick config
-            None, // No contracts config
-            Some(dars_config),
-            None, // No auth
-            last_seen,
-        )
+            Ok::<_, anyhow::Error>(())
+        })
         .await;
-
-        guard.resume().await;
 
         // Update in-memory state in tight scopes — never hold the RwLock
         // across a DB await (see kick/onboarding/contracts handlers above).
-        match result {
-            Ok(_) => {
+        match outcome {
+            Ok(Ok(())) => {
                 {
                     let mut status = dars_state_clone.status.write().await;
                     *status = WorkflowProgress::Completed;
@@ -1507,7 +1510,7 @@ pub async fn start_dars(
                 tracing::info!("DARs distribution workflow completed successfully");
                 mark_run_completed(&db, &instance_for_task).await;
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 let msg = format!("{e}");
                 {
                     let mut status = dars_state_clone.status.write().await;
@@ -1517,6 +1520,11 @@ pub async fn start_dars(
                 }
                 tracing::error!("DARs distribution workflow failed: {e}");
                 mark_run_failed(&db, &instance_for_task, &msg).await;
+            }
+            Err(GuardedAwaitTimeout) => {
+                tracing::warn!(
+                    "Guarded await timed out (30s) on start_dars handler; peer mesh may be unresponsive"
+                );
             }
         }
     });

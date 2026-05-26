@@ -416,27 +416,32 @@ async fn spawn_onboarding_resume(
     listener_notify: Arc<Notify>,
     last_seen: LastSeen,
 ) {
-    let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
-    let result = workflow::start_coordinator(
-        config,
-        db.clone(),
-        WorkflowType::Onboarding,
-        Some(onboarding_config),
-        None,
-        None,
-        None,
-        None,
-        last_seen,
-    )
+    let listener_control_inner = listener_control.clone();
+    let listener_notify_inner = listener_notify.clone();
+    let db_inner = db.clone();
+    let outcome = guarded_await(async move {
+        let _guard = ListenerPauseGuard::pause(listener_control_inner, listener_notify_inner).await;
+        workflow::start_coordinator(
+            config,
+            db_inner,
+            WorkflowType::Onboarding,
+            Some(onboarding_config),
+            None,
+            None,
+            None,
+            None,
+            last_seen,
+        )
+        .await
+    })
     .await;
-    guard.resume().await;
 
     // Update in-memory state in tight scopes — never hold the RwLock across
     // a DB await. /onboarding/status acquires a read lock to serve every
     // poll; if a writer holds the lock during the DB write, every concurrent
     // read blocks for that duration on a slow runner.
-    match result {
-        Ok(_) => {
+    match outcome {
+        Ok(Ok(_)) => {
             {
                 let mut status = state.status.write().await;
                 *status = OnboardingStatus::Completed;
@@ -444,7 +449,7 @@ async fn spawn_onboarding_resume(
             tracing::info!("Resumed onboarding workflow {instance} completed");
             mark_completed_via_pool(&db, &instance).await;
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             let msg = format!("{e}");
             {
                 let mut status = state.status.write().await;
@@ -454,6 +459,11 @@ async fn spawn_onboarding_resume(
             }
             tracing::error!("Resumed onboarding workflow {instance} failed: {e:#}");
             mark_failed_via_pool(&db, &instance, &msg).await;
+        }
+        Err(GuardedAwaitTimeout) => {
+            tracing::info!(
+                "Guarded await timed out (30s) on spawn_onboarding_resume; treating as transient"
+            );
         }
     }
 }
@@ -469,23 +479,28 @@ async fn spawn_kick_resume(
     listener_notify: Arc<Notify>,
     last_seen: LastSeen,
 ) {
-    let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
-    let result = workflow::start_coordinator(
-        config,
-        db.clone(),
-        WorkflowType::Kick,
-        None,
-        Some(kick_config),
-        None,
-        None,
-        None,
-        last_seen,
-    )
+    let listener_control_inner = listener_control.clone();
+    let listener_notify_inner = listener_notify.clone();
+    let db_inner = db.clone();
+    let outcome = guarded_await(async move {
+        let _guard = ListenerPauseGuard::pause(listener_control_inner, listener_notify_inner).await;
+        workflow::start_coordinator(
+            config,
+            db_inner,
+            WorkflowType::Kick,
+            None,
+            Some(kick_config),
+            None,
+            None,
+            None,
+            last_seen,
+        )
+        .await
+    })
     .await;
-    guard.resume().await;
 
-    match result {
-        Ok(_) => {
+    match outcome {
+        Ok(Ok(_)) => {
             {
                 let mut status = state.status.write().await;
                 *status = KickStatus::Completed;
@@ -493,7 +508,7 @@ async fn spawn_kick_resume(
             tracing::info!("Resumed kick workflow {instance} completed");
             mark_completed_via_pool(&db, &instance).await;
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             let msg = format!("{e}");
             {
                 let mut status = state.status.write().await;
@@ -503,6 +518,11 @@ async fn spawn_kick_resume(
             }
             tracing::error!("Resumed kick workflow {instance} failed: {e:#}");
             mark_failed_via_pool(&db, &instance, &msg).await;
+        }
+        Err(GuardedAwaitTimeout) => {
+            tracing::info!(
+                "Guarded await timed out (30s) on spawn_kick_resume; treating as transient"
+            );
         }
     }
 }
@@ -519,23 +539,28 @@ async fn spawn_contracts_resume(
     auth: Option<WorkflowAuth>,
     last_seen: LastSeen,
 ) {
-    let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
-    let result = workflow::start_coordinator(
-        config,
-        db.clone(),
-        WorkflowType::Contracts,
-        None,
-        None,
-        Some(contracts_config),
-        None,
-        auth,
-        last_seen,
-    )
+    let listener_control_inner = listener_control.clone();
+    let listener_notify_inner = listener_notify.clone();
+    let db_inner = db.clone();
+    let outcome = guarded_await(async move {
+        let _guard = ListenerPauseGuard::pause(listener_control_inner, listener_notify_inner).await;
+        workflow::start_coordinator(
+            config,
+            db_inner,
+            WorkflowType::Contracts,
+            None,
+            None,
+            Some(contracts_config),
+            None,
+            auth,
+            last_seen,
+        )
+        .await
+    })
     .await;
-    guard.resume().await;
 
-    match result {
-        Ok(_) => {
+    match outcome {
+        Ok(Ok(_)) => {
             {
                 let mut status = state.status.write().await;
                 *status = WorkflowProgress::Completed;
@@ -543,7 +568,7 @@ async fn spawn_contracts_resume(
             tracing::info!("Resumed contracts workflow {instance} completed");
             mark_completed_via_pool(&db, &instance).await;
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             let msg = format!("{e}");
             {
                 let mut status = state.status.write().await;
@@ -553,6 +578,11 @@ async fn spawn_contracts_resume(
             }
             tracing::error!("Resumed contracts workflow {instance} failed: {e:#}");
             mark_failed_via_pool(&db, &instance, &msg).await;
+        }
+        Err(GuardedAwaitTimeout) => {
+            tracing::info!(
+                "Guarded await timed out (30s) on spawn_contracts_resume; treating as transient"
+            );
         }
     }
 }
@@ -568,23 +598,28 @@ async fn spawn_dars_resume(
     listener_notify: Arc<Notify>,
     last_seen: LastSeen,
 ) {
-    let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
-    let result = workflow::start_coordinator(
-        config,
-        db.clone(),
-        WorkflowType::Dars,
-        None,
-        None,
-        None,
-        Some(dars_config),
-        None,
-        last_seen,
-    )
+    let listener_control_inner = listener_control.clone();
+    let listener_notify_inner = listener_notify.clone();
+    let db_inner = db.clone();
+    let outcome = guarded_await(async move {
+        let _guard = ListenerPauseGuard::pause(listener_control_inner, listener_notify_inner).await;
+        workflow::start_coordinator(
+            config,
+            db_inner,
+            WorkflowType::Dars,
+            None,
+            None,
+            None,
+            Some(dars_config),
+            None,
+            last_seen,
+        )
+        .await
+    })
     .await;
-    guard.resume().await;
 
-    match result {
-        Ok(_) => {
+    match outcome {
+        Ok(Ok(_)) => {
             {
                 let mut status = state.status.write().await;
                 *status = WorkflowProgress::Completed;
@@ -592,7 +627,7 @@ async fn spawn_dars_resume(
             tracing::info!("Resumed dars workflow {instance} completed");
             mark_completed_via_pool(&db, &instance).await;
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             let msg = format!("{e}");
             {
                 let mut status = state.status.write().await;
@@ -602,6 +637,11 @@ async fn spawn_dars_resume(
             }
             tracing::error!("Resumed dars workflow {instance} failed: {e:#}");
             mark_failed_via_pool(&db, &instance, &msg).await;
+        }
+        Err(GuardedAwaitTimeout) => {
+            tracing::info!(
+                "Guarded await timed out (30s) on spawn_dars_resume; treating as transient"
+            );
         }
     }
 }
