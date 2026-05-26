@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    future::Future,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -86,6 +87,30 @@ impl Drop for ListenerPauseGuard {
         self.listener_pause_flag.store(false, Ordering::Release);
         self.listener_notify.notify_one();
     }
+}
+
+/// Default budget for any `.await` made while holding a `ListenerPauseGuard`.
+///
+/// Layer 3a from the design at https://github.com/DLC-link/dec-party-manager/issues/176.
+pub const GUARDED_AWAIT_TIMEOUT_DEFAULT: Duration = Duration::from_secs(30);
+
+/// Error returned when `guarded_await` exceeds its timeout.
+#[derive(Debug, thiserror::Error)]
+#[error("guarded await timed out")]
+pub struct GuardedAwaitTimeout;
+
+/// Run `fut` with a 30s timeout. On timeout the future is dropped, which
+/// drops any `ListenerPauseGuard` owned by the inner block — releasing the
+/// listener pause.
+///
+/// **Discipline:** the `ListenerPauseGuard` MUST be owned by the inner future
+/// (declared inside `async move { ... }`), not the outer scope. If it lives in
+/// the outer scope, this helper does not release it. See the negative test
+/// `guarded_await_with_outer_guard_does_not_drop_guard`.
+pub async fn guarded_await<F: Future>(fut: F) -> Result<F::Output, GuardedAwaitTimeout> {
+    tokio::time::timeout(GUARDED_AWAIT_TIMEOUT_DEFAULT, fut)
+        .await
+        .map_err(|_| GuardedAwaitTimeout)
 }
 
 /// Cross-workflow mutual exclusion.
@@ -1899,5 +1924,61 @@ mod tests {
         assert!(mk("0").validate().is_err());
         assert!(mk("-1.5").validate().is_err());
         assert!(mk("0.0001").validate().is_ok());
+    }
+}
+
+#[cfg(test)]
+mod guarded_await_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use tokio::sync::Notify;
+
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn guarded_await_returns_inner_value() {
+        let result: Result<i32, GuardedAwaitTimeout> = guarded_await(async { 42 }).await;
+        assert_eq!(result.unwrap(), 42);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn guarded_await_times_out() {
+        let result: Result<(), GuardedAwaitTimeout> =
+            guarded_await(std::future::pending::<()>()).await;
+        assert!(matches!(result, Err(GuardedAwaitTimeout)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn guarded_await_drops_inner_future_on_timeout() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let notify = Arc::new(Notify::new());
+        let flag_clone = flag.clone();
+        let notify_clone = notify.clone();
+
+        let result: Result<(), GuardedAwaitTimeout> = guarded_await(async move {
+            let _guard = ListenerPauseGuard::pause(flag_clone, notify_clone).await;
+            std::future::pending::<()>().await;
+        })
+        .await;
+
+        assert!(matches!(result, Err(GuardedAwaitTimeout)));
+        assert!(!flag.load(Ordering::Acquire), "pause flag must be cleared");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn guarded_await_with_outer_guard_does_not_drop_guard() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let notify = Arc::new(Notify::new());
+        let _guard = ListenerPauseGuard::pause(flag.clone(), notify.clone()).await;
+
+        let result: Result<(), GuardedAwaitTimeout> =
+            guarded_await(std::future::pending::<()>()).await;
+
+        assert!(matches!(result, Err(GuardedAwaitTimeout)));
+        assert!(
+            flag.load(Ordering::Acquire),
+            "outer-scope guard must NOT be dropped by timeout"
+        );
     }
 }
