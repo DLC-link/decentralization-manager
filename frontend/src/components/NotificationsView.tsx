@@ -877,6 +877,51 @@ const DomainActionCard = ({
         </Typography>
       )}
 
+      {domainAction.transfer_details && (() => {
+        const td = domainAction.transfer_details;
+        // Canton Coin's token-standard `instrument_id` is the literal
+        // "Amulet" — render as "CC" to match Holdings and the Transfer
+        // Proposal dropdown.
+        const token =
+          td.instrument_id === "Amulet" ? "CC" : td.instrument_id;
+        const rows: { label: string; value: string }[] = [
+          { label: "Token", value: token },
+          { label: "Amount", value: td.amount },
+          { label: "Recipient", value: truncatePartyId(td.receiver) },
+        ];
+        return (
+          <Box
+            sx={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 0.75,
+              px: 1.25,
+              py: 1,
+              bgcolor: "action.hover",
+              borderRadius: 1,
+            }}
+          >
+            {rows.map((r) => (
+              <Box
+                key={r.label}
+                sx={{ display: "flex", alignItems: "baseline", gap: 1 }}
+              >
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{ minWidth: 96 }}
+                >
+                  {r.label}
+                </Typography>
+                <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                  {r.value}
+                </Typography>
+              </Box>
+            ))}
+          </Box>
+        );
+      })()}
+
       <Typography
         variant="caption"
         color="text.secondary"

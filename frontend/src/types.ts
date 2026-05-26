@@ -363,6 +363,17 @@ export interface DomainGovernanceAction {
    *  Confirmation contracts can only be expired (dismissed), not confirmed
    *  or executed. */
   orphaned?: boolean;
+  /** Recipient / amount / instrument pulled from a TransferProposal so the
+   *  notification card can show what's being transferred without an extra
+   *  fetch. Present only on Transfer proposals. */
+  transfer_details?: TransferProposalDetails;
+}
+
+export interface TransferProposalDetails {
+  receiver: string;
+  amount: string;
+  instrument_admin: string;
+  instrument_id: string;
 }
 
 export interface GovernanceResponse {

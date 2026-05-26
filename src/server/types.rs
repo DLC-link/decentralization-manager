@@ -1274,6 +1274,25 @@ pub struct DomainGovernanceAction {
     /// Execute affordances.
     #[serde(default)]
     pub orphaned: bool,
+    /// Structured Transfer-proposal fields (recipient, amount, instrument)
+    /// pulled from the on-chain `TransferProposal` contract so the
+    /// notification card can display what's actually being transferred
+    /// without the user having to inspect the contract CID. Only populated
+    /// for `Transfer` proposals.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transfer_details: Option<TransferProposalDetails>,
+}
+
+/// Recipient/amount/instrument extracted from a `TransferProposal`'s
+/// `transfer` field. Surfaced inside `DomainGovernanceAction` so the
+/// notification queue card shows the meaningful parameters of the proposal.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct TransferProposalDetails {
+    pub receiver: CantonId,
+    #[schema(value_type = String)]
+    pub amount: DamlDecimal,
+    pub instrument_admin: CantonId,
+    pub instrument_id: String,
 }
 
 /// Request to submit a confirmation for an action with structured type
