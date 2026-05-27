@@ -167,7 +167,14 @@ pub async fn execute_submissions(
             }],
         };
 
-        // Generate unique submission ID
+        // Per-attempt submission ID (RPC-level idempotency key only). Canton
+        // command dedup keys on `command_id` + act_as + user_id, NOT on this.
+        // The dedup-stable id is the prepared transaction's `command_id`
+        // (= contract_def.id, set in prepare.rs), which is persisted in the
+        // prepared artifact and reused verbatim on resume — so a retried
+        // submission after a crash / guarded_await drop dedups correctly.
+        // Do not move `command_id` to a fresh UUID per attempt: that would
+        // silently break dedup and allow double-application of this submission.
         let submission_id = Uuid::new_v4().to_string();
 
         // Execute the submission
