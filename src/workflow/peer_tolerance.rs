@@ -85,15 +85,23 @@ pub fn classify(err: anyhow::Error) -> PeerStepError {
         return PeerStepError::ConnectionClass(err);
     }
 
-    // NoiseError wraps io::Error inside its Io variant.
-    if let Some(crate::noise::NoiseError::Io(io_err)) =
-        err.downcast_ref::<crate::noise::NoiseError>()
-        && matches!(
-            io_err.kind(),
-            ErrorKind::ConnectionRefused | ErrorKind::TimedOut | ErrorKind::ConnectionAborted
-        )
-    {
-        return PeerStepError::ConnectionClass(err);
+    // NoiseError: match all connection-class variants in one place.
+    if let Some(noise_err) = err.downcast_ref::<crate::noise::NoiseError>() {
+        use crate::noise::NoiseError;
+        let is_connection_class = match noise_err {
+            NoiseError::Io(io_err) => matches!(
+                io_err.kind(),
+                ErrorKind::ConnectionRefused | ErrorKind::TimedOut | ErrorKind::ConnectionAborted
+            ),
+            NoiseError::TcpConnectionFailed(_)
+            | NoiseError::TcpConnectionTimeout(_)
+            | NoiseError::RequestTimeout => true,
+            NoiseError::BadStatusCode(status) => status.as_u16() == 503,
+            _ => false,
+        };
+        if is_connection_class {
+            return PeerStepError::ConnectionClass(err);
+        }
     }
 
     // reqwest::Error downcast — covers coordinator HTTP calls.
@@ -230,6 +238,48 @@ mod tests {
 
         let err: anyhow::Error = anyhow::Error::new(req_err);
         assert!(matches!(classify(err), PeerStepError::ConnectionClass(_)));
+    }
+
+    #[test]
+    fn classify_noise_tcp_connection_failed_is_connection_class() {
+        let err = anyhow::Error::new(crate::noise::NoiseError::TcpConnectionFailed(
+            "refused".into(),
+        ));
+        assert!(matches!(classify(err), PeerStepError::ConnectionClass(_)));
+    }
+
+    #[test]
+    fn classify_noise_tcp_connection_timeout_is_connection_class() {
+        let err = anyhow::Error::new(crate::noise::NoiseError::TcpConnectionTimeout(
+            "addr".into(),
+        ));
+        assert!(matches!(classify(err), PeerStepError::ConnectionClass(_)));
+    }
+
+    #[test]
+    fn classify_noise_request_timeout_is_connection_class() {
+        let err = anyhow::Error::new(crate::noise::NoiseError::RequestTimeout);
+        assert!(matches!(classify(err), PeerStepError::ConnectionClass(_)));
+    }
+
+    #[test]
+    fn classify_noise_bad_status_503_is_connection_class() {
+        let status = hyper::StatusCode::from_u16(503).unwrap();
+        let err = anyhow::Error::new(crate::noise::NoiseError::BadStatusCode(status));
+        assert!(matches!(classify(err), PeerStepError::ConnectionClass(_)));
+    }
+
+    #[test]
+    fn classify_noise_bad_status_500_is_real() {
+        let status = hyper::StatusCode::from_u16(500).unwrap();
+        let err = anyhow::Error::new(crate::noise::NoiseError::BadStatusCode(status));
+        assert!(matches!(classify(err), PeerStepError::Real(_)));
+    }
+
+    #[test]
+    fn classify_noise_handshake_failed_is_real() {
+        let err = anyhow::Error::new(crate::noise::NoiseError::HandshakeFailed);
+        assert!(matches!(classify(err), PeerStepError::Real(_)));
     }
 
     #[tokio::test]
