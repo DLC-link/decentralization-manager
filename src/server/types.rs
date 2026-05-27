@@ -310,6 +310,12 @@ pub struct KickRequest {
     pub decentralized_party_id: CantonId,
     pub participant_id: CantonId,
     pub new_threshold: i32,
+    /// The party's threshold *before* the kick. Display-only — surfaced on
+    /// the workflow run card as "old → new" so the operator can see the
+    /// change at a glance. Defaults to 0 (rendered as just the new value)
+    /// when an older client omits it.
+    #[serde(default)]
+    pub previous_threshold: i32,
 }
 
 /// Request to create a new decentralized party
@@ -529,6 +535,13 @@ pub struct WorkflowRun {
     /// when missing from the config payload.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub participants: Vec<CantonId>,
+    /// Kick runs only: the threshold before and after the kick, lifted from
+    /// `config_json` so the run card can show "old → new". `None` for every
+    /// other workflow kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_threshold: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_threshold: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub dismissed: bool,
@@ -1877,6 +1890,8 @@ mod tests {
             dec_party_id: Some(CantonId::parse(&dec_party_id_str).unwrap()),
             prefix: None,
             participants: Vec::new(),
+            previous_threshold: None,
+            new_threshold: None,
             error: None,
             dismissed: false,
             created_at: 1_700_000_000,

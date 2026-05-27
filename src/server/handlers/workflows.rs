@@ -94,6 +94,8 @@ where
         dec_party_id,
         prefix: None,
         participants: Vec::new(),
+        previous_threshold: None,
+        new_threshold: None,
         error: None,
         dismissed: false,
         created_at: now,
@@ -307,6 +309,7 @@ pub async fn start_kick(
         participant_id.clone(),
         namespace_fingerprint,
         body.new_threshold,
+        body.previous_threshold,
         instance_name.clone(),
     );
 
@@ -1876,6 +1879,11 @@ fn enrich_from_config_json(run: &mut WorkflowRun) {
         party_id_prefix: Option<String>,
         #[serde(default)]
         participants: Vec<String>,
+        // Kick configs only.
+        #[serde(default)]
+        new_threshold: Option<i32>,
+        #[serde(default)]
+        previous_threshold: Option<i32>,
     }
     if let Ok(shape) = serde_json::from_str::<ConfigShape>(&run.config_json) {
         let prefix = shape.prefix.or(shape.party_id_prefix);
@@ -1891,6 +1899,10 @@ fn enrich_from_config_json(run: &mut WorkflowRun) {
                 .filter_map(|s| CantonId::parse(&s).ok())
                 .collect();
         }
+        run.new_threshold = shape.new_threshold;
+        // Only surface a previous threshold when an older client actually
+        // sent one (it defaults to 0); 0 means "unknown", render as new-only.
+        run.previous_threshold = shape.previous_threshold.filter(|t| *t > 0);
     }
     // Fallback: if config_json didn't expose a participants list (e.g. Kick /
     // Contracts / Dars), surface the run's `expected_peers` instead so the

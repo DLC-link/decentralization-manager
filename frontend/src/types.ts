@@ -159,6 +159,8 @@ export interface KickRequest {
   decentralized_party_id: string;
   participant_id: string;
   new_threshold: number;
+  /** Threshold before the kick — display-only, surfaced on the run card. */
+  previous_threshold: number;
 }
 
 export type WorkflowProgress =
@@ -281,6 +283,9 @@ export interface WorkflowRun {
   prefix?: string;
   participants?: string[];
   dar_filenames?: string[];
+  /** Kick runs only: threshold before/after, for an "old → new" summary. */
+  previous_threshold?: number;
+  new_threshold?: number;
   error?: string;
   dismissed: boolean;
   created_at: number;

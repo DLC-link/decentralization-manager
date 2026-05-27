@@ -162,6 +162,7 @@ export const KickDialog = ({
       decentralized_party_id: partyId,
       participant_id: participantUid,
       new_threshold: newThreshold,
+      previous_threshold: currentThreshold,
     };
 
     try {
@@ -178,6 +179,10 @@ export const KickDialog = ({
 
       showSnackbar("Kick workflow started — follow progress in the feed");
       onClose();
+      // Jump to the Pending Approvals feed so the user lands on the run they
+      // just started (refresh + navigate). Without this the dialog closes
+      // back to the party detail and the in-flight kick is easy to miss.
+      onKickComplete();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error");
       setLoading(false);

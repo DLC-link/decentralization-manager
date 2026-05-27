@@ -1274,6 +1274,7 @@ const WorkflowRunCard = ({
       {(isInProgress ||
         run.error ||
         run.dec_party_id ||
+        run.new_threshold != null ||
         (run.participants && run.participants.length > 0)) && (
         <Box
           sx={{
@@ -1363,6 +1364,37 @@ const WorkflowRunCard = ({
                   />
                 ))}
               </Box>
+            </Box>
+          )}
+          {run.new_threshold != null && (
+            <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ minWidth: 96 }}
+              >
+                Threshold
+              </Typography>
+              <Typography variant="body2">
+                {run.previous_threshold != null ? (
+                  <>
+                    <Box
+                      component="span"
+                      sx={{ color: "text.secondary", textDecoration: "line-through" }}
+                    >
+                      {run.previous_threshold}
+                    </Box>{" "}
+                    →{" "}
+                    <Box component="span" sx={{ fontWeight: 600 }}>
+                      {run.new_threshold}
+                    </Box>
+                  </>
+                ) : (
+                  <Box component="span" sx={{ fontWeight: 600 }}>
+                    {run.new_threshold}
+                  </Box>
+                )}
+              </Typography>
             </Box>
           )}
           {run.error && (

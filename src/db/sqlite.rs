@@ -1869,6 +1869,8 @@ mod tests {
             dec_party_id: None,
             prefix: None,
             participants: Vec::new(),
+            previous_threshold: None,
+            new_threshold: None,
             error: None,
             dismissed: false,
             created_at: 1000,
