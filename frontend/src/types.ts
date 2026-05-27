@@ -159,6 +159,8 @@ export interface KickRequest {
   decentralized_party_id: string;
   participant_id: string;
   new_threshold: number;
+  /** Threshold before the kick — display-only, surfaced on the run card. */
+  previous_threshold: number;
 }
 
 export type WorkflowProgress =
@@ -281,6 +283,9 @@ export interface WorkflowRun {
   prefix?: string;
   participants?: string[];
   dar_filenames?: string[];
+  /** Kick runs only: threshold before/after, for an "old → new" summary. */
+  previous_threshold?: number;
+  new_threshold?: number;
   error?: string;
   dismissed: boolean;
   created_at: number;
@@ -363,6 +368,17 @@ export interface DomainGovernanceAction {
    *  Confirmation contracts can only be expired (dismissed), not confirmed
    *  or executed. */
   orphaned?: boolean;
+  /** Recipient / amount / instrument pulled from a TransferProposal so the
+   *  notification card can show what's being transferred without an extra
+   *  fetch. Present only on Transfer proposals. */
+  transfer_details?: TransferProposalDetails;
+}
+
+export interface TransferProposalDetails {
+  receiver: string;
+  amount: string;
+  instrument_admin: string;
+  instrument_id: string;
 }
 
 export interface GovernanceResponse {
@@ -793,6 +809,38 @@ export interface TransferInstructionsResponse {
 export interface TransferPreapprovalsResponse {
   cc: number;
   token: number;
+}
+
+export interface Holding {
+  instrument_admin: string;
+  instrument_id: string;
+  amount: string;
+  preapproval_set_up: boolean;
+}
+
+export interface HoldingsResponse {
+  holdings: Holding[];
+}
+
+export interface TransferFactoryInfo {
+  contract_id: string;
+  expected_admin: string;
+}
+
+export interface TransferFactoriesResponse {
+  transfer_factories: TransferFactoryInfo[];
+}
+
+export interface GovernanceState {
+  contract_id: string;
+  vault_manager: string;
+  members: string[];
+  threshold: number;
+  action_confirmation_timeout_microseconds?: number;
+}
+
+export interface GovernanceStateResponse {
+  state: GovernanceState | null;
 }
 
 export type Network = "devnet" | "testnet" | "mainnet";

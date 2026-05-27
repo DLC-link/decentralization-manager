@@ -19,6 +19,7 @@ import {
   DEVNET_VAULT_RULES,
   DEVNET_VAULT_PROCESSOR_RULES,
 } from "../constants";
+import { fieldHelpAdornment } from "./FieldHelp";
 import type {
   GovernanceAction,
   DisclosedContractInput,
@@ -80,6 +81,17 @@ const getRequiredContractIds = (action: ActionType): string[] => {
   }
 };
 
+/// Heuristic for "this error came from the Canton ledger" — those messages
+/// carry Canton's gRPC error envelope (`code: '...', message: "..."`) and
+/// usually a `DAML_*` error category from the Daml interpreter. Operators
+/// can't fix these from the UI, so we tell them to forward to the BitSafe
+/// team.
+const isChainError = (msg: string): boolean =>
+  msg.includes("DAML_") ||
+  msg.includes("code: ") ||
+  msg.includes("INVALID_GIVEN_CURRENT_SYSTEM_STATE") ||
+  msg.includes("CONTRACT_NOT_FOUND");
+
 interface ExecuteDialogProps {
   open: boolean;
   onClose: () => void;
@@ -87,6 +99,9 @@ interface ExecuteDialogProps {
   action: GovernanceAction | null;
   loading: boolean;
   error: string | null;
+  /// Optional dismiss callback — when provided, the inline error Alert
+  /// gets an X button that calls this to clear the message.
+  onErrorDismiss?: () => void;
   blobMap?: Record<string, string>;
 }
 
@@ -95,6 +110,7 @@ interface ExecuteFormProps {
   fullBlobMap: Record<string, string>;
   loading: boolean;
   error: string | null;
+  onErrorDismiss?: () => void;
   onClose: () => void;
   onExecute: (disclosedContracts: DisclosedContractInput[]) => void;
 }
@@ -106,6 +122,7 @@ const ExecuteForm = ({
   fullBlobMap,
   loading,
   error,
+  onErrorDismiss,
   onClose,
   onExecute,
 }: ExecuteFormProps) => {
@@ -234,6 +251,14 @@ const ExecuteForm = ({
                       size="small"
                       disabled={loading}
                       sx={{ mb: 1 }}
+                      slotProps={{
+                        input: {
+                          endAdornment: fieldHelpAdornment(
+                            "The Canton contract ID this action depends on. Usually comes from the active contract set (ACS) on the registry or a previous step in the workflow.",
+                            "Help for Contract ID",
+                          ),
+                        },
+                      }}
                     />
                     <TextField
                       label="Blob (base64)"
@@ -247,6 +272,14 @@ const ExecuteForm = ({
                       multiline
                       minRows={2}
                       maxRows={4}
+                      slotProps={{
+                        input: {
+                          endAdornment: fieldHelpAdornment(
+                            "The base64-encoded created_event_blob that proves the contract exists on the ledger. Pulled from the ACS lookup or returned alongside the contract ID.",
+                            "Help for Blob",
+                          ),
+                        },
+                      }}
                     />
                   </Box>
                 ))}
@@ -254,7 +287,22 @@ const ExecuteForm = ({
             )}
           </Box>
 
-          {error && <Alert severity="error">{error}</Alert>}
+          {error && (
+            <Alert
+              severity="error"
+              onClose={onErrorDismiss ? () => onErrorDismiss() : undefined}
+            >
+              <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+                <span>{error}</span>
+                {isChainError(error) && (
+                  <Typography variant="caption">
+                    This is a chain error message — please forward the issue
+                    to the BitSafe team.
+                  </Typography>
+                )}
+              </Box>
+            </Alert>
+          )}
         </Box>
       </DialogContent>
       <DialogActions>
@@ -281,6 +329,7 @@ export const ExecuteDialog = ({
   action,
   loading,
   error,
+  onErrorDismiss,
   blobMap = {},
 }: ExecuteDialogProps) => {
   const fullBlobMap = useMemo(
@@ -297,6 +346,7 @@ export const ExecuteDialog = ({
           fullBlobMap={fullBlobMap}
           loading={loading}
           error={error}
+          onErrorDismiss={onErrorDismiss}
           onClose={onClose}
           onExecute={onExecute}
         />

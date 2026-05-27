@@ -92,6 +92,10 @@ where
         expected_peers: invitees.to_vec(),
         completed_peers: Vec::new(),
         dec_party_id,
+        prefix: None,
+        participants: Vec::new(),
+        previous_threshold: None,
+        new_threshold: None,
         error: None,
         dismissed: false,
         created_at: now,
@@ -305,6 +309,7 @@ pub async fn start_kick(
         participant_id.clone(),
         namespace_fingerprint,
         body.new_threshold,
+        body.previous_threshold,
         instance_name.clone(),
     );
 
@@ -648,6 +653,27 @@ pub async fn start_onboarding(
     let instance_name = format!("{party_id_prefix}-creation");
     let onboarding_config =
         workflow::OnboardingConfig::new(party_id_prefix.clone(), instance_name.clone());
+
+    // Refuse onboarding when a party with this prefix already exists. The
+    // human-readable prefix is the only piece of the party id the operator
+    // chooses; allowing duplicates makes the parties list ambiguous and —
+    // when the participant set also matches — the workflow silently
+    // converges onto the existing party (Canton's DNS hash is deterministic
+    // from owners + threshold). Surface a clear 409 upfront instead.
+    match find_party_with_prefix(&data.db, &party_id_prefix).await {
+        Ok(Some(existing_party_id)) => {
+            return HttpResponse::Conflict().json(ErrorResponse {
+                error: format!(
+                    "A decentralized party with the prefix '{party_id_prefix}' already exists \
+                     ({existing_party_id}). Choose a different prefix."
+                ),
+            });
+        }
+        Ok(None) => {}
+        Err(e) => {
+            tracing::warn!("Failed to check for duplicate-prefix party: {e:#}");
+        }
+    }
 
     if let Err(e) = insert_coordinator_run(
         &data.db,
@@ -1828,11 +1854,62 @@ pub async fn list_workflows(data: web::Data<AppState>) -> impl Responder {
             if let Some(pk) = r.coordinator_pubkey.as_deref() {
                 r.coordinator_name = pubkey_to_name.get(pk).cloned();
             }
+            enrich_from_config_json(&mut r);
             r
         })
         .collect();
 
     HttpResponse::Ok().json(WorkflowRunsResponse { runs: resolved })
+}
+
+/// Pull `prefix` + `participants` out of the run's `config_json` and lift
+/// them onto the response struct so the frontend can show them without
+/// parsing JSON blobs. Coordinator configs spell the prefix field
+/// `party_id_prefix` (e.g. `OnboardingConfig`) while the peer-side payload
+/// uses `prefix`; we accept either. For participants we fall back to
+/// `expected_peers` when the config doesn't carry a list of its own — that
+/// way Kick / Contracts / Dars runs (whose configs don't include a peer
+/// list) still surface their participants.
+fn enrich_from_config_json(run: &mut WorkflowRun) {
+    #[derive(serde::Deserialize)]
+    struct ConfigShape {
+        #[serde(default)]
+        prefix: Option<String>,
+        #[serde(default)]
+        party_id_prefix: Option<String>,
+        #[serde(default)]
+        participants: Vec<String>,
+        // Kick configs only.
+        #[serde(default)]
+        new_threshold: Option<i32>,
+        #[serde(default)]
+        previous_threshold: Option<i32>,
+    }
+    if let Ok(shape) = serde_json::from_str::<ConfigShape>(&run.config_json) {
+        let prefix = shape.prefix.or(shape.party_id_prefix);
+        if let Some(p) = prefix
+            && !p.is_empty()
+        {
+            run.prefix = Some(p);
+        }
+        if !shape.participants.is_empty() {
+            run.participants = shape
+                .participants
+                .into_iter()
+                .filter_map(|s| CantonId::parse(&s).ok())
+                .collect();
+        }
+        run.new_threshold = shape.new_threshold;
+        // Only surface a previous threshold when an older client actually
+        // sent one (it defaults to 0); 0 means "unknown", render as new-only.
+        run.previous_threshold = shape.previous_threshold.filter(|t| *t > 0);
+    }
+    // Fallback: if config_json didn't expose a participants list (e.g. Kick /
+    // Contracts / Dars), surface the run's `expected_peers` instead so the
+    // card still shows who was involved.
+    if run.participants.is_empty() && !run.expected_peers.is_empty() {
+        run.participants = run.expected_peers.clone();
+    }
 }
 
 /// Mark a terminal-state workflow run as dismissed so it disappears from the
@@ -2041,8 +2118,16 @@ pub async fn retry_workflow(
     })
 }
 
-/// Best-effort: notify previously-invited peers that the workflow is cancelled
-/// so they can drop the matching pending invitation.
+/// Look for an existing decentralized party whose human-readable prefix
+/// equals `prefix`. Returns the matching `party_id` if found — used by the
+/// onboarding pre-flight to refuse duplicate-prefix runs.
+async fn find_party_with_prefix(db: &SqlitePool, prefix: &str) -> Result<Option<String>> {
+    use crate::db::schema::SchemaRead;
+
+    let parties = db.get_dec_parties_by_prefix(prefix).await?;
+    Ok(parties.into_iter().next().map(|p| p.party_id))
+}
+
 async fn send_cancel_invites(
     config: &NodeConfig,
     db: &SqlitePool,

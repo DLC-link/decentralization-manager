@@ -310,6 +310,12 @@ pub struct KickRequest {
     pub decentralized_party_id: CantonId,
     pub participant_id: CantonId,
     pub new_threshold: i32,
+    /// The party's threshold *before* the kick. Display-only — surfaced on
+    /// the workflow run card as "old → new" so the operator can see the
+    /// change at a glance. Defaults to 0 (rendered as just the new value)
+    /// when an older client omits it.
+    #[serde(default)]
+    pub previous_threshold: i32,
 }
 
 /// Request to create a new decentralized party
@@ -520,6 +526,22 @@ pub struct WorkflowRun {
     pub completed_peers: Vec<CantonId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dec_party_id: Option<CantonId>,
+    /// Dec party prefix associated with this run (e.g. "UAT"). Populated by
+    /// the API layer from `config_json` so the frontend can display a chip
+    /// without parsing JSON blobs itself. Not persisted as a column.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+    /// Participants involved in this run (same source as `prefix`). Empty
+    /// when missing from the config payload.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub participants: Vec<CantonId>,
+    /// Kick runs only: the threshold before and after the kick, lifted from
+    /// `config_json` so the run card can show "old → new". `None` for every
+    /// other workflow kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_threshold: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_threshold: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub dismissed: bool,
@@ -594,6 +616,16 @@ impl std::str::FromStr for InvitationType {
 pub struct OnboardingInvitePayload {
     pub prefix: String,
     pub participants: Vec<CantonId>,
+}
+
+/// Payload sent inside a `DeclineInvitation` Noise message — peer telling
+/// the coordinator that it has rejected an outstanding invitation so the
+/// coordinator can fail its matching in-progress run with a clear error.
+#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct DeclineInvitationPayload {
+    pub kind: WorkflowKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Payload sent inside an `InviteDars` Noise message.
@@ -1255,6 +1287,25 @@ pub struct DomainGovernanceAction {
     /// Execute affordances.
     #[serde(default)]
     pub orphaned: bool,
+    /// Structured Transfer-proposal fields (recipient, amount, instrument)
+    /// pulled from the on-chain `TransferProposal` contract so the
+    /// notification card can display what's actually being transferred
+    /// without the user having to inspect the contract CID. Only populated
+    /// for `Transfer` proposals.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transfer_details: Option<TransferProposalDetails>,
+}
+
+/// Recipient/amount/instrument extracted from a `TransferProposal`'s
+/// `transfer` field. Surfaced inside `DomainGovernanceAction` so the
+/// notification queue card shows the meaningful parameters of the proposal.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct TransferProposalDetails {
+    pub receiver: CantonId,
+    #[schema(value_type = String)]
+    pub amount: DamlDecimal,
+    pub instrument_admin: CantonId,
+    pub instrument_id: String,
 }
 
 /// Request to submit a confirmation for an action with structured type
@@ -1435,6 +1486,45 @@ pub struct TransferInstructionInfo {
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct TransferInstructionsResponse {
     pub transfer_instructions: Vec<TransferInstructionInfo>,
+}
+
+/// A token-standard Holding owned by a decentralized party, aggregated across
+/// every active `Splice.Api.Token.HoldingV1:Holding` contract that shares the
+/// same `(instrument_admin, instrument_id)` pair.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct HoldingInfo {
+    pub instrument_admin: CantonId,
+    pub instrument_id: String,
+    #[schema(value_type = String)]
+    pub amount: DamlDecimal,
+    /// True if a `TransferPreapproval` is in place for this party for this
+    /// instrument. CC (Amulet) holdings match when any
+    /// `Splice.AmuletRules:TransferPreapproval` exists; utility-token holdings
+    /// match by `(instrument_admin, instrument_id)` against
+    /// `Utility.Registry.App.V0.Model.TransferPreapproval` contracts.
+    pub preapproval_set_up: bool,
+}
+
+/// Response for the holdings endpoint.
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct HoldingsResponse {
+    pub holdings: Vec<HoldingInfo>,
+}
+
+/// Active `Splice.Api.Token.TransferInstructionV1:TransferFactory` contract
+/// visible to the party. The frontend joins these to the party's holdings by
+/// `expected_admin == holding.instrument_admin` to prefill the TransferFactory
+/// CID and expected-admin fields on the Transfer Proposal form.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct TransferFactoryInfo {
+    pub contract_id: String,
+    pub expected_admin: CantonId,
+}
+
+/// Response for the transfer-factories endpoint.
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct TransferFactoriesResponse {
+    pub transfer_factories: Vec<TransferFactoryInfo>,
 }
 
 /// Information about an InstrumentConfiguration contract (one "token" the
@@ -1798,6 +1888,10 @@ mod tests {
             expected_peers: vec![peer_a.clone(), peer_b.clone()],
             completed_peers: vec![peer_a],
             dec_party_id: Some(CantonId::parse(&dec_party_id_str).unwrap()),
+            prefix: None,
+            participants: Vec::new(),
+            previous_threshold: None,
+            new_threshold: None,
             error: None,
             dismissed: false,
             created_at: 1_700_000_000,

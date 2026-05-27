@@ -14,8 +14,11 @@ services:
       - "9001:9001"
     env_file:
       - ./remote/participant-1/.env
-    entrypoint:
-      ["dec-party-manager", "-d", "/app", "serve", "--host", "0.0.0.0", "--port", "8081"]
+    environment:
+      DECPM_DIR: /app
+      DECPM_HOST: 0.0.0.0
+      DECPM_PORT: "8081"
+    entrypoint: ["dec-party-manager", "serve"]
 
   participant-2:
     platform: linux/amd64
@@ -32,8 +35,11 @@ services:
       - "9002:9002"
     env_file:
       - ./remote/participant-2/.env
-    entrypoint:
-      ["dec-party-manager", "-d", "/app", "serve", "--host", "0.0.0.0", "--port", "8082"]
+    environment:
+      DECPM_DIR: /app
+      DECPM_HOST: 0.0.0.0
+      DECPM_PORT: "8082"
+    entrypoint: ["dec-party-manager", "serve"]
 
   participant-3:
     platform: linux/amd64
@@ -50,5 +56,8 @@ services:
       - "9003:9003"
     env_file:
       - ./remote/participant-3/.env
-    entrypoint:
-      ["dec-party-manager", "-d", "/app", "serve", "--host", "0.0.0.0", "--port", "8083"]
+    environment:
+      DECPM_DIR: /app
+      DECPM_HOST: 0.0.0.0
+      DECPM_PORT: "8083"
+    entrypoint: ["dec-party-manager", "serve"]

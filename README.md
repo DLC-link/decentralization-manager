@@ -58,19 +58,21 @@ The application runs as an HTTP server with an embedded React frontend. Multiple
 
 ```bash
 # Build and run with env vars
+DECPM_DIR=./development/participant-1 \
+DECPM_PORT=8081 \
 DECPM_CANTON_ADMIN_HOST=localhost \
 DECPM_CANTON_ADMIN_PORT=5002 \
 DECPM_CANTON_LEDGER_HOST=localhost \
 DECPM_CANTON_LEDGER_PORT=5001 \
 DECPM_NOISE_PORT=9001 \
-cargo run -- -d ./development/participant-1 serve --port 8081
+cargo run -- serve
 
 # Or with a .env file in the data directory
-cargo run -- -d ./development/participant-1 serve --port 8081
+cargo run -- -d ./development/participant-1 serve
 
 # Or with release build
 cargo build --release
-./target/release/dec-party-manager -d ./development/participant-1 serve --port 8081
+DECPM_PORT=8081 ./target/release/dec-party-manager -d ./development/participant-1 serve
 ```
 
 Open http://localhost:8081 in your browser.

@@ -27,9 +27,9 @@ use super::{
     action_serializer,
     types::{
         ActionType, ContractInfo, ContractWithBlob, DomainGovernanceAction, GovernanceAction,
-        GovernanceConfirmation, GovernanceState, InstrumentInfo, PartyMetadata,
-        ProviderServiceInfo, RegistrarServiceInfo, TransferInstructionInfo, UserServiceInfo,
-        VaultInfo,
+        GovernanceConfirmation, GovernanceState, HoldingInfo, InstrumentInfo, PartyMetadata,
+        ProviderServiceInfo, RegistrarServiceInfo, TransferFactoryInfo, TransferInstructionInfo,
+        TransferProposalDetails, UserServiceInfo, VaultInfo,
     },
 };
 
@@ -620,20 +620,20 @@ pub async fn get_governance_confirmations(
     // Collect domain confirmations grouped by proposal CID (core domain actions)
     let mut domain_confirmations: HashMap<String, (String, Vec<GovernanceConfirmation>)> =
         HashMap::new();
-    // Map of `contract_id -> Option<description>` for every active
+    // Map of `contract_id -> ProposalInfo` for every active
     // `GovernableAction` proposal visible to this party on this participant.
     // The presence of a key here is what gates inclusion in `domain_actions`
     // below — `Confirmation`s referencing a proposal that's no longer active
     // (or never reached this participant's ACS) get filtered out, otherwise
     // surfacing them in the notification queue gives the user a Confirm
     // button that always 500s with `CONTRACT_NOT_FOUND` on the proposal cid.
-    let mut proposal_descriptions: HashMap<String, Option<String>> = HashMap::new();
-    // Whether `proposal_descriptions` reflects the full active-proposal set
-    // for this party on this participant. If the description fetch errored we
+    let mut proposal_infos: HashMap<String, ProposalInfo> = HashMap::new();
+    // Whether `proposal_infos` reflects the full active-proposal set
+    // for this party on this participant. If the proposal fetch errored we
     // can't tell orphans apart from "we just couldn't read the proposals", so
     // we skip orphan-marking below to avoid surfacing a flood of false
     // orphans to the user.
-    let mut proposal_descriptions_complete = true;
+    let mut proposal_infos_complete = true;
 
     if test_mode {
         tracing::debug!("Using WildcardFilter for governance query (test mode)");
@@ -643,7 +643,7 @@ pub async fn get_governance_confirmations(
             token,
             &mut confirmations_by_hash,
             &mut domain_confirmations,
-            &mut proposal_descriptions,
+            &mut proposal_infos,
         )
         .await?;
     } else {
@@ -681,18 +681,12 @@ pub async fn get_governance_confirmations(
                 }
             }
         }
-        // Fetch proposal descriptions via GovernableAction interface query
-        if let Err(e) = fetch_proposal_descriptions(
-            config,
-            party_id,
-            token,
-            packages,
-            &mut proposal_descriptions,
-        )
-        .await
+        // Fetch proposal infos via GovernableAction interface query
+        if let Err(e) =
+            fetch_proposal_infos(config, party_id, token, packages, &mut proposal_infos).await
         {
-            tracing::debug!("Could not fetch proposal descriptions: {e}");
-            proposal_descriptions_complete = false;
+            tracing::debug!("Could not fetch proposal infos: {e}");
+            proposal_infos_complete = false;
         }
     }
 
@@ -735,10 +729,11 @@ pub async fn get_governance_confirmations(
             // Only mark as orphaned when we successfully fetched the full
             // active-proposal set; otherwise the missing-from-map signal is
             // unreliable and we'd falsely mark everything as orphaned.
-            let (description, orphaned) = match proposal_descriptions.remove(&proposal_cid) {
-                Some(d) => (d, false),
-                None => (None, proposal_descriptions_complete),
-            };
+            let (description, transfer_details, orphaned) =
+                match proposal_infos.remove(&proposal_cid) {
+                    Some(info) => (info.description, info.transfer, false),
+                    None => (None, None, proposal_infos_complete),
+                };
             let mut seen_parties = std::collections::HashSet::new();
             let unique_confirmations: Vec<GovernanceConfirmation> = confirmations
                 .into_iter()
@@ -754,6 +749,7 @@ pub async fn get_governance_confirmations(
                 // Orphans can't be executed regardless of threshold.
                 can_execute: !orphaned && confirmation_count >= threshold,
                 orphaned,
+                transfer_details,
             }
         })
         .collect();
@@ -768,7 +764,7 @@ async fn fetch_governance_with_wildcard(
     token: Option<String>,
     confirmations_by_hash: &mut HashMap<String, (ActionType, Vec<GovernanceConfirmation>)>,
     domain_confirmations: &mut HashMap<String, (String, Vec<GovernanceConfirmation>)>,
-    proposal_descriptions: &mut HashMap<String, Option<String>>,
+    proposal_infos: &mut HashMap<String, ProposalInfo>,
 ) -> Result {
     let mut state_client = utils::create_state_client(config, token).await?;
 
@@ -820,8 +816,8 @@ async fn fetch_governance_with_wildcard(
                     extract_and_add_confirmation(&created, confirmations_by_hash);
                 }
             } else {
-                // Capture proposal descriptions from GovernableAction contracts
-                extract_proposal_description(&created, proposal_descriptions);
+                // Capture proposal info from GovernableAction contracts
+                extract_proposal_info(&created, proposal_infos);
             }
         }
     }
@@ -1052,14 +1048,26 @@ fn extract_and_add_domain_confirmation(
         .push(confirmation);
 }
 
-/// Extract a proposal description from a GovernableAction contract's create_arguments.
+/// Per-proposal info pulled out of a `GovernableAction` contract's
+/// `create_arguments`. `description` mirrors the `description` field on
+/// every proposal; `transfer` is populated only for `TransferProposal`
+/// templates so the notifications queue can render recipient/amount/
+/// instrument on the card without a follow-up fetch.
+pub struct ProposalInfo {
+    pub description: Option<String>,
+    pub transfer: Option<TransferProposalDetails>,
+}
+
+/// Extract proposal info from a GovernableAction contract's create_arguments.
 ///
-/// Looks for a `description` field (Text) on the contract. Only captures it if the
-/// contract also has a `governanceParty` field (to avoid matching unrelated contracts
-/// in wildcard mode).
-fn extract_proposal_description(
+/// Looks for a `description` field (Text) and, for `TransferProposal`
+/// contracts, the nested `transfer` record. Only captures it if the
+/// contract has the `governanceParty` + `proposer` fields shared by every
+/// governable action (avoids matching unrelated contracts in wildcard
+/// mode).
+fn extract_proposal_info(
     created: &CreatedEvent,
-    proposal_descriptions: &mut HashMap<String, Option<String>>,
+    proposal_infos: &mut HashMap<String, ProposalInfo>,
 ) {
     let Some(record) = &created.create_arguments else {
         return;
@@ -1083,21 +1091,66 @@ fn extract_proposal_description(
             _ => None,
         });
 
-    // Always record the cid, even when no description field is present —
-    // the consumer relies on map membership to gate active-proposal filtering.
-    proposal_descriptions.insert(created.contract_id.clone(), description);
+    let transfer = extract_transfer_proposal_details(record);
+
+    // Always record the cid, even when no description / transfer fields
+    // are present — the consumer relies on map membership to gate
+    // active-proposal filtering.
+    proposal_infos.insert(
+        created.contract_id.clone(),
+        ProposalInfo {
+            description,
+            transfer,
+        },
+    );
 }
 
-/// Fetch proposal descriptions via GovernableAction interface query (production mode).
+/// Pull `receiver`, `amount`, and the nested `instrumentId` out of a
+/// `TransferProposal`'s `transfer` field. Returns `None` for any proposal
+/// that doesn't have a `transfer` record (every non-transfer template).
+fn extract_transfer_proposal_details(record: &Record) -> Option<TransferProposalDetails> {
+    let transfer_record = record
+        .fields
+        .iter()
+        .find(|f| f.label == "transfer")
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Record(r)) => Some(r),
+            _ => None,
+        })?;
+    let receiver: CantonId = field_party(transfer_record, "receiver")?.parse().ok()?;
+    let amount =
+        field_numeric(transfer_record, "amount").and_then(|s| DamlDecimal::parse(&s).ok())?;
+    let instrument_record = transfer_record
+        .fields
+        .iter()
+        .find(|f| f.label == "instrumentId")
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Record(r)) => Some(r),
+            _ => None,
+        })?;
+    let instrument_admin: CantonId = field_party(instrument_record, "admin")?.parse().ok()?;
+    let instrument_id = field_text(instrument_record, "id")?;
+    Some(TransferProposalDetails {
+        receiver,
+        amount,
+        instrument_admin,
+        instrument_id,
+    })
+}
+
+/// Fetch proposal infos via GovernableAction interface query (production mode).
 ///
 /// Queries active contracts implementing GovernableAction and extracts the
-/// `description` field from their create_arguments.
-async fn fetch_proposal_descriptions(
+/// `description` field plus, where applicable, the `TransferProposal`'s
+/// recipient/amount/instrument from their create_arguments.
+async fn fetch_proposal_infos(
     config: &NodeConfig,
     party_id: &CantonId,
     token: Option<String>,
     packages: &PackageConfig,
-    proposal_descriptions: &mut HashMap<String, Option<String>>,
+    proposal_infos: &mut HashMap<String, ProposalInfo>,
 ) -> Result {
     let Some(ref pkg) = packages.governance_action else {
         return Ok(());
@@ -1149,7 +1202,7 @@ async fn fetch_proposal_descriptions(
         if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
             && let Some(created) = active.created_event
         {
-            extract_proposal_description(&created, proposal_descriptions);
+            extract_proposal_info(&created, proposal_infos);
         }
     }
 
@@ -2407,6 +2460,9 @@ pub struct ContractQueryParams {
     pub module_name: String,
     pub entity_name: String,
     pub use_interface_filter: bool,
+    /// When true, drop contracts whose `executeBefore` field is already in
+    /// the past. No-op for templates that don't carry an `executeBefore`.
+    pub active_only: bool,
 }
 
 /// Uses WildcardFilter in test mode, TemplateFilter or InterfaceFilter in production.
@@ -2488,6 +2544,13 @@ pub async fn query_contracts_by_template(
             };
 
             if matches {
+                // QA flagged the Accept Mint Request dropdown for surfacing
+                // contracts whose `executeBefore` has already passed —
+                // accepting them would fail at interpretation with
+                // deadline-exceeded. Drop them here when the caller opts in.
+                if params.active_only && is_execute_before_expired(&created) {
+                    continue;
+                }
                 let blob =
                     base64::engine::general_purpose::STANDARD.encode(&created.created_event_blob);
                 contracts.push(ContractWithBlob {
@@ -2698,6 +2761,23 @@ fn field_numeric(record: &Record, label: &str) -> Option<String> {
         })
 }
 
+/// Returns true if the contract's create-arguments carry an `executeBefore`
+/// Time field whose value is in the past. Returns false when no such field
+/// exists, so templates without a deadline are kept as-is.
+fn is_execute_before_expired(created: &CreatedEvent) -> bool {
+    let Some(record) = created.create_arguments.as_ref() else {
+        return false;
+    };
+    let Some(execute_before_micros) = field_timestamp(record, "executeBefore") else {
+        return false;
+    };
+    let now_micros = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_micros() as i64)
+        .unwrap_or(0);
+    execute_before_micros <= now_micros
+}
+
 fn field_timestamp(record: &Record, label: &str) -> Option<i64> {
     record
         .fields
@@ -2708,6 +2788,420 @@ fn field_timestamp(record: &Record, label: &str) -> Option<i64> {
             Some(value::Sum::Timestamp(t)) => Some(*t),
             _ => None,
         })
+}
+
+// ============================================================================
+// Token-standard TransferFactory Query (for Transfer Proposal form prefill)
+// ============================================================================
+
+/// Fetch active `Splice.Api.Token.TransferInstructionV1:TransferFactory`
+/// contracts visible to `party_id`. Used by the Transfer Proposal form's
+/// instrument dropdown to prefill the factory CID and expected-admin once the
+/// user picks an instrument — joined on
+/// `expected_admin == holding.instrument_admin`.
+pub async fn get_transfer_factories(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+) -> Result<Vec<TransferFactoryInfo>> {
+    let mut state_client = utils::create_state_client(config, token).await?;
+
+    let ledger_end = state_client
+        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
+        .await?
+        .into_inner()
+        .offset;
+
+    let mut filters_by_party = HashMap::new();
+    filters_by_party.insert(
+        party_id.to_string(),
+        Filters {
+            cumulative: vec![CumulativeFilter {
+                identifier_filter: Some(cumulative_filter::IdentifierFilter::InterfaceFilter(
+                    InterfaceFilter {
+                        interface_id: Some(Identifier {
+                            package_id: "#splice-api-token-transfer-instruction-v1".to_string(),
+                            module_name: "Splice.Api.Token.TransferInstructionV1".to_string(),
+                            entity_name: "TransferFactory".to_string(),
+                        }),
+                        include_interface_view: true,
+                        include_created_event_blob: false,
+                    },
+                )),
+            }],
+        },
+    );
+
+    let acs_request = GetActiveContractsRequest {
+        active_at_offset: ledger_end,
+        event_format: Some(EventFormat {
+            filters_by_party,
+            filters_for_any_party: None,
+            verbose: true,
+        }),
+    };
+
+    let mut stream = state_client
+        .get_active_contracts(tonic::Request::new(acs_request))
+        .await?
+        .into_inner();
+
+    let mut factories = Vec::new();
+    while let Some(response) = stream.message().await? {
+        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
+            && let Some(created) = active.created_event
+            && let Some(info) = extract_transfer_factory_info(&created)
+        {
+            factories.push(info);
+        }
+    }
+    Ok(factories)
+}
+
+/// Pull `admin` (the instrument admin / expected admin) out of the
+/// `TransferFactory` interface view. The view is the standard
+/// `TransferFactoryView` which contains an `admin: Party` field.
+fn extract_transfer_factory_info(created: &CreatedEvent) -> Option<TransferFactoryInfo> {
+    let view = created.interface_views.iter().find(|v| {
+        v.interface_id.as_ref().is_some_and(|id| {
+            id.module_name == "Splice.Api.Token.TransferInstructionV1"
+                && id.entity_name == "TransferFactory"
+        })
+    })?;
+    let view_record = view.view_value.as_ref()?;
+    let admin: CantonId = field_party(view_record, "admin")?.parse().ok()?;
+    Some(TransferFactoryInfo {
+        contract_id: created.contract_id.clone(),
+        expected_admin: admin,
+    })
+}
+
+// ============================================================================
+// Token-standard Holding Query (for the Holdings section in PartyDetail)
+// ============================================================================
+
+/// Standard `instrumentId.id` for Canton Coin holdings — used to route the
+/// preapproval check to `Splice.AmuletRules:TransferPreapproval` (which has no
+/// explicit instrument field) instead of the per-instrument Utility registry.
+const AMULET_INSTRUMENT_ID: &str = "Amulet";
+
+/// Fetch all token-standard holdings owned by `party_id`, aggregated by
+/// instrument. Each returned `HoldingInfo` represents one
+/// `(instrument_admin, instrument_id)` pair with the summed amount across
+/// every active `Holding` contract.
+///
+/// `preapproval_set_up` reflects whether the party has a `TransferPreapproval`
+/// in place for that instrument: CC holdings match any
+/// `Splice.AmuletRules:TransferPreapproval`, other instruments match by
+/// `(admin, id)` against `Utility.Registry.App.V0.Model.TransferPreapproval`.
+pub async fn get_holdings(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    test_mode: bool,
+) -> Result<Vec<HoldingInfo>> {
+    let raw = fetch_holding_views(config, party_id, token.clone()).await?;
+
+    // Aggregate amounts by (admin, id). A party can own many Holding contracts
+    // for the same instrument (one per UTXO-style entry).
+    let mut totals: HashMap<(String, String), (CantonId, String, DamlDecimal)> = HashMap::new();
+    for raw_holding in raw {
+        let key = (
+            raw_holding.instrument_admin.to_string(),
+            raw_holding.instrument_id.clone(),
+        );
+        totals
+            .entry(key)
+            .and_modify(|(_, _, total)| {
+                *total += raw_holding.amount;
+            })
+            .or_insert((
+                raw_holding.instrument_admin,
+                raw_holding.instrument_id,
+                raw_holding.amount,
+            ));
+    }
+
+    if totals.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Look up preapprovals once and join.
+    let preapprovals = fetch_preapproved_instruments(config, party_id, token, test_mode).await?;
+
+    let mut holdings: Vec<HoldingInfo> = totals
+        .into_values()
+        .map(|(instrument_admin, instrument_id, amount)| {
+            let preapproval_set_up = if instrument_id == AMULET_INSTRUMENT_ID {
+                preapprovals.has_amulet
+            } else {
+                preapprovals
+                    .utility
+                    .contains(&(instrument_admin.to_string(), instrument_id.clone()))
+            };
+            HoldingInfo {
+                instrument_admin,
+                instrument_id,
+                amount,
+                preapproval_set_up,
+            }
+        })
+        .collect();
+
+    // Stable display order: admin ascending, then id ascending.
+    holdings.sort_by(|a, b| {
+        a.instrument_admin
+            .to_string()
+            .cmp(&b.instrument_admin.to_string())
+            .then_with(|| a.instrument_id.cmp(&b.instrument_id))
+    });
+
+    Ok(holdings)
+}
+
+/// Run the ACS query with `InterfaceFilter` for `Holding` and return one
+/// parsed view per active contract owned by `party_id`.
+async fn fetch_holding_views(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+) -> Result<Vec<HoldingView>> {
+    let mut state_client = utils::create_state_client(config, token).await?;
+
+    let ledger_end = state_client
+        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
+        .await?
+        .into_inner()
+        .offset;
+
+    let mut filters_by_party = HashMap::new();
+    filters_by_party.insert(
+        party_id.to_string(),
+        Filters {
+            cumulative: vec![CumulativeFilter {
+                identifier_filter: Some(cumulative_filter::IdentifierFilter::InterfaceFilter(
+                    InterfaceFilter {
+                        interface_id: Some(Identifier {
+                            package_id: "#splice-api-token-holding-v1".to_string(),
+                            module_name: "Splice.Api.Token.HoldingV1".to_string(),
+                            entity_name: "Holding".to_string(),
+                        }),
+                        include_interface_view: true,
+                        include_created_event_blob: false,
+                    },
+                )),
+            }],
+        },
+    );
+
+    let acs_request = GetActiveContractsRequest {
+        active_at_offset: ledger_end,
+        event_format: Some(EventFormat {
+            filters_by_party,
+            filters_for_any_party: None,
+            verbose: true,
+        }),
+    };
+
+    let mut stream = state_client
+        .get_active_contracts(tonic::Request::new(acs_request))
+        .await?
+        .into_inner();
+
+    let owner_str = party_id.to_string();
+    let mut holdings = Vec::new();
+    while let Some(response) = stream.message().await? {
+        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
+            && let Some(created) = active.created_event
+            && let Some(view) = extract_holding_view(&created)
+            && view.owner == owner_str
+        {
+            holdings.push(view);
+        }
+    }
+    Ok(holdings)
+}
+
+/// Intermediate parse result that retains `owner` so callers can drop holdings
+/// the party can see (via interface visibility) but doesn't actually own.
+struct HoldingView {
+    owner: String,
+    instrument_admin: CantonId,
+    instrument_id: String,
+    amount: DamlDecimal,
+}
+
+fn extract_holding_view(created: &CreatedEvent) -> Option<HoldingView> {
+    let view = created.interface_views.iter().find(|v| {
+        v.interface_id.as_ref().is_some_and(|id| {
+            id.module_name == "Splice.Api.Token.HoldingV1" && id.entity_name == "Holding"
+        })
+    })?;
+    let view_record = view.view_value.as_ref()?;
+
+    let owner = field_party(view_record, "owner")?;
+    let amount = field_numeric(view_record, "amount").and_then(|s| DamlDecimal::parse(&s).ok())?;
+
+    let instrument_record = view_record
+        .fields
+        .iter()
+        .find(|f| f.label == "instrumentId")
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Record(r)) => Some(r),
+            _ => None,
+        })?;
+    let instrument_admin: CantonId = field_party(instrument_record, "admin")?.parse().ok()?;
+    let instrument_id = field_text(instrument_record, "id")?;
+
+    Some(HoldingView {
+        owner,
+        instrument_admin,
+        instrument_id,
+        amount,
+    })
+}
+
+/// Result of the per-party preapproval lookup. `utility` is the set of
+/// instruments (`(admin, id)`) that have an active utility-registry
+/// `TransferPreapproval`; `has_amulet` is true iff at least one Amulet
+/// `TransferPreapproval` exists.
+struct PartyPreapprovals {
+    has_amulet: bool,
+    utility: std::collections::HashSet<(String, String)>,
+}
+
+/// `NO_TEMPLATES_FOR_PACKAGE_NAME_AND_QUALIFIED_NAME` means the template
+/// simply isn't uploaded on this participant — there's nothing to count, not
+/// a failure. Demote those to debug so the logs don't fill with red herrings
+/// on participants without splice-amulet / utility-registry packages.
+fn log_preapproval_lookup_error(label: &str, e: &anyhow::Error) {
+    let msg = e.to_string();
+    if msg.contains("NO_TEMPLATES_FOR_PACKAGE_NAME_AND_QUALIFIED_NAME") {
+        tracing::debug!("No {label} templates on this participant; treating as 0");
+    } else {
+        tracing::warn!("Failed to query {label}: {e}");
+    }
+}
+
+async fn fetch_preapproved_instruments(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    test_mode: bool,
+) -> Result<PartyPreapprovals> {
+    let amulet_params = ContractQueryParams {
+        package_id: "#splice-amulet".to_string(),
+        module_name: "Splice.AmuletRules".to_string(),
+        entity_name: "TransferPreapproval".to_string(),
+        use_interface_filter: false,
+        active_only: false,
+    };
+    let has_amulet = match query_contracts_by_template(
+        config,
+        party_id,
+        token.clone(),
+        test_mode,
+        &amulet_params,
+    )
+    .await
+    {
+        Ok(rows) => !rows.is_empty(),
+        Err(e) => {
+            log_preapproval_lookup_error("Amulet TransferPreapproval", &e);
+            false
+        }
+    };
+
+    // Utility preapprovals carry their instrument on the create-arguments
+    // payload, so re-fetch with a TemplateFilter to get create_arguments and
+    // parse `instrumentId.{admin,id}` out.
+    let utility = match fetch_utility_preapproval_instruments(config, party_id, token).await {
+        Ok(set) => set,
+        Err(e) => {
+            log_preapproval_lookup_error("utility TransferPreapproval", &e);
+            std::collections::HashSet::new()
+        }
+    };
+
+    Ok(PartyPreapprovals {
+        has_amulet,
+        utility,
+    })
+}
+
+async fn fetch_utility_preapproval_instruments(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+) -> Result<std::collections::HashSet<(String, String)>> {
+    let mut state_client = utils::create_state_client(config, token).await?;
+    let ledger_end = state_client
+        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
+        .await?
+        .into_inner()
+        .offset;
+
+    let mut filters_by_party = HashMap::new();
+    filters_by_party.insert(
+        party_id.to_string(),
+        Filters {
+            cumulative: vec![CumulativeFilter {
+                identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
+                    TemplateFilter {
+                        template_id: Some(Identifier {
+                            package_id: "#utility-registry-app-v0".to_string(),
+                            module_name: "Utility.Registry.App.V0.Model.TransferPreapproval"
+                                .to_string(),
+                            entity_name: "TransferPreapproval".to_string(),
+                        }),
+                        include_created_event_blob: false,
+                    },
+                )),
+            }],
+        },
+    );
+
+    let acs_request = GetActiveContractsRequest {
+        active_at_offset: ledger_end,
+        event_format: Some(EventFormat {
+            filters_by_party,
+            filters_for_any_party: None,
+            verbose: true,
+        }),
+    };
+
+    let mut stream = state_client
+        .get_active_contracts(tonic::Request::new(acs_request))
+        .await?
+        .into_inner();
+
+    let mut set = std::collections::HashSet::new();
+    while let Some(response) = stream.message().await? {
+        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
+            && let Some(created) = active.created_event
+            && let Some(args) = created.create_arguments
+            && let Some((admin, id)) = extract_preapproval_instrument(&args)
+        {
+            set.insert((admin, id));
+        }
+    }
+    Ok(set)
+}
+
+fn extract_preapproval_instrument(args: &Record) -> Option<(String, String)> {
+    let instrument_record = args
+        .fields
+        .iter()
+        .find(|f| f.label == "instrumentId")
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Record(r)) => Some(r),
+            _ => None,
+        })?;
+    let admin = field_party(instrument_record, "admin")?;
+    let id = field_text(instrument_record, "id")?;
+    Some((admin, id))
 }
 
 #[cfg(test)]
