@@ -282,30 +282,45 @@ pub async fn start_peer(
         let message = match client.get_next_command_with_payload().await {
             Ok(msg) => {
                 consecutive_errors = 0; // Reset error count on success
+                connection_class_deadline.reset();
                 msg
             }
             Err(e) => {
-                consecutive_errors += 1;
-
-                // Per-attempt failures are WARN, not ERROR — the loop's design
-                // is to tolerate transient blips (e.g. coordinator restarting
-                // briefly during peer-config reload). Only the final-strike
-                // bail is logged at ERROR. This keeps test logs readable when
-                // a known restart cycle produces one or two retries that
-                // succeed on the next attempt.
-                tracing::warn!("Attempt {consecutive_errors}/3: failed to get next command: {e}");
-
-                // If we get multiple connection refused errors in a row,
-                // the coordinator has likely shut down or there's a persistent error
-                if consecutive_errors >= 3 {
-                    tracing::error!(
-                        "Failed to communicate with coordinator after 3 attempts. Aborting."
-                    );
-                    anyhow::bail!("Peer failed: persistent communication errors with coordinator");
+                match classify(e.into()) {
+                    PeerStepError::ConnectionClass(orig) => {
+                        // Coordinator transiently unreachable (e.g. restarting, incl.
+                        // macOS TIME_WAIT rebind). Ride the 180s wall-clock budget
+                        // instead of the 3-strike counter so a coordinator restart does
+                        // not abort the peer at ~15s. Resets on the next successful poll.
+                        tracing::warn!("Coordinator transiently unreachable: {orig}");
+                        if connection_class_deadline.record_failure(std::time::Instant::now()) {
+                            tracing::error!(
+                                "Coordinator unreachable beyond connection-class deadline. Aborting."
+                            );
+                            anyhow::bail!(
+                                "Peer failed: coordinator unreachable past connection-class deadline"
+                            );
+                        }
+                        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                        continue;
+                    }
+                    PeerStepError::Real(orig) => {
+                        consecutive_errors += 1;
+                        tracing::warn!(
+                            "Attempt {consecutive_errors}/3: failed to get next command: {orig}"
+                        );
+                        if consecutive_errors >= 3 {
+                            tracing::error!(
+                                "Failed to communicate with coordinator after 3 attempts. Aborting."
+                            );
+                            anyhow::bail!(
+                                "Peer failed: persistent communication errors with coordinator"
+                            );
+                        }
+                        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                        continue;
+                    }
                 }
-
-                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-                continue;
             }
         };
 
