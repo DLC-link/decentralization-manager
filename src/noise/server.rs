@@ -1,8 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    io,
     marker::PhantomData,
-    net::SocketAddr,
     sync::Arc,
     time::Instant,
 };
@@ -10,6 +8,7 @@ use std::{
 use hyper::{Body, Request, Response, StatusCode};
 use secp256k1::PublicKey;
 use sqlx::SqlitePool;
+use tokio::net::TcpListener;
 use tokio_noise::handshakes::nn_psk2::Responder;
 
 use crate::{
@@ -185,17 +184,9 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
 
         tracing::info!("Starting Noise server on {listen_addr}");
 
-        let addr: SocketAddr = listen_addr
-            .parse()
-            .map_err(|e| NoiseError::Io(io::Error::new(io::ErrorKind::InvalidInput, e)))?;
-        let socket = match addr {
-            SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4(),
-            SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6(),
-        }
-        .map_err(NoiseError::Io)?;
-        socket.set_reuseaddr(true).map_err(NoiseError::Io)?;
-        socket.bind(addr).map_err(NoiseError::Io)?;
-        let listener = socket.listen(1024).map_err(NoiseError::Io)?;
+        let listener = TcpListener::bind(&listen_addr)
+            .await
+            .map_err(NoiseError::Io)?;
 
         let make_responder = {
             let keypair = self.keypair.clone();
