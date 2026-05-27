@@ -6,6 +6,7 @@ import {
   Chip,
   CircularProgress,
   IconButton,
+  LinearProgress,
   Skeleton,
   Tooltip,
   Typography,
@@ -143,7 +144,10 @@ const InvitationCard = ({
       );
       onAfter();
     } catch (err) {
-      showSnackbar(err instanceof Error ? err.message : `Failed to ${path}`);
+      showSnackbar(
+        err instanceof Error ? err.message : `Failed to ${path}`,
+        "error",
+      );
     } finally {
       setBusy(false);
     }
@@ -363,6 +367,7 @@ const ActionCard = ({
     } catch (err) {
       showSnackbar(
         err instanceof Error ? err.message : `Failed: ${endpoint}`,
+        "error",
       );
       return false;
     } finally {
@@ -372,7 +377,7 @@ const ActionCard = ({
 
   const handleConfirm = async () => {
     if (!party.rulesContractId) {
-      showSnackbar("Governance rules contract is not set");
+      showSnackbar("Governance rules contract is not set", "error");
       return;
     }
     const body: ConfirmActionRequest = {
@@ -396,7 +401,7 @@ const ActionCard = ({
 
   const handleExpire = async (confirmationCid: string) => {
     if (!party.rulesContractId) {
-      showSnackbar("Governance rules contract is not set");
+      showSnackbar("Governance rules contract is not set", "error");
       return;
     }
     const body: ExpireConfirmationRequest = {
@@ -683,6 +688,7 @@ const ActionCard = ({
         action={action}
         loading={executeLoading}
         error={executeError}
+        onErrorDismiss={() => setExecuteError(null)}
       />
     </Box>
   );
@@ -720,7 +726,7 @@ const DomainActionCard = ({
     successMsg: string,
   ): Promise<void> => {
     if (!party.rulesContractId) {
-      showSnackbar("Governance rules contract is not set");
+      showSnackbar("Governance rules contract is not set", "error");
       return;
     }
     setBusy(true);
@@ -737,7 +743,10 @@ const DomainActionCard = ({
       showSnackbar(successMsg);
       onAfter();
     } catch (err) {
-      showSnackbar(err instanceof Error ? err.message : `Failed: ${endpoint}`);
+      showSnackbar(
+        err instanceof Error ? err.message : `Failed: ${endpoint}`,
+        "error",
+      );
     } finally {
       setBusy(false);
     }
@@ -867,6 +876,51 @@ const DomainActionCard = ({
           {domainAction.description}
         </Typography>
       )}
+
+      {domainAction.transfer_details && (() => {
+        const td = domainAction.transfer_details;
+        // Canton Coin's token-standard `instrument_id` is the literal
+        // "Amulet" — render as "CC" to match Holdings and the Transfer
+        // Proposal dropdown.
+        const token =
+          td.instrument_id === "Amulet" ? "CC" : td.instrument_id;
+        const rows: { label: string; value: string }[] = [
+          { label: "Token", value: token },
+          { label: "Amount", value: td.amount },
+          { label: "Recipient", value: truncatePartyId(td.receiver) },
+        ];
+        return (
+          <Box
+            sx={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 0.75,
+              px: 1.25,
+              py: 1,
+              bgcolor: "action.hover",
+              borderRadius: 1,
+            }}
+          >
+            {rows.map((r) => (
+              <Box
+                key={r.label}
+                sx={{ display: "flex", alignItems: "baseline", gap: 1 }}
+              >
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{ minWidth: 96 }}
+                >
+                  {r.label}
+                </Typography>
+                <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                  {r.value}
+                </Typography>
+              </Box>
+            ))}
+          </Box>
+        );
+      })()}
 
       <Typography
         variant="caption"
@@ -1079,7 +1133,10 @@ const WorkflowRunCard = ({
       showSnackbar(`${run.kind} workflow cancelled`);
       onAfter();
     } catch (err) {
-      showSnackbar(err instanceof Error ? err.message : "Failed to cancel");
+      showSnackbar(
+        err instanceof Error ? err.message : "Failed to cancel",
+        "error",
+      );
     } finally {
       setBusy(false);
     }
@@ -1098,7 +1155,10 @@ const WorkflowRunCard = ({
       }
       onAfter();
     } catch (err) {
-      showSnackbar(err instanceof Error ? err.message : "Failed to dismiss");
+      showSnackbar(
+        err instanceof Error ? err.message : "Failed to dismiss",
+        "error",
+      );
     } finally {
       setBusy(false);
     }
@@ -1118,7 +1178,10 @@ const WorkflowRunCard = ({
       showSnackbar(`Retrying ${run.kind} workflow`);
       onAfter();
     } catch (err) {
-      showSnackbar(err instanceof Error ? err.message : "Failed to retry");
+      showSnackbar(
+        err instanceof Error ? err.message : "Failed to retry",
+        "error",
+      );
     } finally {
       setBusy(false);
     }
@@ -1152,18 +1215,6 @@ const WorkflowRunCard = ({
         ? `from ${run.coordinator_pubkey.slice(0, 12)}…${run.coordinator_pubkey.slice(-6)}`
         : null;
 
-  const completedCount = run.completed_peers.length;
-  const totalCount = run.expected_peers.length;
-  // Per-kind label for the peer progress counter. DARs distribution
-  // doesn't sign anything — peers just upload the dar locally and
-  // signal completion. Other kinds collect DAML signatures.
-  const peerVerb = run.kind === "Dars" ? "uploaded" : "signed";
-  // Step counters are only meaningful on the coordinator side — the
-  // peer's `current_step` is always "Active" with step_index=0,
-  // step_total=N (see invitations.rs `upsert_peer_run`), so rendering
-  // it as "Active (1/N)" is misleading. Hide step + peer count rows
-  // entirely for peer-side cards.
-  const isCoordinator = run.role === "Coordinator";
 
   return (
     <Box
@@ -1186,9 +1237,19 @@ const WorkflowRunCard = ({
         }}
       >
         <Box>
-          <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
-            {run.kind} workflow
-          </Typography>
+          <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
+            <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
+              {run.kind} workflow
+            </Typography>
+            {run.prefix && (
+              <Chip
+                label={run.prefix}
+                size="small"
+                variant="outlined"
+                sx={{ height: 20 }}
+              />
+            )}
+          </Box>
           {fromLine && (
             <Typography variant="caption" color="text.secondary">
               {fromLine}
@@ -1210,7 +1271,11 @@ const WorkflowRunCard = ({
         </Box>
       </Box>
 
-      {(isInProgress || run.error) && (
+      {(isInProgress ||
+        run.error ||
+        run.dec_party_id ||
+        run.new_threshold != null ||
+        (run.participants && run.participants.length > 0)) && (
         <Box
           sx={{
             display: "flex",
@@ -1222,32 +1287,38 @@ const WorkflowRunCard = ({
             borderRadius: 1,
           }}
         >
-          {isInProgress && (
-            <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
-              <Typography
-                variant="caption"
-                color="text.secondary"
-                sx={{ minWidth: 96 }}
+          {isInProgress && run.step_total > 0 && (
+            <Box
+              sx={{
+                display: "flex",
+                flexDirection: "column",
+                gap: 0.5,
+              }}
+            >
+              <Box
+                sx={{
+                  display: "flex",
+                  alignItems: "baseline",
+                  gap: 1,
+                  justifyContent: "space-between",
+                }}
               >
-                Step
-              </Typography>
-              <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                {run.current_step} ({run.step_index + 1}/{run.step_total})
-              </Typography>
-            </Box>
-          )}
-          {isInProgress && isCoordinator && totalCount > 0 && (
-            <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
-              <Typography
-                variant="caption"
-                color="text.secondary"
-                sx={{ minWidth: 96 }}
-              >
-                Peers
-              </Typography>
-              <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                {completedCount} / {totalCount} {peerVerb}
-              </Typography>
+                <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                  {run.current_step}
+                </Typography>
+                <Typography variant="caption" color="text.secondary">
+                  {run.step_index + 1} / {run.step_total}
+                </Typography>
+              </Box>
+              <LinearProgress
+                variant="determinate"
+                value={Math.min(
+                  100,
+                  ((run.step_index + 1) / run.step_total) * 100,
+                )}
+                color="primary"
+                sx={{ height: 6, borderRadius: 3 }}
+              />
             </Box>
           )}
           {run.dec_party_id && (
@@ -1271,6 +1342,58 @@ const WorkflowRunCard = ({
                 }}
               >
                 {truncatePartyId(run.dec_party_id)}
+              </Typography>
+            </Box>
+          )}
+          {run.participants && run.participants.length > 0 && (
+            <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ minWidth: 96 }}
+              >
+                Participants ({run.participants.length})
+              </Typography>
+              <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
+                {run.participants.map((id) => (
+                  <Chip
+                    key={id}
+                    size="small"
+                    variant="outlined"
+                    label={truncatePartyId(id)}
+                  />
+                ))}
+              </Box>
+            </Box>
+          )}
+          {run.new_threshold != null && (
+            <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ minWidth: 96 }}
+              >
+                Threshold
+              </Typography>
+              <Typography variant="body2">
+                {run.previous_threshold != null ? (
+                  <>
+                    <Box
+                      component="span"
+                      sx={{ color: "text.secondary", textDecoration: "line-through" }}
+                    >
+                      {run.previous_threshold}
+                    </Box>{" "}
+                    →{" "}
+                    <Box component="span" sx={{ fontWeight: 600 }}>
+                      {run.new_threshold}
+                    </Box>
+                  </>
+                ) : (
+                  <Box component="span" sx={{ fontWeight: 600 }}>
+                    {run.new_threshold}
+                  </Box>
+                )}
               </Typography>
             </Box>
           )}

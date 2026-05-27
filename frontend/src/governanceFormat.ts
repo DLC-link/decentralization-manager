@@ -93,7 +93,7 @@ const truncatePartyId = (id: string): string => {
   return `${prefix}::${namespace.slice(0, 6)}…${namespace.slice(-6)}`;
 };
 
-const formatMicroseconds = (us: number): string => {
+export const formatMicroseconds = (us: number): string => {
   const ms = us / 1000;
   if (ms < 1000) return `${ms}ms`;
   const seconds = ms / 1000;

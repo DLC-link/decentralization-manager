@@ -31,9 +31,9 @@ use crate::{
         middleware::require_admin,
         queries::{
             ContractQueryParams as QueryContractParams, get_governance_confirmations,
-            get_governance_state as query_governance_state, get_instruments,
+            get_governance_state as query_governance_state, get_holdings, get_instruments,
             get_open_transfer_instructions, get_provider_services, get_registrar_services,
-            get_user_services, get_vaults, query_contracts_by_template,
+            get_transfer_factories, get_user_services, get_vaults, query_contracts_by_template,
         },
         transfer_context::{
             fetch as fetch_accept_transfer_context, maybe_fetch_for_proposal,
@@ -43,11 +43,12 @@ use crate::{
             AuditLogEntry, AuditLogQuery, AuditLogResponse, CancelConfirmationRequest,
             ChainAuditEntry, ChainAuditQuery, ChainAuditResponse, ConfirmActionRequest,
             ContractQueryResponse, ErrorResponse, ExecuteActionRequest, ExpireConfirmationRequest,
-            GovernanceResponse, GovernanceStateResponse, GovernanceType, InstrumentsResponse,
-            KnownMember, KnownMembersResponse, MessageResponse, NetworkInfo, OperatorInfo,
-            ProposalType, ProposeActionRequest, ProviderServicesResponse,
-            RegistrarServicesResponse, TransferInstructionsResponse, TransferPreapprovalsResponse,
-            UserServicesResponse, VaultsResponse,
+            GovernanceResponse, GovernanceStateResponse, GovernanceType, HoldingsResponse,
+            InstrumentsResponse, KnownMember, KnownMembersResponse, MessageResponse, NetworkInfo,
+            OperatorInfo, ProposalType, ProposeActionRequest, ProviderServicesResponse,
+            RegistrarServicesResponse, TransferFactoriesResponse, TransferFactoryInfo,
+            TransferInstructionsResponse, TransferPreapprovalsResponse, UserServicesResponse,
+            VaultsResponse,
         },
     },
     utils,
@@ -73,6 +74,12 @@ pub struct ContractQueryParams {
     /// Use InterfaceFilter instead of TemplateFilter (for querying by interface)
     #[serde(default)]
     pub interface: bool,
+    /// Drop contracts whose `executeBefore` deadline has already passed.
+    /// Used by Accept Mint/Burn Request dropdowns so the user doesn't pick
+    /// a contract that would fail at interpretation. No-op on templates
+    /// without an `executeBefore` field.
+    #[serde(default)]
+    pub active_only: bool,
 }
 
 // ============================================================================
@@ -98,22 +105,31 @@ pub async fn get_governance(
     let token = get_party_token(&data, party_id).await;
     let test_mode = data.test_mode;
 
-    let threshold = get_party_threshold(&data, party_id).await.unwrap_or(2);
-
     let member_party_id = get_member_party_id(&data, party_id).await;
     let packages = packages();
 
-    let rules_contract_id =
+    // Pull `(rules_contract_id, threshold)` off the active GovernanceRules /
+    // VaultGovernanceRules contract. The Daml `ExecuteGovernanceAction`
+    // choice gates on THIS threshold ("Enough member confirmations to
+    // execute action") — not the decentralized-namespace topology
+    // threshold, which is a separate value used for signing
+    // PartyToParticipant updates. Falling back to the DNS threshold for
+    // historical compatibility only when the gov state isn't reachable.
+    let (rules_contract_id, gov_state_threshold) =
         match query_governance_state(&data.config, party_id, token.clone(), test_mode, &packages)
             .await
         {
-            Ok(Some(state)) => Some(state.contract_id),
-            Ok(None) => None,
+            Ok(Some(state)) => (Some(state.contract_id), Some(state.threshold as usize)),
+            Ok(None) => (None, None),
             Err(e) => {
-                tracing::warn!("Failed to fetch active rules contract id: {e}");
-                None
+                tracing::warn!("Failed to fetch active rules contract: {e}");
+                (None, None)
             }
         };
+    let threshold = match gov_state_threshold {
+        Some(t) => t,
+        None => get_party_threshold(&data, party_id).await.unwrap_or(2),
+    };
 
     match get_governance_confirmations(
         &data.config,
@@ -486,18 +502,21 @@ pub async fn get_transfer_preapprovals_handler(
         module_name: "Splice.AmuletRules".to_string(),
         entity_name: "TransferPreapproval".to_string(),
         use_interface_filter: false,
+        active_only: false,
     };
     let cc_proposal = QueryContractParams {
         package_id: "#splice-amulet".to_string(),
         module_name: "Splice.Wallet.TransferPreapproval".to_string(),
         entity_name: "TransferPreapprovalProposal".to_string(),
         use_interface_filter: false,
+        active_only: false,
     };
     let token_params = QueryContractParams {
         package_id: "#utility-registry-app-v0".to_string(),
         module_name: "Utility.Registry.App.V0.Model.TransferPreapproval".to_string(),
         entity_name: "TransferPreapproval".to_string(),
         use_interface_filter: false,
+        active_only: false,
     };
 
     async fn count(
@@ -511,7 +530,18 @@ pub async fn get_transfer_preapprovals_handler(
         match query_contracts_by_template(config, party, token, test_mode, params).await {
             Ok(c) => c.len(),
             Err(e) => {
-                tracing::warn!("Failed to query {label}: {e}");
+                // Template-not-uploaded means there are simply no such
+                // contracts on this participant — a legitimate 0, not a
+                // failure worth a WARN.
+                if e.to_string()
+                    .contains("NO_TEMPLATES_FOR_PACKAGE_NAME_AND_QUALIFIED_NAME")
+                {
+                    tracing::debug!(
+                        "No {label} templates uploaded on this participant; counting as 0",
+                    );
+                } else {
+                    tracing::warn!("Failed to query {label}: {e}");
+                }
                 0
             }
         }
@@ -585,6 +615,117 @@ pub async fn get_instruments_handler(
     }
 }
 
+/// List active `TransferFactory` contracts visible to the party. Used by the
+/// Transfer Proposal form to prefill the factory contract id and expected
+/// admin once the user picks an instrument from the dropdown.
+#[utoipa::path(
+    tag = "Services",
+    params(GovernanceQuery),
+    responses(
+        (status = 200, description = "Transfer factories", body = TransferFactoriesResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+#[get("/transfer-factories")]
+pub async fn get_transfer_factories_handler(
+    data: web::Data<AppState>,
+    query: web::Query<GovernanceQuery>,
+) -> impl Responder {
+    let party_id = &query.party_id;
+    let token = get_party_token(&data, party_id).await;
+
+    match get_transfer_factories(&data.config, party_id, token).await {
+        Ok(mut transfer_factories) => {
+            // Canton Coin's TransferFactory implementation is the system
+            // `Splice.AmuletRules:AmuletRules` contract, which the ledger
+            // interface query above doesn't surface to feature parties. The
+            // DSO API publishes its contract id; expose it as a synthetic
+            // factory keyed on the DSO party so the Transfer Proposal form's
+            // existing `expected_admin == holding.instrument_admin` join
+            // matches CC holdings (whose instrument_admin is the DSO).
+            if let Some((dso_party_id, amulet_rules_cid)) =
+                fetch_amulet_rules_factory(&data.http_client, &data.config).await
+            {
+                transfer_factories.push(TransferFactoryInfo {
+                    contract_id: amulet_rules_cid,
+                    expected_admin: dso_party_id,
+                });
+            }
+            HttpResponse::Ok().json(TransferFactoriesResponse { transfer_factories })
+        }
+        Err(e) => {
+            tracing::error!("Failed to fetch transfer factories: {e}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch transfer factories: {e}"),
+            })
+        }
+    }
+}
+
+/// Pull the DSO party id and AmuletRules contract id from the DSO API. Returns
+/// `None` (with a logged warning) on any failure so callers can degrade
+/// gracefully — the only consumer is `/transfer-factories`, which omits CC
+/// rather than failing the whole response when the DSO API is unreachable.
+async fn fetch_amulet_rules_factory(
+    http_client: &reqwest::Client,
+    config: &NodeConfig,
+) -> Option<(CantonId, String)> {
+    let url = config.canton.network.dso_url();
+    let res = match http_client.get(url).send().await {
+        Ok(res) if res.status().is_success() => res,
+        Ok(res) => {
+            tracing::warn!("DSO API returned {} fetching AmuletRules", res.status());
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!("Failed to reach DSO API for AmuletRules: {e}");
+            return None;
+        }
+    };
+    let json: serde_json::Value = res
+        .json()
+        .await
+        .inspect_err(|e| tracing::warn!("Failed to parse DSO response: {e}"))
+        .ok()?;
+    let dso = json.pointer("/dso_party_id").and_then(|v| v.as_str())?;
+    let cid = json
+        .pointer("/amulet_rules/contract/contract_id")
+        .and_then(|v| v.as_str())?;
+    Some((dso.parse().ok()?, cid.to_string()))
+}
+
+/// Get token-standard `Holding` contracts owned by a party, aggregated by
+/// `(instrument_admin, instrument_id)`. Each row also reports whether a
+/// `TransferPreapproval` is in place for that instrument so the frontend can
+/// render a Yes/No badge without a second round-trip.
+#[utoipa::path(
+    tag = "Services",
+    params(GovernanceQuery),
+    responses(
+        (status = 200, description = "Party holdings", body = HoldingsResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+#[get("/holdings")]
+pub async fn get_holdings_handler(
+    data: web::Data<AppState>,
+    query: web::Query<GovernanceQuery>,
+) -> impl Responder {
+    let party_id = &query.party_id;
+    let token = get_party_token(&data, party_id).await;
+    let test_mode = data.test_mode;
+
+    match get_holdings(&data.config, party_id, token, test_mode).await {
+        Ok(holdings) => HttpResponse::Ok().json(HoldingsResponse { holdings }),
+        Err(e) => {
+            tracing::error!("Failed to fetch holdings: {e}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch holdings: {e}"),
+            })
+        }
+    }
+}
+
 /// Query contract IDs by template
 #[utoipa::path(
     tag = "Services",
@@ -609,6 +750,7 @@ pub async fn query_contracts_handler(
         module_name: query.module_name.clone(),
         entity_name: query.entity_name.clone(),
         use_interface_filter: query.interface,
+        active_only: query.active_only,
     };
 
     match query_contracts_by_template(&data.config, party_id, token, test_mode, &contract_params)
@@ -823,8 +965,10 @@ pub async fn propose_action(
         ProposalType::AcceptTransfer {
             transfer_instruction_cid,
         } => match fetch_accept_transfer_context(
+            &data.config,
+            Some(token.clone()),
             data.config.canton.network,
-            &party_id.to_string(),
+            party_id,
             transfer_instruction_cid,
         )
         .await

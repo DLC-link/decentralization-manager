@@ -46,17 +46,7 @@ spec:
         - name: dec-party-manager
           image: public.ecr.aws/dlc-link/canton-decparty-manager:0.1.3
           imagePullPolicy: Always
-          command:
-            [
-              "dec-party-manager",
-              "-d",
-              "/app",
-              "serve",
-              "--host",
-              "0.0.0.0",
-              "--port",
-              "8080",
-            ]
+          command: ["dec-party-manager", "serve"]
           ports:
             - name: http
               containerPort: 8080
@@ -77,6 +67,12 @@ spec:
           env:
             - name: RUST_LOG
               value: dec_party_manager=debug,tokio_noise=error,hyper_noise=error
+            - name: DECPM_DIR
+              value: /app
+            - name: DECPM_HOST
+              value: 0.0.0.0
+            - name: DECPM_PORT
+              value: "8080"
           envFrom:
             - secretRef:
                 name: dec-party-manager-2-secrets

@@ -18,6 +18,7 @@ import {
 import { API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
 import { useSnackbar } from "../contexts";
+import { fieldHelpAdornment } from "./FieldHelp";
 import type { OnboardingStatusResponse, Peer, NodeConfig } from "../types";
 
 interface OnboardingDialogProps {
@@ -287,6 +288,14 @@ export const OnboardingDialog = ({
             fullWidth
             disabled={loading || status?.status === "inprogress"}
             helperText="A unique identifier prefix for the decentralized party"
+            slotProps={{
+              input: {
+                endAdornment: fieldHelpAdornment(
+                  "The human-readable name for the new decentralized party. It shows up as the bit before '::' in the party id and must be unique on this node. Cannot be changed after creation.",
+                  "Help for Party ID Prefix",
+                ),
+              },
+            }}
           />
 
           <Divider />
@@ -332,7 +341,11 @@ export const OnboardingDialog = ({
             )}
           </Box>
 
-          {error && !meshErrors && <Alert severity="error">{error}</Alert>}
+          {error && !meshErrors && (
+            <Alert severity="error" onClose={() => setError(null)}>
+              {error}
+            </Alert>
+          )}
 
           {meshErrors && (
             <Alert severity="error">

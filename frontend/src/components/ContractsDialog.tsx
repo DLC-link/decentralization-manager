@@ -36,6 +36,7 @@ import StorageIcon from "@mui/icons-material/Storage";
 import { API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
 import { useSnackbar } from "../contexts";
+import { TextHelp, fieldHelpAdornment } from "./FieldHelp";
 import type {
   ContractsStatusResponse,
   ContractsRequest,
@@ -75,6 +76,17 @@ const FIELD_TYPES = [
   { value: "bool", label: "Boolean" },
   { value: "record", label: "Record" },
 ];
+
+/// Hover-on-label tooltip text for each contract field type. Used by the
+/// FieldEditor's label cell (in lockStructure mode) to show context about
+/// what each field controls without rendering a `(?)` icon.
+const FIELD_TYPE_HELP: Record<string, string> = {
+  rel_time:
+    "How long a governance proposal stays open before it expires. After this window, the proposal can no longer collect signatures and must be re-submitted.",
+  bool: "Boolean (true/false) value passed to the contract as-is.",
+  optional:
+    "Pick the value type wrapped by this Optional field. Selecting a type sets a default value; leaving the inner field empty represents None.",
+};
 
 const createDefaultField = (
   type: string,
@@ -323,6 +335,14 @@ const FieldEditor = ({
             value={field.id}
             onChange={(e) => onChange({ ...field, id: e.target.value })}
             fullWidth
+            slotProps={{
+              input: {
+                endAdornment: fieldHelpAdornment(
+                  "The full party ID of a single Canton participant (e.g. alice::1220...). Paste the exact ID; it cannot be edited after the contract is created.",
+                  "Help for Participant Party",
+                ),
+              },
+            }}
           />
         );
 
@@ -345,6 +365,14 @@ const FieldEditor = ({
                   }
                   e.preventDefault();
                 }
+              }}
+              slotProps={{
+                input: {
+                  endAdornment: fieldHelpAdornment(
+                    "The set of member parties that participate in governance. Paste each full party ID and press Enter to add. You can grow or shrink the set later via governance actions.",
+                    "Help for Member Set",
+                  ),
+                },
               }}
             />
             {field.parties.length > 0 && (
@@ -400,6 +428,14 @@ const FieldEditor = ({
               })
             }
             sx={{ width: 100 }}
+            slotProps={{
+              input: {
+                endAdornment: fieldHelpAdornment(
+                  "Minimum number of members that must approve a governance action before it executes. Defaults to a two-thirds majority.",
+                  "Help for Governance Threshold",
+                ),
+              },
+            }}
           />
         );
 
@@ -494,6 +530,14 @@ const FieldEditor = ({
                   })
                 }
                 sx={{ width: 100 }}
+                slotProps={{
+                  input: {
+                    endAdornment: fieldHelpAdornment(
+                      "Optional governance threshold override. Minimum approvals required for an action; leave at default for a two-thirds majority.",
+                      "Help for Optional Governance Threshold",
+                    ),
+                  },
+                }}
               />
             )}
             {field.inner?.type === "text" && (
@@ -508,6 +552,14 @@ const FieldEditor = ({
                   })
                 }
                 sx={{ flex: 1 }}
+                slotProps={{
+                  input: {
+                    endAdornment: fieldHelpAdornment(
+                      "Optional text value for this contract field. Free-form string passed to the contract as-is.",
+                      "Help for Optional Text",
+                    ),
+                  },
+                }}
               />
             )}
             {field.inner?.type === "int64" && (
@@ -526,6 +578,14 @@ const FieldEditor = ({
                   })
                 }
                 sx={{ width: 100 }}
+                slotProps={{
+                  input: {
+                    endAdornment: fieldHelpAdornment(
+                      "Optional integer value for this contract field. Whole number passed to the contract as-is.",
+                      "Help for Optional Integer",
+                    ),
+                  },
+                }}
               />
             )}
             {field.inner?.type === "party_set" && (
@@ -541,6 +601,14 @@ const FieldEditor = ({
                   size="small"
                   placeholder="Paste party ID, press Enter (leave empty for no extra proposers)"
                   fullWidth
+                  slotProps={{
+                    input: {
+                      endAdornment: fieldHelpAdornment(
+                        "Additional parties allowed to propose governance actions, beyond the regular members. Leave empty to keep the proposer allowlist at its default.",
+                        "Help for Additional Proposers",
+                      ),
+                    },
+                  }}
                   onKeyDown={(e) => {
                     if (e.key === "Enter") {
                       const input = e.target as HTMLInputElement;
@@ -622,6 +690,14 @@ const FieldEditor = ({
             value={field.id}
             onChange={(e) => onChange({ ...field, id: e.target.value })}
             sx={{ width: 150 }}
+            slotProps={{
+              input: {
+                endAdornment: fieldHelpAdornment(
+                  "Short identifier for the asset this contract operates on (e.g. CBTC). Must match the instrument symbol used by the deployed package.",
+                  "Help for Instrument ID",
+                ),
+              },
+            }}
           />
         );
 
@@ -633,6 +709,14 @@ const FieldEditor = ({
             value={field.value}
             onChange={(e) => onChange({ ...field, value: e.target.value })}
             sx={{ flex: 1 }}
+            slotProps={{
+              input: {
+                endAdornment: fieldHelpAdornment(
+                  "Free-form text value passed to the contract as-is.",
+                  "Help for Text Value",
+                ),
+              },
+            }}
           />
         );
 
@@ -647,6 +731,14 @@ const FieldEditor = ({
               onChange({ ...field, value: parseInt(e.target.value) || 0 })
             }
             sx={{ width: 120 }}
+            slotProps={{
+              input: {
+                endAdornment: fieldHelpAdornment(
+                  "Whole-number value (signed 64-bit integer) passed to the contract as-is.",
+                  "Help for Integer Value",
+                ),
+              },
+            }}
           />
         );
 
@@ -765,9 +857,18 @@ const FieldEditor = ({
     >
       {lockStructure ? (
         <Typography variant="body2" sx={{ fontWeight: 500, pl: 1.5, py: 1 }}>
-          {label ??
-            FIELD_TYPES.find((t) => t.value === field.type)?.label ??
-            field.type}
+          {(() => {
+            const labelText =
+              label ??
+              FIELD_TYPES.find((t) => t.value === field.type)?.label ??
+              field.type;
+            const help = FIELD_TYPE_HELP[field.type];
+            return help ? (
+              <TextHelp text={help}>{labelText}</TextHelp>
+            ) : (
+              labelText
+            );
+          })()}
         </Typography>
       ) : (
         <FormControl size="small" fullWidth>
@@ -889,10 +990,15 @@ const ContractEditor = ({
               onChange({ ...contract, package_id: value })
             }
             size="small"
+            sx={{ flex: 1 }}
             renderInput={(params) => (
               <TextField
                 {...params}
-                label="Package Name / ID"
+                label={
+                  <TextHelp text="Canton package that contains the contract template. Pick an uploaded DAR from the list, or paste a full package ID hash.">
+                    Package Name / ID
+                  </TextHelp>
+                }
                 placeholder="Enter or select package ID"
               />
             )}
@@ -907,6 +1013,14 @@ const ContractEditor = ({
               }
               fullWidth
               placeholder="e.g., CBTC.Governance"
+              slotProps={{
+                input: {
+                  endAdornment: fieldHelpAdornment(
+                    "Dotted Daml module path inside the package (e.g. CBTC.Governance). Must match the module where the contract template is defined.",
+                    "Help for Module Name",
+                  ),
+                },
+              }}
             />
             <TextField
               size="small"
@@ -917,6 +1031,14 @@ const ContractEditor = ({
               }
               fullWidth
               placeholder="e.g., CBTCGovernanceRules"
+              slotProps={{
+                input: {
+                  endAdornment: fieldHelpAdornment(
+                    "Name of the contract template inside the module (e.g. CBTCGovernanceRules). This is the type whose record fields you fill in below.",
+                    "Help for Entity Name",
+                  ),
+                },
+              }}
             />
           </Box>
 
@@ -1471,7 +1593,11 @@ export const ContractsDialog = ({
       </DialogTitle>
       <DialogContent>
         <Box sx={{ display: "flex", flexDirection: "column", gap: 2, mt: 1 }}>
-          {error && <Alert severity="error">{error}</Alert>}
+          {error && (
+            <Alert severity="error" onClose={() => setError(null)}>
+              {error}
+            </Alert>
+          )}
 
           {isInProgress && (
             <Alert severity="info" icon={<CircularProgress size={20} />}>
@@ -1532,6 +1658,14 @@ export const ContractsDialog = ({
                     required
                     error={!operatorParty}
                     helperText="Full party ID for the operator (e.g., operator::1220...)"
+                    slotProps={{
+                      input: {
+                        endAdornment: fieldHelpAdornment(
+                          "Full party ID of the operator party that administers these contracts (e.g. operator::1220...). It cannot be changed after the contracts are created.",
+                          "Help for Operator Party ID",
+                        ),
+                      },
+                    }}
                   />
                 )}
 
@@ -1576,6 +1710,14 @@ export const ContractsDialog = ({
                       disabled={
                         participantParties.length >= participantIds.length
                       }
+                      slotProps={{
+                        input: {
+                          endAdornment: fieldHelpAdornment(
+                            "Paste the full party ID for each participant and press Enter to add. Order must match the participant list above; the count must equal the total number of participants before you can deploy.",
+                            "Help for Participant Party IDs",
+                          ),
+                        },
+                      }}
                     />
                     {participantParties.length > 0 && (
                       <Box

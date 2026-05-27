@@ -170,7 +170,11 @@ export const AuthCheckAccordion = () => {
             <CircularProgress size={24} />
           </Box>
         ) : error ? (
-          <Alert severity="error" sx={{ mb: 2 }}>
+          <Alert
+            severity="error"
+            sx={{ mb: 2 }}
+            onClose={() => setError(null)}
+          >
             {error}
           </Alert>
         ) : !hasParties ? (
