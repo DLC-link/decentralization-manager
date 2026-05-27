@@ -965,8 +965,10 @@ pub async fn propose_action(
         ProposalType::AcceptTransfer {
             transfer_instruction_cid,
         } => match fetch_accept_transfer_context(
+            &data.config,
+            Some(token.clone()),
             data.config.canton.network,
-            &party_id.to_string(),
+            party_id,
             transfer_instruction_cid,
         )
         .await

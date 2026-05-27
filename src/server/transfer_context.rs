@@ -20,7 +20,7 @@ use canton_common::{
 };
 use canton_proto_rs::com::daml::ledger::api::v2::{
     CumulativeFilter, DisclosedContract, EventFormat, Filters, GetEventsByContractIdRequest,
-    WildcardFilter, cumulative_filter, value,
+    Identifier, InterfaceFilter, WildcardFilter, cumulative_filter, value,
 };
 
 use crate::{
@@ -46,14 +46,27 @@ pub struct AcceptTransferContext {
 /// given `TransferInstruction`. Used by the propose handler (to bake the
 /// context into the proposal) and the execute handler (to attach disclosed
 /// contracts to the submission).
+///
+/// The registry serves the choice context under the instrument's *registrar*
+/// (`/registrars/{admin}/…`), which is the instrument admin — NOT the
+/// accepting party. For utility tokens a dec-party administers itself the two
+/// coincide, but for shared instruments (e.g. CBTC, admin = `cbtc-network`)
+/// they differ, so we resolve the admin from the instruction rather than
+/// assuming it's the caller. `party_id` is the accepting party, used only for
+/// ledger visibility when looking the instruction up.
 pub async fn fetch(
+    config: &NodeConfig,
+    token: Option<String>,
     network: Network,
-    decentralized_party_id: &str,
+    party_id: &CantonId,
     transfer_instruction_cid: &str,
 ) -> Result<AcceptTransferContext> {
+    let registrar =
+        fetch_instruction_registrar(config, token, party_id, transfer_instruction_cid).await?;
+
     let response = canton_registry::accept_context::get(canton_registry::accept_context::Params {
         registry_url: network.registry_url().to_string(),
-        decentralized_party_id: decentralized_party_id.to_string(),
+        decentralized_party_id: registrar.to_string(),
         // Upstream field is named `transfer_offer_contract_id` but the
         // registry endpoint actually keys on the TransferInstruction cid.
         // Naming mismatch is in canton-lib, not here.
@@ -81,6 +94,106 @@ pub async fn fetch(
     })
 }
 
+/// Resolve the token-standard registrar for a `TransferInstruction` — its
+/// instrument admin — by reading the instruction's interface view. The
+/// registry's accept choice-context is keyed on this registrar, not on the
+/// accepting party.
+async fn fetch_instruction_registrar(
+    config: &NodeConfig,
+    token: Option<String>,
+    party_id: &CantonId,
+    transfer_instruction_cid: &str,
+) -> Result<CantonId> {
+    let mut client = utils::create_event_query_client(config, token).await?;
+
+    let mut filters_by_party = HashMap::new();
+    filters_by_party.insert(
+        party_id.to_string(),
+        Filters {
+            cumulative: vec![CumulativeFilter {
+                identifier_filter: Some(cumulative_filter::IdentifierFilter::InterfaceFilter(
+                    InterfaceFilter {
+                        interface_id: Some(Identifier {
+                            package_id: "#splice-api-token-transfer-instruction-v1".to_string(),
+                            module_name: "Splice.Api.Token.TransferInstructionV1".to_string(),
+                            entity_name: "TransferInstruction".to_string(),
+                        }),
+                        include_interface_view: true,
+                        include_created_event_blob: false,
+                    },
+                )),
+            }],
+        },
+    );
+
+    let request = GetEventsByContractIdRequest {
+        contract_id: transfer_instruction_cid.to_string(),
+        event_format: Some(EventFormat {
+            filters_by_party,
+            filters_for_any_party: None,
+            verbose: true,
+        }),
+    };
+
+    let created_event = client
+        .get_events_by_contract_id(tonic::Request::new(request))
+        .await
+        .context("Failed to query transfer instruction by contract id")?
+        .into_inner()
+        .created
+        .and_then(|c| c.created_event)
+        .context("Transfer instruction not found or not visible to party")?;
+
+    let view_record = created_event
+        .interface_views
+        .iter()
+        .find(|v| {
+            v.interface_id.as_ref().is_some_and(|id| {
+                id.module_name == "Splice.Api.Token.TransferInstructionV1"
+                    && id.entity_name == "TransferInstruction"
+            })
+        })
+        .and_then(|v| v.view_value.as_ref())
+        .context("Transfer instruction interface view missing")?;
+
+    let instrument_record = view_record
+        .fields
+        .iter()
+        .find(|f| f.label == "transfer")
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Record(r)) => Some(r),
+            _ => None,
+        })
+        .and_then(|transfer| {
+            transfer
+                .fields
+                .iter()
+                .find(|f| f.label == "instrumentId")
+                .and_then(|f| f.value.as_ref())
+                .and_then(|v| match &v.sum {
+                    Some(value::Sum::Record(r)) => Some(r),
+                    _ => None,
+                })
+        })
+        .context("Transfer instruction missing transfer.instrumentId")?;
+
+    let admin = instrument_record
+        .fields
+        .iter()
+        .find(|f| f.label == "admin")
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Party(p)) => Some(p.clone()),
+            _ => None,
+        })
+        .context("instrumentId missing admin party")?;
+
+    admin
+        .parse()
+        .context("Failed to parse instrument admin as a party id")
+}
+
 /// Inspect a governance proposal contract by cid; if it's an
 /// `AcceptTransferProposal`, fetch the choice context from the registry and
 /// return it so the executor can attach disclosed contracts. Returns `Ok(None)`
@@ -94,7 +207,8 @@ pub async fn maybe_fetch_for_proposal(
     party_id: &CantonId,
     proposal_cid: &str,
 ) -> Result<Option<AcceptTransferContext>> {
-    let mut client = utils::create_event_query_client(config, token).await?;
+    // `fetch` (below) needs the token too — clone before this client consumes it.
+    let mut client = utils::create_event_query_client(config, token.clone()).await?;
 
     // `GetEventsByContractId` filters by party-visibility so the requester
     // must be authorized to read the proposal. Use the party that's executing
@@ -168,8 +282,10 @@ pub async fn maybe_fetch_for_proposal(
         .context("AcceptTransferProposal missing transferInstructionCid field")?;
 
     let ctx = fetch(
+        config,
+        token,
         config.canton.network,
-        &party_id.to_string(),
+        party_id,
         &transfer_instruction_cid,
     )
     .await?;
