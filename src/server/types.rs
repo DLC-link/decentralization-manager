@@ -88,21 +88,6 @@ impl Drop for ListenerPauseGuard {
     }
 }
 
-/// Parse a Duration in seconds from an env var, falling back to `default` on
-/// missing, empty, or malformed values. Logs a WARN on malformed.
-pub fn duration_from_env_or(var: &str, default: Duration) -> Duration {
-    match std::env::var(var) {
-        Ok(v) if !v.is_empty() => match v.parse::<u64>() {
-            Ok(secs) => Duration::from_secs(secs),
-            Err(e) => {
-                tracing::warn!("invalid value for {var}: {e}; using default {default:?}");
-                default
-            }
-        },
-        _ => default,
-    }
-}
-
 /// Cross-workflow mutual exclusion.
 ///
 /// At most one workflow (kick / onboarding / contracts / dars) may run at
@@ -1914,48 +1899,5 @@ mod tests {
         assert!(mk("0").validate().is_err());
         assert!(mk("-1.5").validate().is_err());
         assert!(mk("0.0001").validate().is_ok());
-    }
-}
-
-#[cfg(test)]
-mod duration_from_env_tests {
-    use super::*;
-
-    #[test]
-    fn duration_from_env_uses_default_when_unset() {
-        // Each test uses its own var name to avoid OnceLock interference and
-        // cross-test env races.
-        let var = "DPM_TEST_DURATION_UNSET_VAR";
-        // SAFETY: tests share the process env; ensure the var is clear first.
-        unsafe { std::env::remove_var(var) };
-        let d = duration_from_env_or(var, Duration::from_secs(99));
-        assert_eq!(d, Duration::from_secs(99));
-    }
-
-    #[test]
-    fn duration_from_env_parses_when_set() {
-        let var = "DPM_TEST_DURATION_SET_VAR";
-        unsafe { std::env::set_var(var, "5") };
-        let d = duration_from_env_or(var, Duration::from_secs(99));
-        unsafe { std::env::remove_var(var) };
-        assert_eq!(d, Duration::from_secs(5));
-    }
-
-    #[test]
-    fn duration_from_env_falls_back_on_garbage() {
-        let var = "DPM_TEST_DURATION_GARBAGE_VAR";
-        unsafe { std::env::set_var(var, "not-a-number") };
-        let d = duration_from_env_or(var, Duration::from_secs(99));
-        unsafe { std::env::remove_var(var) };
-        assert_eq!(d, Duration::from_secs(99));
-    }
-
-    #[test]
-    fn duration_from_env_treats_empty_as_unset() {
-        let var = "DPM_TEST_DURATION_EMPTY_VAR";
-        unsafe { std::env::set_var(var, "") };
-        let d = duration_from_env_or(var, Duration::from_secs(99));
-        unsafe { std::env::remove_var(var) };
-        assert_eq!(d, Duration::from_secs(99));
     }
 }
