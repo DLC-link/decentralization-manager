@@ -846,6 +846,7 @@ async fn send_onboarding_invites(
     let payload = OnboardingInvitePayload {
         prefix: party_id_prefix.to_string(),
         participants: peer_ids.to_vec(),
+        coordinator_http_url: None,
     };
     let payload_bytes = serde_json::to_vec(&payload)?;
     let invite_message = Message::new(MessageType::InviteOnboarding, payload_bytes);
@@ -1564,6 +1565,7 @@ async fn send_dars_invites(
 
     let payload = DarsInvitePayload {
         dar_filenames: dar_filenames.to_vec(),
+        coordinator_http_url: None,
     };
     let payload_bytes = serde_json::to_vec(&payload)?;
     let invite_message = Message::new(MessageType::InviteDars, payload_bytes);
