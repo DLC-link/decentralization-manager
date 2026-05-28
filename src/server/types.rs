@@ -1827,18 +1827,28 @@ mod probe_response_tests {
     use super::*;
 
     #[test]
-    fn probe_response_serde_roundtrip_in_progress() {
-        let r = PeerProbeResponse {
-            status: WorkflowProgress::InProgress,
-            instance_name: "abc-creation".into(),
-            updated_at: 1234,
-            error: None,
-        };
-        let s = serde_json::to_string(&r).unwrap();
-        assert!(s.contains("\"InProgress\""), "got: {s}");
-        let back: PeerProbeResponse = serde_json::from_str(&s).unwrap();
-        assert_eq!(back.status, WorkflowProgress::InProgress);
-        assert_eq!(back.instance_name, "abc-creation");
+    fn probe_response_serde_roundtrip_all_variants() {
+        for (variant, expected_str) in [
+            (WorkflowProgress::Idle, "Idle"),
+            (WorkflowProgress::InProgress, "InProgress"),
+            (WorkflowProgress::Completed, "Completed"),
+            (WorkflowProgress::Failed, "Failed"),
+            (WorkflowProgress::Cancelled, "Cancelled"),
+        ] {
+            let r = PeerProbeResponse {
+                status: variant,
+                instance_name: "test".into(),
+                updated_at: 0,
+                error: None,
+            };
+            let s = serde_json::to_string(&r).unwrap();
+            assert!(
+                s.contains(&format!("\"{expected_str}\"")),
+                "variant {variant:?} serialized incorrectly: {s}"
+            );
+            let back: PeerProbeResponse = serde_json::from_str(&s).unwrap();
+            assert_eq!(back.status, variant);
+        }
     }
 }
 
