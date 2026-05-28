@@ -360,6 +360,36 @@ impl SchemaRead for SqlitePool {
         row.map(|r| r.into_domain()).transpose()
     }
 
+    async fn get_workflow_run_for_peer_probe(
+        &self,
+        kind: WorkflowKind,
+        peer_id: &CantonId,
+    ) -> Result<Option<WorkflowRun>> {
+        // SQLite stores `expected_peers` as a JSON array of strings. Match
+        // membership via a parameterized LIKE on the serialized form. Quote-
+        // delimit the needle to make matching exact (otherwise `peerA::...`
+        // would substring-match inside `peerA10::...`).
+        let peer_str = peer_id.to_string();
+        let needle = format!("\"{peer_str}\"");
+        let row = sqlx::query_as::<_, WorkflowRunRow>(
+            r#"
+            SELECT *
+            FROM workflow_runs
+            WHERE role = 'Coordinator'
+              AND kind = ?
+              AND expected_peers_json LIKE '%' || ? || '%'
+            ORDER BY (status = 'inprogress') DESC, updated_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(kind.as_str())
+        .bind(needle)
+        .fetch_optional(self)
+        .await
+        .context("get_workflow_run_for_peer_probe")?;
+        row.map(|r| r.into_domain()).transpose()
+    }
+
     async fn get_visible_workflow_runs(&self) -> Result<Vec<WorkflowRun>> {
         let rows = sqlx::query_as::<_, WorkflowRunRow>(
             "SELECT * FROM workflow_runs \
@@ -2020,6 +2050,173 @@ mod tests {
             .await?;
         assert!(listed.is_empty());
 
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn peer_probe_lookup_prefers_in_progress(pool: SqlitePool) -> Result {
+        let peer = CantonId::parse(
+            "peerX::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+        )?;
+        let make_run = |name: &str, status: WorkflowProgress, updated_at: i64| WorkflowRun {
+            instance_name: name.into(),
+            kind: WorkflowKind::Onboarding,
+            role: WorkflowRole::Coordinator,
+            status,
+            current_step: "Active".into(),
+            step_index: 0,
+            step_total: 1,
+            config_json: "{}".into(),
+            coordinator_pubkey: None,
+            coordinator_name: None,
+            expected_peers: vec![peer.clone()],
+            completed_peers: Vec::new(),
+            dec_party_id: None,
+            error: None,
+            dismissed: false,
+            coordinator_http_url: None,
+            created_at: 0,
+            updated_at,
+        };
+        for (name, status, t) in [
+            ("old-cancel", WorkflowProgress::Cancelled, 100_i64),
+            ("active-now", WorkflowProgress::InProgress, 50_i64),
+        ] {
+            let mut tx = pool.begin_transaction().await?;
+            tx.upsert_workflow_run(&make_run(name, status, t)).await?;
+            Commitable::commit(tx).await?;
+        }
+        let row = pool
+            .get_workflow_run_for_peer_probe(WorkflowKind::Onboarding, &peer)
+            .await?
+            .expect("row");
+        // InProgress wins regardless of updated_at.
+        assert_eq!(row.instance_name, "active-now");
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn peer_probe_lookup_returns_terminal_when_no_active(pool: SqlitePool) -> Result {
+        let peer = CantonId::parse(
+            "peerX::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+        )?;
+        let make_run = |name: &str, status: WorkflowProgress, updated_at: i64| WorkflowRun {
+            instance_name: name.into(),
+            kind: WorkflowKind::Onboarding,
+            role: WorkflowRole::Coordinator,
+            status,
+            current_step: "Active".into(),
+            step_index: 0,
+            step_total: 1,
+            config_json: "{}".into(),
+            coordinator_pubkey: None,
+            coordinator_name: None,
+            expected_peers: vec![peer.clone()],
+            completed_peers: Vec::new(),
+            dec_party_id: None,
+            error: None,
+            dismissed: false,
+            coordinator_http_url: None,
+            created_at: 0,
+            updated_at,
+        };
+        // Two terminal rows; latest updated_at wins.
+        for (name, status, t) in [
+            ("first-cancel", WorkflowProgress::Cancelled, 100_i64),
+            ("later-failed", WorkflowProgress::Failed, 200_i64),
+        ] {
+            let mut tx = pool.begin_transaction().await?;
+            tx.upsert_workflow_run(&make_run(name, status, t)).await?;
+            Commitable::commit(tx).await?;
+        }
+        let row = pool
+            .get_workflow_run_for_peer_probe(WorkflowKind::Onboarding, &peer)
+            .await?
+            .expect("row");
+        assert_eq!(row.instance_name, "later-failed");
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn peer_probe_lookup_returns_dismissed_rows(pool: SqlitePool) -> Result {
+        // The only matching row has dismissed=true; the probe must still return it.
+        let peer = CantonId::parse(
+            "peerX::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+        )?;
+        let run = WorkflowRun {
+            instance_name: "dismissed-but-real".into(),
+            kind: WorkflowKind::Onboarding,
+            role: WorkflowRole::Coordinator,
+            status: WorkflowProgress::Cancelled,
+            current_step: "Active".into(),
+            step_index: 0,
+            step_total: 1,
+            config_json: "{}".into(),
+            coordinator_pubkey: None,
+            coordinator_name: None,
+            expected_peers: vec![peer.clone()],
+            completed_peers: Vec::new(),
+            dec_party_id: None,
+            error: None,
+            dismissed: true,
+            coordinator_http_url: None,
+            created_at: 0,
+            updated_at: 100,
+        };
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_workflow_run(&run).await?;
+        Commitable::commit(tx).await?;
+
+        let row = pool
+            .get_workflow_run_for_peer_probe(WorkflowKind::Onboarding, &peer)
+            .await?
+            .expect("row");
+        assert_eq!(row.instance_name, "dismissed-but-real");
+        assert_eq!(row.status, WorkflowProgress::Cancelled);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn peer_probe_lookup_handles_prefix_collisions(pool: SqlitePool) -> Result {
+        // Guards against the JSON-LIKE needle matching a longer ID by prefix —
+        // e.g. `peerA::1220abcd` substring-matching inside `peerA10::1220abcd`.
+        // The implementation must quote-delimit the needle so the match is exact.
+        let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
+        let peer_short = CantonId::parse(&format!("peerA::{ns}"))?;
+        let peer_long = CantonId::parse(&format!("peerA10::{ns}"))?;
+
+        let run = WorkflowRun {
+            instance_name: "collision-test".into(),
+            kind: WorkflowKind::Onboarding,
+            role: WorkflowRole::Coordinator,
+            status: WorkflowProgress::InProgress,
+            current_step: "Active".into(),
+            step_index: 0,
+            step_total: 1,
+            config_json: "{}".into(),
+            coordinator_pubkey: None,
+            coordinator_name: None,
+            expected_peers: vec![peer_long.clone()],
+            completed_peers: Vec::new(),
+            dec_party_id: None,
+            error: None,
+            dismissed: false,
+            coordinator_http_url: None,
+            created_at: 0,
+            updated_at: 100,
+        };
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_workflow_run(&run).await?;
+        Commitable::commit(tx).await?;
+
+        // Probe for peer_short — must NOT match peer_long's row.
+        let row = pool
+            .get_workflow_run_for_peer_probe(WorkflowKind::Onboarding, &peer_short)
+            .await?;
+        assert!(
+            row.is_none(),
+            "needle `peerA::...` must not collide with `peerA10::...`"
+        );
         Ok(())
     }
 
