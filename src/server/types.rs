@@ -638,10 +638,11 @@ pub struct DarsInvitePayload {
 }
 
 /// Payload sent inside an `InviteKick` Noise message — gives the peer enough
-/// context to show "kicking X, threshold a→b" before the kick proposals
-/// arrive later in the workflow.
+/// context to show "kicking X from dec party Y, threshold a→b" before the kick
+/// proposals arrive later in the workflow.
 #[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct KickInvitePayload {
+    pub dec_party_id: CantonId,
     pub kicked_participant: CantonId,
     pub new_threshold: i32,
     pub previous_threshold: i32,
@@ -673,6 +674,10 @@ pub struct PendingInvitation {
     /// Kick-only: threshold before the kick.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_threshold: Option<i32>,
+    /// Kick-only: dec party the kick targets. Lets the peer card render the
+    /// same "Dec party" row the coordinator shows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dec_party_id: Option<CantonId>,
 }
 
 /// Response for pending invitations endpoint

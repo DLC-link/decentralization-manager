@@ -462,6 +462,7 @@ async fn send_kick_invites(
     let current_participant_id = config.participant_id();
     let kicked_participant = &kick_config.participant_id;
     let payload = KickInvitePayload {
+        dec_party_id: kick_config.decentralized_party_id.clone(),
         kicked_participant: kicked_participant.clone(),
         new_threshold: kick_config.new_threshold,
         previous_threshold: kick_config.previous_threshold,

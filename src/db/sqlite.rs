@@ -779,8 +779,9 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                 dar_filenames,
                 kicked_participant,
                 new_threshold,
-                previous_threshold
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                previous_threshold,
+                dec_party_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ",
         )
         .bind(&row.id)
@@ -793,6 +794,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         .bind(&row.kicked_participant)
         .bind(row.new_threshold)
         .bind(row.previous_threshold)
+        .bind(&row.dec_party_id)
         .execute(&mut **self)
         .await?;
 
@@ -1773,6 +1775,7 @@ mod tests {
             kicked_participant: None,
             new_threshold: None,
             previous_threshold: None,
+            dec_party_id: None,
         };
         let inv_b = PendingInvitation {
             id: "kick-bbbbbbbbbbbbbbbb".to_string(),
@@ -1786,6 +1789,7 @@ mod tests {
             kicked_participant: Some(CantonId::parse(&format!("kicked::{TEST_NS}")).unwrap()),
             new_threshold: Some(2),
             previous_threshold: Some(3),
+            dec_party_id: Some(CantonId::parse(&format!("dec::{TEST_NS}")).unwrap()),
         };
 
         let mut tx = pool.begin_transaction().await?;
@@ -1805,6 +1809,7 @@ mod tests {
             kicked_participant: None,
             new_threshold: None,
             previous_threshold: None,
+            dec_party_id: None,
         };
         let mut tx = pool.begin_transaction().await?;
         tx.upsert_pending_invitation(&inv_c).await?;

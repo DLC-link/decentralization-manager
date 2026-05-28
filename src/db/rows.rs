@@ -189,6 +189,7 @@ pub struct PendingInvitationRow {
     pub kicked_participant: Option<String>,
     pub new_threshold: Option<i64>,
     pub previous_threshold: Option<i64>,
+    pub dec_party_id: Option<String>,
 }
 
 fn encode_list<T: serde::Serialize>(items: &[T], context_label: &str) -> Result<Option<String>> {
@@ -232,6 +233,7 @@ impl PendingInvitationRow {
             kicked_participant: inv.kicked_participant.as_ref().map(|p| p.to_string()),
             new_threshold: inv.new_threshold.map(i64::from),
             previous_threshold: inv.previous_threshold.map(i64::from),
+            dec_party_id: inv.dec_party_id.as_ref().map(|p| p.to_string()),
         })
     }
 
@@ -251,6 +253,11 @@ impl PendingInvitationRow {
             .map(|s| CantonId::parse(&s))
             .transpose()
             .with_context(|| format!("invalid kicked_participant for id {}", self.id))?;
+        let dec_party_id = self
+            .dec_party_id
+            .map(|s| CantonId::parse(&s))
+            .transpose()
+            .with_context(|| format!("invalid dec_party_id for id {}", self.id))?;
         Ok(PendingInvitation {
             id: self.id,
             invitation_type,
@@ -263,6 +270,7 @@ impl PendingInvitationRow {
             kicked_participant,
             new_threshold: self.new_threshold.map(|v| v as i32),
             previous_threshold: self.previous_threshold.map(|v| v as i32),
+            dec_party_id,
         })
     }
 }
