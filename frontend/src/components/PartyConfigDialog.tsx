@@ -44,6 +44,10 @@ export const PartyConfigDialog = ({
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
   const [discovering, setDiscovering] = useState(false);
+  /// Allow the user to bypass discovery and enter Member Party ID / User ID by
+  /// hand — needed when discovery isn't applicable (e.g. an external IdP user
+  /// who already has a member party assigned out-of-band) or when it fails.
+  const [manualEntry, setManualEntry] = useState(false);
   const [discoverInfo, setDiscoverInfo] = useState<string | null>(null);
 
   const [provider, setProvider] = useState<Provider>("keycloak");
@@ -104,6 +108,7 @@ export const PartyConfigDialog = ({
       setError(null);
       setSuccess(false);
       setDiscoverInfo(null);
+      setManualEntry(false);
       fetchConfig();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -593,7 +598,7 @@ export const PartyConfigDialog = ({
                 </>
               )}
 
-              {memberPartyId || userId ? (
+              {memberPartyId || userId || manualEntry ? (
                 <>
                   <Divider />
                   <TextField
@@ -606,7 +611,7 @@ export const PartyConfigDialog = ({
                     slotProps={{
                       input: {
                         endAdornment: fieldHelpAdornment(
-                          "The participant-local party that acts as this node's member of the decentralized party. Discovered from the user's primary party via the credentials above.",
+                          "The participant-local party that acts as this node's member of the decentralized party. Discovered from the user's primary party via the credentials above, or entered manually.",
                           "Help for Member Party ID",
                         ),
                       },
@@ -630,7 +635,7 @@ export const PartyConfigDialog = ({
                   />
                 </>
               ) : (
-                <Box>
+                <Box sx={{ display: "flex", alignItems: "center", gap: 1.5 }}>
                   <Button
                     size="small"
                     variant="outlined"
@@ -641,6 +646,14 @@ export const PartyConfigDialog = ({
                     }
                   >
                     {discovering ? "Discovering…" : "Discover Member Party"}
+                  </Button>
+                  <Button
+                    size="small"
+                    variant="text"
+                    onClick={() => setManualEntry(true)}
+                    disabled={saving || discovering}
+                  >
+                    Enter manually
                   </Button>
                 </Box>
               )}

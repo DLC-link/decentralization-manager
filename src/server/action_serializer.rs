@@ -121,6 +121,15 @@ fn make_empty_extra_args() -> Value {
     make_extra_args(make_empty_text_map())
 }
 
+/// Placeholder timestamps used when serializing a `Transfer` record into a
+/// `TransferProposal`. Exposed so the registry choice-context fetch uses the
+/// *same* values — the registrar resolves the context for these exact choice
+/// arguments, so any drift between propose-time and execute-time payloads
+/// fails interpretation. `0` is epoch and `i64::MAX / 1000` is the maximum
+/// Daml `Time` value (well past any realistic deadline).
+pub const TRANSFER_REQUESTED_AT_MICROS: i64 = 0;
+pub const TRANSFER_EXECUTE_BEFORE_MICROS: i64 = i64::MAX / 1000;
+
 fn make_extra_args(context_values: Value) -> Value {
     make_record(vec![
         field(
@@ -924,13 +933,13 @@ pub fn build_proposal_create_args(
                 field(
                     "requestedAt",
                     Value {
-                        sum: Some(value::Sum::Timestamp(0)),
+                        sum: Some(value::Sum::Timestamp(TRANSFER_REQUESTED_AT_MICROS)),
                     },
                 ),
                 field(
                     "executeBefore",
                     Value {
-                        sum: Some(value::Sum::Timestamp(i64::MAX / 1000)),
+                        sum: Some(value::Sum::Timestamp(TRANSFER_EXECUTE_BEFORE_MICROS)),
                     },
                 ),
                 field(

@@ -26,7 +26,7 @@ use canton_proto_rs::com::daml::ledger::api::v2::{
     CumulativeFilter, DisclosedContract, EventFormat, Filters, GetEventsByContractIdRequest,
     Identifier, InterfaceFilter, Record, WildcardFilter, cumulative_filter, value,
 };
-use chrono::{Duration, Utc};
+use chrono::DateTime;
 
 use crate::{
     config::{Network, NodeConfig},
@@ -34,6 +34,12 @@ use crate::{
     participant_id::CantonId,
     utils,
 };
+
+fn micros_to_rfc3339(micros: i64) -> Result<String> {
+    DateTime::from_timestamp_micros(micros)
+        .map(|dt| dt.to_rfc3339())
+        .ok_or_else(|| anyhow::anyhow!("timestamp {micros} micros is out of range for RFC3339"))
+}
 
 /// The data needed to submit an `AcceptTransfer` flow against the ledger.
 ///
@@ -63,30 +69,38 @@ pub struct ProposeTransferContext {
 /// `TransferFactory` cid and the choice context required to exercise
 /// `TransferFactory_Transfer` later. Used by the propose handler for
 /// shared-instrument transfers where the factory isn't on the dec party's ACS.
+/// Inputs that need to match byte-for-byte between the registry's choice-
+/// context resolution and the on-chain `TransferProposal` — drifting on any
+/// field invalidates the context returned by the registrar.
+pub struct ProposeTransferArgs<'a> {
+    pub sender: &'a CantonId,
+    pub receiver: &'a CantonId,
+    pub amount: &'a DamlDecimal,
+    pub instrument_admin: &'a CantonId,
+    pub instrument_id: &'a str,
+    pub input_holding_cids: &'a [String],
+    pub requested_at_micros: i64,
+    pub execute_before_micros: i64,
+}
+
 pub async fn fetch_factory_for_propose(
     network: Network,
-    sender: &CantonId,
-    receiver: &CantonId,
-    amount: &DamlDecimal,
-    instrument_admin: &CantonId,
-    instrument_id: &str,
-    input_holding_cids: &[String],
+    args: ProposeTransferArgs<'_>,
 ) -> Result<ProposeTransferContext> {
-    let now = Utc::now();
     let request = canton_registry::transfer_factory::Request {
         choice_arguments: ChoiceArguments {
-            expected_admin: instrument_admin.to_string(),
+            expected_admin: args.instrument_admin.to_string(),
             transfer: Transfer {
-                sender: sender.to_string(),
-                receiver: receiver.to_string(),
-                amount: *amount,
+                sender: args.sender.to_string(),
+                receiver: args.receiver.to_string(),
+                amount: *args.amount,
                 instrument_id: InstrumentId {
-                    admin: instrument_admin.to_string(),
-                    id: instrument_id.to_string(),
+                    admin: args.instrument_admin.to_string(),
+                    id: args.instrument_id.to_string(),
                 },
-                requested_at: now.to_rfc3339(),
-                execute_before: (now + Duration::hours(24)).to_rfc3339(),
-                input_holding_cids: Some(input_holding_cids.to_vec()),
+                requested_at: micros_to_rfc3339(args.requested_at_micros)?,
+                execute_before: micros_to_rfc3339(args.execute_before_micros)?,
+                input_holding_cids: Some(args.input_holding_cids.to_vec()),
                 meta: Some(Meta { values: None }),
             },
             extra_args: ExtraArgs {
@@ -103,7 +117,7 @@ pub async fn fetch_factory_for_propose(
     let response =
         canton_registry::transfer_factory::get(canton_registry::transfer_factory::Params {
             registry_url: network.registry_url().to_string(),
-            decentralized_party_id: instrument_admin.to_string(),
+            decentralized_party_id: args.instrument_admin.to_string(),
             request,
         })
         .await
@@ -395,12 +409,16 @@ pub async fn maybe_fetch_for_proposal(
         .context("TransferProposal transfer.receiver is not a valid party id")?;
     let resolved = fetch_factory_for_propose(
         config.canton.network,
-        &sender,
-        &receiver,
-        &transfer.amount,
-        &instrument_admin,
-        &transfer.instrument_id.id,
-        transfer.input_holding_cids.as_deref().unwrap_or(&[]),
+        ProposeTransferArgs {
+            sender: &sender,
+            receiver: &receiver,
+            amount: &transfer.amount,
+            instrument_admin: &instrument_admin,
+            instrument_id: &transfer.instrument_id.id,
+            input_holding_cids: transfer.input_holding_cids.as_deref().unwrap_or(&[]),
+            requested_at_micros: transfer.requested_at_micros,
+            execute_before_micros: transfer.execute_before_micros,
+        },
     )
     .await?;
 
@@ -410,9 +428,21 @@ pub async fn maybe_fetch_for_proposal(
     }))
 }
 
-/// Pull the `transfer` record out of a `TransferProposal` create_arguments and
-/// reshape it into the canton-lib `Transfer` struct used by the registry call.
-fn transfer_record_from_proposal(record: &Record) -> Result<Transfer> {
+/// Decoded view of a `TransferProposal`'s `transfer` record. Keeps the raw
+/// micros for `requestedAt` / `executeBefore` so the registry call can build a
+/// request that matches the on-chain choice arguments byte-for-byte.
+struct StoredTransfer {
+    sender: String,
+    receiver: String,
+    amount: DamlDecimal,
+    instrument_id: InstrumentId,
+    input_holding_cids: Option<Vec<String>>,
+    requested_at_micros: i64,
+    execute_before_micros: i64,
+}
+
+/// Pull the `transfer` record out of a `TransferProposal` create_arguments.
+fn transfer_record_from_proposal(record: &Record) -> Result<StoredTransfer> {
     let transfer_value = record
         .fields
         .iter()
@@ -456,17 +486,31 @@ fn transfer_record_from_proposal(record: &Record) -> Result<Transfer> {
             ),
             _ => None,
         });
-    let now = Utc::now();
-    Ok(Transfer {
+    let requested_at_micros = field_timestamp_micros(transfer_record, "requestedAt")
+        .context("TransferProposal transfer.requestedAt missing or not a Timestamp")?;
+    let execute_before_micros = field_timestamp_micros(transfer_record, "executeBefore")
+        .context("TransferProposal transfer.executeBefore missing or not a Timestamp")?;
+    Ok(StoredTransfer {
         sender,
         receiver,
         amount,
         instrument_id: InstrumentId { admin, id },
-        requested_at: now.to_rfc3339(),
-        execute_before: (now + Duration::hours(24)).to_rfc3339(),
         input_holding_cids,
-        meta: Some(Meta { values: None }),
+        requested_at_micros,
+        execute_before_micros,
     })
+}
+
+fn field_timestamp_micros(record: &Record, label: &str) -> Option<i64> {
+    record
+        .fields
+        .iter()
+        .find(|f| f.label == label)
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Timestamp(t)) => Some(*t),
+            _ => None,
+        })
 }
 
 fn field_party_str(record: &Record, label: &str) -> Result<String> {

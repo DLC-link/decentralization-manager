@@ -36,7 +36,7 @@ use crate::{
             get_transfer_factories, get_user_services, get_vaults, query_contracts_by_template,
         },
         transfer_context::{
-            AcceptTransferContext, fetch as fetch_accept_transfer_context,
+            AcceptTransferContext, ProposeTransferArgs, fetch as fetch_accept_transfer_context,
             fetch_factory_for_propose, maybe_fetch_for_proposal, to_proto_disclosed_contracts,
         },
         types::{
@@ -1030,12 +1030,16 @@ pub async fn propose_action(
             };
             match fetch_factory_for_propose(
                 data.config.canton.network,
-                &member_party_id,
-                receiver,
-                amount,
-                &admin,
-                &instrument_id.id,
-                input_holding_cids,
+                ProposeTransferArgs {
+                    sender: party_id,
+                    receiver,
+                    amount,
+                    instrument_admin: &admin,
+                    instrument_id: &instrument_id.id,
+                    input_holding_cids,
+                    requested_at_micros: action_serializer::TRANSFER_REQUESTED_AT_MICROS,
+                    execute_before_micros: action_serializer::TRANSFER_EXECUTE_BEFORE_MICROS,
+                },
             )
             .await
             {
