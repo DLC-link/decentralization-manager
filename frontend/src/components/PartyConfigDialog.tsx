@@ -360,42 +360,6 @@ export const PartyConfigDialog = ({
                 gap: 2,
               }}
             >
-              <TextField
-                label="Member Party ID"
-                value={memberPartyId}
-                onChange={(e) => setMemberPartyId(e.target.value)}
-                fullWidth
-                size="small"
-                disabled={saving}
-                slotProps={{
-                  input: {
-                    endAdornment: fieldHelpAdornment(
-                      "The participant-local party that acts as this node's member of the decentralized party. Use Discover Member Party below to auto-fill it from the user's primary party.",
-                      "Help for Member Party ID",
-                    ),
-                  },
-                }}
-              />
-
-              <TextField
-                label="User ID"
-                value={userId}
-                onChange={(e) => setUserId(e.target.value)}
-                fullWidth
-                size="small"
-                disabled={saving}
-                slotProps={{
-                  input: {
-                    endAdornment: fieldHelpAdornment(
-                      "The IdP user id (Keycloak or Auth0) that will hold actAs and readAs rights for the member party. Usually matches the subject claim of tokens issued for this user.",
-                      "Help for User ID",
-                    ),
-                  },
-                }}
-              />
-
-              <Divider />
-
               {provider === "auth0" ? (
                 <>
                   <Typography variant="subtitle2">Auth0</Typography>
@@ -629,19 +593,57 @@ export const PartyConfigDialog = ({
                 </>
               )}
 
-              <Box>
-                <Button
-                  size="small"
-                  variant="outlined"
-                  onClick={handleDiscover}
-                  disabled={!canDiscover || discovering || saving}
-                  startIcon={
-                    discovering ? <CircularProgress size={16} /> : undefined
-                  }
-                >
-                  {discovering ? "Discovering…" : "Discover Member Party"}
-                </Button>
-              </Box>
+              {memberPartyId || userId ? (
+                <>
+                  <Divider />
+                  <TextField
+                    label="Member Party ID"
+                    value={memberPartyId}
+                    onChange={(e) => setMemberPartyId(e.target.value)}
+                    fullWidth
+                    size="small"
+                    disabled={saving}
+                    slotProps={{
+                      input: {
+                        endAdornment: fieldHelpAdornment(
+                          "The participant-local party that acts as this node's member of the decentralized party. Discovered from the user's primary party via the credentials above.",
+                          "Help for Member Party ID",
+                        ),
+                      },
+                    }}
+                  />
+                  <TextField
+                    label="User ID"
+                    value={userId}
+                    onChange={(e) => setUserId(e.target.value)}
+                    fullWidth
+                    size="small"
+                    disabled={saving}
+                    slotProps={{
+                      input: {
+                        endAdornment: fieldHelpAdornment(
+                          "The IdP user id (Keycloak or Auth0) that will hold actAs and readAs rights for the member party. Usually matches the subject claim of tokens issued for this user.",
+                          "Help for User ID",
+                        ),
+                      },
+                    }}
+                  />
+                </>
+              ) : (
+                <Box>
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    onClick={handleDiscover}
+                    disabled={!canDiscover || discovering || saving}
+                    startIcon={
+                      discovering ? <CircularProgress size={16} /> : undefined
+                    }
+                  >
+                    {discovering ? "Discovering…" : "Discover Member Party"}
+                  </Button>
+                </Box>
+              )}
               {discoverInfo && <Alert severity="success">{discoverInfo}</Alert>}
 
               {error && (
