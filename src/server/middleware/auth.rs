@@ -298,6 +298,7 @@ mod tests {
     use crate::{
         auth::{JwtValidator, MockValidator, TokenValidator},
         config::{NodeConfig, PartyCredentials},
+        noise::NoiseKeypair,
         server::AppState,
     };
 
@@ -344,6 +345,8 @@ mod tests {
             test_mode: true,
             refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
             http_client: reqwest::Client::new(),
+            http_advertised_url: "http://127.0.0.1:8080".to_string(),
+            noise_keypair: Arc::new(NoiseKeypair::generate()),
         })
     }
 
