@@ -115,9 +115,11 @@ const truncatePartyId = (id: string): string => {
 const InvitationCard = ({
   invitation,
   onAfter,
+  onSelectParty,
 }: {
   invitation: PendingInvitation;
   onAfter: () => void;
+  onSelectParty: (partyId: string) => void;
 }) => {
   const [busy, setBusy] = useState(false);
   const { showSnackbar } = useSnackbar();
@@ -317,7 +319,7 @@ const InvitationCard = ({
           }}
         >
           {invitation.dec_party_id && (
-            <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+            <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
               <Typography
                 variant="caption"
                 color="text.secondary"
@@ -326,23 +328,18 @@ const InvitationCard = ({
                 Dec party
               </Typography>
               <Typography
-                variant="body2"
-                sx={{ fontWeight: 600, fontFamily: "monospace" }}
+                component="span"
+                variant="caption"
+                onClick={() => onSelectParty(invitation.dec_party_id!)}
+                sx={{
+                  fontFamily: "monospace",
+                  color: "primary.main",
+                  cursor: "pointer",
+                  "&:hover": { textDecoration: "underline" },
+                }}
               >
                 {truncatePartyId(invitation.dec_party_id)}
               </Typography>
-              <Tooltip title="Copy dec party id">
-                <IconButton
-                  size="small"
-                  onClick={async () => {
-                    const ok = await copyToClipboard(invitation.dec_party_id!);
-                    showSnackbar(ok ? "Copied to clipboard" : "Failed to copy");
-                  }}
-                  sx={{ p: 0.25 }}
-                >
-                  <ContentCopyIcon sx={{ fontSize: 14 }} />
-                </IconButton>
-              </Tooltip>
             </Box>
           )}
           {invitation.kicked_participant && (
@@ -1582,7 +1579,7 @@ const WorkflowRunCard = ({
             </Box>
           )}
           {run.dec_party_id && (
-            <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+            <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
               <Typography
                 variant="caption"
                 color="text.secondary"
@@ -1592,29 +1589,17 @@ const WorkflowRunCard = ({
               </Typography>
               <Typography
                 component="span"
-                variant="body2"
+                variant="caption"
                 onClick={() => onSelectParty(run.dec_party_id!)}
                 sx={{
                   fontFamily: "monospace",
-                  fontWeight: 600,
+                  color: "primary.main",
                   cursor: "pointer",
                   "&:hover": { textDecoration: "underline" },
                 }}
               >
                 {truncatePartyId(run.dec_party_id)}
               </Typography>
-              <Tooltip title="Copy dec party id">
-                <IconButton
-                  size="small"
-                  onClick={async () => {
-                    const ok = await copyToClipboard(run.dec_party_id!);
-                    showSnackbar(ok ? "Copied to clipboard" : "Failed to copy");
-                  }}
-                  sx={{ p: 0.25 }}
-                >
-                  <ContentCopyIcon sx={{ fontSize: 14 }} />
-                </IconButton>
-              </Tooltip>
             </Box>
           )}
           {run.kicked_participant && (
@@ -1831,6 +1816,7 @@ export const NotificationsView = ({
               key={`inv-${entry.invitation.id}`}
               invitation={entry.invitation}
               onAfter={onInvitationsChanged}
+              onSelectParty={onSelectParty}
             />
           );
         }
