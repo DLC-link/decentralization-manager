@@ -703,6 +703,9 @@ pub struct PendingInvitation {
     /// Dars-only: filenames the coordinator is distributing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dar_filenames: Vec<String>,
+    /// Coordinator's HTTP base URL for cancel-probe fallback. See #173.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub coordinator_http_url: Option<String>,
 }
 
 /// Response for pending invitations endpoint

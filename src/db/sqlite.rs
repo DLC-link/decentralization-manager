@@ -1767,6 +1767,7 @@ mod tests {
                 CantonId::parse(&format!("node2::{TEST_NS}")).unwrap(),
             ],
             dar_filenames: Vec::new(),
+            coordinator_http_url: None,
         };
         let inv_b = PendingInvitation {
             id: "kick-bbbbbbbbbbbbbbbb".to_string(),
@@ -1777,6 +1778,7 @@ mod tests {
             prefix: None,
             participants: Vec::new(),
             dar_filenames: Vec::new(),
+            coordinator_http_url: None,
         };
 
         let mut tx = pool.begin_transaction().await?;
@@ -1793,6 +1795,7 @@ mod tests {
             prefix: None,
             participants: Vec::new(),
             dar_filenames: vec!["app.dar".to_string(), "lib.dar".to_string()],
+            coordinator_http_url: None,
         };
         let mut tx = pool.begin_transaction().await?;
         tx.upsert_pending_invitation(&inv_c).await?;

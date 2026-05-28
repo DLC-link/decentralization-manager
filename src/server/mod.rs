@@ -168,6 +168,8 @@ enum InvitationMeta {
     None,
     Onboarding(OnboardingInvitePayload),
     Dars(DarsInvitePayload),
+    Kick(KickInvitePayload),
+    Contracts(ContractsInvitePayload),
 }
 
 /// On boot, re-spawn any InProgress workflow runs that were interrupted by the
@@ -694,14 +696,23 @@ impl WorkflowTriggers {
         let mut prefix = None;
         let mut participants = Vec::new();
         let mut dar_filenames = Vec::new();
+        let mut coordinator_http_url = None;
         match meta {
             InvitationMeta::None => {}
             InvitationMeta::Onboarding(p) => {
                 prefix = Some(p.prefix);
                 participants = p.participants;
+                coordinator_http_url = p.coordinator_http_url;
             }
             InvitationMeta::Dars(p) => {
                 dar_filenames = p.dar_filenames;
+                coordinator_http_url = p.coordinator_http_url;
+            }
+            InvitationMeta::Kick(p) => {
+                coordinator_http_url = p.coordinator_http_url;
+            }
+            InvitationMeta::Contracts(p) => {
+                coordinator_http_url = p.coordinator_http_url;
             }
         }
         let invitation = PendingInvitation {
@@ -720,6 +731,7 @@ impl WorkflowTriggers {
             prefix,
             participants,
             dar_filenames,
+            coordinator_http_url,
         };
 
         match self.db.begin_transaction().await {
@@ -1850,7 +1862,22 @@ async fn handle_incoming_connection(
                                             }
                                         }
                                     }
-                                    _ => InvitationMeta::None,
+                                    InvitationType::Kick => {
+                                        let p: KickInvitePayload = if msg.payload.is_empty() {
+                                            KickInvitePayload::default()
+                                        } else {
+                                            serde_json::from_slice(&msg.payload).unwrap_or_default()
+                                        };
+                                        InvitationMeta::Kick(p)
+                                    }
+                                    InvitationType::Contracts => {
+                                        let p: ContractsInvitePayload = if msg.payload.is_empty() {
+                                            ContractsInvitePayload::default()
+                                        } else {
+                                            serde_json::from_slice(&msg.payload).unwrap_or_default()
+                                        };
+                                        InvitationMeta::Contracts(p)
+                                    }
                                 }
                             };
                             if let Some(ref pubkey) = peer_pubkey_hex {

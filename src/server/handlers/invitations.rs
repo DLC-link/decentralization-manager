@@ -38,14 +38,13 @@ fn step_total_for(kind: WorkflowKind) -> i64 {
     }
 }
 
-/// Insert the peer-side `workflow_runs` row for a freshly-accepted invite.
-/// The synthetic instance_name is `peer-<kind>-<coord_pubkey[..16]>-<ts>`
+/// Pure builder — no I/O. Constructs the peer-side `WorkflowRun` row from
+/// an accepted invitation. Tested directly via unit tests.
+///
+/// The synthetic `instance_name` is `peer-<kind>-<coord_pubkey[..16]>-<ts>`
 /// — only one accepted invite can be active per node at a time so the
 /// timestamp suffix is enough to keep older completed rows distinct.
-async fn insert_peer_run(
-    data: &web::Data<AppState>,
-    invitation: &PendingInvitation,
-) -> Option<String> {
+fn build_peer_run_row(invitation: &PendingInvitation) -> WorkflowRun {
     let kind: WorkflowKind = invitation.invitation_type.into();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -59,8 +58,8 @@ async fn insert_peer_run(
         pubkey_short,
         now
     );
-    let run = WorkflowRun {
-        instance_name: instance_name.clone(),
+    WorkflowRun {
+        instance_name,
         kind,
         role: WorkflowRole::Peer,
         status: WorkflowProgress::InProgress,
@@ -87,11 +86,20 @@ async fn insert_peer_run(
         dec_party_id: None,
         error: None,
         dismissed: false,
-        coordinator_http_url: None,
+        coordinator_http_url: invitation.coordinator_http_url.clone(),
         created_at: now,
         updated_at: now,
-    };
+    }
+}
 
+/// Insert the peer-side `workflow_runs` row for a freshly-accepted invite.
+/// Delegates row construction to [`build_peer_run_row`] and persists via DB.
+async fn insert_peer_run(
+    data: &web::Data<AppState>,
+    invitation: &PendingInvitation,
+) -> Option<String> {
+    let run = build_peer_run_row(invitation);
+    let instance_name = run.instance_name.clone();
     let mut tx = match data.db.begin_transaction().await {
         Ok(t) => t,
         Err(e) => {
@@ -261,4 +269,49 @@ pub async fn decline_invitation(
     HttpResponse::Ok().json(serde_json::json!({
         "message": "Invitation declined"
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::types::{InvitationType, WorkflowProgress, WorkflowRole};
+
+    fn make_invitation(
+        invitation_type: InvitationType,
+        coordinator_http_url: Option<String>,
+    ) -> PendingInvitation {
+        PendingInvitation {
+            id: "i1".into(),
+            invitation_type,
+            coordinator_pubkey: "deadbeef00000000".into(),
+            coordinator_name: None,
+            received_at: 0,
+            prefix: None,
+            participants: Vec::new(),
+            dar_filenames: Vec::new(),
+            coordinator_http_url,
+        }
+    }
+
+    #[test]
+    fn build_peer_run_row_carries_http_url() {
+        let invitation = make_invitation(
+            InvitationType::Onboarding,
+            Some("http://10.0.0.1:8080".into()),
+        );
+        let run = build_peer_run_row(&invitation);
+        assert_eq!(
+            run.coordinator_http_url.as_deref(),
+            Some("http://10.0.0.1:8080")
+        );
+        assert_eq!(run.role, WorkflowRole::Peer);
+        assert_eq!(run.status, WorkflowProgress::InProgress);
+    }
+
+    #[test]
+    fn build_peer_run_row_no_url_is_legacy() {
+        let invitation = make_invitation(InvitationType::Kick, None);
+        let run = build_peer_run_row(&invitation);
+        assert!(run.coordinator_http_url.is_none());
+    }
 }
