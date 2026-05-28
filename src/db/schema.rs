@@ -104,6 +104,17 @@ pub trait SchemaRead {
         role: WorkflowRole,
     ) -> Result<Option<WorkflowRun>>;
 
+    /// Look up the most-recent coordinator-side `workflow_runs` row for the
+    /// given `kind` where `peer_id` is in `expected_peers`. Ordering:
+    /// InProgress rows first, then by `updated_at DESC`. Does NOT filter on
+    /// `dismissed` — late probes must still see Cancelled even after
+    /// operator dismissal (#173 design §5).
+    async fn get_workflow_run_for_peer_probe(
+        &self,
+        kind: WorkflowKind,
+        peer_id: &CantonId,
+    ) -> Result<Option<WorkflowRun>>;
+
     /// Get all workflow runs that should appear in the notification feed:
     /// every InProgress run plus any terminal run the user hasn't dismissed
     /// yet. Newest-updated first.
