@@ -523,6 +523,13 @@ pub struct WorkflowRun {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub dismissed: bool,
+    /// Coordinator's HTTP base URL captured at invite-accept time. Used by
+    /// the peer command-poll's failure-classification probe. NULL means the
+    /// invite arrived in the old empty-bodied wire format (rolling-upgrade
+    /// compatibility, see #173 design §6); those rows take the legacy
+    /// 3-strike fallback.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub coordinator_http_url: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -1800,6 +1807,7 @@ mod tests {
             dec_party_id: Some(CantonId::parse(&dec_party_id_str).unwrap()),
             error: None,
             dismissed: false,
+            coordinator_http_url: None,
             created_at: 1_700_000_000,
             updated_at: 1_700_000_001,
         };

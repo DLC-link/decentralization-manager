@@ -838,9 +838,10 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                 dec_party_id,
                 error,
                 dismissed,
+                coordinator_http_url,
                 created_at,
                 updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(instance_name) DO UPDATE SET
                 kind                     = excluded.kind,
                 role                     = excluded.role,
@@ -850,11 +851,12 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                 step_total               = excluded.step_total,
                 config_json              = excluded.config_json,
                 coordinator_pubkey       = excluded.coordinator_pubkey,
-                expected_peers_json  = excluded.expected_peers_json,
-                completed_peers_json = excluded.completed_peers_json,
+                expected_peers_json      = excluded.expected_peers_json,
+                completed_peers_json     = excluded.completed_peers_json,
                 dec_party_id             = excluded.dec_party_id,
                 error                    = excluded.error,
                 dismissed                = excluded.dismissed,
+                coordinator_http_url     = excluded.coordinator_http_url,
                 updated_at               = excluded.updated_at
             ",
         )
@@ -872,6 +874,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         .bind(&row.dec_party_id)
         .bind(&row.error)
         .bind(row.dismissed)
+        .bind(&row.coordinator_http_url)
         .bind(row.created_at)
         .bind(row.updated_at)
         .execute(&mut **self)
@@ -1869,6 +1872,7 @@ mod tests {
             dec_party_id: None,
             error: None,
             dismissed: false,
+            coordinator_http_url: None,
             created_at: 1000,
             updated_at: 1000,
         }
@@ -2013,6 +2017,43 @@ mod tests {
             .await?;
         assert!(listed.is_empty());
 
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn workflow_run_persists_coordinator_http_url(pool: SqlitePool) -> Result {
+        let mut tx = pool.begin_transaction().await?;
+        let run = WorkflowRun {
+            instance_name: "test-url-roundtrip".into(),
+            kind: WorkflowKind::Onboarding,
+            role: WorkflowRole::Peer,
+            status: WorkflowProgress::InProgress,
+            current_step: "Active".into(),
+            step_index: 0,
+            step_total: 1,
+            config_json: "{}".into(),
+            coordinator_pubkey: Some("deadbeef".into()),
+            coordinator_name: None,
+            expected_peers: Vec::new(),
+            completed_peers: Vec::new(),
+            dec_party_id: None,
+            error: None,
+            dismissed: false,
+            coordinator_http_url: Some("http://10.0.0.1:8080".into()),
+            created_at: 0,
+            updated_at: 0,
+        };
+        tx.upsert_workflow_run(&run).await?;
+        Commitable::commit(tx).await?;
+
+        let loaded = pool
+            .get_workflow_run("test-url-roundtrip")
+            .await?
+            .expect("row");
+        assert_eq!(
+            loaded.coordinator_http_url.as_deref(),
+            Some("http://10.0.0.1:8080")
+        );
         Ok(())
     }
 }

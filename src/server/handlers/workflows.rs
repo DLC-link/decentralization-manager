@@ -94,6 +94,7 @@ where
         dec_party_id,
         error: None,
         dismissed: false,
+        coordinator_http_url: None,
         created_at: now,
         updated_at: now,
     };
