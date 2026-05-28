@@ -286,6 +286,7 @@ pub struct WorkflowRunRow {
     pub dec_party_id: Option<String>,
     pub error: Option<String>,
     pub dismissed: i64,
+    pub coordinator_http_url: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -336,6 +337,7 @@ impl WorkflowRunRow {
             dec_party_id: r.dec_party_id.as_ref().map(CantonId::to_string),
             error: r.error.clone(),
             dismissed: if r.dismissed { 1 } else { 0 },
+            coordinator_http_url: r.coordinator_http_url.clone(),
             created_at: r.created_at,
             updated_at: r.updated_at,
         })
@@ -380,6 +382,7 @@ impl WorkflowRunRow {
             dec_party_id,
             error: self.error,
             dismissed: self.dismissed != 0,
+            coordinator_http_url: self.coordinator_http_url,
             created_at: self.created_at,
             updated_at: self.updated_at,
         })

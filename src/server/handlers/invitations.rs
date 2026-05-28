@@ -87,6 +87,7 @@ async fn insert_peer_run(
         dec_party_id: None,
         error: None,
         dismissed: false,
+        coordinator_http_url: None,
         created_at: now,
         updated_at: now,
     };
