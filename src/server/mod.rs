@@ -1324,6 +1324,7 @@ pub async fn start_server(
             .service(handlers::get_invitations)
             .service(handlers::accept_invitation)
             .service(handlers::decline_invitation)
+            .service(handlers::get_peer_probe)
             .service(handlers::get_auth_config)
             .service(handlers::get_auth_status)
             .service(handlers::test_auth)
