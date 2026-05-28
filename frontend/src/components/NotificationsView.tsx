@@ -609,7 +609,7 @@ const ActionCard = ({
                         }}
                       />
                     )}
-                    {!isOwn && (
+                    {!isOwn && !isProposer && (
                       <Tooltip title="Expire confirmation">
                         <span>
                           <IconButton
@@ -884,10 +884,14 @@ const DomainActionCard = ({
         // Proposal dropdown.
         const token =
           td.instrument_id === "Amulet" ? "CC" : td.instrument_id;
-        const rows: { label: string; value: string }[] = [
+        const rows: { label: string; value: string; copyValue?: string }[] = [
           { label: "Token", value: token },
           { label: "Amount", value: td.amount },
-          { label: "Recipient", value: truncatePartyId(td.receiver) },
+          {
+            label: "Recipient",
+            value: truncatePartyId(td.receiver),
+            copyValue: td.receiver,
+          },
         ];
         return (
           <Box
@@ -904,7 +908,7 @@ const DomainActionCard = ({
             {rows.map((r) => (
               <Box
                 key={r.label}
-                sx={{ display: "flex", alignItems: "baseline", gap: 1 }}
+                sx={{ display: "flex", alignItems: "center", gap: 1 }}
               >
                 <Typography
                   variant="caption"
@@ -916,19 +920,117 @@ const DomainActionCard = ({
                 <Typography variant="body2" sx={{ fontWeight: 600 }}>
                   {r.value}
                 </Typography>
+                {r.copyValue && (
+                  <Tooltip title={`Copy ${r.label.toLowerCase()}`}>
+                    <IconButton
+                      size="small"
+                      onClick={async () => {
+                        const ok = await copyToClipboard(r.copyValue!);
+                        showSnackbar(
+                          ok ? "Copied to clipboard" : "Failed to copy",
+                        );
+                      }}
+                      sx={{ p: 0.25 }}
+                    >
+                      <ContentCopyIcon sx={{ fontSize: 14 }} />
+                    </IconButton>
+                  </Tooltip>
+                )}
               </Box>
             ))}
           </Box>
         );
       })()}
 
-      <Typography
-        variant="caption"
-        color="text.secondary"
-        sx={{ fontFamily: "monospace" }}
-      >
-        {domainAction.proposal_cid.slice(0, 16)}…
-      </Typography>
+      {domainAction.accept_transfer_details && (() => {
+        const atd = domainAction.accept_transfer_details;
+        // Same Amulet → CC rename as the Transfer card for consistency.
+        const token =
+          atd.instrument_id === "Amulet" ? "CC" : atd.instrument_id;
+        const rows: { label: string; value: string; copyValue?: string }[] = [
+          { label: "Token", value: token },
+          { label: "Amount", value: atd.amount },
+          {
+            label: "Sender",
+            value: truncatePartyId(atd.sender),
+            copyValue: atd.sender,
+          },
+          {
+            label: "Recipient",
+            value: truncatePartyId(atd.receiver),
+            copyValue: atd.receiver,
+          },
+        ];
+        return (
+          <Box
+            sx={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 0.75,
+              px: 1.25,
+              py: 1,
+              bgcolor: "action.hover",
+              borderRadius: 1,
+            }}
+          >
+            {rows.map((r) => (
+              <Box
+                key={r.label}
+                sx={{ display: "flex", alignItems: "center", gap: 1 }}
+              >
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{ minWidth: 96 }}
+                >
+                  {r.label}
+                </Typography>
+                <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                  {r.value}
+                </Typography>
+                {r.copyValue && (
+                  <Tooltip title={`Copy ${r.label.toLowerCase()}`}>
+                    <IconButton
+                      size="small"
+                      onClick={async () => {
+                        const ok = await copyToClipboard(r.copyValue!);
+                        showSnackbar(
+                          ok ? "Copied to clipboard" : "Failed to copy",
+                        );
+                      }}
+                      sx={{ p: 0.25 }}
+                    >
+                      <ContentCopyIcon sx={{ fontSize: 14 }} />
+                    </IconButton>
+                  </Tooltip>
+                )}
+              </Box>
+            ))}
+          </Box>
+        );
+      })()}
+
+      <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
+        <Typography
+          variant="caption"
+          color="text.secondary"
+          sx={{ fontFamily: "monospace" }}
+        >
+          {domainAction.proposal_cid.slice(0, 16)}…
+        </Typography>
+        <Tooltip title="Copy proposal contract id">
+          <IconButton
+            size="small"
+            onClick={async () => {
+              const ok = await copyToClipboard(domainAction.proposal_cid);
+              showSnackbar(ok ? "Copied to clipboard" : "Failed to copy");
+            }}
+            sx={{ p: 0.25 }}
+          >
+            <ContentCopyIcon sx={{ fontSize: 14 }} />
+          </IconButton>
+        </Tooltip>
+      </Box>
 
       {domainAction.confirmations.length > 0 && (() => {
         const sorted = [...domainAction.confirmations].sort(
@@ -988,7 +1090,7 @@ const DomainActionCard = ({
                         }}
                       />
                     )}
-                    {!isOwn && (
+                    {!isOwn && !isProposer && (
                       <Tooltip title="Expire confirmation">
                         <span>
                           <IconButton

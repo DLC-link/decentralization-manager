@@ -1294,6 +1294,14 @@ pub struct DomainGovernanceAction {
     /// for `Transfer` proposals.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transfer_details: Option<TransferProposalDetails>,
+    /// Sender / amount / instrument resolved from the `TransferInstruction`
+    /// referenced by an `AcceptTransferProposal`. Lets the notification card
+    /// show the operator what they're approving (who sent what) without a
+    /// follow-up fetch from the UI. Only populated for `AcceptTransfer`
+    /// proposals, and only when the linked instruction was readable at query
+    /// time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accept_transfer_details: Option<AcceptTransferDetails>,
 }
 
 /// Recipient/amount/instrument extracted from a `TransferProposal`'s
@@ -1301,6 +1309,21 @@ pub struct DomainGovernanceAction {
 /// notification queue card shows the meaningful parameters of the proposal.
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct TransferProposalDetails {
+    pub receiver: CantonId,
+    #[schema(value_type = String)]
+    pub amount: DamlDecimal,
+    pub instrument_admin: CantonId,
+    pub instrument_id: String,
+}
+
+/// Sender/receiver/amount/instrument extracted from the `TransferInstruction`
+/// referenced by an `AcceptTransferProposal`. Surfaced inside
+/// `DomainGovernanceAction` so the pending-approval card for an Accept can
+/// render who's transferring what to whom — the proposal contract itself
+/// only carries the `TransferInstruction` cid, not these fields.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct AcceptTransferDetails {
+    pub sender: CantonId,
     pub receiver: CantonId,
     #[schema(value_type = String)]
     pub amount: DamlDecimal,

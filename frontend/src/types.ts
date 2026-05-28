@@ -372,9 +372,22 @@ export interface DomainGovernanceAction {
    *  notification card can show what's being transferred without an extra
    *  fetch. Present only on Transfer proposals. */
   transfer_details?: TransferProposalDetails;
+  /** Sender / amount / instrument resolved from the TransferInstruction
+   *  referenced by an AcceptTransferProposal so the pending-approval card
+   *  shows who's sending what to whom. Present only on AcceptTransfer
+   *  proposals (and only when the linked instruction was readable). */
+  accept_transfer_details?: AcceptTransferDetails;
 }
 
 export interface TransferProposalDetails {
+  receiver: string;
+  amount: string;
+  instrument_admin: string;
+  instrument_id: string;
+}
+
+export interface AcceptTransferDetails {
+  sender: string;
   receiver: string;
   amount: string;
   instrument_admin: string;
