@@ -654,12 +654,36 @@ impl std::str::FromStr for InvitationType {
 pub struct OnboardingInvitePayload {
     pub prefix: String,
     pub participants: Vec<CantonId>,
+    /// Coordinator's HTTP base URL — used by the peer's cancel-probe
+    /// fallback when Noise becomes unreachable. See #173 design §6.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub coordinator_http_url: Option<String>,
 }
 
 /// Payload sent inside an `InviteDars` Noise message.
 #[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct DarsInvitePayload {
     pub dar_filenames: Vec<String>,
+    /// Coordinator's HTTP base URL — used by the peer's cancel-probe
+    /// fallback when Noise becomes unreachable. See #173 design §6.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub coordinator_http_url: Option<String>,
+}
+
+/// Payload sent inside an `InviteKick` Noise message. Carries the
+/// coordinator's HTTP URL for the cancel probe (#173 design §6).
+#[derive(Clone, Debug, Default, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct KickInvitePayload {
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub coordinator_http_url: Option<String>,
+}
+
+/// Payload sent inside an `InviteContracts` Noise message. Carries the
+/// coordinator's HTTP URL for the cancel probe (#173 design §6).
+#[derive(Clone, Debug, Default, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ContractsInvitePayload {
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub coordinator_http_url: Option<String>,
 }
 
 /// A pending invitation from a coordinator
@@ -1990,5 +2014,74 @@ mod tests {
         assert!(mk("0").validate().is_err());
         assert!(mk("-1.5").validate().is_err());
         assert!(mk("0.0001").validate().is_ok());
+    }
+}
+
+#[cfg(test)]
+mod invite_payload_url_tests {
+    use super::*;
+
+    #[test]
+    fn onboarding_invite_payload_carries_http_url() {
+        let p = OnboardingInvitePayload {
+            prefix: "x".into(),
+            participants: vec![],
+            coordinator_http_url: Some("http://10.0.0.1:8080".into()),
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert!(s.contains("http://10.0.0.1:8080"), "got: {s}");
+        let back: OnboardingInvitePayload = serde_json::from_str(&s).unwrap();
+        assert_eq!(
+            back.coordinator_http_url.as_deref(),
+            Some("http://10.0.0.1:8080")
+        );
+    }
+
+    #[test]
+    fn dars_invite_payload_carries_http_url() {
+        let p = DarsInvitePayload {
+            dar_filenames: vec!["a.dar".into()],
+            coordinator_http_url: Some("http://10.0.0.1:8080".into()),
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        let back: DarsInvitePayload = serde_json::from_str(&s).unwrap();
+        assert_eq!(
+            back.coordinator_http_url.as_deref(),
+            Some("http://10.0.0.1:8080")
+        );
+    }
+
+    #[test]
+    fn kick_invite_payload_roundtrip() {
+        let p = KickInvitePayload {
+            coordinator_http_url: Some("http://10.0.0.1:8080".into()),
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        let back: KickInvitePayload = serde_json::from_str(&s).unwrap();
+        assert_eq!(
+            back.coordinator_http_url.as_deref(),
+            Some("http://10.0.0.1:8080")
+        );
+    }
+
+    #[test]
+    fn contracts_invite_payload_roundtrip() {
+        let p = ContractsInvitePayload {
+            coordinator_http_url: Some("http://10.0.0.1:8080".into()),
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        let back: ContractsInvitePayload = serde_json::from_str(&s).unwrap();
+        assert_eq!(
+            back.coordinator_http_url.as_deref(),
+            Some("http://10.0.0.1:8080")
+        );
+    }
+
+    #[test]
+    fn empty_kick_payload_back_compat_parses_as_no_url() {
+        // Old coordinator: sent KickInvite with no body.
+        // New peer must parse "{}" as KickInvitePayload with None URL.
+        let back: KickInvitePayload = serde_json::from_str("{}").unwrap();
+        assert!(back.coordinator_http_url.is_none());
     }
 }
