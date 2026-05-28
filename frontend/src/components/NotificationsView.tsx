@@ -556,6 +556,7 @@ const ActionCard = ({
           (a, b) => (a.created_at ?? 0) - (b.created_at ?? 0),
         );
         const proposerCid = sorted[0]?.contract_id;
+        const nowSeconds = Math.floor(Date.now() / 1000);
         return (
           <Box
             sx={{
@@ -579,6 +580,8 @@ const ActionCard = ({
               {sorted.map((c) => {
                 const isOwn = c.confirming_party === party.memberPartyId;
                 const isProposer = c.contract_id === proposerCid;
+                const isExpired =
+                  (c.expires_at ?? 0) > 0 && (c.expires_at ?? 0) <= nowSeconds;
                 return (
                   <Box
                     key={c.contract_id}
@@ -588,7 +591,12 @@ const ActionCard = ({
                       variant="caption"
                       sx={{
                         fontFamily: "monospace",
-                        color: isOwn ? "primary.main" : "text.primary",
+                        color: isExpired
+                          ? "text.disabled"
+                          : isOwn
+                            ? "primary.main"
+                            : "text.primary",
+                        textDecoration: isExpired ? "line-through" : "none",
                       }}
                     >
                       {truncatePartyId(c.confirming_party)}
@@ -609,7 +617,23 @@ const ActionCard = ({
                         }}
                       />
                     )}
-                    {!isOwn && !isProposer && (
+                    {isExpired && (
+                      <Chip
+                        label="expired"
+                        size="small"
+                        variant="outlined"
+                        color="warning"
+                        sx={{
+                          height: 18,
+                          "& .MuiChip-label": {
+                            px: 0.75,
+                            fontSize: 10,
+                            lineHeight: 1,
+                          },
+                        }}
+                      />
+                    )}
+                    {!isOwn && !isProposer && isExpired && (
                       <Tooltip title="Expire confirmation">
                         <span>
                           <IconButton
@@ -1037,6 +1061,7 @@ const DomainActionCard = ({
           (a, b) => (a.created_at ?? 0) - (b.created_at ?? 0),
         );
         const proposerCid = sorted[0]?.contract_id;
+        const nowSeconds = Math.floor(Date.now() / 1000);
         return (
           <Box
             sx={{
@@ -1060,6 +1085,8 @@ const DomainActionCard = ({
               {sorted.map((c) => {
                 const isOwn = c.confirming_party === party.memberPartyId;
                 const isProposer = c.contract_id === proposerCid;
+                const isExpired =
+                  (c.expires_at ?? 0) > 0 && (c.expires_at ?? 0) <= nowSeconds;
                 return (
                   <Box
                     key={c.contract_id}
@@ -1069,7 +1096,12 @@ const DomainActionCard = ({
                       variant="caption"
                       sx={{
                         fontFamily: "monospace",
-                        color: isOwn ? "primary.main" : "text.primary",
+                        color: isExpired
+                          ? "text.disabled"
+                          : isOwn
+                            ? "primary.main"
+                            : "text.primary",
+                        textDecoration: isExpired ? "line-through" : "none",
                       }}
                     >
                       {truncatePartyId(c.confirming_party)}
@@ -1090,7 +1122,23 @@ const DomainActionCard = ({
                         }}
                       />
                     )}
-                    {!isOwn && !isProposer && (
+                    {isExpired && (
+                      <Chip
+                        label="expired"
+                        size="small"
+                        variant="outlined"
+                        color="warning"
+                        sx={{
+                          height: 18,
+                          "& .MuiChip-label": {
+                            px: 0.75,
+                            fontSize: 10,
+                            lineHeight: 1,
+                          },
+                        }}
+                      />
+                    )}
+                    {!isOwn && !isProposer && isExpired && (
                       <Tooltip title="Expire confirmation">
                         <span>
                           <IconButton

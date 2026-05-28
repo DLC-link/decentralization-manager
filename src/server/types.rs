@@ -1377,6 +1377,9 @@ pub struct GovernanceConfirmation {
     /// 0 if the timestamp could not be resolved.
     #[serde(default)]
     pub created_at: i64,
+    /// Unix seconds of the confirmation's `expiresAt`. 0 if unresolved.
+    #[serde(default)]
+    pub expires_at: i64,
 }
 
 /// A governance action with its confirmations, grouped by action hash

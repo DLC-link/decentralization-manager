@@ -345,6 +345,8 @@ export interface GovernanceConfirmation {
   confirming_party: string;
   /** Unix seconds when this confirmation contract was created on the ledger. */
   created_at?: number;
+  /** Unix seconds of the confirmation's `expiresAt`. */
+  expires_at?: number;
 }
 
 export interface GovernanceAction {

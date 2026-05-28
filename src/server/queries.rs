@@ -1,4 +1,5 @@
 use std::{
+    cmp::Reverse,
     collections::HashMap,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -690,18 +691,28 @@ pub async fn get_governance_confirmations(
         }
     }
 
+    let now_seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
     // Convert to GovernanceAction list, deduplicating confirmations by confirming_party
     let actions: Vec<GovernanceAction> = confirmations_by_hash
         .into_iter()
-        .map(|(action_hash, (action, confirmations))| {
-            // Deduplicate by confirming_party - keep only one confirmation per member
+        .map(|(action_hash, (action, mut confirmations))| {
+            // Newest-first so dedupe per-member keeps the freshest confirmation.
+            confirmations.sort_by_key(|c| Reverse(c.created_at));
             let mut seen_parties = std::collections::HashSet::new();
             let unique_confirmations: Vec<GovernanceConfirmation> = confirmations
                 .into_iter()
                 .filter(|c| seen_parties.insert(c.confirming_party.clone()))
                 .collect();
 
-            let confirmation_count = unique_confirmations.len();
+            // Mirror DAML's `expiresAt > now` filter so the UI doesn't offer an Execute that chain will reject.
+            let confirmation_count = unique_confirmations
+                .iter()
+                .filter(|c| c.expires_at == 0 || c.expires_at > now_seconds)
+                .count();
             let last_confirmation_at = unique_confirmations
                 .iter()
                 .map(|c| c.created_at)
@@ -725,7 +736,8 @@ pub async fn get_governance_confirmations(
     // expired explicitly to clear them.
     let domain_actions: Vec<DomainGovernanceAction> = domain_confirmations
         .into_iter()
-        .map(|(proposal_cid, (action_label, confirmations))| {
+        .map(|(proposal_cid, (action_label, mut confirmations))| {
+            confirmations.sort_by_key(|c| Reverse(c.created_at));
             // Only mark as orphaned when we successfully fetched the full
             // active-proposal set; otherwise the missing-from-map signal is
             // unreliable and we'd falsely mark everything as orphaned.
@@ -739,7 +751,10 @@ pub async fn get_governance_confirmations(
                 .into_iter()
                 .filter(|c| seen_parties.insert(c.confirming_party.clone()))
                 .collect();
-            let confirmation_count = unique_confirmations.len();
+            let confirmation_count = unique_confirmations
+                .iter()
+                .filter(|c| c.expires_at == 0 || c.expires_at > now_seconds)
+                .count();
             DomainGovernanceAction {
                 proposal_cid,
                 action_label,
@@ -961,6 +976,9 @@ fn extract_and_add_confirmation(
         action: action.clone(),
         confirming_party,
         created_at: created.created_at.as_ref().map(|t| t.seconds).unwrap_or(0),
+        expires_at: field_timestamp(record, "expiresAt")
+            .map(|micros| micros / 1_000_000)
+            .unwrap_or(0),
     };
 
     confirmations_by_hash
@@ -1040,6 +1058,9 @@ fn extract_and_add_domain_confirmation(
         action: ActionType::GovernanceSetThreshold { new_threshold: 0 }, // placeholder
         confirming_party,
         created_at: created.created_at.as_ref().map(|t| t.seconds).unwrap_or(0),
+        expires_at: field_timestamp(record, "expiresAt")
+            .map(|micros| micros / 1_000_000)
+            .unwrap_or(0),
     };
 
     domain_confirmations
