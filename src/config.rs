@@ -232,6 +232,10 @@ pub struct NodeInfo {
     pub port: u16,
     /// Public address that other peers should use to connect to this node
     pub public_address: Option<String>,
+    /// Public HTTP base URL other peers use for the cancel-probe endpoint.
+    /// When unset, derives from `public_address()` + the HTTP port passed
+    /// at runtime. Operators behind LBs set this explicitly.
+    pub http_advertised_url: Option<String>,
 }
 
 impl NodeInfo {
@@ -242,6 +246,16 @@ impl NodeInfo {
             .as_deref()
             .unwrap_or(&self.listen_address)
     }
+
+    /// Compute the externally-reachable HTTP base URL for this node.
+    /// Explicit override wins; otherwise falls back to
+    /// `http://<public_address()>:<http_port>`.
+    pub fn http_advertised_url(&self, http_port: u16) -> String {
+        if let Some(url) = &self.http_advertised_url {
+            return url.clone();
+        }
+        format!("http://{}:{}", self.public_address(), http_port)
+    }
 }
 
 impl Default for NodeInfo {
@@ -251,6 +265,7 @@ impl Default for NodeInfo {
             listen_address: "0.0.0.0".to_string(),
             port: 9000,
             public_address: None,
+            http_advertised_url: None,
         }
     }
 }
@@ -533,5 +548,41 @@ mod tests {
             packages.vault_governance.as_deref(),
             Some("#bitsafe-vault-governance-v0-rc8"),
         );
+    }
+
+    #[test]
+    fn explicit_override_wins() {
+        let info = NodeInfo {
+            participant_id: None,
+            listen_address: "0.0.0.0".into(),
+            port: 9000,
+            public_address: Some("10.0.0.1".into()),
+            http_advertised_url: Some("https://node1.example.com".into()),
+        };
+        assert_eq!(info.http_advertised_url(8080), "https://node1.example.com");
+    }
+
+    #[test]
+    fn falls_back_to_public_address_with_http_port() {
+        let info = NodeInfo {
+            participant_id: None,
+            listen_address: "0.0.0.0".into(),
+            port: 9000,
+            public_address: Some("10.0.0.1".into()),
+            http_advertised_url: None,
+        };
+        assert_eq!(info.http_advertised_url(8080), "http://10.0.0.1:8080");
+    }
+
+    #[test]
+    fn falls_back_to_listen_address_when_no_public() {
+        let info = NodeInfo {
+            participant_id: None,
+            listen_address: "127.0.0.1".into(),
+            port: 9000,
+            public_address: None,
+            http_advertised_url: None,
+        };
+        assert_eq!(info.http_advertised_url(8080), "http://127.0.0.1:8080");
     }
 }
