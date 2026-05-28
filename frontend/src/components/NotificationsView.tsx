@@ -164,7 +164,9 @@ const InvitationCard = ({
     (invitation.dar_filenames?.length ?? 0) > 0;
   const showKickMeta =
     invitation.invitation_type === "Kick" &&
-    (!!invitation.kicked_participant || invitation.new_threshold != null);
+    (!!invitation.kicked_participant ||
+      invitation.new_threshold != null ||
+      !!invitation.dec_party_id);
 
   return (
     <Box
@@ -314,6 +316,35 @@ const InvitationCard = ({
             borderRadius: 1,
           }}
         >
+          {invitation.dec_party_id && (
+            <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ minWidth: 96 }}
+              >
+                Dec party
+              </Typography>
+              <Typography
+                variant="body2"
+                sx={{ fontWeight: 600, fontFamily: "monospace" }}
+              >
+                {truncatePartyId(invitation.dec_party_id)}
+              </Typography>
+              <Tooltip title="Copy dec party id">
+                <IconButton
+                  size="small"
+                  onClick={async () => {
+                    const ok = await copyToClipboard(invitation.dec_party_id!);
+                    showSnackbar(ok ? "Copied to clipboard" : "Failed to copy");
+                  }}
+                  sx={{ p: 0.25 }}
+                >
+                  <ContentCopyIcon sx={{ fontSize: 14 }} />
+                </IconButton>
+              </Tooltip>
+            </Box>
+          )}
           {invitation.kicked_participant && (
             <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
               <Typography

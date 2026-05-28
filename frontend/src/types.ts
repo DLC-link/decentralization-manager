@@ -257,6 +257,8 @@ export interface PendingInvitation {
   new_threshold?: number;
   /** Kick-only: threshold before the kick. */
   previous_threshold?: number;
+  /** Kick-only: the dec party the kick targets. */
+  dec_party_id?: string;
 }
 
 export interface PendingInvitationsResponse {
