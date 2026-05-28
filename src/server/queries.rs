@@ -3176,9 +3176,13 @@ pub async fn get_holdings(
             let preapproval_set_up = if instrument_id == AMULET_INSTRUMENT_ID {
                 preapprovals.has_amulet
             } else {
+                let admin = instrument_admin.to_string();
                 preapprovals
                     .utility
-                    .contains(&(instrument_admin.to_string(), instrument_id.clone()))
+                    .contains(&(admin.clone(), instrument_id.clone()))
+                    || preapprovals
+                        .utility
+                        .contains(&(admin, PREAPPROVAL_WILDCARD_ID.to_string()))
             };
             HoldingInfo {
                 instrument_admin,
@@ -3422,27 +3426,54 @@ async fn fetch_utility_preapproval_instruments(
         if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
             && let Some(created) = active.created_event
             && let Some(args) = created.create_arguments
-            && let Some((admin, id)) = extract_preapproval_instrument(&args)
         {
-            set.insert((admin, id));
+            for entry in extract_preapproval_entries(&args) {
+                set.insert(entry);
+            }
         }
     }
     Ok(set)
 }
 
-fn extract_preapproval_instrument(args: &Record) -> Option<(String, String)> {
-    let instrument_record = args
+/// Sentinel `instrument_id` for a preapproval whose `instrumentAllowances` is
+/// empty — utility-registry semantics is "any instrument from this admin", so
+/// we store the wildcard once and the join check matches all of that admin's
+/// holdings.
+pub(super) const PREAPPROVAL_WILDCARD_ID: &str = "*";
+
+/// Extract one `(admin, id)` per allowance from a `Utility.Registry.App.V0
+/// .Model.TransferPreapproval.TransferPreapproval` contract. The on-chain
+/// shape is `instrumentAdmin: Party` + `instrumentAllowances: [{ id: Text }]`;
+/// an empty allowance list is the registrar's wildcard ("preapprove any
+/// instrument issued by this admin"), which we represent as
+/// `(admin, PREAPPROVAL_WILDCARD_ID)`.
+fn extract_preapproval_entries(args: &Record) -> Vec<(String, String)> {
+    let Some(admin) = field_party(args, "instrumentAdmin") else {
+        return Vec::new();
+    };
+    let allowances = args
         .fields
         .iter()
-        .find(|f| f.label == "instrumentId")
+        .find(|f| f.label == "instrumentAllowances")
         .and_then(|f| f.value.as_ref())
         .and_then(|v| match &v.sum {
-            Some(value::Sum::Record(r)) => Some(r),
+            Some(value::Sum::List(l)) => Some(&l.elements),
             _ => None,
-        })?;
-    let admin = field_party(instrument_record, "admin")?;
-    let id = field_text(instrument_record, "id")?;
-    Some((admin, id))
+        });
+    let Some(elements) = allowances else {
+        return vec![(admin, PREAPPROVAL_WILDCARD_ID.to_string())];
+    };
+    if elements.is_empty() {
+        return vec![(admin, PREAPPROVAL_WILDCARD_ID.to_string())];
+    }
+    elements
+        .iter()
+        .filter_map(|v| match &v.sum {
+            Some(value::Sum::Record(r)) => field_text(r, "id"),
+            _ => None,
+        })
+        .map(|id| (admin.clone(), id))
+        .collect()
 }
 
 #[cfg(test)]
