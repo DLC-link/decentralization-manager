@@ -34,6 +34,7 @@ aes-gcm = { version = "0.10" }
 anyhow = { version = "1.0.98" }
 base64 = { version = "0.22" }
 bytes = { version = "1.11.1" }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 clap = { version = "4.5.43", features = ["derive", "env", "string"] }
 colored = { version = "3.1.1" }
 dotenvy = { version = "0.15" }

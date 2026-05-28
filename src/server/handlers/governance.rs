@@ -36,8 +36,8 @@ use crate::{
             get_transfer_factories, get_user_services, get_vaults, query_contracts_by_template,
         },
         transfer_context::{
-            fetch as fetch_accept_transfer_context, maybe_fetch_for_proposal,
-            to_proto_disclosed_contracts,
+            AcceptTransferContext, ProposeTransferArgs, fetch as fetch_accept_transfer_context,
+            fetch_factory_for_propose, maybe_fetch_for_proposal, to_proto_disclosed_contracts,
         },
         types::{
             AuditLogEntry, AuditLogQuery, AuditLogResponse, CancelConfirmationRequest,
@@ -634,7 +634,7 @@ pub async fn get_transfer_factories_handler(
     let party_id = &query.party_id;
     let token = get_party_token(&data, party_id).await;
 
-    match get_transfer_factories(&data.config, party_id, token).await {
+    match get_transfer_factories(&data.config, party_id, token.clone()).await {
         Ok(mut transfer_factories) => {
             // Canton Coin's TransferFactory implementation is the system
             // `Splice.AmuletRules:AmuletRules` contract, which the ledger
@@ -650,6 +650,29 @@ pub async fn get_transfer_factories_handler(
                     contract_id: amulet_rules_cid,
                     expected_admin: dso_party_id,
                 });
+            }
+            // Shared-instrument tokens (e.g. CBTC, admin = `cbtc-network`)
+            // don't expose a `TransferFactory` on this dec party's ACS —
+            // the factory lives on the registrar. Surface a placeholder
+            // entry per unique non-self admin so the dropdown enables the
+            // holding; the propose handler resolves the real factory cid +
+            // choice context from the registrar at submit time.
+            let mut existing_admins: HashSet<String> = transfer_factories
+                .iter()
+                .map(|f| f.expected_admin.to_string())
+                .collect();
+            existing_admins.insert(party_id.to_string());
+            if let Ok(holdings) = get_holdings(&data.config, party_id, token, data.test_mode).await
+            {
+                for holding in holdings {
+                    let admin_str = holding.instrument_admin.to_string();
+                    if existing_admins.insert(admin_str) {
+                        transfer_factories.push(TransferFactoryInfo {
+                            contract_id: String::new(),
+                            expected_admin: holding.instrument_admin,
+                        });
+                    }
+                }
             }
             HttpResponse::Ok().json(TransferFactoriesResponse { transfer_factories })
         }
@@ -956,12 +979,18 @@ pub async fn propose_action(
 
     let packages = packages();
 
-    // For `AcceptTransfer`, the underlying `TransferInstruction_Accept` choice
-    // requires the token-standard `transfer-rule` choice-context entry. Fetch
-    // the context from the registry now so the on-chain proposal carries the
-    // right `extraArgs.context.values`; without it, execute time fails with
-    // `Missing context entry for utility.digitalasset.com/transfer-rule`.
-    let accept_transfer_context = match &body.proposal {
+    // Resolve registry-backed context for token-standard transfer flows:
+    //   * `AcceptTransfer`: fetch the `transfer-rule` choice context the
+    //     `TransferInstruction_Accept` choice reads at execute time. Without it
+    //     execute fails with `Missing context entry for
+    //     utility.digitalasset.com/transfer-rule`.
+    //   * `Transfer` with empty `transfer_factory_cid`: the dec party doesn't
+    //     administer this instrument (e.g. CBTC, admin = `cbtc-network`), so
+    //     the factory isn't on its ACS. Resolve the factory cid + context via
+    //     the registrar's `transfer-factory` endpoint and substitute them into
+    //     the proposal we're about to create.
+    let mut resolved_proposal = body.proposal.clone();
+    let transfer_choice_context = match &mut resolved_proposal {
         ProposalType::AcceptTransfer {
             transfer_instruction_cid,
         } => match fetch_accept_transfer_context(
@@ -983,6 +1012,52 @@ pub async fn propose_action(
                 });
             }
         },
+        ProposalType::Transfer {
+            transfer_factory_cid,
+            receiver,
+            amount,
+            instrument_id,
+            input_holding_cids,
+            ..
+        } if transfer_factory_cid.is_empty() => {
+            let admin: CantonId = match instrument_id.admin.parse() {
+                Ok(p) => p,
+                Err(e) => {
+                    return HttpResponse::BadRequest().json(ErrorResponse {
+                        error: format!("Invalid instrument admin party id: {e}"),
+                    });
+                }
+            };
+            match fetch_factory_for_propose(
+                data.config.canton.network,
+                ProposeTransferArgs {
+                    sender: party_id,
+                    receiver,
+                    amount,
+                    instrument_admin: &admin,
+                    instrument_id: &instrument_id.id,
+                    input_holding_cids,
+                    requested_at_micros: action_serializer::TRANSFER_REQUESTED_AT_MICROS,
+                    execute_before_micros: action_serializer::TRANSFER_EXECUTE_BEFORE_MICROS,
+                },
+            )
+            .await
+            {
+                Ok(resolved) => {
+                    *transfer_factory_cid = resolved.factory_cid;
+                    Some(AcceptTransferContext {
+                        context: resolved.context,
+                        disclosed_contracts: resolved.disclosed_contracts,
+                    })
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to fetch Transfer choice context from registry: {e:#}");
+                    return HttpResponse::BadGateway().json(ErrorResponse {
+                        error: format!("Failed to fetch transfer factory: {e}"),
+                    });
+                }
+            }
+        }
         _ => None,
     };
 
@@ -990,8 +1065,8 @@ pub async fn propose_action(
         match action_serializer::build_proposal_create_args(
             &party_id.to_string(),
             &member_party_id.to_string(),
-            &body.proposal,
-            accept_transfer_context.as_ref().map(|r| &r.context),
+            &resolved_proposal,
+            transfer_choice_context.as_ref().map(|r| &r.context),
         ) {
             Ok(args) => args,
             Err(e) => {

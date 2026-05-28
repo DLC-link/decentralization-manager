@@ -542,6 +542,9 @@ pub struct WorkflowRun {
     pub previous_threshold: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new_threshold: Option<i32>,
+    /// Kick runs only: the participant being kicked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kicked_participant: Option<CantonId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub dismissed: bool,
@@ -634,6 +637,17 @@ pub struct DarsInvitePayload {
     pub dar_filenames: Vec<String>,
 }
 
+/// Payload sent inside an `InviteKick` Noise message — gives the peer enough
+/// context to show "kicking X from dec party Y, threshold a→b" before the kick
+/// proposals arrive later in the workflow.
+#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct KickInvitePayload {
+    pub dec_party_id: CantonId,
+    pub kicked_participant: CantonId,
+    pub new_threshold: i32,
+    pub previous_threshold: i32,
+}
+
 /// A pending invitation from a coordinator
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct PendingInvitation {
@@ -651,6 +665,19 @@ pub struct PendingInvitation {
     /// Dars-only: filenames the coordinator is distributing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dar_filenames: Vec<String>,
+    /// Kick-only: the participant being removed from the party.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kicked_participant: Option<CantonId>,
+    /// Kick-only: threshold after the kick.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_threshold: Option<i32>,
+    /// Kick-only: threshold before the kick.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_threshold: Option<i32>,
+    /// Kick-only: dec party the kick targets. Lets the peer card render the
+    /// same "Dec party" row the coordinator shows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dec_party_id: Option<CantonId>,
 }
 
 /// Response for pending invitations endpoint
@@ -1294,6 +1321,14 @@ pub struct DomainGovernanceAction {
     /// for `Transfer` proposals.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transfer_details: Option<TransferProposalDetails>,
+    /// Sender / amount / instrument resolved from the `TransferInstruction`
+    /// referenced by an `AcceptTransferProposal`. Lets the notification card
+    /// show the operator what they're approving (who sent what) without a
+    /// follow-up fetch from the UI. Only populated for `AcceptTransfer`
+    /// proposals, and only when the linked instruction was readable at query
+    /// time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accept_transfer_details: Option<AcceptTransferDetails>,
 }
 
 /// Recipient/amount/instrument extracted from a `TransferProposal`'s
@@ -1301,6 +1336,21 @@ pub struct DomainGovernanceAction {
 /// notification queue card shows the meaningful parameters of the proposal.
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct TransferProposalDetails {
+    pub receiver: CantonId,
+    #[schema(value_type = String)]
+    pub amount: DamlDecimal,
+    pub instrument_admin: CantonId,
+    pub instrument_id: String,
+}
+
+/// Sender/receiver/amount/instrument extracted from the `TransferInstruction`
+/// referenced by an `AcceptTransferProposal`. Surfaced inside
+/// `DomainGovernanceAction` so the pending-approval card for an Accept can
+/// render who's transferring what to whom — the proposal contract itself
+/// only carries the `TransferInstruction` cid, not these fields.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct AcceptTransferDetails {
+    pub sender: CantonId,
     pub receiver: CantonId,
     #[schema(value_type = String)]
     pub amount: DamlDecimal,
@@ -1354,6 +1404,9 @@ pub struct GovernanceConfirmation {
     /// 0 if the timestamp could not be resolved.
     #[serde(default)]
     pub created_at: i64,
+    /// Unix seconds of the confirmation's `expiresAt`. 0 if unresolved.
+    #[serde(default)]
+    pub expires_at: i64,
 }
 
 /// A governance action with its confirmations, grouped by action hash
@@ -1468,9 +1521,9 @@ pub struct UserServiceInfo {
     pub user: CantonId,
 }
 
-/// An open `TransferInstruction` awaiting receiver acceptance. Populates the
-/// Accept Transfer proposal form's dropdown so operators don't have to paste
-/// the contract id by hand.
+/// An open `TransferInstruction` whose `receiver` is this party. Includes
+/// offers waiting on an internal workflow (admin / registrar) so the dropdown
+/// can surface them as "pending: X" rather than silently hide them.
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct TransferInstructionInfo {
     pub contract_id: String,
@@ -1480,6 +1533,32 @@ pub struct TransferInstructionInfo {
     pub amount: DamlDecimal,
     pub instrument_admin: CantonId,
     pub instrument_id: String,
+    pub status: TransferInstructionStatus,
+    /// For `PendingInternalWorkflow`: the parties whose action is awaited and
+    /// the human-readable label of what they need to do.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_actions: Vec<PendingAction>,
+    /// Unix seconds of the offer's `executeBefore` deadline. Past-deadline
+    /// rows are surfaced anyway (disabled in the UI) so the user can see they
+    /// exist — DAML refuses to Accept them, but staying silent confused users.
+    #[serde(default)]
+    pub expires_at: i64,
+}
+
+/// One row of `TransferInstructionStatus.pendingActions`. The Daml type is
+/// `Map Party Text`; the receiver can render "<party> — <action>" per row.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct PendingAction {
+    pub party: CantonId,
+    pub action: String,
+}
+
+/// Mirrors `Splice.Api.Token.TransferInstructionV1.TransferInstructionStatus`.
+#[derive(Clone, Copy, Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TransferInstructionStatus {
+    PendingReceiverAcceptance,
+    PendingInternalWorkflow,
 }
 
 /// Response for the transfer instructions endpoint.
@@ -1892,6 +1971,7 @@ mod tests {
             participants: Vec::new(),
             previous_threshold: None,
             new_threshold: None,
+            kicked_participant: None,
             error: None,
             dismissed: false,
             created_at: 1_700_000_000,

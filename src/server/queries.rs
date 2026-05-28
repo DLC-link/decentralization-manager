@@ -1,4 +1,5 @@
 use std::{
+    cmp::Reverse,
     collections::HashMap,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -7,8 +8,8 @@ use canton_common::decimal::DamlDecimal;
 use canton_proto_rs::com::{
     daml::ledger::api::v2::{
         CreatedEvent, CumulativeFilter, EventFormat, Filters, GetActiveContractsRequest,
-        GetLedgerEndRequest, Identifier, InterfaceFilter, Record, TemplateFilter, Value,
-        WildcardFilter, admin::ListKnownPartiesRequest, cumulative_filter,
+        GetEventsByContractIdRequest, GetLedgerEndRequest, Identifier, InterfaceFilter, Record,
+        TemplateFilter, Value, WildcardFilter, admin::ListKnownPartiesRequest, cumulative_filter,
         get_active_contracts_response::ContractEntry, value,
     },
     digitalasset::canton::admin::participant::v30::{
@@ -26,9 +27,10 @@ use crate::{
 use super::{
     action_serializer,
     types::{
-        ActionType, ContractInfo, ContractWithBlob, DomainGovernanceAction, GovernanceAction,
-        GovernanceConfirmation, GovernanceState, HoldingInfo, InstrumentInfo, PartyMetadata,
-        ProviderServiceInfo, RegistrarServiceInfo, TransferFactoryInfo, TransferInstructionInfo,
+        AcceptTransferDetails, ActionType, ContractInfo, ContractWithBlob, DomainGovernanceAction,
+        GovernanceAction, GovernanceConfirmation, GovernanceState, HoldingInfo, InstrumentInfo,
+        PartyMetadata, PendingAction, ProviderServiceInfo, RegistrarServiceInfo,
+        TransferFactoryInfo, TransferInstructionInfo, TransferInstructionStatus,
         TransferProposalDetails, UserServiceInfo, VaultInfo,
     },
 };
@@ -690,18 +692,28 @@ pub async fn get_governance_confirmations(
         }
     }
 
+    let now_seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
     // Convert to GovernanceAction list, deduplicating confirmations by confirming_party
     let actions: Vec<GovernanceAction> = confirmations_by_hash
         .into_iter()
-        .map(|(action_hash, (action, confirmations))| {
-            // Deduplicate by confirming_party - keep only one confirmation per member
+        .map(|(action_hash, (action, mut confirmations))| {
+            // Newest-first so dedupe per-member keeps the freshest confirmation.
+            confirmations.sort_by_key(|c| Reverse(c.created_at));
             let mut seen_parties = std::collections::HashSet::new();
             let unique_confirmations: Vec<GovernanceConfirmation> = confirmations
                 .into_iter()
                 .filter(|c| seen_parties.insert(c.confirming_party.clone()))
                 .collect();
 
-            let confirmation_count = unique_confirmations.len();
+            // Mirror DAML's `expiresAt > now` filter so the UI doesn't offer an Execute that chain will reject.
+            let confirmation_count = unique_confirmations
+                .iter()
+                .filter(|c| c.expires_at == 0 || c.expires_at > now_seconds)
+                .count();
             let last_confirmation_at = unique_confirmations
                 .iter()
                 .map(|c| c.created_at)
@@ -725,21 +737,25 @@ pub async fn get_governance_confirmations(
     // expired explicitly to clear them.
     let domain_actions: Vec<DomainGovernanceAction> = domain_confirmations
         .into_iter()
-        .map(|(proposal_cid, (action_label, confirmations))| {
+        .map(|(proposal_cid, (action_label, mut confirmations))| {
+            confirmations.sort_by_key(|c| Reverse(c.created_at));
             // Only mark as orphaned when we successfully fetched the full
             // active-proposal set; otherwise the missing-from-map signal is
             // unreliable and we'd falsely mark everything as orphaned.
-            let (description, transfer_details, orphaned) =
+            let (description, transfer_details, accept_transfer_details, orphaned) =
                 match proposal_infos.remove(&proposal_cid) {
-                    Some(info) => (info.description, info.transfer, false),
-                    None => (None, None, proposal_infos_complete),
+                    Some(info) => (info.description, info.transfer, info.accept_transfer, false),
+                    None => (None, None, None, proposal_infos_complete),
                 };
             let mut seen_parties = std::collections::HashSet::new();
             let unique_confirmations: Vec<GovernanceConfirmation> = confirmations
                 .into_iter()
                 .filter(|c| seen_parties.insert(c.confirming_party.clone()))
                 .collect();
-            let confirmation_count = unique_confirmations.len();
+            let confirmation_count = unique_confirmations
+                .iter()
+                .filter(|c| c.expires_at == 0 || c.expires_at > now_seconds)
+                .count();
             DomainGovernanceAction {
                 proposal_cid,
                 action_label,
@@ -750,6 +766,7 @@ pub async fn get_governance_confirmations(
                 can_execute: !orphaned && confirmation_count >= threshold,
                 orphaned,
                 transfer_details,
+                accept_transfer_details,
             }
         })
         .collect();
@@ -960,6 +977,9 @@ fn extract_and_add_confirmation(
         action: action.clone(),
         confirming_party,
         created_at: created.created_at.as_ref().map(|t| t.seconds).unwrap_or(0),
+        expires_at: field_timestamp(record, "expiresAt")
+            .map(|micros| micros / 1_000_000)
+            .unwrap_or(0),
     };
 
     confirmations_by_hash
@@ -1039,6 +1059,9 @@ fn extract_and_add_domain_confirmation(
         action: ActionType::GovernanceSetThreshold { new_threshold: 0 }, // placeholder
         confirming_party,
         created_at: created.created_at.as_ref().map(|t| t.seconds).unwrap_or(0),
+        expires_at: field_timestamp(record, "expiresAt")
+            .map(|micros| micros / 1_000_000)
+            .unwrap_or(0),
     };
 
     domain_confirmations
@@ -1053,9 +1076,18 @@ fn extract_and_add_domain_confirmation(
 /// every proposal; `transfer` is populated only for `TransferProposal`
 /// templates so the notifications queue can render recipient/amount/
 /// instrument on the card without a follow-up fetch.
+///
+/// `accept_transfer_instruction_cid` is captured for `AcceptTransferProposal`
+/// templates (they only carry the linked `TransferInstruction` cid, not the
+/// transfer fields themselves). `accept_transfer` is then populated by a
+/// follow-up `GetEventsByContractId` per cid against the
+/// `Splice.Api.Token.TransferInstructionV1:TransferInstruction` interface so
+/// the pending-approval card can render sender/amount/instrument.
 pub struct ProposalInfo {
     pub description: Option<String>,
     pub transfer: Option<TransferProposalDetails>,
+    pub accept_transfer_instruction_cid: Option<String>,
+    pub accept_transfer: Option<AcceptTransferDetails>,
 }
 
 /// Extract proposal info from a GovernableAction contract's create_arguments.
@@ -1093,6 +1125,20 @@ fn extract_proposal_info(
 
     let transfer = extract_transfer_proposal_details(record);
 
+    // `AcceptTransferProposal`s carry `transferInstructionCid` instead of the
+    // transfer fields. Capture it here; the post-pass in `fetch_proposal_infos`
+    // resolves each cid to an `AcceptTransferDetails` via a per-cid event
+    // query so the card can render sender/amount/instrument.
+    let accept_transfer_instruction_cid = record
+        .fields
+        .iter()
+        .find(|f| f.label == "transferInstructionCid")
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::ContractId(cid)) => Some(cid.clone()),
+            _ => None,
+        });
+
     // Always record the cid, even when no description / transfer fields
     // are present — the consumer relies on map membership to gate
     // active-proposal filtering.
@@ -1101,8 +1147,141 @@ fn extract_proposal_info(
         ProposalInfo {
             description,
             transfer,
+            accept_transfer_instruction_cid,
+            accept_transfer: None,
         },
     );
+}
+
+/// Pull sender/receiver/amount/instrument out of a `TransferInstruction`
+/// interface view, *without* the status / deadline filters that
+/// `extract_transfer_instruction_info` (used for the Accept dropdown) applies.
+/// Pending-approval cards must render regardless of where the instruction is
+/// in its lifecycle — the proposal is still being voted on, and the operator
+/// needs to see what they're approving even if the underlying instruction has
+/// already advanced or expired.
+fn extract_accept_transfer_details_from_view(
+    created: &CreatedEvent,
+) -> Option<AcceptTransferDetails> {
+    let view = created.interface_views.iter().find(|v| {
+        v.interface_id.as_ref().is_some_and(|id| {
+            id.module_name == "Splice.Api.Token.TransferInstructionV1"
+                && id.entity_name == "TransferInstruction"
+        })
+    })?;
+    let view_record = view.view_value.as_ref()?;
+    let transfer_record = view_record
+        .fields
+        .iter()
+        .find(|f| f.label == "transfer")
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Record(r)) => Some(r),
+            _ => None,
+        })?;
+    let sender: CantonId = field_party(transfer_record, "sender")?.parse().ok()?;
+    let receiver: CantonId = field_party(transfer_record, "receiver")?.parse().ok()?;
+    let amount =
+        field_numeric(transfer_record, "amount").and_then(|s| DamlDecimal::parse(&s).ok())?;
+    let instrument_record = transfer_record
+        .fields
+        .iter()
+        .find(|f| f.label == "instrumentId")
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Record(r)) => Some(r),
+            _ => None,
+        })?;
+    let instrument_admin: CantonId = field_party(instrument_record, "admin")?.parse().ok()?;
+    let instrument_id = field_text(instrument_record, "id")?;
+    Some(AcceptTransferDetails {
+        sender,
+        receiver,
+        amount,
+        instrument_admin,
+        instrument_id,
+    })
+}
+
+/// Resolve each `TransferInstruction` cid captured on
+/// `AcceptTransferProposal`s into an `AcceptTransferDetails` and store it on
+/// the corresponding `ProposalInfo`. Skips silently per-cid on failure — the
+/// card just falls back to its cid-only rendering rather than blocking the
+/// whole confirmations response on one bad instruction.
+async fn resolve_accept_transfer_details(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    proposal_infos: &mut HashMap<String, ProposalInfo>,
+) -> Result {
+    let pending: Vec<(String, String)> = proposal_infos
+        .iter()
+        .filter_map(|(proposal_cid, info)| {
+            if info.accept_transfer.is_some() {
+                return None;
+            }
+            info.accept_transfer_instruction_cid
+                .as_ref()
+                .map(|cid| (proposal_cid.clone(), cid.clone()))
+        })
+        .collect();
+    if pending.is_empty() {
+        return Ok(());
+    }
+
+    let mut client = utils::create_event_query_client(config, token).await?;
+
+    for (proposal_cid, instruction_cid) in pending {
+        let mut filters_by_party = HashMap::new();
+        filters_by_party.insert(
+            party_id.to_string(),
+            Filters {
+                cumulative: vec![CumulativeFilter {
+                    identifier_filter: Some(cumulative_filter::IdentifierFilter::InterfaceFilter(
+                        InterfaceFilter {
+                            interface_id: Some(Identifier {
+                                package_id: "#splice-api-token-transfer-instruction-v1".to_string(),
+                                module_name: "Splice.Api.Token.TransferInstructionV1".to_string(),
+                                entity_name: "TransferInstruction".to_string(),
+                            }),
+                            include_interface_view: true,
+                            include_created_event_blob: false,
+                        },
+                    )),
+                }],
+            },
+        );
+        let request = GetEventsByContractIdRequest {
+            contract_id: instruction_cid.clone(),
+            event_format: Some(EventFormat {
+                filters_by_party,
+                filters_for_any_party: None,
+                verbose: true,
+            }),
+        };
+        let created_event = match client
+            .get_events_by_contract_id(tonic::Request::new(request))
+            .await
+        {
+            Ok(resp) => resp.into_inner().created.and_then(|c| c.created_event),
+            Err(e) => {
+                tracing::debug!(
+                    "Could not resolve TransferInstruction {instruction_cid} for proposal \
+                     {proposal_cid}: {e}"
+                );
+                continue;
+            }
+        };
+        let Some(created_event) = created_event else {
+            continue;
+        };
+        if let Some(details) = extract_accept_transfer_details_from_view(&created_event)
+            && let Some(info) = proposal_infos.get_mut(&proposal_cid)
+        {
+            info.accept_transfer = Some(details);
+        }
+    }
+    Ok(())
 }
 
 /// Pull `receiver`, `amount`, and the nested `instrumentId` out of a
@@ -1156,7 +1335,7 @@ async fn fetch_proposal_infos(
         return Ok(());
     };
 
-    let mut state_client = utils::create_state_client(config, token).await?;
+    let mut state_client = utils::create_state_client(config, token.clone()).await?;
 
     let ledger_end = state_client
         .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
@@ -1205,6 +1384,13 @@ async fn fetch_proposal_infos(
             extract_proposal_info(&created, proposal_infos);
         }
     }
+
+    // Resolve the linked `TransferInstruction` for any
+    // `AcceptTransferProposal`s we just captured so the notification card has
+    // sender/amount/instrument to render. Errors per-cid are logged and
+    // swallowed inside the resolver; an outer error here would only come from
+    // a client-creation failure, which we let propagate.
+    resolve_accept_transfer_details(config, party_id, token, proposal_infos).await?;
 
     Ok(())
 }
@@ -2568,10 +2754,11 @@ pub async fn query_contracts_by_template(
 // Token-standard TransferInstruction Query (for Accept Transfer dropdown)
 // ============================================================================
 
-/// The only `TransferInstructionStatus` constructor that can be Accepted —
-/// see `Splice.Api.Token.TransferInstructionV1` in the token-standard package.
+/// `TransferInstructionStatus` constructor names — see
+/// `Splice.Api.Token.TransferInstructionV1` in the token-standard package.
 /// Lifted here so a grep surfaces every place that depends on the spelling.
 const TRANSFER_PENDING_RECEIVER_ACCEPTANCE: &str = "TransferPendingReceiverAcceptance";
+const TRANSFER_PENDING_INTERNAL_WORKFLOW: &str = "TransferPendingInternalWorkflow";
 
 /// Fetch open `TransferInstruction` contracts (status
 /// `TransferPendingReceiverAcceptance`) whose `receiver` is `party_id`.
@@ -2661,20 +2848,40 @@ fn extract_transfer_instruction_info(created: &CreatedEvent) -> Option<TransferI
     })?;
     let view_record = view.view_value.as_ref()?;
 
-    // Filter out already-progressing instructions; only pending-acceptance
-    // ones can be Accepted.
-    let status = view_record
+    // Surface both pending-acceptance (immediately acceptable) and
+    // pending-internal-workflow (blocked on an admin/registrar action). The UI
+    // disables the latter with a "Pending: <party> — <action>" subtitle so
+    // operators see the offer exists instead of getting silent "no offers".
+    let status_value = view_record
         .fields
         .iter()
         .find(|f| f.label == "status")
         .and_then(|f| f.value.as_ref())?;
-    let is_pending_acceptance = matches!(
-        &status.sum,
-        Some(value::Sum::Variant(v)) if v.constructor == TRANSFER_PENDING_RECEIVER_ACCEPTANCE
-    );
-    if !is_pending_acceptance {
-        return None;
-    }
+    let status_variant = match &status_value.sum {
+        Some(value::Sum::Variant(v)) => v,
+        _ => return None,
+    };
+    let (status, pending_actions) = match status_variant.constructor.as_str() {
+        TRANSFER_PENDING_RECEIVER_ACCEPTANCE => (
+            TransferInstructionStatus::PendingReceiverAcceptance,
+            Vec::new(),
+        ),
+        TRANSFER_PENDING_INTERNAL_WORKFLOW => {
+            let actions = status_variant
+                .value
+                .as_ref()
+                .and_then(|v| match &v.sum {
+                    Some(value::Sum::Record(r)) => Some(r),
+                    _ => None,
+                })
+                .and_then(|r| r.fields.iter().find(|f| f.label == "pendingActions"))
+                .and_then(|f| f.value.as_ref())
+                .map(extract_pending_actions)
+                .unwrap_or_default();
+            (TransferInstructionStatus::PendingInternalWorkflow, actions)
+        }
+        _ => return None,
+    };
 
     let transfer_record = view_record
         .fields
@@ -2686,17 +2893,11 @@ fn extract_transfer_instruction_info(created: &CreatedEvent) -> Option<TransferI
             _ => None,
         })?;
 
-    // Drop instructions whose `executeBefore` deadline has already passed —
-    // accepting them would fail at interpretation with `deadline-exceeded`,
-    // so they have no business in the dropdown.
-    let execute_before_micros = field_timestamp(transfer_record, "executeBefore")?;
-    let now_micros = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()?
-        .as_micros() as i64;
-    if execute_before_micros <= now_micros {
-        return None;
-    }
+    // Surface the deadline so the UI can disable past-deadline rows; do *not*
+    // hide them. Accepting an expired offer would fail at interpretation with
+    // `deadline-exceeded`, but staying silent left users wondering where their
+    // offers went — surface them as disabled "expired" entries instead.
+    let expires_at = field_timestamp(transfer_record, "executeBefore")? / 1_000_000;
 
     let sender: CantonId = field_party(transfer_record, "sender")?.parse().ok()?;
     let receiver: CantonId = field_party(transfer_record, "receiver")?.parse().ok()?;
@@ -2722,7 +2923,47 @@ fn extract_transfer_instruction_info(created: &CreatedEvent) -> Option<TransferI
         amount,
         instrument_admin,
         instrument_id,
+        status,
+        pending_actions,
+        expires_at,
     })
+}
+
+/// Decode the `pendingActions :: Map Party Text` payload of
+/// `TransferPendingInternalWorkflow`. Daml `Map` is delivered as a `GenMap` of
+/// key/value pairs; we drop entries with malformed party ids rather than
+/// failing the whole instruction.
+fn extract_pending_actions(value: &Value) -> Vec<PendingAction> {
+    let entries = match &value.sum {
+        Some(value::Sum::GenMap(m)) => &m.entries,
+        Some(value::Sum::TextMap(_)) => return Vec::new(), // party-keyed maps come as GenMap
+        _ => return Vec::new(),
+    };
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let key_party = entry
+                .key
+                .as_ref()
+                .and_then(|v| match &v.sum {
+                    Some(value::Sum::Party(p)) => Some(p.clone()),
+                    _ => None,
+                })
+                .and_then(|s| CantonId::parse(&s).ok())?;
+            let action = entry
+                .value
+                .as_ref()
+                .and_then(|v| match &v.sum {
+                    Some(value::Sum::Text(t)) => Some(t.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            Some(PendingAction {
+                party: key_party,
+                action,
+            })
+        })
+        .collect()
 }
 
 fn field_party(record: &Record, label: &str) -> Option<String> {
@@ -2935,9 +3176,13 @@ pub async fn get_holdings(
             let preapproval_set_up = if instrument_id == AMULET_INSTRUMENT_ID {
                 preapprovals.has_amulet
             } else {
+                let admin = instrument_admin.to_string();
                 preapprovals
                     .utility
-                    .contains(&(instrument_admin.to_string(), instrument_id.clone()))
+                    .contains(&(admin.clone(), instrument_id.clone()))
+                    || preapprovals
+                        .utility
+                        .contains(&(admin, PREAPPROVAL_WILDCARD_ID.to_string()))
             };
             HoldingInfo {
                 instrument_admin,
@@ -3181,27 +3426,54 @@ async fn fetch_utility_preapproval_instruments(
         if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
             && let Some(created) = active.created_event
             && let Some(args) = created.create_arguments
-            && let Some((admin, id)) = extract_preapproval_instrument(&args)
         {
-            set.insert((admin, id));
+            for entry in extract_preapproval_entries(&args) {
+                set.insert(entry);
+            }
         }
     }
     Ok(set)
 }
 
-fn extract_preapproval_instrument(args: &Record) -> Option<(String, String)> {
-    let instrument_record = args
+/// Sentinel `instrument_id` for a preapproval whose `instrumentAllowances` is
+/// empty — utility-registry semantics is "any instrument from this admin", so
+/// we store the wildcard once and the join check matches all of that admin's
+/// holdings.
+pub(super) const PREAPPROVAL_WILDCARD_ID: &str = "*";
+
+/// Extract one `(admin, id)` per allowance from a `Utility.Registry.App.V0
+/// .Model.TransferPreapproval.TransferPreapproval` contract. The on-chain
+/// shape is `instrumentAdmin: Party` + `instrumentAllowances: [{ id: Text }]`;
+/// an empty allowance list is the registrar's wildcard ("preapprove any
+/// instrument issued by this admin"), which we represent as
+/// `(admin, PREAPPROVAL_WILDCARD_ID)`.
+fn extract_preapproval_entries(args: &Record) -> Vec<(String, String)> {
+    let Some(admin) = field_party(args, "instrumentAdmin") else {
+        return Vec::new();
+    };
+    let allowances = args
         .fields
         .iter()
-        .find(|f| f.label == "instrumentId")
+        .find(|f| f.label == "instrumentAllowances")
         .and_then(|f| f.value.as_ref())
         .and_then(|v| match &v.sum {
-            Some(value::Sum::Record(r)) => Some(r),
+            Some(value::Sum::List(l)) => Some(&l.elements),
             _ => None,
-        })?;
-    let admin = field_party(instrument_record, "admin")?;
-    let id = field_text(instrument_record, "id")?;
-    Some((admin, id))
+        });
+    let Some(elements) = allowances else {
+        return vec![(admin, PREAPPROVAL_WILDCARD_ID.to_string())];
+    };
+    if elements.is_empty() {
+        return vec![(admin, PREAPPROVAL_WILDCARD_ID.to_string())];
+    }
+    elements
+        .iter()
+        .filter_map(|v| match &v.sum {
+            Some(value::Sum::Record(r)) => field_text(r, "id"),
+            _ => None,
+        })
+        .map(|id| (admin.clone(), id))
+        .collect()
 }
 
 #[cfg(test)]
@@ -3416,11 +3688,12 @@ mod tests {
     }
 
     #[test]
-    fn extract_transfer_instruction_info_drops_expired() {
-        // Epoch is comfortably in the past.
-        assert!(
+    fn extract_transfer_instruction_info_keeps_expired_with_zero_deadline() {
+        // Expired offers used to be dropped silently; now they're returned so
+        // the UI can render them as disabled "expired" rows.
+        let info =
             extract_transfer_instruction_info(&make_event(TRANSFER_PENDING_RECEIVER_ACCEPTANCE, 0))
-                .is_none(),
-        );
+                .expect("expired offer should still be returned, just past-deadline");
+        assert_eq!(info.expires_at, 0);
     }
 }
