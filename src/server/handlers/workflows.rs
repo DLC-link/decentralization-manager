@@ -25,9 +25,10 @@ use crate::{
             ContractsRequest, DarsInvitePayload, DarsRequest, ErrorResponse, HttpWorkflowState,
             KickRequest, KickResponse, KickStatus, ListenerPauseGuard, MessageResponse,
             MissingEdgeKind, MissingPeerEdge, OnboardingInvitePayload, OnboardingMeshErrorResponse,
-            OnboardingRequest, OnboardingResponse, OnboardingStatus, SuccessResponse,
-            WorkflowInFlightGuard, WorkflowKind, WorkflowProgress, WorkflowResponse, WorkflowRole,
-            WorkflowRun, WorkflowRunsResponse, WorkflowStatusResponse,
+            OnboardingRequest, OnboardingResponse, OnboardingStatus, PeerProbeResponse,
+            SuccessResponse, WorkflowInFlightGuard, WorkflowKind, WorkflowProgress,
+            WorkflowResponse, WorkflowRole, WorkflowRun, WorkflowRunsResponse,
+            WorkflowStatusResponse,
         },
     },
     workflow::{self, ContractsStep, DarsStep, KickStep, OnboardingStep, state::WorkflowStep},
@@ -2247,4 +2248,359 @@ async fn send_contracts_invites(
     }
 
     Ok(())
+}
+
+// ============================================================================
+// Peer probe endpoint
+// ============================================================================
+
+/// Query parameters for the peer-probe endpoint.
+#[derive(serde::Deserialize, utoipa::IntoParams)]
+pub struct PeerProbeQuery {
+    pub kind: WorkflowKind,
+}
+
+#[utoipa::path(
+    tag = "Workflows",
+    responses(
+        (status = 200, description = "Coordinator's view of this peer's run", body = PeerProbeResponse),
+        (status = 400, description = "Malformed peer pubkey", body = ErrorResponse),
+        (status = 401, description = "Missing/malformed signature", body = ErrorResponse),
+        (status = 403, description = "Signature invalid or stale", body = ErrorResponse),
+        (status = 404, description = "No matching run", body = ErrorResponse),
+    )
+)]
+#[get("/workflows/peer-probe")]
+pub async fn get_peer_probe(
+    req: HttpRequest,
+    data: web::Data<AppState>,
+    query: web::Query<PeerProbeQuery>,
+) -> impl Responder {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let peer_pubkey_hex = match req
+        .headers()
+        .get("X-Probe-Peer-Pubkey")
+        .and_then(|h| h.to_str().ok())
+    {
+        Some(v) => v.to_string(),
+        None => {
+            return HttpResponse::Unauthorized().json(ErrorResponse {
+                error: "missing X-Probe-Peer-Pubkey header".into(),
+            });
+        }
+    };
+    let ts: u64 = match req
+        .headers()
+        .get("X-Probe-Timestamp")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.parse().ok())
+    {
+        Some(v) => v,
+        None => {
+            return HttpResponse::Unauthorized().json(ErrorResponse {
+                error: "missing/invalid X-Probe-Timestamp header".into(),
+            });
+        }
+    };
+    let sig_bytes = match req
+        .headers()
+        .get("X-Probe-Signature")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| hex::decode(s).ok())
+    {
+        Some(v) => v,
+        None => {
+            return HttpResponse::Unauthorized().json(ErrorResponse {
+                error: "missing/invalid X-Probe-Signature header".into(),
+            });
+        }
+    };
+
+    // Look up the peer by pubkey to get their CantonId.
+    let peer = match data.db.get_peer_by_public_key(&peer_pubkey_hex).await {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            return HttpResponse::Forbidden().json(ErrorResponse {
+                error: "unknown peer pubkey".into(),
+            });
+        }
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("peer lookup failed: {e}"),
+            });
+        }
+    };
+
+    let peer_pub = match parse_public_key(&peer_pubkey_hex) {
+        Ok(p) => p,
+        Err(_) => {
+            return HttpResponse::BadRequest().json(ErrorResponse {
+                error: "malformed peer pubkey".into(),
+            });
+        }
+    };
+    // Read from the cached keypair on AppState (loaded once at startup) —
+    // avoids per-request file I/O.
+    let coord_kp = data.noise_keypair.clone();
+    let kind_str = match query.kind {
+        WorkflowKind::Onboarding => "Onboarding",
+        WorkflowKind::Kick => "Kick",
+        WorkflowKind::Contracts => "Contracts",
+        WorkflowKind::Dars => "Dars",
+    };
+    if let Err(e) = crate::noise::probe_sig::verify_probe(
+        &peer_pub,
+        &coord_kp.public_key,
+        kind_str,
+        ts,
+        &sig_bytes,
+        now,
+        crate::consts::PROBE_TIMESTAMP_TOLERANCE,
+    ) {
+        return HttpResponse::Forbidden().json(ErrorResponse {
+            error: format!("signature verification failed: {e}"),
+        });
+    }
+
+    match data
+        .db
+        .get_workflow_run_for_peer_probe(query.kind, &peer.participant_id)
+        .await
+    {
+        Ok(Some(run)) => HttpResponse::Ok().json(PeerProbeResponse {
+            status: run.status,
+            instance_name: run.instance_name,
+            updated_at: run.updated_at,
+            error: run.error,
+        }),
+        Ok(None) => HttpResponse::NotFound().json(ErrorResponse {
+            error: format!("no {kind_str} run for this peer"),
+        }),
+        Err(e) => HttpResponse::InternalServerError().json(ErrorResponse {
+            error: format!("workflow_runs lookup failed: {e}"),
+        }),
+    }
+}
+
+#[cfg(test)]
+mod peer_probe_tests {
+    use std::collections::{HashMap, HashSet};
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use actix_web::http::StatusCode;
+    use actix_web::test::TestRequest;
+    use actix_web::{App, test, web::Data};
+    use sqlx::SqlitePool;
+    use tokio::sync::{Mutex, Notify, RwLock};
+
+    use super::*;
+    use crate::auth::validator::TokenValidator;
+    use crate::auth::{MockAuthRegistry, MockValidator, WorkflowAuth};
+    use crate::db::MIGRATOR;
+    use crate::db::schema::{Commitable, SchemaWrite};
+    use crate::noise::{NoiseKeypair, probe_sig::sign_probe};
+    use crate::participant_id::CantonId;
+    use crate::server::AppState;
+    use crate::server::types::{WorkflowKind, WorkflowProgress, WorkflowRole, WorkflowRun};
+
+    /// Real 64-hex Canton namespace fingerprint used by existing tests
+    /// (see `src/server/handlers/party_config.rs:643`). Required because
+    /// `CantonId::parse` validates the namespace length.
+    const TEST_NS: &str = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
+
+    fn now_secs() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    /// Build an AppState wired to `pool` with the coordinator identity
+    /// `coord_keypair`. All other fields are inert.
+    fn build_state(pool: SqlitePool, coord_keypair: Arc<NoiseKeypair>) -> Data<AppState> {
+        let party_credentials = Arc::new(RwLock::new(Vec::new()));
+        Data::new(AppState {
+            db: pool,
+            config: crate::config::NodeConfig::default(),
+            peer_status: Arc::new(RwLock::new(HashMap::new())),
+            last_seen: Arc::new(RwLock::new(HashMap::new())),
+            noise_listener_pause_flag: Arc::new(AtomicBool::new(false)),
+            noise_listener_notify: Arc::new(Notify::new()),
+            onboarding_trigger: Arc::new(Notify::new()),
+            kick_trigger: Arc::new(Notify::new()),
+            contracts_trigger: Arc::new(Notify::new()),
+            dars_trigger: Arc::new(Notify::new()),
+            coordinator_pubkey: Arc::new(RwLock::new(None)),
+            peer_run_instance: Arc::new(RwLock::new(None)),
+            pending_invitations: Arc::new(RwLock::new(Vec::new())),
+            auth: Arc::new(RwLock::new(Some(WorkflowAuth::Mock(Arc::new(
+                MockAuthRegistry::new(party_credentials.clone()),
+            ))))),
+            token_validator: TokenValidator::Mock(Arc::new(MockValidator::new(
+                "decman-admin".to_string(),
+            ))),
+            admin_role: Some("decman-admin".to_string()),
+            party_credentials,
+            bootstrap_mu: Arc::new(Mutex::new(())),
+            workflow_in_flight: Arc::new(AtomicBool::new(false)),
+            test_mode: true,
+            refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
+            http_client: reqwest::Client::new(),
+            http_advertised_url: "http://127.0.0.1:8080".to_string(),
+            noise_keypair: coord_keypair,
+        })
+    }
+
+    /// Insert a `peers` row mapping `peer.public_key (hex)` → `participant_id`.
+    async fn insert_peer_row(pool: &SqlitePool, peer_pubkey_hex: &str, participant_id: &CantonId) {
+        sqlx::query(
+            "INSERT INTO peers (participant_id, name, address, port, public_key, party) \
+             VALUES (?, ?, ?, ?, ?, NULL)",
+        )
+        .bind(participant_id.to_string())
+        .bind("test-peer")
+        .bind("127.0.0.1")
+        .bind(9001_i32)
+        .bind(peer_pubkey_hex)
+        .execute(pool)
+        .await
+        .expect("insert peer");
+    }
+
+    async fn insert_coord_run(
+        pool: &SqlitePool,
+        peer_id: &CantonId,
+        status: WorkflowProgress,
+        dismissed: bool,
+    ) {
+        let run = WorkflowRun {
+            instance_name: "test-run".into(),
+            kind: WorkflowKind::Onboarding,
+            role: WorkflowRole::Coordinator,
+            status,
+            current_step: "Active".into(),
+            step_index: 0,
+            step_total: 1,
+            config_json: "{}".into(),
+            coordinator_pubkey: None,
+            coordinator_name: None,
+            expected_peers: vec![peer_id.clone()],
+            completed_peers: Vec::new(),
+            dec_party_id: None,
+            error: None,
+            dismissed,
+            coordinator_http_url: None,
+            created_at: 0,
+            updated_at: now_secs() as i64,
+        };
+        let mut tx = pool.begin_transaction().await.unwrap();
+        tx.upsert_workflow_run(&run).await.unwrap();
+        Commitable::commit(tx).await.unwrap();
+    }
+
+    fn build_request(
+        peer: &NoiseKeypair,
+        coord: &NoiseKeypair,
+        kind_str: &str,
+        age_secs: i64,
+    ) -> TestRequest {
+        let now = now_secs() as i64;
+        let ts = (now + age_secs) as u64;
+        let sig = sign_probe(peer, &coord.public_key, kind_str, ts);
+        TestRequest::get()
+            .uri(&format!("/workflows/peer-probe?kind={kind_str}"))
+            .insert_header(("X-Probe-Peer-Pubkey", peer.public_key_hex()))
+            .insert_header(("X-Probe-Timestamp", ts.to_string()))
+            .insert_header(("X-Probe-Signature", hex::encode(&sig)))
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn returns_in_progress_for_active_run(pool: SqlitePool) {
+        let peer = NoiseKeypair::generate();
+        let coord = Arc::new(NoiseKeypair::generate());
+        let peer_id = CantonId::parse(&format!("peerA::{TEST_NS}")).expect("parse");
+        insert_peer_row(&pool, &peer.public_key_hex(), &peer_id).await;
+        insert_coord_run(&pool, &peer_id, WorkflowProgress::InProgress, false).await;
+
+        let app = test::init_service(
+            App::new()
+                .app_data(build_state(pool, coord.clone()))
+                .service(get_peer_probe),
+        )
+        .await;
+        let req = build_request(&peer, &coord, "Onboarding", 0).to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: PeerProbeResponse = test::read_body_json(resp).await;
+        assert_eq!(body.status, WorkflowProgress::InProgress);
+        assert_eq!(body.instance_name, "test-run");
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn returns_404_when_no_matching_row(pool: SqlitePool) {
+        let peer = NoiseKeypair::generate();
+        let coord = Arc::new(NoiseKeypair::generate());
+        let peer_id = CantonId::parse(&format!("peerA::{TEST_NS}")).expect("parse");
+        insert_peer_row(&pool, &peer.public_key_hex(), &peer_id).await;
+        // no workflow_runs row inserted
+
+        let app = test::init_service(
+            App::new()
+                .app_data(build_state(pool, coord.clone()))
+                .service(get_peer_probe),
+        )
+        .await;
+        let req = build_request(&peer, &coord, "Onboarding", 0).to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn returns_403_for_stale_timestamp(pool: SqlitePool) {
+        let peer = NoiseKeypair::generate();
+        let coord = Arc::new(NoiseKeypair::generate());
+        let peer_id = CantonId::parse(&format!("peerA::{TEST_NS}")).expect("parse");
+        insert_peer_row(&pool, &peer.public_key_hex(), &peer_id).await;
+        insert_coord_run(&pool, &peer_id, WorkflowProgress::InProgress, false).await;
+
+        let app = test::init_service(
+            App::new()
+                .app_data(build_state(pool, coord.clone()))
+                .service(get_peer_probe),
+        )
+        .await;
+        // ts 60s in the past → outside 30s tolerance
+        let req = build_request(&peer, &coord, "Onboarding", -60).to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn returns_cancelled_for_dismissed_row(pool: SqlitePool) {
+        // A late probe must still see Cancelled even after the operator
+        // dismissed the row from the notifications feed (#173 design §5).
+        let peer = NoiseKeypair::generate();
+        let coord = Arc::new(NoiseKeypair::generate());
+        let peer_id = CantonId::parse(&format!("peerA::{TEST_NS}")).expect("parse");
+        insert_peer_row(&pool, &peer.public_key_hex(), &peer_id).await;
+        insert_coord_run(&pool, &peer_id, WorkflowProgress::Cancelled, true).await;
+
+        let app = test::init_service(
+            App::new()
+                .app_data(build_state(pool, coord.clone()))
+                .service(get_peer_probe),
+        )
+        .await;
+        let req = build_request(&peer, &coord, "Onboarding", 0).to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: PeerProbeResponse = test::read_body_json(resp).await;
+        assert_eq!(body.status, WorkflowProgress::Cancelled);
+    }
 }
