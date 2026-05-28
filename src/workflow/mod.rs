@@ -1,4 +1,5 @@
 pub mod contracts;
+pub mod coordinator_probe;
 pub mod dars;
 pub mod kick;
 pub mod onboarding;
