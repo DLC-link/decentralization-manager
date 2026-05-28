@@ -407,6 +407,59 @@ pub struct WorkflowResponse {
 pub type KickResponse = WorkflowResponse;
 pub type OnboardingResponse = WorkflowResponse;
 
+/// Response shape for `GET /workflows/peer-probe`. Tells a peer the
+/// coordinator's view of the peer's run, independent of Noise-connection
+/// liveness. See issue #173 fix design §5.
+#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct PeerProbeResponse {
+    #[serde(
+        serialize_with = "serialize_workflow_progress_pascalcase",
+        deserialize_with = "deserialize_workflow_progress_pascalcase"
+    )]
+    pub status: WorkflowProgress,
+    pub instance_name: String,
+    pub updated_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub error: Option<String>,
+}
+
+fn serialize_workflow_progress_pascalcase<S>(
+    status: &WorkflowProgress,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let s = match status {
+        WorkflowProgress::Idle => "Idle",
+        WorkflowProgress::InProgress => "InProgress",
+        WorkflowProgress::Completed => "Completed",
+        WorkflowProgress::Failed => "Failed",
+        WorkflowProgress::Cancelled => "Cancelled",
+    };
+    serializer.serialize_str(s)
+}
+
+fn deserialize_workflow_progress_pascalcase<'de, D>(
+    deserializer: D,
+) -> Result<WorkflowProgress, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    match s.as_str() {
+        "Idle" => Ok(WorkflowProgress::Idle),
+        "InProgress" => Ok(WorkflowProgress::InProgress),
+        "Completed" => Ok(WorkflowProgress::Completed),
+        "Failed" => Ok(WorkflowProgress::Failed),
+        "Cancelled" => Ok(WorkflowProgress::Cancelled),
+        other => Err(serde::de::Error::unknown_variant(
+            other,
+            &["Idle", "InProgress", "Completed", "Failed", "Cancelled"],
+        )),
+    }
+}
+
 /// Which workflow this run belongs to. Mirrors InvitationType, but lives on
 /// every persisted run (coordinator + peer) regardless of how it started.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -1767,6 +1820,26 @@ impl From<crate::db::rows::ChainAuditCacheRow> for ChainAuditEntry {
 pub struct ChainAuditResponse {
     pub entries: Vec<ChainAuditEntry>,
     pub total_returned: usize,
+}
+
+#[cfg(test)]
+mod probe_response_tests {
+    use super::*;
+
+    #[test]
+    fn probe_response_serde_roundtrip_in_progress() {
+        let r = PeerProbeResponse {
+            status: WorkflowProgress::InProgress,
+            instance_name: "abc-creation".into(),
+            updated_at: 1234,
+            error: None,
+        };
+        let s = serde_json::to_string(&r).unwrap();
+        assert!(s.contains("\"InProgress\""), "got: {s}");
+        let back: PeerProbeResponse = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.status, WorkflowProgress::InProgress);
+        assert_eq!(back.instance_name, "abc-creation");
+    }
 }
 
 #[cfg(test)]
