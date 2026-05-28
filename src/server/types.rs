@@ -1516,9 +1516,9 @@ pub struct UserServiceInfo {
     pub user: CantonId,
 }
 
-/// An open `TransferInstruction` awaiting receiver acceptance. Populates the
-/// Accept Transfer proposal form's dropdown so operators don't have to paste
-/// the contract id by hand.
+/// An open `TransferInstruction` whose `receiver` is this party. Includes
+/// offers waiting on an internal workflow (admin / registrar) so the dropdown
+/// can surface them as "pending: X" rather than silently hide them.
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct TransferInstructionInfo {
     pub contract_id: String,
@@ -1528,6 +1528,32 @@ pub struct TransferInstructionInfo {
     pub amount: DamlDecimal,
     pub instrument_admin: CantonId,
     pub instrument_id: String,
+    pub status: TransferInstructionStatus,
+    /// For `PendingInternalWorkflow`: the parties whose action is awaited and
+    /// the human-readable label of what they need to do.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_actions: Vec<PendingAction>,
+    /// Unix seconds of the offer's `executeBefore` deadline. Past-deadline
+    /// rows are surfaced anyway (disabled in the UI) so the user can see they
+    /// exist — DAML refuses to Accept them, but staying silent confused users.
+    #[serde(default)]
+    pub expires_at: i64,
+}
+
+/// One row of `TransferInstructionStatus.pendingActions`. The Daml type is
+/// `Map Party Text`; the receiver can render "<party> — <action>" per row.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct PendingAction {
+    pub party: CantonId,
+    pub action: String,
+}
+
+/// Mirrors `Splice.Api.Token.TransferInstructionV1.TransferInstructionStatus`.
+#[derive(Clone, Copy, Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TransferInstructionStatus {
+    PendingReceiverAcceptance,
+    PendingInternalWorkflow,
 }
 
 /// Response for the transfer instructions endpoint.

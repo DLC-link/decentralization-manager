@@ -812,8 +812,18 @@ export interface InstrumentsResponse {
   instruments: InstrumentInfo[];
 }
 
-/** An open `TransferInstruction` awaiting receiver acceptance, surfaced for
- *  the Accept Transfer proposal dropdown. */
+export type TransferInstructionStatus =
+  | "pending_receiver_acceptance"
+  | "pending_internal_workflow";
+
+export interface PendingAction {
+  party: string;
+  action: string;
+}
+
+/** An open `TransferInstruction` whose `receiver` is this party. Includes
+ *  offers blocked on an internal workflow so the dropdown can show them
+ *  disabled with the "Pending: <party> — <action>" reason. */
 export interface TransferInstructionInfo {
   contract_id: string;
   sender: string;
@@ -821,6 +831,10 @@ export interface TransferInstructionInfo {
   amount: string;
   instrument_admin: string;
   instrument_id: string;
+  status: TransferInstructionStatus;
+  pending_actions?: PendingAction[];
+  /** Unix seconds of the offer's `executeBefore` deadline. */
+  expires_at?: number;
 }
 
 export interface TransferInstructionsResponse {

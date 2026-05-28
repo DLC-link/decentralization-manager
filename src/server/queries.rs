@@ -29,8 +29,9 @@ use super::{
     types::{
         AcceptTransferDetails, ActionType, ContractInfo, ContractWithBlob, DomainGovernanceAction,
         GovernanceAction, GovernanceConfirmation, GovernanceState, HoldingInfo, InstrumentInfo,
-        PartyMetadata, ProviderServiceInfo, RegistrarServiceInfo, TransferFactoryInfo,
-        TransferInstructionInfo, TransferProposalDetails, UserServiceInfo, VaultInfo,
+        PartyMetadata, PendingAction, ProviderServiceInfo, RegistrarServiceInfo,
+        TransferFactoryInfo, TransferInstructionInfo, TransferInstructionStatus,
+        TransferProposalDetails, UserServiceInfo, VaultInfo,
     },
 };
 
@@ -2753,10 +2754,11 @@ pub async fn query_contracts_by_template(
 // Token-standard TransferInstruction Query (for Accept Transfer dropdown)
 // ============================================================================
 
-/// The only `TransferInstructionStatus` constructor that can be Accepted —
-/// see `Splice.Api.Token.TransferInstructionV1` in the token-standard package.
+/// `TransferInstructionStatus` constructor names — see
+/// `Splice.Api.Token.TransferInstructionV1` in the token-standard package.
 /// Lifted here so a grep surfaces every place that depends on the spelling.
 const TRANSFER_PENDING_RECEIVER_ACCEPTANCE: &str = "TransferPendingReceiverAcceptance";
+const TRANSFER_PENDING_INTERNAL_WORKFLOW: &str = "TransferPendingInternalWorkflow";
 
 /// Fetch open `TransferInstruction` contracts (status
 /// `TransferPendingReceiverAcceptance`) whose `receiver` is `party_id`.
@@ -2846,20 +2848,40 @@ fn extract_transfer_instruction_info(created: &CreatedEvent) -> Option<TransferI
     })?;
     let view_record = view.view_value.as_ref()?;
 
-    // Filter out already-progressing instructions; only pending-acceptance
-    // ones can be Accepted.
-    let status = view_record
+    // Surface both pending-acceptance (immediately acceptable) and
+    // pending-internal-workflow (blocked on an admin/registrar action). The UI
+    // disables the latter with a "Pending: <party> — <action>" subtitle so
+    // operators see the offer exists instead of getting silent "no offers".
+    let status_value = view_record
         .fields
         .iter()
         .find(|f| f.label == "status")
         .and_then(|f| f.value.as_ref())?;
-    let is_pending_acceptance = matches!(
-        &status.sum,
-        Some(value::Sum::Variant(v)) if v.constructor == TRANSFER_PENDING_RECEIVER_ACCEPTANCE
-    );
-    if !is_pending_acceptance {
-        return None;
-    }
+    let status_variant = match &status_value.sum {
+        Some(value::Sum::Variant(v)) => v,
+        _ => return None,
+    };
+    let (status, pending_actions) = match status_variant.constructor.as_str() {
+        TRANSFER_PENDING_RECEIVER_ACCEPTANCE => (
+            TransferInstructionStatus::PendingReceiverAcceptance,
+            Vec::new(),
+        ),
+        TRANSFER_PENDING_INTERNAL_WORKFLOW => {
+            let actions = status_variant
+                .value
+                .as_ref()
+                .and_then(|v| match &v.sum {
+                    Some(value::Sum::Record(r)) => Some(r),
+                    _ => None,
+                })
+                .and_then(|r| r.fields.iter().find(|f| f.label == "pendingActions"))
+                .and_then(|f| f.value.as_ref())
+                .map(extract_pending_actions)
+                .unwrap_or_default();
+            (TransferInstructionStatus::PendingInternalWorkflow, actions)
+        }
+        _ => return None,
+    };
 
     let transfer_record = view_record
         .fields
@@ -2871,17 +2893,11 @@ fn extract_transfer_instruction_info(created: &CreatedEvent) -> Option<TransferI
             _ => None,
         })?;
 
-    // Drop instructions whose `executeBefore` deadline has already passed —
-    // accepting them would fail at interpretation with `deadline-exceeded`,
-    // so they have no business in the dropdown.
-    let execute_before_micros = field_timestamp(transfer_record, "executeBefore")?;
-    let now_micros = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()?
-        .as_micros() as i64;
-    if execute_before_micros <= now_micros {
-        return None;
-    }
+    // Surface the deadline so the UI can disable past-deadline rows; do *not*
+    // hide them. Accepting an expired offer would fail at interpretation with
+    // `deadline-exceeded`, but staying silent left users wondering where their
+    // offers went — surface them as disabled "expired" entries instead.
+    let expires_at = field_timestamp(transfer_record, "executeBefore")? / 1_000_000;
 
     let sender: CantonId = field_party(transfer_record, "sender")?.parse().ok()?;
     let receiver: CantonId = field_party(transfer_record, "receiver")?.parse().ok()?;
@@ -2907,7 +2923,47 @@ fn extract_transfer_instruction_info(created: &CreatedEvent) -> Option<TransferI
         amount,
         instrument_admin,
         instrument_id,
+        status,
+        pending_actions,
+        expires_at,
     })
+}
+
+/// Decode the `pendingActions :: Map Party Text` payload of
+/// `TransferPendingInternalWorkflow`. Daml `Map` is delivered as a `GenMap` of
+/// key/value pairs; we drop entries with malformed party ids rather than
+/// failing the whole instruction.
+fn extract_pending_actions(value: &Value) -> Vec<PendingAction> {
+    let entries = match &value.sum {
+        Some(value::Sum::GenMap(m)) => &m.entries,
+        Some(value::Sum::TextMap(_)) => return Vec::new(), // party-keyed maps come as GenMap
+        _ => return Vec::new(),
+    };
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let key_party = entry
+                .key
+                .as_ref()
+                .and_then(|v| match &v.sum {
+                    Some(value::Sum::Party(p)) => Some(p.clone()),
+                    _ => None,
+                })
+                .and_then(|s| CantonId::parse(&s).ok())?;
+            let action = entry
+                .value
+                .as_ref()
+                .and_then(|v| match &v.sum {
+                    Some(value::Sum::Text(t)) => Some(t.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            Some(PendingAction {
+                party: key_party,
+                action,
+            })
+        })
+        .collect()
 }
 
 fn field_party(record: &Record, label: &str) -> Option<String> {
@@ -3601,11 +3657,12 @@ mod tests {
     }
 
     #[test]
-    fn extract_transfer_instruction_info_drops_expired() {
-        // Epoch is comfortably in the past.
-        assert!(
+    fn extract_transfer_instruction_info_keeps_expired_with_zero_deadline() {
+        // Expired offers used to be dropped silently; now they're returned so
+        // the UI can render them as disabled "expired" rows.
+        let info =
             extract_transfer_instruction_info(&make_event(TRANSFER_PENDING_RECEIVER_ACCEPTANCE, 0))
-                .is_none(),
-        );
+                .expect("expired offer should still be returned, just past-deadline");
+        assert_eq!(info.expires_at, 0);
     }
 }
