@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 /// Minimum number of participants required for onboarding and kick workflows
 pub const MIN_PARTICIPANTS: usize = 2;
 
@@ -67,6 +69,23 @@ pub const CANTON_PROTOCOL_VERSION: i32 = 34;
 /// rejected with LOCAL_VERDICT_TIMEOUT.
 pub const TOPOLOGY_PROPAGATION_DELAY_SECS: u64 = 30;
 
+/// Cap on how long a peer tolerates BOTH Noise AND HTTP probe being
+/// unreachable before bailing the run as Failed. Set above devnet's worst
+/// observed coordinator restart (~120s for pod restart with image pull) but
+/// short enough that a permanently-dead coordinator doesn't waste a full
+/// integration run. See issue #173 fix design §7.
+pub const EXTENDED_TOLERANCE_BUDGET: Duration = Duration::from_secs(180);
+
+/// HTTP request timeout for the peer→coordinator cancel probe. Short because
+/// the probe is on the failure path of an already-failing Noise call; we
+/// don't want the probe to amplify latency.
+pub const PROBE_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Max age of a probe timestamp the coordinator will accept, defending
+/// against signed-probe replay. 30s tolerates modest clock skew (NTP-typical
+/// under 1s); larger skew is an operator issue and surfaces as 403.
+pub const PROBE_TIMESTAMP_TOLERANCE: Duration = Duration::from_secs(30);
+
 // File name prefixes
 /// Prefix for peer public key files
 pub const PEER_KEYS_PREFIX: &str = "peer-public-keys";
@@ -132,3 +151,15 @@ pub const DB_FILENAME: &str = "decpm.db";
 
 /// DARs directory name (inside data/)
 pub const DARS_DIR: &str = "dars";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn probe_constants_have_expected_values() {
+        assert_eq!(EXTENDED_TOLERANCE_BUDGET, Duration::from_secs(180));
+        assert_eq!(PROBE_REQUEST_TIMEOUT, Duration::from_secs(2));
+        assert_eq!(PROBE_TIMESTAMP_TOLERANCE, Duration::from_secs(30));
+    }
+}
