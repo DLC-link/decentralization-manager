@@ -1582,7 +1582,7 @@ const WorkflowRunCard = ({
             </Box>
           )}
           {run.dec_party_id && (
-            <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
+            <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
               <Typography
                 variant="caption"
                 color="text.secondary"
@@ -1592,17 +1592,29 @@ const WorkflowRunCard = ({
               </Typography>
               <Typography
                 component="span"
-                variant="caption"
+                variant="body2"
                 onClick={() => onSelectParty(run.dec_party_id!)}
                 sx={{
                   fontFamily: "monospace",
-                  color: "primary.main",
+                  fontWeight: 600,
                   cursor: "pointer",
                   "&:hover": { textDecoration: "underline" },
                 }}
               >
                 {truncatePartyId(run.dec_party_id)}
               </Typography>
+              <Tooltip title="Copy dec party id">
+                <IconButton
+                  size="small"
+                  onClick={async () => {
+                    const ok = await copyToClipboard(run.dec_party_id!);
+                    showSnackbar(ok ? "Copied to clipboard" : "Failed to copy");
+                  }}
+                  sx={{ p: 0.25 }}
+                >
+                  <ContentCopyIcon sx={{ fontSize: 14 }} />
+                </IconButton>
+              </Tooltip>
             </Box>
           )}
           {run.kicked_participant && (
