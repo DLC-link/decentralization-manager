@@ -15,13 +15,18 @@ use std::collections::HashMap;
 use anyhow::Context as _;
 use base64::Engine as _;
 use canton_common::{
-    transfer::DisclosedContract as RegistryDisclosedContract,
-    transfer_factory::{Context, ContextValue},
+    decimal::DamlDecimal,
+    transfer::{DisclosedContract as RegistryDisclosedContract, InstrumentId, Meta, Transfer},
+    transfer_factory::{
+        ChoiceArguments, Context, ContextValue, ExtraArgs, Meta as FactoryMeta,
+        MetaValue as FactoryMetaValue,
+    },
 };
 use canton_proto_rs::com::daml::ledger::api::v2::{
     CumulativeFilter, DisclosedContract, EventFormat, Filters, GetEventsByContractIdRequest,
-    Identifier, InterfaceFilter, WildcardFilter, cumulative_filter, value,
+    Identifier, InterfaceFilter, Record, WildcardFilter, cumulative_filter, value,
 };
+use chrono::{Duration, Utc};
 
 use crate::{
     config::{Network, NodeConfig},
@@ -40,6 +45,75 @@ use crate::{
 pub struct AcceptTransferContext {
     pub context: Context,
     pub disclosed_contracts: Vec<RegistryDisclosedContract>,
+}
+
+/// Registry-resolved data for a `Transfer` proposal whose instrument is
+/// administered by a shared party (e.g. CBTC, admin = `cbtc-network`). The
+/// `factory_cid` is the registrar's singleton `TransferFactory` contract that
+/// the proposal must reference; `context` populates `extraArgs.context.values`;
+/// `disclosed_contracts` must accompany the execute-time submission.
+#[derive(Debug, Clone)]
+pub struct ProposeTransferContext {
+    pub factory_cid: String,
+    pub context: Context,
+    pub disclosed_contracts: Vec<RegistryDisclosedContract>,
+}
+
+/// Call the registrar's `transfer-factory` endpoint to resolve the singleton
+/// `TransferFactory` cid and the choice context required to exercise
+/// `TransferFactory_Transfer` later. Used by the propose handler for
+/// shared-instrument transfers where the factory isn't on the dec party's ACS.
+pub async fn fetch_factory_for_propose(
+    network: Network,
+    sender: &CantonId,
+    receiver: &CantonId,
+    amount: &DamlDecimal,
+    instrument_admin: &CantonId,
+    instrument_id: &str,
+    input_holding_cids: &[String],
+) -> Result<ProposeTransferContext> {
+    let now = Utc::now();
+    let request = canton_registry::transfer_factory::Request {
+        choice_arguments: ChoiceArguments {
+            expected_admin: instrument_admin.to_string(),
+            transfer: Transfer {
+                sender: sender.to_string(),
+                receiver: receiver.to_string(),
+                amount: *amount,
+                instrument_id: InstrumentId {
+                    admin: instrument_admin.to_string(),
+                    id: instrument_id.to_string(),
+                },
+                requested_at: now.to_rfc3339(),
+                execute_before: (now + Duration::hours(24)).to_rfc3339(),
+                input_holding_cids: Some(input_holding_cids.to_vec()),
+                meta: Some(Meta { values: None }),
+            },
+            extra_args: ExtraArgs {
+                context: Context {
+                    values: HashMap::new(),
+                },
+                meta: FactoryMeta {
+                    values: FactoryMetaValue {},
+                },
+            },
+        },
+        exclude_debug_fields: true,
+    };
+    let response =
+        canton_registry::transfer_factory::get(canton_registry::transfer_factory::Params {
+            registry_url: network.registry_url().to_string(),
+            decentralized_party_id: instrument_admin.to_string(),
+            request,
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("registry transfer-factory request failed: {e}"))?;
+
+    Ok(ProposeTransferContext {
+        factory_cid: response.factory_id,
+        context: response.choice_context.choice_context_data,
+        disclosed_contracts: response.choice_context.disclosed_contracts,
+    })
 }
 
 /// Fetch the accept choice context from the token-standard registry for a
@@ -251,46 +325,187 @@ pub async fn maybe_fetch_for_proposal(
         return Ok(None);
     };
 
-    // Identify `AcceptTransferProposal` by template id. The package id is
-    // package-name-resolved (e.g. `#governance-token-custody-v0`) so match
-    // on the module + entity tuple alone.
-    let is_accept_transfer = created_event
-        .template_id
-        .as_ref()
+    // Identify the proposal template by id. The package id is package-name-resolved
+    // (e.g. `#governance-token-custody-v0`) so match on the module + entity tuple.
+    let template = created_event.template_id.as_ref();
+    let is_accept_transfer = template
         .map(|t| {
             t.module_name == "Governance.TokenCustody.AcceptTransfer"
                 && t.entity_name == "AcceptTransferProposal"
         })
         .unwrap_or(false);
-    if !is_accept_transfer {
+    let is_transfer = template
+        .map(|t| {
+            t.module_name == "Governance.TokenCustody.TransferProposal"
+                && t.entity_name == "TransferProposal"
+        })
+        .unwrap_or(false);
+    if !is_accept_transfer && !is_transfer {
         return Ok(None);
     }
 
     let Some(create_args) = created_event.create_arguments else {
-        anyhow::bail!("AcceptTransferProposal create_arguments missing in event response");
+        anyhow::bail!("proposal create_arguments missing in event response");
     };
 
-    let transfer_instruction_cid = create_args
-        .fields
-        .iter()
-        .find(|f| f.label == "transferInstructionCid")
-        .and_then(|f| f.value.as_ref())
-        .and_then(|v| match &v.sum {
-            Some(value::Sum::ContractId(cid)) => Some(cid.clone()),
-            _ => None,
-        })
-        .context("AcceptTransferProposal missing transferInstructionCid field")?;
+    if is_accept_transfer {
+        let transfer_instruction_cid = create_args
+            .fields
+            .iter()
+            .find(|f| f.label == "transferInstructionCid")
+            .and_then(|f| f.value.as_ref())
+            .and_then(|v| match &v.sum {
+                Some(value::Sum::ContractId(cid)) => Some(cid.clone()),
+                _ => None,
+            })
+            .context("AcceptTransferProposal missing transferInstructionCid field")?;
 
-    let ctx = fetch(
-        config,
-        token,
+        let ctx = fetch(
+            config,
+            token,
+            config.canton.network,
+            party_id,
+            &transfer_instruction_cid,
+        )
+        .await?;
+
+        return Ok(Some(ctx));
+    }
+
+    // is_transfer: re-resolve disclosed contracts for the stored TransferProposal
+    // so the executor's submission can exercise TransferFactory_Transfer. Only
+    // needed for shared-instrument transfers (e.g. CBTC); for utility tokens the
+    // factory lives in the dec party's own ACS and no extra disclosure is needed.
+    let transfer = transfer_record_from_proposal(&create_args)?;
+    let instrument_admin: CantonId = transfer
+        .instrument_id
+        .admin
+        .parse()
+        .context("TransferProposal transfer.instrumentId.admin is not a valid party id")?;
+    if &instrument_admin == party_id {
+        return Ok(None);
+    }
+    let sender: CantonId = transfer
+        .sender
+        .parse()
+        .context("TransferProposal transfer.sender is not a valid party id")?;
+    let receiver: CantonId = transfer
+        .receiver
+        .parse()
+        .context("TransferProposal transfer.receiver is not a valid party id")?;
+    let resolved = fetch_factory_for_propose(
         config.canton.network,
-        party_id,
-        &transfer_instruction_cid,
+        &sender,
+        &receiver,
+        &transfer.amount,
+        &instrument_admin,
+        &transfer.instrument_id.id,
+        transfer.input_holding_cids.as_deref().unwrap_or(&[]),
     )
     .await?;
 
-    Ok(Some(ctx))
+    Ok(Some(AcceptTransferContext {
+        context: resolved.context,
+        disclosed_contracts: resolved.disclosed_contracts,
+    }))
+}
+
+/// Pull the `transfer` record out of a `TransferProposal` create_arguments and
+/// reshape it into the canton-lib `Transfer` struct used by the registry call.
+fn transfer_record_from_proposal(record: &Record) -> Result<Transfer> {
+    let transfer_value = record
+        .fields
+        .iter()
+        .find(|f| f.label == "transfer")
+        .and_then(|f| f.value.as_ref())
+        .context("TransferProposal missing transfer field")?;
+    let transfer_record = match &transfer_value.sum {
+        Some(value::Sum::Record(r)) => r,
+        _ => anyhow::bail!("TransferProposal transfer field is not a record"),
+    };
+    let sender = field_party_str(transfer_record, "sender")?;
+    let receiver = field_party_str(transfer_record, "receiver")?;
+    let amount = DamlDecimal::parse(&field_numeric_str(transfer_record, "amount")?)
+        .context("TransferProposal transfer.amount is not a valid Daml decimal")?;
+    let instrument_record = transfer_record
+        .fields
+        .iter()
+        .find(|f| f.label == "instrumentId")
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Record(r)) => Some(r),
+            _ => None,
+        })
+        .context("transfer record missing instrumentId")?;
+    let admin = field_party_str(instrument_record, "admin")?;
+    let id = field_text_str(instrument_record, "id")?;
+    let input_holding_cids = transfer_record
+        .fields
+        .iter()
+        .find(|f| f.label == "inputHoldingCids")
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::List(l)) => Some(
+                l.elements
+                    .iter()
+                    .filter_map(|el| match &el.sum {
+                        Some(value::Sum::ContractId(cid)) => Some(cid.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        });
+    let now = Utc::now();
+    Ok(Transfer {
+        sender,
+        receiver,
+        amount,
+        instrument_id: InstrumentId { admin, id },
+        requested_at: now.to_rfc3339(),
+        execute_before: (now + Duration::hours(24)).to_rfc3339(),
+        input_holding_cids,
+        meta: Some(Meta { values: None }),
+    })
+}
+
+fn field_party_str(record: &Record, label: &str) -> Result<String> {
+    record
+        .fields
+        .iter()
+        .find(|f| f.label == label)
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Party(p)) => Some(p.clone()),
+            _ => None,
+        })
+        .with_context(|| format!("missing party field {label}"))
+}
+
+fn field_text_str(record: &Record, label: &str) -> Result<String> {
+    record
+        .fields
+        .iter()
+        .find(|f| f.label == label)
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Text(t)) => Some(t.clone()),
+            _ => None,
+        })
+        .with_context(|| format!("missing text field {label}"))
+}
+
+fn field_numeric_str(record: &Record, label: &str) -> Result<String> {
+    record
+        .fields
+        .iter()
+        .find(|f| f.label == label)
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Numeric(n)) => Some(n.clone()),
+            _ => None,
+        })
+        .with_context(|| format!("missing numeric field {label}"))
 }
 
 /// Translate the registry's JSON `DisclosedContract` view into the Ledger
