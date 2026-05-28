@@ -1,4 +1,5 @@
 pub mod client;
+pub mod probe_sig;
 pub mod server;
 
 #[cfg(unix)]
@@ -390,7 +391,7 @@ impl NoiseSecretKey {
         Ok(Self(Zeroizing::new(bytes)))
     }
 
-    fn to_secp_secret_key(&self) -> SecretKey {
+    pub(crate) fn to_secp_secret_key(&self) -> SecretKey {
         // Bytes were validated on construction; reconstruction is infallible.
         SecretKey::from_slice(&self.0[..])
             .expect("NoiseSecretKey bytes were validated on construction")
@@ -520,6 +521,12 @@ impl NoiseKeypair {
     pub fn derive_psk(&self, peer_public_key: &PublicKey) -> Zeroizing<[u8; 32]> {
         let secp_sk = self.secret_key.to_secp_secret_key();
         Zeroizing::new(SharedSecret::new(peer_public_key, &secp_sk).secret_bytes())
+    }
+
+    /// Internal: expose the secret key for in-crate signing modules.
+    /// Crate-private to keep the secret material from leaking.
+    pub(crate) fn secret_key_ref(&self) -> &NoiseSecretKey {
+        &self.secret_key
     }
 }
 
