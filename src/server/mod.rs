@@ -21,6 +21,7 @@ use std::{
 
 use actix_cors::Cors;
 use actix_web::{App, HttpServer, web};
+use anyhow::Context;
 use canton_proto_rs::com::digitalasset::canton::{
     admin::participant::v30::{ListPackagesRequest, package_service_client::PackageServiceClient},
     crypto::{
@@ -119,6 +120,15 @@ pub struct AppState {
     /// startup so its connection pool / keep-alives are reused across
     /// requests instead of paying TCP+TLS setup on every call.
     pub http_client: reqwest::Client,
+    /// Cached HTTP base URL this node publishes to peers. Computed once
+    /// at startup from `NodeInfo::http_advertised_url(http_port)`.
+    pub http_advertised_url: String,
+
+    /// Cached secp256k1 keypair for this node. Loaded once at startup so
+    /// the per-request probe verification path doesn't repeat file I/O +
+    /// chmod checks. Wrapped in Arc so it can be cheaply cloned into
+    /// spawned tasks.
+    pub noise_keypair: Arc<NoiseKeypair>,
 }
 
 // The previous `ListenerControl` struct collapsed to a single `Arc<AtomicBool>`
@@ -1009,6 +1019,15 @@ pub async fn start_server(
     }
     let pending_invitations = Arc::new(RwLock::new(persisted_invitations));
 
+    let http_advertised_url = config.node.http_advertised_url(port);
+    tracing::info!("HTTP advertised URL for cancel-probe: {http_advertised_url}");
+
+    let noise_keypair = Arc::new(
+        NoiseKeypair::from_file(&config.key_file_path())
+            .await
+            .context("load coordinator keypair for probe verification")?,
+    );
+
     let app_state = web::Data::new(AppState {
         db: db.clone(),
         config: config.clone(),
@@ -1032,6 +1051,8 @@ pub async fn start_server(
         test_mode,
         refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
         http_client,
+        http_advertised_url,
+        noise_keypair,
     });
     let kick_state = web::Data::new(Arc::new(handlers::KickWorkflowState::new()));
     let onboarding_state = web::Data::new(Arc::new(handlers::OnboardingWorkflowState::new()));

@@ -340,6 +340,7 @@ pub async fn start_kick(
     let listener_notify = data.noise_listener_notify.clone();
     let last_seen = data.last_seen.clone();
     let instance_for_task = instance_name.clone();
+    let http_advertised_url = data.http_advertised_url.clone();
 
     // See start_dars below for the rationale: abort_handle, status, and error
     // are flipped under simultaneously-held locks so a concurrent /kick/cancel
@@ -353,7 +354,8 @@ pub async fn start_kick(
         let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
 
         // Send kick invites to all peers before starting coordinator workflow
-        let invite_result = send_kick_invites(&config, &db, &participant_id).await;
+        let invite_result =
+            send_kick_invites(&config, &db, &participant_id, &http_advertised_url).await;
         if let Err(e) = invite_result {
             tracing::error!("Failed to send kick invites: {e}");
             guard.resume().await;
@@ -448,12 +450,18 @@ async fn send_kick_invites(
     config: &NodeConfig,
     db: &SqlitePool,
     kicked_participant: &CantonId,
+    coordinator_http_url: &str,
 ) -> Result {
+    use crate::server::types::KickInvitePayload;
     let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
 
     let current_participant_id = config.participant_id();
-    let invite_message = Message::new_empty(MessageType::InviteKick);
+    let payload = KickInvitePayload {
+        coordinator_http_url: Some(coordinator_http_url.to_string()),
+    };
+    let payload_bytes = serde_json::to_vec(&payload)?;
+    let invite_message = Message::new(MessageType::InviteKick, payload_bytes);
 
     tracing::info!(
         "Kick invites: self={}, kicked={}",
@@ -677,6 +685,7 @@ pub async fn start_onboarding(
     let auth_lock = data.auth.clone();
     let last_seen = data.last_seen.clone();
     let instance_for_task = instance_name.clone();
+    let http_advertised_url = data.http_advertised_url.clone();
 
     // See start_dars below for the rationale: abort_handle, status, and error
     // are flipped under simultaneously-held locks so a concurrent
@@ -691,8 +700,14 @@ pub async fn start_onboarding(
         let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
 
         // Send invites to selected peers before starting coordinator workflow
-        let invite_result =
-            send_onboarding_invites(&config, &db, &peer_ids, &party_id_prefix).await;
+        let invite_result = send_onboarding_invites(
+            &config,
+            &db,
+            &peer_ids,
+            &party_id_prefix,
+            &http_advertised_url,
+        )
+        .await;
         if let Err(e) = invite_result {
             tracing::error!("Failed to send onboarding invites: {e}");
             guard.resume().await;
@@ -839,6 +854,7 @@ async fn send_onboarding_invites(
     db: &SqlitePool,
     peer_ids: &[CantonId],
     party_id_prefix: &str,
+    coordinator_http_url: &str,
 ) -> Result {
     let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
@@ -846,7 +862,7 @@ async fn send_onboarding_invites(
     let payload = OnboardingInvitePayload {
         prefix: party_id_prefix.to_string(),
         participants: peer_ids.to_vec(),
-        coordinator_http_url: None,
+        coordinator_http_url: Some(coordinator_http_url.to_string()),
     };
     let payload_bytes = serde_json::to_vec(&payload)?;
     let invite_message = Message::new(MessageType::InviteOnboarding, payload_bytes);
@@ -1172,6 +1188,7 @@ pub async fn start_contracts(
     let last_seen = data.last_seen.clone();
     *contracts_state.invited_peers.write().await = contracts_invitees;
     let instance_for_task = instance_name_for_run.clone();
+    let http_advertised_url = data.http_advertised_url.clone();
 
     // See start_dars below for the rationale: abort_handle, status, and error
     // are flipped under simultaneously-held locks so a concurrent
@@ -1186,7 +1203,7 @@ pub async fn start_contracts(
         let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
 
         // Send invites to all peers before starting coordinator workflow
-        let invite_result = send_contracts_invites(&config, &db).await;
+        let invite_result = send_contracts_invites(&config, &db, &http_advertised_url).await;
         if let Err(e) = invite_result {
             tracing::error!("Failed to send contracts invites: {e}");
             guard.resume().await;
@@ -1435,6 +1452,7 @@ pub async fn start_dars(
     let peer_ids = body.peer_ids.clone();
     *dars_state.invited_peers.write().await = peer_ids.clone();
     let instance_for_task = instance_name.clone();
+    let http_advertised_url = data.http_advertised_url.clone();
 
     // Acquire abort_handle, status, and error locks BEFORE spawning, then
     // flip all three together. Held simultaneously around the spawn so a
@@ -1463,7 +1481,14 @@ pub async fn start_dars(
             .iter()
             .map(|f| f.filename.clone())
             .collect();
-        let invite_result = send_dars_invites(&config, &db, &peer_ids, &dar_filenames).await;
+        let invite_result = send_dars_invites(
+            &config,
+            &db,
+            &peer_ids,
+            &dar_filenames,
+            &http_advertised_url,
+        )
+        .await;
         if let Err(e) = invite_result {
             tracing::error!("Failed to send DARs invites: {e}");
             guard.resume().await;
@@ -1559,13 +1584,14 @@ async fn send_dars_invites(
     db: &SqlitePool,
     peer_ids: &[CantonId],
     dar_filenames: &[String],
+    coordinator_http_url: &str,
 ) -> Result {
     let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
 
     let payload = DarsInvitePayload {
         dar_filenames: dar_filenames.to_vec(),
-        coordinator_http_url: None,
+        coordinator_http_url: Some(coordinator_http_url.to_string()),
     };
     let payload_bytes = serde_json::to_vec(&payload)?;
     let invite_message = Message::new(MessageType::InviteDars, payload_bytes);
@@ -2122,12 +2148,21 @@ async fn broadcast_simple_message(
 }
 
 /// Send contracts invites to all peers using Noise protocol
-async fn send_contracts_invites(config: &NodeConfig, db: &SqlitePool) -> Result {
+async fn send_contracts_invites(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    coordinator_http_url: &str,
+) -> Result {
+    use crate::server::types::ContractsInvitePayload;
     let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
 
     let current_participant_id = config.participant_id();
-    let invite_message = Message::new_empty(MessageType::InviteContracts);
+    let payload = ContractsInvitePayload {
+        coordinator_http_url: Some(coordinator_http_url.to_string()),
+    };
+    let payload_bytes = serde_json::to_vec(&payload)?;
+    let invite_message = Message::new(MessageType::InviteContracts, payload_bytes);
 
     for peer in &network_config.peers {
         if peer.participant_id == *current_participant_id {
