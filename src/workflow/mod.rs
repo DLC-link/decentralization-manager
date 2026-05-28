@@ -22,12 +22,14 @@ use sqlx::SqlitePool;
 use crate::{
     auth::WorkflowAuth,
     config::{NetworkConfig, NodeConfig, Peer},
-    consts::MAX_CONSECUTIVE_STEP_FAILURES,
+    consts::{EXTENDED_TOLERANCE_BUDGET, MAX_CONSECUTIVE_STEP_FAILURES},
     db::schema::{Commitable, SchemaRead, SchemaWrite},
     error::Result,
-    noise::{MessageType, client::NoiseClient, server::NoiseServer},
+    noise::{
+        MessageType, NoiseKeypair, client::NoiseClient, parse_public_key, server::NoiseServer,
+    },
     participant_id::CantonId,
-    server::{WorkflowKind, peer_status::LastSeen},
+    server::{WorkflowKind, WorkflowProgress, peer_status::LastSeen},
     utils,
     workflow::{
         state::WorkflowStep,
@@ -247,6 +249,8 @@ pub async fn start_peer(
         coordinator.participant_id
     );
 
+    // Save before coordinator is moved into NoiseClient::new.
+    let coord_pub_key_str = coordinator.public_key.clone();
     let client = NoiseClient::new(node_config.clone(), coordinator).await?;
 
     tracing::info!("Noise client initialized, entering command polling loop");
@@ -269,36 +273,115 @@ pub async fn start_peer(
     };
 
     // Command polling loop
-    let mut consecutive_errors = 0;
+    let mut consecutive_errors = 0; // legacy 3-strike fallback for NULL-URL rows
+    let mut budget = coordinator_probe::BudgetTracker::new(EXTENDED_TOLERANCE_BUDGET);
+    // Keypair is loaded once per `start_peer` invocation (not per loop iteration).
+    // `NoiseClient::new` also loads it internally, so this is duplicate one-shot
+    // I/O — accepted because (a) it's once per workflow, (b) extracting an
+    // accessor through NoiseClient would be a larger refactor touching every
+    // call site. Revisit if a future probe ever needs to run on a hot path.
+    let keypair = NoiseKeypair::from_file(&node_config.key_file_path()).await?;
+    let coord_pub = parse_public_key(&coord_pub_key_str)?;
+    // Read the URL once at start of this `start_peer` invocation and hold for the
+    // workflow's lifetime — the row's `coordinator_http_url` is only ever populated
+    // at invite-accept time (see Task 9's `build_peer_run_row`), never updated in
+    // place, so a one-shot read is correct and avoids a per-iteration DB roundtrip.
+    let coordinator_http_url: Option<String> = match db.get_workflow_run(&instance_name).await {
+        Ok(Some(r)) => r.coordinator_http_url,
+        _ => None,
+    };
     let mut consecutive_step_failures = 0;
     loop {
         // Poll coordinator for next command (with payload for commands that need data)
         let message = match client.get_next_command_with_payload().await {
             Ok(msg) => {
                 consecutive_errors = 0; // Reset error count on success
+                budget.reset();
                 msg
             }
             Err(e) => {
-                consecutive_errors += 1;
+                tracing::warn!("get_next_command failed: {e}");
 
-                // Per-attempt failures are WARN, not ERROR — the loop's design
-                // is to tolerate transient blips (e.g. coordinator restarting
-                // briefly during peer-config reload). Only the final-strike
-                // bail is logged at ERROR. This keeps test logs readable when
-                // a known restart cycle produces one or two retries that
-                // succeed on the next attempt.
-                tracing::warn!("Attempt {consecutive_errors}/3: failed to get next command: {e}");
-
-                // If we get multiple connection refused errors in a row,
-                // the coordinator has likely shut down or there's a persistent error
-                if consecutive_errors >= 3 {
-                    tracing::error!(
-                        "Failed to communicate with coordinator after 3 attempts. Aborting."
+                // If we don't have a workflow kind (the row-lookup at start_peer
+                // entry failed) we cannot construct a meaningful probe URL/payload —
+                // take the legacy 3-strike fallback for this attempt.
+                let Some(kind) = peer_kind else {
+                    consecutive_errors += 1;
+                    tracing::warn!(
+                        "Attempt {consecutive_errors}/3: legacy fallback (kind unknown)"
                     );
-                    anyhow::bail!("Peer failed: persistent communication errors with coordinator");
-                }
+                    if consecutive_errors >= 3 {
+                        anyhow::bail!("Peer failed: persistent comm errors (kind unknown)");
+                    }
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    continue;
+                };
 
-                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                let probe_result = coordinator_probe::probe_coordinator_state(
+                    coordinator_http_url.as_deref(),
+                    &keypair,
+                    &coord_pub,
+                    kind,
+                )
+                .await;
+
+                match coordinator_probe::decide_action(probe_result, &mut budget) {
+                    coordinator_probe::PeerAction::BailCancelled => {
+                        tracing::info!("Probe says Cancelled; bailing run {instance_name}");
+                        mark_peer_run_cancelled(&db, &instance_name).await;
+                        anyhow::bail!("Peer cancelled by coordinator");
+                    }
+                    coordinator_probe::PeerAction::Tolerate => {
+                        tracing::info!("Probe says InProgress; tolerating noise failure");
+                    }
+                    coordinator_probe::PeerAction::BailFailedCompletedWithoutMe => {
+                        mark_peer_run_failed(
+                            &db,
+                            &instance_name,
+                            "coordinator completed without my participation; investigate",
+                        )
+                        .await;
+                        anyhow::bail!("Coordinator reached Completed without this peer");
+                    }
+                    coordinator_probe::PeerAction::BailFailedFromCoordinator(err) => {
+                        let msg = err.unwrap_or_else(|| "coordinator reported Failed".into());
+                        mark_peer_run_failed(&db, &instance_name, &msg).await;
+                        anyhow::bail!("Coordinator run Failed: {msg}");
+                    }
+                    coordinator_probe::PeerAction::BailFailedNotFound => {
+                        mark_peer_run_failed(
+                            &db,
+                            &instance_name,
+                            "coordinator has no record of this run",
+                        )
+                        .await;
+                        anyhow::bail!("Coordinator has no record of this run");
+                    }
+                    coordinator_probe::PeerAction::BudgetState(
+                        coordinator_probe::BudgetState::Expired,
+                    ) => {
+                        mark_peer_run_failed(
+                            &db,
+                            &instance_name,
+                            "coordinator unreachable (Noise + HTTP) past budget",
+                        )
+                        .await;
+                        anyhow::bail!("Peer failed: coordinator unreachable past 180s budget");
+                    }
+                    coordinator_probe::PeerAction::BudgetState(
+                        coordinator_probe::BudgetState::Tolerate,
+                    ) => {
+                        tracing::warn!("Probe failed; budget tracking on");
+                    }
+                    coordinator_probe::PeerAction::LegacyFallback => {
+                        consecutive_errors += 1;
+                        tracing::warn!("Attempt {consecutive_errors}/3: legacy fallback (no URL)");
+                        if consecutive_errors >= 3 {
+                            anyhow::bail!("Peer failed: persistent comm errors (legacy fallback)");
+                        }
+                    }
+                }
+                tokio::time::sleep(Duration::from_secs(5)).await;
                 continue;
             }
         };
@@ -735,6 +818,34 @@ async fn persist_peer_step(
 /// used. The byte-for-byte payload of each submission is preserved so the
 /// peer's sign step decodes them identically to what the coordinator
 /// produced.
+async fn mark_peer_run_cancelled(db: &SqlitePool, instance_name: &str) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    if let Ok(mut tx) = db.begin_transaction().await
+        && let Ok(()) = tx
+            .set_workflow_run_status(instance_name, WorkflowProgress::Cancelled, None, now)
+            .await
+    {
+        let _ = Commitable::commit(tx).await;
+    }
+}
+
+async fn mark_peer_run_failed(db: &SqlitePool, instance_name: &str, msg: &str) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    if let Ok(mut tx) = db.begin_transaction().await
+        && let Ok(()) = tx
+            .set_workflow_run_status(instance_name, WorkflowProgress::Failed, Some(msg), now)
+            .await
+    {
+        let _ = Commitable::commit(tx).await;
+    }
+}
+
 async fn save_prepared_submissions_from_payload(
     payload: &[u8],
     db: &SqlitePool,

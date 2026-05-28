@@ -177,3 +177,122 @@ mod tests {
         assert_eq!(t.record_failure(), BudgetState::Tolerate);
     }
 }
+
+/// Action the peer command-poll should take on Noise failure, given the
+/// probe outcome and the current budget state. Pure — no I/O, no DB writes.
+#[derive(Debug, PartialEq)]
+pub enum PeerAction {
+    BailCancelled,
+    Tolerate,
+    BailFailedCompletedWithoutMe,
+    BailFailedFromCoordinator(Option<String>),
+    BailFailedNotFound,
+    BudgetState(BudgetState),
+    LegacyFallback,
+}
+
+pub fn decide_action(
+    probe: std::result::Result<CoordinatorState, ProbeError>,
+    budget: &mut BudgetTracker,
+) -> PeerAction {
+    match probe {
+        Ok(CoordinatorState::Cancelled) => PeerAction::BailCancelled,
+        Ok(CoordinatorState::InProgress) => {
+            budget.reset();
+            PeerAction::Tolerate
+        }
+        Ok(CoordinatorState::Completed) => PeerAction::BailFailedCompletedWithoutMe,
+        Ok(CoordinatorState::Failed { error }) => PeerAction::BailFailedFromCoordinator(error),
+        Err(ProbeError::NotFound) => PeerAction::BailFailedNotFound,
+        Err(ProbeError::NoUrl) => PeerAction::LegacyFallback,
+        Err(_) => PeerAction::BudgetState(budget.record_failure()),
+    }
+}
+
+#[cfg(test)]
+mod decide_action_tests {
+    use super::*;
+
+    fn fresh() -> BudgetTracker {
+        BudgetTracker::new(Duration::from_secs(180))
+    }
+
+    #[test]
+    fn cancelled_bails() {
+        let mut b = fresh();
+        assert_eq!(
+            decide_action(Ok(CoordinatorState::Cancelled), &mut b),
+            PeerAction::BailCancelled
+        );
+    }
+
+    #[test]
+    fn in_progress_resets_budget() {
+        let mut b = BudgetTracker::new(Duration::from_micros(1));
+        let _ = b.record_failure();
+        std::thread::sleep(Duration::from_millis(2));
+        assert_eq!(
+            decide_action(Ok(CoordinatorState::InProgress), &mut b),
+            PeerAction::Tolerate
+        );
+        assert_eq!(
+            decide_action(Err(ProbeError::Transport("x".into())), &mut b),
+            PeerAction::BudgetState(BudgetState::Tolerate)
+        );
+    }
+
+    #[test]
+    fn completed_bails_failed() {
+        let mut b = fresh();
+        assert_eq!(
+            decide_action(Ok(CoordinatorState::Completed), &mut b),
+            PeerAction::BailFailedCompletedWithoutMe
+        );
+    }
+
+    #[test]
+    fn coord_failed_propagates() {
+        let mut b = fresh();
+        assert_eq!(
+            decide_action(
+                Ok(CoordinatorState::Failed {
+                    error: Some("x".into())
+                }),
+                &mut b
+            ),
+            PeerAction::BailFailedFromCoordinator(Some("x".into()))
+        );
+    }
+
+    #[test]
+    fn not_found_bails_failed() {
+        let mut b = fresh();
+        assert_eq!(
+            decide_action(Err(ProbeError::NotFound), &mut b),
+            PeerAction::BailFailedNotFound
+        );
+    }
+
+    #[test]
+    fn no_url_triggers_legacy_fallback() {
+        let mut b = fresh();
+        assert_eq!(
+            decide_action(Err(ProbeError::NoUrl), &mut b),
+            PeerAction::LegacyFallback
+        );
+    }
+
+    #[test]
+    fn transport_accrues_then_expires() {
+        let mut b = BudgetTracker::new(Duration::from_micros(1));
+        assert_eq!(
+            decide_action(Err(ProbeError::Transport("net".into())), &mut b),
+            PeerAction::BudgetState(BudgetState::Tolerate)
+        );
+        std::thread::sleep(Duration::from_millis(2));
+        assert_eq!(
+            decide_action(Err(ProbeError::Transport("net".into())), &mut b),
+            PeerAction::BudgetState(BudgetState::Expired)
+        );
+    }
+}
