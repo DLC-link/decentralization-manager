@@ -249,6 +249,10 @@ impl PendingInvitationRow {
             prefix: self.prefix,
             participants,
             dar_filenames,
+            // coordinator_http_url is not persisted to the pending_invitations
+            // table; it is held in-memory from the Noise invite message and
+            // flows directly into the workflow_runs row on accept.
+            coordinator_http_url: None,
         })
     }
 }
