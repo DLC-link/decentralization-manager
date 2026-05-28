@@ -542,6 +542,9 @@ pub struct WorkflowRun {
     pub previous_threshold: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new_threshold: Option<i32>,
+    /// Kick runs only: the participant being kicked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kicked_participant: Option<CantonId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub dismissed: bool,
@@ -634,6 +637,16 @@ pub struct DarsInvitePayload {
     pub dar_filenames: Vec<String>,
 }
 
+/// Payload sent inside an `InviteKick` Noise message — gives the peer enough
+/// context to show "kicking X, threshold a→b" before the kick proposals
+/// arrive later in the workflow.
+#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct KickInvitePayload {
+    pub kicked_participant: CantonId,
+    pub new_threshold: i32,
+    pub previous_threshold: i32,
+}
+
 /// A pending invitation from a coordinator
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct PendingInvitation {
@@ -651,6 +664,15 @@ pub struct PendingInvitation {
     /// Dars-only: filenames the coordinator is distributing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dar_filenames: Vec<String>,
+    /// Kick-only: the participant being removed from the party.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kicked_participant: Option<CantonId>,
+    /// Kick-only: threshold after the kick.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_threshold: Option<i32>,
+    /// Kick-only: threshold before the kick.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_threshold: Option<i32>,
 }
 
 /// Response for pending invitations endpoint
@@ -1918,6 +1940,7 @@ mod tests {
             participants: Vec::new(),
             previous_threshold: None,
             new_threshold: None,
+            kicked_participant: None,
             error: None,
             dismissed: false,
             created_at: 1_700_000_000,

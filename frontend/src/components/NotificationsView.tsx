@@ -162,6 +162,9 @@ const InvitationCard = ({
   const showDarsMeta =
     invitation.invitation_type === "Dars" &&
     (invitation.dar_filenames?.length ?? 0) > 0;
+  const showKickMeta =
+    invitation.invitation_type === "Kick" &&
+    (!!invitation.kicked_participant || invitation.new_threshold != null);
 
   return (
     <Box
@@ -296,6 +299,81 @@ const InvitationCard = ({
               />
             ))}
           </Box>
+        </Box>
+      )}
+
+      {showKickMeta && (
+        <Box
+          sx={{
+            display: "flex",
+            flexDirection: "column",
+            gap: 0.75,
+            px: 1.25,
+            py: 1,
+            bgcolor: "action.hover",
+            borderRadius: 1,
+          }}
+        >
+          {invitation.kicked_participant && (
+            <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ minWidth: 96 }}
+              >
+                Kicking
+              </Typography>
+              <Typography
+                variant="body2"
+                sx={{ fontWeight: 600, fontFamily: "monospace" }}
+              >
+                {truncatePartyId(invitation.kicked_participant)}
+              </Typography>
+              <Tooltip title="Copy kicked party id">
+                <IconButton
+                  size="small"
+                  onClick={async () => {
+                    const ok = await copyToClipboard(invitation.kicked_participant!);
+                    showSnackbar(ok ? "Copied to clipboard" : "Failed to copy");
+                  }}
+                  sx={{ p: 0.25 }}
+                >
+                  <ContentCopyIcon sx={{ fontSize: 14 }} />
+                </IconButton>
+              </Tooltip>
+            </Box>
+          )}
+          {invitation.new_threshold != null && (
+            <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ minWidth: 96 }}
+              >
+                Threshold
+              </Typography>
+              <Typography variant="body2">
+                {invitation.previous_threshold != null ? (
+                  <>
+                    <Box
+                      component="span"
+                      sx={{ color: "text.secondary", textDecoration: "line-through" }}
+                    >
+                      {invitation.previous_threshold}
+                    </Box>{" "}
+                    →{" "}
+                    <Box component="span" sx={{ fontWeight: 600 }}>
+                      {invitation.new_threshold}
+                    </Box>
+                  </>
+                ) : (
+                  <Box component="span" sx={{ fontWeight: 600 }}>
+                    {invitation.new_threshold}
+                  </Box>
+                )}
+              </Typography>
+            </Box>
+          )}
         </Box>
       )}
 
@@ -1425,6 +1503,7 @@ const WorkflowRunCard = ({
         run.error ||
         run.dec_party_id ||
         run.new_threshold != null ||
+        run.kicked_participant ||
         (run.participants && run.participants.length > 0)) && (
         <Box
           sx={{
@@ -1493,6 +1572,35 @@ const WorkflowRunCard = ({
               >
                 {truncatePartyId(run.dec_party_id)}
               </Typography>
+            </Box>
+          )}
+          {run.kicked_participant && (
+            <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ minWidth: 96 }}
+              >
+                Kicking
+              </Typography>
+              <Typography
+                variant="body2"
+                sx={{ fontWeight: 600, fontFamily: "monospace" }}
+              >
+                {truncatePartyId(run.kicked_participant)}
+              </Typography>
+              <Tooltip title="Copy kicked party id">
+                <IconButton
+                  size="small"
+                  onClick={async () => {
+                    const ok = await copyToClipboard(run.kicked_participant!);
+                    showSnackbar(ok ? "Copied to clipboard" : "Failed to copy");
+                  }}
+                  sx={{ p: 0.25 }}
+                >
+                  <ContentCopyIcon sx={{ fontSize: 14 }} />
+                </IconButton>
+              </Tooltip>
             </Box>
           )}
           {run.participants && run.participants.length > 0 && (

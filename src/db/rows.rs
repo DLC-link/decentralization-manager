@@ -186,6 +186,9 @@ pub struct PendingInvitationRow {
     pub prefix: Option<String>,
     pub participants: Option<String>,
     pub dar_filenames: Option<String>,
+    pub kicked_participant: Option<String>,
+    pub new_threshold: Option<i64>,
+    pub previous_threshold: Option<i64>,
 }
 
 fn encode_list<T: serde::Serialize>(items: &[T], context_label: &str) -> Result<Option<String>> {
@@ -226,6 +229,9 @@ impl PendingInvitationRow {
             prefix: inv.prefix.clone(),
             participants: encode_list(&inv.participants, "pending invitation participants")?,
             dar_filenames: encode_list(&inv.dar_filenames, "pending invitation dar_filenames")?,
+            kicked_participant: inv.kicked_participant.as_ref().map(|p| p.to_string()),
+            new_threshold: inv.new_threshold.map(i64::from),
+            previous_threshold: inv.previous_threshold.map(i64::from),
         })
     }
 
@@ -240,6 +246,11 @@ impl PendingInvitationRow {
             .with_context(|| format!("invalid invitation_type for id {}", self.id))?;
         let participants = decode_list(self.participants, &self.id, "participants")?;
         let dar_filenames = decode_list(self.dar_filenames, &self.id, "dar_filenames")?;
+        let kicked_participant = self
+            .kicked_participant
+            .map(|s| CantonId::parse(&s))
+            .transpose()
+            .with_context(|| format!("invalid kicked_participant for id {}", self.id))?;
         Ok(PendingInvitation {
             id: self.id,
             invitation_type,
@@ -249,6 +260,9 @@ impl PendingInvitationRow {
             prefix: self.prefix,
             participants,
             dar_filenames,
+            kicked_participant,
+            new_threshold: self.new_threshold.map(|v| v as i32),
+            previous_threshold: self.previous_threshold.map(|v| v as i32),
         })
     }
 }
@@ -385,6 +399,7 @@ impl WorkflowRunRow {
             participants: Vec::new(),
             previous_threshold: None,
             new_threshold: None,
+            kicked_participant: None,
             error: self.error,
             dismissed: self.dismissed != 0,
             created_at: self.created_at,

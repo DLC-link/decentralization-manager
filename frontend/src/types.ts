@@ -251,6 +251,12 @@ export interface PendingInvitation {
   participants?: string[];
   /** Dars-only: filenames the coordinator is distributing. */
   dar_filenames?: string[];
+  /** Kick-only: the participant being removed from the party. */
+  kicked_participant?: string;
+  /** Kick-only: threshold after the kick. */
+  new_threshold?: number;
+  /** Kick-only: threshold before the kick. */
+  previous_threshold?: number;
 }
 
 export interface PendingInvitationsResponse {
@@ -286,6 +292,8 @@ export interface WorkflowRun {
   /** Kick runs only: threshold before/after, for an "old → new" summary. */
   previous_threshold?: number;
   new_threshold?: number;
+  /** Kick runs only: the participant being kicked. */
+  kicked_participant?: string;
   error?: string;
   dismissed: boolean;
   created_at: number;
