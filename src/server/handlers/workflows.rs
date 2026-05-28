@@ -6,6 +6,7 @@ use std::{
 
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 
+use anyhow::Context;
 use sqlx::SqlitePool;
 
 use super::parties::{
@@ -23,11 +24,12 @@ use crate::{
         respawn_coordinator,
         types::{
             ContractsRequest, DarsInvitePayload, DarsRequest, ErrorResponse, HttpWorkflowState,
-            KickRequest, KickResponse, KickStatus, ListenerPauseGuard, MessageResponse,
-            MissingEdgeKind, MissingPeerEdge, OnboardingInvitePayload, OnboardingMeshErrorResponse,
-            OnboardingRequest, OnboardingResponse, OnboardingStatus, SuccessResponse,
-            WorkflowInFlightGuard, WorkflowKind, WorkflowProgress, WorkflowResponse, WorkflowRole,
-            WorkflowRun, WorkflowRunsResponse, WorkflowStatusResponse,
+            KickInvitePayload, KickRequest, KickResponse, KickStatus, ListenerPauseGuard,
+            MessageResponse, MissingEdgeKind, MissingPeerEdge, OnboardingInvitePayload,
+            OnboardingMeshErrorResponse, OnboardingRequest, OnboardingResponse, OnboardingStatus,
+            SuccessResponse, WorkflowInFlightGuard, WorkflowKind, WorkflowProgress,
+            WorkflowResponse, WorkflowRole, WorkflowRun, WorkflowRunsResponse,
+            WorkflowStatusResponse,
         },
     },
     workflow::{self, ContractsStep, DarsStep, KickStep, OnboardingStep, state::WorkflowStep},
@@ -96,6 +98,7 @@ where
         participants: Vec::new(),
         previous_threshold: None,
         new_threshold: None,
+        kicked_participant: None,
         error: None,
         dismissed: false,
         created_at: now,
@@ -357,7 +360,7 @@ pub async fn start_kick(
         let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
 
         // Send kick invites to all peers before starting coordinator workflow
-        let invite_result = send_kick_invites(&config, &db, &participant_id).await;
+        let invite_result = send_kick_invites(&config, &db, &kick_config).await;
         if let Err(e) = invite_result {
             tracing::error!("Failed to send kick invites: {e}");
             guard.resume().await;
@@ -451,13 +454,21 @@ pub async fn get_kick_status(kick_state: web::Data<Arc<KickWorkflowState>>) -> i
 async fn send_kick_invites(
     config: &NodeConfig,
     db: &SqlitePool,
-    kicked_participant: &CantonId,
+    kick_config: &workflow::KickConfig,
 ) -> Result {
     let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
 
     let current_participant_id = config.participant_id();
-    let invite_message = Message::new_empty(MessageType::InviteKick);
+    let kicked_participant = &kick_config.participant_id;
+    let payload = KickInvitePayload {
+        dec_party_id: kick_config.decentralized_party_id.clone(),
+        kicked_participant: kicked_participant.clone(),
+        new_threshold: kick_config.new_threshold,
+        previous_threshold: kick_config.previous_threshold,
+    };
+    let payload_bytes = serde_json::to_vec(&payload).context("encode KickInvitePayload")?;
+    let invite_message = Message::new(MessageType::InviteKick, payload_bytes);
 
     tracing::info!(
         "Kick invites: self={}, kicked={}",
@@ -1878,12 +1889,14 @@ fn enrich_from_config_json(run: &mut WorkflowRun) {
         #[serde(default)]
         party_id_prefix: Option<String>,
         #[serde(default)]
-        participants: Vec<String>,
+        participants: Vec<CantonId>,
         // Kick configs only.
         #[serde(default)]
         new_threshold: Option<i32>,
         #[serde(default)]
         previous_threshold: Option<i32>,
+        #[serde(default)]
+        participant_id: Option<CantonId>,
     }
     if let Ok(shape) = serde_json::from_str::<ConfigShape>(&run.config_json) {
         let prefix = shape.prefix.or(shape.party_id_prefix);
@@ -1893,16 +1906,13 @@ fn enrich_from_config_json(run: &mut WorkflowRun) {
             run.prefix = Some(p);
         }
         if !shape.participants.is_empty() {
-            run.participants = shape
-                .participants
-                .into_iter()
-                .filter_map(|s| CantonId::parse(&s).ok())
-                .collect();
+            run.participants = shape.participants;
         }
         run.new_threshold = shape.new_threshold;
         // Only surface a previous threshold when an older client actually
         // sent one (it defaults to 0); 0 means "unknown", render as new-only.
         run.previous_threshold = shape.previous_threshold.filter(|t| *t > 0);
+        run.kicked_participant = shape.participant_id;
     }
     // Fallback: if config_json didn't expose a participants list (e.g. Kick /
     // Contracts / Dars), surface the run's `expected_peers` instead so the

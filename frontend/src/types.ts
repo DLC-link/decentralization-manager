@@ -251,6 +251,14 @@ export interface PendingInvitation {
   participants?: string[];
   /** Dars-only: filenames the coordinator is distributing. */
   dar_filenames?: string[];
+  /** Kick-only: the participant being removed from the party. */
+  kicked_participant?: string;
+  /** Kick-only: threshold after the kick. */
+  new_threshold?: number;
+  /** Kick-only: threshold before the kick. */
+  previous_threshold?: number;
+  /** Kick-only: the dec party the kick targets. */
+  dec_party_id?: string;
 }
 
 export interface PendingInvitationsResponse {
@@ -286,6 +294,8 @@ export interface WorkflowRun {
   /** Kick runs only: threshold before/after, for an "old → new" summary. */
   previous_threshold?: number;
   new_threshold?: number;
+  /** Kick runs only: the participant being kicked. */
+  kicked_participant?: string;
   error?: string;
   dismissed: boolean;
   created_at: number;
@@ -345,6 +355,8 @@ export interface GovernanceConfirmation {
   confirming_party: string;
   /** Unix seconds when this confirmation contract was created on the ledger. */
   created_at?: number;
+  /** Unix seconds of the confirmation's `expiresAt`. */
+  expires_at?: number;
 }
 
 export interface GovernanceAction {
@@ -372,9 +384,22 @@ export interface DomainGovernanceAction {
    *  notification card can show what's being transferred without an extra
    *  fetch. Present only on Transfer proposals. */
   transfer_details?: TransferProposalDetails;
+  /** Sender / amount / instrument resolved from the TransferInstruction
+   *  referenced by an AcceptTransferProposal so the pending-approval card
+   *  shows who's sending what to whom. Present only on AcceptTransfer
+   *  proposals (and only when the linked instruction was readable). */
+  accept_transfer_details?: AcceptTransferDetails;
 }
 
 export interface TransferProposalDetails {
+  receiver: string;
+  amount: string;
+  instrument_admin: string;
+  instrument_id: string;
+}
+
+export interface AcceptTransferDetails {
+  sender: string;
   receiver: string;
   amount: string;
   instrument_admin: string;
@@ -789,8 +814,18 @@ export interface InstrumentsResponse {
   instruments: InstrumentInfo[];
 }
 
-/** An open `TransferInstruction` awaiting receiver acceptance, surfaced for
- *  the Accept Transfer proposal dropdown. */
+export type TransferInstructionStatus =
+  | "pending_receiver_acceptance"
+  | "pending_internal_workflow";
+
+export interface PendingAction {
+  party: string;
+  action: string;
+}
+
+/** An open `TransferInstruction` whose `receiver` is this party. Includes
+ *  offers blocked on an internal workflow so the dropdown can show them
+ *  disabled with the "Pending: <party> — <action>" reason. */
 export interface TransferInstructionInfo {
   contract_id: string;
   sender: string;
@@ -798,6 +833,10 @@ export interface TransferInstructionInfo {
   amount: string;
   instrument_admin: string;
   instrument_id: string;
+  status: TransferInstructionStatus;
+  pending_actions?: PendingAction[];
+  /** Unix seconds of the offer's `executeBefore` deadline. */
+  expires_at?: number;
 }
 
 export interface TransferInstructionsResponse {

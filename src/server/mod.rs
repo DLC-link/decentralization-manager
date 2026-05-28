@@ -158,6 +158,7 @@ enum InvitationMeta {
     None,
     Onboarding(OnboardingInvitePayload),
     Dars(DarsInvitePayload),
+    Kick(KickInvitePayload),
 }
 
 /// On boot, re-spawn any InProgress workflow runs that were interrupted by the
@@ -684,6 +685,10 @@ impl WorkflowTriggers {
         let mut prefix = None;
         let mut participants = Vec::new();
         let mut dar_filenames = Vec::new();
+        let mut kicked_participant = None;
+        let mut new_threshold = None;
+        let mut previous_threshold = None;
+        let mut dec_party_id = None;
         match meta {
             InvitationMeta::None => {}
             InvitationMeta::Onboarding(p) => {
@@ -692,6 +697,12 @@ impl WorkflowTriggers {
             }
             InvitationMeta::Dars(p) => {
                 dar_filenames = p.dar_filenames;
+            }
+            InvitationMeta::Kick(p) => {
+                kicked_participant = Some(p.kicked_participant);
+                new_threshold = Some(p.new_threshold);
+                previous_threshold = Some(p.previous_threshold);
+                dec_party_id = Some(p.dec_party_id);
             }
         }
         let invitation = PendingInvitation {
@@ -710,6 +721,10 @@ impl WorkflowTriggers {
             prefix,
             participants,
             dar_filenames,
+            kicked_participant,
+            new_threshold,
+            previous_threshold,
+            dec_party_id,
         };
 
         match self.db.begin_transaction().await {
@@ -1826,6 +1841,19 @@ async fn handle_incoming_connection(
                                             Err(e) => {
                                                 tracing::warn!(
                                                     "Dars invite payload was unparseable: {e}"
+                                                );
+                                                InvitationMeta::None
+                                            }
+                                        }
+                                    }
+                                    InvitationType::Kick => {
+                                        match serde_json::from_slice::<KickInvitePayload>(
+                                            &msg.payload,
+                                        ) {
+                                            Ok(p) => InvitationMeta::Kick(p),
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    "Kick invite payload was unparseable: {e}"
                                                 );
                                                 InvitationMeta::None
                                             }

@@ -78,6 +78,9 @@ async fn insert_peer_run(
             "prefix": invitation.prefix,
             "participants": invitation.participants,
             "dar_filenames": invitation.dar_filenames,
+            "participant_id": invitation.kicked_participant,
+            "new_threshold": invitation.new_threshold,
+            "previous_threshold": invitation.previous_threshold,
         })
         .to_string(),
         coordinator_pubkey: Some(invitation.coordinator_pubkey.clone()),
@@ -86,11 +89,13 @@ async fn insert_peer_run(
         // set. For other kinds we don't get a list from the invite.
         expected_peers: invitation.participants.clone(),
         completed_peers: Vec::new(),
-        dec_party_id: None,
+        // Kick invites carry the target dec party; other invite kinds don't.
+        dec_party_id: invitation.dec_party_id.clone(),
         prefix: None,
         participants: Vec::new(),
         previous_threshold: None,
         new_threshold: None,
+        kicked_participant: None,
         error: None,
         dismissed: false,
         created_at: now,

@@ -115,9 +115,11 @@ const truncatePartyId = (id: string): string => {
 const InvitationCard = ({
   invitation,
   onAfter,
+  onSelectParty,
 }: {
   invitation: PendingInvitation;
   onAfter: () => void;
+  onSelectParty: (partyId: string) => void;
 }) => {
   const [busy, setBusy] = useState(false);
   const { showSnackbar } = useSnackbar();
@@ -162,6 +164,11 @@ const InvitationCard = ({
   const showDarsMeta =
     invitation.invitation_type === "Dars" &&
     (invitation.dar_filenames?.length ?? 0) > 0;
+  const showKickMeta =
+    invitation.invitation_type === "Kick" &&
+    (!!invitation.kicked_participant ||
+      invitation.new_threshold != null ||
+      !!invitation.dec_party_id);
 
   return (
     <Box
@@ -296,6 +303,105 @@ const InvitationCard = ({
               />
             ))}
           </Box>
+        </Box>
+      )}
+
+      {showKickMeta && (
+        <Box
+          sx={{
+            display: "flex",
+            flexDirection: "column",
+            gap: 0.75,
+            px: 1.25,
+            py: 1,
+            bgcolor: "action.hover",
+            borderRadius: 1,
+          }}
+        >
+          {invitation.dec_party_id && (
+            <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ minWidth: 96 }}
+              >
+                Dec party
+              </Typography>
+              <Typography
+                component="span"
+                variant="caption"
+                onClick={() => onSelectParty(invitation.dec_party_id!)}
+                sx={{
+                  fontFamily: "monospace",
+                  color: "primary.main",
+                  cursor: "pointer",
+                  "&:hover": { textDecoration: "underline" },
+                }}
+              >
+                {truncatePartyId(invitation.dec_party_id)}
+              </Typography>
+            </Box>
+          )}
+          {invitation.kicked_participant && (
+            <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ minWidth: 96 }}
+              >
+                Kicking
+              </Typography>
+              <Typography
+                variant="body2"
+                sx={{ fontWeight: 600, fontFamily: "monospace" }}
+              >
+                {truncatePartyId(invitation.kicked_participant)}
+              </Typography>
+              <Tooltip title="Copy kicked party id">
+                <IconButton
+                  size="small"
+                  onClick={async () => {
+                    const ok = await copyToClipboard(invitation.kicked_participant!);
+                    showSnackbar(ok ? "Copied to clipboard" : "Failed to copy");
+                  }}
+                  sx={{ p: 0.25 }}
+                >
+                  <ContentCopyIcon sx={{ fontSize: 14 }} />
+                </IconButton>
+              </Tooltip>
+            </Box>
+          )}
+          {invitation.new_threshold != null && (
+            <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ minWidth: 96 }}
+              >
+                Threshold
+              </Typography>
+              <Typography variant="body2">
+                {invitation.previous_threshold != null ? (
+                  <>
+                    <Box
+                      component="span"
+                      sx={{ color: "text.secondary", textDecoration: "line-through" }}
+                    >
+                      {invitation.previous_threshold}
+                    </Box>{" "}
+                    →{" "}
+                    <Box component="span" sx={{ fontWeight: 600 }}>
+                      {invitation.new_threshold}
+                    </Box>
+                  </>
+                ) : (
+                  <Box component="span" sx={{ fontWeight: 600 }}>
+                    {invitation.new_threshold}
+                  </Box>
+                )}
+              </Typography>
+            </Box>
+          )}
         </Box>
       )}
 
@@ -556,6 +662,7 @@ const ActionCard = ({
           (a, b) => (a.created_at ?? 0) - (b.created_at ?? 0),
         );
         const proposerCid = sorted[0]?.contract_id;
+        const nowSeconds = Math.floor(Date.now() / 1000);
         return (
           <Box
             sx={{
@@ -579,6 +686,8 @@ const ActionCard = ({
               {sorted.map((c) => {
                 const isOwn = c.confirming_party === party.memberPartyId;
                 const isProposer = c.contract_id === proposerCid;
+                const isExpired =
+                  (c.expires_at ?? 0) > 0 && (c.expires_at ?? 0) <= nowSeconds;
                 return (
                   <Box
                     key={c.contract_id}
@@ -588,7 +697,12 @@ const ActionCard = ({
                       variant="caption"
                       sx={{
                         fontFamily: "monospace",
-                        color: isOwn ? "primary.main" : "text.primary",
+                        color: isExpired
+                          ? "text.disabled"
+                          : isOwn
+                            ? "primary.main"
+                            : "text.primary",
+                        textDecoration: isExpired ? "line-through" : "none",
                       }}
                     >
                       {truncatePartyId(c.confirming_party)}
@@ -609,7 +723,23 @@ const ActionCard = ({
                         }}
                       />
                     )}
-                    {!isOwn && (
+                    {isExpired && (
+                      <Chip
+                        label="expired"
+                        size="small"
+                        variant="outlined"
+                        color="warning"
+                        sx={{
+                          height: 18,
+                          "& .MuiChip-label": {
+                            px: 0.75,
+                            fontSize: 10,
+                            lineHeight: 1,
+                          },
+                        }}
+                      />
+                    )}
+                    {!isOwn && !isProposer && isExpired && (
                       <Tooltip title="Expire confirmation">
                         <span>
                           <IconButton
@@ -884,10 +1014,14 @@ const DomainActionCard = ({
         // Proposal dropdown.
         const token =
           td.instrument_id === "Amulet" ? "CC" : td.instrument_id;
-        const rows: { label: string; value: string }[] = [
+        const rows: { label: string; value: string; copyValue?: string }[] = [
           { label: "Token", value: token },
           { label: "Amount", value: td.amount },
-          { label: "Recipient", value: truncatePartyId(td.receiver) },
+          {
+            label: "Recipient",
+            value: truncatePartyId(td.receiver),
+            copyValue: td.receiver,
+          },
         ];
         return (
           <Box
@@ -904,7 +1038,7 @@ const DomainActionCard = ({
             {rows.map((r) => (
               <Box
                 key={r.label}
-                sx={{ display: "flex", alignItems: "baseline", gap: 1 }}
+                sx={{ display: "flex", alignItems: "center", gap: 1 }}
               >
                 <Typography
                   variant="caption"
@@ -916,25 +1050,124 @@ const DomainActionCard = ({
                 <Typography variant="body2" sx={{ fontWeight: 600 }}>
                   {r.value}
                 </Typography>
+                {r.copyValue && (
+                  <Tooltip title={`Copy ${r.label.toLowerCase()}`}>
+                    <IconButton
+                      size="small"
+                      onClick={async () => {
+                        const ok = await copyToClipboard(r.copyValue!);
+                        showSnackbar(
+                          ok ? "Copied to clipboard" : "Failed to copy",
+                        );
+                      }}
+                      sx={{ p: 0.25 }}
+                    >
+                      <ContentCopyIcon sx={{ fontSize: 14 }} />
+                    </IconButton>
+                  </Tooltip>
+                )}
               </Box>
             ))}
           </Box>
         );
       })()}
 
-      <Typography
-        variant="caption"
-        color="text.secondary"
-        sx={{ fontFamily: "monospace" }}
-      >
-        {domainAction.proposal_cid.slice(0, 16)}…
-      </Typography>
+      {domainAction.accept_transfer_details && (() => {
+        const atd = domainAction.accept_transfer_details;
+        // Same Amulet → CC rename as the Transfer card for consistency.
+        const token =
+          atd.instrument_id === "Amulet" ? "CC" : atd.instrument_id;
+        const rows: { label: string; value: string; copyValue?: string }[] = [
+          { label: "Token", value: token },
+          { label: "Amount", value: atd.amount },
+          {
+            label: "Sender",
+            value: truncatePartyId(atd.sender),
+            copyValue: atd.sender,
+          },
+          {
+            label: "Recipient",
+            value: truncatePartyId(atd.receiver),
+            copyValue: atd.receiver,
+          },
+        ];
+        return (
+          <Box
+            sx={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 0.75,
+              px: 1.25,
+              py: 1,
+              bgcolor: "action.hover",
+              borderRadius: 1,
+            }}
+          >
+            {rows.map((r) => (
+              <Box
+                key={r.label}
+                sx={{ display: "flex", alignItems: "center", gap: 1 }}
+              >
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{ minWidth: 96 }}
+                >
+                  {r.label}
+                </Typography>
+                <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                  {r.value}
+                </Typography>
+                {r.copyValue && (
+                  <Tooltip title={`Copy ${r.label.toLowerCase()}`}>
+                    <IconButton
+                      size="small"
+                      onClick={async () => {
+                        const ok = await copyToClipboard(r.copyValue!);
+                        showSnackbar(
+                          ok ? "Copied to clipboard" : "Failed to copy",
+                        );
+                      }}
+                      sx={{ p: 0.25 }}
+                    >
+                      <ContentCopyIcon sx={{ fontSize: 14 }} />
+                    </IconButton>
+                  </Tooltip>
+                )}
+              </Box>
+            ))}
+          </Box>
+        );
+      })()}
+
+      <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
+        <Typography
+          variant="caption"
+          color="text.secondary"
+          sx={{ fontFamily: "monospace" }}
+        >
+          {domainAction.proposal_cid.slice(0, 16)}…
+        </Typography>
+        <Tooltip title="Copy proposal contract id">
+          <IconButton
+            size="small"
+            onClick={async () => {
+              const ok = await copyToClipboard(domainAction.proposal_cid);
+              showSnackbar(ok ? "Copied to clipboard" : "Failed to copy");
+            }}
+            sx={{ p: 0.25 }}
+          >
+            <ContentCopyIcon sx={{ fontSize: 14 }} />
+          </IconButton>
+        </Tooltip>
+      </Box>
 
       {domainAction.confirmations.length > 0 && (() => {
         const sorted = [...domainAction.confirmations].sort(
           (a, b) => (a.created_at ?? 0) - (b.created_at ?? 0),
         );
         const proposerCid = sorted[0]?.contract_id;
+        const nowSeconds = Math.floor(Date.now() / 1000);
         return (
           <Box
             sx={{
@@ -958,6 +1191,8 @@ const DomainActionCard = ({
               {sorted.map((c) => {
                 const isOwn = c.confirming_party === party.memberPartyId;
                 const isProposer = c.contract_id === proposerCid;
+                const isExpired =
+                  (c.expires_at ?? 0) > 0 && (c.expires_at ?? 0) <= nowSeconds;
                 return (
                   <Box
                     key={c.contract_id}
@@ -967,7 +1202,12 @@ const DomainActionCard = ({
                       variant="caption"
                       sx={{
                         fontFamily: "monospace",
-                        color: isOwn ? "primary.main" : "text.primary",
+                        color: isExpired
+                          ? "text.disabled"
+                          : isOwn
+                            ? "primary.main"
+                            : "text.primary",
+                        textDecoration: isExpired ? "line-through" : "none",
                       }}
                     >
                       {truncatePartyId(c.confirming_party)}
@@ -988,7 +1228,23 @@ const DomainActionCard = ({
                         }}
                       />
                     )}
-                    {!isOwn && (
+                    {isExpired && (
+                      <Chip
+                        label="expired"
+                        size="small"
+                        variant="outlined"
+                        color="warning"
+                        sx={{
+                          height: 18,
+                          "& .MuiChip-label": {
+                            px: 0.75,
+                            fontSize: 10,
+                            lineHeight: 1,
+                          },
+                        }}
+                      />
+                    )}
+                    {!isOwn && !isProposer && isExpired && (
                       <Tooltip title="Expire confirmation">
                         <span>
                           <IconButton
@@ -1275,6 +1531,7 @@ const WorkflowRunCard = ({
         run.error ||
         run.dec_party_id ||
         run.new_threshold != null ||
+        run.kicked_participant ||
         (run.participants && run.participants.length > 0)) && (
         <Box
           sx={{
@@ -1343,6 +1600,35 @@ const WorkflowRunCard = ({
               >
                 {truncatePartyId(run.dec_party_id)}
               </Typography>
+            </Box>
+          )}
+          {run.kicked_participant && (
+            <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ minWidth: 96 }}
+              >
+                Kicking
+              </Typography>
+              <Typography
+                variant="body2"
+                sx={{ fontWeight: 600, fontFamily: "monospace" }}
+              >
+                {truncatePartyId(run.kicked_participant)}
+              </Typography>
+              <Tooltip title="Copy kicked party id">
+                <IconButton
+                  size="small"
+                  onClick={async () => {
+                    const ok = await copyToClipboard(run.kicked_participant!);
+                    showSnackbar(ok ? "Copied to clipboard" : "Failed to copy");
+                  }}
+                  sx={{ p: 0.25 }}
+                >
+                  <ContentCopyIcon sx={{ fontSize: 14 }} />
+                </IconButton>
+              </Tooltip>
             </Box>
           )}
           {run.participants && run.participants.length > 0 && (
@@ -1530,6 +1816,7 @@ export const NotificationsView = ({
               key={`inv-${entry.invitation.id}`}
               invitation={entry.invitation}
               onAfter={onInvitationsChanged}
+              onSelectParty={onSelectParty}
             />
           );
         }

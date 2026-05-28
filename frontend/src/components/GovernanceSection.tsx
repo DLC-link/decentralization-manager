@@ -3844,11 +3844,65 @@ export const GovernanceSection = ({
                     const cidTail = option.contract_id.slice(-8);
                     return `${senderName} → ${amount} ${option.instrument_id} (…${cidTail})`;
                   }}
+                  getOptionDisabled={(option) => {
+                    if (typeof option === "string") return false;
+                    if (option.status === "pending_internal_workflow") return true;
+                    const exp = option.expires_at ?? 0;
+                    return exp > 0 && exp <= Math.floor(Date.now() / 1000);
+                  }}
                   isOptionEqualToValue={(option, value) =>
                     typeof value === "string"
                       ? option.contract_id === value
                       : option.contract_id === value.contract_id
                   }
+                  renderOption={(props, option) => {
+                    if (typeof option === "string") {
+                      return <li {...props}>{option}</li>;
+                    }
+                    const senderName = option.sender.split("::")[0];
+                    const amount = option.amount.replace(/\.?0+$/, "");
+                    const cidTail = option.contract_id.slice(-8);
+                    const isBlocked =
+                      option.status === "pending_internal_workflow";
+                    const exp = option.expires_at ?? 0;
+                    const isExpired =
+                      exp > 0 && exp <= Math.floor(Date.now() / 1000);
+                    const pendingSummary = (option.pending_actions ?? [])
+                      .map((p) => {
+                        const partyName = p.party.split("::")[0];
+                        return p.action
+                          ? `${partyName} — ${p.action}`
+                          : partyName;
+                      })
+                      .join(", ");
+                    return (
+                      <li {...props} key={option.contract_id}>
+                        <Box
+                          sx={{
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: 0.25,
+                            opacity: isBlocked || isExpired ? 0.6 : 1,
+                          }}
+                        >
+                          <Typography variant="body2">
+                            {senderName} → {amount} {option.instrument_id} (…
+                            {cidTail})
+                          </Typography>
+                          {isExpired && (
+                            <Typography variant="caption" color="warning.main">
+                              Expired {new Date(exp * 1000).toLocaleString()}
+                            </Typography>
+                          )}
+                          {!isExpired && isBlocked && (
+                            <Typography variant="caption" color="warning.main">
+                              Waiting on{pendingSummary ? `: ${pendingSummary}` : " internal workflow"}
+                            </Typography>
+                          )}
+                        </Box>
+                      </li>
+                    );
+                  }}
                   renderInput={(params) => (
                     <TextField
                       {...params}
