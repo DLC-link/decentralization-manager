@@ -206,6 +206,15 @@ pub async fn spawn_node(spawn: &NodeSpawn, restarted_pids_file: &PathBuf) -> Res
         )
         .env("DECPM_CANTON_NETWORK", "devnet")
         .env("DECPM_NOISE_PORT", spawn.noise_port.to_string())
+        // Issue #173: shrink the peer-probe extended-tolerance budget for the
+        // integration suite so coordinator_permanently_dead doesn't add 3min
+        // to every run, and so unrelated chaos cleanup doesn't cascade through
+        // long 180s peer waits. Prod uses the 180s default. Tests can still
+        // bypass this with their own DECPM_PROBE_BUDGET_SECS in the spawn env.
+        .env(
+            "DECPM_PROBE_BUDGET_SECS",
+            std::env::var("DECPM_PROBE_BUDGET_SECS").unwrap_or_else(|_| "10".into()),
+        )
         .stdout(Stdio::from(log_file))
         .stderr(Stdio::from(log_clone))
         .kill_on_drop(false)

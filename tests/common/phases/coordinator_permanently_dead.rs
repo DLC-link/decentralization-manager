@@ -1,5 +1,7 @@
-//! GX+1: Coordinator permanently dies → peers bail Failed after the 180 s
-//! extended-tolerance budget expires. Verifies the bailout is bounded.
+//! GX+1: Coordinator permanently dies → peers bail Failed after the
+//! configured extended-tolerance budget expires. Verifies the bailout is
+//! bounded. The budget is `DECPM_PROBE_BUDGET_SECS` (set to 10s by the
+//! integration harness; prod default is 180s).
 //!
 //! Uses existing helpers: `processes::kill_node` (no restart) and
 //! `processes::spawn_only` (restart later, for downstream phases). The peer
@@ -44,11 +46,15 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     chaos::say("GX+1", "killing P1 permanently");
     processes::kill_node(f, 1).await?;
 
-    // Both peers must bail Failed within (180 s budget + slack).
+    // Bail bounds adapt to the runtime budget. Integration suite default = 10s.
+    let budget_secs: u64 = std::env::var("DECPM_PROBE_BUDGET_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10);
     let start = Instant::now();
     let p2_inst_ref = p2_inst.as_str();
     let p3_inst_ref = p3_inst.as_str();
-    chaos::poll_until(Duration::from_secs(240), || async {
+    chaos::poll_until(Duration::from_secs(budget_secs + 60), || async {
         let s2 = db::workflow_run_status(&p2_db, p2_inst_ref, "Peer").await?;
         let s3 = db::workflow_run_status(&p3_db, p3_inst_ref, "Peer").await?;
         Ok(s2.as_deref() == Some("failed") && s3.as_deref() == Some("failed"))
@@ -57,12 +63,14 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
 
     let elapsed = start.elapsed();
     anyhow::ensure!(
-        elapsed >= Duration::from_secs(150),
-        "peers bailed too early ({elapsed:?}); expected ≥150s (180s budget minus jitter)"
+        elapsed >= Duration::from_secs(budget_secs.saturating_sub(2)),
+        "peers bailed too early ({elapsed:?}); expected ≥{}s (budget minus jitter)",
+        budget_secs.saturating_sub(2)
     );
     anyhow::ensure!(
-        elapsed <= Duration::from_secs(230),
-        "peers took too long to bail ({elapsed:?}); expected ≤230s"
+        elapsed <= Duration::from_secs(budget_secs + 30),
+        "peers took too long to bail ({elapsed:?}); expected ≤{}s",
+        budget_secs + 30
     );
 
     chaos::say("GX+1", &format!("peers bailed Failed after {elapsed:?}"));
