@@ -6,6 +6,7 @@
 -- The provider then accepts the proposal separately (handling fee payment).
 module Governance.TokenCustody.SetupCcPreapproval where
 
+import DA.Optional (isSome)
 import Splice.Wallet.TransferPreapproval (TransferPreapprovalProposal(..))
 
 import Governance.Action
@@ -28,6 +29,7 @@ template SetupCcPreapprovalProposal
     expectedDso : Optional Party
       -- ^ The DSO party expected on the transfer preapproval.
   where
+    ensure isSome expectedDso
     signatory proposer
     observer governanceParty
 
@@ -36,7 +38,7 @@ template SetupCcPreapprovalProposal
         governanceParty
         proposer
         actionLabel = "SetupCcPreapproval"
-        description = "Set up Canton Coin transfer preapproval"
+        description = "Set up Canton Coin transfer preapproval (provider " <> show provider <> ")"
 
       executeImpl = do
         create TransferPreapprovalProposal with

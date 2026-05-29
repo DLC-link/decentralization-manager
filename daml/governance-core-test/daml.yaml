@@ -7,8 +7,8 @@ dependencies:
   - daml-stdlib
   - daml-script
 data-dependencies:
-  - ../governance-action-v0/.daml/dist/governance-action-v0-0.1.0.dar
-  - ../governance-core/.daml/dist/governance-core-v0-0.1.0.dar
+  - ../governance-action-v1-rc1/.daml/dist/governance-action-v1-rc1-0.1.0.dar
+  - ../governance-core/.daml/dist/governance-core-v1-rc1-0.1.0.dar
   - ../dars/splice-util-0.1.4.dar
   - ../dars/testlib-0.1.0.dar
 build-options:

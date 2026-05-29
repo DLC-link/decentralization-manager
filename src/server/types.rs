@@ -1119,6 +1119,17 @@ pub struct InstrumentAllowance {
     pub id: String,
 }
 
+/// Additional identifier for an instrument, supplied at `SetupUtility` time.
+/// Mirrors `Utility.Registry.Holding.V0.Types.InstrumentIdentifier` — used to
+/// record standard market symbols (e.g. Ticker, ISIN) alongside the primary
+/// `instrument_id_text` UUID.
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
+pub struct InstrumentIdentifier {
+    pub source: CantonId,
+    pub id: String,
+    pub scheme: String,
+}
+
 /// Types of governance domain action proposals
 #[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -1161,6 +1172,8 @@ pub enum ProposalType {
         provider_service_cid: String,
         operator: CantonId,
         instrument_id_text: String,
+        #[serde(default)]
+        additional_identifiers: Vec<InstrumentIdentifier>,
         create_transfer_rule: bool,
         create_allocation_factory: bool,
     },
