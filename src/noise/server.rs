@@ -12,11 +12,11 @@ use tokio::net::TcpListener;
 use tokio_noise::handshakes::nn_psk2::Responder;
 
 use crate::{
-    config::{NetworkConfig, NodeConfig},
+    config::{NetworkConfig, NodeConfig, Peer},
     db::schema::SchemaRead,
     noise::{
         CHUNK_SIZE, MAX_PAYLOAD_SIZE, Message, MessageType, NOISE_REQUEST_TIMEOUT, NoiseError,
-        NoiseKeypair, parse_public_key,
+        NoiseKeypair, parse_public_key, send_noise_message,
     },
     participant_id::CantonId,
     server::{
@@ -42,6 +42,10 @@ pub struct NoiseServer<S: WorkflowStep + 'static> {
     node_config: Arc<NodeConfig>,
     keypair: Arc<NoiseKeypair>,
     peer_keys: HashMap<String, PublicKey>,
+    /// Full peer records (address + port + public_key) kept around so the
+    /// server can fan out broadcast notifications (e.g. CancelInvite after
+    /// a DeclineInvitation) without going through the DB on the hot path.
+    peers: Vec<Peer>,
     workflow_state: Arc<WorkflowState<S>>,
     last_seen: LastSeen,
     _p: PhantomData<S>,
@@ -160,10 +164,20 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
             }
         };
 
+        let peers = network_config
+            .peers
+            .iter()
+            .filter(|p| {
+                let peer_id = p.participant_id.to_string();
+                p.participant_id != *node_config.participant_id() && !excluded.contains(&peer_id)
+            })
+            .cloned()
+            .collect();
         Ok(Self {
             node_config: Arc::new(node_config),
             keypair: Arc::new(keypair),
             peer_keys,
+            peers,
             workflow_state,
             last_seen,
             _p: PhantomData,
@@ -303,6 +317,10 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
             MessageType::StatusUpdate => {
                 self.handle_status_update(peer_id, message.payload).await?
             }
+            MessageType::DeclineInvitation => {
+                self.handle_decline_invitation(peer_id, message.payload)
+                    .await
+            }
             _ => {
                 tracing::warn!("Unhandled message type: {:?}", message.msg_type);
                 Message::new(MessageType::Error, b"Unsupported message type".to_vec())
@@ -432,6 +450,62 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         self.workflow_state.peer_completed(peer_id).await;
 
         Ok(Message::new_empty(MessageType::Ack))
+    }
+
+    /// Handle a peer-initiated decline of an outstanding invitation. Fails
+    /// this coordinator run with a descriptive error so the UI doesn't have
+    /// to wait for the timeout path, then broadcasts a `CancelInvite` to the
+    /// remaining peers so their pending invites / in-flight peer runs roll
+    /// back instead of hanging. Always replies with `Ack` — the declining
+    /// peer treats the send as fire-and-forget.
+    async fn handle_decline_invitation(&self, peer_id: CantonId, payload: Vec<u8>) -> Message {
+        let reason = serde_json::from_slice::<crate::server::DeclineInvitationPayload>(&payload)
+            .ok()
+            .and_then(|p| p.reason);
+
+        let msg = match &reason {
+            Some(r) => format!("Peer {peer_id} declined the invitation: {r}"),
+            None => format!("Peer {peer_id} declined the invitation"),
+        };
+        tracing::warn!("{msg}");
+        self.workflow_state.mark_failed(msg).await;
+
+        self.broadcast_cancel_to_others(&peer_id).await;
+
+        Message::new_empty(MessageType::Ack)
+    }
+
+    /// Best-effort fan-out of `CancelInvite` to every peer we expected to
+    /// participate in this run *except* the one whose decline triggered the
+    /// teardown. Their listener treats `CancelInvite` as "drop the invite
+    /// and mark any in-progress peer run as Cancelled" (see
+    /// `Triggers::cancel_peer_runs_from`), which is the same outcome we want
+    /// here. Failures are logged and ignored.
+    async fn broadcast_cancel_to_others(&self, declining_peer: &CantonId) {
+        let identity = self.node_config.participant_id().to_string();
+        let identity_bytes = identity.as_bytes();
+        let message = Message::new_empty(MessageType::CancelInvite);
+
+        for peer in &self.peers {
+            if &peer.participant_id == declining_peer {
+                continue;
+            }
+            if peer.public_key.is_empty() {
+                continue;
+            }
+            let Ok(peer_pub_key) = parse_public_key(&peer.public_key) else {
+                continue;
+            };
+            let psk = self.keypair.derive_psk(&peer_pub_key);
+            if let Err(e) =
+                send_noise_message(&peer.address, peer.port, &psk, identity_bytes, &message).await
+            {
+                tracing::warn!(
+                    "Best-effort CancelInvite to {} after decline failed: {e}",
+                    peer.participant_id
+                );
+            }
+        }
     }
 }
 

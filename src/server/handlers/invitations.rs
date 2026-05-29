@@ -3,14 +3,16 @@ use std::collections::HashMap;
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 
 use crate::{
+    config::Peer,
     db::schema::{Commitable, SchemaRead, SchemaWrite},
+    noise::client::NoiseClient,
     server::{
         AppState,
         middleware::require_admin,
         types::{
-            ErrorResponse, InvitationActionRequest, InvitationType, MessageResponse,
-            PendingInvitation, PendingInvitationsResponse, WorkflowKind, WorkflowProgress,
-            WorkflowRole, WorkflowRun,
+            DeclineInvitationPayload, ErrorResponse, InvitationActionRequest, InvitationType,
+            MessageResponse, PendingInvitation, PendingInvitationsResponse, WorkflowKind,
+            WorkflowProgress, WorkflowRole, WorkflowRun,
         },
     },
     workflow::{ContractsStep, DarsStep, KickStep, OnboardingStep, state::WorkflowStep},
@@ -75,6 +77,9 @@ fn build_peer_run_row(invitation: &PendingInvitation) -> WorkflowRun {
             "prefix": invitation.prefix,
             "participants": invitation.participants,
             "dar_filenames": invitation.dar_filenames,
+            "participant_id": invitation.kicked_participant,
+            "new_threshold": invitation.new_threshold,
+            "previous_threshold": invitation.previous_threshold,
         })
         .to_string(),
         coordinator_pubkey: Some(invitation.coordinator_pubkey.clone()),
@@ -83,7 +88,13 @@ fn build_peer_run_row(invitation: &PendingInvitation) -> WorkflowRun {
         // set. For other kinds we don't get a list from the invite.
         expected_peers: invitation.participants.clone(),
         completed_peers: Vec::new(),
-        dec_party_id: None,
+        // Kick invites carry the target dec party; other invite kinds don't.
+        dec_party_id: invitation.dec_party_id.clone(),
+        prefix: None,
+        participants: Vec::new(),
+        previous_threshold: None,
+        new_threshold: None,
+        kicked_participant: None,
         error: None,
         dismissed: false,
         coordinator_http_url: invitation.coordinator_http_url.clone(),
@@ -246,29 +257,87 @@ pub async fn decline_invitation(
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
     }
-    let removed = {
+    let invitation = {
         let mut invitations = data.pending_invitations.write().await;
         let idx = invitations.iter().position(|i| i.id == body.id);
         match idx {
-            Some(i) => {
-                invitations.remove(i);
-                true
+            Some(i) => invitations.remove(i),
+            None => {
+                return HttpResponse::NotFound().json(serde_json::json!({
+                    "error": "Invitation not found"
+                }));
             }
-            None => false,
         }
     };
 
-    if !removed {
-        return HttpResponse::NotFound().json(serde_json::json!({
-            "error": "Invitation not found"
-        }));
-    }
+    delete_persisted_invitation(&data, &invitation.id).await;
 
-    delete_persisted_invitation(&data, &body.id).await;
-    tracing::info!("Declined invitation {}", body.id);
+    // Best-effort: tell the coordinator we declined so they can fail their
+    // matching in-progress run immediately instead of waiting until timeout.
+    // If the Noise round-trip fails for any reason we still report success
+    // to the operator — the local invitation is gone and the coordinator's
+    // existing timeout/cancel paths cover the worst case.
+    notify_coordinator_of_decline(&data, &invitation).await;
+
+    tracing::info!("Declined invitation {}", invitation.id);
     HttpResponse::Ok().json(serde_json::json!({
         "message": "Invitation declined"
     }))
+}
+
+/// Best-effort: open a Noise client to the coordinator and send a
+/// `DeclineInvitation` message. Logs (but does not propagate) failures —
+/// callers treat this as fire-and-forget.
+async fn notify_coordinator_of_decline(data: &web::Data<AppState>, invitation: &PendingInvitation) {
+    let coordinator = match find_coordinator_peer(data, &invitation.coordinator_pubkey).await {
+        Some(p) => p,
+        None => {
+            tracing::warn!(
+                "Cannot notify coordinator of decline: no peer record for pubkey {}",
+                invitation.coordinator_pubkey
+            );
+            return;
+        }
+    };
+
+    let payload = DeclineInvitationPayload {
+        kind: invitation.invitation_type.into(),
+        reason: None,
+    };
+    let payload_bytes = match serde_json::to_vec(&payload) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!("Failed to encode DeclineInvitationPayload: {e}");
+            return;
+        }
+    };
+
+    let client = match NoiseClient::new(data.config.clone(), coordinator).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("Failed to build NoiseClient for decline notification: {e}");
+            return;
+        }
+    };
+
+    if let Err(e) = client.send_decline_invitation(payload_bytes).await {
+        tracing::warn!("Best-effort decline notification to coordinator failed: {e}");
+    }
+}
+
+/// Look up the `Peer` record that owns the given Noise public key. The
+/// invitation carries the coordinator's pubkey but `get_peer` is keyed by
+/// participant id, so iterate the peers table.
+async fn find_coordinator_peer(
+    data: &web::Data<AppState>,
+    coordinator_pubkey: &str,
+) -> Option<Peer> {
+    data.db
+        .get_all_peers()
+        .await
+        .ok()?
+        .into_iter()
+        .find(|p| p.public_key == coordinator_pubkey)
 }
 
 #[cfg(test)]
@@ -289,6 +358,10 @@ mod tests {
             prefix: None,
             participants: Vec::new(),
             dar_filenames: Vec::new(),
+            kicked_participant: None,
+            new_threshold: None,
+            previous_threshold: None,
+            dec_party_id: None,
             coordinator_http_url,
         }
     }

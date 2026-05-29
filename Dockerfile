@@ -33,4 +33,10 @@ COPY --from=builder /app/target/release/dec-party-manager /usr/local/bin/
 
 EXPOSE 8080 9000
 
-ENTRYPOINT ["dec-party-manager", "-d", "/", "serve", "--host", "0.0.0.0", "--port", "8080"]
+# Image defaults; override via env at run time. Every other knob is already
+# DECPM_*, keep the CLI invocation flag-free for consistency.
+ENV DECPM_DIR=/ \
+    DECPM_HOST=0.0.0.0 \
+    DECPM_PORT=8080
+
+ENTRYPOINT ["dec-party-manager", "serve"]

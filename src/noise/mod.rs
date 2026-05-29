@@ -53,6 +53,11 @@ pub enum MessageType {
     /// invite from this coordinator to flip their Failed run back to
     /// InProgress and re-spin `start_peer`.
     RetryWorkflow = 0x0015,
+    /// Peer-initiated decline: sent to the coordinator right before a peer
+    /// removes its local pending invitation, so the coordinator's matching
+    /// in-progress run can be marked Failed instead of hanging until
+    /// timeout. Payload is a JSON `DeclineInvitationPayload`.
+    DeclineInvitation = 0x0016,
 
     // Responses (0x0100 - 0x01FF)
     Ack = 0x0101,
@@ -122,6 +127,7 @@ impl TryFrom<u16> for MessageType {
             0x0013 => Ok(Self::InviteDars),
             0x0014 => Ok(Self::CancelInvite),
             0x0015 => Ok(Self::RetryWorkflow),
+            0x0016 => Ok(Self::DeclineInvitation),
             0x0101 => Ok(Self::Ack),
             0x0102 => Ok(Self::Data),
             0x0103 => Ok(Self::Error),

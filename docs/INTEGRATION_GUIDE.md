@@ -154,9 +154,7 @@ spec:
       containers:
         - name: dec-party-manager
           image: public.ecr.aws/dlc-link/canton-decparty-manager:latest
-          command:
-            ["dec-party-manager", "-d", "/app", "serve",
-             "--host", "0.0.0.0", "--port", "8080"]
+          command: ["dec-party-manager", "serve"]
           ports:
             - name: http
               containerPort: 8080
@@ -172,6 +170,13 @@ spec:
             limits:
               memory: "512Mi"
               cpu: "500m"
+          env:
+            - name: DECPM_DIR
+              value: /app
+            - name: DECPM_HOST
+              value: 0.0.0.0
+            - name: DECPM_PORT
+              value: "8080"
           envFrom:
             - secretRef:
                 name: dec-party-manager-secrets
@@ -203,7 +208,10 @@ spec:
 # Build from source
 cargo build --release
 
-# Option 1: Using environment variables
+# Option 1: Using environment variables (recommended)
+export DECPM_DIR=/path/to/root-dir
+export DECPM_HOST=0.0.0.0
+export DECPM_PORT=8080
 export DECPM_CANTON_ADMIN_HOST=localhost
 export DECPM_CANTON_ADMIN_PORT=5002
 export DECPM_CANTON_LEDGER_HOST=localhost
@@ -211,12 +219,12 @@ export DECPM_CANTON_LEDGER_PORT=5001
 export DECPM_CANTON_SYNCHRONIZER=global
 export DECPM_CANTON_NETWORK=devnet
 
-./target/release/dec-party-manager -d /path/to/root-dir serve \
-  --host 0.0.0.0 \
-  --port 8080
+./target/release/dec-party-manager serve
 
 # Option 2: Using a .env file in the root directory
 cat > /path/to/root-dir/.env <<EOF
+DECPM_HOST=0.0.0.0
+DECPM_PORT=8080
 DECPM_CANTON_ADMIN_HOST=localhost
 DECPM_CANTON_ADMIN_PORT=5002
 DECPM_CANTON_LEDGER_HOST=localhost
@@ -225,11 +233,9 @@ DECPM_CANTON_SYNCHRONIZER=global
 DECPM_CANTON_NETWORK=devnet
 EOF
 
-./target/release/dec-party-manager -d /path/to/root-dir serve \
-  --host 0.0.0.0 \
-  --port 8080
+./target/release/dec-party-manager -d /path/to/root-dir serve
 
-# Option 3: Using CLI flags directly
+# Option 3: Using CLI flags (flags override env)
 ./target/release/dec-party-manager -d /path/to/root-dir serve \
   --host 0.0.0.0 \
   --port 8080 \
@@ -241,15 +247,15 @@ EOF
   --canton-network devnet
 ```
 
-CLI options:
+CLI options (every flag has a matching `DECPM_*` env var; flags override env):
 
 | Flag | Env Var | Default | Description |
 |------|---------|---------|-------------|
-| `-d`, `--dir` | -- | `.` | Root directory for persistent data; loads `.env` from this dir if present |
-| `--host` | -- | `0.0.0.0` | HTTP server bind address |
-| `--port` | -- | `8080` | HTTP server port |
+| `-d`, `--dir` | `DECPM_DIR` | `.` | Root directory for persistent data; loads `.env` from this dir if present |
+| `--host` | `DECPM_HOST` | `0.0.0.0` | HTTP server bind address |
+| `--port` | `DECPM_PORT` | `8080` | HTTP server port |
 | `--test` | -- | `false` | Enable test mode with mock authentication |
-| `--db` | -- | `{dir}/data/decpm.db` | Path to SQLite database file |
+| `--db` | `DECPM_DB_PATH` | `{dir}/data/decpm.db` | Path to SQLite database file |
 | `--listen-address` | `DECPM_LISTEN_ADDRESS` | `0.0.0.0` | Noise server bind address |
 | `--noise-port` | `DECPM_NOISE_PORT` | `9000` | Noise server port |
 | `--public-address` | `DECPM_PUBLIC_ADDRESS` | (none) | External address for peers |

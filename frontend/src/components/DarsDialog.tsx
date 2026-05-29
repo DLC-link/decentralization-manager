@@ -21,6 +21,7 @@ import DeleteIcon from "@mui/icons-material/Delete";
 import { API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
 import { useSnackbar } from "../contexts";
+import { TextHelp } from "./FieldHelp";
 import type { DarsStatusResponse, DarFile, Peer, NodeConfig } from "../types";
 
 interface DarsDialogProps {
@@ -273,7 +274,11 @@ export const DarsDialog = ({
       </DialogTitle>
       <DialogContent>
         <Box sx={{ display: "flex", flexDirection: "column", gap: 2, mt: 1 }}>
-          {error && <Alert severity="error">{error}</Alert>}
+          {error && (
+            <Alert severity="error" onClose={() => setError(null)}>
+              {error}
+            </Alert>
+          )}
 
           {isInProgress && (
             <Alert severity="info" icon={<CircularProgress size={20} />}>
@@ -312,7 +317,9 @@ export const DarsDialog = ({
                   variant="outlined"
                   startIcon={<UploadFileIcon />}
                 >
-                  Select DAR Files
+                  <TextHelp text="Pick one or more Daml Archive (.dar) files from your machine. These will be uploaded to the participant and, in distribute mode, sent to the peers you select below.">
+                    Select DAR Files
+                  </TextHelp>
                   <input
                     type="file"
                     hidden
@@ -370,9 +377,13 @@ export const DarsDialog = ({
                 <>
                   <Divider />
                   <Box>
-                    <Typography variant="subtitle2" sx={{ mb: 1 }}>
-                      Select Peers to Distribute To
-                    </Typography>
+                    <Box sx={{ display: "flex", alignItems: "center", gap: 0.5, mb: 1 }}>
+                      <Typography variant="subtitle2">
+                        <TextHelp text="The other participants that should receive these DARs. All known peers are selected by default — uncheck any you want to skip.">
+                          Select Peers to Distribute To
+                        </TextHelp>
+                      </Typography>
+                    </Box>
                     {loadingPeers ? (
                       <Box sx={{ display: "flex", justifyContent: "center", py: 2 }}>
                         <CircularProgress size={24} />

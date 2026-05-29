@@ -22,7 +22,13 @@ fn parse_positive_usize(s: &str) -> std::result::Result<usize, String> {
 #[command(about = "Canton decentralized party onboarding workflow automation", long_about = None)]
 pub struct Cli {
     /// Path to root directory containing config/ and data/ subdirectories
-    #[arg(short, long, value_name = "DIR", default_value = ".")]
+    #[arg(
+        short,
+        long,
+        value_name = "DIR",
+        default_value = ".",
+        env = "DECPM_DIR"
+    )]
     pub dir: PathBuf,
 
     #[command(subcommand)]
@@ -34,15 +40,15 @@ pub enum Commands {
     /// Start the HTTP server for querying decentralized parties
     Serve {
         /// Host address to bind to
-        #[arg(long, default_value = "0.0.0.0")]
+        #[arg(long, default_value = "0.0.0.0", env = "DECPM_HOST")]
         host: String,
 
         /// Port to listen on
-        #[arg(long, default_value = "8080")]
+        #[arg(long, default_value = "8080", env = "DECPM_PORT")]
         port: u16,
 
         /// Path to SQLite database file (defaults to {dir}/data/decpm.db)
-        #[arg(long)]
+        #[arg(long, env = "DECPM_DB_PATH")]
         db: Option<PathBuf>,
 
         /// Encryption key for secrets stored in the database

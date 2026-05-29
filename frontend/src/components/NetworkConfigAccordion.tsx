@@ -27,6 +27,7 @@ import ContentPasteIcon from "@mui/icons-material/ContentPaste";
 import { useSnackbar } from "../contexts";
 import { zebraRow } from "../styles";
 import { copyToClipboard } from "../clipboard";
+import { fieldHelpAdornment } from "./FieldHelp";
 import type {
   NetworkConfig,
   Peer,
@@ -176,7 +177,10 @@ export const NetworkConfigAccordion = ({
       const text = await navigator.clipboard.readText();
       const parts = text.trim().split(",");
       if (parts.length < 5) {
-        showSnackbar("Invalid CSV format. Expected: participant_id,name,address,port,public_key");
+        showSnackbar(
+          "Invalid CSV format. Expected: participant_id,name,address,port,public_key",
+          "error",
+        );
         return;
       }
       const [participant_id, name, address, portStr, public_key] = parts;
@@ -185,7 +189,7 @@ export const NetworkConfigAccordion = ({
       setEditedPeers((peers) => [...peers, newPeer]);
       showSnackbar("Peer added from clipboard");
     } catch {
-      showSnackbar("Failed to read clipboard");
+      showSnackbar("Failed to read clipboard", "error");
     }
   };
 
@@ -215,18 +219,42 @@ export const NetworkConfigAccordion = ({
                   label="Participant ID"
                   value={peer.participant_id}
                   onChange={(e) => updatePeer(index, "participant_id", e.target.value)}
+                  slotProps={{
+                    input: {
+                      endAdornment: fieldHelpAdornment(
+                        "The Canton ID of the remote node, like \"validator-1::1220abc...\". Used as the unique key for this peer on your local peers table.",
+                        "Help for Participant ID",
+                      ),
+                    },
+                  }}
                 />
                 <TextField
                   size="small"
                   label="Name"
                   value={peer.name}
                   onChange={(e) => updatePeer(index, "name", e.target.value)}
+                  slotProps={{
+                    input: {
+                      endAdornment: fieldHelpAdornment(
+                        "A human-readable label for this peer that shows up in the UI. Any text you like.",
+                        "Help for Name",
+                      ),
+                    },
+                  }}
                 />
                 <TextField
                   size="small"
                   label="Address"
                   value={peer.address}
                   onChange={(e) => updatePeer(index, "address", e.target.value)}
+                  slotProps={{
+                    input: {
+                      endAdornment: fieldHelpAdornment(
+                        "The hostname or IP address where your local node's Noise client will connect to this peer.",
+                        "Help for Address",
+                      ),
+                    },
+                  }}
                 />
                 <TextField
                   size="small"
@@ -236,6 +264,14 @@ export const NetworkConfigAccordion = ({
                   onChange={(e) =>
                     updatePeer(index, "port", parseInt(e.target.value) || 0)
                   }
+                  slotProps={{
+                    input: {
+                      endAdornment: fieldHelpAdornment(
+                        "The TCP port the peer's Noise server is listening on. Combined with Address to dial the peer.",
+                        "Help for Port",
+                      ),
+                    },
+                  }}
                 />
                 <TextField
                   size="small"
@@ -244,6 +280,14 @@ export const NetworkConfigAccordion = ({
                   onChange={(e) =>
                     updatePeer(index, "public_key", e.target.value)
                   }
+                  slotProps={{
+                    input: {
+                      endAdornment: fieldHelpAdornment(
+                        "The peer's Noise public key (hex-encoded). Used to derive the pre-shared key that secures the encrypted channel.",
+                        "Help for Public Key",
+                      ),
+                    },
+                  }}
                 />
                 <Tooltip title="Remove peer">
                   <IconButton

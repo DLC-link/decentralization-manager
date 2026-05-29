@@ -14,6 +14,7 @@ import {
 import { API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
 import { useSnackbar } from "../contexts";
+import { fieldHelpAdornment } from "./FieldHelp";
 import type {
   DecentralizedPartiesResponse,
   KickRequest,
@@ -63,10 +64,21 @@ export const KickDialog = ({
     const partyPrefix = partyId.split("::")[0];
     if (!partyPrefix) return;
     let cancelled = false;
+    // On the first poll, force a server-side refresh — the cached
+    // `/decentralized-parties` response can be missing the owner_key if
+    // the previous resolve happened while the participant being kicked
+    // was offline. Force=true triggers a fresh peer-Noise round-trip plus
+    // the topology-derived fallback so the next poll usually has the key.
+    let firstFetch = true;
     const fetchOwnerKey = async () => {
       try {
+        const params = new URLSearchParams({ prefix: partyPrefix });
+        if (firstFetch) {
+          params.set("refresh", "true");
+          firstFetch = false;
+        }
         const res = await authenticatedFetch(
-          `${API_BASE}/decentralized-parties?prefix=${encodeURIComponent(partyPrefix)}`,
+          `${API_BASE}/decentralized-parties?${params}`,
         );
         if (!res.ok) return;
         const data: DecentralizedPartiesResponse = await res.json();
@@ -150,6 +162,7 @@ export const KickDialog = ({
       decentralized_party_id: partyId,
       participant_id: participantUid,
       new_threshold: newThreshold,
+      previous_threshold: currentThreshold,
     };
 
     try {
@@ -166,6 +179,10 @@ export const KickDialog = ({
 
       showSnackbar("Kick workflow started — follow progress in the feed");
       onClose();
+      // Jump to the Pending Approvals feed so the user lands on the run they
+      // just started (refresh + navigate). Without this the dialog closes
+      // back to the party detail and the in-flight kick is easy to miss.
+      onKickComplete();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error");
       setLoading(false);
@@ -215,6 +232,14 @@ export const KickDialog = ({
             disabled
             fullWidth
             size="small"
+            slotProps={{
+              input: {
+                endAdornment: fieldHelpAdornment(
+                  "The decentralized party the participant is being removed from. Pre-filled from the party you opened — not editable.",
+                  "Help for Decentralized Party ID",
+                ),
+              },
+            }}
           />
 
           <TextField
@@ -223,6 +248,14 @@ export const KickDialog = ({
             disabled
             fullWidth
             size="small"
+            slotProps={{
+              input: {
+                endAdornment: fieldHelpAdornment(
+                  "The participant being removed from the party. Pre-filled from the row you clicked Kick on.",
+                  "Help for Participant ID to Kick",
+                ),
+              },
+            }}
           />
 
           <TextField
@@ -236,6 +269,14 @@ export const KickDialog = ({
                 ? "The DNS owner key that will be removed"
                 : "Owner key not yet known — waiting for cache resolution"
             }
+            slotProps={{
+              input: {
+                endAdornment: fieldHelpAdornment(
+                  "The participant's namespace fingerprint, looked up automatically from the participant via Noise or from Canton's topology. This is the key that gets removed from the decentralized namespace.",
+                  "Help for Namespace Fingerprint",
+                ),
+              },
+            }}
           />
 
           <TextField
@@ -246,11 +287,23 @@ export const KickDialog = ({
             fullWidth
             size="small"
             disabled={loading}
-            slotProps={{ htmlInput: { min: 1, max: remainingOwners } }}
+            slotProps={{
+              htmlInput: { min: 1, max: remainingOwners },
+              input: {
+                endAdornment: fieldHelpAdornment(
+                  "Number of remaining owners that must sign topology changes for this party after the kick. Must be between 1 and the number of owners left.",
+                  "Help for New Threshold",
+                ),
+              },
+            }}
             helperText={`Threshold after kick (suggested: ${suggestedThreshold}, max: ${remainingOwners})`}
           />
 
-          {error && <Alert severity="error">{error}</Alert>}
+          {error && (
+            <Alert severity="error" onClose={() => setError(null)}>
+              {error}
+            </Alert>
+          )}
 
           {status?.status === "inprogress" && (
             <Alert severity="info" icon={<CircularProgress size={20} />}>
