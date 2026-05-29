@@ -36,7 +36,7 @@ template AcceptTransferProposal
         governanceParty
         proposer
         actionLabel = "AcceptTransfer"
-        description = "Accept incoming token transfer"
+        description = "Accept incoming transfer (instruction " <> show transferInstructionCid <> ")"
 
       executeImpl = do
         exercise transferInstructionCid TransferInstruction_Accept with

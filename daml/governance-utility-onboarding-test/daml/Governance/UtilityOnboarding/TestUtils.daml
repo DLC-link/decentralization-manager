@@ -121,6 +121,7 @@ setupUtilityForTest parties rulesCid = do
     providerServiceCid = providerCid
     operator = parties.operator
     instrumentIdText = "TEST-TOKEN"
+    additionalIdentifiers = []
     createTransferRule = True
     createAllocationFactory = True
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid

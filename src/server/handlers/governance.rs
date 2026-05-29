@@ -2259,7 +2259,7 @@ async fn execute_expire_confirmation(
                     module_name: "Governance.Rules".to_string(),
                     entity_name: "GovernanceRules".to_string(),
                 },
-                "GovernanceRules_ExpireGovernanceConfirmation".to_string(),
+                "GovernanceRules_ExpireGovernanceSelfConfirmation".to_string(),
             )
         }
         GovernanceType::CoreDomain => {

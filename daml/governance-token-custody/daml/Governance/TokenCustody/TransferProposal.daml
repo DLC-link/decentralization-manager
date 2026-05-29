@@ -60,7 +60,7 @@ template TransferProposal
         governanceParty
         proposer
         actionLabel = "Transfer"
-        description = "Transfer tokens from governance party"
+        description = "Transfer " <> show transfer.amount <> " of " <> show transfer.instrumentId <> " to " <> show transfer.receiver
 
       executeImpl = do
         exercise transferFactoryCid TransferFactory_Transfer with

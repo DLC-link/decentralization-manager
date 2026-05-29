@@ -257,7 +257,7 @@ pub async fn get_chain_audit(
     // regardless of which package version produced them. Filtering happens
     // client-side via `template_index` below. Without this, an old run that
     // emitted events under (say) `#governance-core-v0-rc3` becomes
-    // unqueryable on a participant that has only `#governance-core-v0`
+    // unqueryable on a participant that has only `#governance-core-v1-rc1`
     // vetted: the package-name reference in a `TemplateFilter` fails to
     // resolve and `GetUpdates` errors out with "Packages not found on
     // participant". The audit trail isn't sensitive to package version.

@@ -12,6 +12,7 @@ import Utility.Registry.App.V0.Service.Registrar
   (RegistrarService_CreateInstrumentConfiguration(..),
    RegistrarServiceRequest(..),
    RegistrarServiceRequest_Accept(..))
+import Utility.Registry.Holding.V0.Types (InstrumentIdentifier)
 
 import Governance.Action
 
@@ -24,6 +25,7 @@ template SetupUtility
     providerServiceCid : ContractId ProviderService
     operator : Party
     instrumentIdText : Text
+    additionalIdentifiers : [InstrumentIdentifier]
     createTransferRule : Bool
     createAllocationFactory : Bool
   where
@@ -55,7 +57,7 @@ template SetupUtility
             credentialCids = []
         _ <- exercise result.registrarServiceCid RegistrarService_CreateInstrumentConfiguration with
           instrumentId = instrumentIdText
-          additionalIdentifiers = []
+          additionalIdentifiers = additionalIdentifiers
           issuerRequirements = []
           holderRequirements = []
         pure ()

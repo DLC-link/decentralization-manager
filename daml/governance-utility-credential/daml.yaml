@@ -1,12 +1,12 @@
 sdk-version: 3.4.11
-name: governance-utility-credential-v0
+name: governance-utility-credential-v1-rc1
 version: 0.1.0
 source: daml
 dependencies:
   - daml-prim
   - daml-stdlib
 data-dependencies:
-  - ../governance-action-v0/.daml/dist/governance-action-v0-0.1.0.dar
+  - ../governance-action-v1-rc1/.daml/dist/governance-action-v1-rc1-0.1.0.dar
   - ../dars/splice-util-0.1.4.dar
   - ../dars/utility-credential-app-v0-0.4.1.dar
   - ../dars/utility-credential-v0-0.1.0.dar

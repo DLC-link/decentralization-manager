@@ -37,7 +37,7 @@ template SetupTokenPreapprovalProposal
         governanceParty
         proposer
         actionLabel = "SetupTokenPreapproval"
-        description = "Set up utility token transfer preapproval"
+        description = "Set up utility token transfer preapproval (admin " <> show instrumentAdmin <> ")"
 
       executeImpl = do
         create TransferPreapproval with

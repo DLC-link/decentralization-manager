@@ -60,13 +60,15 @@ template GovernanceSelfConfirmation
     expiresAt : Time
       -- ^ When this confirmation becomes invalid.
   where
-    signatory confirmer
-    observer governanceParty
+    signatory confirmer, governanceParty
 
     -- | Consume this confirmation during action execution.
     choice GovernanceSelfConfirmation_Consume : GovernanceSelfConfirmation
       controller governanceParty
-      do pure this
+      do
+        now <- getTime
+        require "Self-confirmation has expired" (now < expiresAt)
+        pure this
 
     -- | Expire a stale confirmation.
     choice GovernanceSelfConfirmation_Expire : ()
@@ -354,7 +356,7 @@ template GovernanceRules
         pure GovernanceRules_ExecuteGovernanceActionResult with ..
 
     -- | Expire a stale self-management confirmation.
-    nonconsuming choice GovernanceRules_ExpireGovernanceConfirmation : ()
+    nonconsuming choice GovernanceRules_ExpireGovernanceSelfConfirmation : ()
       with
         member : Party
         staleConfirmationCid : ContractId GovernanceSelfConfirmation
