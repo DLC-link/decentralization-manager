@@ -1555,17 +1555,16 @@ async fn handle_incoming_connection(
                             // Always answer health — even mid-workflow. Reports
                             // liveness plus this node's in-flight workflow (if
                             // any) so peers don't infer "offline" from a busy node.
-                            let resp = crate::server::health::build_health_response(
+                            let resp = health::build_health_response(
                                 &triggers.db,
                                 &triggers.config.participant_id().to_string(),
                             )
                             .await;
                             let msg =
                                 Message::new(MessageType::HealthResponse, resp.to_payload());
-                            return Ok(Response::builder()
-                                .status(StatusCode::OK)
-                                .body(Body::from(msg.to_bytes()))
-                                .unwrap());
+                            // `Response::new` defaults to 200 OK and is infallible,
+                            // so there is no builder error to unwrap.
+                            return Ok(Response::new(Body::from(msg.to_bytes())));
                         }
                         MessageType::ListPackages => {
                             tracing::debug!("Received ListPackages request");
