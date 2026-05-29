@@ -14,6 +14,7 @@ pub mod kick;
 pub mod notification_feed;
 pub mod owner_key_resilience;
 pub mod peer_3_strikes_abort;
+pub mod restart_coordinator_mid_workflow_resume;
 pub mod restart_coordinator_resume;
 pub mod restart_peer_resume;
 pub mod restart_with_concurrent_kinds;
