@@ -1319,6 +1319,8 @@ pub async fn start_server(
             .service(handlers::get_registrar_services_handler)
             .service(handlers::get_instruments_handler)
             .service(handlers::get_transfer_instructions_handler)
+            .service(handlers::get_mint_requests_handler)
+            .service(handlers::get_burn_requests_handler)
             .service(handlers::get_transfer_preapprovals_handler)
             .service(handlers::get_transfer_factories_handler)
             .service(handlers::get_holdings_handler)

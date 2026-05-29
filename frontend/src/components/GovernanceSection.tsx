@@ -41,8 +41,6 @@ import {
   TEMPLATE_ALLOCATION_FACTORY,
   INTERFACE_FEATURED_APP_RIGHT,
   TEMPLATE_REGISTRAR_SERVICE,
-  TEMPLATE_MINT_REQUEST,
-  TEMPLATE_BURN_REQUEST,
 } from "../constants";
 import { authenticatedFetch } from "../api";
 import { getActionTypeOptions } from "../governanceFormat";
@@ -73,6 +71,9 @@ import type {
   InstrumentsResponse,
   TransferInstructionInfo,
   TransferInstructionsResponse,
+  TokenRequestInfo,
+  MintRequestsResponse,
+  BurnRequestsResponse,
   TransferPreapprovalsResponse,
   TransferFactoryInfo,
   TransferFactoriesResponse,
@@ -301,8 +302,13 @@ export const GovernanceSection = ({
   >([]);
   const [userServices, setUserServices] = useState<UserServiceInfo[]>([]);
   const [registrarServiceContracts, setRegistrarServiceContracts] = useState<ContractWithBlob[]>([]);
-  const [mintRequestContracts, setMintRequestContracts] = useState<ContractWithBlob[]>([]);
-  const [burnRequestContracts, setBurnRequestContracts] = useState<ContractWithBlob[]>([]);
+  // Typed `MintRequest`/`BurnRequest` rows so the Accept dropdowns can show
+  // holder → amount instrument (…cid) — mirroring the Accept Transfer UX —
+  // instead of just the contract id slug.
+  const [mintRequestContracts, setMintRequestContracts] = useState<TokenRequestInfo[]>([]);
+  const [burnRequestContracts, setBurnRequestContracts] = useState<TokenRequestInfo[]>([]);
+  const [mintRequestsLoading, setMintRequestsLoading] = useState(false);
+  const [burnRequestsLoading, setBurnRequestsLoading] = useState(false);
   // InstrumentConfiguration contracts fetched from /instruments. Each one
   // represents a token the governance party can mint/burn against and exposes
   // its parsed instrument_admin + instrument_id, so we can drive a real
@@ -595,6 +601,43 @@ export const GovernanceSection = ({
     }
   }, [proposalType, fetchOpenTransferInstructions]);
 
+  // Pull typed open mint/burn requests for the Accept dropdowns. Mirrors the
+  // Accept Transfer flow above — the backend extracts holder/amount/instrument
+  // from the contract payload so we can render a useful label.
+  const fetchOpenMintRequests = useCallback(async () => {
+    setMintRequestsLoading(true);
+    try {
+      const res = await authenticatedFetch(
+        `${API_BASE}/governance/mint-requests?party_id=${encodeURIComponent(partyId)}`,
+      );
+      if (res.ok) {
+        const response: MintRequestsResponse = await res.json();
+        setMintRequestContracts(response.mint_requests);
+      }
+    } catch (e) {
+      console.error("Failed to fetch mint requests:", e);
+    } finally {
+      setMintRequestsLoading(false);
+    }
+  }, [partyId]);
+
+  const fetchOpenBurnRequests = useCallback(async () => {
+    setBurnRequestsLoading(true);
+    try {
+      const res = await authenticatedFetch(
+        `${API_BASE}/governance/burn-requests?party_id=${encodeURIComponent(partyId)}`,
+      );
+      if (res.ok) {
+        const response: BurnRequestsResponse = await res.json();
+        setBurnRequestContracts(response.burn_requests);
+      }
+    } catch (e) {
+      console.error("Failed to fetch burn requests:", e);
+    } finally {
+      setBurnRequestsLoading(false);
+    }
+  }, [partyId]);
+
   // Fetch holdings + transfer factories for the Transfer Proposal dropdown.
   // Both endpoints are cheap (one ACS query each) and we need them together
   // to render the dropdown + prefill, so fetch them in parallel.
@@ -716,16 +759,12 @@ export const GovernanceSection = ({
       fetchContractsByTemplate(TEMPLATE_REGISTRAR_SERVICE).then(setRegistrarServiceContracts);
     }
     if (proposalType === "accept_mint_request") {
-      fetchContractsByTemplate(TEMPLATE_MINT_REQUEST, { activeOnly: true }).then(
-        setMintRequestContracts,
-      );
+      fetchOpenMintRequests();
     }
     if (proposalType === "accept_burn_request") {
-      fetchContractsByTemplate(TEMPLATE_BURN_REQUEST, { activeOnly: true }).then(
-        setBurnRequestContracts,
-      );
+      fetchOpenBurnRequests();
     }
-  }, [proposalType, fetchContractsByTemplate]);
+  }, [proposalType, fetchContractsByTemplate, fetchOpenMintRequests, fetchOpenBurnRequests]);
 
   // Fetch all deployment-related contracts for vault_deployment
   const fetchDeployContracts = useCallback(async () => {
@@ -4448,42 +4487,122 @@ export const GovernanceSection = ({
                 const requestCid = isMint ? proposalMintRequestCid : proposalBurnRequestCid;
                 const setRequestCid = isMint ? setProposalMintRequestCid : setProposalBurnRequestCid;
                 const requestLabel = isMint ? "MintRequest" : "BurnRequest";
+                const requestsLoading = isMint ? mintRequestsLoading : burnRequestsLoading;
+                // Mint = tokens created (green), burn = tokens destroyed (red).
+                const accentColor = isMint ? "success.main" : "error.main";
+                // Selecting a request prefills the matching InstrumentConfiguration
+                // so the user doesn't have to re-pick the token by hand.
+                const prefillInstrument = (req: TokenRequestInfo) => {
+                  const inst = availableInstruments.find(
+                    (i) =>
+                      i.instrument_admin === req.instrument_admin &&
+                      i.instrument_id === req.instrument_id,
+                  );
+                  if (inst) setProposalInstrumentConfigurationCid(inst.contract_id);
+                };
                 return (
                   <>
-                    <FormControl size="small" fullWidth required>
-                      <InputLabel>
-                        <TextHelp
-                          text={
-                            isMint
-                              ? "MintRequest contract created by the holder that this proposal will accept."
-                              : "BurnRequest contract created by the holder that this proposal will accept."
+                    <Autocomplete
+                      size="small"
+                      freeSolo
+                      options={requestContracts}
+                      value={requestCid}
+                      loading={requestsLoading}
+                      onChange={(_event, value) => {
+                        if (typeof value === "string" || value === null) {
+                          setRequestCid(value ?? "");
+                        } else {
+                          setRequestCid(value.contract_id);
+                          prefillInstrument(value);
+                        }
+                      }}
+                      onInputChange={(_event, value, reason) => {
+                        if (reason === "input") setRequestCid(value);
+                      }}
+                      getOptionLabel={(option) => {
+                        if (typeof option === "string") return option;
+                        const holderName = option.holder.split("::")[0];
+                        const amount = option.amount.replace(/\.?0+$/, "");
+                        const cidTail = option.contract_id.slice(-8);
+                        return `${holderName} → ${amount} ${option.instrument_id} (…${cidTail})`;
+                      }}
+                      getOptionDisabled={(option) => {
+                        if (typeof option === "string") return false;
+                        const exp = option.expires_at ?? 0;
+                        return exp > 0 && exp <= Math.floor(Date.now() / 1000);
+                      }}
+                      isOptionEqualToValue={(option, value) =>
+                        typeof value === "string"
+                          ? option.contract_id === value
+                          : option.contract_id === value.contract_id
+                      }
+                      renderOption={(props, option) => {
+                        if (typeof option === "string") {
+                          return <li {...props}>{option}</li>;
+                        }
+                        const holderName = option.holder.split("::")[0];
+                        const amount = option.amount.replace(/\.?0+$/, "");
+                        const cidTail = option.contract_id.slice(-8);
+                        const exp = option.expires_at ?? 0;
+                        const isExpired =
+                          exp > 0 && exp <= Math.floor(Date.now() / 1000);
+                        return (
+                          <li {...props} key={option.contract_id}>
+                            <Box
+                              sx={{
+                                display: "flex",
+                                flexDirection: "column",
+                                gap: 0.25,
+                                opacity: isExpired ? 0.6 : 1,
+                              }}
+                            >
+                              <Typography variant="body2">
+                                {holderName} →{" "}
+                                <Box
+                                  component="span"
+                                  sx={{ color: accentColor, fontWeight: 600 }}
+                                >
+                                  {amount} {option.instrument_id}
+                                </Box>{" "}
+                                (…{cidTail})
+                              </Typography>
+                              {isExpired && (
+                                <Typography variant="caption" color="warning.main">
+                                  Expired {new Date(exp * 1000).toLocaleString()}
+                                </Typography>
+                              )}
+                            </Box>
+                          </li>
+                        );
+                      }}
+                      renderInput={(params) => (
+                        <TextField
+                          {...params}
+                          label={
+                            <TextHelp
+                              text={
+                                isMint
+                                  ? "MintRequest contract created by the holder that this proposal will accept."
+                                  : "BurnRequest contract created by the holder that this proposal will accept."
+                              }
+                            >
+                              {requestLabel}
+                            </TextHelp>
                           }
-                        >
-                          {requestLabel}
-                        </TextHelp>
-                      </InputLabel>
-                      <Select
-                        label={requestLabel}
-                        value={requestCid}
-                        onChange={(e) => setRequestCid(e.target.value)}
-                        MenuProps={{ disableScrollLock: true }}
-                      >
-                        {requestContracts.length > 0 ? (
-                          requestContracts.map((c) => (
-                            <MenuItem key={c.contract_id} value={c.contract_id}>
-                              {c.contract_id.slice(0, 16)}…
-                            </MenuItem>
-                          ))
-                        ) : (
-                          <MenuItem disabled>
-                            No {requestLabel} contracts found — holder must create one first
-                          </MenuItem>
-                        )}
-                      </Select>
-                    </FormControl>
-                    <FormControl size="small" fullWidth required>
+                          required
+                          helperText={
+                            requestsLoading
+                              ? `Loading open ${isMint ? "mint" : "burn"} requests…`
+                              : requestContracts.length === 0
+                                ? `No ${requestLabel} contracts found — holder must create one first`
+                                : "Pick an open request, or paste a contract id"
+                          }
+                        />
+                      )}
+                    />
+                    <FormControl size="small" fullWidth required disabled>
                       <InputLabel>
-                        <TextHelp text="Instrument the request was made against. Usually the one referenced by the selected request.">
+                        <TextHelp text="Instrument the request was made against. Derived automatically from the selected request.">
                           Instrument
                         </TextHelp>
                       </InputLabel>

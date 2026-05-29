@@ -1580,6 +1580,35 @@ pub struct TransferInstructionsResponse {
     pub transfer_instructions: Vec<TransferInstructionInfo>,
 }
 
+/// An open `MintRequest`/`BurnRequest` (`Utility.Registry.App.V0.Model.{Mint,Burn}`)
+/// the governance party can accept. The shape is identical for both kinds; the
+/// containing endpoint disambiguates. `expires_at` is read off the inner
+/// `mint`/`burn` payload's `executeBefore` field so the dropdown can disable
+/// past-deadline rows.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct TokenRequestInfo {
+    pub contract_id: String,
+    pub holder: CantonId,
+    #[schema(value_type = String)]
+    pub amount: DamlDecimal,
+    pub instrument_admin: CantonId,
+    pub instrument_id: String,
+    /// Unix seconds of the request's `executeBefore` deadline.
+    pub expires_at: i64,
+}
+
+/// Response for the mint-requests endpoint.
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct MintRequestsResponse {
+    pub mint_requests: Vec<TokenRequestInfo>,
+}
+
+/// Response for the burn-requests endpoint.
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct BurnRequestsResponse {
+    pub burn_requests: Vec<TokenRequestInfo>,
+}
+
 /// A token-standard Holding owned by a decentralized party, aggregated across
 /// every active `Splice.Api.Token.HoldingV1:Holding` contract that shares the
 /// same `(instrument_admin, instrument_id)` pair.
