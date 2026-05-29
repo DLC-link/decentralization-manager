@@ -32,23 +32,24 @@ use crate::{
         queries::{
             ContractQueryParams as QueryContractParams, get_governance_confirmations,
             get_governance_state as query_governance_state, get_holdings, get_instruments,
-            get_open_transfer_instructions, get_provider_services, get_registrar_services,
-            get_transfer_factories, get_user_services, get_vaults, query_contracts_by_template,
+            get_open_burn_requests, get_open_mint_requests, get_open_transfer_instructions,
+            get_provider_services, get_registrar_services, get_transfer_factories,
+            get_user_services, get_vaults, query_contracts_by_template,
         },
         transfer_context::{
             AcceptTransferContext, ProposeTransferArgs, fetch as fetch_accept_transfer_context,
             fetch_factory_for_propose, maybe_fetch_for_proposal, to_proto_disclosed_contracts,
         },
         types::{
-            AuditLogEntry, AuditLogQuery, AuditLogResponse, CancelConfirmationRequest,
-            ChainAuditEntry, ChainAuditQuery, ChainAuditResponse, ConfirmActionRequest,
-            ContractQueryResponse, ErrorResponse, ExecuteActionRequest, ExpireConfirmationRequest,
-            GovernanceResponse, GovernanceStateResponse, GovernanceType, HoldingsResponse,
-            InstrumentsResponse, KnownMember, KnownMembersResponse, MessageResponse, NetworkInfo,
-            OperatorInfo, ProposalType, ProposeActionRequest, ProviderServicesResponse,
-            RegistrarServicesResponse, TransferFactoriesResponse, TransferFactoryInfo,
-            TransferInstructionsResponse, TransferPreapprovalsResponse, UserServicesResponse,
-            VaultsResponse,
+            AuditLogEntry, AuditLogQuery, AuditLogResponse, BurnRequestsResponse,
+            CancelConfirmationRequest, ChainAuditEntry, ChainAuditQuery, ChainAuditResponse,
+            ConfirmActionRequest, ContractQueryResponse, ErrorResponse, ExecuteActionRequest,
+            ExpireConfirmationRequest, GovernanceResponse, GovernanceStateResponse, GovernanceType,
+            HoldingsResponse, InstrumentsResponse, KnownMember, KnownMembersResponse,
+            MessageResponse, MintRequestsResponse, NetworkInfo, OperatorInfo, ProposalType,
+            ProposeActionRequest, ProviderServicesResponse, RegistrarServicesResponse,
+            TransferFactoriesResponse, TransferFactoryInfo, TransferInstructionsResponse,
+            TransferPreapprovalsResponse, UserServicesResponse, VaultsResponse,
         },
     },
     utils,
@@ -465,6 +466,66 @@ pub async fn get_transfer_instructions_handler(
             tracing::error!("Failed to fetch transfer instructions: {e}");
             HttpResponse::InternalServerError().json(ErrorResponse {
                 error: format!("Failed to fetch transfer instructions: {e}"),
+            })
+        }
+    }
+}
+
+/// Open `MintRequest` contracts the governance party can accept. Returns
+/// typed fields (holder, amount, instrument) so the Accept Mint Request
+/// dropdown can surface a human-readable label instead of just the cid.
+#[utoipa::path(
+    tag = "Services",
+    params(GovernanceQuery),
+    responses(
+        (status = 200, description = "Open mint requests", body = MintRequestsResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    )
+)]
+#[get("/governance/mint-requests")]
+pub async fn get_mint_requests_handler(
+    data: web::Data<AppState>,
+    query: web::Query<GovernanceQuery>,
+) -> impl Responder {
+    let party_id = &query.party_id;
+    let token = get_party_token(&data, party_id).await;
+    let packages = packages();
+
+    match get_open_mint_requests(&data.config, party_id, token, &packages).await {
+        Ok(mint_requests) => HttpResponse::Ok().json(MintRequestsResponse { mint_requests }),
+        Err(e) => {
+            tracing::error!("Failed to fetch mint requests: {e}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch mint requests: {e}"),
+            })
+        }
+    }
+}
+
+/// Open `BurnRequest` contracts. Mirrors `/governance/mint-requests`.
+#[utoipa::path(
+    tag = "Services",
+    params(GovernanceQuery),
+    responses(
+        (status = 200, description = "Open burn requests", body = BurnRequestsResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    )
+)]
+#[get("/governance/burn-requests")]
+pub async fn get_burn_requests_handler(
+    data: web::Data<AppState>,
+    query: web::Query<GovernanceQuery>,
+) -> impl Responder {
+    let party_id = &query.party_id;
+    let token = get_party_token(&data, party_id).await;
+    let packages = packages();
+
+    match get_open_burn_requests(&data.config, party_id, token, &packages).await {
+        Ok(burn_requests) => HttpResponse::Ok().json(BurnRequestsResponse { burn_requests }),
+        Err(e) => {
+            tracing::error!("Failed to fetch burn requests: {e}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch burn requests: {e}"),
             })
         }
     }

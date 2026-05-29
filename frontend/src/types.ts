@@ -843,6 +843,26 @@ export interface TransferInstructionsResponse {
   transfer_instructions: TransferInstructionInfo[];
 }
 
+/** An open `MintRequest` / `BurnRequest` the governance party can accept.
+ *  Shape is shared between mint and burn — the containing endpoint
+ *  disambiguates. `expires_at` is unix seconds of `executeBefore`. */
+export interface TokenRequestInfo {
+  contract_id: string;
+  holder: string;
+  amount: string;
+  instrument_admin: string;
+  instrument_id: string;
+  expires_at: number;
+}
+
+export interface MintRequestsResponse {
+  mint_requests: TokenRequestInfo[];
+}
+
+export interface BurnRequestsResponse {
+  burn_requests: TokenRequestInfo[];
+}
+
 /** Count of active TransferPreapproval contracts the gov party already has,
  *  split by direction (CC = Canton Coin via Splice; token = via Utility). */
 export interface TransferPreapprovalsResponse {

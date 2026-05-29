@@ -29,7 +29,7 @@ use super::{
     types::{
         AcceptTransferDetails, ActionType, ContractInfo, ContractWithBlob, DomainGovernanceAction,
         GovernanceAction, GovernanceConfirmation, GovernanceState, HoldingInfo, InstrumentInfo,
-        PartyMetadata, PendingAction, ProviderServiceInfo, RegistrarServiceInfo,
+        PartyMetadata, PendingAction, ProviderServiceInfo, RegistrarServiceInfo, TokenRequestInfo,
         TransferFactoryInfo, TransferInstructionInfo, TransferInstructionStatus,
         TransferProposalDetails, UserServiceInfo, VaultInfo,
     },
@@ -2927,6 +2927,191 @@ fn extract_transfer_instruction_info(created: &CreatedEvent) -> Option<TransferI
         pending_actions,
         expires_at,
     })
+}
+
+/// Fetch active `MintRequest` contracts (`Utility.Registry.App.V0.Model.Mint`)
+/// visible to `party_id`. Past-deadline contracts are dropped so the Accept
+/// dropdown only offers requests that would still succeed at interpretation.
+pub async fn get_open_mint_requests(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    packages: &PackageConfig,
+) -> Result<Vec<TokenRequestInfo>> {
+    let Some(pkg) = packages.utility_registry.as_ref() else {
+        return Ok(Vec::new());
+    };
+    fetch_token_requests_for_template(
+        config,
+        party_id,
+        token,
+        &TemplateId {
+            package_id: pkg.clone(),
+            module_name: "Utility.Registry.App.V0.Model.Mint",
+            entity_name: "MintRequest",
+        },
+        "mint",
+    )
+    .await
+}
+
+/// Fetch active `BurnRequest` contracts. Mirrors `get_open_mint_requests`.
+pub async fn get_open_burn_requests(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    packages: &PackageConfig,
+) -> Result<Vec<TokenRequestInfo>> {
+    let Some(pkg) = packages.utility_registry.as_ref() else {
+        return Ok(Vec::new());
+    };
+    fetch_token_requests_for_template(
+        config,
+        party_id,
+        token,
+        &TemplateId {
+            package_id: pkg.clone(),
+            module_name: "Utility.Registry.App.V0.Model.Burn",
+            entity_name: "BurnRequest",
+        },
+        "burn",
+    )
+    .await
+}
+
+async fn fetch_token_requests_for_template(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    template: &TemplateId,
+    payload_field: &str,
+) -> Result<Vec<TokenRequestInfo>> {
+    let mut state_client = utils::create_state_client(config, token).await?;
+
+    let ledger_end = state_client
+        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
+        .await?
+        .into_inner()
+        .offset;
+
+    let mut filters_by_party = HashMap::new();
+    filters_by_party.insert(
+        party_id.to_string(),
+        Filters {
+            cumulative: vec![CumulativeFilter {
+                identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
+                    TemplateFilter {
+                        template_id: Some(Identifier {
+                            package_id: template.package_id.clone(),
+                            module_name: template.module_name.to_string(),
+                            entity_name: template.entity_name.to_string(),
+                        }),
+                        include_created_event_blob: false,
+                    },
+                )),
+            }],
+        },
+    );
+
+    let acs_request = GetActiveContractsRequest {
+        active_at_offset: ledger_end,
+        event_format: Some(EventFormat {
+            filters_by_party,
+            filters_for_any_party: None,
+            verbose: true,
+        }),
+    };
+
+    let mut stream = state_client
+        .get_active_contracts(tonic::Request::new(acs_request))
+        .await?
+        .into_inner();
+
+    let mut requests = Vec::new();
+    while let Some(response) = stream.message().await? {
+        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
+            && let Some(created) = active.created_event
+            && !is_execute_before_expired_in_payload(&created, payload_field)
+            && let Some(info) = extract_token_request_info(&created, payload_field)
+        {
+            requests.push(info);
+        }
+    }
+
+    Ok(requests)
+}
+
+/// Extract `{holder, amount, instrumentId.{admin,id}, executeBefore}` from a
+/// MintRequest/BurnRequest created event. `payload_field` is `"mint"` or
+/// `"burn"` — the nested record wrapping the shared `Mint`/`Burn` payload.
+fn extract_token_request_info(
+    created: &CreatedEvent,
+    payload_field: &str,
+) -> Option<TokenRequestInfo> {
+    let record = created.create_arguments.as_ref()?;
+    let payload = record
+        .fields
+        .iter()
+        .find(|f| f.label == payload_field)
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Record(r)) => Some(r),
+            _ => None,
+        })?;
+
+    let holder: CantonId = field_party(payload, "holder")?.parse().ok()?;
+    let amount = field_numeric(payload, "amount").and_then(|s| DamlDecimal::parse(&s).ok())?;
+
+    let instrument_record = payload
+        .fields
+        .iter()
+        .find(|f| f.label == "instrumentId")
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Record(r)) => Some(r),
+            _ => None,
+        })?;
+    let instrument_admin: CantonId = field_party(instrument_record, "admin")?.parse().ok()?;
+    let instrument_id = field_text(instrument_record, "id")?;
+
+    let expires_at = field_timestamp(payload, "executeBefore")? / 1_000_000;
+
+    Some(TokenRequestInfo {
+        contract_id: created.contract_id.clone(),
+        holder,
+        amount,
+        instrument_admin,
+        instrument_id,
+        expires_at,
+    })
+}
+
+/// Same as `is_execute_before_expired`, but looks inside the nested `mint`/
+/// `burn` payload record where MintRequest/BurnRequest carry their deadline.
+fn is_execute_before_expired_in_payload(created: &CreatedEvent, payload_field: &str) -> bool {
+    let Some(record) = created.create_arguments.as_ref() else {
+        return false;
+    };
+    let Some(payload) = record
+        .fields
+        .iter()
+        .find(|f| f.label == payload_field)
+        .and_then(|f| f.value.as_ref())
+        .and_then(|v| match &v.sum {
+            Some(value::Sum::Record(r)) => Some(r),
+            _ => None,
+        })
+    else {
+        return false;
+    };
+    let Some(execute_before_micros) = field_timestamp(payload, "executeBefore") else {
+        return false;
+    };
+    let now_micros = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_micros() as i64)
+        .unwrap_or(0);
+    execute_before_micros <= now_micros
 }
 
 /// Decode the `pendingActions :: Map Party Text` payload of
