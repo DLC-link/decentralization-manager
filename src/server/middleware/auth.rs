@@ -199,7 +199,16 @@ fn parse_bearer(header: &str) -> Option<&str> {
 fn is_always_public(path: &str) -> bool {
     matches!(
         path,
-        "" | "/" | "/index.html" | "/favicon.ico" | "/favicon.svg" | "/auth-config"
+        // #173: the cancel probe carries its own signed-pubkey auth (custom
+        // X-Probe-* headers verified by `crate::noise::probe_sig::verify_probe`
+        // in the handler). Bearer-token auth doesn't apply — peers are agents,
+        // not human admins with OIDC tokens.
+        "" | "/"
+            | "/index.html"
+            | "/favicon.ico"
+            | "/favicon.svg"
+            | "/auth-config"
+            | "/workflows/peer-probe"
     ) || path.starts_with("/assets/")
         || path.starts_with("/swagger-ui/")
         || path.starts_with("/api-docs/")
@@ -224,6 +233,16 @@ mod tests {
         assert!(is_always_public("/auth-config"));
         assert!(!is_always_public("/auth/status"));
         assert!(!is_always_public("/auth/test"));
+    }
+
+    #[test]
+    fn peer_probe_bypasses_bearer_auth() {
+        // #173: signed-pubkey auth handled inside the handler — bearer
+        // middleware would reject every peer probe with 401.
+        assert!(is_always_public("/workflows/peer-probe"));
+        // Other /workflows/* endpoints still require auth.
+        assert!(!is_always_public("/workflows"));
+        assert!(!is_always_public("/workflows/peer-probe/something-else"));
     }
 
     #[test]
