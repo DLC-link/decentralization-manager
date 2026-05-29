@@ -129,19 +129,7 @@ pub async fn ensure_nodes_healthy(f: &mut Fixture) -> anyhow::Result<()> {
         }
         let http_ok = TcpStream::connect(("127.0.0.1", http_port)).await.is_ok();
         let noise_ok = TcpStream::connect(("127.0.0.1", noise_port)).await.is_ok();
-        if http_ok {
-            // Noise can legitimately be transient between phases — a prior
-            // workflow's per-workflow NoiseServer may still be releasing
-            // port 9001 (post-#173 the probe makes peer survival independent
-            // of noise anyway). Respawning here used to mask state cleanup
-            // but now amplifies TIME_WAIT bind loops, so only respawn on
-            // HTTP-down.
-            if !noise_ok {
-                tracing::warn!(
-                    "ensure_nodes_healthy: P{idx} noise port down but HTTP up; \
-                     trusting workflow state will settle (no respawn)"
-                );
-            }
+        if http_ok && noise_ok {
             continue;
         }
         tracing::warn!(
