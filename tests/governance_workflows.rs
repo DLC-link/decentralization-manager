@@ -109,6 +109,7 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     phases::cancel_cascades::run(&mut f).await?;
     phases::start_handler_conflict_409::run(&mut f).await?;
     phases::restart_coordinator_resume::run(&mut f).await?; // G1
+    phases::restart_coordinator_mid_workflow_resume::run(&mut f).await?; // GX
     phases::restart_peer_resume::run(&mut f).await?; // G2
     phases::retry_coordinator_broadcast::run(&mut f).await?; // G3
     phases::dismiss_failed_cleans_artifacts::run(&mut f).await?; // G4
