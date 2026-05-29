@@ -16,7 +16,7 @@ use crate::{error::Result, participant_id::CantonId};
 
 use super::types::{
     ActionType, AppRewardBeneficiary, BillingParams, Claim, FarConfig, InstrumentAllowance,
-    InstrumentId, ProposalType, VaultLimits,
+    InstrumentId, InstrumentIdentifier, ProposalType, VaultLimits,
 };
 
 // ============================================================================
@@ -280,6 +280,14 @@ fn serialize_app_reward_beneficiary(b: &AppRewardBeneficiary) -> Value {
     make_record(vec![
         field("beneficiary", make_party(&b.beneficiary)),
         field("weight", make_numeric(&b.weight.to_string())),
+    ])
+}
+
+fn serialize_instrument_identifier(i: &InstrumentIdentifier) -> Value {
+    make_record(vec![
+        field("source", make_party(&i.source)),
+        field("id", make_text(&i.id)),
+        field("scheme", make_text(&i.scheme)),
     ])
 }
 
@@ -1037,6 +1045,7 @@ pub fn build_proposal_create_args(
             provider_service_cid,
             operator,
             instrument_id_text,
+            additional_identifiers,
             create_transfer_rule,
             create_allocation_factory,
         } => (
@@ -1051,6 +1060,15 @@ pub fn build_proposal_create_args(
                     field("providerServiceCid", make_contract_id(provider_service_cid)),
                     field("operator", make_party(operator)),
                     field("instrumentIdText", make_text(instrument_id_text)),
+                    field(
+                        "additionalIdentifiers",
+                        make_list(
+                            additional_identifiers
+                                .iter()
+                                .map(serialize_instrument_identifier)
+                                .collect(),
+                        ),
+                    ),
                     field("createTransferRule", make_bool(*create_transfer_rule)),
                     field(
                         "createAllocationFactory",
