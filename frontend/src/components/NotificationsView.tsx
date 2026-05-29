@@ -6,6 +6,7 @@ import {
   Chip,
   CircularProgress,
   IconButton,
+  LinearProgress,
   Skeleton,
   Tooltip,
   Typography,
@@ -114,9 +115,11 @@ const truncatePartyId = (id: string): string => {
 const InvitationCard = ({
   invitation,
   onAfter,
+  onSelectParty,
 }: {
   invitation: PendingInvitation;
   onAfter: () => void;
+  onSelectParty: (partyId: string) => void;
 }) => {
   const [busy, setBusy] = useState(false);
   const { showSnackbar } = useSnackbar();
@@ -143,7 +146,10 @@ const InvitationCard = ({
       );
       onAfter();
     } catch (err) {
-      showSnackbar(err instanceof Error ? err.message : `Failed to ${path}`);
+      showSnackbar(
+        err instanceof Error ? err.message : `Failed to ${path}`,
+        "error",
+      );
     } finally {
       setBusy(false);
     }
@@ -158,6 +164,11 @@ const InvitationCard = ({
   const showDarsMeta =
     invitation.invitation_type === "Dars" &&
     (invitation.dar_filenames?.length ?? 0) > 0;
+  const showKickMeta =
+    invitation.invitation_type === "Kick" &&
+    (!!invitation.kicked_participant ||
+      invitation.new_threshold != null ||
+      !!invitation.dec_party_id);
 
   return (
     <Box
@@ -295,6 +306,105 @@ const InvitationCard = ({
         </Box>
       )}
 
+      {showKickMeta && (
+        <Box
+          sx={{
+            display: "flex",
+            flexDirection: "column",
+            gap: 0.75,
+            px: 1.25,
+            py: 1,
+            bgcolor: "action.hover",
+            borderRadius: 1,
+          }}
+        >
+          {invitation.dec_party_id && (
+            <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ minWidth: 96 }}
+              >
+                Dec party
+              </Typography>
+              <Typography
+                component="span"
+                variant="caption"
+                onClick={() => onSelectParty(invitation.dec_party_id!)}
+                sx={{
+                  fontFamily: "monospace",
+                  color: "primary.main",
+                  cursor: "pointer",
+                  "&:hover": { textDecoration: "underline" },
+                }}
+              >
+                {truncatePartyId(invitation.dec_party_id)}
+              </Typography>
+            </Box>
+          )}
+          {invitation.kicked_participant && (
+            <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ minWidth: 96 }}
+              >
+                Kicking
+              </Typography>
+              <Typography
+                variant="body2"
+                sx={{ fontWeight: 600, fontFamily: "monospace" }}
+              >
+                {truncatePartyId(invitation.kicked_participant)}
+              </Typography>
+              <Tooltip title="Copy kicked party id">
+                <IconButton
+                  size="small"
+                  onClick={async () => {
+                    const ok = await copyToClipboard(invitation.kicked_participant!);
+                    showSnackbar(ok ? "Copied to clipboard" : "Failed to copy");
+                  }}
+                  sx={{ p: 0.25 }}
+                >
+                  <ContentCopyIcon sx={{ fontSize: 14 }} />
+                </IconButton>
+              </Tooltip>
+            </Box>
+          )}
+          {invitation.new_threshold != null && (
+            <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ minWidth: 96 }}
+              >
+                Threshold
+              </Typography>
+              <Typography variant="body2">
+                {invitation.previous_threshold != null ? (
+                  <>
+                    <Box
+                      component="span"
+                      sx={{ color: "text.secondary", textDecoration: "line-through" }}
+                    >
+                      {invitation.previous_threshold}
+                    </Box>{" "}
+                    →{" "}
+                    <Box component="span" sx={{ fontWeight: 600 }}>
+                      {invitation.new_threshold}
+                    </Box>
+                  </>
+                ) : (
+                  <Box component="span" sx={{ fontWeight: 600 }}>
+                    {invitation.new_threshold}
+                  </Box>
+                )}
+              </Typography>
+            </Box>
+          )}
+        </Box>
+      )}
+
       <Box sx={{ display: "flex", gap: 1, justifyContent: "flex-end" }}>
         <Button
           variant="text"
@@ -363,6 +473,7 @@ const ActionCard = ({
     } catch (err) {
       showSnackbar(
         err instanceof Error ? err.message : `Failed: ${endpoint}`,
+        "error",
       );
       return false;
     } finally {
@@ -372,7 +483,7 @@ const ActionCard = ({
 
   const handleConfirm = async () => {
     if (!party.rulesContractId) {
-      showSnackbar("Governance rules contract is not set");
+      showSnackbar("Governance rules contract is not set", "error");
       return;
     }
     const body: ConfirmActionRequest = {
@@ -396,7 +507,7 @@ const ActionCard = ({
 
   const handleExpire = async (confirmationCid: string) => {
     if (!party.rulesContractId) {
-      showSnackbar("Governance rules contract is not set");
+      showSnackbar("Governance rules contract is not set", "error");
       return;
     }
     const body: ExpireConfirmationRequest = {
@@ -551,6 +662,7 @@ const ActionCard = ({
           (a, b) => (a.created_at ?? 0) - (b.created_at ?? 0),
         );
         const proposerCid = sorted[0]?.contract_id;
+        const nowSeconds = Math.floor(Date.now() / 1000);
         return (
           <Box
             sx={{
@@ -574,6 +686,8 @@ const ActionCard = ({
               {sorted.map((c) => {
                 const isOwn = c.confirming_party === party.memberPartyId;
                 const isProposer = c.contract_id === proposerCid;
+                const isExpired =
+                  (c.expires_at ?? 0) > 0 && (c.expires_at ?? 0) <= nowSeconds;
                 return (
                   <Box
                     key={c.contract_id}
@@ -583,7 +697,12 @@ const ActionCard = ({
                       variant="caption"
                       sx={{
                         fontFamily: "monospace",
-                        color: isOwn ? "primary.main" : "text.primary",
+                        color: isExpired
+                          ? "text.disabled"
+                          : isOwn
+                            ? "primary.main"
+                            : "text.primary",
+                        textDecoration: isExpired ? "line-through" : "none",
                       }}
                     >
                       {truncatePartyId(c.confirming_party)}
@@ -604,7 +723,23 @@ const ActionCard = ({
                         }}
                       />
                     )}
-                    {!isOwn && (
+                    {isExpired && (
+                      <Chip
+                        label="expired"
+                        size="small"
+                        variant="outlined"
+                        color="warning"
+                        sx={{
+                          height: 18,
+                          "& .MuiChip-label": {
+                            px: 0.75,
+                            fontSize: 10,
+                            lineHeight: 1,
+                          },
+                        }}
+                      />
+                    )}
+                    {!isOwn && !isProposer && isExpired && (
                       <Tooltip title="Expire confirmation">
                         <span>
                           <IconButton
@@ -683,6 +818,7 @@ const ActionCard = ({
         action={action}
         loading={executeLoading}
         error={executeError}
+        onErrorDismiss={() => setExecuteError(null)}
       />
     </Box>
   );
@@ -720,7 +856,7 @@ const DomainActionCard = ({
     successMsg: string,
   ): Promise<void> => {
     if (!party.rulesContractId) {
-      showSnackbar("Governance rules contract is not set");
+      showSnackbar("Governance rules contract is not set", "error");
       return;
     }
     setBusy(true);
@@ -737,7 +873,10 @@ const DomainActionCard = ({
       showSnackbar(successMsg);
       onAfter();
     } catch (err) {
-      showSnackbar(err instanceof Error ? err.message : `Failed: ${endpoint}`);
+      showSnackbar(
+        err instanceof Error ? err.message : `Failed: ${endpoint}`,
+        "error",
+      );
     } finally {
       setBusy(false);
     }
@@ -868,19 +1007,167 @@ const DomainActionCard = ({
         </Typography>
       )}
 
-      <Typography
-        variant="caption"
-        color="text.secondary"
-        sx={{ fontFamily: "monospace" }}
-      >
-        {domainAction.proposal_cid.slice(0, 16)}…
-      </Typography>
+      {domainAction.transfer_details && (() => {
+        const td = domainAction.transfer_details;
+        // Canton Coin's token-standard `instrument_id` is the literal
+        // "Amulet" — render as "CC" to match Holdings and the Transfer
+        // Proposal dropdown.
+        const token =
+          td.instrument_id === "Amulet" ? "CC" : td.instrument_id;
+        const rows: { label: string; value: string; copyValue?: string }[] = [
+          { label: "Token", value: token },
+          { label: "Amount", value: td.amount },
+          {
+            label: "Recipient",
+            value: truncatePartyId(td.receiver),
+            copyValue: td.receiver,
+          },
+        ];
+        return (
+          <Box
+            sx={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 0.75,
+              px: 1.25,
+              py: 1,
+              bgcolor: "action.hover",
+              borderRadius: 1,
+            }}
+          >
+            {rows.map((r) => (
+              <Box
+                key={r.label}
+                sx={{ display: "flex", alignItems: "center", gap: 1 }}
+              >
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{ minWidth: 96 }}
+                >
+                  {r.label}
+                </Typography>
+                <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                  {r.value}
+                </Typography>
+                {r.copyValue && (
+                  <Tooltip title={`Copy ${r.label.toLowerCase()}`}>
+                    <IconButton
+                      size="small"
+                      onClick={async () => {
+                        const ok = await copyToClipboard(r.copyValue!);
+                        showSnackbar(
+                          ok ? "Copied to clipboard" : "Failed to copy",
+                        );
+                      }}
+                      sx={{ p: 0.25 }}
+                    >
+                      <ContentCopyIcon sx={{ fontSize: 14 }} />
+                    </IconButton>
+                  </Tooltip>
+                )}
+              </Box>
+            ))}
+          </Box>
+        );
+      })()}
+
+      {domainAction.accept_transfer_details && (() => {
+        const atd = domainAction.accept_transfer_details;
+        // Same Amulet → CC rename as the Transfer card for consistency.
+        const token =
+          atd.instrument_id === "Amulet" ? "CC" : atd.instrument_id;
+        const rows: { label: string; value: string; copyValue?: string }[] = [
+          { label: "Token", value: token },
+          { label: "Amount", value: atd.amount },
+          {
+            label: "Sender",
+            value: truncatePartyId(atd.sender),
+            copyValue: atd.sender,
+          },
+          {
+            label: "Recipient",
+            value: truncatePartyId(atd.receiver),
+            copyValue: atd.receiver,
+          },
+        ];
+        return (
+          <Box
+            sx={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 0.75,
+              px: 1.25,
+              py: 1,
+              bgcolor: "action.hover",
+              borderRadius: 1,
+            }}
+          >
+            {rows.map((r) => (
+              <Box
+                key={r.label}
+                sx={{ display: "flex", alignItems: "center", gap: 1 }}
+              >
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{ minWidth: 96 }}
+                >
+                  {r.label}
+                </Typography>
+                <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                  {r.value}
+                </Typography>
+                {r.copyValue && (
+                  <Tooltip title={`Copy ${r.label.toLowerCase()}`}>
+                    <IconButton
+                      size="small"
+                      onClick={async () => {
+                        const ok = await copyToClipboard(r.copyValue!);
+                        showSnackbar(
+                          ok ? "Copied to clipboard" : "Failed to copy",
+                        );
+                      }}
+                      sx={{ p: 0.25 }}
+                    >
+                      <ContentCopyIcon sx={{ fontSize: 14 }} />
+                    </IconButton>
+                  </Tooltip>
+                )}
+              </Box>
+            ))}
+          </Box>
+        );
+      })()}
+
+      <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
+        <Typography
+          variant="caption"
+          color="text.secondary"
+          sx={{ fontFamily: "monospace" }}
+        >
+          {domainAction.proposal_cid.slice(0, 16)}…
+        </Typography>
+        <Tooltip title="Copy proposal contract id">
+          <IconButton
+            size="small"
+            onClick={async () => {
+              const ok = await copyToClipboard(domainAction.proposal_cid);
+              showSnackbar(ok ? "Copied to clipboard" : "Failed to copy");
+            }}
+            sx={{ p: 0.25 }}
+          >
+            <ContentCopyIcon sx={{ fontSize: 14 }} />
+          </IconButton>
+        </Tooltip>
+      </Box>
 
       {domainAction.confirmations.length > 0 && (() => {
         const sorted = [...domainAction.confirmations].sort(
           (a, b) => (a.created_at ?? 0) - (b.created_at ?? 0),
         );
         const proposerCid = sorted[0]?.contract_id;
+        const nowSeconds = Math.floor(Date.now() / 1000);
         return (
           <Box
             sx={{
@@ -904,6 +1191,8 @@ const DomainActionCard = ({
               {sorted.map((c) => {
                 const isOwn = c.confirming_party === party.memberPartyId;
                 const isProposer = c.contract_id === proposerCid;
+                const isExpired =
+                  (c.expires_at ?? 0) > 0 && (c.expires_at ?? 0) <= nowSeconds;
                 return (
                   <Box
                     key={c.contract_id}
@@ -913,7 +1202,12 @@ const DomainActionCard = ({
                       variant="caption"
                       sx={{
                         fontFamily: "monospace",
-                        color: isOwn ? "primary.main" : "text.primary",
+                        color: isExpired
+                          ? "text.disabled"
+                          : isOwn
+                            ? "primary.main"
+                            : "text.primary",
+                        textDecoration: isExpired ? "line-through" : "none",
                       }}
                     >
                       {truncatePartyId(c.confirming_party)}
@@ -934,7 +1228,23 @@ const DomainActionCard = ({
                         }}
                       />
                     )}
-                    {!isOwn && (
+                    {isExpired && (
+                      <Chip
+                        label="expired"
+                        size="small"
+                        variant="outlined"
+                        color="warning"
+                        sx={{
+                          height: 18,
+                          "& .MuiChip-label": {
+                            px: 0.75,
+                            fontSize: 10,
+                            lineHeight: 1,
+                          },
+                        }}
+                      />
+                    )}
+                    {!isOwn && !isProposer && isExpired && (
                       <Tooltip title="Expire confirmation">
                         <span>
                           <IconButton
@@ -1079,7 +1389,10 @@ const WorkflowRunCard = ({
       showSnackbar(`${run.kind} workflow cancelled`);
       onAfter();
     } catch (err) {
-      showSnackbar(err instanceof Error ? err.message : "Failed to cancel");
+      showSnackbar(
+        err instanceof Error ? err.message : "Failed to cancel",
+        "error",
+      );
     } finally {
       setBusy(false);
     }
@@ -1098,7 +1411,10 @@ const WorkflowRunCard = ({
       }
       onAfter();
     } catch (err) {
-      showSnackbar(err instanceof Error ? err.message : "Failed to dismiss");
+      showSnackbar(
+        err instanceof Error ? err.message : "Failed to dismiss",
+        "error",
+      );
     } finally {
       setBusy(false);
     }
@@ -1118,7 +1434,10 @@ const WorkflowRunCard = ({
       showSnackbar(`Retrying ${run.kind} workflow`);
       onAfter();
     } catch (err) {
-      showSnackbar(err instanceof Error ? err.message : "Failed to retry");
+      showSnackbar(
+        err instanceof Error ? err.message : "Failed to retry",
+        "error",
+      );
     } finally {
       setBusy(false);
     }
@@ -1152,18 +1471,6 @@ const WorkflowRunCard = ({
         ? `from ${run.coordinator_pubkey.slice(0, 12)}…${run.coordinator_pubkey.slice(-6)}`
         : null;
 
-  const completedCount = run.completed_peers.length;
-  const totalCount = run.expected_peers.length;
-  // Per-kind label for the peer progress counter. DARs distribution
-  // doesn't sign anything — peers just upload the dar locally and
-  // signal completion. Other kinds collect DAML signatures.
-  const peerVerb = run.kind === "Dars" ? "uploaded" : "signed";
-  // Step counters are only meaningful on the coordinator side — the
-  // peer's `current_step` is always "Active" with step_index=0,
-  // step_total=N (see invitations.rs `upsert_peer_run`), so rendering
-  // it as "Active (1/N)" is misleading. Hide step + peer count rows
-  // entirely for peer-side cards.
-  const isCoordinator = run.role === "Coordinator";
 
   return (
     <Box
@@ -1186,9 +1493,19 @@ const WorkflowRunCard = ({
         }}
       >
         <Box>
-          <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
-            {run.kind} workflow
-          </Typography>
+          <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
+            <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
+              {run.kind} workflow
+            </Typography>
+            {run.prefix && (
+              <Chip
+                label={run.prefix}
+                size="small"
+                variant="outlined"
+                sx={{ height: 20 }}
+              />
+            )}
+          </Box>
           {fromLine && (
             <Typography variant="caption" color="text.secondary">
               {fromLine}
@@ -1210,7 +1527,12 @@ const WorkflowRunCard = ({
         </Box>
       </Box>
 
-      {(isInProgress || run.error) && (
+      {(isInProgress ||
+        run.error ||
+        run.dec_party_id ||
+        run.new_threshold != null ||
+        run.kicked_participant ||
+        (run.participants && run.participants.length > 0)) && (
         <Box
           sx={{
             display: "flex",
@@ -1222,32 +1544,38 @@ const WorkflowRunCard = ({
             borderRadius: 1,
           }}
         >
-          {isInProgress && (
-            <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
-              <Typography
-                variant="caption"
-                color="text.secondary"
-                sx={{ minWidth: 96 }}
+          {isInProgress && run.step_total > 0 && (
+            <Box
+              sx={{
+                display: "flex",
+                flexDirection: "column",
+                gap: 0.5,
+              }}
+            >
+              <Box
+                sx={{
+                  display: "flex",
+                  alignItems: "baseline",
+                  gap: 1,
+                  justifyContent: "space-between",
+                }}
               >
-                Step
-              </Typography>
-              <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                {run.current_step} ({run.step_index + 1}/{run.step_total})
-              </Typography>
-            </Box>
-          )}
-          {isInProgress && isCoordinator && totalCount > 0 && (
-            <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
-              <Typography
-                variant="caption"
-                color="text.secondary"
-                sx={{ minWidth: 96 }}
-              >
-                Peers
-              </Typography>
-              <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                {completedCount} / {totalCount} {peerVerb}
-              </Typography>
+                <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                  {run.current_step}
+                </Typography>
+                <Typography variant="caption" color="text.secondary">
+                  {run.step_index + 1} / {run.step_total}
+                </Typography>
+              </Box>
+              <LinearProgress
+                variant="determinate"
+                value={Math.min(
+                  100,
+                  ((run.step_index + 1) / run.step_total) * 100,
+                )}
+                color="primary"
+                sx={{ height: 6, borderRadius: 3 }}
+              />
             </Box>
           )}
           {run.dec_party_id && (
@@ -1271,6 +1599,87 @@ const WorkflowRunCard = ({
                 }}
               >
                 {truncatePartyId(run.dec_party_id)}
+              </Typography>
+            </Box>
+          )}
+          {run.kicked_participant && (
+            <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ minWidth: 96 }}
+              >
+                Kicking
+              </Typography>
+              <Typography
+                variant="body2"
+                sx={{ fontWeight: 600, fontFamily: "monospace" }}
+              >
+                {truncatePartyId(run.kicked_participant)}
+              </Typography>
+              <Tooltip title="Copy kicked party id">
+                <IconButton
+                  size="small"
+                  onClick={async () => {
+                    const ok = await copyToClipboard(run.kicked_participant!);
+                    showSnackbar(ok ? "Copied to clipboard" : "Failed to copy");
+                  }}
+                  sx={{ p: 0.25 }}
+                >
+                  <ContentCopyIcon sx={{ fontSize: 14 }} />
+                </IconButton>
+              </Tooltip>
+            </Box>
+          )}
+          {run.participants && run.participants.length > 0 && (
+            <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ minWidth: 96 }}
+              >
+                Participants ({run.participants.length})
+              </Typography>
+              <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
+                {run.participants.map((id) => (
+                  <Chip
+                    key={id}
+                    size="small"
+                    variant="outlined"
+                    label={truncatePartyId(id)}
+                  />
+                ))}
+              </Box>
+            </Box>
+          )}
+          {run.new_threshold != null && (
+            <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ minWidth: 96 }}
+              >
+                Threshold
+              </Typography>
+              <Typography variant="body2">
+                {run.previous_threshold != null ? (
+                  <>
+                    <Box
+                      component="span"
+                      sx={{ color: "text.secondary", textDecoration: "line-through" }}
+                    >
+                      {run.previous_threshold}
+                    </Box>{" "}
+                    →{" "}
+                    <Box component="span" sx={{ fontWeight: 600 }}>
+                      {run.new_threshold}
+                    </Box>
+                  </>
+                ) : (
+                  <Box component="span" sx={{ fontWeight: 600 }}>
+                    {run.new_threshold}
+                  </Box>
+                )}
               </Typography>
             </Box>
           )}
@@ -1407,6 +1816,7 @@ export const NotificationsView = ({
               key={`inv-${entry.invitation.id}`}
               invitation={entry.invitation}
               onAfter={onInvitationsChanged}
+              onSelectParty={onSelectParty}
             />
           );
         }

@@ -13,6 +13,7 @@ import {
 } from "@mui/material";
 import { API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
+import { fieldHelpAdornment } from "./FieldHelp";
 
 interface GrantRightsDialogProps {
   open: boolean;
@@ -103,6 +104,14 @@ export const GrantRightsDialog = ({
             autoFocus
             disabled={loading}
             autoComplete="off"
+            slotProps={{
+              input: {
+                endAdornment: fieldHelpAdornment(
+                  "The Keycloak client ID whose service account has ParticipantAdmin rights on this participant. The same one your team uses in Yaak.",
+                  "Help for Client ID",
+                ),
+              },
+            }}
           />
 
           <TextField
@@ -114,9 +123,21 @@ export const GrantRightsDialog = ({
             fullWidth
             disabled={loading}
             autoComplete="off"
+            slotProps={{
+              input: {
+                endAdornment: fieldHelpAdornment(
+                  "The secret that pairs with the client ID above. Used once to grant rights, then discarded — never stored.",
+                  "Help for Client Secret",
+                ),
+              },
+            }}
           />
 
-          {error && <Alert severity="error">{error}</Alert>}
+          {error && (
+            <Alert severity="error" onClose={() => setError(null)}>
+              {error}
+            </Alert>
+          )}
         </Box>
       </DialogContent>
       <DialogActions>

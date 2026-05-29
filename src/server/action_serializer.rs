@@ -121,6 +121,15 @@ fn make_empty_extra_args() -> Value {
     make_extra_args(make_empty_text_map())
 }
 
+/// Placeholder timestamps used when serializing a `Transfer` record into a
+/// `TransferProposal`. Exposed so the registry choice-context fetch uses the
+/// *same* values — the registrar resolves the context for these exact choice
+/// arguments, so any drift between propose-time and execute-time payloads
+/// fails interpretation. `0` is epoch and `i64::MAX / 1000` is the maximum
+/// Daml `Time` value (well past any realistic deadline).
+pub const TRANSFER_REQUESTED_AT_MICROS: i64 = 0;
+pub const TRANSFER_EXECUTE_BEFORE_MICROS: i64 = i64::MAX / 1000;
+
 fn make_extra_args(context_values: Value) -> Value {
     make_record(vec![
         field(
@@ -853,7 +862,7 @@ pub fn build_proposal_create_args(
     governance_party: &str,
     proposer: &str,
     proposal: &ProposalType,
-    accept_transfer_context: Option<&ChoiceContext>,
+    transfer_choice_context: Option<&ChoiceContext>,
 ) -> Result<(ProposalPackage, &'static str, &'static str, Record)> {
     Ok(match proposal {
         ProposalType::SetupCcPreapproval {
@@ -924,13 +933,13 @@ pub fn build_proposal_create_args(
                 field(
                     "requestedAt",
                     Value {
-                        sum: Some(value::Sum::Timestamp(0)),
+                        sum: Some(value::Sum::Timestamp(TRANSFER_REQUESTED_AT_MICROS)),
                     },
                 ),
                 field(
                     "executeBefore",
                     Value {
-                        sum: Some(value::Sum::Timestamp(i64::MAX / 1000)),
+                        sum: Some(value::Sum::Timestamp(TRANSFER_EXECUTE_BEFORE_MICROS)),
                     },
                 ),
                 field(
@@ -944,6 +953,10 @@ pub fn build_proposal_create_args(
                 ),
                 field("meta", make_empty_metadata()),
             ]);
+            let extra_args = match transfer_choice_context {
+                Some(ctx) => make_extra_args_from_context(ctx)?,
+                None => make_empty_extra_args(),
+            };
             (
                 ProposalPackage::GovernanceTokenCustody,
                 "Governance.TokenCustody.TransferProposal",
@@ -956,7 +969,7 @@ pub fn build_proposal_create_args(
                         field("transferFactoryCid", make_contract_id(transfer_factory_cid)),
                         field("expectedAdmin", make_party(expected_admin)),
                         field("transfer", transfer_record),
-                        field("extraArgs", make_empty_extra_args()),
+                        field("extraArgs", extra_args),
                     ],
                 },
             )
@@ -973,7 +986,7 @@ pub fn build_proposal_create_args(
             // expected to fetch the choice context from the token-standard
             // registry and pass it in; if it didn't, fall back to an empty
             // record (legacy callers, e.g. tests).
-            let extra_args = match accept_transfer_context {
+            let extra_args = match transfer_choice_context {
                 Some(ctx) => make_extra_args_from_context(ctx)?,
                 None => make_empty_extra_args(),
             };

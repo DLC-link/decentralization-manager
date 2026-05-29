@@ -1,4 +1,10 @@
-import { useState, useRef, useEffect, useCallback, type ReactNode } from "react";
+import {
+  useState,
+  useRef,
+  useEffect,
+  useCallback,
+  type ReactNode,
+} from "react";
 import {
   Box,
   Button,
@@ -20,23 +26,80 @@ import PersonRemoveIcon from "@mui/icons-material/PersonRemove";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import RefreshIcon from "@mui/icons-material/Refresh";
-import SettingsIcon from "@mui/icons-material/Settings";
 import { CopyableText } from "./CopyableText";
+import { TextHelp } from "./FieldHelp";
 import { KickDialog } from "./KickDialog";
 import { ContractsDialog } from "./ContractsDialog";
 import { PartyConfigDialog } from "./PartyConfigDialog";
 import { GovernanceActionsDialog } from "./GovernanceActionsDialog";
 import { GovernanceAuditTrail, CHAIN_LIMIT } from "./GovernanceAuditTrail";
-import { AuthSection } from "./AuthSection";
+import { HoldingsSection } from "./HoldingsSection";
+import { AuthSection, getAuthStatusIcon } from "./AuthSection";
 import { zebraRow } from "../styles";
-import { ADMIN_ACCESS } from "../constants";
-import type { DecentralizedParty, Network, PartyAuthStatus } from "../types";
+import { ADMIN_ACCESS, API_BASE } from "../constants";
+import { authenticatedFetch } from "../api";
+import { formatMicroseconds } from "../governanceFormat";
+import type {
+  DecentralizedParty,
+  GovernanceState,
+  GovernanceStateResponse,
+  Network,
+  PartyAuthStatus,
+} from "../types";
+
+const StatCard = ({
+  label,
+  value,
+  helpText,
+}: {
+  label: string;
+  value: number | string;
+  /// Optional plain-English explanation rendered as a tooltip on hover
+  /// of the pill's label. No inline icon — keeps the chip compact.
+  helpText?: string;
+}) => {
+  const labelNode = (
+    <Typography
+      variant="caption"
+      color="text.secondary"
+      sx={{ textTransform: "uppercase", letterSpacing: 0.6, fontWeight: 500 }}
+    >
+      {label}
+    </Typography>
+  );
+  return (
+    <Box
+      sx={(theme) => ({
+        display: "inline-flex",
+        alignItems: "baseline",
+        gap: 0.75,
+        px: 1.5,
+        py: 0.5,
+        borderRadius: 999,
+        backgroundColor:
+          theme.palette.mode === "light"
+            ? "rgba(0, 0, 0, 0.04)"
+            : "rgba(255, 255, 255, 0.06)",
+      })}
+    >
+      {helpText ? <TextHelp text={helpText}>{labelNode}</TextHelp> : labelNode}
+      <Typography variant="body2" sx={{ fontWeight: 700 }}>
+        {value}
+      </Typography>
+    </Box>
+  );
+};
 
 interface CollapsibleSectionProps {
   title: string;
   expanded: boolean;
   onToggle: () => void;
   badge?: ReactNode;
+  /// Optional plain-English explanation of the section's title word.
+  /// Wraps the title in a `TextHelp` so hovering / focusing the title
+  /// reveals a tooltip — no inline icon, since the title text itself is
+  /// the trigger.
+  helpText?: string;
   children: ReactNode;
 }
 
@@ -45,18 +108,25 @@ const CollapsibleSection = ({
   expanded,
   onToggle,
   badge,
+  helpText,
   children,
 }: CollapsibleSectionProps) => (
   <>
     <Divider />
     <Box
-      sx={{
+      sx={(theme) => ({
         display: "flex",
         alignItems: "center",
         cursor: "pointer",
         py: 1,
         px: 3,
-      }}
+        backgroundColor: expanded
+          ? "transparent"
+          : theme.palette.mode === "light"
+            ? "rgba(0, 0, 0, 0.03)"
+            : "rgba(255, 255, 255, 0.04)",
+        transition: "background-color 0.2s ease",
+      })}
       onClick={onToggle}
     >
       <ExpandMoreIcon
@@ -67,9 +137,15 @@ const CollapsibleSection = ({
           transition: "transform 0.2s ease",
         }}
       />
-      <Typography variant="subtitle2">
-        {title}
-      </Typography>
+      {helpText ? (
+        <TextHelp text={helpText}>
+          <Typography variant="subtitle2" component="span">
+            {title}
+          </Typography>
+        </TextHelp>
+      ) : (
+        <Typography variant="subtitle2">{title}</Typography>
+      )}
       {badge}
     </Box>
     <Collapse in={expanded}>{children}</Collapse>
@@ -108,9 +184,15 @@ export const PartyDetail = ({
   const [configDialogOpen, setConfigDialogOpen] = useState(false);
   const [selectedParticipant, setSelectedParticipant] = useState("");
   const [participantsExpanded, setParticipantsExpanded] = useState(true);
-  const [contractsExpanded, setContractsExpanded] = useState(true);
-  const [authExpanded, setAuthExpanded] = useState(true);
-  const [governanceExpanded, setGovernanceExpanded] = useState(true);
+  const [contractsExpanded, setContractsExpanded] = useState(false);
+  const [holdingsExpanded, setHoldingsExpanded] = useState(false);
+  const [authExpanded, setAuthExpanded] = useState(false);
+  const [governanceExpanded, setGovernanceExpanded] = useState(false);
+  const [holdingsCount, setHoldingsCount] = useState(0);
+  const [holdingsLoading, setHoldingsLoading] = useState(false);
+  const [holdingsRefreshNonce, setHoldingsRefreshNonce] = useState(0);
+  const [governanceState, setGovernanceState] =
+    useState<GovernanceState | null>(null);
   const [editGovContractId, setEditGovContractId] = useState<string | null>(
     null,
   );
@@ -166,6 +248,29 @@ export const PartyDetail = ({
     }
   }, [party.contracts, updateScrollShadows]);
 
+  // Fetch governance state (threshold + action_confirmation_timeout) so the
+  // contracts table can show these values on the row of the active rules
+  // contract. Cancellation guards against a stale response landing after the
+  // user has switched to a different party.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await authenticatedFetch(
+          `${API_BASE}/governance/state?party_id=${encodeURIComponent(party.party_id)}`,
+        );
+        if (!res.ok) return;
+        const data: GovernanceStateResponse = await res.json();
+        if (!cancelled) setGovernanceState(data.state);
+      } catch {
+        /* leave columns blank on failure */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [party.party_id]);
+
   const handleKickClick = (participantUid: string) => {
     setSelectedParticipant(participantUid);
     setKickDialogOpen(true);
@@ -205,27 +310,35 @@ export const PartyDetail = ({
           alignItems: "center",
         }}
       >
-        <Chip label={`Threshold: ${party.threshold}`} size="small" />
-        <Chip label={`Owners: ${party.owners.length}`} size="small" />
-        <Chip
-          label={`Participants: ${party.participants.length}`}
-          size="small"
+        <StatCard
+          label="Owners"
+          value={party.owners.length}
+          helpText="Owner keys that jointly control the party's decentralized namespace. Topology changes need a quorum of these — see Threshold."
         />
-        {party.contracts && (
-          <Chip
-            label={`Contracts: ${party.contracts.length}`}
-            size="small"
-            color="primary"
-          />
+        <StatCard
+          label="Threshold"
+          value={party.threshold}
+          helpText="Number of decentralized-namespace owners that must sign topology changes for this party (separate from the governance threshold below)."
+        />
+        {governanceState && (
+          <>
+            <StatCard
+              label="Gov Threshold"
+              value={governanceState.threshold}
+              helpText="Number of governance-member confirmations required to execute a governance action on this party."
+            />
+            {governanceState.action_confirmation_timeout_microseconds !=
+              null && (
+              <StatCard
+                label="Action Timeout"
+                value={formatMicroseconds(
+                  governanceState.action_confirmation_timeout_microseconds,
+                )}
+                helpText="How long an unexecuted action confirmation stays valid before it expires."
+              />
+            )}
+          </>
         )}
-        <Tooltip title="Party configuration">
-          <IconButton
-            size="small"
-            onClick={() => setConfigDialogOpen(true)}
-          >
-            <SettingsIcon fontSize="small" />
-          </IconButton>
-        </Tooltip>
         {isOwner && (
           <Button
             variant="outlined"
@@ -246,11 +359,27 @@ export const PartyDetail = ({
               : "Deploy Contracts"}
           </Button>
         )}
+        {isOwner && rulesContract && (
+          <Button
+            variant="outlined"
+            size="small"
+            startIcon={<EditIcon />}
+            onClick={() => {
+              setGovDialogView("actions");
+              setEditGovContractId(rulesContract.contract_id);
+            }}
+            disabled={!authStatus?.rights?.dec_party_act_as}
+          >
+            Governance Actions
+          </Button>
+        )}
       </Box>
 
       {/* Owner Key */}
       {party.my_owner_key && (
-        <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: 2, px: 3 }}>
+        <Box
+          sx={{ display: "flex", alignItems: "center", gap: 1, mb: 2, px: 3 }}
+        >
           <Typography variant="body2" color="text.secondary">
             <strong>My Owner Key:</strong>
           </Typography>
@@ -262,11 +391,37 @@ export const PartyDetail = ({
         </Box>
       )}
 
+      {/* Authentication */}
+      <CollapsibleSection
+        title="Authentication"
+        expanded={authExpanded}
+        onToggle={() => setAuthExpanded(!authExpanded)}
+        helpText="Credentials this node uses to act on the party's behalf via the Canton ledger API."
+        badge={
+          <Box sx={{ display: "flex", alignItems: "center", ml: 1 }}>
+            {getAuthStatusIcon(authStatus)}
+          </Box>
+        }
+      >
+        <Box sx={{ px: 3 }}>
+          <AuthSection
+            partyId={party.party_id}
+            authStatus={authStatus}
+            onRefresh={onAuthRefresh}
+            onConfigure={() => setConfigDialogOpen(true)}
+          />
+        </Box>
+      </CollapsibleSection>
+
       {/* Participants */}
       <CollapsibleSection
         title="Participants"
         expanded={participantsExpanded}
         onToggle={() => setParticipantsExpanded(!participantsExpanded)}
+        helpText="Canton participants hosting this party. One participant per row, with its permission level."
+        badge={
+          <Chip label={party.participants.length} size="small" sx={{ ml: 1 }} />
+        }
       >
         <Box sx={{ overflowX: "auto" }}>
           <Table size="small">
@@ -334,13 +489,9 @@ export const PartyDetail = ({
           title="Contracts"
           expanded={contractsExpanded}
           onToggle={() => setContractsExpanded(!contractsExpanded)}
+          helpText="Daml contracts associated with the party — typically governance rules, vaults, registrar services, etc."
           badge={
-            <Chip
-              label={party.contracts.length}
-              size="small"
-              sx={{ ml: 1 }}
-              color="primary"
-            />
+            <Chip label={party.contracts.length} size="small" sx={{ ml: 1 }} />
           }
         >
           <Box sx={{ position: "relative" }}>
@@ -375,7 +526,6 @@ export const PartyDetail = ({
                     <TableCell sx={{ py: 1 }}>Template</TableCell>
                     <TableCell sx={{ py: 1 }}>Created</TableCell>
                     <TableCell sx={{ py: 1 }}>Contract ID</TableCell>
-                    <TableCell sx={{ py: 1, width: 40 }} />
                   </TableRow>
                 </TableHead>
                 <TableBody>
@@ -387,9 +537,7 @@ export const PartyDetail = ({
                       <TableCell sx={{ py: 1 }}>
                         {c.package_version || "—"}
                       </TableCell>
-                      <TableCell sx={{ py: 1 }}>
-                        {c.template_id}
-                      </TableCell>
+                      <TableCell sx={{ py: 1 }}>{c.template_id}</TableCell>
                       <TableCell sx={{ py: 1 }}>
                         {c.created_at
                           ? new Date(c.created_at).toLocaleString(undefined, {
@@ -407,22 +555,6 @@ export const PartyDetail = ({
                           truncate={{ start: 12, end: 12 }}
                           variant="caption"
                         />
-                      </TableCell>
-                      <TableCell sx={{ py: 1 }} align="right">
-                        {isGovRulesContract(c.template_id) && (
-                          <Tooltip title="Edit governance actions">
-                            <IconButton
-                              size="small"
-                              onClick={() => {
-                                setGovDialogView("actions");
-                                setEditGovContractId(c.contract_id);
-                              }}
-                              disabled={!authStatus?.rights?.dec_party_act_as}
-                            >
-                              <EditIcon fontSize="small" />
-                            </IconButton>
-                          </Tooltip>
-                        )}
                       </TableCell>
                     </TableRow>
                   ))}
@@ -448,20 +580,42 @@ export const PartyDetail = ({
         </CollapsibleSection>
       )}
 
-      {/* Authentication */}
-      {authStatus && (
+      {/* Holdings */}
+      {authStatus?.rights?.dec_party_act_as && (
         <CollapsibleSection
-          title="Authentication"
-          expanded={authExpanded}
-          onToggle={() => setAuthExpanded(!authExpanded)}
+          title="Holdings"
+          expanded={holdingsExpanded}
+          onToggle={() => setHoldingsExpanded(!holdingsExpanded)}
+          helpText="Token-standard balances the party holds, aggregated by instrument."
+          badge={
+            <>
+              {holdingsCount > 0 && (
+                <Chip label={holdingsCount} size="small" sx={{ ml: 1 }} />
+              )}
+              <Tooltip title="Refresh holdings">
+                <span>
+                  <IconButton
+                    size="small"
+                    sx={{ ml: 0.5 }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setHoldingsRefreshNonce((n) => n + 1);
+                    }}
+                    disabled={holdingsLoading}
+                  >
+                    <RefreshIcon fontSize="small" />
+                  </IconButton>
+                </span>
+              </Tooltip>
+            </>
+          }
         >
-          <Box sx={{ px: 3 }}>
-            <AuthSection
-              partyId={party.party_id}
-              authStatus={authStatus}
-              onRefresh={onAuthRefresh}
-            />
-          </Box>
+          <HoldingsSection
+            partyId={party.party_id}
+            refreshNonce={holdingsRefreshNonce}
+            onCountChange={setHoldingsCount}
+            onLoadingChange={setHoldingsLoading}
+          />
         </CollapsibleSection>
       )}
 
@@ -471,6 +625,7 @@ export const PartyDetail = ({
           title="Audit Trail"
           expanded={governanceExpanded}
           onToggle={() => setGovernanceExpanded(!governanceExpanded)}
+          helpText="On-chain history of governance actions and proposals for this party."
           badge={
             <>
               {auditTrailCount > 0 && (
@@ -478,7 +633,6 @@ export const PartyDetail = ({
                   label={`${auditTrailCount}${auditTrailCount === CHAIN_LIMIT ? "+" : ""}`}
                   size="small"
                   sx={{ ml: 1 }}
-                  color="primary"
                 />
               )}
               <Tooltip title="Refresh audit trail">
@@ -500,14 +654,12 @@ export const PartyDetail = ({
             </>
           }
         >
-          <Box sx={{ pl: 3 }}>
-            <GovernanceAuditTrail
-              partyId={party.party_id}
-              refreshNonce={governanceRefreshNonce}
-              onCountChange={setAuditTrailCount}
-              onLoadingChange={setAuditTrailLoading}
-            />
-          </Box>
+          <GovernanceAuditTrail
+            partyId={party.party_id}
+            refreshNonce={governanceRefreshNonce}
+            onCountChange={setAuditTrailCount}
+            onLoadingChange={setAuditTrailLoading}
+          />
         </CollapsibleSection>
       )}
 

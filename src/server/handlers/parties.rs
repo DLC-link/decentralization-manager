@@ -12,8 +12,8 @@ use canton_proto_rs::com::digitalasset::canton::{
         v30::public_key,
     },
     topology::admin::v30::{
-        BaseQuery, ListDecentralizedNamespaceDefinitionRequest, ListPartyToParticipantRequest,
-        StoreId, Synchronizer, base_query, store_id, synchronizer,
+        BaseQuery, ListDecentralizedNamespaceDefinitionRequest, ListNamespaceDelegationRequest,
+        ListPartyToParticipantRequest, StoreId, Synchronizer, base_query, store_id, synchronizer,
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
     },
 };
@@ -340,6 +340,124 @@ pub async fn resolve_owner_keys_from_peers(
             }
         }
     }
+
+    // Topology-driven fallback: covers the case where the participant whose
+    // owner_key we need is offline / unreachable via Noise. The mapping
+    // (participant_uid → owner_key in a party) is recoverable from public
+    // synchronizer state — each participant publishes `NamespaceDelegation`
+    // entries listing the signing keys delegated under its namespace, and
+    // one of those fingerprints is what appears in the party's `owners`
+    // list. This is independent of peer reachability.
+    if let Err(e) = supplement_owner_keys_from_topology(config, db, parties).await {
+        tracing::debug!("Topology-based owner-key fallback skipped: {e:#}");
+    }
+}
+
+/// Fill in missing `dec_party_participant.owner_key` rows by reading public
+/// Canton topology state. For each (party, participant) where the local
+/// cache hasn't learned the owner_key yet, we query the participant's
+/// `NamespaceDelegation` entries, fingerprint their target keys, and
+/// intersect with the party's `owners` list. Whatever matches is the
+/// participant's contribution to the decentralized namespace.
+async fn supplement_owner_keys_from_topology(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    parties: &[DecentralizedParty],
+) -> Result {
+    let channel = tonic::transport::Channel::from_shared(config.admin_api_url())?
+        .connect()
+        .await?;
+    let mut topology_client = TopologyManagerReadServiceClient::new(channel)
+        .max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
+    let synchronizer_id = utils::get_synchronizer_id(config).await?;
+
+    let base_query = || BaseQuery {
+        store: Some(StoreId {
+            store: Some(store_id::Store::Synchronizer(Synchronizer {
+                kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.clone())),
+            })),
+        }),
+        proposals: false,
+        operation: 0,
+        time_query: Some(base_query::TimeQuery::HeadState(())),
+        filter_signed_key: String::new(),
+        protocol_version: None,
+    };
+
+    // Cache per-namespace fingerprints so a participant who appears in many
+    // parties is only queried once.
+    let mut delegated_fingerprints: HashMap<String, HashSet<String>> = HashMap::new();
+
+    for party in parties {
+        for participant in &party.participants {
+            // Already known — nothing to derive.
+            if participant.owner_key.is_some() {
+                continue;
+            }
+            let uid = participant.participant_uid.to_string();
+            let Some((_, namespace)) = uid.rsplit_once("::") else {
+                continue;
+            };
+            let namespace = namespace.to_string();
+
+            if !delegated_fingerprints.contains_key(&namespace) {
+                let resp = match topology_client
+                    .list_namespace_delegation(tonic::Request::new(
+                        ListNamespaceDelegationRequest {
+                            base_query: Some(base_query()),
+                            filter_namespace: namespace.clone(),
+                            filter_target_key_fingerprint: String::new(),
+                        },
+                    ))
+                    .await
+                {
+                    Ok(r) => r.into_inner(),
+                    Err(e) => {
+                        tracing::debug!("ListNamespaceDelegation for {namespace} failed: {e}");
+                        // Cache empty set so we don't retry on every party.
+                        delegated_fingerprints.insert(namespace.clone(), HashSet::new());
+                        continue;
+                    }
+                };
+                let mut fingerprints: HashSet<String> = HashSet::new();
+                for result in resp.results {
+                    if let Some(item) = result.item
+                        && let Some(target_key) = item.target_key
+                    {
+                        fingerprints.insert(utils::compute_fingerprint(&target_key));
+                    }
+                }
+                delegated_fingerprints.insert(namespace.clone(), fingerprints);
+            }
+
+            let fingerprints = match delegated_fingerprints.get(&namespace) {
+                Some(s) if !s.is_empty() => s,
+                _ => continue,
+            };
+            let Some(owner_key) = party.owners.iter().find(|o| fingerprints.contains(*o)) else {
+                continue;
+            };
+
+            let mut tx = match db.begin_transaction().await {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::debug!("Topology fallback: begin_transaction failed: {e}");
+                    continue;
+                }
+            };
+            if let Err(e) = tx
+                .update_participant_owner_key(&party.party_id, &uid, owner_key)
+                .await
+            {
+                tracing::debug!("Topology fallback: update_participant_owner_key for {uid}: {e}");
+                continue;
+            }
+            if let Err(e) = Commitable::commit(tx).await {
+                tracing::debug!("Topology fallback: commit failed: {e}");
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Load cached parties from the dec_party tables.

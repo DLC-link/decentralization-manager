@@ -1,33 +1,4 @@
 apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: dec-party-manager-1-config
-  namespace: catalyst-canton
-  labels:
-    app.kubernetes.io/name: dec-party-manager
-    app.kubernetes.io/instance: participant-1
-data:
-  node.toml: |
-    [node]
-    listen_address = "0.0.0.0"
-    public_address = "a76cb23b1bb6d464ca05fa7e123d8b36-1570805738.us-east-1.elb.amazonaws.com"
-    port = 9000
-
-    [canton]
-    admin_api_host = "participant-ibtc-mainnet.catalyst-canton.svc.cluster.local"
-    admin_api_port = 5002
-    ledger_api_host = "participant-ibtc-mainnet.catalyst-canton.svc.cluster.local"
-    ledger_api_port = 5001
-    synchronizer = "global"
-    network = "mainnet"
-
-    [timeouts]
-    handshake_timeout_secs = 30
-    message_timeout_secs = 120
-    connection_retry_attempts = 3
-    connection_retry_delay_secs = 5
----
-apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: dec-party-manager-1-data
@@ -65,35 +36,17 @@ spec:
         app.kubernetes.io/component: coordinator
     spec:
       initContainers:
-        - name: copy-config
+        - name: init-data
           image: busybox:latest
-          command:
-            - sh
-            - -c
-            - |
-              mkdir -p /app/config /app/data
-              cp /config-readonly/* /app/config/
-              echo "Config copied to persistent storage"
+          command: ["sh", "-c", "mkdir -p /app/data"]
           volumeMounts:
-            - name: config
-              mountPath: /config-readonly
             - name: data
               mountPath: /app
       containers:
         - name: dec-party-manager
           image: public.ecr.aws/dlc-link/canton-decparty-manager:v0.0.10
           imagePullPolicy: Always
-          command:
-            [
-              "dec-party-manager",
-              "-d",
-              "/app",
-              "serve",
-              "--host",
-              "0.0.0.0",
-              "--port",
-              "8080",
-            ]
+          command: ["dec-party-manager", "serve"]
           ports:
             - name: http
               containerPort: 8080
@@ -109,12 +62,21 @@ spec:
               memory: "128Mi"
               cpu: "100m"
             limits:
-              memory: "512Mi"
+              memory: "1Gi"
               cpu: "500m"
+          env:
+            - name: RUST_LOG
+              value: dec_party_manager=info,tokio_noise=error,hyper_noise=error
+            - name: DECPM_DIR
+              value: /app
+            - name: DECPM_HOST
+              value: 0.0.0.0
+            - name: DECPM_PORT
+              value: "8080"
+          envFrom:
+            - secretRef:
+                name: dec-party-manager-1-secrets
       volumes:
-        - name: config
-          configMap:
-            name: dec-party-manager-1-config
         - name: data
           persistentVolumeClaim:
             claimName: dec-party-manager-1-data
@@ -128,7 +90,7 @@ metadata:
     app.kubernetes.io/name: dec-party-manager
     app.kubernetes.io/instance: participant-1
 spec:
-  type: LoadBalancer
+  type: ClusterIP
   ports:
     - name: http
       port: 80
@@ -141,3 +103,43 @@ spec:
   selector:
     app.kubernetes.io/name: dec-party-manager
     app.kubernetes.io/instance: participant-1
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dec-party-manager-1-noise
+  namespace: catalyst-canton
+  labels:
+    app.kubernetes.io/name: dec-party-manager
+    app.kubernetes.io/instance: participant-1
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+spec:
+  type: LoadBalancer
+  ports:
+    - name: noise
+      port: 9000
+      targetPort: 9000
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: dec-party-manager
+    app.kubernetes.io/instance: participant-1
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: dec-party-manager-1-ingress
+  namespace: catalyst-canton
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: dec-party-manager-1.main.canton.ibtc.network
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: dec-party-manager-1
+                port:
+                  number: 80

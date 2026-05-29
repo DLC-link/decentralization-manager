@@ -1,6 +1,7 @@
 import {
   Box,
   Chip,
+  IconButton,
   Table,
   TableBody,
   TableCell,
@@ -12,6 +13,8 @@ import {
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import ErrorIcon from "@mui/icons-material/Error";
 import ScienceIcon from "@mui/icons-material/Science";
+import VisibilityIcon from "@mui/icons-material/Visibility";
+import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
 import { CopyableText } from "./CopyableText";
 import { zebraRow } from "../styles";
 import type { DecentralizedParty, PartyAuthStatus } from "../types";
@@ -20,6 +23,8 @@ interface PartyListProps {
   parties: DecentralizedParty[];
   authStatuses: PartyAuthStatus[];
   onSelectParty: (partyId: string) => void;
+  isHidden: (partyId: string) => boolean;
+  onToggleHidden: (partyId: string) => void;
 }
 
 const AuthStatusIcon = ({ status }: { status?: PartyAuthStatus }) => {
@@ -52,6 +57,8 @@ export const PartyList = ({
   parties,
   authStatuses,
   onSelectParty,
+  isHidden,
+  onToggleHidden,
 }: PartyListProps) => {
   if (parties.length === 0) {
     return (
@@ -72,6 +79,7 @@ export const PartyList = ({
             <TableCell sx={{ py: 1 }} align="center">Participants</TableCell>
             <TableCell sx={{ py: 1 }} align="center">Contracts</TableCell>
             <TableCell sx={{ py: 1 }} align="center">Auth</TableCell>
+            <TableCell sx={{ py: 1, width: 56 }} align="center" />
           </TableRow>
         </TableHead>
         <TableBody>
@@ -79,6 +87,7 @@ export const PartyList = ({
             const auth = authStatuses.find(
               (a) => a.dec_party_id === party.party_id,
             );
+            const hidden = isHidden(party.party_id);
             return (
               <TableRow
                 key={party.party_id}
@@ -86,6 +95,7 @@ export const PartyList = ({
                 sx={{
                   ...zebraRow(idx),
                   cursor: "pointer",
+                  opacity: hidden ? 0.45 : 1,
                 }}
                 onClick={() => onSelectParty(party.party_id)}
                 onKeyDown={(e) => {
@@ -124,6 +134,24 @@ export const PartyList = ({
                 </TableCell>
                 <TableCell sx={{ py: 1.5 }} align="center">
                   <AuthStatusIcon status={auth} />
+                </TableCell>
+                <TableCell sx={{ py: 1.5 }} align="center">
+                  <Tooltip title={hidden ? "Unhide party" : "Hide party"}>
+                    <IconButton
+                      size="small"
+                      aria-label={hidden ? "Unhide party" : "Hide party"}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onToggleHidden(party.party_id);
+                      }}
+                    >
+                      {hidden ? (
+                        <VisibilityOffIcon sx={{ fontSize: 18 }} />
+                      ) : (
+                        <VisibilityIcon sx={{ fontSize: 18 }} />
+                      )}
+                    </IconButton>
+                  </Tooltip>
                 </TableCell>
               </TableRow>
             );

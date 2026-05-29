@@ -159,6 +159,8 @@ export interface KickRequest {
   decentralized_party_id: string;
   participant_id: string;
   new_threshold: number;
+  /** Threshold before the kick — display-only, surfaced on the run card. */
+  previous_threshold: number;
 }
 
 export type WorkflowProgress =
@@ -249,6 +251,14 @@ export interface PendingInvitation {
   participants?: string[];
   /** Dars-only: filenames the coordinator is distributing. */
   dar_filenames?: string[];
+  /** Kick-only: the participant being removed from the party. */
+  kicked_participant?: string;
+  /** Kick-only: threshold after the kick. */
+  new_threshold?: number;
+  /** Kick-only: threshold before the kick. */
+  previous_threshold?: number;
+  /** Kick-only: the dec party the kick targets. */
+  dec_party_id?: string;
 }
 
 export interface PendingInvitationsResponse {
@@ -281,6 +291,11 @@ export interface WorkflowRun {
   prefix?: string;
   participants?: string[];
   dar_filenames?: string[];
+  /** Kick runs only: threshold before/after, for an "old → new" summary. */
+  previous_threshold?: number;
+  new_threshold?: number;
+  /** Kick runs only: the participant being kicked. */
+  kicked_participant?: string;
   error?: string;
   dismissed: boolean;
   created_at: number;
@@ -340,6 +355,8 @@ export interface GovernanceConfirmation {
   confirming_party: string;
   /** Unix seconds when this confirmation contract was created on the ledger. */
   created_at?: number;
+  /** Unix seconds of the confirmation's `expiresAt`. */
+  expires_at?: number;
 }
 
 export interface GovernanceAction {
@@ -363,6 +380,30 @@ export interface DomainGovernanceAction {
    *  Confirmation contracts can only be expired (dismissed), not confirmed
    *  or executed. */
   orphaned?: boolean;
+  /** Recipient / amount / instrument pulled from a TransferProposal so the
+   *  notification card can show what's being transferred without an extra
+   *  fetch. Present only on Transfer proposals. */
+  transfer_details?: TransferProposalDetails;
+  /** Sender / amount / instrument resolved from the TransferInstruction
+   *  referenced by an AcceptTransferProposal so the pending-approval card
+   *  shows who's sending what to whom. Present only on AcceptTransfer
+   *  proposals (and only when the linked instruction was readable). */
+  accept_transfer_details?: AcceptTransferDetails;
+}
+
+export interface TransferProposalDetails {
+  receiver: string;
+  amount: string;
+  instrument_admin: string;
+  instrument_id: string;
+}
+
+export interface AcceptTransferDetails {
+  sender: string;
+  receiver: string;
+  amount: string;
+  instrument_admin: string;
+  instrument_id: string;
 }
 
 export interface GovernanceResponse {
@@ -773,8 +814,18 @@ export interface InstrumentsResponse {
   instruments: InstrumentInfo[];
 }
 
-/** An open `TransferInstruction` awaiting receiver acceptance, surfaced for
- *  the Accept Transfer proposal dropdown. */
+export type TransferInstructionStatus =
+  | "pending_receiver_acceptance"
+  | "pending_internal_workflow";
+
+export interface PendingAction {
+  party: string;
+  action: string;
+}
+
+/** An open `TransferInstruction` whose `receiver` is this party. Includes
+ *  offers blocked on an internal workflow so the dropdown can show them
+ *  disabled with the "Pending: <party> — <action>" reason. */
 export interface TransferInstructionInfo {
   contract_id: string;
   sender: string;
@@ -782,6 +833,10 @@ export interface TransferInstructionInfo {
   amount: string;
   instrument_admin: string;
   instrument_id: string;
+  status: TransferInstructionStatus;
+  pending_actions?: PendingAction[];
+  /** Unix seconds of the offer's `executeBefore` deadline. */
+  expires_at?: number;
 }
 
 export interface TransferInstructionsResponse {
@@ -793,6 +848,38 @@ export interface TransferInstructionsResponse {
 export interface TransferPreapprovalsResponse {
   cc: number;
   token: number;
+}
+
+export interface Holding {
+  instrument_admin: string;
+  instrument_id: string;
+  amount: string;
+  preapproval_set_up: boolean;
+}
+
+export interface HoldingsResponse {
+  holdings: Holding[];
+}
+
+export interface TransferFactoryInfo {
+  contract_id: string;
+  expected_admin: string;
+}
+
+export interface TransferFactoriesResponse {
+  transfer_factories: TransferFactoryInfo[];
+}
+
+export interface GovernanceState {
+  contract_id: string;
+  vault_manager: string;
+  members: string[];
+  threshold: number;
+  action_confirmation_timeout_microseconds?: number;
+}
+
+export interface GovernanceStateResponse {
+  state: GovernanceState | null;
 }
 
 export type Network = "devnet" | "testnet" | "mainnet";

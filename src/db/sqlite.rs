@@ -806,8 +806,12 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                 received_at,
                 prefix,
                 participants,
-                dar_filenames
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                dar_filenames,
+                kicked_participant,
+                new_threshold,
+                previous_threshold,
+                dec_party_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ",
         )
         .bind(&row.id)
@@ -817,6 +821,10 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         .bind(&row.prefix)
         .bind(&row.participants)
         .bind(&row.dar_filenames)
+        .bind(&row.kicked_participant)
+        .bind(row.new_threshold)
+        .bind(row.previous_threshold)
+        .bind(&row.dec_party_id)
         .execute(&mut **self)
         .await?;
 
@@ -1797,6 +1805,10 @@ mod tests {
                 CantonId::parse(&format!("node2::{TEST_NS}")).unwrap(),
             ],
             dar_filenames: Vec::new(),
+            kicked_participant: None,
+            new_threshold: None,
+            previous_threshold: None,
+            dec_party_id: None,
             coordinator_http_url: None,
         };
         let inv_b = PendingInvitation {
@@ -1808,6 +1820,10 @@ mod tests {
             prefix: None,
             participants: Vec::new(),
             dar_filenames: Vec::new(),
+            kicked_participant: Some(CantonId::parse(&format!("kicked::{TEST_NS}")).unwrap()),
+            new_threshold: Some(2),
+            previous_threshold: Some(3),
+            dec_party_id: Some(CantonId::parse(&format!("dec::{TEST_NS}")).unwrap()),
             coordinator_http_url: None,
         };
 
@@ -1825,6 +1841,10 @@ mod tests {
             prefix: None,
             participants: Vec::new(),
             dar_filenames: vec!["app.dar".to_string(), "lib.dar".to_string()],
+            kicked_participant: None,
+            new_threshold: None,
+            previous_threshold: None,
+            dec_party_id: None,
             coordinator_http_url: None,
         };
         let mut tx = pool.begin_transaction().await?;
@@ -1903,6 +1923,11 @@ mod tests {
             ],
             completed_peers: Vec::new(),
             dec_party_id: None,
+            prefix: None,
+            participants: Vec::new(),
+            previous_threshold: None,
+            new_threshold: None,
+            kicked_participant: None,
             error: None,
             dismissed: false,
             coordinator_http_url: None,
@@ -2072,6 +2097,11 @@ mod tests {
             expected_peers: vec![peer.clone()],
             completed_peers: Vec::new(),
             dec_party_id: None,
+            prefix: None,
+            participants: Vec::new(),
+            previous_threshold: None,
+            new_threshold: None,
+            kicked_participant: None,
             error: None,
             dismissed: false,
             coordinator_http_url: None,
@@ -2114,6 +2144,11 @@ mod tests {
             expected_peers: vec![peer.clone()],
             completed_peers: Vec::new(),
             dec_party_id: None,
+            prefix: None,
+            participants: Vec::new(),
+            previous_threshold: None,
+            new_threshold: None,
+            kicked_participant: None,
             error: None,
             dismissed: false,
             coordinator_http_url: None,
@@ -2157,6 +2192,11 @@ mod tests {
             expected_peers: vec![peer.clone()],
             completed_peers: Vec::new(),
             dec_party_id: None,
+            prefix: None,
+            participants: Vec::new(),
+            previous_threshold: None,
+            new_threshold: None,
+            kicked_participant: None,
             error: None,
             dismissed: true,
             coordinator_http_url: None,
@@ -2199,6 +2239,11 @@ mod tests {
             expected_peers: vec![peer_long.clone()],
             completed_peers: Vec::new(),
             dec_party_id: None,
+            prefix: None,
+            participants: Vec::new(),
+            previous_threshold: None,
+            new_threshold: None,
+            kicked_participant: None,
             error: None,
             dismissed: false,
             coordinator_http_url: None,
@@ -2237,6 +2282,11 @@ mod tests {
             expected_peers: Vec::new(),
             completed_peers: Vec::new(),
             dec_party_id: None,
+            prefix: None,
+            participants: Vec::new(),
+            previous_threshold: None,
+            new_threshold: None,
+            kicked_participant: None,
             error: None,
             dismissed: false,
             coordinator_http_url: Some("http://10.0.0.1:8080".into()),

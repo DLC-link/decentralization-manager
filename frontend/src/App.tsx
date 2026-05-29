@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import {
   Badge,
   Container,
@@ -19,6 +19,8 @@ import {
 import FilterListIcon from "@mui/icons-material/FilterList";
 import SearchIcon from "@mui/icons-material/Search";
 import AddIcon from "@mui/icons-material/Add";
+import VisibilityIcon from "@mui/icons-material/Visibility";
+import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
 import { Header } from "./components/Header";
 import { Sidebar, SIDEBAR_WIDTH } from "./components/Sidebar";
 import { PartyList } from "./components/PartyList";
@@ -34,6 +36,7 @@ import type { PartyActions } from "./components/NotificationsView";
 import { useSnackbar } from "./contexts";
 import { API_BASE, ADMIN_ACCESS } from "./constants";
 import { authenticatedFetch } from "./api";
+import { useHiddenParties } from "./useHiddenParties";
 import type {
   DecentralizedParty,
   DecentralizedPartiesResponse,
@@ -114,6 +117,16 @@ const App = () => {
   const [operatorParty, setOperatorParty] = useState("");
   const [selectedPartyId, setSelectedPartyId] = useState<string | null>(null);
   const [showSearchBar, setShowSearchBar] = useState(true);
+  const [showHidden, setShowHidden] = useState(false);
+  const { toggle: toggleHidden, isHidden } = useHiddenParties();
+  const visibleParties = useMemo(
+    () => (showHidden ? parties : parties.filter((p) => !isHidden(p.party_id))),
+    [parties, showHidden, isHidden],
+  );
+  const hiddenCount = useMemo(
+    () => parties.filter((p) => isHidden(p.party_id)).length,
+    [parties, isHidden],
+  );
   const lastScrollY = useRef(0);
   const savedScrollY = useRef(0);
   const pendingSlug = useRef<string | null>(INITIAL_ROUTE.partySlug);
@@ -221,11 +234,12 @@ const App = () => {
           const data: DecentralizedPartiesResponse = await res.json();
           setParties(data.parties);
         } else {
-          showSnackbar("Failed to refresh parties");
+          showSnackbar("Failed to refresh parties", "error");
         }
       } catch (err) {
         showSnackbar(
           err instanceof Error ? err.message : "Failed to refresh parties",
+          "error",
         );
       } finally {
         setRefreshingParties(false);
@@ -439,7 +453,10 @@ const App = () => {
       if (prior === "inprogress" && run.status !== "inprogress") {
         const label = `${run.kind} workflow`;
         if (run.status === "failed") {
-          showSnackbar(`${label} failed: ${run.error || "Unknown error"}`);
+          showSnackbar(
+            `${label} failed: ${run.error || "Unknown error"}`,
+            "error",
+          );
         } else if (run.status === "completed") {
           showSnackbar(`${label} completed`);
         } else if (run.status === "cancelled") {
@@ -621,6 +638,25 @@ const App = () => {
                 },
               }}
             />
+            <Tooltip
+              title={
+                showHidden
+                  ? `Hide ${hiddenCount} hidden ${hiddenCount === 1 ? "party" : "parties"}`
+                  : hiddenCount > 0
+                    ? `Show ${hiddenCount} hidden ${hiddenCount === 1 ? "party" : "parties"}`
+                    : "No hidden parties"
+              }
+            >
+              <span>
+                <IconButton
+                  onClick={() => setShowHidden((v) => !v)}
+                  disabled={hiddenCount === 0 && !showHidden}
+                  color={showHidden ? "primary" : "default"}
+                >
+                  {showHidden ? <VisibilityIcon /> : <VisibilityOffIcon />}
+                </IconButton>
+              </span>
+            </Tooltip>
             <IconButton
               onClick={() => refreshParties()}
               disabled={refreshingParties}
@@ -663,7 +699,9 @@ const App = () => {
 
       {!loading && error && (
         <Container maxWidth="md" sx={{ pt: isLargeScreen ? 4 : 16 }}>
-          <Alert severity="error">{error}</Alert>
+          <Alert severity="error" onClose={() => setError(null)}>
+            {error}
+          </Alert>
         </Container>
       )}
 
@@ -703,7 +741,7 @@ const App = () => {
                   color={activeTab === 3 ? "primary" : "error"}
                   sx={{ pr: notificationCount ? 2.5 : 0 }}
                 >
-                  Notifications
+                  Pending approvals
                 </Badge>
               }
             />
@@ -730,7 +768,9 @@ const App = () => {
         ) : loading ? (
           <LoadingSkeleton />
         ) : error ? (
-          <Alert severity="error">{error}</Alert>
+          <Alert severity="error" onClose={() => setError(null)}>
+            {error}
+          </Alert>
         ) : (
           <>
             {/* Tab 0 & 1: rendered outside Container below */}
@@ -827,6 +867,26 @@ const App = () => {
                       }}
                       sx={{ width: 300 }}
                     />
+                    <Tooltip
+                      title={
+                        showHidden
+                          ? `Hide ${hiddenCount} hidden ${hiddenCount === 1 ? "party" : "parties"}`
+                          : hiddenCount > 0
+                            ? `Show ${hiddenCount} hidden ${hiddenCount === 1 ? "party" : "parties"}`
+                            : "No hidden parties"
+                      }
+                    >
+                      <span>
+                        <IconButton
+                          onClick={() => setShowHidden((v) => !v)}
+                          disabled={hiddenCount === 0 && !showHidden}
+                          color={showHidden ? "primary" : "default"}
+                          sx={{ mt: "1px" }}
+                        >
+                          {showHidden ? <VisibilityIcon /> : <VisibilityOffIcon />}
+                        </IconButton>
+                      </span>
+                    </Tooltip>
                     <IconButton
                       onClick={() => refreshParties()}
                       disabled={refreshingParties}
@@ -843,7 +903,7 @@ const App = () => {
               )}
 
               <PartyList
-                parties={parties}
+                parties={visibleParties}
                 authStatuses={authStatuses}
                 onSelectParty={(id) => {
                   savedScrollY.current = window.scrollY;
@@ -851,6 +911,8 @@ const App = () => {
                   navigate(0, id);
                   window.scrollTo(0, 0);
                 }}
+                isHidden={isHidden}
+                onToggleHidden={toggleHidden}
               />
             </>
           )}

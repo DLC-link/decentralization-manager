@@ -697,6 +697,10 @@ impl WorkflowTriggers {
         let mut participants = Vec::new();
         let mut dar_filenames = Vec::new();
         let mut coordinator_http_url = None;
+        let mut kicked_participant = None;
+        let mut new_threshold = None;
+        let mut previous_threshold = None;
+        let mut dec_party_id = None;
         match meta {
             InvitationMeta::None => {}
             InvitationMeta::Onboarding(p) => {
@@ -709,6 +713,10 @@ impl WorkflowTriggers {
                 coordinator_http_url = p.coordinator_http_url;
             }
             InvitationMeta::Kick(p) => {
+                kicked_participant = Some(p.kicked_participant);
+                new_threshold = Some(p.new_threshold);
+                previous_threshold = Some(p.previous_threshold);
+                dec_party_id = Some(p.dec_party_id);
                 coordinator_http_url = p.coordinator_http_url;
             }
             InvitationMeta::Contracts(p) => {
@@ -731,6 +739,10 @@ impl WorkflowTriggers {
             prefix,
             participants,
             dar_filenames,
+            kicked_participant,
+            new_threshold,
+            previous_threshold,
+            dec_party_id,
             coordinator_http_url,
         };
 
@@ -1342,6 +1354,8 @@ pub async fn start_server(
             .service(handlers::get_instruments_handler)
             .service(handlers::get_transfer_instructions_handler)
             .service(handlers::get_transfer_preapprovals_handler)
+            .service(handlers::get_transfer_factories_handler)
+            .service(handlers::get_holdings_handler)
             .service(handlers::query_contracts_handler)
             .service(handlers::get_packages)
             .service(handlers::propose_action)
@@ -1867,14 +1881,28 @@ async fn handle_incoming_connection(
                                         }
                                     }
                                     InvitationType::Kick => {
-                                        let p: KickInvitePayload = if msg.payload.is_empty() {
-                                            KickInvitePayload::default()
-                                        } else {
-                                            serde_json::from_slice(&msg.payload).unwrap_or_default()
-                                        };
-                                        InvitationMeta::Kick(p)
+                                        // Kick now carries non-Option context fields plus the
+                                        // coordinator_http_url; an empty body from a pre-#173
+                                        // coordinator can't be parsed and falls through to None,
+                                        // which means peers will take the legacy 3-strike
+                                        // fallback for that one run (acceptable per the design).
+                                        match serde_json::from_slice::<KickInvitePayload>(
+                                            &msg.payload,
+                                        ) {
+                                            Ok(p) => InvitationMeta::Kick(p),
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    "Kick invite payload was unparseable: {e}"
+                                                );
+                                                InvitationMeta::None
+                                            }
+                                        }
                                     }
                                     InvitationType::Contracts => {
+                                        // Contracts payload was historically empty-bodied; the
+                                        // new shape adds coordinator_http_url with serde
+                                        // default + skip-if-none, so empty AND bodied forms
+                                        // parse cleanly. unwrap_or_default is safe here.
                                         let p: ContractsInvitePayload = if msg.payload.is_empty() {
                                             ContractsInvitePayload::default()
                                         } else {

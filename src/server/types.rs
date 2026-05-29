@@ -310,6 +310,12 @@ pub struct KickRequest {
     pub decentralized_party_id: CantonId,
     pub participant_id: CantonId,
     pub new_threshold: i32,
+    /// The party's threshold *before* the kick. Display-only — surfaced on
+    /// the workflow run card as "old → new" so the operator can see the
+    /// change at a glance. Defaults to 0 (rendered as just the new value)
+    /// when an older client omits it.
+    #[serde(default)]
+    pub previous_threshold: i32,
 }
 
 /// Request to create a new decentralized party
@@ -573,6 +579,25 @@ pub struct WorkflowRun {
     pub completed_peers: Vec<CantonId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dec_party_id: Option<CantonId>,
+    /// Dec party prefix associated with this run (e.g. "UAT"). Populated by
+    /// the API layer from `config_json` so the frontend can display a chip
+    /// without parsing JSON blobs itself. Not persisted as a column.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+    /// Participants involved in this run (same source as `prefix`). Empty
+    /// when missing from the config payload.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub participants: Vec<CantonId>,
+    /// Kick runs only: the threshold before and after the kick, lifted from
+    /// `config_json` so the run card can show "old → new". `None` for every
+    /// other workflow kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_threshold: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_threshold: Option<i32>,
+    /// Kick runs only: the participant being kicked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kicked_participant: Option<CantonId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub dismissed: bool,
@@ -660,6 +685,16 @@ pub struct OnboardingInvitePayload {
     pub coordinator_http_url: Option<String>,
 }
 
+/// Payload sent inside a `DeclineInvitation` Noise message — peer telling
+/// the coordinator that it has rejected an outstanding invitation so the
+/// coordinator can fail its matching in-progress run with a clear error.
+#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct DeclineInvitationPayload {
+    pub kind: WorkflowKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 /// Payload sent inside an `InviteDars` Noise message.
 #[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct DarsInvitePayload {
@@ -670,18 +705,24 @@ pub struct DarsInvitePayload {
     pub coordinator_http_url: Option<String>,
 }
 
-/// Payload sent inside an `InviteKick` Noise message. Carries the
-/// coordinator's HTTP URL for the cancel probe (#173 design §6).
-#[derive(Clone, Debug, Default, Serialize, Deserialize, utoipa::ToSchema)]
-pub struct KickInvitePayload {
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub coordinator_http_url: Option<String>,
-}
-
 /// Payload sent inside an `InviteContracts` Noise message. Carries the
 /// coordinator's HTTP URL for the cancel probe (#173 design §6).
 #[derive(Clone, Debug, Default, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ContractsInvitePayload {
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub coordinator_http_url: Option<String>,
+}
+
+/// Payload sent inside an `InviteKick` Noise message — gives the peer enough
+/// context to show "kicking X from dec party Y, threshold a→b" before the kick
+/// proposals arrive later in the workflow. Also carries the coordinator's
+/// HTTP URL for the cancel probe (#173 design §6).
+#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct KickInvitePayload {
+    pub dec_party_id: CantonId,
+    pub kicked_participant: CantonId,
+    pub new_threshold: i32,
+    pub previous_threshold: i32,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub coordinator_http_url: Option<String>,
 }
@@ -703,6 +744,19 @@ pub struct PendingInvitation {
     /// Dars-only: filenames the coordinator is distributing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dar_filenames: Vec<String>,
+    /// Kick-only: the participant being removed from the party.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kicked_participant: Option<CantonId>,
+    /// Kick-only: threshold after the kick.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_threshold: Option<i32>,
+    /// Kick-only: threshold before the kick.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_threshold: Option<i32>,
+    /// Kick-only: dec party the kick targets. Lets the peer card render the
+    /// same "Dec party" row the coordinator shows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dec_party_id: Option<CantonId>,
     /// Coordinator's HTTP base URL for cancel-probe fallback. See #173.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub coordinator_http_url: Option<String>,
@@ -1342,6 +1396,48 @@ pub struct DomainGovernanceAction {
     /// Execute affordances.
     #[serde(default)]
     pub orphaned: bool,
+    /// Structured Transfer-proposal fields (recipient, amount, instrument)
+    /// pulled from the on-chain `TransferProposal` contract so the
+    /// notification card can display what's actually being transferred
+    /// without the user having to inspect the contract CID. Only populated
+    /// for `Transfer` proposals.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transfer_details: Option<TransferProposalDetails>,
+    /// Sender / amount / instrument resolved from the `TransferInstruction`
+    /// referenced by an `AcceptTransferProposal`. Lets the notification card
+    /// show the operator what they're approving (who sent what) without a
+    /// follow-up fetch from the UI. Only populated for `AcceptTransfer`
+    /// proposals, and only when the linked instruction was readable at query
+    /// time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accept_transfer_details: Option<AcceptTransferDetails>,
+}
+
+/// Recipient/amount/instrument extracted from a `TransferProposal`'s
+/// `transfer` field. Surfaced inside `DomainGovernanceAction` so the
+/// notification queue card shows the meaningful parameters of the proposal.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct TransferProposalDetails {
+    pub receiver: CantonId,
+    #[schema(value_type = String)]
+    pub amount: DamlDecimal,
+    pub instrument_admin: CantonId,
+    pub instrument_id: String,
+}
+
+/// Sender/receiver/amount/instrument extracted from the `TransferInstruction`
+/// referenced by an `AcceptTransferProposal`. Surfaced inside
+/// `DomainGovernanceAction` so the pending-approval card for an Accept can
+/// render who's transferring what to whom — the proposal contract itself
+/// only carries the `TransferInstruction` cid, not these fields.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct AcceptTransferDetails {
+    pub sender: CantonId,
+    pub receiver: CantonId,
+    #[schema(value_type = String)]
+    pub amount: DamlDecimal,
+    pub instrument_admin: CantonId,
+    pub instrument_id: String,
 }
 
 /// Request to submit a confirmation for an action with structured type
@@ -1390,6 +1486,9 @@ pub struct GovernanceConfirmation {
     /// 0 if the timestamp could not be resolved.
     #[serde(default)]
     pub created_at: i64,
+    /// Unix seconds of the confirmation's `expiresAt`. 0 if unresolved.
+    #[serde(default)]
+    pub expires_at: i64,
 }
 
 /// A governance action with its confirmations, grouped by action hash
@@ -1504,9 +1603,9 @@ pub struct UserServiceInfo {
     pub user: CantonId,
 }
 
-/// An open `TransferInstruction` awaiting receiver acceptance. Populates the
-/// Accept Transfer proposal form's dropdown so operators don't have to paste
-/// the contract id by hand.
+/// An open `TransferInstruction` whose `receiver` is this party. Includes
+/// offers waiting on an internal workflow (admin / registrar) so the dropdown
+/// can surface them as "pending: X" rather than silently hide them.
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct TransferInstructionInfo {
     pub contract_id: String,
@@ -1516,12 +1615,77 @@ pub struct TransferInstructionInfo {
     pub amount: DamlDecimal,
     pub instrument_admin: CantonId,
     pub instrument_id: String,
+    pub status: TransferInstructionStatus,
+    /// For `PendingInternalWorkflow`: the parties whose action is awaited and
+    /// the human-readable label of what they need to do.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_actions: Vec<PendingAction>,
+    /// Unix seconds of the offer's `executeBefore` deadline. Past-deadline
+    /// rows are surfaced anyway (disabled in the UI) so the user can see they
+    /// exist — DAML refuses to Accept them, but staying silent confused users.
+    #[serde(default)]
+    pub expires_at: i64,
+}
+
+/// One row of `TransferInstructionStatus.pendingActions`. The Daml type is
+/// `Map Party Text`; the receiver can render "<party> — <action>" per row.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct PendingAction {
+    pub party: CantonId,
+    pub action: String,
+}
+
+/// Mirrors `Splice.Api.Token.TransferInstructionV1.TransferInstructionStatus`.
+#[derive(Clone, Copy, Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TransferInstructionStatus {
+    PendingReceiverAcceptance,
+    PendingInternalWorkflow,
 }
 
 /// Response for the transfer instructions endpoint.
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct TransferInstructionsResponse {
     pub transfer_instructions: Vec<TransferInstructionInfo>,
+}
+
+/// A token-standard Holding owned by a decentralized party, aggregated across
+/// every active `Splice.Api.Token.HoldingV1:Holding` contract that shares the
+/// same `(instrument_admin, instrument_id)` pair.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct HoldingInfo {
+    pub instrument_admin: CantonId,
+    pub instrument_id: String,
+    #[schema(value_type = String)]
+    pub amount: DamlDecimal,
+    /// True if a `TransferPreapproval` is in place for this party for this
+    /// instrument. CC (Amulet) holdings match when any
+    /// `Splice.AmuletRules:TransferPreapproval` exists; utility-token holdings
+    /// match by `(instrument_admin, instrument_id)` against
+    /// `Utility.Registry.App.V0.Model.TransferPreapproval` contracts.
+    pub preapproval_set_up: bool,
+}
+
+/// Response for the holdings endpoint.
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct HoldingsResponse {
+    pub holdings: Vec<HoldingInfo>,
+}
+
+/// Active `Splice.Api.Token.TransferInstructionV1:TransferFactory` contract
+/// visible to the party. The frontend joins these to the party's holdings by
+/// `expected_admin == holding.instrument_admin` to prefill the TransferFactory
+/// CID and expected-admin fields on the Transfer Proposal form.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct TransferFactoryInfo {
+    pub contract_id: String,
+    pub expected_admin: CantonId,
+}
+
+/// Response for the transfer-factories endpoint.
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct TransferFactoriesResponse {
+    pub transfer_factories: Vec<TransferFactoryInfo>,
 }
 
 /// Information about an InstrumentConfiguration contract (one "token" the
@@ -1915,6 +2079,11 @@ mod tests {
             expected_peers: vec![peer_a.clone(), peer_b.clone()],
             completed_peers: vec![peer_a],
             dec_party_id: Some(CantonId::parse(&dec_party_id_str).unwrap()),
+            prefix: None,
+            participants: Vec::new(),
+            previous_threshold: None,
+            new_threshold: None,
+            kicked_participant: None,
             error: None,
             dismissed: false,
             coordinator_http_url: None,
@@ -2056,7 +2225,12 @@ mod invite_payload_url_tests {
 
     #[test]
     fn kick_invite_payload_roundtrip() {
+        let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
         let p = KickInvitePayload {
+            dec_party_id: CantonId::parse(&format!("dec::{ns}")).unwrap(),
+            kicked_participant: CantonId::parse(&format!("kicked::{ns}")).unwrap(),
+            new_threshold: 2,
+            previous_threshold: 3,
             coordinator_http_url: Some("http://10.0.0.1:8080".into()),
         };
         let s = serde_json::to_string(&p).unwrap();
@@ -2065,6 +2239,7 @@ mod invite_payload_url_tests {
             back.coordinator_http_url.as_deref(),
             Some("http://10.0.0.1:8080")
         );
+        assert_eq!(back.new_threshold, 2);
     }
 
     #[test]
@@ -2080,11 +2255,10 @@ mod invite_payload_url_tests {
         );
     }
 
-    #[test]
-    fn empty_kick_payload_back_compat_parses_as_no_url() {
-        // Old coordinator: sent KickInvite with no body.
-        // New peer must parse "{}" as KickInvitePayload with None URL.
-        let back: KickInvitePayload = serde_json::from_str("{}").unwrap();
-        assert!(back.coordinator_http_url.is_none());
-    }
+    // NOTE: post-merge with main, KickInvitePayload now has required fields
+    // (dec_party_id, kicked_participant, new/previous_threshold) so empty `{}`
+    // back-compat no longer parses. The pre-#173 `Message::new_empty(InviteKick)`
+    // path is unsupported under main; new peers fall through to None for those
+    // legacy messages (logged as "Kick invite payload was unparseable") and
+    // take the legacy 3-strike fallback for that run. See server/mod.rs.
 }
