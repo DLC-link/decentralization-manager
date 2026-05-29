@@ -325,6 +325,12 @@ pub async fn start_peer(
                 )
                 .await;
 
+                // Log the specific failure variant so future debugging doesn't
+                // need to instrument the decide_action arms by hand.
+                if let Err(ref e) = probe_result {
+                    tracing::warn!("Probe error: {e}");
+                }
+
                 match coordinator_probe::decide_action(probe_result, &mut budget) {
                     coordinator_probe::PeerAction::BailCancelled => {
                         tracing::info!("Probe says Cancelled; bailing run {instance_name}");
