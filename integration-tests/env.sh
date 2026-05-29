@@ -92,9 +92,11 @@ cleanup() {
     # Stop localnet
     stop_localnet
 
-    # Remove temp directory
-    if [ -n "$DEV_DIR" ] && [ -d "$DEV_DIR" ]; then
+    # Remove temp directory (unless KEEP_DEV_DIR=1 is set for diagnosis)
+    if [ -z "${KEEP_DEV_DIR:-}" ] && [ -n "$DEV_DIR" ] && [ -d "$DEV_DIR" ]; then
         rm -rf "$DEV_DIR"
+    elif [ -n "${KEEP_DEV_DIR:-}" ]; then
+        echo "KEEP_DEV_DIR set; preserving $DEV_DIR for diagnosis"
     fi
 
     wait 2>/dev/null || true
