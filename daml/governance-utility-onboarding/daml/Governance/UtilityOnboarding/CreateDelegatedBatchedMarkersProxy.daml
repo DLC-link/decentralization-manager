@@ -25,7 +25,7 @@ template CreateDelegatedBatchedMarkersProxy
         governanceParty
         proposer
         actionLabel = "CreateDelegatedBatchedMarkersProxy"
-        description = "Authorize operator to create batched markers for the provider."
+        description = "Authorize operator " <> show operator <> " to create batched markers"
 
       executeImpl = do
         _ <- create DelegatedBatchedMarkersProxy with

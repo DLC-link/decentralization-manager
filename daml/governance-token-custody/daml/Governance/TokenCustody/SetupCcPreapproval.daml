@@ -36,7 +36,7 @@ template SetupCcPreapprovalProposal
         governanceParty
         proposer
         actionLabel = "SetupCcPreapproval"
-        description = "Set up Canton Coin transfer preapproval"
+        description = "Set up Canton Coin transfer preapproval (provider " <> show provider <> ")"
 
       executeImpl = do
         create TransferPreapprovalProposal with

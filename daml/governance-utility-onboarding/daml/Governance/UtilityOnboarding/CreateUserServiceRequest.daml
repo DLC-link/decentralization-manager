@@ -24,7 +24,7 @@ template CreateUserServiceRequest
         governanceParty
         proposer
         actionLabel = "CreateUserServiceRequest"
-        description = "Create a UserServiceRequest for onboarding."
+        description = "Create UserServiceRequest (operator " <> show operator <> ", user " <> show user <> ")"
 
       executeImpl = do
         _ <- create UserServiceRequest with operator, user
