@@ -1034,10 +1034,13 @@ pub async fn start_server(
     let http_advertised_url = config.node.http_advertised_url(port);
     tracing::info!("HTTP advertised URL for cancel-probe: {http_advertised_url}");
 
+    // `load_or_generate_keypair` so first-run startup doesn't fail when the
+    // key file hasn't been created yet (the existing keypair load at workflow
+    // start uses the same helper — see line ~1392 below).
     let noise_keypair = Arc::new(
-        NoiseKeypair::from_file(&config.key_file_path())
+        load_or_generate_keypair(&config.key_file_path())
             .await
-            .context("load coordinator keypair for probe verification")?,
+            .context("load/generate coordinator keypair for probe verification")?,
     );
 
     let app_state = web::Data::new(AppState {
