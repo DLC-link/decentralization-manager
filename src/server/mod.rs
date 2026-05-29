@@ -8,6 +8,7 @@ mod queries;
 mod transfer_context;
 mod types;
 
+pub mod health;
 pub mod peer_status;
 
 use std::{
