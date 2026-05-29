@@ -3,7 +3,8 @@ use sqlx::SqlitePool;
 
 use crate::{
     db::schema::SchemaRead,
-    server::{WorkflowKind, WorkflowRole},
+    noise::{Message, MessageType},
+    server::{ConnectionStatus, WorkflowKind, WorkflowRole},
 };
 
 /// The workflow a node is currently participating in, if any.
@@ -69,14 +70,29 @@ pub async fn build_health_response(db: &SqlitePool, participant_id: &str) -> Hea
     }
 }
 
+/// Classify a successful Noise reply to a `Health` probe. Any reply that isn't a
+/// parseable `HealthResponse` (a peer on older code, a `Pong`, an empty body)
+/// still means the peer is reachable — we just don't learn its workflow state.
+pub(crate) fn classify_health_reply(reply: &[u8]) -> (ConnectionStatus, Option<WorkflowInfo>) {
+    if let Ok(msg) = Message::from_bytes(reply)
+        && msg.msg_type == MessageType::HealthResponse
+        && let Some(h) = HealthResponse::from_payload(&msg.payload)
+    {
+        return (ConnectionStatus::Connected, h.workflow);
+    }
+    (ConnectionStatus::Connected, None)
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::db::MIGRATOR;
+    use anyhow::Context;
+
+    use crate::{db::MIGRATOR, error::Result};
 
     use super::*;
 
     #[test]
-    fn health_response_payload_round_trips() {
+    fn health_response_payload_round_trips() -> Result {
         let h = HealthResponse {
             participant_id: "p1::1220ab".into(),
             in_workflow: true,
@@ -89,10 +105,48 @@ mod tests {
             }),
             version: "0.1.0".into(),
         };
-        let bytes = h.to_payload();
-        let back = HealthResponse::from_payload(&bytes).unwrap();
+        let back = HealthResponse::from_payload(&h.to_payload())
+            .context("payload should round-trip")?;
         assert!(back.in_workflow);
-        assert_eq!(back.workflow.unwrap().step, "SignDns");
+        let workflow = back.workflow.context("workflow should be present")?;
+        assert_eq!(workflow.step, "SignDns");
+        Ok(())
+    }
+
+    #[test]
+    fn classify_health_reply_parses_workflow_and_falls_back() -> Result {
+        // New peer: HealthResponse with workflow → Connected + workflow.
+        let hr = HealthResponse {
+            participant_id: "p2::1220".into(),
+            in_workflow: true,
+            workflow: Some(WorkflowInfo {
+                kind: WorkflowKind::Onboarding,
+                role: WorkflowRole::Peer,
+                step: "SignDns".into(),
+                step_index: 3,
+                step_total: 8,
+            }),
+            version: "0.1.0".into(),
+        };
+        let reply = Message::new(MessageType::HealthResponse, hr.to_payload()).to_bytes();
+        let (status, workflow) = classify_health_reply(&reply);
+        assert_eq!(status, ConnectionStatus::Connected);
+        assert_eq!(
+            workflow.context("workflow should be parsed")?.kind,
+            WorkflowKind::Onboarding
+        );
+
+        // Old peer: replies Pong (not HealthResponse) → reachable, no workflow.
+        let pong = Message::new_empty(MessageType::Pong).to_bytes();
+        let (status, workflow) = classify_health_reply(&pong);
+        assert_eq!(status, ConnectionStatus::Connected);
+        assert!(workflow.is_none());
+
+        // Empty body (e.g. an old listener's fall-through) → still reachable.
+        let (status, workflow) = classify_health_reply(&[]);
+        assert_eq!(status, ConnectionStatus::Connected);
+        assert!(workflow.is_none());
+        Ok(())
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]

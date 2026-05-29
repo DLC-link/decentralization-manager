@@ -15,6 +15,7 @@ use tokio::sync::{Notify, RwLock};
 use crate::{
     config::PackageConfig,
     participant_id::CantonId,
+    server::health::WorkflowInfo,
     workflow::contracts::{ContractDefinition, DarFile},
 };
 
@@ -292,6 +293,14 @@ pub enum ConnectionStatus {
 pub struct ParticipantStatus {
     pub id: String,
     pub status: ConnectionStatus,
+    /// Round-trip latency of the health probe, in milliseconds. `None` when the
+    /// peer is the current node or was unreachable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<u64>,
+    /// The workflow this peer is currently participating in, if any and if it
+    /// reported one (peers on older code report `None`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workflow: Option<WorkflowInfo>,
 }
 
 /// Response for the participants status endpoint
