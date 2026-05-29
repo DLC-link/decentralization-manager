@@ -24,7 +24,7 @@ template CreateProviderServiceRequest
         governanceParty
         proposer
         actionLabel = "CreateProviderServiceRequest"
-        description = "Create a ProviderServiceRequest for onboarding."
+        description = "Create ProviderServiceRequest (operator " <> show operator <> ", provider " <> show provider <> ")"
 
       executeImpl = do
         _ <- create ProviderServiceRequest with operator, provider

@@ -25,7 +25,7 @@ template SetEnableResultContracts
         governanceParty
         proposer
         actionLabel = "SetEnableResultContracts"
-        description = "Toggle result-contract emission on RegistrarService."
+        description = "Set RegistrarService.enableResultContracts = " <> show enableResultContracts
 
       executeImpl = do
         _ <- exercise registrarServiceCid RegistrarService_Set with
