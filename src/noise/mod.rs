@@ -41,6 +41,7 @@ pub enum MessageType {
     RequestOwnerKeys = 0x000C,
     ListPeers = 0x000D,
     RequestMemberParty = 0x000E,
+    Health = 0x000F,
 
     // Invites (0x0010 - 0x001F)
     InviteOnboarding = 0x0010,
@@ -68,6 +69,8 @@ pub enum MessageType {
     OwnerKeys = 0x0107,
     PeerList = 0x0108,
     MemberPartyResponse = 0x0109,
+    HealthResponse = 0x010A,
+    Busy = 0x010B,
 
     // Data Transfers (0x0200 - 0x02FF)
     KeysUpload = 0x0201,
@@ -120,6 +123,7 @@ impl TryFrom<u16> for MessageType {
             0x000C => Ok(Self::RequestOwnerKeys),
             0x000D => Ok(Self::ListPeers),
             0x000E => Ok(Self::RequestMemberParty),
+            0x000F => Ok(Self::Health),
             0x0010 => Ok(Self::InviteOnboarding),
             0x0011 => Ok(Self::InviteKick),
             0x0012 => Ok(Self::InviteContracts),
@@ -136,6 +140,8 @@ impl TryFrom<u16> for MessageType {
             0x0107 => Ok(Self::OwnerKeys),
             0x0108 => Ok(Self::PeerList),
             0x0109 => Ok(Self::MemberPartyResponse),
+            0x010A => Ok(Self::HealthResponse),
+            0x010B => Ok(Self::Busy),
             0x0201 => Ok(Self::KeysUpload),
             0x0202 => Ok(Self::DnsSignature),
             0x0203 => Ok(Self::P2pSignatures),
@@ -884,6 +890,22 @@ mod tests {
         assert_eq!(MessageType::try_from(0x0101)?, MessageType::Ack);
         assert!(MessageType::try_from(0xFFFF).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn health_message_types_round_trip() {
+        for mt in [
+            MessageType::Health,
+            MessageType::HealthResponse,
+            MessageType::Busy,
+        ] {
+            let code = mt.to_u16();
+            assert_eq!(MessageType::try_from(code).unwrap(), mt);
+        }
+        // Health request encodes/decodes through the wire format.
+        let m = Message::new_empty(MessageType::Health);
+        let decoded = Message::from_bytes(&m.to_bytes()).unwrap();
+        assert_eq!(decoded.msg_type, MessageType::Health);
     }
 
     #[test]
