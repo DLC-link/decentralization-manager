@@ -1551,6 +1551,22 @@ async fn handle_incoming_connection(
                                 .body(Body::from(pong.to_bytes()))
                                 .unwrap());
                         }
+                        MessageType::Health => {
+                            // Always answer health — even mid-workflow. Reports
+                            // liveness plus this node's in-flight workflow (if
+                            // any) so peers don't infer "offline" from a busy node.
+                            let resp = crate::server::health::build_health_response(
+                                &triggers.db,
+                                &triggers.config.participant_id().to_string(),
+                            )
+                            .await;
+                            let msg =
+                                Message::new(MessageType::HealthResponse, resp.to_payload());
+                            return Ok(Response::builder()
+                                .status(StatusCode::OK)
+                                .body(Body::from(msg.to_bytes()))
+                                .unwrap());
+                        }
                         MessageType::ListPackages => {
                             tracing::debug!("Received ListPackages request");
                             let admin_url = triggers.admin_api_url.clone();
