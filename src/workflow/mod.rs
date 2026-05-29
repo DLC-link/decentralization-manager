@@ -22,7 +22,7 @@ use sqlx::SqlitePool;
 use crate::{
     auth::WorkflowAuth,
     config::{NetworkConfig, NodeConfig, Peer},
-    consts::{EXTENDED_TOLERANCE_BUDGET, MAX_CONSECUTIVE_STEP_FAILURES},
+    consts::{self, MAX_CONSECUTIVE_STEP_FAILURES},
     db::schema::{Commitable, SchemaRead, SchemaWrite},
     error::Result,
     noise::{
@@ -274,7 +274,7 @@ pub async fn start_peer(
 
     // Command polling loop
     let mut consecutive_errors = 0; // legacy 3-strike fallback for NULL-URL rows
-    let mut budget = coordinator_probe::BudgetTracker::new(EXTENDED_TOLERANCE_BUDGET);
+    let mut budget = coordinator_probe::BudgetTracker::new(consts::extended_tolerance_budget());
     // Keypair is loaded once per `start_peer` invocation (not per loop iteration).
     // `NoiseClient::new` also loads it internally, so this is duplicate one-shot
     // I/O — accepted because (a) it's once per workflow, (b) extracting an
@@ -372,7 +372,10 @@ pub async fn start_peer(
                             "coordinator unreachable (Noise + HTTP) past budget",
                         )
                         .await;
-                        anyhow::bail!("Peer failed: coordinator unreachable past 180s budget");
+                        anyhow::bail!(
+                            "Peer failed: coordinator unreachable past {budget_s}s budget",
+                            budget_s = consts::extended_tolerance_budget().as_secs()
+                        );
                     }
                     coordinator_probe::PeerAction::BudgetState(
                         coordinator_probe::BudgetState::Tolerate,

@@ -74,7 +74,24 @@ pub const TOPOLOGY_PROPAGATION_DELAY_SECS: u64 = 30;
 /// observed coordinator restart (~120s for pod restart with image pull) but
 /// short enough that a permanently-dead coordinator doesn't waste a full
 /// integration run. See issue #173 fix design §7.
+///
+/// Overridable at runtime via the `DECPM_PROBE_BUDGET_SECS` env var — used
+/// by the integration suite to shrink the budget to single-digit seconds
+/// so a permanently-dead coordinator test doesn't add 3 minutes to every
+/// run. Prod deployments should leave it unset (uses the default below).
 pub const EXTENDED_TOLERANCE_BUDGET: Duration = Duration::from_secs(180);
+
+/// Read the effective probe budget — environment override or the default
+/// constant. Read once per `start_peer` invocation; not hot-path.
+pub fn extended_tolerance_budget() -> Duration {
+    match std::env::var("DECPM_PROBE_BUDGET_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        Some(secs) => Duration::from_secs(secs),
+        None => EXTENDED_TOLERANCE_BUDGET,
+    }
+}
 
 /// HTTP request timeout for the peer→coordinator cancel probe. Short because
 /// the probe is on the failure path of an already-failing Noise call; we
