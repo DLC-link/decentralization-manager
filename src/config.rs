@@ -249,12 +249,20 @@ impl NodeInfo {
 
     /// Compute the externally-reachable HTTP base URL for this node.
     /// Explicit override wins; otherwise falls back to
-    /// `http://<public_address()>:<http_port>`.
+    /// `http://<routable_host>:<http_port>`. `routable_host` resolves
+    /// `public_address` first, then `listen_address` — but a bind-all wildcard
+    /// (`0.0.0.0` or `::`) is replaced with `127.0.0.1` because clients can't
+    /// connect to a wildcard. Production operators behind LBs should set
+    /// `public_address` (or `http_advertised_url` directly).
     pub fn http_advertised_url(&self, http_port: u16) -> String {
         if let Some(url) = &self.http_advertised_url {
             return url.clone();
         }
-        format!("http://{}:{}", self.public_address(), http_port)
+        let host = match self.public_address() {
+            "0.0.0.0" | "::" | "" => "127.0.0.1",
+            other => other,
+        };
+        format!("http://{host}:{http_port}")
     }
 }
 
@@ -584,5 +592,29 @@ mod tests {
             http_advertised_url: None,
         };
         assert_eq!(info.http_advertised_url(8080), "http://127.0.0.1:8080");
+    }
+
+    #[test]
+    fn wildcard_bind_resolves_to_localhost() {
+        // bind=0.0.0.0 + no public_address → 127.0.0.1 (not 0.0.0.0,
+        // which is unroutable as a client URL).
+        let info = NodeInfo {
+            participant_id: None,
+            listen_address: "0.0.0.0".into(),
+            port: 9000,
+            public_address: None,
+            http_advertised_url: None,
+        };
+        assert_eq!(info.http_advertised_url(8080), "http://127.0.0.1:8080");
+
+        // IPv6 wildcard ::, same fallback.
+        let info_v6 = NodeInfo {
+            participant_id: None,
+            listen_address: "::".into(),
+            port: 9000,
+            public_address: None,
+            http_advertised_url: None,
+        };
+        assert_eq!(info_v6.http_advertised_url(8080), "http://127.0.0.1:8080");
     }
 }
