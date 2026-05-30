@@ -625,17 +625,7 @@ async fn send_kick_invites(
         .await
         {
             Ok(response) => {
-                if let Ok(msg) = Message::from_bytes(&response) {
-                    if msg.msg_type == MessageType::Ack {
-                        tracing::info!("Peer {} acknowledged kick invite", peer.participant_id);
-                    } else {
-                        tracing::warn!(
-                            "Peer {} responded with {msg_type:?} instead of Ack",
-                            peer.participant_id,
-                            msg_type = msg.msg_type
-                        );
-                    }
-                }
+                interpret_invite_reply(&peer.participant_id, "kick", &response)?;
             }
             Err(e) => {
                 tracing::error!("Failed to send kick invite to {}: {e}", peer.participant_id);
@@ -957,6 +947,40 @@ pub async fn get_onboarding_status(
     })
 }
 
+/// Interpret a peer's reply to a workflow invite.
+///
+/// A `Busy` reply means the peer raced into another workflow between our
+/// pre-flight health check and this invite. Treat it as a hard error so the
+/// coordinator aborts fast — the spawning task marks the run Failed with a clear
+/// reason — instead of waiting on a peer that will never join. Any other
+/// non-`Ack` reply, or an unparseable one, is logged but tolerated (an older
+/// peer may not Ack).
+fn interpret_invite_reply(peer_id: &CantonId, kind: &str, response: &[u8]) -> Result {
+    match Message::from_bytes(response) {
+        Ok(msg) if msg.msg_type == MessageType::Ack => {
+            tracing::info!("Peer {peer_id} acknowledged {kind} invite");
+            Ok(())
+        }
+        Ok(msg) if msg.msg_type == MessageType::Busy => {
+            anyhow::bail!(
+                "Peer {peer_id} is already participating in another workflow; \
+                 aborting {kind} before it starts"
+            )
+        }
+        Ok(msg) => {
+            tracing::warn!(
+                "Peer {peer_id} responded with {msg_type:?} instead of Ack to {kind} invite",
+                msg_type = msg.msg_type
+            );
+            Ok(())
+        }
+        Err(_) => {
+            tracing::warn!("Peer {peer_id} sent an unparseable {kind} invite reply");
+            Ok(())
+        }
+    }
+}
+
 /// Send onboarding invites to selected peers using Noise protocol
 async fn send_onboarding_invites(
     config: &NodeConfig,
@@ -1020,16 +1044,7 @@ async fn send_onboarding_invites(
         .await
         {
             Ok(response) => {
-                if let Ok(msg) = Message::from_bytes(&response) {
-                    if msg.msg_type == MessageType::Ack {
-                        tracing::info!("Peer {peer_id} acknowledged invite");
-                    } else {
-                        tracing::warn!(
-                            "Peer {peer_id} responded with {msg_type:?} instead of Ack",
-                            msg_type = msg.msg_type
-                        );
-                    }
-                }
+                interpret_invite_reply(peer_id, "onboarding", &response)?;
             }
             Err(e) => {
                 tracing::error!("Failed to send invite to {peer_id}: {e}");
@@ -1741,16 +1756,7 @@ async fn send_dars_invites(
         .await
         {
             Ok(response) => {
-                if let Ok(msg) = Message::from_bytes(&response) {
-                    if msg.msg_type == MessageType::Ack {
-                        tracing::info!("Peer {peer_id} acknowledged DARs invite");
-                    } else {
-                        tracing::warn!(
-                            "Peer {peer_id} responded with {msg_type:?} instead of Ack",
-                            msg_type = msg.msg_type
-                        );
-                    }
-                }
+                interpret_invite_reply(peer_id, "DARs", &response)?;
             }
             Err(e) => {
                 tracing::error!("Failed to send DARs invite to {peer_id}: {e}");
@@ -2353,20 +2359,7 @@ async fn send_contracts_invites(config: &NodeConfig, db: &SqlitePool) -> Result 
         .await
         {
             Ok(response) => {
-                if let Ok(msg) = Message::from_bytes(&response) {
-                    if msg.msg_type == MessageType::Ack {
-                        tracing::info!(
-                            "Peer {} acknowledged contracts invite",
-                            peer.participant_id
-                        );
-                    } else {
-                        tracing::warn!(
-                            "Peer {} responded with {msg_type:?} instead of Ack",
-                            peer.participant_id,
-                            msg_type = msg.msg_type
-                        );
-                    }
-                }
+                interpret_invite_reply(&peer.participant_id, "contracts", &response)?;
             }
             Err(e) => {
                 tracing::error!(
@@ -2393,5 +2386,26 @@ mod tests {
         let msg = format_busy_peers(&busy);
         assert!(msg.contains("participant2 is participating in an Onboarding workflow"));
         assert!(msg.contains("participant3 is participating in a Kick workflow"));
+    }
+
+    #[test]
+    fn invite_reply_aborts_on_busy_only() -> anyhow::Result<()> {
+        let peer = CantonId::parse(
+            "participant::12200ad4539c269a7b13af6806fb2ee326e7c0d7233fa6144004c416502a2c73fb0b",
+        )?;
+
+        // Ack is the happy path.
+        let ack = Message::new_empty(MessageType::Ack).to_bytes();
+        assert!(interpret_invite_reply(&peer, "onboarding", &ack).is_ok());
+
+        // Busy aborts so the coordinator fails fast instead of waiting forever.
+        let busy = Message::new(MessageType::Busy, b"Onboarding".to_vec()).to_bytes();
+        assert!(interpret_invite_reply(&peer, "onboarding", &busy).is_err());
+
+        // Any other (parseable) reply is tolerated — older peers may not Ack.
+        let other = Message::new_empty(MessageType::Wait).to_bytes();
+        assert!(interpret_invite_reply(&peer, "onboarding", &other).is_ok());
+
+        Ok(())
     }
 }
