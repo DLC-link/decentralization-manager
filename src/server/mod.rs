@@ -218,26 +218,55 @@ async fn recover_in_progress_workflows(
         runs.len()
     );
 
-    for run in runs {
+    // Only one coordinator workflow can be active at a time: the global
+    // in-flight gate enforces that for fresh starts, and the single
+    // `active_workflow` routing slot can hold only one. Multiple InProgress
+    // coordinator rows can therefore only be stale leftovers (e.g. a run whose
+    // cancel/abort never reached a terminal status). Resume just the newest one
+    // and fail the rest — otherwise every resumed coordinator registers the slot,
+    // the last writer wins, and peers polling for one workflow get misrouted to
+    // another (observed as the G1 coordinator-resume hang).
+    let newest_coordinator = runs
+        .iter()
+        .filter(|r| r.role == WorkflowRole::Coordinator)
+        .max_by_key(|r| r.created_at)
+        .map(|r| r.instance_name.clone());
+
+    for run in &runs {
         match run.role {
             WorkflowRole::Coordinator => {
-                respawn_coordinator(
-                    db.clone(),
-                    config.clone(),
-                    &run,
-                    kick_state.clone(),
-                    onboarding_state.clone(),
-                    contracts_state.clone(),
-                    dars_state.clone(),
-                    active_workflow.clone(),
-                    auth.clone(),
-                    last_seen.clone(),
-                )
-                .await;
+                if Some(&run.instance_name) == newest_coordinator.as_ref() {
+                    respawn_coordinator(
+                        db.clone(),
+                        config.clone(),
+                        run,
+                        kick_state.clone(),
+                        onboarding_state.clone(),
+                        contracts_state.clone(),
+                        dars_state.clone(),
+                        active_workflow.clone(),
+                        auth.clone(),
+                        last_seen.clone(),
+                    )
+                    .await;
+                } else {
+                    tracing::warn!(
+                        "Not resuming stale {:?} coordinator run {}: a newer coordinator \
+                         workflow is resuming and only one can be active at a time",
+                        run.kind,
+                        run.instance_name
+                    );
+                    mark_failed_via_pool(
+                        &db,
+                        &run.instance_name,
+                        "Superseded on restart: another coordinator workflow resumed",
+                    )
+                    .await;
+                }
             }
             WorkflowRole::Peer => {
                 refire_peer(
-                    &run,
+                    run,
                     &onboarding_trigger,
                     &kick_trigger,
                     &contracts_trigger,
