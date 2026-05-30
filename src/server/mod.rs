@@ -1638,30 +1638,22 @@ async fn handle_incoming_connection(
                                 .unwrap());
                         }
                         MessageType::GetChunk => {
-                            // GetChunk serves BOTH the chunked ListPackages transfer
-                            // and a workflow's chunked command, and the two are
-                            // indistinguishable on the wire. Disambiguate by state: a
-                            // peer with an in-flight cached ListPackages payload is
-                            // mid-transfer of that, so serve its chunks from the cache
-                            // below; only route GetChunk to the active workflow when the
-                            // peer has no (unexpired) cached payload.
-                            let peer_has_cached_packages = if let Some(ref pk) = peer_pubkey_hex {
-                                let cache = triggers.list_packages_chunk_cache.lock().await;
-                                cache.get(pk).is_some_and(|(_, t)| {
-                                    t.elapsed() < LIST_PACKAGES_CHUNK_CACHE_TTL
-                                })
-                            } else {
-                                false
-                            };
-                            let active = if peer_has_cached_packages {
-                                None
-                            } else {
-                                triggers
-                                    .active_workflow
-                                    .read()
-                                    .unwrap_or_else(|e| e.into_inner())
-                                    .clone()
-                            };
+                            // GetChunk serves BOTH the chunked ListPackages transfer and a
+                            // workflow's chunked command, and the two are indistinguishable
+                            // on the wire. Prefer the active workflow: a peer's ListPackages
+                            // chunk cache entry lives until its TTL and routinely lingers
+                            // from an earlier phase (e.g. a package check) into a later
+                            // workflow, so routing by "a cache entry exists" would feed a
+                            // workflow's chunk requests stale ListPackages bytes and corrupt
+                            // the transfer. While a workflow is in flight a peer's GetChunks
+                            // belong to it; the cache below serves chunks only when no
+                            // workflow is active (ListPackages and workflows never overlap
+                            // for a given node, so this can't strand a real ListPackages).
+                            let active = triggers
+                                .active_workflow
+                                .read()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .clone();
                             if let Some(wf) = active
                                 && let Some(pid) =
                                     peer_id_str.as_deref().and_then(|s| CantonId::parse(s).ok())
