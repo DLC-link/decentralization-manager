@@ -155,6 +155,38 @@ pub async fn start_coordinator(
     CantonId::parse(party_id_str.trim())
 }
 
+/// Ensure the coordinator has generated its own onboarding keys and waited for
+/// Canton to propagate the namespace delegations — exactly once per run.
+///
+/// The coordinator normally does this when it processes the `GenerateKeys` step.
+/// But the workflow advances `GenerateKeys -> CreateProposals` as soon as every
+/// *peer* has completed `GenerateKeys` (see `WorkflowState::peer_completed`),
+/// independently of the coordinator's own loop. When peers complete quickly —
+/// notably on resume, where they re-upload already-generated keys almost
+/// instantly — the state can race past `GenerateKeys` before the coordinator
+/// loop reaches that arm, skipping the key generation and the propagation wait.
+/// `create_proposals` then fails with `TOPOLOGY_NO_APPROPRIATE_SIGNING_KEY_IN_STORE`.
+/// Calling this at the start of `CreateProposals` as well makes the keys a
+/// precondition of proposal creation regardless of the race. It is a no-op once
+/// the keys have been generated.
+async fn ensure_coordinator_keys(
+    completed: &mut HashSet<OnboardingStep>,
+    node_config: &NodeConfig,
+    db: &SqlitePool,
+    instance_name: &str,
+    onboarding_config: &OnboardingConfig,
+) -> Result {
+    if completed.contains(&OnboardingStep::GenerateKeys) {
+        return Ok(());
+    }
+    tracing::info!("Coordinator executing: Generate keys");
+    generate_keys(node_config, db, instance_name, onboarding_config).await?;
+    completed.insert(OnboardingStep::GenerateKeys);
+    tracing::info!("Waiting 3 seconds for Canton to process namespace delegations...");
+    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+    Ok(())
+}
+
 async fn run_workflow(
     workflow_state: Arc<WorkflowState<OnboardingStep>>,
     node_config: NodeConfig,
@@ -179,19 +211,29 @@ async fn run_workflow(
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             }
             OnboardingStep::GenerateKeys => {
-                if !coordinator_completed_steps.contains(&OnboardingStep::GenerateKeys) {
-                    tracing::info!("Coordinator executing: Generate keys");
-                    generate_keys(&node_config, &db, &instance_name, &onboarding_config).await?;
-                    coordinator_completed_steps.insert(OnboardingStep::GenerateKeys);
-
-                    tracing::info!(
-                        "Waiting 3 seconds for Canton to process namespace delegations..."
-                    );
-                    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-                }
+                ensure_coordinator_keys(
+                    &mut coordinator_completed_steps,
+                    &node_config,
+                    &db,
+                    &instance_name,
+                    &onboarding_config,
+                )
+                .await?;
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             }
             OnboardingStep::CreateProposals => {
+                // The GenerateKeys arm above is skipped entirely if peers advance
+                // the state past it before this loop reaches it (common on
+                // resume); make the coordinator's keys a precondition here so the
+                // proposals can be signed with them. No-op if already generated.
+                ensure_coordinator_keys(
+                    &mut coordinator_completed_steps,
+                    &node_config,
+                    &db,
+                    &instance_name,
+                    &onboarding_config,
+                )
+                .await?;
                 tracing::info!("Coordinator executing: Create proposals");
                 // Save peer keys and participant IDs uploaded during GenerateKeys step
                 save_keys_and_ids(&workflow_state, &db, &instance_name).await?;
