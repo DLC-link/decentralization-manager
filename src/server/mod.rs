@@ -13,10 +13,7 @@ pub mod peer_status;
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, atomic::AtomicBool},
     time::{Duration, Instant},
 };
 
@@ -80,8 +77,6 @@ pub struct AppState {
     pub config: NodeConfig,
     pub peer_status: Arc<RwLock<HashMap<String, bool>>>,
     pub last_seen: LastSeen,
-    pub noise_listener_pause_flag: Arc<AtomicBool>,
-    pub noise_listener_notify: Arc<Notify>,
     pub onboarding_trigger: Arc<Notify>,
     pub kick_trigger: Arc<Notify>,
     pub contracts_trigger: Arc<Notify>,
@@ -996,8 +991,6 @@ pub async fn start_server(
 
     let peer_status = Arc::new(RwLock::new(HashMap::new()));
     let last_seen: LastSeen = Arc::new(RwLock::new(HashMap::new()));
-    let listener_control = Arc::new(AtomicBool::new(false));
-    let listener_notify = Arc::new(Notify::new());
     let onboarding_trigger = Arc::new(Notify::new());
     let kick_trigger = Arc::new(Notify::new());
     let contracts_trigger = Arc::new(Notify::new());
@@ -1022,8 +1015,6 @@ pub async fn start_server(
         config: config.clone(),
         peer_status: peer_status.clone(),
         last_seen: last_seen.clone(),
-        noise_listener_pause_flag: listener_control.clone(),
-        noise_listener_notify: listener_notify.clone(),
         onboarding_trigger: onboarding_trigger.clone(),
         kick_trigger: kick_trigger.clone(),
         contracts_trigger: contracts_trigger.clone(),
@@ -1075,8 +1066,6 @@ pub async fn start_server(
     let heartbeat_db = db.clone();
     let heartbeat_status = peer_status.clone();
     let heartbeat_last_seen = last_seen.clone();
-    let heartbeat_control = listener_control.clone();
-    let heartbeat_notify = listener_notify.clone();
     let heartbeat_triggers = WorkflowTriggers {
         pending_invitations: pending_invitations.clone(),
         config: config.clone(),
@@ -1098,8 +1087,6 @@ pub async fn start_server(
             heartbeat_db,
             heartbeat_status,
             heartbeat_last_seen,
-            heartbeat_control,
-            heartbeat_notify,
             heartbeat_triggers,
         )
         .await;
@@ -1108,8 +1095,6 @@ pub async fn start_server(
     // Start peer trigger listener for onboarding (starts peer workflow when invite received)
     let onboarding_peer_config = config.clone();
     let onboarding_peer_db = db.clone();
-    let onboarding_peer_control = listener_control.clone();
-    let onboarding_peer_notify = listener_notify.clone();
     let onboarding_peer_state = onboarding_state.clone();
     let onboarding_coordinator_pubkey = coordinator_pubkey.clone();
     let onboarding_peer_run_instance = peer_run_instance.clone();
@@ -1117,8 +1102,6 @@ pub async fn start_server(
         run_onboarding_peer_listener(
             onboarding_peer_config,
             onboarding_peer_db,
-            onboarding_peer_control,
-            onboarding_peer_notify,
             onboarding_peer_state,
             onboarding_trigger,
             onboarding_coordinator_pubkey,
@@ -1130,8 +1113,6 @@ pub async fn start_server(
     // Start peer trigger listener for kick (starts peer workflow when kick invite received)
     let kick_peer_config = config.clone();
     let kick_peer_db = db.clone();
-    let kick_peer_control = listener_control.clone();
-    let kick_peer_notify = listener_notify.clone();
     let kick_peer_state = kick_state.clone();
     let kick_coordinator_pubkey = coordinator_pubkey.clone();
     let kick_peer_run_instance = peer_run_instance.clone();
@@ -1139,8 +1120,6 @@ pub async fn start_server(
         run_kick_peer_listener(
             kick_peer_config,
             kick_peer_db,
-            kick_peer_control,
-            kick_peer_notify,
             kick_peer_state,
             kick_trigger,
             kick_coordinator_pubkey,
@@ -1152,8 +1131,6 @@ pub async fn start_server(
     // Start peer trigger listener for contracts (starts peer workflow when contracts invite received)
     let contracts_peer_config = config.clone();
     let contracts_peer_db = db.clone();
-    let contracts_peer_control = listener_control.clone();
-    let contracts_peer_notify = listener_notify.clone();
     let contracts_peer_state = contracts_state.clone();
     let contracts_coordinator_pubkey = coordinator_pubkey.clone();
     let contracts_peer_run_instance = peer_run_instance.clone();
@@ -1161,8 +1138,6 @@ pub async fn start_server(
         run_contracts_peer_listener(
             contracts_peer_config,
             contracts_peer_db,
-            contracts_peer_control,
-            contracts_peer_notify,
             contracts_peer_state,
             contracts_trigger,
             contracts_coordinator_pubkey,
@@ -1174,8 +1149,6 @@ pub async fn start_server(
     // Start peer trigger listener for DARs (starts peer workflow when DARs invite received)
     let dars_peer_config = config.clone();
     let dars_peer_db = db.clone();
-    let dars_peer_control = listener_control.clone();
-    let dars_peer_notify = listener_notify.clone();
     let dars_peer_state = dars_state.clone();
     let dars_coordinator_pubkey = coordinator_pubkey.clone();
     let dars_peer_run_instance = peer_run_instance.clone();
@@ -1183,8 +1156,6 @@ pub async fn start_server(
         run_dars_peer_listener(
             dars_peer_config,
             dars_peer_db,
-            dars_peer_control,
-            dars_peer_notify,
             dars_peer_state,
             dars_trigger,
             dars_coordinator_pubkey,
@@ -1355,8 +1326,6 @@ async fn run_heartbeat(
     db: SqlitePool,
     peer_status: Arc<RwLock<HashMap<String, bool>>>,
     last_seen: LastSeen,
-    listener_control: Arc<AtomicBool>,
-    listener_notify: Arc<Notify>,
     triggers: WorkflowTriggers,
 ) {
     use tokio::net::TcpListener;
@@ -1397,9 +1366,10 @@ async fn run_heartbeat(
     }
     let peer_keys = Arc::new(peer_keys);
 
-    // Listener management loop
-    let listener_control_spawn = listener_control.clone();
-    let listener_notify_spawn = listener_notify.clone();
+    // Listener loop: bind the always-on Noise listener and accept forever. It is
+    // never paused — workflow traffic is routed in-process via the
+    // active-workflow slot, so the listener stays up (and keeps answering
+    // Health / Ping) even while this node is participating in a workflow.
     let keypair_spawn = keypair.clone();
     let last_seen_spawn = last_seen.clone();
     let peer_keys_spawn = peer_keys.clone();
@@ -1407,54 +1377,29 @@ async fn run_heartbeat(
 
     tokio::spawn(async move {
         loop {
-            // Wait for permission to bind
-            let should_pause = listener_control_spawn.load(Ordering::Acquire);
-
-            if should_pause {
-                tracing::info!("Noise listener paused for workflow");
-                listener_notify_spawn.notified().await;
-                tracing::info!("Resuming Noise listener");
-                continue;
-            }
-
-            // Try to bind listener
             match TcpListener::bind(&listen_addr).await {
                 Ok(listener) => {
-                    tracing::info!("Noise invite listener started on {listen_addr}");
+                    tracing::info!("Noise listener started on {listen_addr}");
 
                     loop {
-                        tokio::select! {
-                            result = listener.accept() => {
-                                if let Ok((socket, peer_addr)) = result {
-                                    let keypair = keypair_spawn.clone();
-                                    let last_seen = last_seen_spawn.clone();
-                                    let peer_keys = peer_keys_spawn.clone();
-                                    let triggers = triggers_spawn.clone();
+                        if let Ok((socket, peer_addr)) = listener.accept().await {
+                            let keypair = keypair_spawn.clone();
+                            let last_seen = last_seen_spawn.clone();
+                            let peer_keys = peer_keys_spawn.clone();
+                            let triggers = triggers_spawn.clone();
 
-                                    tokio::spawn(async move {
-                                        handle_incoming_connection(socket, peer_addr, keypair, peer_keys, triggers, last_seen).await;
-                                    });
-                                }
-                            }
-                            _ = async {
-                                loop {
-                                    tokio::time::sleep(Duration::from_millis(100)).await;
-                                    if listener_control_spawn
-                                        .load(Ordering::Acquire)
-                                    {
-                                        break;
-                                    }
-                                }
-                            } => {
-                                tracing::info!("Stopping listener for workflow");
-                                break;
-                            }
+                            tokio::spawn(async move {
+                                handle_incoming_connection(
+                                    socket, peer_addr, keypair, peer_keys, triggers, last_seen,
+                                )
+                                .await;
+                            });
                         }
                     }
                 }
                 Err(e) => {
                     tracing::warn!(
-                        "Failed to bind invite listener on {listen_addr}: {e}, retrying in 5s"
+                        "Failed to bind Noise listener on {listen_addr}: {e}, retrying in 5s"
                     );
                     tokio::time::sleep(Duration::from_secs(5)).await;
                 }
@@ -2146,8 +2091,6 @@ async fn finalize_peer_run(
 async fn run_onboarding_peer_listener(
     config: NodeConfig,
     db: SqlitePool,
-    listener_control: Arc<AtomicBool>,
-    listener_notify: Arc<Notify>,
     onboarding_state: web::Data<Arc<handlers::OnboardingWorkflowState>>,
     onboarding_trigger: Arc<Notify>,
     coordinator_pubkey: Arc<RwLock<Option<String>>>,
@@ -2216,14 +2159,9 @@ async fn run_onboarding_peer_listener(
             *error = None;
         }
 
-        let guard =
-            types::ListenerPauseGuard::pause(listener_control.clone(), listener_notify.clone())
-                .await;
         let workflow_config = config.clone();
         let result =
             workflow::start_peer(workflow_config, coordinator, db.clone(), local_instance).await;
-
-        guard.resume().await;
 
         // Update status
         let mut status = onboarding_state.status.write().await;
@@ -2253,8 +2191,6 @@ async fn run_onboarding_peer_listener(
 async fn run_kick_peer_listener(
     config: NodeConfig,
     db: SqlitePool,
-    listener_control: Arc<AtomicBool>,
-    listener_notify: Arc<Notify>,
     kick_state: web::Data<Arc<handlers::KickWorkflowState>>,
     kick_trigger: Arc<Notify>,
     coordinator_pubkey: Arc<RwLock<Option<String>>>,
@@ -2322,14 +2258,9 @@ async fn run_kick_peer_listener(
             *error = None;
         }
 
-        let guard =
-            types::ListenerPauseGuard::pause(listener_control.clone(), listener_notify.clone())
-                .await;
         let workflow_config = config.clone();
         let result =
             workflow::start_peer(workflow_config, coordinator, db.clone(), local_instance).await;
-
-        guard.resume().await;
 
         // Update status
         let mut status = kick_state.status.write().await;
@@ -2359,8 +2290,6 @@ async fn run_kick_peer_listener(
 async fn run_contracts_peer_listener(
     config: NodeConfig,
     db: SqlitePool,
-    listener_control: Arc<AtomicBool>,
-    listener_notify: Arc<Notify>,
     contracts_state: web::Data<Arc<handlers::ContractsWorkflowState>>,
     contracts_trigger: Arc<Notify>,
     coordinator_pubkey: Arc<RwLock<Option<String>>>,
@@ -2428,14 +2357,9 @@ async fn run_contracts_peer_listener(
             *error = None;
         }
 
-        let guard =
-            types::ListenerPauseGuard::pause(listener_control.clone(), listener_notify.clone())
-                .await;
         let workflow_config = config.clone();
         let result =
             workflow::start_peer(workflow_config, coordinator, db.clone(), local_instance).await;
-
-        guard.resume().await;
 
         // Update status
         let mut status = contracts_state.status.write().await;
@@ -2465,8 +2389,6 @@ async fn run_contracts_peer_listener(
 async fn run_dars_peer_listener(
     config: NodeConfig,
     db: SqlitePool,
-    listener_control: Arc<AtomicBool>,
-    listener_notify: Arc<Notify>,
     dars_state: web::Data<Arc<handlers::DarsWorkflowState>>,
     dars_trigger: Arc<Notify>,
     coordinator_pubkey: Arc<RwLock<Option<String>>>,
@@ -2541,14 +2463,9 @@ async fn run_dars_peer_listener(
             *error = None;
         }
 
-        let guard =
-            types::ListenerPauseGuard::pause(listener_control.clone(), listener_notify.clone())
-                .await;
         let workflow_config = config.clone();
         let result =
             workflow::start_peer(workflow_config, coordinator, db.clone(), local_instance).await;
-
-        guard.resume().await;
 
         // Update status
         let mut status = dars_state.status.write().await;

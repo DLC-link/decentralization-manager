@@ -4,13 +4,12 @@ use std::{
         Arc, RwLock as StdRwLock,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
 };
 
 use canton_common::decimal::DamlDecimal;
 use canton_proto_rs::com::digitalasset::canton::protocol::v30::enums::ParticipantPermission;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Notify, RwLock};
+use tokio::sync::RwLock;
 
 use crate::{
     config::PackageConfig,
@@ -47,46 +46,6 @@ impl<S: WorkflowStatus> Default for HttpWorkflowState<S> {
 impl<S: WorkflowStatus> HttpWorkflowState<S> {
     pub fn new() -> Self {
         Self::default()
-    }
-}
-
-/// Guard that pauses the Noise listener while held and resumes it when dropped.
-///
-/// `should_pause` is an `AtomicBool` rather than a `bool` behind a lock so that
-/// the `Drop` impl can reset it synchronously. The earlier `Arc<RwLock<bool>>`
-/// design left the listener stuck in the paused state on task abort or panic
-/// (the captured guard was dropped but the async reset never ran), forcing the
-/// cancel handler to clean up manually.
-pub struct ListenerPauseGuard {
-    listener_pause_flag: Arc<AtomicBool>,
-    listener_notify: Arc<Notify>,
-}
-
-impl ListenerPauseGuard {
-    /// Pause the listener and return a guard that will resume it when dropped.
-    pub async fn pause(listener_pause_flag: Arc<AtomicBool>, listener_notify: Arc<Notify>) -> Self {
-        listener_pause_flag.store(true, Ordering::Release);
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        Self {
-            listener_pause_flag,
-            listener_notify,
-        }
-    }
-
-    /// Resume the listener explicitly. `Drop` does the same thing; calling
-    /// this is only useful when you want to ensure the resume has fired
-    /// before the surrounding async function returns.
-    pub async fn resume(self) {
-        // The `Drop` impl below does the actual work; this just consumes
-        // `self` so the caller can't keep using the guard.
-        drop(self);
-    }
-}
-
-impl Drop for ListenerPauseGuard {
-    fn drop(&mut self) {
-        self.listener_pause_flag.store(false, Ordering::Release);
-        self.listener_notify.notify_one();
     }
 }
 
