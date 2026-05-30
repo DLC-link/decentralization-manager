@@ -341,6 +341,7 @@ mod tests {
             party_credentials,
             bootstrap_mu: Arc::new(Mutex::new(())),
             workflow_in_flight: Arc::new(AtomicBool::new(false)),
+            active_workflow: Arc::new(std::sync::RwLock::new(None)),
             test_mode: true,
             refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
             http_client: reqwest::Client::new(),

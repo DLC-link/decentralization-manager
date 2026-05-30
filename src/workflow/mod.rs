@@ -5,10 +5,7 @@ pub mod onboarding;
 pub mod state;
 pub mod storage;
 
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use canton_proto_rs::com::digitalasset::canton::{
@@ -24,9 +21,9 @@ use crate::{
     consts::MAX_CONSECUTIVE_STEP_FAILURES,
     db::schema::{Commitable, SchemaRead, SchemaWrite},
     error::Result,
-    noise::{MessageType, client::NoiseClient, server::NoiseServer},
+    noise::{MessageType, client::NoiseClient, server::ActiveWorkflow},
     participant_id::CantonId,
-    server::{WorkflowKind, peer_status::LastSeen},
+    server::{ActiveWorkflowGuard, ActiveWorkflowSlot, WorkflowKind, peer_status::LastSeen},
     utils,
     workflow::{
         state::WorkflowStep,
@@ -67,6 +64,7 @@ pub async fn start_coordinator(
     dars_config: Option<DarsConfig>,
     workflow_auth: Option<WorkflowAuth>,
     last_seen: LastSeen,
+    active_workflow: ActiveWorkflowSlot,
 ) -> Result<CoordinatorResult> {
     tracing::info!("Loading peers from database...");
     let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
@@ -84,6 +82,7 @@ pub async fn start_coordinator(
                 config,
                 db,
                 last_seen,
+                active_workflow,
             )
             .await?;
             Ok(CoordinatorResult {
@@ -101,6 +100,7 @@ pub async fn start_coordinator(
                 workflow_auth,
                 db,
                 last_seen,
+                active_workflow,
             )
             .await?;
             Ok(CoordinatorResult {
@@ -116,6 +116,7 @@ pub async fn start_coordinator(
                 config,
                 db,
                 last_seen,
+                active_workflow,
             )
             .await?;
             Ok(CoordinatorResult {
@@ -131,6 +132,7 @@ pub async fn start_coordinator(
                 config,
                 db,
                 last_seen,
+                active_workflow,
             )
             .await?;
             Ok(CoordinatorResult {
@@ -198,31 +200,31 @@ impl<S: PartialEq + Copy + std::fmt::Debug> StepStalenessWatchdog<S> {
     }
 }
 
-pub async fn run_server_with_workflow<S: state::WorkflowStep + 'static>(
-    server: Arc<NoiseServer<S>>,
+/// Register the coordinator's workflow so the always-on Noise listener can route
+/// peer command messages to it, then drive the workflow loop to completion. No
+/// port is bound here — the single always-on listener already owns port 9000.
+/// The [`ActiveWorkflowGuard`] clears the slot on return (success, error, or
+/// panic), so a finished or failed workflow stops receiving routed commands.
+pub async fn run_workflow_with_handler(
+    active: ActiveWorkflow,
+    slot: ActiveWorkflowSlot,
     workflow_handle: tokio::task::JoinHandle<Result>,
 ) -> Result {
-    tokio::select! {
-        result = server.start() => {
-            result?;
+    let _guard = ActiveWorkflowGuard::register(slot, active);
+    match workflow_handle.await {
+        Ok(Ok(())) => {
+            tracing::info!("Workflow completed successfully, shutting down");
+            Ok(())
         }
-        result = workflow_handle => {
-            match result {
-                Ok(Ok(())) => {
-                    tracing::info!("Workflow completed successfully, shutting down");
-                }
-                Ok(Err(e)) => {
-                    tracing::error!("Workflow failed: {e:#}");
-                    anyhow::bail!("Coordinator workflow failed: {e:#}");
-                }
-                Err(e) => {
-                    tracing::error!("Workflow task panicked: {e}");
-                    anyhow::bail!("Coordinator workflow task panicked: {e}");
-                }
-            }
+        Ok(Err(e)) => {
+            tracing::error!("Workflow failed: {e:#}");
+            anyhow::bail!("Coordinator workflow failed: {e:#}");
+        }
+        Err(e) => {
+            tracing::error!("Workflow task panicked: {e}");
+            anyhow::bail!("Coordinator workflow task panicked: {e}");
         }
     }
-    Ok(())
 }
 
 /// Start node in peer mode (client)

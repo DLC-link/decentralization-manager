@@ -54,6 +54,7 @@ use crate::{
         CHUNK_SIZE, MAX_CHUNKED_TOTAL_SIZE, MAX_PAYLOAD_SIZE, Message, MessageType, NoiseKeypair,
         load_or_generate_keypair, parse_public_key,
     },
+    participant_id::CantonId,
     server::middleware::AuthMiddleware,
     server::peer_status::LastSeen,
     utils::{self, compute_fingerprint},
@@ -111,6 +112,9 @@ pub struct AppState {
     /// `WorkflowInFlightGuard` before spawning; the guard rides along inside
     /// the spawned task and drops when the task ends.
     pub workflow_in_flight: Arc<AtomicBool>,
+    /// The coordinator's in-flight workflow, registered here so the always-on
+    /// Noise listener can route its workflow-command messages. `None` when idle.
+    pub active_workflow: ActiveWorkflowSlot,
     /// Whether the server is running in test mode
     pub test_mode: bool,
     /// Prefixes currently being refreshed from Canton (deduplication)
@@ -153,6 +157,8 @@ struct WorkflowTriggers {
     dars_trigger: Arc<Notify>,
     coordinator_pubkey: Arc<RwLock<Option<String>>>,
     peer_run_instance: Arc<RwLock<Option<String>>>,
+    /// The node's in-flight workflow, used to route workflow-command messages.
+    active_workflow: ActiveWorkflowSlot,
 }
 
 enum InvitationMeta {
@@ -192,8 +198,7 @@ async fn recover_in_progress_workflows(
     onboarding_state: web::Data<Arc<handlers::OnboardingWorkflowState>>,
     contracts_state: web::Data<Arc<handlers::ContractsWorkflowState>>,
     dars_state: web::Data<Arc<handlers::DarsWorkflowState>>,
-    listener_control: Arc<AtomicBool>,
-    listener_notify: Arc<Notify>,
+    active_workflow: ActiveWorkflowSlot,
     auth: Arc<RwLock<Option<WorkflowAuth>>>,
     last_seen: LastSeen,
     onboarding_trigger: Arc<Notify>,
@@ -229,8 +234,7 @@ async fn recover_in_progress_workflows(
                     onboarding_state.clone(),
                     contracts_state.clone(),
                     dars_state.clone(),
-                    listener_control.clone(),
-                    listener_notify.clone(),
+                    active_workflow.clone(),
                     auth.clone(),
                     last_seen.clone(),
                 )
@@ -265,8 +269,7 @@ pub(crate) async fn respawn_coordinator(
     onboarding_state: web::Data<Arc<handlers::OnboardingWorkflowState>>,
     contracts_state: web::Data<Arc<handlers::ContractsWorkflowState>>,
     dars_state: web::Data<Arc<handlers::DarsWorkflowState>>,
-    listener_control: Arc<AtomicBool>,
-    listener_notify: Arc<Notify>,
+    active_workflow: ActiveWorkflowSlot,
     auth: Arc<RwLock<Option<WorkflowAuth>>>,
     last_seen: LastSeen,
 ) {
@@ -307,8 +310,7 @@ pub(crate) async fn respawn_coordinator(
                 onboarding_config,
                 instance.clone(),
                 state_ref,
-                listener_control,
-                listener_notify,
+                active_workflow,
                 last_seen,
             ));
             *abort_guard = Some(join_handle.abort_handle());
@@ -335,8 +337,7 @@ pub(crate) async fn respawn_coordinator(
                 kick_config,
                 instance.clone(),
                 state_ref,
-                listener_control,
-                listener_notify,
+                active_workflow,
                 last_seen,
             ));
             *abort_guard = Some(join_handle.abort_handle());
@@ -367,8 +368,7 @@ pub(crate) async fn respawn_coordinator(
                 contracts_config,
                 instance.clone(),
                 state_ref,
-                listener_control,
-                listener_notify,
+                active_workflow,
                 auth_snapshot,
                 last_seen,
             ));
@@ -396,8 +396,7 @@ pub(crate) async fn respawn_coordinator(
                 dars_config,
                 instance.clone(),
                 state_ref,
-                listener_control,
-                listener_notify,
+                active_workflow,
                 last_seen,
             ));
             *abort_guard = Some(join_handle.abort_handle());
@@ -414,11 +413,9 @@ async fn spawn_onboarding_resume(
     onboarding_config: workflow::OnboardingConfig,
     instance: String,
     state: Arc<HttpWorkflowState<OnboardingStatus>>,
-    listener_control: Arc<AtomicBool>,
-    listener_notify: Arc<Notify>,
+    active_workflow: ActiveWorkflowSlot,
     last_seen: LastSeen,
 ) {
-    let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
     let result = workflow::start_coordinator(
         config,
         db.clone(),
@@ -429,9 +426,9 @@ async fn spawn_onboarding_resume(
         None,
         None,
         last_seen,
+        active_workflow,
     )
     .await;
-    guard.resume().await;
 
     // Update in-memory state in tight scopes — never hold the RwLock across
     // a DB await. /onboarding/status acquires a read lock to serve every
@@ -467,11 +464,9 @@ async fn spawn_kick_resume(
     kick_config: workflow::KickConfig,
     instance: String,
     state: Arc<HttpWorkflowState<KickStatus>>,
-    listener_control: Arc<AtomicBool>,
-    listener_notify: Arc<Notify>,
+    active_workflow: ActiveWorkflowSlot,
     last_seen: LastSeen,
 ) {
-    let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
     let result = workflow::start_coordinator(
         config,
         db.clone(),
@@ -482,9 +477,9 @@ async fn spawn_kick_resume(
         None,
         None,
         last_seen,
+        active_workflow,
     )
     .await;
-    guard.resume().await;
 
     match result {
         Ok(_) => {
@@ -516,12 +511,10 @@ async fn spawn_contracts_resume(
     contracts_config: workflow::ContractsConfig,
     instance: String,
     state: Arc<HttpWorkflowState<WorkflowProgress>>,
-    listener_control: Arc<AtomicBool>,
-    listener_notify: Arc<Notify>,
+    active_workflow: ActiveWorkflowSlot,
     auth: Option<WorkflowAuth>,
     last_seen: LastSeen,
 ) {
-    let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
     let result = workflow::start_coordinator(
         config,
         db.clone(),
@@ -532,9 +525,9 @@ async fn spawn_contracts_resume(
         None,
         auth,
         last_seen,
+        active_workflow,
     )
     .await;
-    guard.resume().await;
 
     match result {
         Ok(_) => {
@@ -566,11 +559,9 @@ async fn spawn_dars_resume(
     dars_config: workflow::DarsConfig,
     instance: String,
     state: Arc<HttpWorkflowState<WorkflowProgress>>,
-    listener_control: Arc<AtomicBool>,
-    listener_notify: Arc<Notify>,
+    active_workflow: ActiveWorkflowSlot,
     last_seen: LastSeen,
 ) {
-    let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
     let result = workflow::start_coordinator(
         config,
         db.clone(),
@@ -581,9 +572,9 @@ async fn spawn_dars_resume(
         Some(dars_config),
         None,
         last_seen,
+        active_workflow,
     )
     .await;
-    guard.resume().await;
 
     match result {
         Ok(_) => {
@@ -1025,6 +1016,7 @@ pub async fn start_server(
     }
     let pending_invitations = Arc::new(RwLock::new(persisted_invitations));
 
+    let active_workflow: ActiveWorkflowSlot = Arc::new(std::sync::RwLock::new(None));
     let app_state = web::Data::new(AppState {
         db: db.clone(),
         config: config.clone(),
@@ -1045,6 +1037,7 @@ pub async fn start_server(
         party_credentials: party_credentials.clone(),
         bootstrap_mu: Arc::new(Mutex::new(())),
         workflow_in_flight: Arc::new(AtomicBool::new(false)),
+        active_workflow: active_workflow.clone(),
         test_mode,
         refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
         http_client,
@@ -1065,8 +1058,7 @@ pub async fn start_server(
         onboarding_state.clone(),
         contracts_state.clone(),
         dars_state.clone(),
-        listener_control.clone(),
-        listener_notify.clone(),
+        active_workflow.clone(),
         app_state.auth.clone(),
         last_seen.clone(),
         onboarding_trigger.clone(),
@@ -1098,6 +1090,7 @@ pub async fn start_server(
         dars_trigger: dars_trigger.clone(),
         coordinator_pubkey: coordinator_pubkey.clone(),
         peer_run_instance: peer_run_instance.clone(),
+        active_workflow: active_workflow.clone(),
     };
     tokio::spawn(async move {
         run_heartbeat(
@@ -1560,8 +1553,7 @@ async fn handle_incoming_connection(
                                 &triggers.config.participant_id().to_string(),
                             )
                             .await;
-                            let msg =
-                                Message::new(MessageType::HealthResponse, resp.to_payload());
+                            let msg = Message::new(MessageType::HealthResponse, resp.to_payload());
                             // `Response::new` defaults to 200 OK and is infallible,
                             // so there is no builder error to unwrap.
                             return Ok(Response::new(Body::from(msg.to_bytes())));
@@ -1661,6 +1653,24 @@ async fn handle_incoming_connection(
                                 .unwrap());
                         }
                         MessageType::GetChunk => {
+                            // During a workflow, GetChunk fetches the workflow's
+                            // chunked command payload via the registered slot;
+                            // otherwise it serves a chunked ListPackages response
+                            // from the cache below.
+                            let active = triggers
+                                .active_workflow
+                                .read()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .clone();
+                            if let Some(wf) = active
+                                && let Some(pid) =
+                                    peer_id_str.as_deref().and_then(|s| CantonId::parse(s).ok())
+                            {
+                                let resp = wf.handle_command(pid, msg).await.unwrap_or_else(|e| {
+                                    Message::new(MessageType::Error, format!("{e}").into_bytes())
+                                });
+                                return Ok(Response::new(Body::from(resp.to_bytes())));
+                            }
                             if msg.payload.len() < 4 {
                                 tracing::warn!("Received GetChunk request with payload < 4 bytes");
                                 return Ok(Response::builder()
@@ -1820,10 +1830,60 @@ async fn handle_incoming_connection(
                                 .body(Body::from(response_msg.to_bytes()))
                                 .unwrap());
                         }
+                        MessageType::GetNextCommand
+                        | MessageType::KeysUpload
+                        | MessageType::DnsSignature
+                        | MessageType::P2pSignatures
+                        | MessageType::SubmissionSignatures
+                        | MessageType::KickSignatures
+                        | MessageType::StatusUpdate
+                        | MessageType::DeclineInvitation => {
+                            // Route workflow-command traffic to the coordinator's
+                            // in-flight workflow (registered in the slot). Hold the
+                            // lock only long enough to clone the handle out — never
+                            // across the await.
+                            let active = triggers
+                                .active_workflow
+                                .read()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .clone();
+                            let peer = peer_id_str.as_deref().and_then(|s| CantonId::parse(s).ok());
+                            let resp = match (active, peer) {
+                                (Some(wf), Some(pid)) => {
+                                    wf.handle_command(pid, msg).await.unwrap_or_else(|e| {
+                                        Message::new(
+                                            MessageType::Error,
+                                            format!("{e}").into_bytes(),
+                                        )
+                                    })
+                                }
+                                _ => Message::new_empty(MessageType::Wait),
+                            };
+                            return Ok(Response::new(Body::from(resp.to_bytes())));
+                        }
                         MessageType::InviteOnboarding
                         | MessageType::InviteKick
                         | MessageType::InviteContracts
                         | MessageType::InviteDars => {
+                            // Refuse a new invite while already in a workflow, so a
+                            // busy node doesn't silently queue a second one. The DB
+                            // is the single source of truth for both coordinator and
+                            // peer roles.
+                            let health = health::build_health_response(
+                                &triggers.db,
+                                &triggers.config.participant_id().to_string(),
+                            )
+                            .await;
+                            if let Some(wf) = health.workflow {
+                                let kind = wf.kind;
+                                tracing::info!(
+                                    "Refusing invite — node is already in a {kind} workflow"
+                                );
+                                return Ok(Response::new(Body::from(
+                                    Message::new(MessageType::Busy, health::busy_payload(kind))
+                                        .to_bytes(),
+                                )));
+                            }
                             let invitation_type = match msg.msg_type {
                                 MessageType::InviteOnboarding => InvitationType::Onboarding,
                                 MessageType::InviteKick => InvitationType::Kick,

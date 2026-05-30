@@ -83,6 +83,12 @@ pub(crate) fn classify_health_reply(reply: &[u8]) -> (ConnectionStatus, Option<W
     (ConnectionStatus::Connected, None)
 }
 
+/// The `Busy` invite-reply payload: the in-flight `WorkflowKind` as a string,
+/// so the inviting coordinator can report which workflow the busy peer is in.
+pub fn busy_payload(kind: WorkflowKind) -> Vec<u8> {
+    kind.as_str().as_bytes().to_vec()
+}
+
 #[cfg(test)]
 mod tests {
     use anyhow::Context;
@@ -105,8 +111,8 @@ mod tests {
             }),
             version: "0.1.0".into(),
         };
-        let back = HealthResponse::from_payload(&h.to_payload())
-            .context("payload should round-trip")?;
+        let back =
+            HealthResponse::from_payload(&h.to_payload()).context("payload should round-trip")?;
         assert!(back.in_workflow);
         let workflow = back.workflow.context("workflow should be present")?;
         assert_eq!(workflow.step, "SignDns");

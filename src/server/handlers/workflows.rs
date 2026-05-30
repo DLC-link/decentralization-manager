@@ -24,12 +24,11 @@ use crate::{
         respawn_coordinator,
         types::{
             ContractsRequest, DarsInvitePayload, DarsRequest, ErrorResponse, HttpWorkflowState,
-            KickInvitePayload, KickRequest, KickResponse, KickStatus, ListenerPauseGuard,
-            MessageResponse, MissingEdgeKind, MissingPeerEdge, OnboardingInvitePayload,
-            OnboardingMeshErrorResponse, OnboardingRequest, OnboardingResponse, OnboardingStatus,
-            SuccessResponse, WorkflowInFlightGuard, WorkflowKind, WorkflowProgress,
-            WorkflowResponse, WorkflowRole, WorkflowRun, WorkflowRunsResponse,
-            WorkflowStatusResponse,
+            KickInvitePayload, KickRequest, KickResponse, KickStatus, MessageResponse,
+            MissingEdgeKind, MissingPeerEdge, OnboardingInvitePayload, OnboardingMeshErrorResponse,
+            OnboardingRequest, OnboardingResponse, OnboardingStatus, SuccessResponse,
+            WorkflowInFlightGuard, WorkflowKind, WorkflowProgress, WorkflowResponse, WorkflowRole,
+            WorkflowRun, WorkflowRunsResponse, WorkflowStatusResponse,
         },
     },
     workflow::{self, ContractsStep, DarsStep, KickStep, OnboardingStep, state::WorkflowStep},
@@ -343,8 +342,7 @@ pub async fn start_kick(
     let config = data.config.clone();
     let db = data.db.clone();
     let kick_state_clone = kick_state.get_ref().clone();
-    let listener_control = data.noise_listener_pause_flag.clone();
-    let listener_notify = data.noise_listener_notify.clone();
+    let active_workflow = data.active_workflow.clone();
     let last_seen = data.last_seen.clone();
     let instance_for_task = instance_name.clone();
 
@@ -357,13 +355,11 @@ pub async fn start_kick(
 
     let join_handle = tokio::spawn(async move {
         let _workflow_guard = workflow_guard; // dropped at end → releases cross-workflow gate
-        let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
 
         // Send kick invites to all peers before starting coordinator workflow
         let invite_result = send_kick_invites(&config, &db, &kick_config).await;
         if let Err(e) = invite_result {
             tracing::error!("Failed to send kick invites: {e}");
-            guard.resume().await;
             let msg = format!("Failed to send invites: {e}");
             {
                 let mut status = kick_state_clone.status.write().await;
@@ -388,10 +384,9 @@ pub async fn start_kick(
             None, // No dars config
             None, // No auth registry for kick
             last_seen,
+            active_workflow,
         )
         .await;
-
-        guard.resume().await;
 
         // Update in-memory state in tight scopes — never hold the RwLock
         // across a DB await. /kick/status acquires a read lock to serve
@@ -706,8 +701,7 @@ pub async fn start_onboarding(
     let config = data.config.clone();
     let db = data.db.clone();
     let onboarding_state_clone = onboarding_state.get_ref().clone();
-    let listener_control = data.noise_listener_pause_flag.clone();
-    let listener_notify = data.noise_listener_notify.clone();
+    let active_workflow = data.active_workflow.clone();
     *onboarding_state.invited_peers.write().await = peer_ids.clone();
     let party_credentials = data.party_credentials.clone();
     let auth_lock = data.auth.clone();
@@ -724,14 +718,12 @@ pub async fn start_onboarding(
 
     let join_handle = tokio::spawn(async move {
         let _workflow_guard = workflow_guard; // releases cross-workflow gate on drop
-        let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
 
         // Send invites to selected peers before starting coordinator workflow
         let invite_result =
             send_onboarding_invites(&config, &db, &peer_ids, &party_id_prefix).await;
         if let Err(e) = invite_result {
             tracing::error!("Failed to send onboarding invites: {e}");
-            guard.resume().await;
             let msg = format!("Failed to send invites: {e}");
             {
                 let mut status = onboarding_state_clone.status.write().await;
@@ -756,10 +748,9 @@ pub async fn start_onboarding(
             None, // No dars config
             None, // No auth registry for onboarding
             last_seen,
+            active_workflow,
         )
         .await;
-
-        guard.resume().await;
 
         // Update in-memory state in tight scopes — never hold the RwLock
         // across a DB await. /onboarding/status acquires a read lock to
@@ -1201,8 +1192,7 @@ pub async fn start_contracts(
     let workflow_auth = data.auth.read().await.clone();
     let auth_lock = data.auth.clone();
     let contracts_state_clone = contracts_state.get_ref().clone();
-    let listener_control = data.noise_listener_pause_flag.clone();
-    let listener_notify = data.noise_listener_notify.clone();
+    let active_workflow = data.active_workflow.clone();
     let party_credentials = data.party_credentials.clone();
     let last_seen = data.last_seen.clone();
     *contracts_state.invited_peers.write().await = contracts_invitees;
@@ -1218,13 +1208,11 @@ pub async fn start_contracts(
 
     let join_handle = tokio::spawn(async move {
         let _workflow_guard = workflow_guard; // releases cross-workflow gate on drop
-        let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
 
         // Send invites to all peers before starting coordinator workflow
         let invite_result = send_contracts_invites(&config, &db).await;
         if let Err(e) = invite_result {
             tracing::error!("Failed to send contracts invites: {e}");
-            guard.resume().await;
             let msg = format!("Failed to send invites: {e}");
             {
                 let mut status = contracts_state_clone.status.write().await;
@@ -1249,10 +1237,9 @@ pub async fn start_contracts(
             None, // No dars config
             workflow_auth,
             last_seen,
+            active_workflow,
         )
         .await;
-
-        guard.resume().await;
 
         // Update in-memory state in tight scopes — never hold the RwLock
         // across a DB await. /contracts/status acquires a read lock to
@@ -1464,8 +1451,7 @@ pub async fn start_dars(
     let config = data.config.clone();
     let db = data.db.clone();
     let dars_state_clone = dars_state.get_ref().clone();
-    let listener_control = data.noise_listener_pause_flag.clone();
-    let listener_notify = data.noise_listener_notify.clone();
+    let active_workflow = data.active_workflow.clone();
     let last_seen = data.last_seen.clone();
     let peer_ids = body.peer_ids.clone();
     *dars_state.invited_peers.write().await = peer_ids.clone();
@@ -1490,7 +1476,6 @@ pub async fn start_dars(
 
     let join_handle = tokio::spawn(async move {
         let _workflow_guard = workflow_guard; // releases cross-workflow gate on drop
-        let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
 
         // Send invites to selected peers before starting coordinator workflow
         let dar_filenames: Vec<String> = dars_config
@@ -1501,7 +1486,6 @@ pub async fn start_dars(
         let invite_result = send_dars_invites(&config, &db, &peer_ids, &dar_filenames).await;
         if let Err(e) = invite_result {
             tracing::error!("Failed to send DARs invites: {e}");
-            guard.resume().await;
             let mut status = dars_state_clone.status.write().await;
             let mut error = dars_state_clone.error.write().await;
             *status = WorkflowProgress::Failed;
@@ -1528,10 +1512,9 @@ pub async fn start_dars(
             Some(dars_config),
             None, // No auth
             last_seen,
+            active_workflow,
         )
         .await;
-
-        guard.resume().await;
 
         // Update in-memory state in tight scopes — never hold the RwLock
         // across a DB await (see kick/onboarding/contracts handlers above).
@@ -2113,8 +2096,7 @@ pub async fn retry_workflow(
         onboarding_state,
         contracts_state,
         dars_state,
-        data.noise_listener_pause_flag.clone(),
-        data.noise_listener_notify.clone(),
+        data.active_workflow.clone(),
         data.auth.clone(),
         data.last_seen.clone(),
     )

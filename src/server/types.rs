@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     sync::{
-        Arc,
+        Arc, RwLock as StdRwLock,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -14,6 +14,7 @@ use tokio::sync::{Notify, RwLock};
 
 use crate::{
     config::PackageConfig,
+    noise::server::ActiveWorkflow,
     participant_id::CantonId,
     server::health::WorkflowInfo,
     workflow::contracts::{ContractDefinition, DarFile},
@@ -117,6 +118,33 @@ impl WorkflowInFlightGuard {
 impl Drop for WorkflowInFlightGuard {
     fn drop(&mut self) {
         self.0.store(false, Ordering::Release);
+    }
+}
+
+/// Shared slot holding the coordinator's in-flight workflow, or `None` when
+/// idle. Uses `std::sync::RwLock` (not tokio) so the listener holds it only
+/// long enough to clone the handle out — never across an await — and `Drop`
+/// can clear it synchronously. This replaces `ListenerPauseGuard`: instead of
+/// pausing the listener for a workflow, the workflow registers itself here and
+/// the always-on listener routes its commands.
+pub type ActiveWorkflowSlot = Arc<StdRwLock<Option<ActiveWorkflow>>>;
+
+/// Registers an [`ActiveWorkflow`] in the slot for the guard's lifetime and
+/// clears it on drop — including on coordinator task panic or abort.
+pub struct ActiveWorkflowGuard(ActiveWorkflowSlot);
+
+impl ActiveWorkflowGuard {
+    /// Register `workflow` as this node's active workflow until the returned
+    /// guard is dropped.
+    pub fn register(slot: ActiveWorkflowSlot, workflow: ActiveWorkflow) -> Self {
+        *slot.write().unwrap_or_else(|e| e.into_inner()) = Some(workflow);
+        Self(slot)
+    }
+}
+
+impl Drop for ActiveWorkflowGuard {
+    fn drop(&mut self) {
+        *self.0.write().unwrap_or_else(|e| e.into_inner()) = None;
     }
 }
 

@@ -6,9 +6,9 @@ use sqlx::SqlitePool;
 use crate::{
     config::{NetworkConfig, NodeConfig},
     error::Result,
-    noise::server::NoiseServer,
+    noise::server::{ActiveWorkflow, NoiseServer},
     participant_id::CantonId,
-    server::peer_status::LastSeen,
+    server::{ActiveWorkflowSlot, peer_status::LastSeen},
     utils,
     workflow::{
         state::WorkflowState,
@@ -101,6 +101,7 @@ pub async fn start_coordinator(
     onboarding_config: OnboardingConfig,
     db: SqlitePool,
     last_seen: LastSeen,
+    active_workflow: ActiveWorkflowSlot,
 ) -> Result<CantonId> {
     tracing::info!("Initializing Noise server...");
 
@@ -132,7 +133,12 @@ pub async fn start_coordinator(
         .await
     });
 
-    crate::workflow::run_server_with_workflow(server, workflow_handle).await?;
+    crate::workflow::run_workflow_with_handler(
+        ActiveWorkflow::Onboarding(server),
+        active_workflow,
+        workflow_handle,
+    )
+    .await?;
 
     // Read the resolved party id from workflow_artifacts (written by
     // CreateProposals). This survives across the await on the server task
