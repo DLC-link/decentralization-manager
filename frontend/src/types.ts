@@ -150,9 +150,19 @@ export type ConnectionStatus =
   | "Unreachable"
   | "HandshakeFailed";
 
+export interface WorkflowInfo {
+  kind: "Onboarding" | "Kick" | "Contracts" | "Dars";
+  role: "Coordinator" | "Peer";
+  step: string;
+  step_index: number;
+  step_total: number;
+}
+
 export interface ParticipantStatus {
   id: string;
   status: ConnectionStatus;
+  latency_ms?: number;
+  workflow?: WorkflowInfo;
 }
 
 export interface KickRequest {
