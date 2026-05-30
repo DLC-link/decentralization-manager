@@ -16,10 +16,14 @@ use crate::{
     config::{NetworkConfig, NodeConfig},
     db::schema::{Commitable, SchemaRead, SchemaWrite},
     error::Result,
-    noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
+    noise::{
+        Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message,
+        send_noise_message_with_retry,
+    },
     participant_id::CantonId,
     server::{
         AppState,
+        health::classify_health_reply,
         middleware::require_admin,
         respawn_coordinator,
         types::{
@@ -33,6 +37,87 @@ use crate::{
     },
     workflow::{self, ContractsStep, DarsStep, KickStep, OnboardingStep, state::WorkflowStep},
 };
+
+// ============================================================================
+// Pre-flight busy check
+// ============================================================================
+
+/// Format the operator-facing 409 message naming each busy peer and the
+/// workflow it is currently participating in.
+fn format_busy_peers(busy: &[(String, WorkflowKind)]) -> String {
+    busy.iter()
+        .map(|(id, kind)| {
+            let article = if matches!(kind, WorkflowKind::Onboarding) {
+                "an"
+            } else {
+                "a"
+            };
+            format!(
+                "Peer {id} is participating in {article} {kind} workflow, please try again later."
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Probe every invited peer's `Health` in parallel and return those already in a
+/// workflow. Unreachable peers are NOT treated as busy — the workflow proceeds
+/// and the existing staleness / decline paths handle a genuinely dead peer.
+/// Peers on older code report no workflow and so aren't blocked (graceful
+/// rollout — the peer-side invite gate still protects correctness).
+async fn preflight_busy_peers(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    invitees: &[CantonId],
+) -> Vec<(String, WorkflowKind)> {
+    let Ok(peers) = db.get_all_peers().await else {
+        return Vec::new();
+    };
+    let Ok(keypair) = NoiseKeypair::from_file(&config.key_file_path()).await else {
+        return Vec::new();
+    };
+    let identity = config.participant_id().to_string();
+    let invitee_set: HashSet<String> = invitees.iter().map(CantonId::to_string).collect();
+
+    let mut probes = Vec::new();
+    for peer in peers
+        .into_iter()
+        .filter(|p| invitee_set.contains(&p.participant_id.to_string()))
+    {
+        let Ok(pubkey) = parse_public_key(&peer.public_key) else {
+            continue;
+        };
+        let psk = keypair.derive_psk(&pubkey);
+        let id = peer.participant_id.to_string();
+        let address = peer.address.clone();
+        let port = peer.port;
+        let identity = identity.clone();
+        let retry = config.noise_retry.clone();
+        probes.push(tokio::spawn(async move {
+            match send_noise_message_with_retry(
+                &address,
+                port,
+                &psk,
+                identity.as_bytes(),
+                &Message::new_empty(MessageType::Health),
+                &retry,
+            )
+            .await
+            {
+                Ok(response) => classify_health_reply(&response).1.map(|w| (id, w.kind)),
+                Err(_) => None,
+            }
+        }));
+    }
+
+    let mut busy = Vec::new();
+    for probe in probes {
+        if let Ok(Some(hit)) = probe.await {
+            busy.push(hit);
+        }
+    }
+    busy
+}
 
 // ============================================================================
 // Workflow State Types
@@ -336,6 +421,12 @@ pub async fn start_kick(
         });
     }
 
+    let busy = preflight_busy_peers(&data.config, &data.db, &invitees).await;
+    if !busy.is_empty() {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format_busy_peers(&busy),
+        });
+    }
     *kick_state.invited_peers.write().await = invitees;
 
     // Spawn the kick workflow in the background
@@ -702,6 +793,12 @@ pub async fn start_onboarding(
     let db = data.db.clone();
     let onboarding_state_clone = onboarding_state.get_ref().clone();
     let active_workflow = data.active_workflow.clone();
+    let busy = preflight_busy_peers(&data.config, &data.db, &peer_ids).await;
+    if !busy.is_empty() {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format_busy_peers(&busy),
+        });
+    }
     *onboarding_state.invited_peers.write().await = peer_ids.clone();
     let party_credentials = data.party_credentials.clone();
     let auth_lock = data.auth.clone();
@@ -1195,6 +1292,12 @@ pub async fn start_contracts(
     let active_workflow = data.active_workflow.clone();
     let party_credentials = data.party_credentials.clone();
     let last_seen = data.last_seen.clone();
+    let busy = preflight_busy_peers(&data.config, &data.db, &contracts_invitees).await;
+    if !busy.is_empty() {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format_busy_peers(&busy),
+        });
+    }
     *contracts_state.invited_peers.write().await = contracts_invitees;
     let instance_for_task = instance_name_for_run.clone();
 
@@ -1454,6 +1557,12 @@ pub async fn start_dars(
     let active_workflow = data.active_workflow.clone();
     let last_seen = data.last_seen.clone();
     let peer_ids = body.peer_ids.clone();
+    let busy = preflight_busy_peers(&data.config, &data.db, &peer_ids).await;
+    if !busy.is_empty() {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format_busy_peers(&busy),
+        });
+    }
     *dars_state.invited_peers.write().await = peer_ids.clone();
     let instance_for_task = instance_name.clone();
 
@@ -2269,4 +2378,20 @@ async fn send_contracts_invites(config: &NodeConfig, db: &SqlitePool) -> Result 
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn busy_message_names_each_peer_and_kind() {
+        let busy = vec![
+            ("participant2".to_string(), WorkflowKind::Onboarding),
+            ("participant3".to_string(), WorkflowKind::Kick),
+        ];
+        let msg = format_busy_peers(&busy);
+        assert!(msg.contains("participant2 is participating in an Onboarding workflow"));
+        assert!(msg.contains("participant3 is participating in a Kick workflow"));
+    }
 }
