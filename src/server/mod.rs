@@ -1831,7 +1831,25 @@ async fn handle_incoming_connection(
                                         )
                                     })
                                 }
-                                _ => Message::new_empty(MessageType::Wait),
+                                (None, _) => {
+                                    // No active coordinator workflow on this node. A peer
+                                    // still polling here is resuming a run whose coordinator
+                                    // workflow is gone (cancelled, dismissed, or never
+                                    // resumed). Replying Wait would make it poll forever,
+                                    // leaving its run InProgress and the node perpetually
+                                    // "busy" to the invite/pre-flight checks. Return a
+                                    // non-success status so the peer's bounded retry (3
+                                    // strikes) gives up and finalizes the run — the same
+                                    // outcome the pre-unify heartbeat listener produced by
+                                    // not serving workflow commands at all. A coordinator
+                                    // that is merely busy on a slow step keeps its slot
+                                    // registered and still returns Wait via handle_command
+                                    // above, so this fires only when no workflow exists.
+                                    let mut resp = Response::new(Body::empty());
+                                    *resp.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
+                                    return Ok(resp);
+                                }
+                                (Some(_), None) => Message::new_empty(MessageType::Wait),
                             };
                             return Ok(Response::new(Body::from(resp.to_bytes())));
                         }
