@@ -1411,18 +1411,29 @@ async fn run_heartbeat(
                     tracing::info!("Noise listener started on {listen_addr}");
 
                     loop {
-                        if let Ok((socket, peer_addr)) = listener.accept().await {
-                            let keypair = keypair_spawn.clone();
-                            let last_seen = last_seen_spawn.clone();
-                            let peer_keys = peer_keys_spawn.clone();
-                            let triggers = triggers_spawn.clone();
+                        match listener.accept().await {
+                            Ok((socket, peer_addr)) => {
+                                let keypair = keypair_spawn.clone();
+                                let last_seen = last_seen_spawn.clone();
+                                let peer_keys = peer_keys_spawn.clone();
+                                let triggers = triggers_spawn.clone();
 
-                            tokio::spawn(async move {
-                                handle_incoming_connection(
-                                    socket, peer_addr, keypair, peer_keys, triggers, last_seen,
-                                )
-                                .await;
-                            });
+                                tokio::spawn(async move {
+                                    handle_incoming_connection(
+                                        socket, peer_addr, keypair, peer_keys, triggers, last_seen,
+                                    )
+                                    .await;
+                                });
+                            }
+                            Err(e) => {
+                                // Don't tight-loop on persistent accept errors (e.g. FD
+                                // exhaustion): log and back off briefly before retrying.
+                                tracing::warn!(
+                                    "Noise listener accept error on {listen_addr}: {e}; \
+                                     backing off 100ms"
+                                );
+                                tokio::time::sleep(Duration::from_millis(100)).await;
+                            }
                         }
                     }
                 }
@@ -1627,15 +1638,30 @@ async fn handle_incoming_connection(
                                 .unwrap());
                         }
                         MessageType::GetChunk => {
-                            // During a workflow, GetChunk fetches the workflow's
-                            // chunked command payload via the registered slot;
-                            // otherwise it serves a chunked ListPackages response
-                            // from the cache below.
-                            let active = triggers
-                                .active_workflow
-                                .read()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .clone();
+                            // GetChunk serves BOTH the chunked ListPackages transfer
+                            // and a workflow's chunked command, and the two are
+                            // indistinguishable on the wire. Disambiguate by state: a
+                            // peer with an in-flight cached ListPackages payload is
+                            // mid-transfer of that, so serve its chunks from the cache
+                            // below; only route GetChunk to the active workflow when the
+                            // peer has no (unexpired) cached payload.
+                            let peer_has_cached_packages = if let Some(ref pk) = peer_pubkey_hex {
+                                let cache = triggers.list_packages_chunk_cache.lock().await;
+                                cache.get(pk).is_some_and(|(_, t)| {
+                                    t.elapsed() < LIST_PACKAGES_CHUNK_CACHE_TTL
+                                })
+                            } else {
+                                false
+                            };
+                            let active = if peer_has_cached_packages {
+                                None
+                            } else {
+                                triggers
+                                    .active_workflow
+                                    .read()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .clone()
+                            };
                             if let Some(wf) = active
                                 && let Some(pid) =
                                     peer_id_str.as_deref().and_then(|s| CantonId::parse(s).ok())

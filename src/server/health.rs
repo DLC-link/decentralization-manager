@@ -33,7 +33,12 @@ pub struct HealthResponse {
 impl HealthResponse {
     /// Serialize to the JSON bytes carried in a `HealthResponse` Noise message.
     pub fn to_payload(&self) -> Vec<u8> {
-        serde_json::to_vec(self).unwrap_or_default()
+        serde_json::to_vec(self).unwrap_or_else(|e| {
+            // HealthResponse is always serializable; if this ever fails, surface
+            // it instead of silently emitting an unparseable empty payload.
+            tracing::error!("health: failed to serialize HealthResponse: {e}");
+            Vec::new()
+        })
     }
 
     /// Parse from a `HealthResponse` Noise message payload. Returns `None` if
@@ -48,19 +53,24 @@ impl HealthResponse {
 /// A node runs at most one workflow at a time (the global in-flight mutex), so
 /// we report the first in-progress run if present.
 pub async fn build_health_response(db: &SqlitePool, participant_id: &str) -> HealthResponse {
-    let workflow = db
-        .get_in_progress_workflow_runs()
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .next()
-        .map(|r| WorkflowInfo {
-            kind: r.kind,
-            role: r.role,
-            step: r.current_step,
-            step_index: r.step_index,
-            step_total: r.step_total,
-        });
+    let runs = match db.get_in_progress_workflow_runs().await {
+        Ok(runs) => runs,
+        Err(e) => {
+            // Don't silently report not-in-workflow on a DB error — log it so a
+            // degraded health response can be diagnosed.
+            tracing::warn!(
+                "health: failed to read in-progress workflow runs, reporting not-in-workflow: {e}"
+            );
+            Vec::new()
+        }
+    };
+    let workflow = runs.into_iter().next().map(|r| WorkflowInfo {
+        kind: r.kind,
+        role: r.role,
+        step: r.current_step,
+        step_index: r.step_index,
+        step_total: r.step_total,
+    });
 
     HealthResponse {
         participant_id: participant_id.to_string(),
