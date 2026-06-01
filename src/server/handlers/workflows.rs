@@ -400,6 +400,15 @@ pub async fn start_kick(
         instance_name.clone(),
     );
 
+    // Refuse BEFORE persisting our run row if any selected peer is already in a
+    // workflow — otherwise a busy-peer rejection leaves a phantom InProgress row.
+    let busy = preflight_busy_peers(&data.config, &data.db, &invitees).await;
+    if !busy.is_empty() {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format_busy_peers(&busy),
+        });
+    }
+
     // Insert the workflow_runs row BEFORE flipping in-memory status. If the
     // insert fails (e.g. partial-unique-index says another kick is already in
     // flight), bubble that out as a 409 — same semantics as the existing
@@ -421,12 +430,6 @@ pub async fn start_kick(
         });
     }
 
-    let busy = preflight_busy_peers(&data.config, &data.db, &invitees).await;
-    if !busy.is_empty() {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format_busy_peers(&busy),
-        });
-    }
     *kick_state.invited_peers.write().await = invitees;
 
     // Spawn the kick workflow in the background
@@ -762,6 +765,17 @@ pub async fn start_onboarding(
         }
     }
 
+    // Refuse BEFORE persisting our run row if any selected peer is already in a
+    // workflow. Doing this after the insert leaves a phantom InProgress row when
+    // a peer is busy: no invites are sent, and the in-memory state is never set,
+    // so the row can't even be cancelled.
+    let busy = preflight_busy_peers(&data.config, &data.db, &peer_ids).await;
+    if !busy.is_empty() {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format_busy_peers(&busy),
+        });
+    }
+
     if let Err(e) = insert_coordinator_run(
         &data.db,
         &instance_name,
@@ -783,12 +797,6 @@ pub async fn start_onboarding(
     let db = data.db.clone();
     let onboarding_state_clone = onboarding_state.get_ref().clone();
     let active_workflow = data.active_workflow.clone();
-    let busy = preflight_busy_peers(&data.config, &data.db, &peer_ids).await;
-    if !busy.is_empty() {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format_busy_peers(&busy),
-        });
-    }
     *onboarding_state.invited_peers.write().await = peer_ids.clone();
     let party_credentials = data.party_credentials.clone();
     let auth_lock = data.auth.clone();
@@ -1282,6 +1290,14 @@ pub async fn start_contracts(
     };
 
     let instance_name_for_run = contracts_config.instance_name.clone();
+    // Refuse BEFORE persisting our run row if any selected peer is already in a
+    // workflow — otherwise a busy-peer rejection leaves a phantom InProgress row.
+    let busy = preflight_busy_peers(&data.config, &data.db, &contracts_invitees).await;
+    if !busy.is_empty() {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format_busy_peers(&busy),
+        });
+    }
     if let Err(e) = insert_coordinator_run(
         &data.db,
         &instance_name_for_run,
@@ -1307,12 +1323,6 @@ pub async fn start_contracts(
     let active_workflow = data.active_workflow.clone();
     let party_credentials = data.party_credentials.clone();
     let last_seen = data.last_seen.clone();
-    let busy = preflight_busy_peers(&data.config, &data.db, &contracts_invitees).await;
-    if !busy.is_empty() {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format_busy_peers(&busy),
-        });
-    }
     *contracts_state.invited_peers.write().await = contracts_invitees;
     let instance_for_task = instance_name_for_run.clone();
 
@@ -1549,6 +1559,14 @@ pub async fn start_dars(
         peer_ids: body.peer_ids.clone(),
     };
 
+    // Refuse BEFORE persisting our run row if any selected peer is already in a
+    // workflow — otherwise a busy-peer rejection leaves a phantom InProgress row.
+    let busy = preflight_busy_peers(&data.config, &data.db, &body.peer_ids).await;
+    if !busy.is_empty() {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format_busy_peers(&busy),
+        });
+    }
     if let Err(e) = insert_coordinator_run(
         &data.db,
         &instance_name,
@@ -1572,12 +1590,6 @@ pub async fn start_dars(
     let active_workflow = data.active_workflow.clone();
     let last_seen = data.last_seen.clone();
     let peer_ids = body.peer_ids.clone();
-    let busy = preflight_busy_peers(&data.config, &data.db, &peer_ids).await;
-    if !busy.is_empty() {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format_busy_peers(&busy),
-        });
-    }
     *dars_state.invited_peers.write().await = peer_ids.clone();
     let instance_for_task = instance_name.clone();
 
