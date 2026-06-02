@@ -340,6 +340,41 @@ pub async fn start_kick(
         }
     };
 
+    // Scope the kick to this dec party's actual members, not every peer this
+    // node has configured. A party can be a strict subset of the configured
+    // mesh (see start_onboarding), and basing the signer set / threshold bound
+    // / invites on the full mesh would invite outsiders and stall
+    // WaitingForPeers on peers that were never part of the party. Fall back to
+    // the full peer set only if membership isn't cached yet (shouldn't happen —
+    // the owner-key check above already requires a cached participant row).
+    let party_member_ids: HashSet<CantonId> = match data
+        .db
+        .get_dec_party_participants(&decentralized_party_id)
+        .await
+    {
+        Ok(rows) if !rows.is_empty() => rows
+            .iter()
+            .filter_map(|r| CantonId::parse(&r.participant_uid).ok())
+            .collect(),
+        Ok(_) => {
+            tracing::warn!(
+                "No cached participants for {decentralized_party_id}; \
+                 falling back to all configured peers for kick scoping"
+            );
+            peers.iter().map(|p| p.participant_id.clone()).collect()
+        }
+        Err(e) => {
+            tracing::error!("Failed to load dec party participants for kick: {e}");
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: "Failed to load decentralized party members".to_string(),
+            });
+        }
+    };
+    let peers: Vec<_> = peers
+        .into_iter()
+        .filter(|p| party_member_ids.contains(&p.participant_id))
+        .collect();
+
     // Preconditions for a kick: there must be at least one peer left
     // after the kick (so the surviving signer set is non-empty), and the
     // participant being kicked must be a known peer. Without these checks
@@ -348,7 +383,7 @@ pub async fn start_kick(
     if peers.len() < 2 {
         return HttpResponse::BadRequest().json(ErrorResponse {
             error: format!(
-                "Cannot kick: need at least 2 known peers (this node + the target), \
+                "Cannot kick: need at least 2 party members (this node + the target), \
                  have {n}",
                 n = peers.len(),
             ),
@@ -356,7 +391,9 @@ pub async fn start_kick(
     }
     if !peers.iter().any(|p| p.participant_id == participant_id) {
         return HttpResponse::BadRequest().json(ErrorResponse {
-            error: format!("Cannot kick {participant_id}: not in this node's peer list"),
+            error: format!(
+                "Cannot kick {participant_id}: not a member of this decentralized party"
+            ),
         });
     }
 
@@ -371,7 +408,7 @@ pub async fn start_kick(
         return HttpResponse::BadRequest().json(ErrorResponse {
             error: format!(
                 "new_threshold must be between 1 and {post_kick_member_count} \
-                 (peer count {n}, minus the participant being kicked); got {got}",
+                 (party member count {n}, minus the participant being kicked); got {got}",
                 n = peers.len(),
                 got = body.new_threshold,
             ),
@@ -430,6 +467,7 @@ pub async fn start_kick(
         });
     }
 
+    let invitees_for_invites = invitees.clone();
     *kick_state.invited_peers.write().await = invitees;
 
     // Spawn the kick workflow in the background
@@ -450,8 +488,9 @@ pub async fn start_kick(
     let join_handle = tokio::spawn(async move {
         let _workflow_guard = workflow_guard; // dropped at end → releases cross-workflow gate
 
-        // Send kick invites to all peers before starting coordinator workflow
-        let invite_result = send_kick_invites(&config, &db, &kick_config).await;
+        // Send kick invites to the surviving party members before starting workflow
+        let invite_result =
+            send_kick_invites(&config, &db, &kick_config, &invitees_for_invites).await;
         if let Err(e) = invite_result {
             tracing::error!("Failed to send kick invites: {e}");
             let msg = format!("Failed to send invites: {e}");
@@ -544,12 +583,14 @@ async fn send_kick_invites(
     config: &NodeConfig,
     db: &SqlitePool,
     kick_config: &workflow::KickConfig,
+    invitees: &[CantonId],
 ) -> Result {
     let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
 
     let current_participant_id = config.participant_id();
     let kicked_participant = &kick_config.participant_id;
+    let invitee_set: HashSet<&CantonId> = invitees.iter().collect();
     let payload = KickInvitePayload {
         dec_party_id: kick_config.decentralized_party_id.clone(),
         kicked_participant: kicked_participant.clone(),
@@ -572,6 +613,12 @@ async fn send_kick_invites(
             peer.participant_id == *current_participant_id,
             peer.participant_id == *kicked_participant
         );
+
+        // Only invite this run's surviving party members (see start_kick). The
+        // self/kicked skips below are now subsumed by this but kept for clarity.
+        if !invitee_set.contains(&peer.participant_id) {
+            continue;
+        }
 
         // Skip self
         if peer.participant_id == *current_participant_id {
@@ -1276,12 +1323,18 @@ pub async fn start_contracts(
         instance_name,
     );
 
-    // Track invitees for /cancel: every peer except self.
+    // Scope to the party's actual signers, not every peer this node knows
+    // about. A dec party can be a strict subset of the configured mesh (see
+    // start_onboarding), so inviting/waiting for non-member peers would pull
+    // outsiders into the deployment or stall WaitingForPeers on a peer that
+    // never joins. Keep only configured peers that are this party's
+    // participants, minus self.
+    let participant_set: HashSet<CantonId> = body.participant_ids.iter().cloned().collect();
     let contracts_invitees: Vec<CantonId> = match data.db.get_all_peers().await {
         Ok(peers) => peers
             .into_iter()
             .map(|p| p.participant_id)
-            .filter(|p| p != data.config.participant_id())
+            .filter(|p| p != data.config.participant_id() && participant_set.contains(p))
             .collect(),
         Err(e) => {
             tracing::warn!("Failed to load peers for cancel-invite tracking: {e}");
@@ -1323,6 +1376,7 @@ pub async fn start_contracts(
     let active_workflow = data.active_workflow.clone();
     let party_credentials = data.party_credentials.clone();
     let last_seen = data.last_seen.clone();
+    let contracts_invitees_for_invites = contracts_invitees.clone();
     *contracts_state.invited_peers.write().await = contracts_invitees;
     let instance_for_task = instance_name_for_run.clone();
 
@@ -1337,8 +1391,9 @@ pub async fn start_contracts(
     let join_handle = tokio::spawn(async move {
         let _workflow_guard = workflow_guard; // releases cross-workflow gate on drop
 
-        // Send invites to all peers before starting coordinator workflow
-        let invite_result = send_contracts_invites(&config, &db).await;
+        // Send invites to this party's members before starting coordinator workflow
+        let invite_result =
+            send_contracts_invites(&config, &db, &contracts_invitees_for_invites).await;
         if let Err(e) = invite_result {
             tracing::error!("Failed to send contracts invites: {e}");
             let msg = format!("Failed to send invites: {e}");
@@ -2318,16 +2373,27 @@ async fn broadcast_simple_message(
     Ok(())
 }
 
-/// Send contracts invites to all peers using Noise protocol
-async fn send_contracts_invites(config: &NodeConfig, db: &SqlitePool) -> Result {
+/// Send contracts invites to this party's members (`invitees`) over Noise.
+async fn send_contracts_invites(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    invitees: &[CantonId],
+) -> Result {
     let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
 
     let current_participant_id = config.participant_id();
+    let invitee_set: HashSet<&CantonId> = invitees.iter().collect();
     let invite_message = Message::new_empty(MessageType::InviteContracts);
 
     for peer in &network_config.peers {
         if peer.participant_id == *current_participant_id {
+            continue;
+        }
+
+        // Only this party's members (see start_contracts) — never every
+        // configured peer.
+        if !invitee_set.contains(&peer.participant_id) {
             continue;
         }
 
