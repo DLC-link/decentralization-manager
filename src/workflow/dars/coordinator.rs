@@ -5,8 +5,8 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use crate::{
     config::{NetworkConfig, NodeConfig},
     error::Result,
-    noise::server::NoiseServer,
-    server::peer_status::LastSeen,
+    noise::server::{ActiveWorkflow, NoiseServer},
+    server::{ActiveWorkflowSlot, peer_status::LastSeen},
     utils,
     workflow::{COORDINATOR_STEP_STALENESS_THRESHOLD, StepStalenessWatchdog, contracts},
 };
@@ -19,6 +19,7 @@ pub async fn start_coordinator(
     config: DarsConfig,
     db: sqlx::SqlitePool,
     last_seen: LastSeen,
+    active_workflow: ActiveWorkflowSlot,
 ) -> Result {
     tracing::info!("Initializing Noise server for DARs upload...");
 
@@ -49,7 +50,12 @@ pub async fn start_coordinator(
     let workflow_handle =
         tokio::spawn(async move { run_workflow(workflow_state, node_config_clone, config).await });
 
-    crate::workflow::run_server_with_workflow(server, workflow_handle).await
+    crate::workflow::run_workflow_with_handler(
+        ActiveWorkflow::Dars(server),
+        active_workflow,
+        workflow_handle,
+    )
+    .await
 }
 
 async fn run_workflow(

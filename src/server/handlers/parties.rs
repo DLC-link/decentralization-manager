@@ -35,6 +35,7 @@ use crate::{
     participant_id::CantonId,
     server::{
         AppState,
+        health::classify_health_reply,
         queries::{get_contracts, get_party_metadata, sort_contracts},
         types::{
             ConnectionStatus, ContractInfo, DecentralizedPartiesResponse, DecentralizedParty,
@@ -899,8 +900,6 @@ async fn check_participants_status(
     let current_participant_id = config.participant_id();
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
 
-    let ping_message = Message::new_empty(MessageType::Ping);
-
     let mut status_futures = Vec::new();
 
     for peer in network_config.peers.iter() {
@@ -912,6 +911,8 @@ async fn check_participants_status(
                 ParticipantStatus {
                     id: peer_id,
                     status: ConnectionStatus::CurrentNode,
+                    latency_ms: None,
+                    workflow: None,
                 }
             }));
             continue;
@@ -922,7 +923,6 @@ async fn check_participants_status(
         let identity = current_participant_id.to_string();
         let address = peer.address.clone();
         let port = peer.port;
-        let ping_msg = ping_message.clone();
         let noise_retry_cfg = config.noise_retry.clone();
 
         status_futures.push(tokio::spawn(async move {
@@ -931,27 +931,33 @@ async fn check_participants_status(
                 return ParticipantStatus {
                     id: peer_id,
                     status: ConnectionStatus::HandshakeFailed,
+                    latency_ms: None,
+                    workflow: None,
                 };
             };
 
+            let started = std::time::Instant::now();
             match send_noise_message_with_retry(
                 &address,
                 port,
                 &psk,
                 identity.as_bytes(),
-                &ping_msg,
+                &Message::new_empty(MessageType::Health),
                 &noise_retry_cfg,
             )
             .await
             {
                 Ok(response) => {
-                    let status = match Message::from_bytes(&response) {
-                        Ok(msg) if msg.msg_type == MessageType::Pong => ConnectionStatus::Connected,
-                        _ => ConnectionStatus::HandshakeFailed,
-                    };
+                    // A successful Noise round-trip means the peer is reachable;
+                    // classify_health_reply extracts its workflow state (or None
+                    // if the peer is on older code that doesn't answer Health).
+                    let latency_ms = u64::try_from(started.elapsed().as_millis()).ok();
+                    let (status, workflow) = classify_health_reply(&response);
                     ParticipantStatus {
                         id: peer_id,
                         status,
+                        latency_ms,
+                        workflow,
                     }
                 }
                 Err(e) => {
@@ -969,6 +975,8 @@ async fn check_participants_status(
                     ParticipantStatus {
                         id: peer_id,
                         status,
+                        latency_ms: None,
+                        workflow: None,
                     }
                 }
             }

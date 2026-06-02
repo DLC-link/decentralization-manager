@@ -186,8 +186,8 @@ start_nodes() {
         DECPM_CANTON_LEDGER_PORT="${canton_ledger_ports[$idx]}" \
         DECPM_CANTON_NETWORK=devnet \
         DECPM_NOISE_PORT="${noise_ports[$idx]}" \
+        DECPM_PORT="${http_ports[$idx]}" \
         "$BINARY" -d "$DEV_DIR/participant-$i" serve \
-            --host 0.0.0.0 --port "${http_ports[$idx]}" \
             >> "$log_file" 2>&1 &
         PIDS+=($!)
     done

@@ -8,9 +8,11 @@ use canton_proto_rs::com::digitalasset::canton::{
 };
 use prost::Message;
 use sqlx::SqlitePool;
+use tokio::time;
 
 use crate::{
     config::NodeConfig,
+    consts::{topology_retry_delay_secs, topology_retry_max_attempts},
     error::Result,
     utils,
     workflow::storage::{WorkflowStorage, artifact_kinds},
@@ -44,22 +46,60 @@ async fn sign_proposal(
     let mut topology_client =
         TopologyManagerWriteServiceClient::connect(config.admin_api_url()).await?;
 
-    let request = tonic::Request::new(SignTransactionsRequest {
-        transactions: vec![transaction],
-        signed_by: vec![],
-        store: Some(StoreId {
-            store: Some(store_id::Store::Synchronizer(Synchronizer {
-                kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id)),
-            })),
-        }),
-        force_flags: vec![],
-    });
+    // Canton propagates a freshly-generated namespace key into the signing-key
+    // store asynchronously — 10-20s on devnet's kubectl-tunneled cluster. A peer
+    // that signs the DNS/P2P topology transaction before that completes is
+    // rejected with TOPOLOGY_NO_APPROPRIATE_SIGNING_KEY_IN_STORE. That is
+    // transient propagation lag, not a genuine failure, so retry on it using the
+    // same budget the topology-submit steps use (configurable via the
+    // DPM_TOPOLOGY_RETRY_* env vars). Any other error fails immediately.
+    let max_attempts = topology_retry_max_attempts();
+    let retry_delay = time::Duration::from_secs(topology_retry_delay_secs());
 
-    tracing::debug!("Calling SignTransactions RPC for {proposal_type}...");
-    let response = topology_client
-        .sign_transactions(request)
-        .await?
-        .into_inner();
+    let mut signed = None;
+    for attempt in 1..=max_attempts {
+        // `SignTransactionsRequest` takes ownership of its fields, so the
+        // request is rebuilt on each attempt.
+        let request = tonic::Request::new(SignTransactionsRequest {
+            transactions: vec![transaction.clone()],
+            signed_by: vec![],
+            store: Some(StoreId {
+                store: Some(store_id::Store::Synchronizer(Synchronizer {
+                    kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.clone())),
+                })),
+            }),
+            force_flags: vec![],
+        });
+
+        tracing::debug!(
+            "Calling SignTransactions RPC for {proposal_type} (attempt {attempt}/{max_attempts})..."
+        );
+        match topology_client.sign_transactions(request).await {
+            Ok(response) => {
+                signed = Some(response.into_inner());
+                break;
+            }
+            Err(status)
+                if attempt < max_attempts
+                    && status
+                        .message()
+                        .contains("TOPOLOGY_NO_APPROPRIATE_SIGNING_KEY") =>
+            {
+                tracing::warn!(
+                    "{proposal_type} signing key not yet propagated to Canton \
+                     (attempt {attempt}/{max_attempts}), retrying in {retry_delay:?}..."
+                );
+                time::sleep(retry_delay).await;
+            }
+            Err(status) => return Err(status.into()),
+        }
+    }
+
+    let response = signed.ok_or_else(|| {
+        anyhow::anyhow!(
+            "{proposal_type} signing key never propagated to Canton after {max_attempts} attempts"
+        )
+    })?;
 
     if response.transactions.is_empty() {
         anyhow::bail!("No signed transaction returned for {proposal_type}");

@@ -1,20 +1,21 @@
 use std::{
     collections::HashMap,
     sync::{
-        Arc,
+        Arc, RwLock as StdRwLock,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
 };
 
 use canton_common::decimal::DamlDecimal;
 use canton_proto_rs::com::digitalasset::canton::protocol::v30::enums::ParticipantPermission;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Notify, RwLock};
+use tokio::sync::RwLock;
 
 use crate::{
     config::PackageConfig,
+    noise::server::ActiveWorkflow,
     participant_id::CantonId,
+    server::health::WorkflowInfo,
     workflow::contracts::{ContractDefinition, DarFile},
 };
 
@@ -48,46 +49,6 @@ impl<S: WorkflowStatus> HttpWorkflowState<S> {
     }
 }
 
-/// Guard that pauses the Noise listener while held and resumes it when dropped.
-///
-/// `should_pause` is an `AtomicBool` rather than a `bool` behind a lock so that
-/// the `Drop` impl can reset it synchronously. The earlier `Arc<RwLock<bool>>`
-/// design left the listener stuck in the paused state on task abort or panic
-/// (the captured guard was dropped but the async reset never ran), forcing the
-/// cancel handler to clean up manually.
-pub struct ListenerPauseGuard {
-    listener_pause_flag: Arc<AtomicBool>,
-    listener_notify: Arc<Notify>,
-}
-
-impl ListenerPauseGuard {
-    /// Pause the listener and return a guard that will resume it when dropped.
-    pub async fn pause(listener_pause_flag: Arc<AtomicBool>, listener_notify: Arc<Notify>) -> Self {
-        listener_pause_flag.store(true, Ordering::Release);
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        Self {
-            listener_pause_flag,
-            listener_notify,
-        }
-    }
-
-    /// Resume the listener explicitly. `Drop` does the same thing; calling
-    /// this is only useful when you want to ensure the resume has fired
-    /// before the surrounding async function returns.
-    pub async fn resume(self) {
-        // The `Drop` impl below does the actual work; this just consumes
-        // `self` so the caller can't keep using the guard.
-        drop(self);
-    }
-}
-
-impl Drop for ListenerPauseGuard {
-    fn drop(&mut self) {
-        self.listener_pause_flag.store(false, Ordering::Release);
-        self.listener_notify.notify_one();
-    }
-}
-
 /// Cross-workflow mutual exclusion.
 ///
 /// At most one workflow (kick / onboarding / contracts / dars) may run at
@@ -116,6 +77,33 @@ impl WorkflowInFlightGuard {
 impl Drop for WorkflowInFlightGuard {
     fn drop(&mut self) {
         self.0.store(false, Ordering::Release);
+    }
+}
+
+/// Shared slot holding the coordinator's in-flight workflow, or `None` when
+/// idle. Uses `std::sync::RwLock` (not tokio) so the listener holds it only
+/// long enough to clone the handle out — never across an await — and `Drop`
+/// can clear it synchronously. This replaces `ListenerPauseGuard`: instead of
+/// pausing the listener for a workflow, the workflow registers itself here and
+/// the always-on listener routes its commands.
+pub type ActiveWorkflowSlot = Arc<StdRwLock<Option<ActiveWorkflow>>>;
+
+/// Registers an [`ActiveWorkflow`] in the slot for the guard's lifetime and
+/// clears it on drop — including on coordinator task panic or abort.
+pub struct ActiveWorkflowGuard(ActiveWorkflowSlot);
+
+impl ActiveWorkflowGuard {
+    /// Register `workflow` as this node's active workflow until the returned
+    /// guard is dropped.
+    pub fn register(slot: ActiveWorkflowSlot, workflow: ActiveWorkflow) -> Self {
+        *slot.write().unwrap_or_else(|e| e.into_inner()) = Some(workflow);
+        Self(slot)
+    }
+}
+
+impl Drop for ActiveWorkflowGuard {
+    fn drop(&mut self) {
+        *self.0.write().unwrap_or_else(|e| e.into_inner()) = None;
     }
 }
 
@@ -292,6 +280,14 @@ pub enum ConnectionStatus {
 pub struct ParticipantStatus {
     pub id: String,
     pub status: ConnectionStatus,
+    /// Round-trip latency of the health probe, in milliseconds. `None` when the
+    /// peer is the current node or was unreachable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<u64>,
+    /// The workflow this peer is currently participating in, if any and if it
+    /// reported one (peers on older code report `None`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workflow: Option<WorkflowInfo>,
 }
 
 /// Response for the participants status endpoint

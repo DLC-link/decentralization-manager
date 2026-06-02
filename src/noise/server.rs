@@ -1,29 +1,23 @@
-use std::{
-    collections::{HashMap, HashSet},
-    marker::PhantomData,
-    sync::Arc,
-    time::Instant,
-};
+use std::{collections::HashSet, marker::PhantomData, sync::Arc, time::Instant};
 
-use hyper::{Body, Request, Response, StatusCode};
-use secp256k1::PublicKey;
 use sqlx::SqlitePool;
-use tokio::net::TcpListener;
-use tokio_noise::handshakes::nn_psk2::Responder;
 
 use crate::{
     config::{NetworkConfig, NodeConfig, Peer},
     db::schema::SchemaRead,
     noise::{
-        CHUNK_SIZE, MAX_PAYLOAD_SIZE, Message, MessageType, NOISE_REQUEST_TIMEOUT, NoiseError,
-        NoiseKeypair, parse_public_key, send_noise_message,
+        CHUNK_SIZE, MAX_PAYLOAD_SIZE, Message, MessageType, NoiseError, NoiseKeypair,
+        parse_public_key, send_noise_message,
     },
     participant_id::CantonId,
     server::{
         WorkflowProgress,
         peer_status::{LastSeen, bump},
     },
-    workflow::{WorkflowState, state::WorkflowStep},
+    workflow::{
+        WorkflowState, contracts::ContractsStep, dars::DarsStep, kick::KickStep,
+        onboarding::OnboardingStep, state::WorkflowStep,
+    },
 };
 
 /// Whether an outgoing command should carry the workflow's `command_payload`.
@@ -41,7 +35,6 @@ const fn command_carries_payload(command: MessageType) -> bool {
 pub struct NoiseServer<S: WorkflowStep + 'static> {
     node_config: Arc<NodeConfig>,
     keypair: Arc<NoiseKeypair>,
-    peer_keys: HashMap<String, PublicKey>,
     /// Full peer records (address + port + public_key) kept around so the
     /// server can fan out broadcast notifications (e.g. CancelInvite after
     /// a DeclineInvitation) without going through the DB on the hot path.
@@ -49,6 +42,35 @@ pub struct NoiseServer<S: WorkflowStep + 'static> {
     workflow_state: Arc<WorkflowState<S>>,
     last_seen: LastSeen,
     _p: PhantomData<S>,
+}
+
+/// A coordinator's in-flight workflow server, type-erased over the step type so
+/// the single always-on Noise listener can route workflow-command messages to
+/// it via `AppState.active_workflow`. An enum rather than a `dyn` trait object
+/// because the codebase uses native `async fn in trait`, which is not
+/// object-safe, and we avoid pulling in `async-trait`.
+#[derive(Clone)]
+pub enum ActiveWorkflow {
+    Onboarding(Arc<NoiseServer<OnboardingStep>>),
+    Kick(Arc<NoiseServer<KickStep>>),
+    Contracts(Arc<NoiseServer<ContractsStep>>),
+    Dars(Arc<NoiseServer<DarsStep>>),
+}
+
+impl ActiveWorkflow {
+    /// Route a workflow-command message to the underlying typed server.
+    pub async fn handle_command(
+        &self,
+        peer_id: CantonId,
+        message: Message,
+    ) -> Result<Message, NoiseError> {
+        match self {
+            Self::Onboarding(s) => s.handle_command(peer_id, message).await,
+            Self::Kick(s) => s.handle_command(peer_id, message).await,
+            Self::Contracts(s) => s.handle_command(peer_id, message).await,
+            Self::Dars(s) => s.handle_command(peer_id, message).await,
+        }
+    }
 }
 
 impl<S: WorkflowStep + 'static> NoiseServer<S> {
@@ -79,17 +101,6 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
             .unwrap_or_default()
             .into_iter()
             .collect();
-
-        let mut peer_keys = HashMap::new();
-        for peer in &network_config.peers {
-            let peer_id = peer.participant_id.to_string();
-            if peer.participant_id == *node_config.participant_id() || excluded.contains(&peer_id) {
-                continue;
-            }
-
-            let pub_key = parse_public_key(&peer.public_key)?;
-            peer_keys.insert(peer_id, pub_key);
-        }
 
         let expected_peers: Vec<CantonId> = network_config
             .peers
@@ -176,7 +187,6 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         Ok(Self {
             node_config: Arc::new(node_config),
             keypair: Arc::new(keypair),
-            peer_keys,
             peers,
             workflow_state,
             last_seen,
@@ -188,148 +198,56 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         self.workflow_state.clone()
     }
 
-    /// Start the server and listen for connections
-    pub async fn start(self: Arc<Self>) -> Result<(), NoiseError> {
-        let listen_addr = format!(
-            "{host}:{port}",
-            host = self.node_config.node.listen_address,
-            port = self.node_config.node.port
-        );
-
-        tracing::info!("Starting Noise server on {listen_addr}");
-
-        let listener = TcpListener::bind(&listen_addr)
-            .await
-            .map_err(NoiseError::Io)?;
-
-        let make_responder = {
-            let keypair = self.keypair.clone();
-            let peer_keys = self.peer_keys.clone();
-
-            move |_| {
-                let keypair = keypair.clone();
-                let peer_keys = peer_keys.clone();
-
-                // Create PSK derivation function
-                Responder::new(move |identity: &[u8]| -> Option<[u8; 32]> {
-                    // Identity is the participant_id
-                    let peer_id = std::str::from_utf8(identity).ok()?;
-                    let peer_pub_key = peer_keys.get(peer_id)?;
-
-                    // Derive PSK using ECDH (Zeroizing wrapper dropped after copy out)
-                    Some(*keypair.derive_psk(peer_pub_key))
-                })
-            }
-        };
-
-        let make_handle_request = {
-            let server = self.clone();
-
-            move |_| {
-                let server = server.clone();
-
-                move |peer_id: &[u8], req: Request<Body>| {
-                    let server = server.clone();
-                    let peer_id = peer_id.to_vec(); // Clone peer_id to own it
-
-                    async move {
-                        let peer_id_str = std::str::from_utf8(&peer_id)
-                            .map_err(|_| {
-                                NoiseError::UnknownPeer("Invalid peer ID encoding".to_string())
-                            })?
-                            .to_string();
-
-                        server.handle_request(peer_id_str, req).await
-                    }
-                }
-            }
-        };
-
-        hyper_noise::server::accept_and_serve_http(
-            listener,
-            make_responder,
-            make_handle_request,
-            Some(NOISE_REQUEST_TIMEOUT),
-        )
-        .await?;
-
-        Ok(())
-    }
-
-    /// Handle an incoming request from an peer
-    async fn handle_request(
+    /// Handle a workflow-command message routed from the always-on listener.
+    /// These are exactly the workflow arms of the former `handle_request`,
+    /// relocated unchanged.
+    pub async fn handle_command(
         &self,
-        peer_id: String,
-        req: Request<Body>,
-    ) -> Result<Response<Body>, NoiseError> {
-        tracing::debug!("Received request from peer: {peer_id}");
-
+        peer_id: CantonId,
+        message: Message,
+    ) -> Result<Message, NoiseError> {
+        // Track liveness of the peer we exchange workflow commands with.
         {
             let now = Instant::now();
             let mut map = self.last_seen.write().await;
-            bump(&mut map, peer_id.clone(), now);
+            bump(&mut map, peer_id.to_string(), now);
         }
 
-        // The Noise handshake delivers the peer's identity as a string of the
-        // form `prefix::namespace_hex` (set by the client side via
-        // `node_config.participant_id().to_string()`). Parse it back into a
-        // typed `CantonId` once at the entry point so every downstream call
-        // can stay typed.
-        let peer_id = CantonId::parse(&peer_id)
-            .map_err(|e| NoiseError::UnknownPeer(format!("Invalid peer id {peer_id}: {e}")))?;
-
-        // Read request body
-        let body_bytes = hyper::body::to_bytes(req.into_body()).await?;
-
-        // Parse message
-        let message = Message::from_bytes(&body_bytes).map_err(|_| NoiseError::InvalidMessage)?;
-
-        tracing::debug!(
-            "Received message type {:?} from {peer_id}",
-            message.msg_type
-        );
-
-        // Route message based on type
-        let response = match message.msg_type {
-            MessageType::Ping => Message::new_empty(MessageType::Pong),
-            MessageType::GetNextCommand => self.handle_get_next_command(peer_id).await?,
-            MessageType::GetChunk => self.handle_get_chunk(message.payload).await?,
+        match message.msg_type {
+            MessageType::GetNextCommand => self.handle_get_next_command(peer_id).await,
+            MessageType::GetChunk => self.handle_get_chunk(message.payload).await,
             MessageType::KeysUpload => {
                 self.handle_peer_data(peer_id, message.payload, "keys upload")
-                    .await?
+                    .await
             }
             MessageType::DnsSignature => {
                 self.handle_peer_data(peer_id, message.payload, "DNS signature")
-                    .await?
+                    .await
             }
             MessageType::P2pSignatures => {
                 self.handle_peer_data(peer_id, message.payload, "P2P signatures")
-                    .await?
+                    .await
             }
             MessageType::SubmissionSignatures => {
                 self.handle_peer_data(peer_id, message.payload, "submission signatures")
-                    .await?
+                    .await
             }
             MessageType::KickSignatures => {
                 self.handle_peer_data(peer_id, message.payload, "kick signatures")
-                    .await?
-            }
-            MessageType::StatusUpdate => {
-                self.handle_status_update(peer_id, message.payload).await?
-            }
-            MessageType::DeclineInvitation => {
-                self.handle_decline_invitation(peer_id, message.payload)
                     .await
             }
-            _ => {
-                tracing::warn!("Unhandled message type: {:?}", message.msg_type);
-                Message::new(MessageType::Error, b"Unsupported message type".to_vec())
+            MessageType::StatusUpdate => self.handle_status_update(peer_id, message.payload).await,
+            MessageType::DeclineInvitation => Ok(self
+                .handle_decline_invitation(peer_id, message.payload)
+                .await),
+            other => {
+                tracing::warn!("Unsupported routed workflow message: {other:?}");
+                Ok(Message::new(
+                    MessageType::Error,
+                    b"Unsupported message type".to_vec(),
+                ))
             }
-        };
-
-        Ok(Response::builder()
-            .status(StatusCode::OK)
-            .body(Body::from(response.to_bytes()))?)
+        }
     }
 
     /// Handle peer requesting next command

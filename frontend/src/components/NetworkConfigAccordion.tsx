@@ -10,6 +10,7 @@ import {
   IconButton,
   TextField,
   Button,
+  Chip,
   Stack,
   Tooltip,
   useMediaQuery,
@@ -88,8 +89,8 @@ export const NetworkConfigAccordion = ({
     return `${prefix}::${namespace.slice(0, 4)}...${namespace.slice(-4)}`;
   };
 
-  const getStatus = (id: string): ConnectionStatus | undefined =>
-    participantStatuses?.find((s) => s.id === id)?.status;
+  const getStat = (id: string): ParticipantStatus | undefined =>
+    participantStatuses?.find((s) => s.id === id);
 
   const getStatusColor = (status: ConnectionStatus | undefined): string => {
     switch (status) {
@@ -118,6 +119,15 @@ export const NetworkConfigAccordion = ({
       default:
         return "Status unknown";
     }
+  };
+
+  // Tooltip enriched with round-trip latency and the peer's active workflow.
+  const statusTooltip = (st: ParticipantStatus | undefined): string => {
+    let title = getStatusTooltip(st?.status);
+    if (st?.latency_ms != null) title += ` — ${st.latency_ms} ms`;
+    if (st?.workflow)
+      title += ` — in ${st.workflow.kind} (${st.workflow.step})`;
+    return title;
   };
 
   // Build display list: self first, then other peers
@@ -410,15 +420,15 @@ export const NetworkConfigAccordion = ({
                 </TableRow>
               )}
               {otherPeers.map((p, idx) => {
-                const status = getStatus(p.participant_id);
+                const st = getStat(p.participant_id);
                 return (
                   <TableRow key={p.participant_id} sx={zebraRow(idx)}>
                     <TableCell sx={{ py: 1 }}>
-                      <Tooltip title={getStatusTooltip(status)} arrow>
+                      <Tooltip title={statusTooltip(st)} arrow>
                         <CircleIcon
                           sx={{
                             fontSize: 12,
-                            color: getStatusColor(status),
+                            color: getStatusColor(st?.status),
                             cursor: "help",
                           }}
                         />
@@ -426,6 +436,26 @@ export const NetworkConfigAccordion = ({
                     </TableCell>
                     <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>
                       {p.name || truncateParticipantId(p.participant_id)}
+                      {st?.workflow && (
+                        <Chip
+                          size="small"
+                          color="warning"
+                          label={`In workflow: ${st.workflow.kind}`}
+                          sx={{ ml: 1, height: 18, fontSize: "0.65rem" }}
+                        />
+                      )}
+                      {st?.latency_ms != null && (
+                        <Typography
+                          component="span"
+                          sx={{
+                            ml: 1,
+                            color: "text.secondary",
+                            fontSize: "0.7rem",
+                          }}
+                        >
+                          {st.latency_ms} ms
+                        </Typography>
+                      )}
                     </TableCell>
                     <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>
                       {p.address}:{p.port}
