@@ -8,14 +8,12 @@ mod queries;
 mod transfer_context;
 mod types;
 
+pub mod health;
 pub mod peer_status;
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, atomic::AtomicBool},
     time::{Duration, Instant},
 };
 
@@ -53,6 +51,7 @@ use crate::{
         CHUNK_SIZE, MAX_CHUNKED_TOTAL_SIZE, MAX_PAYLOAD_SIZE, Message, MessageType, NoiseKeypair,
         load_or_generate_keypair, parse_public_key,
     },
+    participant_id::CantonId,
     server::middleware::AuthMiddleware,
     server::peer_status::LastSeen,
     utils::{self, compute_fingerprint},
@@ -78,8 +77,6 @@ pub struct AppState {
     pub config: NodeConfig,
     pub peer_status: Arc<RwLock<HashMap<String, bool>>>,
     pub last_seen: LastSeen,
-    pub noise_listener_pause_flag: Arc<AtomicBool>,
-    pub noise_listener_notify: Arc<Notify>,
     pub onboarding_trigger: Arc<Notify>,
     pub kick_trigger: Arc<Notify>,
     pub contracts_trigger: Arc<Notify>,
@@ -110,6 +107,9 @@ pub struct AppState {
     /// `WorkflowInFlightGuard` before spawning; the guard rides along inside
     /// the spawned task and drops when the task ends.
     pub workflow_in_flight: Arc<AtomicBool>,
+    /// The coordinator's in-flight workflow, registered here so the always-on
+    /// Noise listener can route its workflow-command messages. `None` when idle.
+    pub active_workflow: ActiveWorkflowSlot,
     /// Whether the server is running in test mode
     pub test_mode: bool,
     /// Prefixes currently being refreshed from Canton (deduplication)
@@ -152,6 +152,8 @@ struct WorkflowTriggers {
     dars_trigger: Arc<Notify>,
     coordinator_pubkey: Arc<RwLock<Option<String>>>,
     peer_run_instance: Arc<RwLock<Option<String>>>,
+    /// The node's in-flight workflow, used to route workflow-command messages.
+    active_workflow: ActiveWorkflowSlot,
 }
 
 enum InvitationMeta {
@@ -191,8 +193,7 @@ async fn recover_in_progress_workflows(
     onboarding_state: web::Data<Arc<handlers::OnboardingWorkflowState>>,
     contracts_state: web::Data<Arc<handlers::ContractsWorkflowState>>,
     dars_state: web::Data<Arc<handlers::DarsWorkflowState>>,
-    listener_control: Arc<AtomicBool>,
-    listener_notify: Arc<Notify>,
+    active_workflow: ActiveWorkflowSlot,
     auth: Arc<RwLock<Option<WorkflowAuth>>>,
     last_seen: LastSeen,
     onboarding_trigger: Arc<Notify>,
@@ -217,27 +218,55 @@ async fn recover_in_progress_workflows(
         runs.len()
     );
 
-    for run in runs {
+    // Only one coordinator workflow can be active at a time: the global
+    // in-flight gate enforces that for fresh starts, and the single
+    // `active_workflow` routing slot can hold only one. Multiple InProgress
+    // coordinator rows can therefore only be stale leftovers (e.g. a run whose
+    // cancel/abort never reached a terminal status). Resume just the newest one
+    // and fail the rest — otherwise every resumed coordinator registers the slot,
+    // the last writer wins, and peers polling for one workflow get misrouted to
+    // another (observed as the G1 coordinator-resume hang).
+    let newest_coordinator = runs
+        .iter()
+        .filter(|r| r.role == WorkflowRole::Coordinator)
+        .max_by_key(|r| r.created_at)
+        .map(|r| r.instance_name.clone());
+
+    for run in &runs {
         match run.role {
             WorkflowRole::Coordinator => {
-                respawn_coordinator(
-                    db.clone(),
-                    config.clone(),
-                    &run,
-                    kick_state.clone(),
-                    onboarding_state.clone(),
-                    contracts_state.clone(),
-                    dars_state.clone(),
-                    listener_control.clone(),
-                    listener_notify.clone(),
-                    auth.clone(),
-                    last_seen.clone(),
-                )
-                .await;
+                if Some(&run.instance_name) == newest_coordinator.as_ref() {
+                    respawn_coordinator(
+                        db.clone(),
+                        config.clone(),
+                        run,
+                        kick_state.clone(),
+                        onboarding_state.clone(),
+                        contracts_state.clone(),
+                        dars_state.clone(),
+                        active_workflow.clone(),
+                        auth.clone(),
+                        last_seen.clone(),
+                    )
+                    .await;
+                } else {
+                    tracing::warn!(
+                        "Not resuming stale {:?} coordinator run {}: a newer coordinator \
+                         workflow is resuming and only one can be active at a time",
+                        run.kind,
+                        run.instance_name
+                    );
+                    mark_failed_via_pool(
+                        &db,
+                        &run.instance_name,
+                        "Superseded on restart: another coordinator workflow resumed",
+                    )
+                    .await;
+                }
             }
             WorkflowRole::Peer => {
                 refire_peer(
-                    &run,
+                    run,
                     &onboarding_trigger,
                     &kick_trigger,
                     &contracts_trigger,
@@ -264,8 +293,7 @@ pub(crate) async fn respawn_coordinator(
     onboarding_state: web::Data<Arc<handlers::OnboardingWorkflowState>>,
     contracts_state: web::Data<Arc<handlers::ContractsWorkflowState>>,
     dars_state: web::Data<Arc<handlers::DarsWorkflowState>>,
-    listener_control: Arc<AtomicBool>,
-    listener_notify: Arc<Notify>,
+    active_workflow: ActiveWorkflowSlot,
     auth: Arc<RwLock<Option<WorkflowAuth>>>,
     last_seen: LastSeen,
 ) {
@@ -306,8 +334,7 @@ pub(crate) async fn respawn_coordinator(
                 onboarding_config,
                 instance.clone(),
                 state_ref,
-                listener_control,
-                listener_notify,
+                active_workflow,
                 last_seen,
             ));
             *abort_guard = Some(join_handle.abort_handle());
@@ -334,8 +361,7 @@ pub(crate) async fn respawn_coordinator(
                 kick_config,
                 instance.clone(),
                 state_ref,
-                listener_control,
-                listener_notify,
+                active_workflow,
                 last_seen,
             ));
             *abort_guard = Some(join_handle.abort_handle());
@@ -366,8 +392,7 @@ pub(crate) async fn respawn_coordinator(
                 contracts_config,
                 instance.clone(),
                 state_ref,
-                listener_control,
-                listener_notify,
+                active_workflow,
                 auth_snapshot,
                 last_seen,
             ));
@@ -395,8 +420,7 @@ pub(crate) async fn respawn_coordinator(
                 dars_config,
                 instance.clone(),
                 state_ref,
-                listener_control,
-                listener_notify,
+                active_workflow,
                 last_seen,
             ));
             *abort_guard = Some(join_handle.abort_handle());
@@ -413,11 +437,9 @@ async fn spawn_onboarding_resume(
     onboarding_config: workflow::OnboardingConfig,
     instance: String,
     state: Arc<HttpWorkflowState<OnboardingStatus>>,
-    listener_control: Arc<AtomicBool>,
-    listener_notify: Arc<Notify>,
+    active_workflow: ActiveWorkflowSlot,
     last_seen: LastSeen,
 ) {
-    let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
     let result = workflow::start_coordinator(
         config,
         db.clone(),
@@ -428,9 +450,9 @@ async fn spawn_onboarding_resume(
         None,
         None,
         last_seen,
+        active_workflow,
     )
     .await;
-    guard.resume().await;
 
     // Update in-memory state in tight scopes — never hold the RwLock across
     // a DB await. /onboarding/status acquires a read lock to serve every
@@ -466,11 +488,9 @@ async fn spawn_kick_resume(
     kick_config: workflow::KickConfig,
     instance: String,
     state: Arc<HttpWorkflowState<KickStatus>>,
-    listener_control: Arc<AtomicBool>,
-    listener_notify: Arc<Notify>,
+    active_workflow: ActiveWorkflowSlot,
     last_seen: LastSeen,
 ) {
-    let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
     let result = workflow::start_coordinator(
         config,
         db.clone(),
@@ -481,9 +501,9 @@ async fn spawn_kick_resume(
         None,
         None,
         last_seen,
+        active_workflow,
     )
     .await;
-    guard.resume().await;
 
     match result {
         Ok(_) => {
@@ -515,12 +535,10 @@ async fn spawn_contracts_resume(
     contracts_config: workflow::ContractsConfig,
     instance: String,
     state: Arc<HttpWorkflowState<WorkflowProgress>>,
-    listener_control: Arc<AtomicBool>,
-    listener_notify: Arc<Notify>,
+    active_workflow: ActiveWorkflowSlot,
     auth: Option<WorkflowAuth>,
     last_seen: LastSeen,
 ) {
-    let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
     let result = workflow::start_coordinator(
         config,
         db.clone(),
@@ -531,9 +549,9 @@ async fn spawn_contracts_resume(
         None,
         auth,
         last_seen,
+        active_workflow,
     )
     .await;
-    guard.resume().await;
 
     match result {
         Ok(_) => {
@@ -565,11 +583,9 @@ async fn spawn_dars_resume(
     dars_config: workflow::DarsConfig,
     instance: String,
     state: Arc<HttpWorkflowState<WorkflowProgress>>,
-    listener_control: Arc<AtomicBool>,
-    listener_notify: Arc<Notify>,
+    active_workflow: ActiveWorkflowSlot,
     last_seen: LastSeen,
 ) {
-    let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
     let result = workflow::start_coordinator(
         config,
         db.clone(),
@@ -580,9 +596,9 @@ async fn spawn_dars_resume(
         Some(dars_config),
         None,
         last_seen,
+        active_workflow,
     )
     .await;
-    guard.resume().await;
 
     match result {
         Ok(_) => {
@@ -1004,8 +1020,6 @@ pub async fn start_server(
 
     let peer_status = Arc::new(RwLock::new(HashMap::new()));
     let last_seen: LastSeen = Arc::new(RwLock::new(HashMap::new()));
-    let listener_control = Arc::new(AtomicBool::new(false));
-    let listener_notify = Arc::new(Notify::new());
     let onboarding_trigger = Arc::new(Notify::new());
     let kick_trigger = Arc::new(Notify::new());
     let contracts_trigger = Arc::new(Notify::new());
@@ -1024,13 +1038,12 @@ pub async fn start_server(
     }
     let pending_invitations = Arc::new(RwLock::new(persisted_invitations));
 
+    let active_workflow: ActiveWorkflowSlot = Arc::new(std::sync::RwLock::new(None));
     let app_state = web::Data::new(AppState {
         db: db.clone(),
         config: config.clone(),
         peer_status: peer_status.clone(),
         last_seen: last_seen.clone(),
-        noise_listener_pause_flag: listener_control.clone(),
-        noise_listener_notify: listener_notify.clone(),
         onboarding_trigger: onboarding_trigger.clone(),
         kick_trigger: kick_trigger.clone(),
         contracts_trigger: contracts_trigger.clone(),
@@ -1044,6 +1057,7 @@ pub async fn start_server(
         party_credentials: party_credentials.clone(),
         bootstrap_mu: Arc::new(Mutex::new(())),
         workflow_in_flight: Arc::new(AtomicBool::new(false)),
+        active_workflow: active_workflow.clone(),
         test_mode,
         refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
         http_client,
@@ -1064,8 +1078,7 @@ pub async fn start_server(
         onboarding_state.clone(),
         contracts_state.clone(),
         dars_state.clone(),
-        listener_control.clone(),
-        listener_notify.clone(),
+        active_workflow.clone(),
         app_state.auth.clone(),
         last_seen.clone(),
         onboarding_trigger.clone(),
@@ -1082,8 +1095,6 @@ pub async fn start_server(
     let heartbeat_db = db.clone();
     let heartbeat_status = peer_status.clone();
     let heartbeat_last_seen = last_seen.clone();
-    let heartbeat_control = listener_control.clone();
-    let heartbeat_notify = listener_notify.clone();
     let heartbeat_triggers = WorkflowTriggers {
         pending_invitations: pending_invitations.clone(),
         config: config.clone(),
@@ -1097,6 +1108,7 @@ pub async fn start_server(
         dars_trigger: dars_trigger.clone(),
         coordinator_pubkey: coordinator_pubkey.clone(),
         peer_run_instance: peer_run_instance.clone(),
+        active_workflow: active_workflow.clone(),
     };
     tokio::spawn(async move {
         run_heartbeat(
@@ -1104,8 +1116,6 @@ pub async fn start_server(
             heartbeat_db,
             heartbeat_status,
             heartbeat_last_seen,
-            heartbeat_control,
-            heartbeat_notify,
             heartbeat_triggers,
         )
         .await;
@@ -1114,8 +1124,6 @@ pub async fn start_server(
     // Start peer trigger listener for onboarding (starts peer workflow when invite received)
     let onboarding_peer_config = config.clone();
     let onboarding_peer_db = db.clone();
-    let onboarding_peer_control = listener_control.clone();
-    let onboarding_peer_notify = listener_notify.clone();
     let onboarding_peer_state = onboarding_state.clone();
     let onboarding_coordinator_pubkey = coordinator_pubkey.clone();
     let onboarding_peer_run_instance = peer_run_instance.clone();
@@ -1123,8 +1131,6 @@ pub async fn start_server(
         run_onboarding_peer_listener(
             onboarding_peer_config,
             onboarding_peer_db,
-            onboarding_peer_control,
-            onboarding_peer_notify,
             onboarding_peer_state,
             onboarding_trigger,
             onboarding_coordinator_pubkey,
@@ -1136,8 +1142,6 @@ pub async fn start_server(
     // Start peer trigger listener for kick (starts peer workflow when kick invite received)
     let kick_peer_config = config.clone();
     let kick_peer_db = db.clone();
-    let kick_peer_control = listener_control.clone();
-    let kick_peer_notify = listener_notify.clone();
     let kick_peer_state = kick_state.clone();
     let kick_coordinator_pubkey = coordinator_pubkey.clone();
     let kick_peer_run_instance = peer_run_instance.clone();
@@ -1145,8 +1149,6 @@ pub async fn start_server(
         run_kick_peer_listener(
             kick_peer_config,
             kick_peer_db,
-            kick_peer_control,
-            kick_peer_notify,
             kick_peer_state,
             kick_trigger,
             kick_coordinator_pubkey,
@@ -1158,8 +1160,6 @@ pub async fn start_server(
     // Start peer trigger listener for contracts (starts peer workflow when contracts invite received)
     let contracts_peer_config = config.clone();
     let contracts_peer_db = db.clone();
-    let contracts_peer_control = listener_control.clone();
-    let contracts_peer_notify = listener_notify.clone();
     let contracts_peer_state = contracts_state.clone();
     let contracts_coordinator_pubkey = coordinator_pubkey.clone();
     let contracts_peer_run_instance = peer_run_instance.clone();
@@ -1167,8 +1167,6 @@ pub async fn start_server(
         run_contracts_peer_listener(
             contracts_peer_config,
             contracts_peer_db,
-            contracts_peer_control,
-            contracts_peer_notify,
             contracts_peer_state,
             contracts_trigger,
             contracts_coordinator_pubkey,
@@ -1180,8 +1178,6 @@ pub async fn start_server(
     // Start peer trigger listener for DARs (starts peer workflow when DARs invite received)
     let dars_peer_config = config.clone();
     let dars_peer_db = db.clone();
-    let dars_peer_control = listener_control.clone();
-    let dars_peer_notify = listener_notify.clone();
     let dars_peer_state = dars_state.clone();
     let dars_coordinator_pubkey = coordinator_pubkey.clone();
     let dars_peer_run_instance = peer_run_instance.clone();
@@ -1189,8 +1185,6 @@ pub async fn start_server(
         run_dars_peer_listener(
             dars_peer_config,
             dars_peer_db,
-            dars_peer_control,
-            dars_peer_notify,
             dars_peer_state,
             dars_trigger,
             dars_coordinator_pubkey,
@@ -1361,8 +1355,6 @@ async fn run_heartbeat(
     db: SqlitePool,
     peer_status: Arc<RwLock<HashMap<String, bool>>>,
     last_seen: LastSeen,
-    listener_control: Arc<AtomicBool>,
-    listener_notify: Arc<Notify>,
     triggers: WorkflowTriggers,
 ) {
     use tokio::net::TcpListener;
@@ -1403,9 +1395,10 @@ async fn run_heartbeat(
     }
     let peer_keys = Arc::new(peer_keys);
 
-    // Listener management loop
-    let listener_control_spawn = listener_control.clone();
-    let listener_notify_spawn = listener_notify.clone();
+    // Listener loop: bind the always-on Noise listener and accept forever. It is
+    // never paused — workflow traffic is routed in-process via the
+    // active-workflow slot, so the listener stays up (and keeps answering
+    // Health / Ping) even while this node is participating in a workflow.
     let keypair_spawn = keypair.clone();
     let last_seen_spawn = last_seen.clone();
     let peer_keys_spawn = peer_keys.clone();
@@ -1413,54 +1406,40 @@ async fn run_heartbeat(
 
     tokio::spawn(async move {
         loop {
-            // Wait for permission to bind
-            let should_pause = listener_control_spawn.load(Ordering::Acquire);
-
-            if should_pause {
-                tracing::info!("Noise listener paused for workflow");
-                listener_notify_spawn.notified().await;
-                tracing::info!("Resuming Noise listener");
-                continue;
-            }
-
-            // Try to bind listener
             match TcpListener::bind(&listen_addr).await {
                 Ok(listener) => {
-                    tracing::info!("Noise invite listener started on {listen_addr}");
+                    tracing::info!("Noise listener started on {listen_addr}");
 
                     loop {
-                        tokio::select! {
-                            result = listener.accept() => {
-                                if let Ok((socket, peer_addr)) = result {
-                                    let keypair = keypair_spawn.clone();
-                                    let last_seen = last_seen_spawn.clone();
-                                    let peer_keys = peer_keys_spawn.clone();
-                                    let triggers = triggers_spawn.clone();
+                        match listener.accept().await {
+                            Ok((socket, peer_addr)) => {
+                                let keypair = keypair_spawn.clone();
+                                let last_seen = last_seen_spawn.clone();
+                                let peer_keys = peer_keys_spawn.clone();
+                                let triggers = triggers_spawn.clone();
 
-                                    tokio::spawn(async move {
-                                        handle_incoming_connection(socket, peer_addr, keypair, peer_keys, triggers, last_seen).await;
-                                    });
-                                }
+                                tokio::spawn(async move {
+                                    handle_incoming_connection(
+                                        socket, peer_addr, keypair, peer_keys, triggers, last_seen,
+                                    )
+                                    .await;
+                                });
                             }
-                            _ = async {
-                                loop {
-                                    tokio::time::sleep(Duration::from_millis(100)).await;
-                                    if listener_control_spawn
-                                        .load(Ordering::Acquire)
-                                    {
-                                        break;
-                                    }
-                                }
-                            } => {
-                                tracing::info!("Stopping listener for workflow");
-                                break;
+                            Err(e) => {
+                                // Don't tight-loop on persistent accept errors (e.g. FD
+                                // exhaustion): log and back off briefly before retrying.
+                                tracing::warn!(
+                                    "Noise listener accept error on {listen_addr}: {e}; \
+                                     backing off 100ms"
+                                );
+                                tokio::time::sleep(Duration::from_millis(100)).await;
                             }
                         }
                     }
                 }
                 Err(e) => {
                     tracing::warn!(
-                        "Failed to bind invite listener on {listen_addr}: {e}, retrying in 5s"
+                        "Failed to bind Noise listener on {listen_addr}: {e}, retrying in 5s"
                     );
                     tokio::time::sleep(Duration::from_secs(5)).await;
                 }
@@ -1549,6 +1528,20 @@ async fn handle_incoming_connection(
                                 .status(StatusCode::OK)
                                 .body(Body::from(pong.to_bytes()))
                                 .unwrap());
+                        }
+                        MessageType::Health => {
+                            // Always answer health — even mid-workflow. Reports
+                            // liveness plus this node's in-flight workflow (if
+                            // any) so peers don't infer "offline" from a busy node.
+                            let resp = health::build_health_response(
+                                &triggers.db,
+                                &triggers.config.participant_id().to_string(),
+                            )
+                            .await;
+                            let msg = Message::new(MessageType::HealthResponse, resp.to_payload());
+                            // `Response::new` defaults to 200 OK and is infallible,
+                            // so there is no builder error to unwrap.
+                            return Ok(Response::new(Body::from(msg.to_bytes())));
                         }
                         MessageType::ListPackages => {
                             tracing::debug!("Received ListPackages request");
@@ -1645,6 +1638,31 @@ async fn handle_incoming_connection(
                                 .unwrap());
                         }
                         MessageType::GetChunk => {
+                            // GetChunk serves BOTH the chunked ListPackages transfer and a
+                            // workflow's chunked command, and the two are indistinguishable
+                            // on the wire. Prefer the active workflow: a peer's ListPackages
+                            // chunk cache entry lives until its TTL and routinely lingers
+                            // from an earlier phase (e.g. a package check) into a later
+                            // workflow, so routing by "a cache entry exists" would feed a
+                            // workflow's chunk requests stale ListPackages bytes and corrupt
+                            // the transfer. While a workflow is in flight a peer's GetChunks
+                            // belong to it; the cache below serves chunks only when no
+                            // workflow is active (ListPackages and workflows never overlap
+                            // for a given node, so this can't strand a real ListPackages).
+                            let active = triggers
+                                .active_workflow
+                                .read()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .clone();
+                            if let Some(wf) = active
+                                && let Some(pid) =
+                                    peer_id_str.as_deref().and_then(|s| CantonId::parse(s).ok())
+                            {
+                                let resp = wf.handle_command(pid, msg).await.unwrap_or_else(|e| {
+                                    Message::new(MessageType::Error, format!("{e}").into_bytes())
+                                });
+                                return Ok(Response::new(Body::from(resp.to_bytes())));
+                            }
                             if msg.payload.len() < 4 {
                                 tracing::warn!("Received GetChunk request with payload < 4 bytes");
                                 return Ok(Response::builder()
@@ -1804,10 +1822,78 @@ async fn handle_incoming_connection(
                                 .body(Body::from(response_msg.to_bytes()))
                                 .unwrap());
                         }
+                        MessageType::GetNextCommand
+                        | MessageType::KeysUpload
+                        | MessageType::DnsSignature
+                        | MessageType::P2pSignatures
+                        | MessageType::SubmissionSignatures
+                        | MessageType::KickSignatures
+                        | MessageType::StatusUpdate
+                        | MessageType::DeclineInvitation => {
+                            // Route workflow-command traffic to the coordinator's
+                            // in-flight workflow (registered in the slot). Hold the
+                            // lock only long enough to clone the handle out — never
+                            // across the await.
+                            let active = triggers
+                                .active_workflow
+                                .read()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .clone();
+                            let peer = peer_id_str.as_deref().and_then(|s| CantonId::parse(s).ok());
+                            let resp = match (active, peer) {
+                                (Some(wf), Some(pid)) => {
+                                    wf.handle_command(pid, msg).await.unwrap_or_else(|e| {
+                                        Message::new(
+                                            MessageType::Error,
+                                            format!("{e}").into_bytes(),
+                                        )
+                                    })
+                                }
+                                (None, _) => {
+                                    // No active coordinator workflow on this node. A peer
+                                    // still polling here is resuming a run whose coordinator
+                                    // workflow is gone (cancelled, dismissed, or never
+                                    // resumed). Replying Wait would make it poll forever,
+                                    // leaving its run InProgress and the node perpetually
+                                    // "busy" to the invite/pre-flight checks. Return a
+                                    // non-success status so the peer's bounded retry (3
+                                    // strikes) gives up and finalizes the run — the same
+                                    // outcome the pre-unify heartbeat listener produced by
+                                    // not serving workflow commands at all. A coordinator
+                                    // that is merely busy on a slow step keeps its slot
+                                    // registered and still returns Wait via handle_command
+                                    // above, so this fires only when no workflow exists.
+                                    let mut resp = Response::new(Body::empty());
+                                    *resp.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
+                                    return Ok(resp);
+                                }
+                                (Some(_), None) => Message::new_empty(MessageType::Wait),
+                            };
+                            return Ok(Response::new(Body::from(resp.to_bytes())));
+                        }
                         MessageType::InviteOnboarding
                         | MessageType::InviteKick
                         | MessageType::InviteContracts
                         | MessageType::InviteDars => {
+                            // Refuse a new invite while already in a workflow, so a
+                            // busy node doesn't silently queue a second one. The DB
+                            // is the single source of truth for both coordinator and
+                            // peer roles.
+                            let health = health::build_health_response(
+                                &triggers.db,
+                                &triggers.config.participant_id().to_string(),
+                            )
+                            .await;
+                            if let Some(wf) = health.workflow {
+                                let kind = wf.kind;
+                                tracing::info!(
+                                    "Refusing invite — node is already in a {kind} workflow"
+                                );
+                                return Ok(Response::new(Body::from(
+                                    Message::new(MessageType::Busy, health::busy_payload(kind))
+                                        .to_bytes(),
+                                )));
+                            }
                             let invitation_type = match msg.msg_type {
                                 MessageType::InviteOnboarding => InvitationType::Onboarding,
                                 MessageType::InviteKick => InvitationType::Kick,
@@ -2070,8 +2156,6 @@ async fn finalize_peer_run(
 async fn run_onboarding_peer_listener(
     config: NodeConfig,
     db: SqlitePool,
-    listener_control: Arc<AtomicBool>,
-    listener_notify: Arc<Notify>,
     onboarding_state: web::Data<Arc<handlers::OnboardingWorkflowState>>,
     onboarding_trigger: Arc<Notify>,
     coordinator_pubkey: Arc<RwLock<Option<String>>>,
@@ -2140,14 +2224,9 @@ async fn run_onboarding_peer_listener(
             *error = None;
         }
 
-        let guard =
-            types::ListenerPauseGuard::pause(listener_control.clone(), listener_notify.clone())
-                .await;
         let workflow_config = config.clone();
         let result =
             workflow::start_peer(workflow_config, coordinator, db.clone(), local_instance).await;
-
-        guard.resume().await;
 
         // Update status
         let mut status = onboarding_state.status.write().await;
@@ -2177,8 +2256,6 @@ async fn run_onboarding_peer_listener(
 async fn run_kick_peer_listener(
     config: NodeConfig,
     db: SqlitePool,
-    listener_control: Arc<AtomicBool>,
-    listener_notify: Arc<Notify>,
     kick_state: web::Data<Arc<handlers::KickWorkflowState>>,
     kick_trigger: Arc<Notify>,
     coordinator_pubkey: Arc<RwLock<Option<String>>>,
@@ -2246,14 +2323,9 @@ async fn run_kick_peer_listener(
             *error = None;
         }
 
-        let guard =
-            types::ListenerPauseGuard::pause(listener_control.clone(), listener_notify.clone())
-                .await;
         let workflow_config = config.clone();
         let result =
             workflow::start_peer(workflow_config, coordinator, db.clone(), local_instance).await;
-
-        guard.resume().await;
 
         // Update status
         let mut status = kick_state.status.write().await;
@@ -2283,8 +2355,6 @@ async fn run_kick_peer_listener(
 async fn run_contracts_peer_listener(
     config: NodeConfig,
     db: SqlitePool,
-    listener_control: Arc<AtomicBool>,
-    listener_notify: Arc<Notify>,
     contracts_state: web::Data<Arc<handlers::ContractsWorkflowState>>,
     contracts_trigger: Arc<Notify>,
     coordinator_pubkey: Arc<RwLock<Option<String>>>,
@@ -2352,14 +2422,9 @@ async fn run_contracts_peer_listener(
             *error = None;
         }
 
-        let guard =
-            types::ListenerPauseGuard::pause(listener_control.clone(), listener_notify.clone())
-                .await;
         let workflow_config = config.clone();
         let result =
             workflow::start_peer(workflow_config, coordinator, db.clone(), local_instance).await;
-
-        guard.resume().await;
 
         // Update status
         let mut status = contracts_state.status.write().await;
@@ -2389,8 +2454,6 @@ async fn run_contracts_peer_listener(
 async fn run_dars_peer_listener(
     config: NodeConfig,
     db: SqlitePool,
-    listener_control: Arc<AtomicBool>,
-    listener_notify: Arc<Notify>,
     dars_state: web::Data<Arc<handlers::DarsWorkflowState>>,
     dars_trigger: Arc<Notify>,
     coordinator_pubkey: Arc<RwLock<Option<String>>>,
@@ -2465,14 +2528,9 @@ async fn run_dars_peer_listener(
             *error = None;
         }
 
-        let guard =
-            types::ListenerPauseGuard::pause(listener_control.clone(), listener_notify.clone())
-                .await;
         let workflow_config = config.clone();
         let result =
             workflow::start_peer(workflow_config, coordinator, db.clone(), local_instance).await;
-
-        guard.resume().await;
 
         // Update status
         let mut status = dars_state.status.write().await;

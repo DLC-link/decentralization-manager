@@ -58,6 +58,24 @@ pub fn topology_retry_delay_secs() -> u64 {
 /// to succeed the vast majority of the time.
 pub const MAX_CONSECUTIVE_STEP_FAILURES: usize = 6;
 
+/// How many consecutive "no active workflow" replies (HTTP 503 from the
+/// coordinator's always-on listener) a peer tolerates before abandoning a
+/// resumed run.
+///
+/// A peer reaches the listener but finds no workflow registered in two cases:
+///   1. Transient — the coordinator restarted and `recover_in_progress_workflows`
+///      hasn't re-registered the active-workflow slot yet (a sub-second-to-a-few-
+///      seconds window after the listener starts accepting).
+///   2. Permanent — the coordinator's workflow was cancelled or dismissed while
+///      this peer was offline, so the slot will never be populated.
+///
+/// Replying `Wait` to case 2 would leave the peer polling forever, keeping its
+/// run InProgress and the node perpetually "busy" to invite / pre-flight checks.
+/// We instead give up after this many polls. The counter resets on any real
+/// reply, so case 1 rides through. 4 polls × 5s ≈ 20s: long enough to cover a
+/// slow resume, short enough that a dismissed run is cleaned up promptly.
+pub const MAX_CONSECUTIVE_NO_WORKFLOW_POLLS: usize = 4;
+
 /// Canton protocol version used for key export and topology operations
 pub const CANTON_PROTOCOL_VERSION: i32 = 34;
 

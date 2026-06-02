@@ -74,13 +74,26 @@ pub async fn get_party_config(
         }),
         None => {
             let kc_defaults = data.config.canton.network.keycloak_defaults();
+            // Operator-supplied DECPM_KEYCLOAK_URL/REALM (surfaced as the
+            // top-level `config.keycloak`) take precedence over the network
+            // enum defaults; fall back to the per-network defaults only when
+            // a value is unset.
+            let configured = data.config.keycloak.as_ref();
+            let keycloak_url = configured
+                .map(|kc| kc.url.clone())
+                .filter(|url| !url.is_empty())
+                .unwrap_or(kc_defaults.url);
+            let keycloak_realm = configured
+                .map(|kc| kc.realm.clone())
+                .filter(|realm| !realm.is_empty())
+                .unwrap_or(kc_defaults.realm);
             let packages = default_package_config();
             HttpResponse::Ok().json(PartyConfigResponse {
                 dec_party_id,
                 member_party_id: None,
                 user_id: None,
-                keycloak_url: kc_defaults.url,
-                keycloak_realm: kc_defaults.realm,
+                keycloak_url,
+                keycloak_realm,
                 keycloak_client_id: String::new(),
                 has_client_secret: false,
                 has_username: false,
@@ -564,7 +577,7 @@ mod tests {
     use sqlx::SqlitePool;
     use tokio::sync::{Mutex, Notify, RwLock};
 
-    use super::{discover_member_party, save_party_config};
+    use super::{discover_member_party, get_party_config, save_party_config};
     use crate::{
         auth::{MockAuthRegistry, MockValidator, TokenValidator, WorkflowAuth},
         config::{KeycloakConfig, NodeConfig, PartyCredentials, default_package_config},
@@ -589,8 +602,6 @@ mod tests {
             config: NodeConfig::default(),
             peer_status: Arc::new(RwLock::new(HashMap::new())),
             last_seen: Arc::new(RwLock::new(HashMap::new())),
-            noise_listener_pause_flag: Arc::new(AtomicBool::new(false)),
-            noise_listener_notify: Arc::new(Notify::new()),
             onboarding_trigger: Arc::new(Notify::new()),
             kick_trigger: Arc::new(Notify::new()),
             contracts_trigger: Arc::new(Notify::new()),
@@ -608,6 +619,7 @@ mod tests {
             party_credentials,
             bootstrap_mu: Arc::new(Mutex::new(())),
             workflow_in_flight: Arc::new(AtomicBool::new(false)),
+            active_workflow: Arc::new(std::sync::RwLock::new(None)),
             test_mode: true,
             refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
             http_client: reqwest::Client::new(),
@@ -664,8 +676,6 @@ mod tests {
             config: NodeConfig::default(),
             peer_status: Arc::new(RwLock::new(HashMap::new())),
             last_seen: Arc::new(RwLock::new(HashMap::new())),
-            noise_listener_pause_flag: Arc::new(AtomicBool::new(false)),
-            noise_listener_notify: Arc::new(Notify::new()),
             onboarding_trigger: Arc::new(Notify::new()),
             kick_trigger: Arc::new(Notify::new()),
             contracts_trigger: Arc::new(Notify::new()),
@@ -683,6 +693,7 @@ mod tests {
             party_credentials,
             bootstrap_mu: Arc::new(Mutex::new(())),
             workflow_in_flight: Arc::new(AtomicBool::new(false)),
+            active_workflow: Arc::new(std::sync::RwLock::new(None)),
             test_mode: true,
             refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
             http_client: reqwest::Client::new(),
@@ -709,5 +720,69 @@ mod tests {
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// For a party with no saved credentials, `get_party_config` pre-fills the
+    /// form with defaults. When the operator has configured the deployment's
+    /// Keycloak via `DECPM_KEYCLOAK_URL`/`DECPM_KEYCLOAK_REALM` (surfaced as
+    /// `config.keycloak`), those values must win over the network enum's
+    /// hard-coded `keycloak_defaults()` — otherwise the env vars are ignored.
+    #[actix_web::test]
+    async fn get_party_config_prefers_configured_keycloak_over_network_default() {
+        let db = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        // Network stays Devnet (default), whose enum defaults are
+        // `keycloak.dev.canton.ibtc.network` / `ibtc-catalyst-devnet` —
+        // deliberately different from the operator-configured values below.
+        let mut config = NodeConfig::default();
+        config.keycloak = Some(KeycloakConfig {
+            url: "https://deployed-keycloak.example.com".to_string(),
+            realm: "deployed-realm".to_string(),
+            client_id: "frontend-gating-client".to_string(),
+            client_secret: None,
+            username: None,
+            password: None,
+        });
+        let party_credentials = Arc::new(RwLock::new(Vec::new()));
+        let state = Data::new(AppState {
+            db,
+            config,
+            peer_status: Arc::new(RwLock::new(HashMap::new())),
+            last_seen: Arc::new(RwLock::new(HashMap::new())),
+            onboarding_trigger: Arc::new(Notify::new()),
+            kick_trigger: Arc::new(Notify::new()),
+            contracts_trigger: Arc::new(Notify::new()),
+            dars_trigger: Arc::new(Notify::new()),
+            coordinator_pubkey: Arc::new(RwLock::new(None)),
+            peer_run_instance: Arc::new(RwLock::new(None)),
+            pending_invitations: Arc::new(RwLock::new(Vec::new())),
+            auth: Arc::new(RwLock::new(None)),
+            token_validator: TokenValidator::Mock(Arc::new(MockValidator::new(
+                "decman-admin".to_string(),
+            ))),
+            admin_role: None,
+            party_credentials,
+            bootstrap_mu: Arc::new(Mutex::new(())),
+            workflow_in_flight: Arc::new(AtomicBool::new(false)),
+            active_workflow: Arc::new(std::sync::RwLock::new(None)),
+            test_mode: true,
+            refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
+            http_client: reqwest::Client::new(),
+        });
+        let app = test::init_service(App::new().app_data(state).service(get_party_config)).await;
+
+        let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
+        let unconfigured = format!("new-party::{ns}");
+        let req = TestRequest::get()
+            .uri(&format!("/party-config/{unconfigured}"))
+            .to_request();
+        let body: serde_json::Value = test::call_and_read_body_json(&app, req).await;
+
+        assert_eq!(
+            body["keycloak_url"],
+            "https://deployed-keycloak.example.com"
+        );
+        assert_eq!(body["keycloak_realm"], "deployed-realm");
     }
 }

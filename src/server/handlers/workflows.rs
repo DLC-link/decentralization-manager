@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, atomic::Ordering},
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -16,24 +16,108 @@ use crate::{
     config::{NetworkConfig, NodeConfig},
     db::schema::{Commitable, SchemaRead, SchemaWrite},
     error::Result,
-    noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
+    noise::{
+        Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message,
+        send_noise_message_with_retry,
+    },
     participant_id::CantonId,
     server::{
         AppState,
+        health::classify_health_reply,
         middleware::require_admin,
         respawn_coordinator,
         types::{
             ContractsRequest, DarsInvitePayload, DarsRequest, ErrorResponse, HttpWorkflowState,
-            KickInvitePayload, KickRequest, KickResponse, KickStatus, ListenerPauseGuard,
-            MessageResponse, MissingEdgeKind, MissingPeerEdge, OnboardingInvitePayload,
-            OnboardingMeshErrorResponse, OnboardingRequest, OnboardingResponse, OnboardingStatus,
-            SuccessResponse, WorkflowInFlightGuard, WorkflowKind, WorkflowProgress,
-            WorkflowResponse, WorkflowRole, WorkflowRun, WorkflowRunsResponse,
-            WorkflowStatusResponse,
+            KickInvitePayload, KickRequest, KickResponse, KickStatus, MessageResponse,
+            MissingEdgeKind, MissingPeerEdge, OnboardingInvitePayload, OnboardingMeshErrorResponse,
+            OnboardingRequest, OnboardingResponse, OnboardingStatus, SuccessResponse,
+            WorkflowInFlightGuard, WorkflowKind, WorkflowProgress, WorkflowResponse, WorkflowRole,
+            WorkflowRun, WorkflowRunsResponse, WorkflowStatusResponse,
         },
     },
     workflow::{self, ContractsStep, DarsStep, KickStep, OnboardingStep, state::WorkflowStep},
 };
+
+// ============================================================================
+// Pre-flight busy check
+// ============================================================================
+
+/// Format the operator-facing 409 message naming each busy peer and the
+/// workflow it is currently participating in.
+fn format_busy_peers(busy: &[(String, WorkflowKind)]) -> String {
+    busy.iter()
+        .map(|(id, kind)| {
+            let article = if matches!(kind, WorkflowKind::Onboarding) {
+                "an"
+            } else {
+                "a"
+            };
+            format!(
+                "Peer {id} is participating in {article} {kind} workflow, please try again later."
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Probe every invited peer's `Health` in parallel and return those already in a
+/// workflow. Unreachable peers are NOT treated as busy — the workflow proceeds
+/// and the existing staleness / decline paths handle a genuinely dead peer.
+/// Peers on older code report no workflow and so aren't blocked (graceful
+/// rollout — the peer-side invite gate still protects correctness).
+async fn preflight_busy_peers(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    invitees: &[CantonId],
+) -> Vec<(String, WorkflowKind)> {
+    let Ok(peers) = db.get_all_peers().await else {
+        return Vec::new();
+    };
+    let Ok(keypair) = NoiseKeypair::from_file(&config.key_file_path()).await else {
+        return Vec::new();
+    };
+    let identity = config.participant_id().to_string();
+    let invitee_set: HashSet<String> = invitees.iter().map(CantonId::to_string).collect();
+
+    let mut probes = Vec::new();
+    for peer in peers
+        .into_iter()
+        .filter(|p| invitee_set.contains(&p.participant_id.to_string()))
+    {
+        let Ok(pubkey) = parse_public_key(&peer.public_key) else {
+            continue;
+        };
+        let psk = keypair.derive_psk(&pubkey);
+        let id = peer.participant_id.to_string();
+        let address = peer.address.clone();
+        let port = peer.port;
+        let identity = identity.clone();
+        let retry = config.noise_retry.clone();
+        probes.push(tokio::spawn(async move {
+            match send_noise_message_with_retry(
+                &address,
+                port,
+                &psk,
+                identity.as_bytes(),
+                &Message::new_empty(MessageType::Health),
+                &retry,
+            )
+            .await
+            {
+                Ok(response) => classify_health_reply(&response).1.map(|w| (id, w.kind)),
+                Err(_) => None,
+            }
+        }));
+    }
+
+    let mut busy = Vec::new();
+    for probe in probes {
+        if let Ok(Some(hit)) = probe.await {
+            busy.push(hit);
+        }
+    }
+    busy
+}
 
 // ============================================================================
 // Workflow State Types
@@ -316,6 +400,15 @@ pub async fn start_kick(
         instance_name.clone(),
     );
 
+    // Refuse BEFORE persisting our run row if any selected peer is already in a
+    // workflow — otherwise a busy-peer rejection leaves a phantom InProgress row.
+    let busy = preflight_busy_peers(&data.config, &data.db, &invitees).await;
+    if !busy.is_empty() {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format_busy_peers(&busy),
+        });
+    }
+
     // Insert the workflow_runs row BEFORE flipping in-memory status. If the
     // insert fails (e.g. partial-unique-index says another kick is already in
     // flight), bubble that out as a 409 — same semantics as the existing
@@ -343,8 +436,7 @@ pub async fn start_kick(
     let config = data.config.clone();
     let db = data.db.clone();
     let kick_state_clone = kick_state.get_ref().clone();
-    let listener_control = data.noise_listener_pause_flag.clone();
-    let listener_notify = data.noise_listener_notify.clone();
+    let active_workflow = data.active_workflow.clone();
     let last_seen = data.last_seen.clone();
     let instance_for_task = instance_name.clone();
 
@@ -357,13 +449,11 @@ pub async fn start_kick(
 
     let join_handle = tokio::spawn(async move {
         let _workflow_guard = workflow_guard; // dropped at end → releases cross-workflow gate
-        let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
 
         // Send kick invites to all peers before starting coordinator workflow
         let invite_result = send_kick_invites(&config, &db, &kick_config).await;
         if let Err(e) = invite_result {
             tracing::error!("Failed to send kick invites: {e}");
-            guard.resume().await;
             let msg = format!("Failed to send invites: {e}");
             {
                 let mut status = kick_state_clone.status.write().await;
@@ -388,10 +478,9 @@ pub async fn start_kick(
             None, // No dars config
             None, // No auth registry for kick
             last_seen,
+            active_workflow,
         )
         .await;
-
-        guard.resume().await;
 
         // Update in-memory state in tight scopes — never hold the RwLock
         // across a DB await. /kick/status acquires a read lock to serve
@@ -539,17 +628,7 @@ async fn send_kick_invites(
         .await
         {
             Ok(response) => {
-                if let Ok(msg) = Message::from_bytes(&response) {
-                    if msg.msg_type == MessageType::Ack {
-                        tracing::info!("Peer {} acknowledged kick invite", peer.participant_id);
-                    } else {
-                        tracing::warn!(
-                            "Peer {} responded with {msg_type:?} instead of Ack",
-                            peer.participant_id,
-                            msg_type = msg.msg_type
-                        );
-                    }
-                }
+                interpret_invite_reply(&peer.participant_id, "kick", &response)?;
             }
             Err(e) => {
                 tracing::error!("Failed to send kick invite to {}: {e}", peer.participant_id);
@@ -686,6 +765,17 @@ pub async fn start_onboarding(
         }
     }
 
+    // Refuse BEFORE persisting our run row if any selected peer is already in a
+    // workflow. Doing this after the insert leaves a phantom InProgress row when
+    // a peer is busy: no invites are sent, and the in-memory state is never set,
+    // so the row can't even be cancelled.
+    let busy = preflight_busy_peers(&data.config, &data.db, &peer_ids).await;
+    if !busy.is_empty() {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format_busy_peers(&busy),
+        });
+    }
+
     if let Err(e) = insert_coordinator_run(
         &data.db,
         &instance_name,
@@ -706,8 +796,7 @@ pub async fn start_onboarding(
     let config = data.config.clone();
     let db = data.db.clone();
     let onboarding_state_clone = onboarding_state.get_ref().clone();
-    let listener_control = data.noise_listener_pause_flag.clone();
-    let listener_notify = data.noise_listener_notify.clone();
+    let active_workflow = data.active_workflow.clone();
     *onboarding_state.invited_peers.write().await = peer_ids.clone();
     let party_credentials = data.party_credentials.clone();
     let auth_lock = data.auth.clone();
@@ -724,14 +813,12 @@ pub async fn start_onboarding(
 
     let join_handle = tokio::spawn(async move {
         let _workflow_guard = workflow_guard; // releases cross-workflow gate on drop
-        let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
 
         // Send invites to selected peers before starting coordinator workflow
         let invite_result =
             send_onboarding_invites(&config, &db, &peer_ids, &party_id_prefix).await;
         if let Err(e) = invite_result {
             tracing::error!("Failed to send onboarding invites: {e}");
-            guard.resume().await;
             let msg = format!("Failed to send invites: {e}");
             {
                 let mut status = onboarding_state_clone.status.write().await;
@@ -756,10 +843,9 @@ pub async fn start_onboarding(
             None, // No dars config
             None, // No auth registry for onboarding
             last_seen,
+            active_workflow,
         )
         .await;
-
-        guard.resume().await;
 
         // Update in-memory state in tight scopes — never hold the RwLock
         // across a DB await. /onboarding/status acquires a read lock to
@@ -869,6 +955,40 @@ pub async fn get_onboarding_status(
     })
 }
 
+/// Interpret a peer's reply to a workflow invite.
+///
+/// A `Busy` reply means the peer raced into another workflow between our
+/// pre-flight health check and this invite. Treat it as a hard error so the
+/// coordinator aborts fast — the spawning task marks the run Failed with a clear
+/// reason — instead of waiting on a peer that will never join. Any other
+/// non-`Ack` reply, or an unparseable one, is logged but tolerated (an older
+/// peer may not Ack).
+fn interpret_invite_reply(peer_id: &CantonId, kind: &str, response: &[u8]) -> Result {
+    match Message::from_bytes(response) {
+        Ok(msg) if msg.msg_type == MessageType::Ack => {
+            tracing::info!("Peer {peer_id} acknowledged {kind} invite");
+            Ok(())
+        }
+        Ok(msg) if msg.msg_type == MessageType::Busy => {
+            anyhow::bail!(
+                "Peer {peer_id} is already participating in another workflow; \
+                 aborting {kind} before it starts"
+            )
+        }
+        Ok(msg) => {
+            tracing::warn!(
+                "Peer {peer_id} responded with {msg_type:?} instead of Ack to {kind} invite",
+                msg_type = msg.msg_type
+            );
+            Ok(())
+        }
+        Err(_) => {
+            tracing::warn!("Peer {peer_id} sent an unparseable {kind} invite reply");
+            Ok(())
+        }
+    }
+}
+
 /// Send onboarding invites to selected peers using Noise protocol
 async fn send_onboarding_invites(
     config: &NodeConfig,
@@ -932,16 +1052,7 @@ async fn send_onboarding_invites(
         .await
         {
             Ok(response) => {
-                if let Ok(msg) = Message::from_bytes(&response) {
-                    if msg.msg_type == MessageType::Ack {
-                        tracing::info!("Peer {peer_id} acknowledged invite");
-                    } else {
-                        tracing::warn!(
-                            "Peer {peer_id} responded with {msg_type:?} instead of Ack",
-                            msg_type = msg.msg_type
-                        );
-                    }
-                }
+                interpret_invite_reply(peer_id, "onboarding", &response)?;
             }
             Err(e) => {
                 tracing::error!("Failed to send invite to {peer_id}: {e}");
@@ -1179,6 +1290,14 @@ pub async fn start_contracts(
     };
 
     let instance_name_for_run = contracts_config.instance_name.clone();
+    // Refuse BEFORE persisting our run row if any selected peer is already in a
+    // workflow — otherwise a busy-peer rejection leaves a phantom InProgress row.
+    let busy = preflight_busy_peers(&data.config, &data.db, &contracts_invitees).await;
+    if !busy.is_empty() {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format_busy_peers(&busy),
+        });
+    }
     if let Err(e) = insert_coordinator_run(
         &data.db,
         &instance_name_for_run,
@@ -1201,8 +1320,7 @@ pub async fn start_contracts(
     let workflow_auth = data.auth.read().await.clone();
     let auth_lock = data.auth.clone();
     let contracts_state_clone = contracts_state.get_ref().clone();
-    let listener_control = data.noise_listener_pause_flag.clone();
-    let listener_notify = data.noise_listener_notify.clone();
+    let active_workflow = data.active_workflow.clone();
     let party_credentials = data.party_credentials.clone();
     let last_seen = data.last_seen.clone();
     *contracts_state.invited_peers.write().await = contracts_invitees;
@@ -1218,13 +1336,11 @@ pub async fn start_contracts(
 
     let join_handle = tokio::spawn(async move {
         let _workflow_guard = workflow_guard; // releases cross-workflow gate on drop
-        let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
 
         // Send invites to all peers before starting coordinator workflow
         let invite_result = send_contracts_invites(&config, &db).await;
         if let Err(e) = invite_result {
             tracing::error!("Failed to send contracts invites: {e}");
-            guard.resume().await;
             let msg = format!("Failed to send invites: {e}");
             {
                 let mut status = contracts_state_clone.status.write().await;
@@ -1249,10 +1365,9 @@ pub async fn start_contracts(
             None, // No dars config
             workflow_auth,
             last_seen,
+            active_workflow,
         )
         .await;
-
-        guard.resume().await;
 
         // Update in-memory state in tight scopes — never hold the RwLock
         // across a DB await. /contracts/status acquires a read lock to
@@ -1444,6 +1559,14 @@ pub async fn start_dars(
         peer_ids: body.peer_ids.clone(),
     };
 
+    // Refuse BEFORE persisting our run row if any selected peer is already in a
+    // workflow — otherwise a busy-peer rejection leaves a phantom InProgress row.
+    let busy = preflight_busy_peers(&data.config, &data.db, &body.peer_ids).await;
+    if !busy.is_empty() {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format_busy_peers(&busy),
+        });
+    }
     if let Err(e) = insert_coordinator_run(
         &data.db,
         &instance_name,
@@ -1464,8 +1587,7 @@ pub async fn start_dars(
     let config = data.config.clone();
     let db = data.db.clone();
     let dars_state_clone = dars_state.get_ref().clone();
-    let listener_control = data.noise_listener_pause_flag.clone();
-    let listener_notify = data.noise_listener_notify.clone();
+    let active_workflow = data.active_workflow.clone();
     let last_seen = data.last_seen.clone();
     let peer_ids = body.peer_ids.clone();
     *dars_state.invited_peers.write().await = peer_ids.clone();
@@ -1490,7 +1612,6 @@ pub async fn start_dars(
 
     let join_handle = tokio::spawn(async move {
         let _workflow_guard = workflow_guard; // releases cross-workflow gate on drop
-        let guard = ListenerPauseGuard::pause(listener_control, listener_notify).await;
 
         // Send invites to selected peers before starting coordinator workflow
         let dar_filenames: Vec<String> = dars_config
@@ -1501,7 +1622,6 @@ pub async fn start_dars(
         let invite_result = send_dars_invites(&config, &db, &peer_ids, &dar_filenames).await;
         if let Err(e) = invite_result {
             tracing::error!("Failed to send DARs invites: {e}");
-            guard.resume().await;
             let mut status = dars_state_clone.status.write().await;
             let mut error = dars_state_clone.error.write().await;
             *status = WorkflowProgress::Failed;
@@ -1528,10 +1648,9 @@ pub async fn start_dars(
             Some(dars_config),
             None, // No auth
             last_seen,
+            active_workflow,
         )
         .await;
-
-        guard.resume().await;
 
         // Update in-memory state in tight scopes — never hold the RwLock
         // across a DB await (see kick/onboarding/contracts handlers above).
@@ -1649,16 +1768,7 @@ async fn send_dars_invites(
         .await
         {
             Ok(response) => {
-                if let Ok(msg) = Message::from_bytes(&response) {
-                    if msg.msg_type == MessageType::Ack {
-                        tracing::info!("Peer {peer_id} acknowledged DARs invite");
-                    } else {
-                        tracing::warn!(
-                            "Peer {peer_id} responded with {msg_type:?} instead of Ack",
-                            msg_type = msg.msg_type
-                        );
-                    }
-                }
+                interpret_invite_reply(peer_id, "DARs", &response)?;
             }
             Err(e) => {
                 tracing::error!("Failed to send DARs invite to {peer_id}: {e}");
@@ -1698,10 +1808,6 @@ async fn cancel_workflow_state(
         });
     };
     handle.abort();
-
-    data.noise_listener_pause_flag
-        .store(false, Ordering::Release);
-    data.noise_listener_notify.notify_one();
 
     let invitees = state.invited_peers.read().await.clone();
     if !invitees.is_empty()
@@ -2113,8 +2219,7 @@ pub async fn retry_workflow(
         onboarding_state,
         contracts_state,
         dars_state,
-        data.noise_listener_pause_flag.clone(),
-        data.noise_listener_notify.clone(),
+        data.active_workflow.clone(),
         data.auth.clone(),
         data.last_seen.clone(),
     )
@@ -2266,20 +2371,7 @@ async fn send_contracts_invites(config: &NodeConfig, db: &SqlitePool) -> Result 
         .await
         {
             Ok(response) => {
-                if let Ok(msg) = Message::from_bytes(&response) {
-                    if msg.msg_type == MessageType::Ack {
-                        tracing::info!(
-                            "Peer {} acknowledged contracts invite",
-                            peer.participant_id
-                        );
-                    } else {
-                        tracing::warn!(
-                            "Peer {} responded with {msg_type:?} instead of Ack",
-                            peer.participant_id,
-                            msg_type = msg.msg_type
-                        );
-                    }
-                }
+                interpret_invite_reply(&peer.participant_id, "contracts", &response)?;
             }
             Err(e) => {
                 tracing::error!(
@@ -2291,4 +2383,41 @@ async fn send_contracts_invites(config: &NodeConfig, db: &SqlitePool) -> Result 
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn busy_message_names_each_peer_and_kind() {
+        let busy = vec![
+            ("participant2".to_string(), WorkflowKind::Onboarding),
+            ("participant3".to_string(), WorkflowKind::Kick),
+        ];
+        let msg = format_busy_peers(&busy);
+        assert!(msg.contains("participant2 is participating in an Onboarding workflow"));
+        assert!(msg.contains("participant3 is participating in a Kick workflow"));
+    }
+
+    #[test]
+    fn invite_reply_aborts_on_busy_only() -> anyhow::Result<()> {
+        let peer = CantonId::parse(
+            "participant::12200ad4539c269a7b13af6806fb2ee326e7c0d7233fa6144004c416502a2c73fb0b",
+        )?;
+
+        // Ack is the happy path.
+        let ack = Message::new_empty(MessageType::Ack).to_bytes();
+        assert!(interpret_invite_reply(&peer, "onboarding", &ack).is_ok());
+
+        // Busy aborts so the coordinator fails fast instead of waiting forever.
+        let busy = Message::new(MessageType::Busy, b"Onboarding".to_vec()).to_bytes();
+        assert!(interpret_invite_reply(&peer, "onboarding", &busy).is_err());
+
+        // Any other (parseable) reply is tolerated — older peers may not Ack.
+        let other = Message::new_empty(MessageType::Wait).to_bytes();
+        assert!(interpret_invite_reply(&peer, "onboarding", &other).is_ok());
+
+        Ok(())
+    }
 }

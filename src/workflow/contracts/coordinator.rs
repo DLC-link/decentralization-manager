@@ -6,8 +6,8 @@ use crate::{
     auth::WorkflowAuth,
     config::{NetworkConfig, NodeConfig},
     error::Result,
-    noise::server::NoiseServer,
-    server::peer_status::LastSeen,
+    noise::server::{ActiveWorkflow, NoiseServer},
+    server::{ActiveWorkflowSlot, peer_status::LastSeen},
     utils,
     workflow::{
         COORDINATOR_STEP_STALENESS_THRESHOLD, StepStalenessWatchdog,
@@ -28,6 +28,7 @@ pub async fn start_coordinator(
     workflow_auth: Option<WorkflowAuth>,
     db: sqlx::SqlitePool,
     last_seen: LastSeen,
+    active_workflow: ActiveWorkflowSlot,
 ) -> Result {
     tracing::info!("Initializing Noise server...");
 
@@ -61,7 +62,12 @@ pub async fn start_coordinator(
         .await
     });
 
-    crate::workflow::run_server_with_workflow(server, workflow_handle).await
+    crate::workflow::run_workflow_with_handler(
+        ActiveWorkflow::Contracts(server),
+        active_workflow,
+        workflow_handle,
+    )
+    .await
 }
 
 async fn run_workflow(
