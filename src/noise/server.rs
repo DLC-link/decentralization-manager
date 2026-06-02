@@ -102,16 +102,6 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
             .into_iter()
             .collect();
 
-        let expected_peers: Vec<CantonId> = network_config
-            .peers
-            .iter()
-            .filter(|p| {
-                let peer_id = p.participant_id.to_string();
-                p.participant_id != *node_config.participant_id() && !excluded.contains(&peer_id)
-            })
-            .map(|p| p.participant_id.clone())
-            .collect();
-
         if !excluded.is_empty() {
             tracing::info!(
                 "Excluding {count} participant(s) from peers: {participants}",
@@ -119,6 +109,41 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                 participants = excluded.iter().cloned().collect::<Vec<_>>().join(", ")
             );
         }
+
+        // Look up the persisted run up-front. Its `expected_peers` is the
+        // authoritative invitee set the start handler selected for *this* run,
+        // which can be a strict subset of the configured mesh — onboarding and
+        // dars both invite a chosen subset of the peers this node knows about.
+        // Deriving the wait set from the full configured mesh instead made the
+        // coordinator wait in `WaitingForPeers` for peers it was never going to
+        // invite and that can never connect, so any party smaller than the full
+        // mesh (e.g. 1 coordinator + 1 peer) hung until the staleness watchdog
+        // failed it. Prefer the persisted invitees; the coordinator always
+        // inserts its row before constructing this server, so the
+        // configured-mesh fallback only covers the (unexpected) no-row case.
+        let persisted = match SchemaRead::get_workflow_run(&db, &instance_name).await {
+            Ok(run) => run,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to look up persisted workflow_runs row for {instance_name}: {e}; \
+                     falling back to configured peers"
+                );
+                None
+            }
+        };
+
+        let expected_peers: Vec<CantonId> = match persisted.as_ref() {
+            Some(run) => run.expected_peers.clone(),
+            None => network_config
+                .peers
+                .iter()
+                .filter(|p| {
+                    p.participant_id != *node_config.participant_id()
+                        && !excluded.contains(&p.participant_id.to_string())
+                })
+                .map(|p| p.participant_id.clone())
+                .collect(),
+        };
 
         tracing::info!(
             "Expected {count} peer(s): {peers}",
@@ -130,21 +155,32 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                 .join(", ")
         );
 
+        // Scope the fan-out peer records to this run's participant set so
+        // best-effort broadcasts (e.g. CancelInvite on decline) only reach the
+        // peers actually invited to this run, never unrelated configured peers.
+        let expected_set: HashSet<CantonId> = expected_peers.iter().cloned().collect();
+        let peers = network_config
+            .peers
+            .iter()
+            .filter(|p| expected_set.contains(&p.participant_id))
+            .cloned()
+            .collect();
+
         // Resume-aware construction: if an InProgress workflow_runs row already
         // exists for `instance_name` (we restarted mid-flight), re-hydrate the
         // state machine from its persisted `current_step` + already-completed
         // peers instead of starting fresh from `initial_step`. The
         // coordinator workflow loop is naturally driven by `current_step`, so
         // seeding it from the row picks the run back up at the right place.
-        let workflow_state = match SchemaRead::get_workflow_run(&db, &instance_name).await {
-            Ok(Some(run)) if run.status == WorkflowProgress::InProgress => {
+        let workflow_state = match persisted {
+            Some(run) if run.status == WorkflowProgress::InProgress => {
                 match S::try_from_step_name(&run.current_step) {
                     Some(step) => {
                         tracing::info!(
                             "Resuming workflow {instance_name} at step {step:?} \
                              ({} of {} peers completed)",
                             run.completed_peers.len(),
-                            run.expected_peers.len()
+                            expected_peers.len()
                         );
                         WorkflowState::from_persisted(
                             db,
@@ -165,25 +201,9 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                     }
                 }
             }
-            Ok(_) => WorkflowState::new(db, instance_name, initial_step, expected_peers),
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to look up persisted workflow_runs row for {instance_name}: {e}; \
-                     starting fresh"
-                );
-                WorkflowState::new(db, instance_name, initial_step, expected_peers)
-            }
+            _ => WorkflowState::new(db, instance_name, initial_step, expected_peers),
         };
 
-        let peers = network_config
-            .peers
-            .iter()
-            .filter(|p| {
-                let peer_id = p.participant_id.to_string();
-                p.participant_id != *node_config.participant_id() && !excluded.contains(&peer_id)
-            })
-            .cloned()
-            .collect();
         Ok(Self {
             node_config: Arc::new(node_config),
             keypair: Arc::new(keypair),

@@ -21,4 +21,5 @@ pub mod retry_coordinator_broadcast;
 pub mod retry_with_offline_peer;
 pub mod start_handler_conflict_409;
 pub mod token_custody;
+pub mod two_member_party;
 pub mod utility_onboarding;

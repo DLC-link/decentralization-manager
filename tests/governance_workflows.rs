@@ -87,6 +87,10 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
 
     let mut f = Fixture::from_env()?;
     f.discover_network_parties().await?;
+    // Regression guard for the subset-party hang: onboard a party with a
+    // single invited peer (1 coordinator + 1 regular peer) before the
+    // full-mesh happy path, which can't catch it because it invites everyone.
+    phases::two_member_party::run(&mut f).await?;
     phases::create_dec_party::run(&mut f).await?;
     phases::distribute_dars::run(&mut f).await?;
     phases::check_peer_dars::run(&mut f).await?;
