@@ -3,7 +3,6 @@ use canton_proto_rs::com::digitalasset::canton::{
     protocol::v30::SignedTopologyTransaction,
     topology::admin::v30::{
         SignTransactionsRequest, StoreId, Synchronizer, store_id, synchronizer,
-        topology_manager_write_service_client::TopologyManagerWriteServiceClient,
     },
 };
 use prost::Message;
@@ -13,7 +12,10 @@ use crate::{
     config::NodeConfig,
     error::Result,
     utils,
-    workflow::storage::{WorkflowStorage, artifact_kinds},
+    workflow::{
+        storage::{WorkflowStorage, artifact_kinds},
+        topology::sign_transactions_with_topology_retry,
+    },
 };
 
 /// Sign kick proposals
@@ -46,11 +48,7 @@ pub async fn sign_proposals(
     let p2p_transaction: SignedTopologyTransaction =
         utils::read_first_message_from_bytes(&items[1])?;
 
-    // Sign both proposals
-    let mut topology_client =
-        TopologyManagerWriteServiceClient::connect(config.admin_api_url()).await?;
-
-    let request = tonic::Request::new(SignTransactionsRequest {
+    let request = SignTransactionsRequest {
         transactions: vec![dns_transaction, p2p_transaction],
         signed_by: vec![],
         store: Some(StoreId {
@@ -59,13 +57,10 @@ pub async fn sign_proposals(
             })),
         }),
         force_flags: vec![],
-    });
+    };
 
     tracing::debug!("Calling SignTransactions RPC for kick proposals...");
-    let response = topology_client
-        .sign_transactions(request)
-        .await?
-        .into_inner();
+    let response = sign_transactions_with_topology_retry(config, request, "kick").await?;
 
     if response.transactions.len() != 2 {
         anyhow::bail!(
