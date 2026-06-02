@@ -1373,27 +1373,19 @@ async fn run_heartbeat(
             return;
         }
     };
+    // Surface our own Noise public key at startup so operators can confirm the
+    // running node is using the key it published to peers. A mismatch fails
+    // every handshake symmetrically and is otherwise invisible in the logs.
+    tracing::info!("Noise public key: {key}", key = keypair.public_key_hex());
 
-    // Load peers from database for peer key authentication
-    let peers = match db.get_all_peers().await {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::error!("Failed to load peers from database: {e}");
-            return;
-        }
-    };
-
-    // Build peer key map for Noise authentication
-    let mut peer_keys = HashMap::new();
-    for peer in &peers {
-        if peer.participant_id == *config.participant_id() || peer.public_key.is_empty() {
-            continue;
-        }
-        if let Ok(pub_key) = parse_public_key(&peer.public_key) {
-            peer_keys.insert(peer.participant_id.to_string(), pub_key);
-        }
-    }
-    let peer_keys = Arc::new(peer_keys);
+    // Peer keys for inbound authentication are resolved LIVE from the DB on
+    // each incoming connection (see `handle_incoming_connection`) rather than
+    // snapshotted here. A frozen snapshot meant that after a `/network-config`
+    // key correction the node would accept a peer *outbound* (which reads the
+    // live DB) but keep rejecting it *inbound* until a process restart —
+    // producing asymmetric red/green across the mesh. Resolving live makes a
+    // key fix take effect for both directions immediately.
+    let self_id = config.participant_id().clone();
 
     // Listener loop: bind the always-on Noise listener and accept forever. It is
     // never paused — workflow traffic is routed in-process via the
@@ -1401,7 +1393,8 @@ async fn run_heartbeat(
     // Health / Ping) even while this node is participating in a workflow.
     let keypair_spawn = keypair.clone();
     let last_seen_spawn = last_seen.clone();
-    let peer_keys_spawn = peer_keys.clone();
+    let db_spawn = db.clone();
+    let self_id_spawn = self_id.clone();
     let triggers_spawn = triggers.clone();
 
     tokio::spawn(async move {
@@ -1415,12 +1408,14 @@ async fn run_heartbeat(
                             Ok((socket, peer_addr)) => {
                                 let keypair = keypair_spawn.clone();
                                 let last_seen = last_seen_spawn.clone();
-                                let peer_keys = peer_keys_spawn.clone();
+                                let db = db_spawn.clone();
+                                let self_id = self_id_spawn.clone();
                                 let triggers = triggers_spawn.clone();
 
                                 tokio::spawn(async move {
                                     handle_incoming_connection(
-                                        socket, peer_addr, keypair, peer_keys, triggers, last_seen,
+                                        socket, peer_addr, keypair, db, self_id, triggers,
+                                        last_seen,
                                     )
                                     .await;
                                 });
@@ -1451,15 +1446,55 @@ async fn run_heartbeat(
     run_peer_ping_loop(config, db, peer_status, last_seen, keypair).await;
 }
 
+/// Build the identity → public-key allowlist used to authenticate inbound
+/// Noise handshakes, from the current `peers` table. Skips self and any peer
+/// whose public key is empty or unparseable (the latter is logged so a bad
+/// key is visible rather than silently dropped). Read fresh per connection so
+/// `/network-config` updates take effect without a restart; a DB error yields
+/// an empty allowlist (all inbound handshakes fail closed) rather than a panic.
+async fn build_peer_key_map(
+    db: &SqlitePool,
+    self_id: &CantonId,
+) -> HashMap<String, secp256k1::PublicKey> {
+    let peers = match db.get_all_peers().await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("Failed to load peers for inbound Noise auth: {e}");
+            return HashMap::new();
+        }
+    };
+    let mut map = HashMap::new();
+    for peer in &peers {
+        if peer.participant_id == *self_id || peer.public_key.is_empty() {
+            continue;
+        }
+        match parse_public_key(&peer.public_key) {
+            Ok(pub_key) => {
+                map.insert(peer.participant_id.to_string(), pub_key);
+            }
+            Err(e) => tracing::warn!(
+                "Skipping inbound auth key for {} — unparseable public key: {e}",
+                peer.participant_id
+            ),
+        }
+    }
+    map
+}
+
 /// Handle an incoming Noise connection (either ping or invite)
 async fn handle_incoming_connection(
     socket: tokio::net::TcpStream,
     peer_addr: std::net::SocketAddr,
     keypair: Arc<NoiseKeypair>,
-    peer_keys: Arc<HashMap<String, secp256k1::PublicKey>>,
+    db: SqlitePool,
+    self_id: CantonId,
     triggers: WorkflowTriggers,
     last_seen: LastSeen,
 ) {
+    // Resolve the identity→public-key allowlist LIVE from the DB for this
+    // connection so a `/network-config` key correction authenticates inbound
+    // handshakes immediately, without a process restart (see `run_heartbeat`).
+    let peer_keys = Arc::new(build_peer_key_map(&db, &self_id).await);
     let keypair_for_closure = keypair.clone();
     let peer_keys_clone = peer_keys.clone();
     let our_public_key_hex = keypair.public_key_hex();
