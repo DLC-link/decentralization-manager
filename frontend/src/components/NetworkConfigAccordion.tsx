@@ -394,6 +394,7 @@ export const NetworkConfigAccordion = ({
                   <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>Name</TableCell>
                   <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>Address</TableCell>
                   <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>Public Key</TableCell>
+                  <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>Version</TableCell>
                 </TableRow>
               </TableHead>
             <TableBody>
@@ -416,6 +417,13 @@ export const NetworkConfigAccordion = ({
                     sx={{ fontFamily: "monospace", fontSize: "0.75rem", py: 1 }}
                   >
                     {truncateKey(selfEntry.public_key)}
+                  </TableCell>
+                  <TableCell
+                    sx={{ fontFamily: "monospace", fontSize: "0.75rem", py: 1, whiteSpace: "nowrap" }}
+                  >
+                    {getStat(selfEntry.participant_id)?.version ??
+                      nodeConfig?.version ??
+                      "—"}
                   </TableCell>
                 </TableRow>
               )}
@@ -464,6 +472,11 @@ export const NetworkConfigAccordion = ({
                       sx={{ fontFamily: "monospace", fontSize: "0.75rem", py: 1 }}
                     >
                       {truncateKey(p.public_key)}
+                    </TableCell>
+                    <TableCell
+                      sx={{ fontFamily: "monospace", fontSize: "0.75rem", py: 1, whiteSpace: "nowrap" }}
+                    >
+                      {st?.version ?? "—"}
                     </TableCell>
                   </TableRow>
                 );

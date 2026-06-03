@@ -288,6 +288,11 @@ pub struct ParticipantStatus {
     /// reported one (peers on older code report `None`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workflow: Option<WorkflowInfo>,
+    /// dec-party-manager version: this node's own version for the current
+    /// node, or the version a peer reported in its health response. `None` for
+    /// unreachable peers and peers on older code that don't report one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 /// Response for the participants status endpoint

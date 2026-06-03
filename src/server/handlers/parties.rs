@@ -913,6 +913,7 @@ async fn check_participants_status(
                     status: ConnectionStatus::CurrentNode,
                     latency_ms: None,
                     workflow: None,
+                    version: Some(env!("CARGO_PKG_VERSION").to_string()),
                 }
             }));
             continue;
@@ -933,6 +934,7 @@ async fn check_participants_status(
                     status: ConnectionStatus::HandshakeFailed,
                     latency_ms: None,
                     workflow: None,
+                    version: None,
                 };
             };
 
@@ -952,12 +954,13 @@ async fn check_participants_status(
                     // classify_health_reply extracts its workflow state (or None
                     // if the peer is on older code that doesn't answer Health).
                     let latency_ms = u64::try_from(started.elapsed().as_millis()).ok();
-                    let (status, workflow) = classify_health_reply(&response);
+                    let (status, workflow, version) = classify_health_reply(&response);
                     ParticipantStatus {
                         id: peer_id,
                         status,
                         latency_ms,
                         workflow,
+                        version,
                     }
                 }
                 Err(e) => {
@@ -977,6 +980,7 @@ async fn check_participants_status(
                         status,
                         latency_ms: None,
                         workflow: None,
+                        version: None,
                     }
                 }
             }

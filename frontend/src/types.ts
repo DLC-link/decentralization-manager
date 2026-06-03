@@ -129,6 +129,8 @@ export interface NodeConfig {
     network: Network;
   };
   test_mode?: boolean;
+  /** dec-party-manager binary version reported by the node. */
+  version?: string;
 }
 
 export interface Peer {
@@ -163,6 +165,8 @@ export interface ParticipantStatus {
   status: ConnectionStatus;
   latency_ms?: number;
   workflow?: WorkflowInfo;
+  /** dec-party-manager version reported by the node (self or peer). */
+  version?: string;
 }
 
 export interface KickRequest {
