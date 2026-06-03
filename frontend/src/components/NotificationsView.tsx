@@ -1532,7 +1532,9 @@ const WorkflowRunCard = ({
         run.dec_party_id ||
         run.new_threshold != null ||
         run.kicked_participant ||
-        (run.participants && run.participants.length > 0)) && (
+        (run.participants && run.participants.length > 0) ||
+        (run.package_names && run.package_names.length > 0) ||
+        (run.dar_filenames && run.dar_filenames.length > 0)) && (
         <Box
           sx={{
             display: "flex",
@@ -1647,6 +1649,48 @@ const WorkflowRunCard = ({
                     size="small"
                     variant="outlined"
                     label={truncatePartyId(id)}
+                  />
+                ))}
+              </Box>
+            </Box>
+          )}
+          {run.package_names && run.package_names.length > 0 && (
+            <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ minWidth: 96 }}
+              >
+                Packages ({run.package_names.length})
+              </Typography>
+              <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
+                {run.package_names.map((name) => (
+                  <Chip
+                    key={name}
+                    size="small"
+                    variant="outlined"
+                    label={name}
+                  />
+                ))}
+              </Box>
+            </Box>
+          )}
+          {run.dar_filenames && run.dar_filenames.length > 0 && (
+            <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ minWidth: 96 }}
+              >
+                DAR files ({run.dar_filenames.length})
+              </Typography>
+              <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
+                {run.dar_filenames.map((name) => (
+                  <Chip
+                    key={name}
+                    size="small"
+                    variant="outlined"
+                    label={name}
                   />
                 ))}
               </Box>

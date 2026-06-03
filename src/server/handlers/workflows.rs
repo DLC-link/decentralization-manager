@@ -27,12 +27,13 @@ use crate::{
         middleware::require_admin,
         respawn_coordinator,
         types::{
-            ContractsRequest, DarsInvitePayload, DarsRequest, ErrorResponse, HttpWorkflowState,
-            KickInvitePayload, KickRequest, KickResponse, KickStatus, MessageResponse,
-            MissingEdgeKind, MissingPeerEdge, OnboardingInvitePayload, OnboardingMeshErrorResponse,
-            OnboardingRequest, OnboardingResponse, OnboardingStatus, SuccessResponse,
-            WorkflowInFlightGuard, WorkflowKind, WorkflowProgress, WorkflowResponse, WorkflowRole,
-            WorkflowRun, WorkflowRunsResponse, WorkflowStatusResponse,
+            ContractsInvitePayload, ContractsRequest, DarsInvitePayload, DarsRequest,
+            ErrorResponse, HttpWorkflowState, KickInvitePayload, KickRequest, KickResponse,
+            KickStatus, MessageResponse, MissingEdgeKind, MissingPeerEdge, OnboardingInvitePayload,
+            OnboardingMeshErrorResponse, OnboardingRequest, OnboardingResponse, OnboardingStatus,
+            SuccessResponse, WorkflowInFlightGuard, WorkflowKind, WorkflowProgress,
+            WorkflowResponse, WorkflowRole, WorkflowRun, WorkflowRunsResponse,
+            WorkflowStatusResponse,
         },
     },
     workflow::{self, ContractsStep, DarsStep, KickStep, OnboardingStep, state::WorkflowStep},
@@ -183,6 +184,8 @@ where
         previous_threshold: None,
         new_threshold: None,
         kicked_participant: None,
+        package_names: Vec::new(),
+        dar_filenames: Vec::new(),
         error: None,
         dismissed: false,
         created_at: now,
@@ -1400,8 +1403,13 @@ pub async fn start_contracts(
         let _workflow_guard = workflow_guard; // releases cross-workflow gate on drop
 
         // Send invites to this party's members before starting coordinator workflow
-        let invite_result =
-            send_contracts_invites(&config, &db, &contracts_invitees_for_invites).await;
+        let invite_result = send_contracts_invites(
+            &config,
+            &db,
+            &contracts_config,
+            &contracts_invitees_for_invites,
+        )
+        .await;
         if let Err(e) = invite_result {
             tracing::error!("Failed to send contracts invites: {e}");
             let msg = format!("Failed to send invites: {e}");
@@ -1782,6 +1790,9 @@ async fn send_dars_invites(
 
     let payload = DarsInvitePayload {
         dar_filenames: dar_filenames.to_vec(),
+        // Carry the member set so the peer card shows the same participant
+        // list the coordinator shows.
+        participants: peer_ids.to_vec(),
     };
     let payload_bytes = serde_json::to_vec(&payload)?;
     let invite_message = Message::new(MessageType::InviteDars, payload_bytes);
@@ -2051,6 +2062,19 @@ pub async fn list_workflows(data: web::Data<AppState>) -> impl Responder {
 /// way Kick / Contracts / Dars runs (whose configs don't include a peer
 /// list) still surface their participants.
 fn enrich_from_config_json(run: &mut WorkflowRun) {
+    // A contract entry in a coordinator-side `ContractsConfig`. We only need
+    // its human-readable `name` for the card's "Packages" row.
+    #[derive(serde::Deserialize)]
+    struct ContractNameShape {
+        #[serde(default)]
+        name: String,
+    }
+    // A DAR entry in a coordinator-side `DarsConfig`.
+    #[derive(serde::Deserialize)]
+    struct DarFileShape {
+        #[serde(default)]
+        filename: String,
+    }
     #[derive(serde::Deserialize)]
     struct ConfigShape {
         #[serde(default)]
@@ -2066,6 +2090,18 @@ fn enrich_from_config_json(run: &mut WorkflowRun) {
         previous_threshold: Option<i32>,
         #[serde(default)]
         participant_id: Option<CantonId>,
+        // Contracts: `package_names` is the peer's flat list (from the invite);
+        // `contracts[].name` is the coordinator's `ContractsConfig`.
+        #[serde(default)]
+        package_names: Vec<String>,
+        #[serde(default)]
+        contracts: Vec<ContractNameShape>,
+        // Dars: `dar_filenames` is the peer's flat list (from the invite);
+        // `dar_files[].filename` is the coordinator's `DarsConfig`.
+        #[serde(default)]
+        dar_filenames: Vec<String>,
+        #[serde(default)]
+        dar_files: Vec<DarFileShape>,
     }
     if let Ok(shape) = serde_json::from_str::<ConfigShape>(&run.config_json) {
         let prefix = shape.prefix.or(shape.party_id_prefix);
@@ -2082,6 +2118,29 @@ fn enrich_from_config_json(run: &mut WorkflowRun) {
         // sent one (it defaults to 0); 0 means "unknown", render as new-only.
         run.previous_threshold = shape.previous_threshold.filter(|t| *t > 0);
         run.kicked_participant = shape.participant_id;
+        // Package names: peer's flat list wins; otherwise derive from the
+        // coordinator's contract definitions. Both converge to the same set.
+        if !shape.package_names.is_empty() {
+            run.package_names = shape.package_names;
+        } else if !shape.contracts.is_empty() {
+            run.package_names = shape
+                .contracts
+                .into_iter()
+                .map(|c| c.name)
+                .filter(|n| !n.is_empty())
+                .collect();
+        }
+        // DAR filenames: same peer-flat-list-vs-coordinator-config convergence.
+        if !shape.dar_filenames.is_empty() {
+            run.dar_filenames = shape.dar_filenames;
+        } else if !shape.dar_files.is_empty() {
+            run.dar_filenames = shape
+                .dar_files
+                .into_iter()
+                .map(|d| d.filename)
+                .filter(|n| !n.is_empty())
+                .collect();
+        }
     }
     // Fallback: if config_json didn't expose a participants list (e.g. Kick /
     // Contracts / Dars), surface the run's `expected_peers` instead so the
@@ -2385,6 +2444,7 @@ async fn broadcast_simple_message(
 async fn send_contracts_invites(
     config: &NodeConfig,
     db: &SqlitePool,
+    contracts_config: &workflow::ContractsConfig,
     invitees: &[CantonId],
 ) -> Result {
     let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
@@ -2392,7 +2452,22 @@ async fn send_contracts_invites(
 
     let current_participant_id = config.participant_id();
     let invitee_set: HashSet<&CantonId> = invitees.iter().collect();
-    let invite_message = Message::new_empty(MessageType::InviteContracts);
+    // Carry the dec party, member set, and package names so the peer card
+    // renders the same rich summary the coordinator shows (mirrors the Kick
+    // invite). De-dup package names; multiple contracts can share a package.
+    let mut package_names: Vec<String> = contracts_config
+        .contracts
+        .iter()
+        .map(|c| c.name.clone())
+        .collect();
+    package_names.dedup();
+    let payload = ContractsInvitePayload {
+        dec_party_id: contracts_config.decentralized_party_id.clone(),
+        participants: invitees.to_vec(),
+        package_names,
+    };
+    let payload_bytes = serde_json::to_vec(&payload).context("encode ContractsInvitePayload")?;
+    let invite_message = Message::new(MessageType::InviteContracts, payload_bytes);
 
     for peer in &network_config.peers {
         if peer.participant_id == *current_participant_id {
@@ -2492,6 +2567,100 @@ mod tests {
         let other = Message::new_empty(MessageType::Wait).to_bytes();
         assert!(interpret_invite_reply(&peer, "onboarding", &other).is_ok());
 
+        Ok(())
+    }
+
+    fn test_cid(prefix: &str) -> anyhow::Result<CantonId> {
+        let ns = format!("1220{:0>64}", "a");
+        CantonId::parse(&format!("{prefix}::{ns}"))
+    }
+
+    fn enrich_run(config_json: &str, expected_peers: Vec<CantonId>) -> WorkflowRun {
+        WorkflowRun {
+            instance_name: "t".to_string(),
+            kind: WorkflowKind::Contracts,
+            role: WorkflowRole::Coordinator,
+            status: WorkflowProgress::InProgress,
+            current_step: "Active".to_string(),
+            step_index: 0,
+            step_total: 5,
+            config_json: config_json.to_string(),
+            coordinator_pubkey: None,
+            coordinator_name: None,
+            expected_peers,
+            completed_peers: Vec::new(),
+            dec_party_id: None,
+            prefix: None,
+            participants: Vec::new(),
+            previous_threshold: None,
+            new_threshold: None,
+            kicked_participant: None,
+            package_names: Vec::new(),
+            dar_filenames: Vec::new(),
+            error: None,
+            dismissed: false,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn enrich_contracts_coordinator_surfaces_packages() -> anyhow::Result<()> {
+        let peers = vec![test_cid("node1")?, test_cid("node2")?];
+        let mut run = enrich_run(
+            r#"{"contracts":[{"name":"Governance Core"},{"name":"Token Custody"}]}"#,
+            peers.clone(),
+        );
+        enrich_from_config_json(&mut run);
+        assert_eq!(run.package_names, vec!["Governance Core", "Token Custody"]);
+        // Member set comes from expected_peers when config_json has no list.
+        assert_eq!(run.participants, peers);
+        Ok(())
+    }
+
+    #[test]
+    fn enrich_contracts_peer_surfaces_packages_and_participants() -> anyhow::Result<()> {
+        let peers = vec![test_cid("node1")?, test_cid("node2")?];
+        let peers_json = serde_json::to_string(&peers)?;
+        let mut run = enrich_run(
+            &format!(r#"{{"package_names":["Governance Core"],"participants":{peers_json}}}"#),
+            Vec::new(),
+        );
+        enrich_from_config_json(&mut run);
+        assert_eq!(run.package_names, vec!["Governance Core"]);
+        assert_eq!(run.participants, peers);
+        Ok(())
+    }
+
+    #[test]
+    fn enrich_dars_surfaces_filenames_without_dec_party() -> anyhow::Result<()> {
+        let mut run = enrich_run(
+            r#"{"dar_files":[{"filename":"app.dar"},{"filename":"lib.dar"}]}"#,
+            Vec::new(),
+        );
+        enrich_from_config_json(&mut run);
+        assert_eq!(run.dar_filenames, vec!["app.dar", "lib.dar"]);
+        assert!(run.dec_party_id.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn contracts_invite_payload_roundtrips_with_defaults() -> anyhow::Result<()> {
+        let payload = ContractsInvitePayload {
+            dec_party_id: test_cid("dec")?,
+            participants: vec![test_cid("node1")?],
+            package_names: vec!["Governance Core".to_string()],
+        };
+        let bytes = serde_json::to_vec(&payload)?;
+        let back: ContractsInvitePayload = serde_json::from_slice(&bytes)?;
+        assert_eq!(back.package_names, vec!["Governance Core"]);
+        assert_eq!(back.participants.len(), 1);
+        // A minimal payload (only the required dec party) still decodes, so an
+        // older coordinator stays compatible.
+        let minimal: ContractsInvitePayload =
+            serde_json::from_str(&format!(r#"{{"dec_party_id":"{}"}}"#, test_cid("dec")?))?;
+        assert!(minimal.participants.is_empty());
+        assert!(minimal.package_names.is_empty());
         Ok(())
     }
 }

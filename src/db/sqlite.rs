@@ -780,8 +780,9 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                 kicked_participant,
                 new_threshold,
                 previous_threshold,
-                dec_party_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                dec_party_id,
+                package_names
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ",
         )
         .bind(&row.id)
@@ -795,6 +796,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         .bind(row.new_threshold)
         .bind(row.previous_threshold)
         .bind(&row.dec_party_id)
+        .bind(&row.package_names)
         .execute(&mut **self)
         .await?;
 
@@ -1776,6 +1778,7 @@ mod tests {
             new_threshold: None,
             previous_threshold: None,
             dec_party_id: None,
+            package_names: Vec::new(),
         };
         let inv_b = PendingInvitation {
             id: "kick-bbbbbbbbbbbbbbbb".to_string(),
@@ -1790,6 +1793,7 @@ mod tests {
             new_threshold: Some(2),
             previous_threshold: Some(3),
             dec_party_id: Some(CantonId::parse(&format!("dec::{TEST_NS}")).unwrap()),
+            package_names: Vec::new(),
         };
 
         let mut tx = pool.begin_transaction().await?;
@@ -1810,6 +1814,7 @@ mod tests {
             new_threshold: None,
             previous_threshold: None,
             dec_party_id: None,
+            package_names: Vec::new(),
         };
         let mut tx = pool.begin_transaction().await?;
         tx.upsert_pending_invitation(&inv_c).await?;
@@ -1842,6 +1847,48 @@ mod tests {
             .await?;
         Commitable::commit(tx).await?;
         assert!(pool.get_all_pending_invitations().await?.is_empty());
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_contracts_pending_invitation_roundtrip(pool: SqlitePool) -> Result {
+        // A Contracts invite carries dec party + member set + package names so
+        // the peer card is as rich as the coordinator's. Confirm all three
+        // round-trip through the DB (validates migration 000011).
+        let inv = PendingInvitation {
+            id: "contracts-dddddddddddddddd".to_string(),
+            invitation_type: InvitationType::Contracts,
+            coordinator_pubkey: "dddddddddddddddddddddddddddddddd".to_string(),
+            coordinator_name: None,
+            received_at: 4000,
+            prefix: None,
+            participants: vec![
+                CantonId::parse(&format!("node1::{TEST_NS}")).unwrap(),
+                CantonId::parse(&format!("node2::{TEST_NS}")).unwrap(),
+            ],
+            dar_filenames: Vec::new(),
+            kicked_participant: None,
+            new_threshold: None,
+            previous_threshold: None,
+            dec_party_id: Some(CantonId::parse(&format!("dec::{TEST_NS}")).unwrap()),
+            package_names: vec!["Governance Core".to_string(), "Token Custody".to_string()],
+        };
+
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_pending_invitation(&inv).await?;
+        Commitable::commit(tx).await?;
+
+        let loaded = pool.get_all_pending_invitations().await?;
+        assert_eq!(loaded.len(), 1);
+        let got = &loaded[0];
+        assert_eq!(got.invitation_type, InvitationType::Contracts);
+        assert_eq!(got.participants.len(), 2);
+        assert_eq!(
+            got.dec_party_id.as_ref().map(CantonId::to_string),
+            Some(format!("dec::{TEST_NS}"))
+        );
+        assert_eq!(got.package_names, vec!["Governance Core", "Token Custody"]);
 
         Ok(())
     }
@@ -1892,6 +1939,8 @@ mod tests {
             previous_threshold: None,
             new_threshold: None,
             kicked_participant: None,
+            package_names: Vec::new(),
+            dar_filenames: Vec::new(),
             error: None,
             dismissed: false,
             created_at: 1000,

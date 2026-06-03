@@ -541,6 +541,14 @@ pub struct WorkflowRun {
     /// Kick runs only: the participant being kicked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kicked_participant: Option<CantonId>,
+    /// Contracts runs only: package/contract names being deployed. Lifted from
+    /// `config_json` by the API layer (not a DB column), same as `prefix`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub package_names: Vec<String>,
+    /// Dars runs only: DAR filenames being distributed. Lifted from
+    /// `config_json` by the API layer (not a DB column).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dar_filenames: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub dismissed: bool,
@@ -631,6 +639,10 @@ pub struct DeclineInvitationPayload {
 #[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct DarsInvitePayload {
     pub dar_filenames: Vec<String>,
+    /// The member set (selected peers) this distribution targets, so the peer
+    /// card can render the same participant list the coordinator shows.
+    #[serde(default)]
+    pub participants: Vec<CantonId>,
 }
 
 /// Payload sent inside an `InviteKick` Noise message — gives the peer enough
@@ -642,6 +654,19 @@ pub struct KickInvitePayload {
     pub kicked_participant: CantonId,
     pub new_threshold: i32,
     pub previous_threshold: i32,
+}
+
+/// Payload sent inside an `InviteContracts` Noise message — mirrors the rich
+/// Kick payload so the peer card can show the dec party, member set, and the
+/// package/contract names being deployed before the proposals arrive.
+#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ContractsInvitePayload {
+    pub dec_party_id: CantonId,
+    #[serde(default)]
+    pub participants: Vec<CantonId>,
+    /// Human-readable contract/package names (from `ContractDefinition.name`).
+    #[serde(default)]
+    pub package_names: Vec<String>,
 }
 
 /// A pending invitation from a coordinator
@@ -674,6 +699,10 @@ pub struct PendingInvitation {
     /// same "Dec party" row the coordinator shows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dec_party_id: Option<CantonId>,
+    /// Contracts-only: human-readable package/contract names being deployed,
+    /// so the peer card shows the same "Packages" row the coordinator shows.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub package_names: Vec<String>,
 }
 
 /// Response for pending invitations endpoint
@@ -2010,6 +2039,8 @@ mod tests {
             previous_threshold: None,
             new_threshold: None,
             kicked_participant: None,
+            package_names: Vec::new(),
+            dar_filenames: Vec::new(),
             error: None,
             dismissed: false,
             created_at: 1_700_000_000,

@@ -301,6 +301,8 @@ export interface WorkflowRun {
   prefix?: string;
   participants?: string[];
   dar_filenames?: string[];
+  /** Contracts runs only: package/contract names being deployed. */
+  package_names?: string[];
   /** Kick runs only: threshold before/after, for an "old → new" summary. */
   previous_threshold?: number;
   new_threshold?: number;

@@ -190,6 +190,7 @@ pub struct PendingInvitationRow {
     pub new_threshold: Option<i64>,
     pub previous_threshold: Option<i64>,
     pub dec_party_id: Option<String>,
+    pub package_names: Option<String>,
 }
 
 fn encode_list<T: serde::Serialize>(items: &[T], context_label: &str) -> Result<Option<String>> {
@@ -234,6 +235,7 @@ impl PendingInvitationRow {
             new_threshold: inv.new_threshold.map(i64::from),
             previous_threshold: inv.previous_threshold.map(i64::from),
             dec_party_id: inv.dec_party_id.as_ref().map(|p| p.to_string()),
+            package_names: encode_list(&inv.package_names, "pending invitation package_names")?,
         })
     }
 
@@ -248,6 +250,7 @@ impl PendingInvitationRow {
             .with_context(|| format!("invalid invitation_type for id {}", self.id))?;
         let participants = decode_list(self.participants, &self.id, "participants")?;
         let dar_filenames = decode_list(self.dar_filenames, &self.id, "dar_filenames")?;
+        let package_names = decode_list(self.package_names, &self.id, "package_names")?;
         let kicked_participant = self
             .kicked_participant
             .map(|s| CantonId::parse(&s))
@@ -271,6 +274,7 @@ impl PendingInvitationRow {
             new_threshold: self.new_threshold.map(|v| v as i32),
             previous_threshold: self.previous_threshold.map(|v| v as i32),
             dec_party_id,
+            package_names,
         })
     }
 }
@@ -400,14 +404,16 @@ impl WorkflowRunRow {
             expected_peers,
             completed_peers,
             dec_party_id,
-            // `prefix` + `participants` + thresholds are derived from
-            // `config_json` at the API layer; the DB doesn't store them as
-            // columns.
+            // `prefix` + `participants` + thresholds + package/dar names are
+            // derived from `config_json` at the API layer; the DB doesn't store
+            // them as columns.
             prefix: None,
             participants: Vec::new(),
             previous_threshold: None,
             new_threshold: None,
             kicked_participant: None,
+            package_names: Vec::new(),
+            dar_filenames: Vec::new(),
             error: self.error,
             dismissed: self.dismissed != 0,
             created_at: self.created_at,

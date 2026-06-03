@@ -81,21 +81,24 @@ async fn insert_peer_run(
             "participant_id": invitation.kicked_participant,
             "new_threshold": invitation.new_threshold,
             "previous_threshold": invitation.previous_threshold,
+            "package_names": invitation.package_names,
         })
         .to_string(),
         coordinator_pubkey: Some(invitation.coordinator_pubkey.clone()),
         coordinator_name: None,
-        // For onboarding the participants list is the authoritative peer
-        // set. For other kinds we don't get a list from the invite.
+        // For onboarding/contracts/dars the participants list is the
+        // authoritative peer set carried in the invite. Kick doesn't send one.
         expected_peers: invitation.participants.clone(),
         completed_peers: Vec::new(),
-        // Kick invites carry the target dec party; other invite kinds don't.
+        // Kick + contracts invites carry the target dec party; others don't.
         dec_party_id: invitation.dec_party_id.clone(),
         prefix: None,
         participants: Vec::new(),
         previous_threshold: None,
         new_threshold: None,
         kicked_participant: None,
+        package_names: Vec::new(),
+        dar_filenames: Vec::new(),
         error: None,
         dismissed: false,
         created_at: now,

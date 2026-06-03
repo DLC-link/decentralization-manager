@@ -161,6 +161,7 @@ enum InvitationMeta {
     Onboarding(OnboardingInvitePayload),
     Dars(DarsInvitePayload),
     Kick(KickInvitePayload),
+    Contracts(ContractsInvitePayload),
 }
 
 /// On boot, re-spawn any InProgress workflow runs that were interrupted by the
@@ -705,6 +706,7 @@ impl WorkflowTriggers {
         let mut new_threshold = None;
         let mut previous_threshold = None;
         let mut dec_party_id = None;
+        let mut package_names = Vec::new();
         match meta {
             InvitationMeta::None => {}
             InvitationMeta::Onboarding(p) => {
@@ -713,12 +715,18 @@ impl WorkflowTriggers {
             }
             InvitationMeta::Dars(p) => {
                 dar_filenames = p.dar_filenames;
+                participants = p.participants;
             }
             InvitationMeta::Kick(p) => {
                 kicked_participant = Some(p.kicked_participant);
                 new_threshold = Some(p.new_threshold);
                 previous_threshold = Some(p.previous_threshold);
                 dec_party_id = Some(p.dec_party_id);
+            }
+            InvitationMeta::Contracts(p) => {
+                dec_party_id = Some(p.dec_party_id);
+                participants = p.participants;
+                package_names = p.package_names;
             }
         }
         let invitation = PendingInvitation {
@@ -741,6 +749,7 @@ impl WorkflowTriggers {
             new_threshold,
             previous_threshold,
             dec_party_id,
+            package_names,
         };
 
         match self.db.begin_transaction().await {
@@ -1982,7 +1991,19 @@ async fn handle_incoming_connection(
                                             }
                                         }
                                     }
-                                    _ => InvitationMeta::None,
+                                    InvitationType::Contracts => {
+                                        match serde_json::from_slice::<ContractsInvitePayload>(
+                                            &msg.payload,
+                                        ) {
+                                            Ok(p) => InvitationMeta::Contracts(p),
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    "Contracts invite payload was unparseable: {e}"
+                                                );
+                                                InvitationMeta::None
+                                            }
+                                        }
+                                    }
                                 }
                             };
                             if let Some(ref pubkey) = peer_pubkey_hex {
