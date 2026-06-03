@@ -813,6 +813,25 @@ export interface UserServicesResponse {
   services: UserServiceInfo[];
 }
 
+/** A pending CredentialOffer visible to the party. Free offers where the
+ *  party is the holder are the ones the Accept Free Credential forms can
+ *  take. */
+export interface CredentialOfferInfo {
+  contract_id: string;
+  operator: string;
+  issuer: string;
+  holder: string;
+  /** The credential's identifier (the template's `id` field). */
+  credential_id: string;
+  description: string;
+  /** True when the offer carries no billing params (acceptable for free). */
+  is_free: boolean;
+}
+
+export interface CredentialOffersResponse {
+  credential_offers: CredentialOfferInfo[];
+}
+
 export interface RegistrarServiceInfo {
   contract_id: string;
   operator: string;

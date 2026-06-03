@@ -1771,6 +1771,31 @@ pub struct UserServicesResponse {
     pub services: Vec<UserServiceInfo>,
 }
 
+/// A pending `Utility.Credential.App.V0.Model.Offer:CredentialOffer` visible
+/// to the party. The accept-free-credential forms list offers where the party
+/// is the `holder`, so the CredentialOffer cid no longer has to be pasted in
+/// by hand.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct CredentialOfferInfo {
+    pub contract_id: String,
+    pub operator: CantonId,
+    pub issuer: CantonId,
+    pub holder: CantonId,
+    /// The template's `id` field — the credential's identifier.
+    pub credential_id: String,
+    pub description: String,
+    /// True when the offer carries no `billingParams`, i.e. it can be taken
+    /// with `CredentialOffer_AcceptFree` (the only direction the
+    /// AcceptFreeCredential governance action supports).
+    pub is_free: bool,
+}
+
+/// Response for the credential offers endpoint
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct CredentialOffersResponse {
+    pub credential_offers: Vec<CredentialOfferInfo>,
+}
+
 /// Information about a RegistrarService contract
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct RegistrarServiceInfo {

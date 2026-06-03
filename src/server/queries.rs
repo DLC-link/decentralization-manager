@@ -30,11 +30,12 @@ use super::{
         fetch_package_id_to_name, fetch_package_names, newest_matching_names, package_name_prefix,
     },
     types::{
-        AcceptTransferDetails, ActionType, ContractInfo, ContractWithBlob, DomainGovernanceAction,
-        GovernanceAction, GovernanceConfirmation, GovernanceState, HoldingInfo, InstrumentInfo,
-        PartyMetadata, PendingAction, ProviderServiceInfo, RegistrarServiceInfo,
-        ServiceRequestDetails, TokenRequestInfo, TransferFactoryInfo, TransferInstructionInfo,
-        TransferInstructionStatus, TransferProposalDetails, UserServiceInfo, VaultInfo,
+        AcceptTransferDetails, ActionType, ContractInfo, ContractWithBlob, CredentialOfferInfo,
+        DomainGovernanceAction, GovernanceAction, GovernanceConfirmation, GovernanceState,
+        HoldingInfo, InstrumentInfo, PartyMetadata, PendingAction, ProviderServiceInfo,
+        RegistrarServiceInfo, ServiceRequestDetails, TokenRequestInfo, TransferFactoryInfo,
+        TransferInstructionInfo, TransferInstructionStatus, TransferProposalDetails,
+        UserServiceInfo, VaultInfo,
     },
 };
 
@@ -184,6 +185,15 @@ fn user_service_template(packages: &PackageConfig) -> Option<TemplateId> {
         package_id: pkg.clone(),
         module_name: "Utility.Credential.App.V0.Service.User",
         entity_name: "UserService",
+    })
+}
+
+/// CredentialOffer template identifier
+fn credential_offer_template(packages: &PackageConfig) -> Option<TemplateId> {
+    packages.utility_credential.as_ref().map(|pkg| TemplateId {
+        package_id: pkg.clone(),
+        module_name: "Utility.Credential.App.V0.Model.Offer",
+        entity_name: "CredentialOffer",
     })
 }
 
@@ -2457,6 +2467,184 @@ fn extract_user_service_info(created: &CreatedEvent) -> Option<UserServiceInfo> 
 }
 
 // ============================================================================
+// Credential Offer Queries
+// ============================================================================
+
+/// Get all CredentialOffer contracts visible to a party. Includes offers in
+/// both directions (party as `holder` or as `issuer`); the caller filters for
+/// the side it needs.
+pub async fn get_credential_offers(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    test_mode: bool,
+    packages: &PackageConfig,
+) -> Result<Vec<CredentialOfferInfo>> {
+    if test_mode {
+        fetch_credential_offers_with_wildcard(config, party_id, token).await
+    } else {
+        match credential_offer_template(packages) {
+            Some(template) => {
+                fetch_credential_offers_for_template(config, party_id, token, &template).await
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+}
+
+/// Fetch credential offers using WildcardFilter (for test mode)
+async fn fetch_credential_offers_with_wildcard(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+) -> Result<Vec<CredentialOfferInfo>> {
+    let mut state_client = utils::create_state_client(config, token).await?;
+
+    let ledger_end = state_client
+        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
+        .await?
+        .into_inner()
+        .offset;
+
+    let mut filters_by_party = HashMap::new();
+    filters_by_party.insert(
+        party_id.to_string(),
+        Filters {
+            cumulative: vec![CumulativeFilter {
+                identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
+                    WildcardFilter {
+                        include_created_event_blob: false,
+                    },
+                )),
+            }],
+        },
+    );
+
+    let acs_request = GetActiveContractsRequest {
+        active_at_offset: ledger_end,
+        event_format: Some(EventFormat {
+            filters_by_party,
+            filters_for_any_party: None,
+            verbose: true,
+        }),
+    };
+
+    let mut stream = state_client
+        .get_active_contracts(acs_request)
+        .await?
+        .into_inner();
+
+    let mut offers = Vec::new();
+    while let Some(response) = stream.message().await? {
+        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
+            && let Some(created) = active.created_event
+            && let Some(template_id) = &created.template_id
+            && template_id.module_name == "Utility.Credential.App.V0.Model.Offer"
+            && template_id.entity_name == "CredentialOffer"
+            && let Some(info) = extract_credential_offer_info(&created)
+        {
+            offers.push(info);
+        }
+    }
+
+    Ok(offers)
+}
+
+/// Fetch credential offers using TemplateFilter
+async fn fetch_credential_offers_for_template(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    template: &TemplateId,
+) -> Result<Vec<CredentialOfferInfo>> {
+    let mut state_client = utils::create_state_client(config, token).await?;
+
+    let ledger_end = state_client
+        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
+        .await?
+        .into_inner()
+        .offset;
+
+    let mut filters_by_party = HashMap::new();
+    filters_by_party.insert(
+        party_id.to_string(),
+        Filters {
+            cumulative: vec![CumulativeFilter {
+                identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
+                    TemplateFilter {
+                        template_id: Some(Identifier {
+                            package_id: template.package_id.clone(),
+                            module_name: template.module_name.to_string(),
+                            entity_name: template.entity_name.to_string(),
+                        }),
+                        include_created_event_blob: false,
+                    },
+                )),
+            }],
+        },
+    );
+
+    let acs_request = GetActiveContractsRequest {
+        active_at_offset: ledger_end,
+        event_format: Some(EventFormat {
+            filters_by_party,
+            filters_for_any_party: None,
+            verbose: true,
+        }),
+    };
+
+    let mut stream = state_client
+        .get_active_contracts(acs_request)
+        .await?
+        .into_inner();
+
+    let mut offers = Vec::new();
+    while let Some(response) = stream.message().await? {
+        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
+            && let Some(created) = active.created_event
+            && let Some(info) = extract_credential_offer_info(&created)
+        {
+            offers.push(info);
+        }
+    }
+
+    Ok(offers)
+}
+
+/// Extract CredentialOfferInfo from a CredentialOffer created event. An offer
+/// is free when its `billingParams : Optional BillingParams` field is `None` —
+/// only those can be taken via `CredentialOffer_AcceptFree`.
+fn extract_credential_offer_info(created: &CreatedEvent) -> Option<CredentialOfferInfo> {
+    let record = created.create_arguments.as_ref()?;
+
+    let operator: CantonId = field_party(record, "operator")?.parse().ok()?;
+    let issuer: CantonId = field_party(record, "issuer")?.parse().ok()?;
+    let holder: CantonId = field_party(record, "holder")?.parse().ok()?;
+    let credential_id = field_text(record, "id")?;
+    let description = field_text(record, "description").unwrap_or_default();
+
+    let has_billing_params = record
+        .fields
+        .iter()
+        .find(|f| f.label == "billingParams")
+        .and_then(|f| f.value.as_ref())
+        .is_some_and(|v| match &v.sum {
+            Some(value::Sum::Optional(opt)) => opt.value.is_some(),
+            _ => false,
+        });
+
+    Some(CredentialOfferInfo {
+        contract_id: created.contract_id.clone(),
+        operator,
+        issuer,
+        holder,
+        credential_id,
+        description,
+        is_free: !has_billing_params,
+    })
+}
+
+// ============================================================================
 // Registrar Service Queries
 // ============================================================================
 
@@ -3934,7 +4122,9 @@ mod tests {
     // constructor match and the `executeBefore` deadline check.
     // ------------------------------------------------------------------------
 
-    use canton_proto_rs::com::daml::ledger::api::v2::{InterfaceView, RecordField, Variant};
+    use canton_proto_rs::com::daml::ledger::api::v2::{
+        InterfaceView, Optional, RecordField, Variant,
+    };
 
     fn field(label: &str, value: Value) -> RecordField {
         RecordField {
@@ -4145,5 +4335,94 @@ mod tests {
             field("operator", party_value(&format!("operator::{SR_FP}"))),
         ]);
         assert!(extract_service_request_details(&record).is_none());
+    }
+
+    // ------------------------------------------------------------------------
+    // extract_credential_offer_info
+    //
+    // `Utility.Credential.App.V0.Model.Offer:CredentialOffer` carries the
+    // issuer/holder parties, the credential id/description, and an optional
+    // `billingParams`. Offers with `billingParams = None` are free and the only
+    // kind `AcceptFreeCredential` can take, so the extractor surfaces that as
+    // `is_free` for the accept-form dropdown to filter on.
+    // ------------------------------------------------------------------------
+
+    fn optional_value(inner: Option<Value>) -> Value {
+        Value {
+            sum: Some(value::Sum::Optional(Box::new(Optional {
+                value: inner.map(Box::new),
+            }))),
+        }
+    }
+
+    /// A CredentialOffer created event; `billing_params` is the raw value of
+    /// the template's `billingParams : Optional BillingParams` field.
+    fn credential_offer_event(billing_params: Value) -> CreatedEvent {
+        let record = Record {
+            record_id: None,
+            fields: vec![
+                field("operator", party_value(&format!("operator::{SR_FP}"))),
+                field("issuer", party_value(&format!("issuer::{SR_FP}"))),
+                field("holder", party_value(&format!("holder::{SR_FP}"))),
+                field("dso", party_value(&format!("dso::{SR_FP}"))),
+                field("id", text_value("provider-service-credential")),
+                field("description", text_value("Provider service access")),
+                field("billingParams", billing_params),
+                field("depositInitialAmountUsd", optional_value(None)),
+            ],
+        };
+        CreatedEvent {
+            offset: 0,
+            node_id: 0,
+            contract_id: "offer-cid-1".to_string(),
+            template_id: None,
+            contract_key: None,
+            create_arguments: Some(record),
+            created_event_blob: vec![],
+            interface_views: vec![],
+            witness_parties: vec![],
+            signatories: vec![],
+            observers: vec![],
+            created_at: None,
+            package_name: String::new(),
+            representative_package_id: String::new(),
+            acs_delta: false,
+        }
+    }
+
+    #[test]
+    fn extract_credential_offer_info_reads_free_offer() {
+        let event = credential_offer_event(optional_value(None));
+        let Some(info) = extract_credential_offer_info(&event) else {
+            panic!("free offer should yield info");
+        };
+        assert_eq!(info.contract_id, "offer-cid-1");
+        assert_eq!(info.operator.to_string(), format!("operator::{SR_FP}"));
+        assert_eq!(info.issuer.to_string(), format!("issuer::{SR_FP}"));
+        assert_eq!(info.holder.to_string(), format!("holder::{SR_FP}"));
+        assert_eq!(info.credential_id, "provider-service-credential");
+        assert_eq!(info.description, "Provider service access");
+        assert!(info.is_free);
+    }
+
+    #[test]
+    fn extract_credential_offer_info_marks_paid_offer_not_free() {
+        let billing = optional_value(Some(record_value(vec![field(
+            "billingPeriodDuration",
+            text_value("placeholder"),
+        )])));
+        let Some(info) = extract_credential_offer_info(&credential_offer_event(billing)) else {
+            panic!("paid offer should still yield info");
+        };
+        assert!(!info.is_free);
+    }
+
+    #[test]
+    fn extract_credential_offer_info_skips_event_without_holder() {
+        let mut event = credential_offer_event(optional_value(None));
+        if let Some(record) = event.create_arguments.as_mut() {
+            record.fields.retain(|f| f.label != "holder");
+        }
+        assert!(extract_credential_offer_info(&event).is_none());
     }
 }

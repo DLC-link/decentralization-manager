@@ -30,11 +30,11 @@ use crate::{
         chain_audit,
         middleware::require_admin,
         queries::{
-            ContractQueryParams as QueryContractParams, get_governance_confirmations,
-            get_governance_state as query_governance_state, get_holdings, get_instruments,
-            get_open_burn_requests, get_open_mint_requests, get_open_transfer_instructions,
-            get_provider_services, get_registrar_services, get_transfer_factories,
-            get_user_services, get_vaults, query_contracts_by_template,
+            ContractQueryParams as QueryContractParams, get_credential_offers,
+            get_governance_confirmations, get_governance_state as query_governance_state,
+            get_holdings, get_instruments, get_open_burn_requests, get_open_mint_requests,
+            get_open_transfer_instructions, get_provider_services, get_registrar_services,
+            get_transfer_factories, get_user_services, get_vaults, query_contracts_by_template,
             resolve_contract_package_ref,
         },
         transfer_context::{
@@ -44,13 +44,14 @@ use crate::{
         types::{
             AuditLogEntry, AuditLogQuery, AuditLogResponse, BurnRequestsResponse,
             CancelConfirmationRequest, ChainAuditEntry, ChainAuditQuery, ChainAuditResponse,
-            ConfirmActionRequest, ContractQueryResponse, ErrorResponse, ExecuteActionRequest,
-            ExpireConfirmationRequest, GovernanceResponse, GovernanceStateResponse, GovernanceType,
-            HoldingsResponse, InstrumentsResponse, KnownMember, KnownMembersResponse,
-            MessageResponse, MintRequestsResponse, NetworkInfo, OperatorInfo, ProposalType,
-            ProposeActionRequest, ProviderServicesResponse, RegistrarServicesResponse,
-            TransferFactoriesResponse, TransferFactoryInfo, TransferInstructionsResponse,
-            TransferPreapprovalsResponse, UserServicesResponse, VaultsResponse,
+            ConfirmActionRequest, ContractQueryResponse, CredentialOffersResponse, ErrorResponse,
+            ExecuteActionRequest, ExpireConfirmationRequest, GovernanceResponse,
+            GovernanceStateResponse, GovernanceType, HoldingsResponse, InstrumentsResponse,
+            KnownMember, KnownMembersResponse, MessageResponse, MintRequestsResponse, NetworkInfo,
+            OperatorInfo, ProposalType, ProposeActionRequest, ProviderServicesResponse,
+            RegistrarServicesResponse, TransferFactoriesResponse, TransferFactoryInfo,
+            TransferInstructionsResponse, TransferPreapprovalsResponse, UserServicesResponse,
+            VaultsResponse,
         },
     },
     utils,
@@ -405,6 +406,39 @@ pub async fn get_user_services_handler(
             tracing::error!("Failed to fetch user services: {e}");
             HttpResponse::InternalServerError().json(ErrorResponse {
                 error: format!("Failed to fetch user services: {e}"),
+            })
+        }
+    }
+}
+
+/// Get CredentialOffer contracts visible to the party
+#[utoipa::path(
+    tag = "Services",
+    params(GovernanceQuery),
+    responses(
+        (status = 200, description = "Credential offers", body = CredentialOffersResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+#[get("/credential-offers")]
+pub async fn get_credential_offers_handler(
+    data: web::Data<AppState>,
+    query: web::Query<GovernanceQuery>,
+) -> impl Responder {
+    let party_id = &query.party_id;
+
+    let token = get_party_token(&data, party_id).await;
+    let test_mode = data.test_mode;
+    let packages = packages();
+
+    match get_credential_offers(&data.config, party_id, token, test_mode, &packages).await {
+        Ok(credential_offers) => {
+            HttpResponse::Ok().json(CredentialOffersResponse { credential_offers })
+        }
+        Err(e) => {
+            tracing::error!("Failed to fetch credential offers: {e}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch credential offers: {e}"),
             })
         }
     }
