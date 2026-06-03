@@ -1483,6 +1483,14 @@ pub struct GovernanceResponse {
     /// `CONTRACT_NOT_FOUND` on stale ids.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rules_contract_id: Option<String>,
+    /// True when the active governance-core rules contract is under an older
+    /// package than configured (see `GovernanceState::out_of_date`).
+    #[serde(default)]
+    pub gov_core_out_of_date: bool,
+    /// The package ref the rules contract actually lives under (for display
+    /// in the out-of-date warning).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gov_core_package_ref: Option<String>,
 }
 
 /// Request to expire a stale confirmation
@@ -1513,6 +1521,15 @@ pub struct GovernanceState {
     pub threshold: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub action_confirmation_timeout_microseconds: Option<i64>,
+    /// The package-name ref the active rules contract actually lives under,
+    /// e.g. `#governance-core-v0-rc4`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub package_ref: Option<String>,
+    /// True when the active governance-core rules contract was found under an
+    /// older package than the configured `governance_core` ref (a fallback
+    /// hit) — the party should be migrated to the latest package.
+    #[serde(default)]
+    pub out_of_date: bool,
 }
 
 /// Response for the governance state endpoint

@@ -4,6 +4,7 @@ mod audit;
 mod chain_audit;
 mod handlers;
 mod middleware;
+mod package_inventory;
 mod queries;
 mod transfer_context;
 mod types;

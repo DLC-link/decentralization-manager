@@ -3287,6 +3287,17 @@ export const GovernanceSection = ({
           </Alert>
         )}
 
+        {(data?.gov_core_out_of_date || governanceState?.out_of_date) && (
+          <Alert severity="warning" sx={{ mb: 2 }}>
+            The governance core contract is out of date
+            {data?.gov_core_package_ref || governanceState?.package_ref
+              ? ` (running on ${data?.gov_core_package_ref || governanceState?.package_ref})`
+              : ""}
+            . Actions are executed against the old package — the party should
+            be migrated to the latest governance-core package.
+          </Alert>
+        )}
+
         {view !== "actions" && (
         <Box sx={{ mb: 2 }}>
           <Autocomplete

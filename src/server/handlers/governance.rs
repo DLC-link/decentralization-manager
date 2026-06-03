@@ -35,6 +35,7 @@ use crate::{
             get_open_burn_requests, get_open_mint_requests, get_open_transfer_instructions,
             get_provider_services, get_registrar_services, get_transfer_factories,
             get_user_services, get_vaults, query_contracts_by_template,
+            resolve_contract_package_ref,
         },
         transfer_context::{
             AcceptTransferContext, ProposeTransferArgs, fetch as fetch_accept_transfer_context,
@@ -116,15 +117,20 @@ pub async fn get_governance(
     // threshold, which is a separate value used for signing
     // PartyToParticipant updates. Falling back to the DNS threshold for
     // historical compatibility only when the gov state isn't reachable.
-    let (rules_contract_id, gov_state_threshold) =
+    let (rules_contract_id, gov_state_threshold, gov_core_out_of_date, gov_core_package_ref) =
         match query_governance_state(&data.config, party_id, token.clone(), test_mode, &packages)
             .await
         {
-            Ok(Some(state)) => (Some(state.contract_id), Some(state.threshold as usize)),
-            Ok(None) => (None, None),
+            Ok(Some(state)) => (
+                Some(state.contract_id),
+                Some(state.threshold as usize),
+                state.out_of_date,
+                state.package_ref,
+            ),
+            Ok(None) => (None, None, false, None),
             Err(e) => {
                 tracing::warn!("Failed to fetch active rules contract: {e}");
-                (None, None)
+                (None, None, false, None)
             }
         };
     let threshold = match gov_state_threshold {
@@ -148,6 +154,8 @@ pub async fn get_governance(
             threshold,
             member_party_id,
             rules_contract_id,
+            gov_core_out_of_date,
+            gov_core_package_ref,
         }),
         Err(e) => {
             tracing::error!("Failed to fetch governance confirmations: {e}");
@@ -1292,8 +1300,19 @@ pub async fn propose_action(
         }
     };
 
+    // The rules contract may be an out-of-date fallback living under an older
+    // governance-core package — exercise it under its actual package ref.
+    let rules_package_ref = resolve_contract_package_ref(
+        &data.config,
+        party_id,
+        Some(token.clone()),
+        &body.rules_contract_id,
+        governance_core_pkg,
+    )
+    .await;
+
     let confirm_template = Identifier {
-        package_id: governance_core_pkg.to_string(),
+        package_id: rules_package_ref,
         module_name: "Governance.Rules".to_string(),
         entity_name: "GovernanceRules".to_string(),
     };
@@ -1981,7 +2000,7 @@ async fn execute_confirm_action(
 ) -> Result {
     let member_party_id_str = member_party_id.to_string();
     let member_party_id = member_party_id_str.as_str();
-    let (template_id, choice, choice_argument) = match request.governance_type {
+    let (mut template_id, choice, choice_argument) = match request.governance_type {
         GovernanceType::Vault => {
             let pkg = packages
                 .vault_governance
@@ -2035,6 +2054,22 @@ async fn execute_confirm_action(
             )
         }
     };
+
+    // The rules contract may be an out-of-date fallback living under an older
+    // governance-core package — exercise it under its actual package ref.
+    if matches!(
+        request.governance_type,
+        GovernanceType::CoreSelf | GovernanceType::CoreDomain
+    ) {
+        template_id.package_id = resolve_contract_package_ref(
+            config,
+            &request.party_id,
+            Some(token.to_string()),
+            &request.rules_contract_id,
+            &template_id.package_id,
+        )
+        .await;
+    }
 
     let channel = tonic::transport::Channel::from_shared(config.ledger_api_url())?
         .connect()
@@ -2090,7 +2125,7 @@ async fn execute_confirmed_action(
 ) -> Result {
     let member_party_id_str = member_party_id.to_string();
     let member_party_id = member_party_id_str.as_str();
-    let (template_id, choice, choice_argument) = match request.governance_type {
+    let (mut template_id, choice, choice_argument) = match request.governance_type {
         GovernanceType::Vault => {
             let pkg = packages
                 .vault_governance
@@ -2154,6 +2189,22 @@ async fn execute_confirmed_action(
             )
         }
     };
+
+    // The rules contract may be an out-of-date fallback living under an older
+    // governance-core package — exercise it under its actual package ref.
+    if matches!(
+        request.governance_type,
+        GovernanceType::CoreSelf | GovernanceType::CoreDomain
+    ) {
+        template_id.package_id = resolve_contract_package_ref(
+            config,
+            &request.party_id,
+            Some(token.to_string()),
+            &request.rules_contract_id,
+            &template_id.package_id,
+        )
+        .await;
+    }
 
     // For `AcceptTransferProposal` execution the executor's submission must
     // include the registry-supplied disclosed contracts (transfer rule + its
@@ -2294,7 +2345,7 @@ async fn execute_expire_confirmation(
         })),
     };
 
-    let (template_id, choice) = match request.governance_type {
+    let (mut template_id, choice) = match request.governance_type {
         GovernanceType::Vault => {
             let pkg = packages
                 .vault_governance
@@ -2344,6 +2395,22 @@ async fn execute_expire_confirmation(
             )
         }
     };
+
+    // The rules contract may be an out-of-date fallback living under an older
+    // governance-core package — exercise it under its actual package ref.
+    if matches!(
+        request.governance_type,
+        GovernanceType::CoreSelf | GovernanceType::CoreDomain
+    ) {
+        template_id.package_id = resolve_contract_package_ref(
+            config,
+            &request.party_id,
+            Some(token.to_string()),
+            &request.rules_contract_id,
+            &template_id.package_id,
+        )
+        .await;
+    }
 
     let channel = tonic::transport::Channel::from_shared(config.ledger_api_url())?
         .connect()
@@ -2399,7 +2466,7 @@ async fn execute_cancel_confirmation(
 ) -> Result {
     let member_party_id_str = member_party_id.to_string();
     let member_party_id = member_party_id_str.as_str();
-    let (template_id, choice) = match request.governance_type {
+    let (mut template_id, choice) = match request.governance_type {
         GovernanceType::Vault => {
             let pkg = packages
                 .vault_governance
@@ -2446,6 +2513,23 @@ async fn execute_cancel_confirmation(
             )
         }
     };
+
+    // The confirmation contract is created by the rules contract's choice, so
+    // it shares the rules contract's (possibly out-of-date) package —
+    // exercise it under its actual package ref.
+    if matches!(
+        request.governance_type,
+        GovernanceType::CoreSelf | GovernanceType::CoreDomain
+    ) {
+        template_id.package_id = resolve_contract_package_ref(
+            config,
+            &request.party_id,
+            Some(token.to_string()),
+            &request.confirmation_cid,
+            &template_id.package_id,
+        )
+        .await;
+    }
 
     let channel = tonic::transport::Channel::from_shared(config.ledger_api_url())?
         .connect()

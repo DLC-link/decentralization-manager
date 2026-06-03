@@ -26,6 +26,9 @@ use crate::{
 
 use super::{
     action_serializer,
+    package_inventory::{
+        fetch_package_id_to_name, fetch_package_names, newest_matching_names, package_name_prefix,
+    },
     types::{
         AcceptTransferDetails, ActionType, ContractInfo, ContractWithBlob, DomainGovernanceAction,
         GovernanceAction, GovernanceConfirmation, GovernanceState, HoldingInfo, InstrumentInfo,
@@ -332,7 +335,7 @@ pub fn sort_contracts(contracts: &mut Vec<ContractInfo>) {
     });
 }
 
-fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
+pub(crate) fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
     let mut ai = a.split('.');
     let mut bi = b.split('.');
     loop {
@@ -1428,7 +1431,12 @@ pub async fn get_governance_state(
             match fetch_governance_state_for_template(config, party_id, token.clone(), &template)
                 .await
             {
-                Ok(Some(state)) => return Ok(Some(state)),
+                Ok(Some(mut state)) => {
+                    // Found under the configured package — not out of date.
+                    state.package_ref = Some(template.package_id.clone());
+                    state.out_of_date = false;
+                    return Ok(Some(state));
+                }
                 Ok(None) => continue,
                 Err(e) => {
                     let err_str = e.to_string();
@@ -1443,8 +1451,66 @@ pub async fn get_governance_state(
                 }
             }
         }
-        Ok(None)
+        // Nothing under the configured packages — look for a GovernanceRules
+        // contract under an older governance-core package version still
+        // uploaded to the participant.
+        fetch_governance_state_fallback(config, party_id, token, packages).await
     }
+}
+
+/// Look for a GovernanceRules contract under any OLDER governance-core
+/// package version present on the participant. Runs only after the
+/// configured templates yielded nothing; returns the newest match tagged
+/// `out_of_date` with the package ref it actually lives under.
+async fn fetch_governance_state_fallback(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    packages: &PackageConfig,
+) -> Result<Option<GovernanceState>> {
+    let Some(configured) = packages.governance_core.as_deref() else {
+        return Ok(None);
+    };
+    let names = match fetch_package_names(config).await {
+        Ok(names) => names,
+        Err(e) => {
+            tracing::warn!("Fallback gov-core discovery: cannot list packages: {e:#}");
+            return Ok(None);
+        }
+    };
+    let prefix = package_name_prefix(configured);
+    let configured_name = configured.trim_start_matches('#');
+    for name in newest_matching_names(&names, &prefix) {
+        // The configured name was already tried by the caller.
+        if name == configured_name {
+            continue;
+        }
+        let template = TemplateId {
+            package_id: format!("#{name}"),
+            module_name: "Governance.Rules",
+            entity_name: "GovernanceRules",
+        };
+        match fetch_governance_state_for_template(config, party_id, token.clone(), &template).await
+        {
+            Ok(Some(mut state)) => {
+                tracing::warn!(
+                    "GovernanceRules contract for {party_id} found under fallback package \
+                     #{name} (configured {configured}); flagging as out of date"
+                );
+                state.package_ref = Some(template.package_id);
+                state.out_of_date = true;
+                return Ok(Some(state));
+            }
+            Ok(None) => continue,
+            Err(e) => {
+                if !e.to_string().contains("PACKAGE_NAMES_NOT_FOUND") {
+                    tracing::warn!("Fallback gov-core query for #{name} failed: {e}");
+                }
+                continue;
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Fetch governance state using WildcardFilter (for test mode)
@@ -1621,7 +1687,90 @@ fn extract_governance_state(created: &CreatedEvent) -> Option<GovernanceState> {
         members,
         threshold,
         action_confirmation_timeout_microseconds: timeout,
+        package_ref: None,
+        out_of_date: false,
     })
+}
+
+/// Resolve the package-name ref (`#name`) of the package an on-ledger
+/// contract was actually created under. Used to exercise choices on
+/// governance contracts that may live under an older package version than
+/// the configured one. Returns `fallback` (the configured ref) on any
+/// failure so callers degrade to the previous behavior instead of erroring.
+pub(crate) async fn resolve_contract_package_ref(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    contract_id: &str,
+    fallback: &str,
+) -> String {
+    match fetch_contract_package_ref(config, party_id, token, contract_id).await {
+        Ok(Some(package_ref)) => package_ref,
+        Ok(None) => {
+            tracing::debug!(
+                "Could not resolve package ref for {contract_id}; using configured {fallback}"
+            );
+            fallback.to_string()
+        }
+        Err(e) => {
+            tracing::debug!(
+                "Could not resolve package ref for {contract_id}: {e}; \
+                 using configured {fallback}"
+            );
+            fallback.to_string()
+        }
+    }
+}
+
+/// Look up a contract's created event and map its concrete package id back
+/// to a `#name` ref via the participant's package inventory.
+async fn fetch_contract_package_ref(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    contract_id: &str,
+) -> Result<Option<String>> {
+    let mut client = utils::create_event_query_client(config, token).await?;
+
+    let mut filters_by_party = HashMap::new();
+    filters_by_party.insert(
+        party_id.to_string(),
+        Filters {
+            cumulative: vec![CumulativeFilter {
+                identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
+                    WildcardFilter {
+                        include_created_event_blob: false,
+                    },
+                )),
+            }],
+        },
+    );
+    let request = GetEventsByContractIdRequest {
+        contract_id: contract_id.to_string(),
+        event_format: Some(EventFormat {
+            filters_by_party,
+            filters_for_any_party: None,
+            verbose: false,
+        }),
+    };
+
+    let package_id = client
+        .get_events_by_contract_id(tonic::Request::new(request))
+        .await?
+        .into_inner()
+        .created
+        .and_then(|c| c.created_event)
+        .and_then(|e| e.template_id)
+        .map(|t| t.package_id);
+    let Some(package_id) = package_id else {
+        return Ok(None);
+    };
+    // Already a `#name` ref — use it directly.
+    if package_id.starts_with('#') {
+        return Ok(Some(package_id));
+    }
+    let id_to_name = fetch_package_id_to_name(config).await?;
+    Ok(id_to_name.get(&package_id).map(|name| format!("#{name}")))
 }
 
 /// Extract a Set Party (DA.Set.Types:Set) which is stored as Record { map: GenMap<Party, Unit> }

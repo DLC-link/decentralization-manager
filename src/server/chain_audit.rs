@@ -1,16 +1,11 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 
 use anyhow::{Context, Result};
-use canton_proto_rs::com::{
-    daml::ledger::api::v2::{
-        CumulativeFilter, EventFormat, Filters, GetLatestPrunedOffsetsRequest, GetLedgerEndRequest,
-        GetUpdatesRequest, Identifier, InterfaceFilter, Record, TemplateFilter, TransactionFormat,
-        TransactionShape, UpdateFormat, Value, WildcardFilter, cumulative_filter, event::Event,
-        get_updates_response::Update, value,
-    },
-    digitalasset::canton::admin::participant::v30::{
-        ListPackagesRequest, package_service_client::PackageServiceClient,
-    },
+use canton_proto_rs::com::daml::ledger::api::v2::{
+    CumulativeFilter, EventFormat, Filters, GetLatestPrunedOffsetsRequest, GetLedgerEndRequest,
+    GetUpdatesRequest, Identifier, InterfaceFilter, Record, TemplateFilter, TransactionFormat,
+    TransactionShape, UpdateFormat, Value, WildcardFilter, cumulative_filter, event::Event,
+    get_updates_response::Update, value,
 };
 use serde_json::{Value as JsonValue, json};
 use sqlx::SqlitePool;
@@ -21,7 +16,10 @@ use crate::{
     utils,
 };
 
-use super::types::ChainAuditEntry;
+use super::{
+    package_inventory::{fetch_package_names, matching_names, package_name_prefix},
+    types::ChainAuditEntry,
+};
 
 struct ChainTemplate {
     package_prefix: String,
@@ -124,57 +122,6 @@ fn chain_filters(packages: &PackageConfig) -> ChainFilters {
         templates,
         interfaces,
     }
-}
-
-/// Derive the stable package-name prefix from a package reference by
-/// stripping the leading `#` and any trailing version segments, e.g.
-/// `#governance-core-v1-rc1` → `governance-core`.
-fn package_name_prefix(package_ref: &str) -> String {
-    let name = package_ref.strip_prefix('#').unwrap_or(package_ref);
-    let mut segments: Vec<&str> = name.split('-').collect();
-    while segments.len() > 1 {
-        let is_version = segments
-            .last()
-            .and_then(|s| s.strip_prefix("rc").or_else(|| s.strip_prefix('v')))
-            .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()));
-        if !is_version {
-            break;
-        }
-        segments.pop();
-    }
-    segments.join("-")
-}
-
-/// Names from the participant's package inventory that belong to the package
-/// family identified by `prefix` — any version, including renamed historical
-/// uploads like `governance-core-v0-rc3`.
-fn matching_names<'a>(package_names: &'a [String], prefix: &str) -> BTreeSet<&'a str> {
-    package_names
-        .iter()
-        .filter(|name| package_name_prefix(name) == prefix)
-        .map(String::as_str)
-        .collect()
-}
-
-/// Load the names of all packages uploaded to the participant from the Admin
-/// API's PackageService.
-async fn fetch_package_names(config: &NodeConfig) -> Result<Vec<String>> {
-    let mut client = PackageServiceClient::connect(config.admin_api_url())
-        .await
-        .context("Failed to connect to participant Admin API")?;
-    let response = client
-        .list_packages(tonic::Request::new(ListPackagesRequest {
-            limit: 0,
-            filter_name: String::new(),
-        }))
-        .await
-        .context("Failed to list participant packages")?
-        .into_inner();
-    Ok(response
-        .package_descriptions
-        .into_iter()
-        .map(|p| p.name)
-        .collect())
 }
 
 /// Build Canton-side `CumulativeFilter`s for the governance templates using
@@ -707,46 +654,6 @@ mod tests {
             update_id: String::new(),
             details: JsonValue::Null,
         }
-    }
-
-    #[test]
-    fn test_package_name_prefix() {
-        assert_eq!(
-            package_name_prefix("#governance-core-v1-rc1"),
-            "governance-core"
-        );
-        assert_eq!(
-            package_name_prefix("#governance-action-v0"),
-            "governance-action"
-        );
-        assert_eq!(
-            package_name_prefix("#bitsafe-vault-governance-v0-rc8"),
-            "bitsafe-vault-governance"
-        );
-        assert_eq!(package_name_prefix("cbtc-governance"), "cbtc-governance");
-        assert_eq!(
-            package_name_prefix("governance-core-v0-rc3"),
-            "governance-core"
-        );
-        // `vault` starts with `v` but is not a version segment
-        assert_eq!(package_name_prefix("#bitsafe-vault"), "bitsafe-vault");
-    }
-
-    #[test]
-    fn test_matching_names() {
-        let names = vec![
-            "governance-core-v0-rc3".to_string(),
-            "governance-core-v1-rc1".to_string(),
-            "governance-core-extras-v1".to_string(),
-            "cbtc-governance".to_string(),
-        ];
-
-        let matched = matching_names(&names, "governance-core");
-
-        assert_eq!(
-            matched.into_iter().collect::<Vec<_>>(),
-            vec!["governance-core-v0-rc3", "governance-core-v1-rc1"]
-        );
     }
 
     #[test]

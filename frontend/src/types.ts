@@ -424,6 +424,8 @@ export interface GovernanceResponse {
   threshold: number;
   member_party_id?: string;
   rules_contract_id?: string;
+  gov_core_out_of_date?: boolean;
+  gov_core_package_ref?: string;
 }
 
 export interface InstrumentAllowance {
@@ -908,6 +910,8 @@ export interface GovernanceState {
   members: string[];
   threshold: number;
   action_confirmation_timeout_microseconds?: number;
+  package_ref?: string;
+  out_of_date?: boolean;
 }
 
 export interface GovernanceStateResponse {
