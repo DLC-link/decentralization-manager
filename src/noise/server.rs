@@ -11,7 +11,7 @@ use crate::{
         parse_public_key, send_noise_message,
     },
     server::{
-        WorkflowProgress,
+        DeclineInvitationPayload, WorkflowKind, WorkflowProgress,
         peer_status::{LastSeen, bump},
     },
     workflow::{
@@ -29,6 +29,25 @@ use crate::{
 /// listener from resuming, which has caused Contracts-invite races in CI.
 const fn command_carries_payload(command: MessageType) -> bool {
     !matches!(command, MessageType::Disconnect)
+}
+
+/// Whether a peer's invitation decline targets THIS coordinator run. The
+/// workflow kind must match, and when the decline echoes the run identity
+/// (carried on invites since `workflow_instance` was added) it must match
+/// the active run's instance name; declines from older peers without the
+/// field pass on the kind check alone.
+fn decline_matches_run(
+    payload: &DeclineInvitationPayload,
+    run_kind: WorkflowKind,
+    run_instance: &str,
+) -> bool {
+    if payload.kind != run_kind {
+        return false;
+    }
+    match &payload.workflow_instance {
+        Some(instance) => instance == run_instance,
+        None => true,
+    }
 }
 
 /// Coordinator server that accepts connections from peers
@@ -396,12 +415,42 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
     /// remaining peers so their pending invites / in-flight peer runs roll
     /// back instead of hanging. Always replies with `Ack` — the declining
     /// peer treats the send as fire-and-forget.
+    ///
+    /// The decline is validated before failing the run: the always-on
+    /// listener routes EVERY `DeclineInvitation` to whatever workflow is
+    /// currently active, so a peer denying a STALE invitation card (left
+    /// over from an earlier run that failed without a `CancelInvite`) must
+    /// not kill an unrelated run that happens to be active now.
     async fn handle_decline_invitation(&self, peer_id: CantonId, payload: Vec<u8>) -> Message {
-        let reason = serde_json::from_slice::<crate::server::DeclineInvitationPayload>(&payload)
-            .ok()
-            .and_then(|p| p.reason);
+        let payload = serde_json::from_slice::<DeclineInvitationPayload>(&payload).ok();
 
-        let msg = match &reason {
+        // Only peers this run actually invited may fail it.
+        if !self.peers.iter().any(|p| p.participant_id == peer_id) {
+            tracing::warn!(
+                "Ignoring invitation decline from {peer_id}: not a participant of run {}",
+                self.workflow_state.instance_name()
+            );
+            return Message::new_empty(MessageType::Ack);
+        }
+
+        let Some(payload) = payload else {
+            tracing::warn!("Ignoring invitation decline from {peer_id}: unparseable payload");
+            return Message::new_empty(MessageType::Ack);
+        };
+
+        if !decline_matches_run(&payload, S::kind(), self.workflow_state.instance_name()) {
+            tracing::warn!(
+                "Ignoring invitation decline from {peer_id} for {kind:?} run {instance:?}: \
+                 active run is {active_kind:?} {active_instance}",
+                kind = payload.kind,
+                instance = payload.workflow_instance,
+                active_kind = S::kind(),
+                active_instance = self.workflow_state.instance_name()
+            );
+            return Message::new_empty(MessageType::Ack);
+        }
+
+        let msg = match &payload.reason {
             Some(r) => format!("Peer {peer_id} declined the invitation: {r}"),
             None => format!("Peer {peer_id} declined the invitation"),
         };
@@ -464,5 +513,62 @@ mod tests {
         assert!(command_carries_payload(MessageType::SignSubmissions));
         assert!(command_carries_payload(MessageType::SignKick));
         assert!(command_carries_payload(MessageType::GenerateKeys));
+    }
+
+    fn decline(kind: WorkflowKind, workflow_instance: Option<&str>) -> DeclineInvitationPayload {
+        DeclineInvitationPayload {
+            kind,
+            reason: None,
+            workflow_instance: workflow_instance.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn decline_with_matching_kind_and_instance_matches() {
+        let payload = decline(WorkflowKind::Kick, Some("acme-kick-1"));
+
+        assert!(decline_matches_run(
+            &payload,
+            WorkflowKind::Kick,
+            "acme-kick-1"
+        ));
+    }
+
+    #[test]
+    fn decline_with_wrong_kind_is_rejected() {
+        // Stale Kick card denied while a Dars run is active.
+        let payload = decline(WorkflowKind::Kick, None);
+
+        assert!(!decline_matches_run(
+            &payload,
+            WorkflowKind::Dars,
+            "dars-distribute-1"
+        ));
+    }
+
+    #[test]
+    fn decline_with_stale_instance_is_rejected() {
+        // Stale Kick #1 card denied while Kick #2 (same kind, same party,
+        // same member set) is active — only the instance tells them apart.
+        let payload = decline(WorkflowKind::Kick, Some("acme-kick-1"));
+
+        assert!(!decline_matches_run(
+            &payload,
+            WorkflowKind::Kick,
+            "acme-kick-2"
+        ));
+    }
+
+    #[test]
+    fn decline_without_instance_passes_on_kind_alone() {
+        // Invites from coordinators that predate `workflow_instance` carry
+        // no run identity — the kind check alone must keep working.
+        let payload = decline(WorkflowKind::Onboarding, None);
+
+        assert!(decline_matches_run(
+            &payload,
+            WorkflowKind::Onboarding,
+            "acme-creation"
+        ));
     }
 }

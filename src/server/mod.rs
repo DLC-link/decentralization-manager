@@ -708,34 +708,47 @@ impl WorkflowTriggers {
         let mut previous_threshold = None;
         let mut dec_party_id = None;
         let mut package_names = Vec::new();
+        let mut workflow_instance = None;
         match meta {
             InvitationMeta::None => {}
             InvitationMeta::Onboarding(p) => {
                 prefix = Some(p.prefix);
                 participants = p.participants;
+                workflow_instance = p.workflow_instance;
             }
             InvitationMeta::Dars(p) => {
                 dar_filenames = p.dar_filenames;
                 participants = p.participants;
+                workflow_instance = p.workflow_instance;
             }
             InvitationMeta::Kick(p) => {
                 kicked_participant = Some(p.kicked_participant);
                 new_threshold = Some(p.new_threshold);
                 previous_threshold = Some(p.previous_threshold);
                 dec_party_id = Some(p.dec_party_id);
+                workflow_instance = p.workflow_instance;
             }
             InvitationMeta::Contracts(p) => {
                 dec_party_id = Some(p.dec_party_id);
                 participants = p.participants;
                 package_names = p.package_names;
+                workflow_instance = p.workflow_instance;
             }
         }
+        // Key the id on the coordinator's run instance when available so a
+        // NEW run's invite never silently morphs an older card in place — an
+        // accept/decline racing the replacement then misses (404) instead of
+        // acting on an invitation the user never saw. Re-sends of the SAME
+        // run still dedup (same instance → same id). Invites from old
+        // coordinators (no instance) keep the legacy type+pubkey id.
+        let type_str = invitation_type.as_str().to_lowercase();
+        let pubkey_short = &coordinator_pubkey[..16];
+        let id = match &workflow_instance {
+            Some(instance) => format!("{type_str}-{pubkey_short}-{instance}"),
+            None => format!("{type_str}-{pubkey_short}"),
+        };
         let invitation = PendingInvitation {
-            id: format!(
-                "{}-{}",
-                invitation_type.as_str().to_lowercase(),
-                &coordinator_pubkey[..16]
-            ),
+            id,
             invitation_type,
             coordinator_pubkey: coordinator_pubkey.to_string(),
             coordinator_name: None,
@@ -751,10 +764,24 @@ impl WorkflowTriggers {
             previous_threshold,
             dec_party_id,
             package_names,
+            workflow_instance,
         };
 
+        // A coordinator runs at most one workflow at a time, so a fresh
+        // invite supersedes any older invite of the same kind from the same
+        // coordinator — replace by (type, coordinator), not by id, so legacy
+        // and instance-keyed ids don't accumulate side by side.
         match self.db.begin_transaction().await {
             Ok(mut tx) => {
+                let superseded = tx
+                    .delete_pending_invitations_by_type_and_coordinator(
+                        invitation.invitation_type,
+                        coordinator_pubkey,
+                    )
+                    .await;
+                if let Err(e) = superseded {
+                    tracing::warn!("Failed to delete superseded invitations: {e}");
+                }
                 if let Err(e) = tx.upsert_pending_invitation(&invitation).await {
                     tracing::warn!("Failed to persist pending invitation: {e}");
                 } else if let Err(e) = Commitable::commit(tx).await {
@@ -765,7 +792,10 @@ impl WorkflowTriggers {
         }
 
         let mut invitations = self.pending_invitations.write().await;
-        invitations.retain(|i| i.id != invitation.id);
+        invitations.retain(|i| {
+            i.invitation_type != invitation.invitation_type
+                || i.coordinator_pubkey != invitation.coordinator_pubkey
+        });
         invitations.push(invitation);
     }
 

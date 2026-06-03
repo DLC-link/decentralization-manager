@@ -623,6 +623,11 @@ impl std::str::FromStr for InvitationType {
 pub struct OnboardingInvitePayload {
     pub prefix: String,
     pub participants: Vec<CantonId>,
+    /// The coordinator's `workflow_runs` instance name for this run. Echoed
+    /// back in `DeclineInvitationPayload` so the coordinator can tell a
+    /// decline of THIS run apart from a stale invite of an earlier run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_instance: Option<String>,
 }
 
 /// Payload sent inside a `DeclineInvitation` Noise message — peer telling
@@ -633,6 +638,11 @@ pub struct DeclineInvitationPayload {
     pub kind: WorkflowKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// The coordinator run this decline targets (from the invite payload).
+    /// `None` when the invite predates this field — the coordinator then
+    /// falls back to kind + membership checks only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_instance: Option<String>,
 }
 
 /// Payload sent inside an `InviteDars` Noise message.
@@ -643,6 +653,9 @@ pub struct DarsInvitePayload {
     /// card can render the same participant list the coordinator shows.
     #[serde(default)]
     pub participants: Vec<CantonId>,
+    /// The coordinator's run instance name (see `OnboardingInvitePayload`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_instance: Option<String>,
 }
 
 /// Payload sent inside an `InviteKick` Noise message — gives the peer enough
@@ -654,6 +667,9 @@ pub struct KickInvitePayload {
     pub kicked_participant: CantonId,
     pub new_threshold: i32,
     pub previous_threshold: i32,
+    /// The coordinator's run instance name (see `OnboardingInvitePayload`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_instance: Option<String>,
 }
 
 /// Payload sent inside an `InviteContracts` Noise message — mirrors the rich
@@ -667,6 +683,9 @@ pub struct ContractsInvitePayload {
     /// Human-readable contract/package names (from `ContractDefinition.name`).
     #[serde(default)]
     pub package_names: Vec<String>,
+    /// The coordinator's run instance name (see `OnboardingInvitePayload`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_instance: Option<String>,
 }
 
 /// A pending invitation from a coordinator
@@ -703,6 +722,10 @@ pub struct PendingInvitation {
     /// so the peer card shows the same "Packages" row the coordinator shows.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub package_names: Vec<String>,
+    /// The coordinator's run instance name from the invite payload. Echoed
+    /// back on decline so the coordinator only fails the matching run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_instance: Option<String>,
 }
 
 /// Response for pending invitations endpoint

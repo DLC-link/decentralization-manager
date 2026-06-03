@@ -6,7 +6,10 @@ use crate::{
     canton_id::CantonId,
     config::{PartyCredentials, Peer},
     error::Result,
-    server::{PendingInvitation, WorkflowKind, WorkflowProgress, WorkflowRole, WorkflowRun},
+    server::{
+        InvitationType, PendingInvitation, WorkflowKind, WorkflowProgress, WorkflowRole,
+        WorkflowRun,
+    },
 };
 
 /// Read operations on the database
@@ -213,6 +216,14 @@ pub trait Commitable {
     /// Delete every pending invitation matching a coordinator's Noise pubkey
     async fn delete_pending_invitations_by_coordinator(
         &mut self,
+        coordinator_pubkey: &str,
+    ) -> Result;
+
+    /// Delete every pending invitation of one type from one coordinator —
+    /// used to replace a superseded invite when a fresh one arrives.
+    async fn delete_pending_invitations_by_type_and_coordinator(
+        &mut self,
+        invitation_type: InvitationType,
         coordinator_pubkey: &str,
     ) -> Result;
 

@@ -191,6 +191,7 @@ pub struct PendingInvitationRow {
     pub previous_threshold: Option<i64>,
     pub dec_party_id: Option<String>,
     pub package_names: Option<String>,
+    pub workflow_instance: Option<String>,
 }
 
 fn encode_list<T: serde::Serialize>(items: &[T], context_label: &str) -> Result<Option<String>> {
@@ -236,6 +237,7 @@ impl PendingInvitationRow {
             previous_threshold: inv.previous_threshold.map(i64::from),
             dec_party_id: inv.dec_party_id.as_ref().map(|p| p.to_string()),
             package_names: encode_list(&inv.package_names, "pending invitation package_names")?,
+            workflow_instance: inv.workflow_instance.clone(),
         })
     }
 
@@ -275,6 +277,7 @@ impl PendingInvitationRow {
             previous_threshold: self.previous_threshold.map(|v| v as i32),
             dec_party_id,
             package_names,
+            workflow_instance: self.workflow_instance,
         })
     }
 }

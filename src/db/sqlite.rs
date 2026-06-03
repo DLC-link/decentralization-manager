@@ -20,7 +20,10 @@ use crate::{
     canton_id::CantonId,
     config::{PartyCredentials, Peer},
     error::Result,
-    server::{PendingInvitation, WorkflowKind, WorkflowProgress, WorkflowRole, WorkflowRun},
+    server::{
+        InvitationType, PendingInvitation, WorkflowKind, WorkflowProgress, WorkflowRole,
+        WorkflowRun,
+    },
 };
 
 pub static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
@@ -781,8 +784,9 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                 new_threshold,
                 previous_threshold,
                 dec_party_id,
-                package_names
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                package_names,
+                workflow_instance
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ",
         )
         .bind(&row.id)
@@ -797,6 +801,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         .bind(row.previous_threshold)
         .bind(&row.dec_party_id)
         .bind(&row.package_names)
+        .bind(&row.workflow_instance)
         .execute(&mut **self)
         .await?;
 
@@ -820,6 +825,22 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
             .bind(coordinator_pubkey)
             .execute(&mut **self)
             .await?;
+
+        Ok(())
+    }
+
+    async fn delete_pending_invitations_by_type_and_coordinator(
+        &mut self,
+        invitation_type: InvitationType,
+        coordinator_pubkey: &str,
+    ) -> Result {
+        sqlx::query(
+            "DELETE FROM pending_invitations WHERE invitation_type = ? AND coordinator_pubkey = ?",
+        )
+        .bind(invitation_type.to_string())
+        .bind(coordinator_pubkey)
+        .execute(&mut **self)
+        .await?;
 
         Ok(())
     }
@@ -1779,6 +1800,7 @@ mod tests {
             previous_threshold: None,
             dec_party_id: None,
             package_names: Vec::new(),
+            workflow_instance: Some("my-party-creation".to_string()),
         };
         let inv_b = PendingInvitation {
             id: "kick-bbbbbbbbbbbbbbbb".to_string(),
@@ -1794,6 +1816,7 @@ mod tests {
             previous_threshold: Some(3),
             dec_party_id: Some(CantonId::parse(&format!("dec::{TEST_NS}")).unwrap()),
             package_names: Vec::new(),
+            workflow_instance: None,
         };
 
         let mut tx = pool.begin_transaction().await?;
@@ -1815,6 +1838,7 @@ mod tests {
             previous_threshold: None,
             dec_party_id: None,
             package_names: Vec::new(),
+            workflow_instance: None,
         };
         let mut tx = pool.begin_transaction().await?;
         tx.upsert_pending_invitation(&inv_c).await?;
@@ -1873,6 +1897,7 @@ mod tests {
             previous_threshold: None,
             dec_party_id: Some(CantonId::parse(&format!("dec::{TEST_NS}")).unwrap()),
             package_names: vec!["Governance Core".to_string(), "Token Custody".to_string()],
+            workflow_instance: Some("dec-contracts-4000".to_string()),
         };
 
         let mut tx = pool.begin_transaction().await?;
@@ -1889,6 +1914,7 @@ mod tests {
             Some(format!("dec::{TEST_NS}"))
         );
         assert_eq!(got.package_names, vec!["Governance Core", "Token Custody"]);
+        assert_eq!(got.workflow_instance.as_deref(), Some("dec-contracts-4000"));
 
         Ok(())
     }

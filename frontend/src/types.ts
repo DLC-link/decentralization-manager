@@ -251,6 +251,7 @@ export type InvitationType = "Onboarding" | "Kick" | "Contracts" | "Dars";
 
 export interface PendingInvitation {
   id: string;
+  workflow_instance?: string;
   invitation_type: InvitationType;
   coordinator_pubkey: string;
   coordinator_name?: string;

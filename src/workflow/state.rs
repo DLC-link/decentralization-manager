@@ -18,7 +18,7 @@ use crate::{
     canton_id::CantonId,
     db::schema::{Commitable, SchemaWrite},
     noise::MessageType,
-    server::WorkflowProgress,
+    server::{WorkflowKind, WorkflowProgress},
 };
 
 /// Trait for workflow steps. Implementations are small `Copy` enums per
@@ -46,6 +46,10 @@ pub trait WorkflowStep:
     /// Reverse of `step_name`, used to re-hydrate `WorkflowState` from a
     /// persisted row at resume time.
     fn try_from_step_name(name: &str) -> Option<Self>;
+
+    /// The workflow kind this step enum belongs to. Used to reject routed
+    /// messages (e.g. invitation declines) that target a different kind.
+    fn kind() -> WorkflowKind;
 }
 
 /// Generic workflow state tracker. Reads/writes the matching `workflow_runs`

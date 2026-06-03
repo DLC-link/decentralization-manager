@@ -607,6 +607,7 @@ async fn send_kick_invites(
         kicked_participant: kicked_participant.clone(),
         new_threshold: kick_config.new_threshold,
         previous_threshold: kick_config.previous_threshold,
+        workflow_instance: Some(kick_config.instance_name.clone()),
     };
     let payload_bytes = serde_json::to_vec(&payload).context("encode KickInvitePayload")?;
     let invite_message = Message::new(MessageType::InviteKick, payload_bytes);
@@ -881,8 +882,14 @@ pub async fn start_onboarding(
         let _workflow_guard = workflow_guard; // releases cross-workflow gate on drop
 
         // Send invites to selected peers before starting coordinator workflow
-        let invite_result =
-            send_onboarding_invites(&config, &db, &peer_ids, &party_id_prefix).await;
+        let invite_result = send_onboarding_invites(
+            &config,
+            &db,
+            &peer_ids,
+            &party_id_prefix,
+            &instance_for_task,
+        )
+        .await;
         if let Err(e) = invite_result {
             tracing::error!("Failed to send onboarding invites: {e}");
             let msg = format!("Failed to send invites: {e}");
@@ -1061,6 +1068,7 @@ async fn send_onboarding_invites(
     db: &SqlitePool,
     peer_ids: &[CantonId],
     party_id_prefix: &str,
+    instance_name: &str,
 ) -> Result {
     let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
@@ -1068,6 +1076,7 @@ async fn send_onboarding_invites(
     let payload = OnboardingInvitePayload {
         prefix: party_id_prefix.to_string(),
         participants: peer_ids.to_vec(),
+        workflow_instance: Some(instance_name.to_string()),
     };
     let payload_bytes = serde_json::to_vec(&payload)?;
     let invite_message = Message::new(MessageType::InviteOnboarding, payload_bytes);
@@ -1698,7 +1707,14 @@ pub async fn start_dars(
             .iter()
             .map(|f| f.filename.clone())
             .collect();
-        let invite_result = send_dars_invites(&config, &db, &peer_ids, &dar_filenames).await;
+        let invite_result = send_dars_invites(
+            &config,
+            &db,
+            &peer_ids,
+            &dar_filenames,
+            &dars_config.instance_name,
+        )
+        .await;
         if let Err(e) = invite_result {
             tracing::error!("Failed to send DARs invites: {e}");
             let mut status = dars_state_clone.status.write().await;
@@ -1792,6 +1808,7 @@ async fn send_dars_invites(
     db: &SqlitePool,
     peer_ids: &[CantonId],
     dar_filenames: &[String],
+    instance_name: &str,
 ) -> Result {
     let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
@@ -1801,6 +1818,7 @@ async fn send_dars_invites(
         // Carry the member set so the peer card shows the same participant
         // list the coordinator shows.
         participants: peer_ids.to_vec(),
+        workflow_instance: Some(instance_name.to_string()),
     };
     let payload_bytes = serde_json::to_vec(&payload)?;
     let invite_message = Message::new(MessageType::InviteDars, payload_bytes);
@@ -2476,6 +2494,7 @@ async fn send_contracts_invites(
         dec_party_id: contracts_config.decentralized_party_id.clone(),
         participants: invitees.to_vec(),
         package_names,
+        workflow_instance: Some(contracts_config.instance_name.clone()),
     };
     let payload_bytes = serde_json::to_vec(&payload).context("encode ContractsInvitePayload")?;
     let invite_message = Message::new(MessageType::InviteContracts, payload_bytes);
@@ -2661,6 +2680,7 @@ mod tests {
             dec_party_id: test_cid("dec")?,
             participants: vec![test_cid("node1")?],
             package_names: vec!["Governance Core".to_string()],
+            workflow_instance: Some("dec-contracts-1".to_string()),
         };
         let bytes = serde_json::to_vec(&payload)?;
         let back: ContractsInvitePayload = serde_json::from_slice(&bytes)?;

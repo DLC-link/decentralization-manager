@@ -297,6 +297,9 @@ async fn notify_coordinator_of_decline(data: &web::Data<AppState>, invitation: &
     let payload = DeclineInvitationPayload {
         kind: invitation.invitation_type.into(),
         reason: None,
+        // Echo the coordinator's run identity so it only fails the matching
+        // run — a stale card's decline must not kill a newer workflow.
+        workflow_instance: invitation.workflow_instance.clone(),
     };
     let payload_bytes = match serde_json::to_vec(&payload) {
         Ok(b) => b,
