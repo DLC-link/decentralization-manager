@@ -47,13 +47,11 @@ pub async fn start_coordinator(
 
     let workflow_state = server.get_workflow_state();
     let node_config_clone = node_config.clone();
-    let network_config_clone = network_config.clone();
     let db_clone = db.clone();
     let workflow_handle = tokio::spawn(async move {
         run_workflow(
             workflow_state,
             node_config_clone,
-            network_config_clone,
             db_clone,
             config,
             workflow_auth,
@@ -72,7 +70,6 @@ pub async fn start_coordinator(
 async fn run_workflow(
     workflow_state: Arc<WorkflowState<ContractsStep>>,
     node_config: NodeConfig,
-    network_config: NetworkConfig,
     db: sqlx::SqlitePool,
     config: ContractsConfig,
     workflow_auth: Option<WorkflowAuth>,
@@ -96,16 +93,8 @@ async fn run_workflow(
             }
             ContractsStep::PrepareSubmissions => {
                 tracing::info!("Coordinator executing: Prepare submissions");
-                prepare_submissions(
-                    &node_config,
-                    &db,
-                    &instance_name,
-                    &network_config,
-                    &config,
-                    &token,
-                    &user_id,
-                )
-                .await?;
+                prepare_submissions(&node_config, &db, &instance_name, &config, &token, &user_id)
+                    .await?;
 
                 // Load prepared submissions from storage to ship to peers with the
                 // SignSubmissions command. Pair with the contracts config so the
