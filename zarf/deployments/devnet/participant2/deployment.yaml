@@ -46,7 +46,7 @@ spec:
               mountPath: /app
       containers:
         - name: dec-party-manager
-          image: public.ecr.aws/dlc-link/canton-decparty-manager:0.1.5
+          image: public.ecr.aws/dlc-link/canton-decparty-manager:0.1.6
           imagePullPolicy: Always
           command: ["dec-party-manager", "serve"]
           ports:
