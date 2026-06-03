@@ -2462,12 +2462,13 @@ async fn send_contracts_invites(
     let invitee_set: HashSet<&CantonId> = invitees.iter().collect();
     // Carry the dec party, member set, and package names so the peer card
     // renders the same rich summary the coordinator shows (mirrors the Kick
-    // invite). De-dup package names; multiple contracts can share a package
-    // (sort first — `dedup` only removes adjacent duplicates).
+    // invite). Skip empty names, then sort+dedup — `dedup` only removes
+    // adjacent duplicates, and multiple contracts can share a package name.
     let mut package_names: Vec<String> = contracts_config
         .contracts
         .iter()
         .map(|c| c.name.clone())
+        .filter(|n| !n.is_empty())
         .collect();
     package_names.sort();
     package_names.dedup();

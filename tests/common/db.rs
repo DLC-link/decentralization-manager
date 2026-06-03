@@ -39,6 +39,7 @@ async fn open(path: &Path) -> anyhow::Result<SqlitePool> {
 async fn open_rw(path: &Path) -> anyhow::Result<SqlitePool> {
     let opts = SqliteConnectOptions::new()
         .filename(path)
+        .read_only(false)
         .create_if_missing(false);
     SqlitePool::connect_with(opts)
         .await
