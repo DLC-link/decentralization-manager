@@ -348,23 +348,31 @@ pub async fn start_kick(
     // mesh (see start_onboarding), and basing the signer set / threshold bound
     // / invites on the full mesh would invite outsiders and stall
     // WaitingForPeers on peers that were never part of the party. Fall back to
-    // the full peer set only if membership isn't cached yet (shouldn't happen —
-    // the owner-key check above already requires a cached participant row).
+    // the full peer set only if no cached row yields a usable id — membership
+    // not cached yet, or every `participant_uid` in a legacy/invalid format —
+    // since scoping to an empty member set would reject the kick with a
+    // misleading "need at least 2 party members" error.
     let party_member_ids: HashSet<CantonId> = match data
         .db
         .get_dec_party_participants(&decentralized_party_id)
         .await
     {
-        Ok(rows) if !rows.is_empty() => rows
-            .iter()
-            .filter_map(|r| CantonId::parse(&r.participant_uid).ok())
-            .collect(),
-        Ok(_) => {
-            tracing::warn!(
-                "No cached participants for {decentralized_party_id}; \
-                 falling back to all configured peers for kick scoping"
-            );
-            peers.iter().map(|p| p.participant_id.clone()).collect()
+        Ok(rows) => {
+            let parsed: HashSet<CantonId> = rows
+                .iter()
+                .filter_map(|r| CantonId::parse(&r.participant_uid).ok())
+                .collect();
+            if parsed.is_empty() {
+                tracing::warn!(
+                    "No usable cached participants for {decentralized_party_id} \
+                     ({count} rows); falling back to all configured peers for \
+                     kick scoping",
+                    count = rows.len()
+                );
+                peers.iter().map(|p| p.participant_id.clone()).collect()
+            } else {
+                parsed
+            }
         }
         Err(e) => {
             tracing::error!("Failed to load dec party participants for kick: {e}");
@@ -2454,12 +2462,14 @@ async fn send_contracts_invites(
     let invitee_set: HashSet<&CantonId> = invitees.iter().collect();
     // Carry the dec party, member set, and package names so the peer card
     // renders the same rich summary the coordinator shows (mirrors the Kick
-    // invite). De-dup package names; multiple contracts can share a package.
+    // invite). De-dup package names; multiple contracts can share a package
+    // (sort first — `dedup` only removes adjacent duplicates).
     let mut package_names: Vec<String> = contracts_config
         .contracts
         .iter()
         .map(|c| c.name.clone())
         .collect();
+    package_names.sort();
     package_names.dedup();
     let payload = ContractsInvitePayload {
         dec_party_id: contracts_config.decentralized_party_id.clone(),

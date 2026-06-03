@@ -27,7 +27,7 @@ interface OnboardingDialogProps {
   onComplete: () => void;
 }
 
-// Mirrors the server-side `validate_party_id_prefix` (participant_id.rs): the
+// Mirrors the server-side `validate_party_id_prefix` (canton_id.rs): the
 // prefix becomes the Canton party-id identifier (`<prefix>::<namespace>`), so
 // only ASCII letters/digits/'-'/'_' are allowed, it must start with a letter,
 // and be at most 180 chars. Returns an error message, or null if valid.
