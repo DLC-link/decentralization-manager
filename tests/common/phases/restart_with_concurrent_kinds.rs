@@ -24,8 +24,8 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     // forward yet (recover_in_progress_workflows re-hydrates from the DB row,
     // and there is a brief window after respawn where status=InProgress but
     // abort_handle=None — /dars/cancel returns 409 "still initializing" in
-    // that window, and the staleness watchdog hasn't yet flipped the row to
-    // Failed). Poll until the API reports any non-InProgress status, retrying
+    // that window, and nothing else flips the row to a terminal
+    // status). Poll until the API reports any non-InProgress status, retrying
     // the cancel each iteration. Bails after the deadline so the test fails
     // here with a clear message rather than later with a confusing 409.
     #[derive(serde::Deserialize, Debug)]

@@ -5,7 +5,8 @@
 //! likely unreachable`. The coordinator used to derive its `WaitingForPeers`
 //! wait-set from the *full configured mesh* (here P2 **and** P3) instead of
 //! the invited members (P2 only), so it waited for P3 — never invited, never
-//! connects — until the 90s staleness watchdog failed the run.
+//! connects — until the (since-removed) 90s staleness watchdog failed the
+//! run.
 //!
 //! The happy-path `create_dec_party` phase can't catch this because it invites
 //! P2 **and** P3, i.e. the full mesh, where invited == configured. This phase

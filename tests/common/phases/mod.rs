@@ -6,7 +6,6 @@ pub mod create_dec_party;
 pub mod deploy_gov_core;
 pub mod dismiss_failed_cleans_artifacts;
 pub mod distribute_dars;
-pub mod failed_step_bounded_time;
 pub mod generate_keys_idempotent;
 pub mod generic_vote;
 pub mod identity_survives_dismiss;

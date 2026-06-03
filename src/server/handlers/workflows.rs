@@ -61,8 +61,8 @@ fn format_busy_peers(busy: &[(String, WorkflowKind)]) -> String {
 }
 
 /// Probe every invited peer's `Health` in parallel and return those already in a
-/// workflow. Unreachable peers are NOT treated as busy — the workflow proceeds
-/// and the existing staleness / decline paths handle a genuinely dead peer.
+/// workflow. Unreachable peers are NOT treated as busy — the workflow proceeds;
+/// a genuinely dead peer never advances the run and the operator can cancel.
 /// Peers on older code report no workflow and so aren't blocked (graceful
 /// rollout — the peer-side invite gate still protects correctness).
 async fn preflight_busy_peers(

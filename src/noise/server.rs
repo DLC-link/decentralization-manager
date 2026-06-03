@@ -117,8 +117,8 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         // Deriving the wait set from the full configured mesh instead made the
         // coordinator wait in `WaitingForPeers` for peers it was never going to
         // invite and that can never connect, so any party smaller than the full
-        // mesh (e.g. 1 coordinator + 1 peer) hung until the staleness watchdog
-        // failed it. Prefer the persisted invitees; the coordinator always
+        // mesh (e.g. 1 coordinator + 1 peer) hung forever.
+        // Prefer the persisted invitees; the coordinator always
         // inserts its row before constructing this server, so the
         // configured-mesh fallback only covers the (unexpected) no-row case.
         let persisted = match SchemaRead::get_workflow_run(&db, &instance_name).await {
