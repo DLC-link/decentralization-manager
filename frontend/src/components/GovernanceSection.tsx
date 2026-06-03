@@ -3517,6 +3517,15 @@ export const GovernanceSection = ({
 
               <Divider />
 
+              {proposalType === "create_provider_service_request" &&
+                (network === "testnet" || network === "mainnet") && (
+                  <Alert severity="info">
+                    On TestNet and MainNet, a credential from Digital Asset (DA)
+                    is required before a Provider Service Request can be
+                    accepted.
+                  </Alert>
+                )}
+
               {proposalType === "generic_vote" && (
                 <TextField
                   size="small"
