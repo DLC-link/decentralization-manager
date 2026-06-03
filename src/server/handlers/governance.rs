@@ -19,11 +19,11 @@ use serde::Deserialize;
 
 use crate::{
     auth::WorkflowAuth,
+    canton_id::CantonId,
     config::{NetworkConfig, NodeConfig, PackageConfig, default_package_config},
     db::schema::SchemaRead,
     error::Result,
     noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
-    participant_id::CantonId,
     server::{
         AppState, action_serializer,
         audit::{AuditEvent, AuditParams, spawn_audit_log},

@@ -3,10 +3,10 @@ use std::str::FromStr;
 use anyhow::Context;
 
 use crate::{
+    canton_id::CantonId,
     config::{Auth0M2MConfig, KeycloakConfig, PackageConfig, PartyCredentials, Peer},
     db::crypto,
     error::Result,
-    participant_id::CantonId,
     server::{
         InvitationType, PendingInvitation, WorkflowKind, WorkflowProgress, WorkflowRole,
         WorkflowRun,

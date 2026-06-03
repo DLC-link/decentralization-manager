@@ -18,9 +18,9 @@ use canton_proto_rs::com::{
 };
 
 use crate::{
+    canton_id::CantonId,
     config::{NodeConfig, PackageConfig},
     error::Result,
-    participant_id::CantonId,
     utils,
 };
 

@@ -20,10 +20,10 @@ use sqlx::SqlitePool;
 use zeroize::Zeroizing;
 
 use crate::{
+    canton_id::CantonId,
     config::NodeConfig,
     consts::CANTON_PROTOCOL_VERSION,
     error::Result,
-    participant_id::CantonId,
     utils,
     workflow::storage::{WorkflowStorage, artifact_kinds, identity_kinds},
 };

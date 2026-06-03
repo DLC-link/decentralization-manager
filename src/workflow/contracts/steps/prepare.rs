@@ -9,10 +9,10 @@ use prost::Message;
 use sqlx::SqlitePool;
 
 use crate::{
+    canton_id::CantonId,
     config::{NetworkConfig, NodeConfig},
     consts::MIN_PARTICIPANTS_CONTRACTS,
     error::Result,
-    participant_id::CantonId,
     utils,
     workflow::{
         contracts::{ContractsConfig, FieldDefinition},

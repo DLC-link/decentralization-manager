@@ -11,8 +11,8 @@ use serde_json::{Value as JsonValue, json};
 use sqlx::SqlitePool;
 
 use crate::{
+    canton_id::CantonId,
     config::{NodeConfig, PackageConfig},
-    participant_id::CantonId,
     utils,
 };
 

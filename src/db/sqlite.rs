@@ -17,9 +17,9 @@ use super::{
     schema::{Commitable, SchemaRead, SchemaWrite},
 };
 use crate::{
+    canton_id::CantonId,
     config::{PartyCredentials, Peer},
     error::Result,
-    participant_id::CantonId,
     server::{PendingInvitation, WorkflowKind, WorkflowProgress, WorkflowRole, WorkflowRun},
 };
 
@@ -1059,13 +1059,13 @@ mod tests {
     use sqlx::SqlitePool;
 
     use crate::{
+        canton_id::CantonId,
         config::{KeycloakConfig, PackageConfig, PartyCredentials, Peer},
         db::{
             rows::{DecPartyContractRow, DecPartyParticipantRow, DecPartyRow},
             schema::{Commitable, SchemaRead, SchemaWrite},
         },
         error::Result,
-        participant_id::CantonId,
         server::{
             InvitationType, PendingInvitation, WorkflowKind, WorkflowProgress, WorkflowRole,
             WorkflowRun,

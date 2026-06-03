@@ -85,7 +85,7 @@ impl Principal {
     /// when the body is filled in later.
     pub fn require_party_access(
         &self,
-        _party_id: &crate::participant_id::CantonId,
+        _party_id: &crate::canton_id::CantonId,
     ) -> Result<(), ValidationError> {
         Ok(())
     }

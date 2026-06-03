@@ -12,9 +12,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use crate::{
+    canton_id::CantonId,
     config::PackageConfig,
     noise::server::ActiveWorkflow,
-    participant_id::CantonId,
     server::health::WorkflowInfo,
     workflow::contracts::{ContractDefinition, DarFile},
 };

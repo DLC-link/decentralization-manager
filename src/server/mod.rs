@@ -44,6 +44,7 @@ use crate::auth::{AuthRegistry, JwtValidator};
 use crate::auth::{MockAuthRegistry, MockValidator};
 use crate::{
     auth::{TokenValidator, WorkflowAuth},
+    canton_id::CantonId,
     config::{NodeConfig, PartyCredentials},
     db::schema::{Commitable, SchemaRead, SchemaWrite},
     error::Result,
@@ -51,7 +52,6 @@ use crate::{
         CHUNK_SIZE, MAX_CHUNKED_TOTAL_SIZE, MAX_PAYLOAD_SIZE, Message, MessageType, NoiseKeypair,
         load_or_generate_keypair, parse_public_key,
     },
-    participant_id::CantonId,
     server::middleware::AuthMiddleware,
     server::peer_status::LastSeen,
     utils::{self, compute_fingerprint},

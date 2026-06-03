@@ -8,9 +8,9 @@ use keycloak::login::{ClientCredentialsParams, client_credentials, token_url};
 
 use crate::{
     auth::WorkflowAuth,
+    canton_id::CantonId,
     config::NodeConfig,
     error::Result,
-    participant_id::CantonId,
     server::{
         AppState,
         middleware::require_admin,

@@ -171,6 +171,64 @@ impl std::str::FromStr for CantonId {
     }
 }
 
+/// Maximum length allowed for a decentralized-party prefix. The prefix becomes
+/// the identifier part of a Canton party id (`<prefix>::<namespace>`), which
+/// Canton caps at 185 characters (`LfPartyId` / `String185`); we keep a margin.
+pub const MAX_PARTY_ID_PREFIX_LEN: usize = 180;
+
+/// Validate a decentralized-party prefix before it is used to build a Canton
+/// party id (`<prefix>::<namespace>`).
+///
+/// Canton validates that identifier (via `LfPartyId`, ≤185 chars, no `::`) when
+/// it deserialises the onboarding topology transaction; a character outside its
+/// safe set makes the submission fail with an opaque proto error deep inside
+/// the workflow. We enforce a stricter, unambiguous allowlist up-front so a bad
+/// prefix is rejected immediately with a clear message:
+///
+/// - ASCII letters, digits, `-` and `_` only,
+/// - must start with a letter,
+/// - 1..=[`MAX_PARTY_ID_PREFIX_LEN`] characters.
+///
+/// `:` and space are deliberately excluded even though `LfPartyId` permits them:
+/// `::` is the party-id delimiter we split on, and spaces break CSV sharing and
+/// URLs.
+///
+/// # Errors
+///
+/// Returns a human-readable message describing the first rule violated.
+pub fn validate_party_id_prefix(prefix: &str) -> Result<(), String> {
+    if prefix.is_empty() {
+        return Err("Party prefix must not be empty".to_string());
+    }
+
+    let len = prefix.chars().count();
+    if len > MAX_PARTY_ID_PREFIX_LEN {
+        return Err(format!(
+            "Party prefix must be at most {MAX_PARTY_ID_PREFIX_LEN} characters (got {len})"
+        ));
+    }
+
+    if !prefix
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic())
+    {
+        return Err("Party prefix must start with a letter (a-z, A-Z)".to_string());
+    }
+
+    if let Some(bad) = prefix
+        .chars()
+        .find(|c| !(c.is_ascii_alphanumeric() || *c == '-' || *c == '_'))
+    {
+        return Err(format!(
+            "Party prefix contains invalid character {bad:?}; only ASCII letters, \
+             digits, '-' and '_' are allowed"
+        ));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,5 +293,51 @@ mod tests {
         let id = CantonId::parse(original)?;
         assert_eq!(id.to_string(), original);
         Ok(())
+    }
+
+    #[test]
+    fn party_prefix_accepts_valid() {
+        for ok in ["UAT1", "test-network-1", "iBTC_catalyst-testnet", "a"] {
+            assert!(
+                validate_party_id_prefix(ok).is_ok(),
+                "expected {ok:?} to be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn party_prefix_rejects_empty() {
+        assert!(validate_party_id_prefix("").is_err());
+    }
+
+    #[test]
+    fn party_prefix_rejects_disallowed_chars() {
+        // Includes the user-reported set plus the delimiter, space, and unicode.
+        for bad in [
+            "a.b", "a,b", "a<b", "a>b", "a?b", "a!b", "a b", "a:b", "a::b", "a@b", "a/b", "café",
+        ] {
+            assert!(
+                validate_party_id_prefix(bad).is_err(),
+                "expected {bad:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn party_prefix_requires_leading_letter() {
+        for bad in ["1abc", "-abc", "_abc"] {
+            assert!(
+                validate_party_id_prefix(bad).is_err(),
+                "expected {bad:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn party_prefix_enforces_max_length() {
+        let at_limit = "a".repeat(MAX_PARTY_ID_PREFIX_LEN);
+        assert!(validate_party_id_prefix(&at_limit).is_ok());
+        let too_long = "a".repeat(MAX_PARTY_ID_PREFIX_LEN + 1);
+        assert!(validate_party_id_prefix(&too_long).is_err());
     }
 }

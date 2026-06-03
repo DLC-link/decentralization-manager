@@ -1,10 +1,10 @@
 pub mod auth;
+pub mod canton_id;
 pub mod config;
 pub mod consts;
 pub mod db;
 pub mod error;
 pub mod noise;
-pub mod participant_id;
 pub mod server;
 pub mod utils;
 pub mod workflow;

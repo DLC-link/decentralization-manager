@@ -15,12 +15,12 @@ use sqlx::SqlitePool;
 
 use crate::{
     auth::WorkflowAuth,
+    canton_id::CantonId,
     config::{NetworkConfig, NodeConfig, Peer},
     consts::{MAX_CONSECUTIVE_NO_WORKFLOW_POLLS, MAX_CONSECUTIVE_STEP_FAILURES},
     db::schema::{Commitable, SchemaRead, SchemaWrite},
     error::Result,
     noise::{MessageType, NoiseError, client::NoiseClient, server::ActiveWorkflow},
-    participant_id::CantonId,
     server::{ActiveWorkflowGuard, ActiveWorkflowSlot, WorkflowKind, peer_status::LastSeen},
     utils,
     workflow::{

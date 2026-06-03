@@ -22,6 +22,7 @@ use sqlx::SqlitePool;
 
 use crate::{
     auth::WorkflowAuth,
+    canton_id::CantonId,
     config::{NetworkConfig, NodeConfig, PartyCredentials, default_package_config},
     db::{
         rows::{DecPartyContractRow, DecPartyParticipantRow, DecPartyRow},
@@ -32,7 +33,6 @@ use crate::{
         Message, MessageType, NoiseError, NoiseKeypair, parse_public_key, send_noise_message,
         send_noise_message_with_chunked_response, send_noise_message_with_retry,
     },
-    participant_id::CantonId,
     server::{
         AppState,
         health::classify_health_reply,

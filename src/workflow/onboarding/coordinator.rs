@@ -4,10 +4,10 @@ use anyhow::Context;
 use sqlx::SqlitePool;
 
 use crate::{
+    canton_id::CantonId,
     config::{NetworkConfig, NodeConfig},
     error::Result,
     noise::server::{ActiveWorkflow, NoiseServer},
-    participant_id::CantonId,
     server::{ActiveWorkflowSlot, peer_status::LastSeen},
     utils,
     workflow::{

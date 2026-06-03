@@ -3,13 +3,13 @@ use std::{collections::HashSet, marker::PhantomData, sync::Arc, time::Instant};
 use sqlx::SqlitePool;
 
 use crate::{
+    canton_id::CantonId,
     config::{NetworkConfig, NodeConfig, Peer},
     db::schema::SchemaRead,
     noise::{
         CHUNK_SIZE, MAX_PAYLOAD_SIZE, Message, MessageType, NoiseError, NoiseKeypair,
         parse_public_key, send_noise_message,
     },
-    participant_id::CantonId,
     server::{
         WorkflowProgress,
         peer_status::{LastSeen, bump},

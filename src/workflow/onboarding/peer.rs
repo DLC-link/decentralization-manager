@@ -1,10 +1,10 @@
 use sqlx::SqlitePool;
 
 use crate::{
+    canton_id::CantonId,
     config::NodeConfig,
     error::Result,
     noise::client::NoiseClient,
-    participant_id::CantonId,
     utils,
     workflow::storage::{WorkflowStorage, artifact_kinds, identity_kinds},
 };

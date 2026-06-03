@@ -3,9 +3,9 @@ use super::rows::{
     GovernanceAuditRow,
 };
 use crate::{
+    canton_id::CantonId,
     config::{PartyCredentials, Peer},
     error::Result,
-    participant_id::CantonId,
     server::{PendingInvitation, WorkflowKind, WorkflowProgress, WorkflowRole, WorkflowRun},
 };
 

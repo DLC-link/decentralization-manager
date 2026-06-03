@@ -15,9 +15,9 @@ use sqlx::SqlitePool;
 use tokio::sync::RwLock;
 
 use crate::{
+    canton_id::CantonId,
     db::schema::{Commitable, SchemaWrite},
     noise::MessageType,
-    participant_id::CantonId,
     server::WorkflowProgress,
 };
 

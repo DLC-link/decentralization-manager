@@ -13,6 +13,7 @@ use super::parties::{
     fetch_decentralized_parties, resolve_owner_keys_from_peers, store_parties_to_db,
 };
 use crate::{
+    canton_id::{CantonId, validate_party_id_prefix},
     config::{NetworkConfig, NodeConfig},
     db::schema::{Commitable, SchemaRead, SchemaWrite},
     error::Result,
@@ -20,7 +21,6 @@ use crate::{
         Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message,
         send_noise_message_with_retry,
     },
-    participant_id::CantonId,
     server::{
         AppState,
         health::classify_health_reply,
@@ -711,6 +711,14 @@ pub async fn start_onboarding(
 ) -> impl Responder {
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
+    }
+
+    // Reject an invalid party prefix up-front: it becomes the identifier part
+    // of the Canton party id (`<prefix>::<namespace>`), and a bad character
+    // would otherwise fail deep in the workflow as an opaque Canton proto
+    // deserialization error ~90s later. Fail fast with a clear 400 instead.
+    if let Err(msg) = validate_party_id_prefix(&body.party_id_prefix) {
+        return HttpResponse::BadRequest().json(ErrorResponse { error: msg });
     }
 
     // Cross-workflow mutex (see `start_kick` for rationale).

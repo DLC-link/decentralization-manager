@@ -29,9 +29,9 @@ use canton_proto_rs::com::daml::ledger::api::v2::{
 use chrono::DateTime;
 
 use crate::{
+    canton_id::CantonId,
     config::{Network, NodeConfig},
     error::Result,
-    participant_id::CantonId,
     utils,
 };
 

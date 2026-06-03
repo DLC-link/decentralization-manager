@@ -2,7 +2,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use sqlx::SqlitePool;
 
-use crate::participant_id::CantonId;
+use crate::canton_id::CantonId;
 
 use super::types::GovernanceType;
 

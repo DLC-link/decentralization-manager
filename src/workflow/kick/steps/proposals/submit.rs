@@ -13,12 +13,12 @@ use sqlx::SqlitePool;
 use tokio::time;
 
 use crate::{
+    canton_id::CantonId,
     config::NodeConfig,
     consts::{
         TOPOLOGY_PROPAGATION_DELAY_SECS, topology_retry_delay_secs, topology_retry_max_attempts,
     },
     error::Result,
-    participant_id::CantonId,
     utils,
     workflow::storage::{WorkflowStorage, artifact_kinds},
 };
