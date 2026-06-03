@@ -667,6 +667,10 @@ pub struct KickInvitePayload {
     pub kicked_participant: CantonId,
     pub new_threshold: i32,
     pub previous_threshold: i32,
+    /// The surviving member set the kick targets, so the peer card renders
+    /// the same participant list the coordinator shows.
+    #[serde(default)]
+    pub participants: Vec<CantonId>,
     /// The coordinator's run instance name (see `OnboardingInvitePayload`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_instance: Option<String>,

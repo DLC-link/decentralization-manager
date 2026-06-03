@@ -726,6 +726,7 @@ impl WorkflowTriggers {
                 new_threshold = Some(p.new_threshold);
                 previous_threshold = Some(p.previous_threshold);
                 dec_party_id = Some(p.dec_party_id);
+                participants = p.participants;
                 workflow_instance = p.workflow_instance;
             }
             InvitationMeta::Contracts(p) => {

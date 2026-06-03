@@ -607,6 +607,7 @@ async fn send_kick_invites(
         kicked_participant: kicked_participant.clone(),
         new_threshold: kick_config.new_threshold,
         previous_threshold: kick_config.previous_threshold,
+        participants: invitees.to_vec(),
         workflow_instance: Some(kick_config.instance_name.clone()),
     };
     let payload_bytes = serde_json::to_vec(&payload).context("encode KickInvitePayload")?;

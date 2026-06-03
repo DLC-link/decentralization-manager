@@ -258,7 +258,7 @@ export interface PendingInvitation {
   received_at: number;
   /** Onboarding-only: party ID prefix the coordinator chose. */
   prefix?: string;
-  /** Onboarding-only: participant canton IDs the coordinator selected. */
+  /** Onboarding/Dars/Contracts: participant canton IDs the coordinator selected. */
   participants?: string[];
   /** Dars-only: filenames the coordinator is distributing. */
   dar_filenames?: string[];
@@ -268,8 +268,10 @@ export interface PendingInvitation {
   new_threshold?: number;
   /** Kick-only: threshold before the kick. */
   previous_threshold?: number;
-  /** Kick-only: the dec party the kick targets. */
+  /** Kick/Contracts: the dec party the workflow targets. */
   dec_party_id?: string;
+  /** Contracts-only: package/contract names being deployed. */
+  package_names?: string[];
 }
 
 export interface PendingInvitationsResponse {

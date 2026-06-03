@@ -86,8 +86,8 @@ async fn insert_peer_run(
         .to_string(),
         coordinator_pubkey: Some(invitation.coordinator_pubkey.clone()),
         coordinator_name: None,
-        // For onboarding/contracts/dars the participants list is the
-        // authoritative peer set carried in the invite. Kick doesn't send one.
+        // The participants list is the authoritative peer set carried in the
+        // invite (all four kinds send one).
         expected_peers: invitation.participants.clone(),
         completed_peers: Vec::new(),
         // Kick + contracts invites carry the target dec party; others don't.
