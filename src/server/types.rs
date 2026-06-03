@@ -1394,6 +1394,31 @@ pub struct DomainGovernanceAction {
     /// time.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accept_transfer_details: Option<AcceptTransferDetails>,
+    /// Operator plus the counterparty (user or provider) pulled from a
+    /// `CreateUserServiceRequest` / `CreateProviderServiceRequest` proposal so
+    /// the notification card shows the full summary — proposal type (the
+    /// `action_label`), operator party, and the user or provider party — without
+    /// the operator having to inspect the contract. Only populated for those two
+    /// proposal kinds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_request_details: Option<ServiceRequestDetails>,
+}
+
+/// Operator + counterparty parties extracted from a service-request proposal
+/// (`CreateUserServiceRequest` / `CreateProviderServiceRequest`). Surfaced
+/// inside `DomainGovernanceAction` so the pending-approval card can render who
+/// the request onboards. Exactly one of `user` / `provider` is set, matching
+/// the proposal kind.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct ServiceRequestDetails {
+    /// Operator party — present on both request kinds.
+    pub operator: CantonId,
+    /// User party — present for `CreateUserServiceRequest`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<CantonId>,
+    /// Provider party — present for `CreateProviderServiceRequest`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<CantonId>,
 }
 
 /// Recipient/amount/instrument extracted from a `TransferProposal`'s

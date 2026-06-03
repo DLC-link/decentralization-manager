@@ -32,9 +32,9 @@ use super::{
     types::{
         AcceptTransferDetails, ActionType, ContractInfo, ContractWithBlob, DomainGovernanceAction,
         GovernanceAction, GovernanceConfirmation, GovernanceState, HoldingInfo, InstrumentInfo,
-        PartyMetadata, PendingAction, ProviderServiceInfo, RegistrarServiceInfo, TokenRequestInfo,
-        TransferFactoryInfo, TransferInstructionInfo, TransferInstructionStatus,
-        TransferProposalDetails, UserServiceInfo, VaultInfo,
+        PartyMetadata, PendingAction, ProviderServiceInfo, RegistrarServiceInfo,
+        ServiceRequestDetails, TokenRequestInfo, TransferFactoryInfo, TransferInstructionInfo,
+        TransferInstructionStatus, TransferProposalDetails, UserServiceInfo, VaultInfo,
     },
 };
 
@@ -745,11 +745,30 @@ pub async fn get_governance_confirmations(
             // Only mark as orphaned when we successfully fetched the full
             // active-proposal set; otherwise the missing-from-map signal is
             // unreliable and we'd falsely mark everything as orphaned.
-            let (description, transfer_details, accept_transfer_details, orphaned) =
-                match proposal_infos.remove(&proposal_cid) {
-                    Some(info) => (info.description, info.transfer, info.accept_transfer, false),
-                    None => (None, None, None, proposal_infos_complete),
-                };
+            let (
+                description,
+                transfer_details,
+                accept_transfer_details,
+                service_request_info,
+                orphaned,
+            ) = match proposal_infos.remove(&proposal_cid) {
+                Some(info) => (
+                    info.description,
+                    info.transfer,
+                    info.accept_transfer,
+                    info.service_request,
+                    false,
+                ),
+                None => (None, None, None, None, proposal_infos_complete),
+            };
+            // Service-request parties are only meaningful on the two
+            // service-request proposal kinds; clear them otherwise so an
+            // unrelated proposal that happens to carry operator/provider
+            // parties doesn't render a misleading summary.
+            let service_request_details = match action_label.as_str() {
+                "CreateUserServiceRequest" | "CreateProviderServiceRequest" => service_request_info,
+                _ => None,
+            };
             let mut seen_parties = std::collections::HashSet::new();
             let unique_confirmations: Vec<GovernanceConfirmation> = confirmations
                 .into_iter()
@@ -770,6 +789,7 @@ pub async fn get_governance_confirmations(
                 orphaned,
                 transfer_details,
                 accept_transfer_details,
+                service_request_details,
             }
         })
         .collect();
@@ -1091,6 +1111,10 @@ pub struct ProposalInfo {
     pub transfer: Option<TransferProposalDetails>,
     pub accept_transfer_instruction_cid: Option<String>,
     pub accept_transfer: Option<AcceptTransferDetails>,
+    /// Operator + user/provider parties, populated only for
+    /// `Create{User,Provider}ServiceRequest` proposals so the notification card
+    /// can render the full summary.
+    pub service_request: Option<ServiceRequestDetails>,
 }
 
 /// Extract proposal info from a GovernableAction contract's create_arguments.
@@ -1127,6 +1151,7 @@ fn extract_proposal_info(
         });
 
     let transfer = extract_transfer_proposal_details(record);
+    let service_request = extract_service_request_details(record);
 
     // `AcceptTransferProposal`s carry `transferInstructionCid` instead of the
     // transfer fields. Capture it here; the post-pass in `fetch_proposal_infos`
@@ -1152,6 +1177,7 @@ fn extract_proposal_info(
             transfer,
             accept_transfer_instruction_cid,
             accept_transfer: None,
+            service_request,
         },
     );
 }
@@ -1319,6 +1345,26 @@ fn extract_transfer_proposal_details(record: &Record) -> Option<TransferProposal
         amount,
         instrument_admin,
         instrument_id,
+    })
+}
+
+/// Pull `operator` plus the counterparty (`user` for a
+/// `CreateUserServiceRequest`, `provider` for a `CreateProviderServiceRequest`)
+/// out of a service-request proposal's create-arguments. Returns `None` when
+/// neither counterparty field is present, so non-service-request proposals are
+/// left untouched. Both templates carry the parties as top-level `Party`
+/// fields (unlike `TransferProposal`, which nests them under `transfer`).
+fn extract_service_request_details(record: &Record) -> Option<ServiceRequestDetails> {
+    let operator: CantonId = field_party(record, "operator")?.parse().ok()?;
+    let user: Option<CantonId> = field_party(record, "user").and_then(|p| p.parse().ok());
+    let provider: Option<CantonId> = field_party(record, "provider").and_then(|p| p.parse().ok());
+    if user.is_none() && provider.is_none() {
+        return None;
+    }
+    Some(ServiceRequestDetails {
+        operator,
+        user,
+        provider,
     })
 }
 
@@ -4029,5 +4075,75 @@ mod tests {
             extract_transfer_instruction_info(&make_event(TRANSFER_PENDING_RECEIVER_ACCEPTANCE, 0))
                 .expect("expired offer should still be returned, just past-deadline");
         assert_eq!(info.expires_at, 0);
+    }
+
+    // ------------------------------------------------------------------------
+    // extract_service_request_details
+    //
+    // CreateUserServiceRequest / CreateProviderServiceRequest carry operator +
+    // user/provider as top-level Party fields on the proposal contract. The
+    // notification card renders operator + the present counterparty so the
+    // operator sees the full summary alongside the action_label.
+    // ------------------------------------------------------------------------
+
+    // `<prefix>::<34-byte-multihash-hex>`; CantonId::parse rejects other shapes.
+    const SR_FP: &str = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
+
+    fn service_request_record(fields: Vec<RecordField>) -> Record {
+        Record {
+            record_id: None,
+            fields,
+        }
+    }
+
+    #[test]
+    fn extract_service_request_details_reads_user_request() {
+        let record = service_request_record(vec![
+            field("governanceParty", party_value(&format!("gov::{SR_FP}"))),
+            field("proposer", party_value(&format!("proposer::{SR_FP}"))),
+            field("operator", party_value(&format!("operator::{SR_FP}"))),
+            field("user", party_value(&format!("user::{SR_FP}"))),
+        ]);
+        let Some(details) = extract_service_request_details(&record) else {
+            panic!("user service request should yield details");
+        };
+        assert_eq!(details.operator.to_string(), format!("operator::{SR_FP}"));
+        assert_eq!(
+            details.user.map(|p| p.to_string()),
+            Some(format!("user::{SR_FP}")),
+        );
+        assert!(details.provider.is_none());
+    }
+
+    #[test]
+    fn extract_service_request_details_reads_provider_request() {
+        let record = service_request_record(vec![
+            field("governanceParty", party_value(&format!("gov::{SR_FP}"))),
+            field("proposer", party_value(&format!("proposer::{SR_FP}"))),
+            field("operator", party_value(&format!("operator::{SR_FP}"))),
+            field("provider", party_value(&format!("provider::{SR_FP}"))),
+        ]);
+        let Some(details) = extract_service_request_details(&record) else {
+            panic!("provider service request should yield details");
+        };
+        assert_eq!(details.operator.to_string(), format!("operator::{SR_FP}"));
+        assert_eq!(
+            details.provider.map(|p| p.to_string()),
+            Some(format!("provider::{SR_FP}")),
+        );
+        assert!(details.user.is_none());
+    }
+
+    #[test]
+    fn extract_service_request_details_skips_proposal_without_counterparty() {
+        // operator present but no user/provider counterparty → not a service
+        // request, so no details (keeps unrelated operator-bearing proposals
+        // from rendering a half-empty summary).
+        let record = service_request_record(vec![
+            field("governanceParty", party_value(&format!("gov::{SR_FP}"))),
+            field("proposer", party_value(&format!("proposer::{SR_FP}"))),
+            field("operator", party_value(&format!("operator::{SR_FP}"))),
+        ]);
+        assert!(extract_service_request_details(&record).is_none());
     }
 }

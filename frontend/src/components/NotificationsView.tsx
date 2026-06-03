@@ -1130,6 +1130,80 @@ const DomainActionCard = ({
         );
       })()}
 
+      {domainAction.service_request_details && (() => {
+        const srd = domainAction.service_request_details;
+        // The proposal type itself is the action_label header above; here we
+        // surface the operator and the user/provider being onboarded.
+        const rows: { label: string; value: string; copyValue?: string }[] = [
+          {
+            label: "Operator",
+            value: truncatePartyId(srd.operator),
+            copyValue: srd.operator,
+          },
+        ];
+        if (srd.user) {
+          rows.push({
+            label: "User",
+            value: truncatePartyId(srd.user),
+            copyValue: srd.user,
+          });
+        }
+        if (srd.provider) {
+          rows.push({
+            label: "Provider",
+            value: truncatePartyId(srd.provider),
+            copyValue: srd.provider,
+          });
+        }
+        return (
+          <Box
+            sx={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 0.75,
+              px: 1.25,
+              py: 1,
+              bgcolor: "action.hover",
+              borderRadius: 1,
+            }}
+          >
+            {rows.map((r) => (
+              <Box
+                key={r.label}
+                sx={{ display: "flex", alignItems: "center", gap: 1 }}
+              >
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{ minWidth: 96 }}
+                >
+                  {r.label}
+                </Typography>
+                <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                  {r.value}
+                </Typography>
+                {r.copyValue && (
+                  <Tooltip title={`Copy ${r.label.toLowerCase()}`}>
+                    <IconButton
+                      size="small"
+                      onClick={async () => {
+                        const ok = await copyToClipboard(r.copyValue!);
+                        showSnackbar(
+                          ok ? "Copied to clipboard" : "Failed to copy",
+                        );
+                      }}
+                      sx={{ p: 0.25 }}
+                    >
+                      <ContentCopyIcon sx={{ fontSize: 14 }} />
+                    </IconButton>
+                  </Tooltip>
+                )}
+              </Box>
+            ))}
+          </Box>
+        );
+      })()}
+
       <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
         <Typography
           variant="caption"

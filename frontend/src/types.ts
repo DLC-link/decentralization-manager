@@ -404,6 +404,19 @@ export interface DomainGovernanceAction {
    *  shows who's sending what to whom. Present only on AcceptTransfer
    *  proposals (and only when the linked instruction was readable). */
   accept_transfer_details?: AcceptTransferDetails;
+  /** Operator + user/provider parties pulled from a
+   *  Create{User,Provider}ServiceRequest proposal so the pending-approval card
+   *  shows the full summary (proposal type + operator + counterparty). Present
+   *  only on those two proposal kinds. */
+  service_request_details?: ServiceRequestDetails;
+}
+
+export interface ServiceRequestDetails {
+  operator: string;
+  /** Set for CreateUserServiceRequest. */
+  user?: string;
+  /** Set for CreateProviderServiceRequest. */
+  provider?: string;
 }
 
 export interface TransferProposalDetails {
