@@ -10,8 +10,9 @@ use canton_proto_rs::com::{
             v30::{Signature, SignatureFormat, SigningAlgorithmSpec, SigningPublicKey},
         },
         topology::admin::v30::{
-            BaseQuery, ListPartyToParticipantRequest, StoreId, Synchronizer, base_query, store_id,
-            synchronizer, topology_manager_read_service_client::TopologyManagerReadServiceClient,
+            BaseQuery, ListPartyToKeyMappingRequest, ListPartyToParticipantRequest, StoreId,
+            Synchronizer, base_query, store_id, synchronizer,
+            topology_manager_read_service_client::TopologyManagerReadServiceClient,
         },
     },
 };
@@ -88,16 +89,17 @@ pub async fn sign_submissions(
                 Some(b) => b,
                 None => {
                     tracing::warn!(
-                        "Local artifacts backfill failed; querying Canton's \
-                         PartyToParticipant on-chain to recover this node's DAML signing \
-                         key for {dec_party_id}"
+                        "Local artifacts backfill failed; querying Canton's on-chain \
+                         topology (PartyToParticipant / legacy PartyToKeyMapping) to \
+                         recover this node's DAML signing key for {dec_party_id}"
                     );
                     backfill_peer_keys_from_chain(config, dec_party_id)
                         .await?
                         .ok_or_else(|| {
                             anyhow::anyhow!(
                                 "PEER_PUBLIC_KEYS not found in identity table, completed \
-                                 onboarding artifacts, OR PartyToParticipant on-chain for \
+                                 onboarding artifacts, OR on-chain topology \
+                                 (PartyToParticipant / legacy PartyToKeyMapping) for \
                                  {node_id} on {dec_party_id} — onboarding may not have \
                                  completed yet"
                             )
@@ -435,10 +437,16 @@ fn encode_messages_length_prefixed<M: prost::Message>(messages: &[M]) -> Vec<u8>
     buffer.to_vec()
 }
 
-/// On-chain backfill: query Canton's `PartyToParticipant` topology mapping for
-/// the dec_party, then cross-reference its `party_signing_keys` against this
-/// node's vault. The vault key whose fingerprint matches one of the on-chain
+/// On-chain backfill: recover the dec_party's protocol signing keys from
+/// Canton's topology store, then cross-reference them against this node's
+/// vault. The vault key whose fingerprint matches one of the on-chain
 /// signing keys is the DAML key this node contributes to the party.
+///
+/// The keys live in one of two places depending on when the party was
+/// onboarded: `PartyToParticipant.party_signing_keys` (Canton 3.4 — what the
+/// current onboarding submits) or a separate legacy `PartyToKeyMapping`
+/// transaction (Canton 3.3 — parties onboarded before the switch). Both are
+/// checked, newest format first.
 ///
 /// Returns the same `varint(len)||SigningPublicKey` × 2 byte layout that
 /// `read_all_messages_from_bytes` expects. Index `[0]` is unused downstream
@@ -451,47 +459,74 @@ async fn backfill_peer_keys_from_chain(
     let dec_party_id_str = dec_party_id.to_string();
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
 
-    // 1. Pull this party's PartyToParticipant from Canton's topology store.
+    let base_query = BaseQuery {
+        store: Some(StoreId {
+            store: Some(store_id::Store::Synchronizer(Synchronizer {
+                kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id)),
+            })),
+        }),
+        proposals: false,
+        operation: 0,
+        time_query: Some(base_query::TimeQuery::HeadState(())),
+        filter_signed_key: String::new(),
+        protocol_version: None,
+    };
+
+    // 1. Current format: signing keys embedded on the PartyToParticipant.
     let mut topology_client =
         TopologyManagerReadServiceClient::connect(config.admin_api_url()).await?;
     let p2p_response = topology_client
         .list_party_to_participant(tonic::Request::new(ListPartyToParticipantRequest {
-            base_query: Some(BaseQuery {
-                store: Some(StoreId {
-                    store: Some(store_id::Store::Synchronizer(Synchronizer {
-                        kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id)),
-                    })),
-                }),
-                proposals: false,
-                operation: 0,
-                time_query: Some(base_query::TimeQuery::HeadState(())),
-                filter_signed_key: String::new(),
-                protocol_version: None,
-            }),
+            base_query: Some(base_query.clone()),
             filter_party: dec_party_id_str.clone(),
             filter_participant: String::new(),
         }))
         .await?
         .into_inner();
 
-    let Some(item) = p2p_response.results.into_iter().find_map(|r| r.item) else {
-        tracing::warn!("No PartyToParticipant mapping found on-chain for {dec_party_id}");
-        return Ok(None);
-    };
-    let Some(party_signing_keys) = item.party_signing_keys else {
-        tracing::warn!("PartyToParticipant for {dec_party_id} has no party_signing_keys field");
-        return Ok(None);
-    };
-    if party_signing_keys.keys.is_empty() {
-        tracing::warn!("PartyToParticipant for {dec_party_id} has empty party_signing_keys");
+    let mut signing_keys: Vec<SigningPublicKey> = p2p_response
+        .results
+        .into_iter()
+        .find_map(|r| r.item)
+        .and_then(|item| item.party_signing_keys)
+        .map(|k| k.keys)
+        .unwrap_or_default();
+
+    // 2. Legacy format: parties onboarded before the embedded-keys switch
+    //    registered their keys via a separate PartyToKeyMapping transaction.
+    if signing_keys.is_empty() {
+        tracing::warn!(
+            "PartyToParticipant for {dec_party_id} carries no party_signing_keys; \
+             trying the legacy PartyToKeyMapping topology mapping"
+        );
+        let ptk_response = topology_client
+            .list_party_to_key_mapping(tonic::Request::new(ListPartyToKeyMappingRequest {
+                base_query: Some(base_query),
+                filter_party: dec_party_id_str.clone(),
+            }))
+            .await?
+            .into_inner();
+        signing_keys = ptk_response
+            .results
+            .into_iter()
+            .find_map(|r| r.item)
+            .map(|item| item.signing_keys)
+            .unwrap_or_default();
+    }
+
+    if signing_keys.is_empty() {
+        tracing::warn!(
+            "No protocol signing keys found on-chain for {dec_party_id} — neither \
+             PartyToParticipant.party_signing_keys nor a legacy PartyToKeyMapping"
+        );
         return Ok(None);
     }
 
-    // 2. Walk the on-chain keys and pick the one our vault recognizes — that's
+    // 3. Walk the on-chain keys and pick the one our vault recognizes — that's
     //    this node's contribution. Other entries belong to peer participants
     //    and their private halves are not in our vault.
     let mut vault_client = VaultServiceClient::connect(config.admin_api_url()).await?;
-    for key in &party_signing_keys.keys {
+    for key in &signing_keys {
         let fingerprint = utils::compute_fingerprint(key);
         let resp = vault_client
             .list_my_keys(tonic::Request::new(ListMyKeysRequest {
@@ -506,8 +541,8 @@ async fn backfill_peer_keys_from_chain(
             .into_inner();
         if !resp.private_keys_metadata.is_empty() {
             tracing::info!(
-                "Recovered DAML signing key {fingerprint} for {dec_party_id} from on-chain \
-                 PartyToParticipant"
+                "Recovered DAML signing key {fingerprint} for {dec_party_id} from the on-chain \
+                 topology state"
             );
             // Encode as [namespace_placeholder, daml_key]. Downstream only
             // reads index [1], so the placeholder content is irrelevant
@@ -522,7 +557,7 @@ async fn backfill_peer_keys_from_chain(
     tracing::warn!(
         "None of the {count} on-chain signing keys for {dec_party_id} are present in this \
          node's vault — this node may not be a hosting participant of {dec_party_id}",
-        count = party_signing_keys.keys.len()
+        count = signing_keys.len()
     );
     Ok(None)
 }
