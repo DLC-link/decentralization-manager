@@ -39,7 +39,8 @@ use crate::{
         },
         transfer_context::{
             AcceptTransferContext, ProposeTransferArgs, fetch as fetch_accept_transfer_context,
-            fetch_factory_for_propose, maybe_fetch_for_proposal, to_proto_disclosed_contracts,
+            fetch_factory_for_propose, maybe_fetch_for_proposal, needs_registry_context,
+            to_proto_disclosed_contracts,
         },
         types::{
             AuditLogEntry, AuditLogQuery, AuditLogResponse, BurnRequestsResponse,
@@ -1087,11 +1088,15 @@ pub async fn propose_action(
     //     `TransferInstruction_Accept` choice reads at execute time. Without it
     //     execute fails with `Missing context entry for
     //     utility.digitalasset.com/transfer-rule`.
-    //   * `Transfer` with empty `transfer_factory_cid`: the dec party doesn't
-    //     administer this instrument (e.g. CBTC, admin = `cbtc-network`), so
-    //     the factory isn't on its ACS. Resolve the factory cid + context via
-    //     the registrar's `transfer-factory` endpoint and substitute them into
-    //     the proposal we're about to create.
+    //   * `Transfer` of a utility-registry instrument: `TransferFactory_Transfer`
+    //     reads `utility.digitalasset.com/instrument-configuration` from
+    //     `extraArgs.context.values` at execute time, so the context must be
+    //     fetched from the registrar and baked into the proposal regardless of
+    //     whether the dec party administers the instrument. For shared
+    //     instruments (e.g. CBTC, admin = `cbtc-network`) the factory isn't on
+    //     the dec party's ACS, so we also substitute the resolved factory cid.
+    //     Canton Coin is excluded — its `AmuletRules` factory and context come
+    //     from the DSO scan API. See `needs_registry_context`.
     let mut resolved_proposal = body.proposal.clone();
     let transfer_choice_context = match &mut resolved_proposal {
         ProposalType::AcceptTransfer {
@@ -1122,7 +1127,12 @@ pub async fn propose_action(
             instrument_id,
             input_holding_cids,
             ..
-        } if transfer_factory_cid.is_empty() => {
+        } if needs_registry_context(
+            transfer_factory_cid,
+            &instrument_id.admin,
+            &party_id.to_string(),
+        ) =>
+        {
             let admin: CantonId = match instrument_id.admin.parse() {
                 Ok(p) => p,
                 Err(e) => {
@@ -1147,7 +1157,12 @@ pub async fn propose_action(
             .await
             {
                 Ok(resolved) => {
-                    *transfer_factory_cid = resolved.factory_cid;
+                    // Self-administered utility tokens already carry the factory
+                    // cid the UI read from the dec party's ACS; only fill it in
+                    // for shared instruments where the UI left it empty.
+                    if transfer_factory_cid.is_empty() {
+                        *transfer_factory_cid = resolved.factory_cid;
+                    }
                     Some(AcceptTransferContext {
                         context: resolved.context,
                         disclosed_contracts: resolved.disclosed_contracts,

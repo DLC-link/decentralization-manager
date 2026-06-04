@@ -65,6 +65,34 @@ pub struct ProposeTransferContext {
     pub disclosed_contracts: Vec<RegistryDisclosedContract>,
 }
 
+/// Decide whether a `Transfer` proposal must resolve its choice context from
+/// the token-standard registry before creation.
+///
+/// Returns `true` for utility-registry instruments, whose `TransferFactory`
+/// reads `utility.digitalasset.com/instrument-configuration` (and friends) from
+/// `extraArgs.context.values` at execute time:
+///
+///   * **Self-administered dec-party tokens** (`instrument_admin == dec_party`):
+///     the factory lives on the dec party's own ACS, so the UI supplies a
+///     non-empty `transfer_factory_cid` — but the choice context still has to be
+///     fetched and baked into the proposal, or execute fails with
+///     `Missing context entry for utility.digitalasset.com/instrument-configuration`.
+///   * **Shared instruments** (e.g. CBTC, `admin = cbtc-network`): the factory
+///     lives on the registrar, so the UI leaves `transfer_factory_cid` empty and
+///     the registrar resolves both the cid and the context.
+///
+/// Returns `false` for Canton Coin, whose `AmuletRules` factory and choice
+/// context come from the DSO scan API rather than this registry. The UI surfaces
+/// CC as a synthetic factory keyed on the DSO party (non-empty cid, admin is the
+/// DSO), so it is excluded by both predicates.
+pub fn needs_registry_context(
+    transfer_factory_cid: &str,
+    instrument_admin: &str,
+    dec_party: &str,
+) -> bool {
+    transfer_factory_cid.is_empty() || instrument_admin == dec_party
+}
+
 /// Call the registrar's `transfer-factory` endpoint to resolve the singleton
 /// `TransferFactory` cid and the choice context required to exercise
 /// `TransferFactory_Transfer` later. Used by the propose handler for
@@ -571,4 +599,45 @@ pub fn to_proto_disclosed_contracts(
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DEC_PARTY: &str = "Test01::1220c5deadbeef";
+    const DSO: &str = "DSO::1220ffaabbcc";
+
+    #[test]
+    fn self_administered_utility_token_needs_registry_context() {
+        // The dec party administers the instrument itself, so the UI prefills
+        // the on-ACS factory cid — yet the context still must be fetched.
+        assert!(needs_registry_context(
+            "00factory_cid_from_acs",
+            DEC_PARTY,
+            DEC_PARTY,
+        ));
+    }
+
+    #[test]
+    fn shared_instrument_with_empty_factory_needs_registry_context() {
+        // CBTC-style: the factory lives on the registrar, so the UI leaves the
+        // cid empty and the registrar resolves both the cid and the context.
+        assert!(needs_registry_context(
+            "",
+            "cbtc-network::1220aa",
+            DEC_PARTY
+        ));
+    }
+
+    #[test]
+    fn canton_coin_does_not_need_registry_context() {
+        // CC surfaces a synthetic factory: AmuletRules cid + DSO admin. Its
+        // context comes from the DSO scan API, not this registry.
+        assert!(!needs_registry_context(
+            "00amulet_rules_cid",
+            DSO,
+            DEC_PARTY,
+        ));
+    }
 }
