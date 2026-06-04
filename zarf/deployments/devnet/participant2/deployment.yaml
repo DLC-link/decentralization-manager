@@ -24,6 +24,8 @@ metadata:
     app.kubernetes.io/component: peer
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: dec-party-manager
@@ -44,7 +46,7 @@ spec:
               mountPath: /app
       containers:
         - name: dec-party-manager
-          image: public.ecr.aws/dlc-link/canton-decparty-manager:0.1.5
+          image: public.ecr.aws/dlc-link/canton-decparty-manager:0.1.7
           imagePullPolicy: Always
           command: ["dec-party-manager", "serve"]
           ports:
@@ -62,7 +64,7 @@ spec:
               memory: "128Mi"
               cpu: "100m"
             limits:
-              memory: "1Gi"
+              memory: "2Gi"
               cpu: "500m"
           env:
             - name: RUST_LOG

@@ -9,7 +9,7 @@ pub use steps::{
     submit_final_proposals,
 };
 
-use crate::{noise::MessageType, workflow::state::WorkflowStep};
+use crate::{noise::MessageType, server::WorkflowKind, workflow::state::WorkflowStep};
 
 /// Onboarding workflow steps (decentralized party creation)
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -108,5 +108,9 @@ impl WorkflowStep for OnboardingStep {
             "Complete" => Self::Complete,
             _ => return None,
         })
+    }
+
+    fn kind() -> WorkflowKind {
+        WorkflowKind::Onboarding
     }
 }

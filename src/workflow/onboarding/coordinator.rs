@@ -4,10 +4,10 @@ use anyhow::Context;
 use sqlx::SqlitePool;
 
 use crate::{
+    canton_id::CantonId,
     config::{NetworkConfig, NodeConfig},
     error::Result,
     noise::server::{ActiveWorkflow, NoiseServer},
-    participant_id::CantonId,
     server::{ActiveWorkflowSlot, peer_status::LastSeen},
     utils,
     workflow::{
@@ -15,8 +15,6 @@ use crate::{
         storage::{WorkflowStorage, artifact_kinds},
     },
 };
-
-use crate::workflow::{COORDINATOR_STEP_STALENESS_THRESHOLD, StepStalenessWatchdog};
 
 use super::{
     OnboardingConfig, OnboardingStep,
@@ -195,7 +193,6 @@ async fn run_workflow(
 ) -> Result {
     let instance_name = onboarding_config.instance_name.clone();
     let mut coordinator_completed_steps = HashSet::new();
-    let mut watchdog = StepStalenessWatchdog::new(COORDINATOR_STEP_STALENESS_THRESHOLD);
 
     // Set the onboarding config as payload for GenerateKeys step
     let config_payload =
@@ -204,7 +201,6 @@ async fn run_workflow(
 
     loop {
         let current_step = workflow_state.current_step().await;
-        watchdog.check(current_step)?;
 
         match current_step {
             OnboardingStep::WaitingForPeers => {

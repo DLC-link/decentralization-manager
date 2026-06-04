@@ -3,15 +3,15 @@ use std::{collections::HashSet, marker::PhantomData, sync::Arc, time::Instant};
 use sqlx::SqlitePool;
 
 use crate::{
+    canton_id::CantonId,
     config::{NetworkConfig, NodeConfig, Peer},
     db::schema::SchemaRead,
     noise::{
         CHUNK_SIZE, MAX_PAYLOAD_SIZE, Message, MessageType, NoiseError, NoiseKeypair,
         parse_public_key, send_noise_message,
     },
-    participant_id::CantonId,
     server::{
-        WorkflowProgress,
+        DeclineInvitationPayload, WorkflowKind, WorkflowProgress,
         peer_status::{LastSeen, bump},
     },
     workflow::{
@@ -29,6 +29,25 @@ use crate::{
 /// listener from resuming, which has caused Contracts-invite races in CI.
 const fn command_carries_payload(command: MessageType) -> bool {
     !matches!(command, MessageType::Disconnect)
+}
+
+/// Whether a peer's invitation decline targets THIS coordinator run. The
+/// workflow kind must match, and when the decline echoes the run identity
+/// (carried on invites since `workflow_instance` was added) it must match
+/// the active run's instance name; declines from older peers without the
+/// field pass on the kind check alone.
+fn decline_matches_run(
+    payload: &DeclineInvitationPayload,
+    run_kind: WorkflowKind,
+    run_instance: &str,
+) -> bool {
+    if payload.kind != run_kind {
+        return false;
+    }
+    match &payload.workflow_instance {
+        Some(instance) => instance == run_instance,
+        None => true,
+    }
 }
 
 /// Coordinator server that accepts connections from peers
@@ -102,16 +121,6 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
             .into_iter()
             .collect();
 
-        let expected_peers: Vec<CantonId> = network_config
-            .peers
-            .iter()
-            .filter(|p| {
-                let peer_id = p.participant_id.to_string();
-                p.participant_id != *node_config.participant_id() && !excluded.contains(&peer_id)
-            })
-            .map(|p| p.participant_id.clone())
-            .collect();
-
         if !excluded.is_empty() {
             tracing::info!(
                 "Excluding {count} participant(s) from peers: {participants}",
@@ -119,6 +128,41 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                 participants = excluded.iter().cloned().collect::<Vec<_>>().join(", ")
             );
         }
+
+        // Look up the persisted run up-front. Its `expected_peers` is the
+        // authoritative invitee set the start handler selected for *this* run,
+        // which can be a strict subset of the configured mesh — onboarding and
+        // dars both invite a chosen subset of the peers this node knows about.
+        // Deriving the wait set from the full configured mesh instead made the
+        // coordinator wait in `WaitingForPeers` for peers it was never going to
+        // invite and that can never connect, so any party smaller than the full
+        // mesh (e.g. 1 coordinator + 1 peer) hung forever.
+        // Prefer the persisted invitees; the coordinator always
+        // inserts its row before constructing this server, so the
+        // configured-mesh fallback only covers the (unexpected) no-row case.
+        let persisted = match SchemaRead::get_workflow_run(&db, &instance_name).await {
+            Ok(run) => run,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to look up persisted workflow_runs row for {instance_name}: {e}; \
+                     falling back to configured peers"
+                );
+                None
+            }
+        };
+
+        let expected_peers: Vec<CantonId> = match persisted.as_ref() {
+            Some(run) => run.expected_peers.clone(),
+            None => network_config
+                .peers
+                .iter()
+                .filter(|p| {
+                    p.participant_id != *node_config.participant_id()
+                        && !excluded.contains(&p.participant_id.to_string())
+                })
+                .map(|p| p.participant_id.clone())
+                .collect(),
+        };
 
         tracing::info!(
             "Expected {count} peer(s): {peers}",
@@ -130,21 +174,32 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                 .join(", ")
         );
 
+        // Scope the fan-out peer records to this run's participant set so
+        // best-effort broadcasts (e.g. CancelInvite on decline) only reach the
+        // peers actually invited to this run, never unrelated configured peers.
+        let expected_set: HashSet<CantonId> = expected_peers.iter().cloned().collect();
+        let peers = network_config
+            .peers
+            .iter()
+            .filter(|p| expected_set.contains(&p.participant_id))
+            .cloned()
+            .collect();
+
         // Resume-aware construction: if an InProgress workflow_runs row already
         // exists for `instance_name` (we restarted mid-flight), re-hydrate the
         // state machine from its persisted `current_step` + already-completed
         // peers instead of starting fresh from `initial_step`. The
         // coordinator workflow loop is naturally driven by `current_step`, so
         // seeding it from the row picks the run back up at the right place.
-        let workflow_state = match SchemaRead::get_workflow_run(&db, &instance_name).await {
-            Ok(Some(run)) if run.status == WorkflowProgress::InProgress => {
+        let workflow_state = match persisted {
+            Some(run) if run.status == WorkflowProgress::InProgress => {
                 match S::try_from_step_name(&run.current_step) {
                     Some(step) => {
                         tracing::info!(
                             "Resuming workflow {instance_name} at step {step:?} \
                              ({} of {} peers completed)",
                             run.completed_peers.len(),
-                            run.expected_peers.len()
+                            expected_peers.len()
                         );
                         WorkflowState::from_persisted(
                             db,
@@ -165,25 +220,9 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                     }
                 }
             }
-            Ok(_) => WorkflowState::new(db, instance_name, initial_step, expected_peers),
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to look up persisted workflow_runs row for {instance_name}: {e}; \
-                     starting fresh"
-                );
-                WorkflowState::new(db, instance_name, initial_step, expected_peers)
-            }
+            _ => WorkflowState::new(db, instance_name, initial_step, expected_peers),
         };
 
-        let peers = network_config
-            .peers
-            .iter()
-            .filter(|p| {
-                let peer_id = p.participant_id.to_string();
-                p.participant_id != *node_config.participant_id() && !excluded.contains(&peer_id)
-            })
-            .cloned()
-            .collect();
         Ok(Self {
             node_config: Arc::new(node_config),
             keypair: Arc::new(keypair),
@@ -376,12 +415,42 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
     /// remaining peers so their pending invites / in-flight peer runs roll
     /// back instead of hanging. Always replies with `Ack` — the declining
     /// peer treats the send as fire-and-forget.
+    ///
+    /// The decline is validated before failing the run: the always-on
+    /// listener routes EVERY `DeclineInvitation` to whatever workflow is
+    /// currently active, so a peer denying a STALE invitation card (left
+    /// over from an earlier run that failed without a `CancelInvite`) must
+    /// not kill an unrelated run that happens to be active now.
     async fn handle_decline_invitation(&self, peer_id: CantonId, payload: Vec<u8>) -> Message {
-        let reason = serde_json::from_slice::<crate::server::DeclineInvitationPayload>(&payload)
-            .ok()
-            .and_then(|p| p.reason);
+        let payload = serde_json::from_slice::<DeclineInvitationPayload>(&payload).ok();
 
-        let msg = match &reason {
+        // Only peers this run actually invited may fail it.
+        if !self.peers.iter().any(|p| p.participant_id == peer_id) {
+            tracing::warn!(
+                "Ignoring invitation decline from {peer_id}: not a participant of run {}",
+                self.workflow_state.instance_name()
+            );
+            return Message::new_empty(MessageType::Ack);
+        }
+
+        let Some(payload) = payload else {
+            tracing::warn!("Ignoring invitation decline from {peer_id}: unparseable payload");
+            return Message::new_empty(MessageType::Ack);
+        };
+
+        if !decline_matches_run(&payload, S::kind(), self.workflow_state.instance_name()) {
+            tracing::warn!(
+                "Ignoring invitation decline from {peer_id} for {kind:?} run {instance:?}: \
+                 active run is {active_kind:?} {active_instance}",
+                kind = payload.kind,
+                instance = payload.workflow_instance,
+                active_kind = S::kind(),
+                active_instance = self.workflow_state.instance_name()
+            );
+            return Message::new_empty(MessageType::Ack);
+        }
+
+        let msg = match &payload.reason {
             Some(r) => format!("Peer {peer_id} declined the invitation: {r}"),
             None => format!("Peer {peer_id} declined the invitation"),
         };
@@ -444,5 +513,62 @@ mod tests {
         assert!(command_carries_payload(MessageType::SignSubmissions));
         assert!(command_carries_payload(MessageType::SignKick));
         assert!(command_carries_payload(MessageType::GenerateKeys));
+    }
+
+    fn decline(kind: WorkflowKind, workflow_instance: Option<&str>) -> DeclineInvitationPayload {
+        DeclineInvitationPayload {
+            kind,
+            reason: None,
+            workflow_instance: workflow_instance.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn decline_with_matching_kind_and_instance_matches() {
+        let payload = decline(WorkflowKind::Kick, Some("acme-kick-1"));
+
+        assert!(decline_matches_run(
+            &payload,
+            WorkflowKind::Kick,
+            "acme-kick-1"
+        ));
+    }
+
+    #[test]
+    fn decline_with_wrong_kind_is_rejected() {
+        // Stale Kick card denied while a Dars run is active.
+        let payload = decline(WorkflowKind::Kick, None);
+
+        assert!(!decline_matches_run(
+            &payload,
+            WorkflowKind::Dars,
+            "dars-distribute-1"
+        ));
+    }
+
+    #[test]
+    fn decline_with_stale_instance_is_rejected() {
+        // Stale Kick #1 card denied while Kick #2 (same kind, same party,
+        // same member set) is active — only the instance tells them apart.
+        let payload = decline(WorkflowKind::Kick, Some("acme-kick-1"));
+
+        assert!(!decline_matches_run(
+            &payload,
+            WorkflowKind::Kick,
+            "acme-kick-2"
+        ));
+    }
+
+    #[test]
+    fn decline_without_instance_passes_on_kind_alone() {
+        // Invites from coordinators that predate `workflow_instance` carry
+        // no run identity — the kind check alone must keep working.
+        let payload = decline(WorkflowKind::Onboarding, None);
+
+        assert!(decline_matches_run(
+            &payload,
+            WorkflowKind::Onboarding,
+            "acme-creation"
+        ));
     }
 }

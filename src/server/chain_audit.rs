@@ -3,28 +3,33 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use canton_proto_rs::com::daml::ledger::api::v2::{
     CumulativeFilter, EventFormat, Filters, GetLatestPrunedOffsetsRequest, GetLedgerEndRequest,
-    GetUpdatesRequest, Identifier, Record, TransactionFormat, TransactionShape, UpdateFormat,
-    Value, WildcardFilter, cumulative_filter, event::Event, get_updates_response::Update, value,
+    GetUpdatesRequest, Identifier, InterfaceFilter, Record, TemplateFilter, TransactionFormat,
+    TransactionShape, UpdateFormat, Value, WildcardFilter, cumulative_filter, event::Event,
+    get_updates_response::Update, value,
 };
 use serde_json::{Value as JsonValue, json};
-
 use sqlx::SqlitePool;
 
 use crate::{
+    canton_id::CantonId,
     config::{NodeConfig, PackageConfig},
-    participant_id::CantonId,
     utils,
 };
 
-use super::types::ChainAuditEntry;
+use super::{
+    package_inventory::{fetch_package_names, matching_names, package_name_prefix},
+    types::ChainAuditEntry,
+};
 
 struct ChainTemplate {
+    package_prefix: String,
     module_name: &'static str,
     entity_name: &'static str,
     governance_type: &'static str,
 }
 
 struct ChainInterface {
+    package_prefix: String,
     module_name: &'static str,
     entity_name: &'static str,
     governance_type: &'static str,
@@ -35,54 +40,65 @@ struct ChainFilters {
     interfaces: Vec<ChainInterface>,
 }
 
-/// The list of governance Daml types we care about. We no longer pin
-/// `package_id` on each entry — events are matched purely by
-/// `(module_name, entity_name)` after the wildcard ledger query, so the
-/// audit trail covers events from any package version (rc3, rc4, future).
-/// `packages` is kept as an argument so a build that omits some governance
-/// kinds (vault / core / cbtc) still skips them at the index level.
+/// The list of governance Daml types we care about, each tagged with the
+/// stable name prefix of the package family that defines it. Ledger queries
+/// are filtered Canton-side by package-name references resolved from the
+/// participant's own inventory, and events are classified client-side purely
+/// by `(module_name, entity_name)`, so the audit trail covers events from
+/// any package version (rc3, rc4, future). `packages` is kept as an argument
+/// so a build that omits some governance kinds (vault / core / cbtc) still
+/// skips them entirely.
 fn chain_filters(packages: &PackageConfig) -> ChainFilters {
     let mut templates = Vec::new();
     let mut interfaces = Vec::new();
 
-    if packages.vault_governance.is_some() {
+    if let Some(pkg) = &packages.vault_governance {
+        let prefix = package_name_prefix(pkg);
         templates.push(ChainTemplate {
+            package_prefix: prefix.clone(),
             module_name: "BitsafeVault.VaultGovernance",
             entity_name: "VaultGovernanceRules",
             governance_type: "vault",
         });
         templates.push(ChainTemplate {
+            package_prefix: prefix,
             module_name: "BitsafeVault.VaultGovernance",
             entity_name: "VaultGovernanceConfirmation",
             governance_type: "vault",
         });
     }
 
-    if packages.governance_core.is_some() {
+    if let Some(pkg) = &packages.governance_core {
+        let prefix = package_name_prefix(pkg);
         templates.push(ChainTemplate {
+            package_prefix: prefix.clone(),
             module_name: "Governance.Rules",
             entity_name: "GovernanceRules",
             governance_type: "core_self",
         });
         templates.push(ChainTemplate {
+            package_prefix: prefix.clone(),
             module_name: "Governance.Rules",
             entity_name: "GovernanceSelfConfirmation",
             governance_type: "core_self",
         });
         templates.push(ChainTemplate {
+            package_prefix: prefix.clone(),
             module_name: "Governance.Confirmation",
             entity_name: "GovernanceConfirmation",
             governance_type: "core_domain",
         });
         templates.push(ChainTemplate {
+            package_prefix: prefix,
             module_name: "Governance.ExecutionResult",
             entity_name: "GovernanceExecutionResult",
             governance_type: "core_domain",
         });
     }
 
-    if packages.governance_action.is_some() {
+    if let Some(pkg) = &packages.governance_action {
         interfaces.push(ChainInterface {
+            package_prefix: package_name_prefix(pkg),
             module_name: "Governance.Action",
             entity_name: "GovernableAction",
             governance_type: "core_domain",
@@ -90,11 +106,13 @@ fn chain_filters(packages: &PackageConfig) -> ChainFilters {
     }
 
     templates.push(ChainTemplate {
+        package_prefix: "cbtc-governance".to_string(),
         module_name: "CBTC.Governance",
         entity_name: "CBTCGovernanceRules",
         governance_type: "cbtc",
     });
     templates.push(ChainTemplate {
+        package_prefix: "cbtc-governance".to_string(),
         module_name: "CBTC.Governance",
         entity_name: "Confirmation",
         governance_type: "cbtc",
@@ -104,6 +122,76 @@ fn chain_filters(packages: &PackageConfig) -> ChainFilters {
         templates,
         interfaces,
     }
+}
+
+/// Build Canton-side `CumulativeFilter`s for the governance templates using
+/// package-name references taken from the participant's own package
+/// inventory. Referencing only names the participant actually knows avoids
+/// the "Packages not found on participant" failure that unresolvable
+/// package-name references cause, while still covering events from renamed
+/// historical packages whose DARs remain uploaded.
+fn build_canton_filters(filters: &ChainFilters, package_names: &[String]) -> Vec<CumulativeFilter> {
+    let mut cumulative = Vec::new();
+
+    for t in &filters.templates {
+        for name in matching_names(package_names, &t.package_prefix) {
+            cumulative.push(CumulativeFilter {
+                identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
+                    TemplateFilter {
+                        template_id: Some(Identifier {
+                            package_id: format!("#{name}"),
+                            module_name: t.module_name.to_string(),
+                            entity_name: t.entity_name.to_string(),
+                        }),
+                        include_created_event_blob: false,
+                    },
+                )),
+            });
+        }
+    }
+
+    for i in &filters.interfaces {
+        for name in matching_names(package_names, &i.package_prefix) {
+            cumulative.push(CumulativeFilter {
+                identifier_filter: Some(cumulative_filter::IdentifierFilter::InterfaceFilter(
+                    InterfaceFilter {
+                        interface_id: Some(Identifier {
+                            package_id: format!("#{name}"),
+                            module_name: i.module_name.to_string(),
+                            entity_name: i.entity_name.to_string(),
+                        }),
+                        include_interface_view: true,
+                        include_created_event_blob: false,
+                    },
+                )),
+            });
+        }
+    }
+
+    cumulative
+}
+
+/// The wildcard fallback filter: every event for the party, classified and
+/// trimmed client-side.
+fn wildcard_filters() -> Vec<CumulativeFilter> {
+    vec![CumulativeFilter {
+        identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
+            WildcardFilter {
+                include_created_event_blob: false,
+            },
+        )),
+    }]
+}
+
+/// Whether an entry is a governance action worth showing in the audit trail:
+/// proposals, confirmations, executions and their outcomes. `create`
+/// (downstream contract creations) and `other` (unrelated choices) are
+/// subevents the trail should not show.
+fn is_governance_entry(entry: &ChainAuditEntry) -> bool {
+    matches!(
+        entry.event_type.as_str(),
+        "propose" | "confirm" | "execute" | "expire" | "cancel" | "execute_result"
+    )
 }
 
 fn classify_choice(choice: &str) -> String {
@@ -207,8 +295,11 @@ fn optional_value_to_json(v: &Option<Value>) -> JsonValue {
 
 /// Query Canton's ledger for on-chain governance events for a party.
 ///
-/// Streams `GetUpdates` from offset 0 to the current ledger end, filtered to
-/// governance-related templates. Returns entries sorted newest-first.
+/// Streams `GetUpdates` from the pruned offset to the current ledger end,
+/// filtered to governance templates Canton-side when possible (falling back
+/// to a wildcard query otherwise). Returns only governance actions —
+/// proposals, confirmations, executions and their outcomes — sorted
+/// newest-first.
 ///
 /// # Errors
 ///
@@ -243,32 +334,125 @@ pub async fn get_chain_audit(
 
     let begin_offset = pruned_offset.max(0);
 
-    // Build the (module, entity) → governance_type index used to classify
-    // events client-side. We keep this pinned to the static `PackageConfig`
-    // because it's purely about *which Daml types we care about*, not which
-    // package version they came from.
     let filters = chain_filters(packages);
     if filters.templates.is_empty() && filters.interfaces.is_empty() {
         tracing::warn!("No governance templates configured; returning empty chain audit");
         return Ok(Vec::new());
     }
 
-    // Wildcard at the ledger level — pick up all events for the party
-    // regardless of which package version produced them. Filtering happens
-    // client-side via `template_index` below. Without this, an old run that
-    // emitted events under (say) `#governance-core-v0-rc3` becomes
-    // unqueryable on a participant that has only `#governance-core-v1-rc1`
-    // vetted: the package-name reference in a `TemplateFilter` fails to
-    // resolve and `GetUpdates` errors out with "Packages not found on
-    // participant". The audit trail isn't sensitive to package version.
-    let cumulative = vec![CumulativeFilter {
-        identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
-            WildcardFilter {
-                include_created_event_blob: false,
-            },
-        )),
-    }];
+    // The (module, entity) → governance_type index used to classify events
+    // client-side, independent of which package version produced them.
+    let template_index: HashMap<(String, String), &'static str> = filters
+        .templates
+        .iter()
+        .map(|t| {
+            (
+                (t.module_name.to_string(), t.entity_name.to_string()),
+                t.governance_type,
+            )
+        })
+        .chain(filters.interfaces.iter().map(|i| {
+            (
+                (i.module_name.to_string(), i.entity_name.to_string()),
+                i.governance_type,
+            )
+        }))
+        .collect();
 
+    // Filter at the Canton request level when possible: build template and
+    // interface filters from package names present in the participant's own
+    // inventory. Fall back to the wildcard (every event for the party,
+    // classified client-side) if the inventory is unavailable or the
+    // filtered query is rejected.
+    let canton_filters = match fetch_package_names(config).await {
+        Ok(names) => {
+            let cumulative = build_canton_filters(&filters, &names);
+            if cumulative.is_empty() {
+                tracing::warn!(
+                    "No governance packages found on participant; falling back to wildcard"
+                );
+                None
+            } else {
+                Some(cumulative)
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Failed to list participant packages: {e:#}; falling back to wildcard");
+            None
+        }
+    };
+
+    let mut entries = match canton_filters {
+        Some(cumulative) => {
+            let filtered = stream_entries(
+                config,
+                token.clone(),
+                party_id,
+                begin_offset,
+                ledger_end,
+                cumulative,
+                &template_index,
+            )
+            .await;
+            match filtered {
+                Ok(entries) => entries,
+                Err(e) => {
+                    tracing::warn!(
+                        "Filtered chain audit query failed: {e:#}; retrying with wildcard"
+                    );
+                    stream_entries(
+                        config,
+                        token,
+                        party_id,
+                        begin_offset,
+                        ledger_end,
+                        wildcard_filters(),
+                        &template_index,
+                    )
+                    .await?
+                }
+            }
+        }
+        None => {
+            stream_entries(
+                config,
+                token,
+                party_id,
+                begin_offset,
+                ledger_end,
+                wildcard_filters(),
+                &template_index,
+            )
+            .await?
+        }
+    };
+
+    // The trail shows governance actions only — drop downstream creates,
+    // unrelated choices and the like before caching and returning.
+    entries.retain(is_governance_entry);
+
+    entries.sort_by_key(|e| std::cmp::Reverse(e.offset));
+    entries.truncate(limit);
+
+    tracing::info!(
+        "Chain audit for {party_id}: {count} entries (ledger_end={ledger_end})",
+        count = entries.len()
+    );
+
+    Ok(entries)
+}
+
+/// Stream `GetUpdates` between the offsets with the given event filters and
+/// convert matching Created/Exercised events into audit entries.
+async fn stream_entries(
+    config: &NodeConfig,
+    token: Option<String>,
+    party_id: &str,
+    begin_exclusive: i64,
+    end_inclusive: i64,
+    cumulative: Vec<CumulativeFilter>,
+    template_index: &HashMap<(String, String), &'static str>,
+) -> Result<Vec<ChainAuditEntry>> {
     let mut filters_by_party = HashMap::new();
     filters_by_party.insert(party_id.to_string(), Filters { cumulative });
 
@@ -289,8 +473,8 @@ pub async fn get_chain_audit(
 
     let mut update_client = utils::create_update_client(config, token).await?;
     let req = GetUpdatesRequest {
-        begin_exclusive: begin_offset,
-        end_inclusive: Some(ledger_end),
+        begin_exclusive,
+        end_inclusive: Some(end_inclusive),
         update_format: Some(update_format),
     };
 
@@ -299,23 +483,6 @@ pub async fn get_chain_audit(
         .await
         .context("Failed to call GetUpdates")?
         .into_inner();
-
-    let template_index: HashMap<(String, String), &'static str> = filters
-        .templates
-        .iter()
-        .map(|t| {
-            (
-                (t.module_name.to_string(), t.entity_name.to_string()),
-                t.governance_type,
-            )
-        })
-        .chain(filters.interfaces.iter().map(|i| {
-            (
-                (i.module_name.to_string(), i.entity_name.to_string()),
-                i.governance_type,
-            )
-        }))
-        .collect();
 
     let mut entries: Vec<ChainAuditEntry> = Vec::new();
 
@@ -422,14 +589,6 @@ pub async fn get_chain_audit(
         }
     }
 
-    entries.sort_by_key(|e| std::cmp::Reverse(e.offset));
-    entries.truncate(limit);
-
-    tracing::info!(
-        "Chain audit for {party_id}: {count} entries (ledger_end={ledger_end})",
-        count = entries.len()
-    );
-
     Ok(entries)
 }
 
@@ -473,5 +632,82 @@ pub async fn save_chain_audit_cache(
             tracing::warn!("Failed to cache chain audit entry: {e}");
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry_with_event_type(event_type: &str) -> ChainAuditEntry {
+        ChainAuditEntry {
+            offset: 0,
+            timestamp: 0,
+            event_type: event_type.to_string(),
+            contract_id: String::new(),
+            template_id: String::new(),
+            package_id: String::new(),
+            governance_type: "core_domain".to_string(),
+            action_summary: String::new(),
+            choice: None,
+            acting_parties: Vec::new(),
+            update_id: String::new(),
+            details: JsonValue::Null,
+        }
+    }
+
+    #[test]
+    fn test_is_governance_entry() {
+        let kept = [
+            "propose",
+            "confirm",
+            "execute",
+            "expire",
+            "cancel",
+            "execute_result",
+        ];
+        let dropped = ["create", "other"];
+
+        for event_type in kept {
+            assert!(
+                is_governance_entry(&entry_with_event_type(event_type)),
+                "{event_type} should be kept"
+            );
+        }
+        for event_type in dropped {
+            assert!(
+                !is_governance_entry(&entry_with_event_type(event_type)),
+                "{event_type} should be dropped"
+            );
+        }
+    }
+
+    #[test]
+    fn test_build_canton_filters() {
+        let filters = ChainFilters {
+            templates: vec![ChainTemplate {
+                package_prefix: "governance-core".to_string(),
+                module_name: "Governance.Rules",
+                entity_name: "GovernanceRules",
+                governance_type: "core_self",
+            }],
+            interfaces: vec![ChainInterface {
+                package_prefix: "governance-action".to_string(),
+                module_name: "Governance.Action",
+                entity_name: "GovernableAction",
+                governance_type: "core_domain",
+            }],
+        };
+        let names = vec![
+            "governance-core-v0-rc4".to_string(),
+            "governance-core-v1-rc1".to_string(),
+            "governance-action-v1-rc1".to_string(),
+            "unrelated-app-v1".to_string(),
+        ];
+
+        let cumulative = build_canton_filters(&filters, &names);
+
+        // One template filter per core package version + one interface filter
+        assert_eq!(cumulative.len(), 3);
     }
 }

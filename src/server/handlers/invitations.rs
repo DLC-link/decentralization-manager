@@ -81,21 +81,24 @@ async fn insert_peer_run(
             "participant_id": invitation.kicked_participant,
             "new_threshold": invitation.new_threshold,
             "previous_threshold": invitation.previous_threshold,
+            "package_names": invitation.package_names,
         })
         .to_string(),
         coordinator_pubkey: Some(invitation.coordinator_pubkey.clone()),
         coordinator_name: None,
-        // For onboarding the participants list is the authoritative peer
-        // set. For other kinds we don't get a list from the invite.
+        // The participants list is the authoritative peer set carried in the
+        // invite (all four kinds send one).
         expected_peers: invitation.participants.clone(),
         completed_peers: Vec::new(),
-        // Kick invites carry the target dec party; other invite kinds don't.
+        // Kick + contracts invites carry the target dec party; others don't.
         dec_party_id: invitation.dec_party_id.clone(),
         prefix: None,
         participants: Vec::new(),
         previous_threshold: None,
         new_threshold: None,
         kicked_participant: None,
+        package_names: Vec::new(),
+        dar_filenames: Vec::new(),
         error: None,
         dismissed: false,
         created_at: now,
@@ -294,6 +297,9 @@ async fn notify_coordinator_of_decline(data: &web::Data<AppState>, invitation: &
     let payload = DeclineInvitationPayload {
         kind: invitation.invitation_type.into(),
         reason: None,
+        // Echo the coordinator's run identity so it only fails the matching
+        // run — a stale card's decline must not kill a newer workflow.
+        workflow_instance: invitation.workflow_instance.clone(),
     };
     let payload_bytes = match serde_json::to_vec(&payload) {
         Ok(b) => b,

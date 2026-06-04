@@ -8,7 +8,7 @@ use crate::{
     noise::server::{ActiveWorkflow, NoiseServer},
     server::{ActiveWorkflowSlot, peer_status::LastSeen},
     utils,
-    workflow::{COORDINATOR_STEP_STALENESS_THRESHOLD, StepStalenessWatchdog, contracts},
+    workflow::contracts,
 };
 
 use super::{DarsConfig, DarsStep};
@@ -68,11 +68,9 @@ async fn run_workflow(
     workflow_state.set_command_payload(dar_payload).await;
 
     let mut coordinator_completed = false;
-    let mut watchdog = StepStalenessWatchdog::new(COORDINATOR_STEP_STALENESS_THRESHOLD);
 
     loop {
         let current_step = workflow_state.current_step().await;
-        watchdog.check(current_step)?;
 
         match current_step {
             DarsStep::WaitingForPeers => {

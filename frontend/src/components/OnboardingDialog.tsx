@@ -27,6 +27,21 @@ interface OnboardingDialogProps {
   onComplete: () => void;
 }
 
+// Mirrors the server-side `validate_party_id_prefix` (canton_id.rs): the
+// prefix becomes the Canton party-id identifier (`<prefix>::<namespace>`), so
+// only ASCII letters/digits/'-'/'_' are allowed, it must start with a letter,
+// and be at most 180 chars. Returns an error message, or null if valid.
+const MAX_PARTY_ID_PREFIX_LEN = 180;
+const partyPrefixError = (prefix: string): string | null => {
+  if (prefix.length === 0) return null; // empty handled by the disabled state
+  if (prefix.length > MAX_PARTY_ID_PREFIX_LEN)
+    return `Must be at most ${MAX_PARTY_ID_PREFIX_LEN} characters`;
+  if (!/^[A-Za-z]/.test(prefix)) return "Must start with a letter (a–z, A–Z)";
+  if (!/^[A-Za-z0-9_-]+$/.test(prefix))
+    return "Only letters, digits, '-' and '_' are allowed";
+  return null;
+};
+
 export const OnboardingDialog = ({
   open,
   onClose,
@@ -162,6 +177,12 @@ export const OnboardingDialog = ({
       return;
     }
 
+    const prefixErr = partyPrefixError(partyIdPrefix.trim());
+    if (prefixErr) {
+      setError(`Party ID prefix invalid: ${prefixErr}`);
+      return;
+    }
+
     if (selectedPeerIds.size === 0) {
       setError("At least one peer must be selected");
       return;
@@ -287,7 +308,11 @@ export const OnboardingDialog = ({
             placeholder="e.g., my-network"
             fullWidth
             disabled={loading || status?.status === "inprogress"}
-            helperText="A unique identifier prefix for the decentralized party"
+            error={!!partyPrefixError(partyIdPrefix.trim())}
+            helperText={
+              partyPrefixError(partyIdPrefix.trim()) ??
+              "A unique identifier prefix for the decentralized party"
+            }
             slotProps={{
               input: {
                 endAdornment: fieldHelpAdornment(
@@ -460,7 +485,10 @@ export const OnboardingDialog = ({
             variant="contained"
             color="primary"
             disabled={
-              loading || !partyIdPrefix.trim() || selectedPeerIds.size === 0
+              loading ||
+              !partyIdPrefix.trim() ||
+              !!partyPrefixError(partyIdPrefix.trim()) ||
+              selectedPeerIds.size === 0
             }
           >
             {loading ? <CircularProgress size={20} /> : "Start Onboarding"}

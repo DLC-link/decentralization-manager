@@ -75,6 +75,9 @@ struct NodeConfigResponse<'a> {
     #[serde(flatten)]
     config: &'a NodeConfig,
     test_mode: bool,
+    /// dec-party-manager binary version, so the Config tab can show which
+    /// build this node is running.
+    version: &'static str,
 }
 
 /// Get the node configuration
@@ -89,6 +92,7 @@ pub async fn get_node_config(data: web::Data<AppState>) -> impl Responder {
     HttpResponse::Ok().json(NodeConfigResponse {
         config: &data.config,
         test_mode: data.test_mode,
+        version: env!("CARGO_PKG_VERSION"),
     })
 }
 

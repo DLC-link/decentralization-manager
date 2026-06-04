@@ -1,8 +1,11 @@
 //! G3: Coordinator-initiated retry of a Failed run flips peer rows back.
 //!
-//! Force a coordinator-side failure by killing both peers after they
-//! accept. Restart peers. POST /workflows/{instance}/retry on P1.
-//! Assert all three workflow_runs rows reach Completed.
+//! Freeze the run by killing both peers after they accept, then fabricate
+//! the coordinator-side failure (coordinators no longer self-fail when peers
+//! go away — wait-states are human-paced): kill P1, flip its persisted row
+//! to `failed` while it's down, restart it. Restart peers. POST
+//! /workflows/{instance}/retry on P1. Assert all three workflow_runs rows
+//! reach Completed.
 
 use std::time::Duration;
 
@@ -36,34 +39,25 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     processes::kill_node(f, 2).await?;
     processes::kill_node(f, 3).await?;
 
-    // Wait for coordinator to mark Failed. We use the self-healing variant
-    // because P1's noise listener has been observed to die mid-test (a
-    // backend bug exposed by chaos sequences); without periodic
-    // ensure_nodes_healthy the coordinator can stall and never reach Failed.
+    // Fabricate the coordinator failure: kill P1 and flip its persisted row
+    // to `failed` while it's down (the app is the sole writer of its sqlite
+    // file while running). Startup recovery respawns inprogress rows only,
+    // so after the restart the row stays Failed and retryable.
+    chaos::say(
+        "G3",
+        "killing P1 and injecting coordinator failure into its DB",
+    );
+    processes::kill_node(f, 1).await?;
     let p1_db = f.db_path(1);
-    {
-        let p1_db = p1_db.clone();
-        let instance_clone = instance.clone();
-        chaos::poll_until_healthy(
-            f,
-            Duration::from_secs(600),
-            Duration::from_secs(60),
-            move |_| {
-                let p1_db = p1_db.clone();
-                let inst = instance_clone.clone();
-                Box::pin(async move {
-                    Ok(matches!(
-                        db::workflow_run_status(&p1_db, &inst, "Coordinator")
-                            .await?
-                            .as_deref(),
-                        Some("failed")
-                    ))
-                })
-            },
-        )
-        .await?;
-    }
-    chaos::say("G3", "coordinator row marked Failed");
+    db::inject_workflow_run_failure(
+        &p1_db,
+        &instance,
+        "Coordinator",
+        "chaos: injected active-step failure (G3 retry-broadcast)",
+    )
+    .await?;
+    processes::spawn_only(f, 1).await?;
+    chaos::say("G3", "coordinator row Failed; P1 back up");
 
     // Restart peers so they're reachable for retry.
     processes::spawn_only(f, 2).await?;

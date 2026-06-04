@@ -82,15 +82,18 @@ pub async fn build_health_response(db: &SqlitePool, participant_id: &str) -> Hea
 
 /// Classify a successful Noise reply to a `Health` probe. Any reply that isn't a
 /// parseable `HealthResponse` (a peer on older code, a `Pong`, an empty body)
-/// still means the peer is reachable — we just don't learn its workflow state.
-pub(crate) fn classify_health_reply(reply: &[u8]) -> (ConnectionStatus, Option<WorkflowInfo>) {
+/// still means the peer is reachable — we just don't learn its workflow state or
+/// version. Returns `(status, workflow, version)`.
+pub(crate) fn classify_health_reply(
+    reply: &[u8],
+) -> (ConnectionStatus, Option<WorkflowInfo>, Option<String>) {
     if let Ok(msg) = Message::from_bytes(reply)
         && msg.msg_type == MessageType::HealthResponse
         && let Some(h) = HealthResponse::from_payload(&msg.payload)
     {
-        return (ConnectionStatus::Connected, h.workflow);
+        return (ConnectionStatus::Connected, h.workflow, Some(h.version));
     }
-    (ConnectionStatus::Connected, None)
+    (ConnectionStatus::Connected, None, None)
 }
 
 /// The `Busy` invite-reply payload: the in-flight `WorkflowKind` as a string,
@@ -145,23 +148,27 @@ mod tests {
             version: "0.1.0".into(),
         };
         let reply = Message::new(MessageType::HealthResponse, hr.to_payload()).to_bytes();
-        let (status, workflow) = classify_health_reply(&reply);
+        let (status, workflow, version) = classify_health_reply(&reply);
         assert_eq!(status, ConnectionStatus::Connected);
         assert_eq!(
             workflow.context("workflow should be parsed")?.kind,
             WorkflowKind::Onboarding
         );
+        assert_eq!(version.as_deref(), Some("0.1.0"));
 
-        // Old peer: replies Pong (not HealthResponse) → reachable, no workflow.
+        // Old peer: replies Pong (not HealthResponse) → reachable, no workflow,
+        // no version.
         let pong = Message::new_empty(MessageType::Pong).to_bytes();
-        let (status, workflow) = classify_health_reply(&pong);
+        let (status, workflow, version) = classify_health_reply(&pong);
         assert_eq!(status, ConnectionStatus::Connected);
         assert!(workflow.is_none());
+        assert!(version.is_none());
 
         // Empty body (e.g. an old listener's fall-through) → still reachable.
-        let (status, workflow) = classify_health_reply(&[]);
+        let (status, workflow, version) = classify_health_reply(&[]);
         assert_eq!(status, ConnectionStatus::Connected);
         assert!(workflow.is_none());
+        assert!(version.is_none());
         Ok(())
     }
 

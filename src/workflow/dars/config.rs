@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{participant_id::CantonId, workflow::contracts::DarFile};
+use crate::{canton_id::CantonId, workflow::contracts::DarFile};
 
 /// Configuration for DARs upload workflow
 #[derive(Clone, Debug, Deserialize, Serialize)]

@@ -87,6 +87,10 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
 
     let mut f = Fixture::from_env()?;
     f.discover_network_parties().await?;
+    // Regression guard for the subset-party hang: onboard a party with a
+    // single invited peer (1 coordinator + 1 regular peer) before the
+    // full-mesh happy path, which can't catch it because it invites everyone.
+    phases::two_member_party::run(&mut f).await?;
     phases::create_dec_party::run(&mut f).await?;
     phases::distribute_dars::run(&mut f).await?;
     phases::check_peer_dars::run(&mut f).await?;
@@ -116,12 +120,11 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     phases::peer_3_strikes_abort::run(&mut f).await?; // G8 (stub)
     // G9 disabled: the concurrent-kinds resume scenario flakes on the shared
     // dars_state across chaos phases — the peer-handler/abort-handle race
-    // is fixed but G10's stalled /dars/distribute + downstream P1 respawns
+    // is fixed but a stalled /dars/distribute plus downstream respawns
     // can still leave the row in a state where a fresh /dars/distribute
     // 409s. Re-enable once we've drained the pre-G9 dars_state more
     // aggressively (or moved G9 to its own fixture).
     // phases::restart_with_concurrent_kinds::run(&mut f).await?; // G9
-    phases::failed_step_bounded_time::run(&mut f).await?; // P1
     phases::retry_with_offline_peer::run(&mut f).await?; // P2
     Ok(())
 }

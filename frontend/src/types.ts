@@ -129,6 +129,8 @@ export interface NodeConfig {
     network: Network;
   };
   test_mode?: boolean;
+  /** dec-party-manager binary version reported by the node. */
+  version?: string;
 }
 
 export interface Peer {
@@ -163,6 +165,8 @@ export interface ParticipantStatus {
   status: ConnectionStatus;
   latency_ms?: number;
   workflow?: WorkflowInfo;
+  /** dec-party-manager version reported by the node (self or peer). */
+  version?: string;
 }
 
 export interface KickRequest {
@@ -251,13 +255,14 @@ export type InvitationType = "Onboarding" | "Kick" | "Contracts" | "Dars";
 
 export interface PendingInvitation {
   id: string;
+  workflow_instance?: string;
   invitation_type: InvitationType;
   coordinator_pubkey: string;
   coordinator_name?: string;
   received_at: number;
   /** Onboarding-only: party ID prefix the coordinator chose. */
   prefix?: string;
-  /** Onboarding-only: participant canton IDs the coordinator selected. */
+  /** Onboarding/Dars/Contracts: participant canton IDs the coordinator selected. */
   participants?: string[];
   /** Dars-only: filenames the coordinator is distributing. */
   dar_filenames?: string[];
@@ -267,8 +272,10 @@ export interface PendingInvitation {
   new_threshold?: number;
   /** Kick-only: threshold before the kick. */
   previous_threshold?: number;
-  /** Kick-only: the dec party the kick targets. */
+  /** Kick/Contracts: the dec party the workflow targets. */
   dec_party_id?: string;
+  /** Contracts-only: package/contract names being deployed. */
+  package_names?: string[];
 }
 
 export interface PendingInvitationsResponse {
@@ -301,6 +308,8 @@ export interface WorkflowRun {
   prefix?: string;
   participants?: string[];
   dar_filenames?: string[];
+  /** Contracts runs only: package/contract names being deployed. */
+  package_names?: string[];
   /** Kick runs only: threshold before/after, for an "old → new" summary. */
   previous_threshold?: number;
   new_threshold?: number;
@@ -399,6 +408,19 @@ export interface DomainGovernanceAction {
    *  shows who's sending what to whom. Present only on AcceptTransfer
    *  proposals (and only when the linked instruction was readable). */
   accept_transfer_details?: AcceptTransferDetails;
+  /** Operator + user/provider parties pulled from a
+   *  Create{User,Provider}ServiceRequest proposal so the pending-approval card
+   *  shows the full summary (proposal type + operator + counterparty). Present
+   *  only on those two proposal kinds. */
+  service_request_details?: ServiceRequestDetails;
+}
+
+export interface ServiceRequestDetails {
+  operator: string;
+  /** Set for CreateUserServiceRequest. */
+  user?: string;
+  /** Set for CreateProviderServiceRequest. */
+  provider?: string;
 }
 
 export interface TransferProposalDetails {
@@ -422,6 +444,8 @@ export interface GovernanceResponse {
   threshold: number;
   member_party_id?: string;
   rules_contract_id?: string;
+  gov_core_out_of_date?: boolean;
+  gov_core_package_ref?: string;
 }
 
 export interface InstrumentAllowance {
@@ -789,6 +813,25 @@ export interface UserServicesResponse {
   services: UserServiceInfo[];
 }
 
+/** A pending CredentialOffer visible to the party. Free offers where the
+ *  party is the holder are the ones the Accept Free Credential forms can
+ *  take. */
+export interface CredentialOfferInfo {
+  contract_id: string;
+  operator: string;
+  issuer: string;
+  holder: string;
+  /** The credential's identifier (the template's `id` field). */
+  credential_id: string;
+  description: string;
+  /** True when the offer carries no billing params (acceptable for free). */
+  is_free: boolean;
+}
+
+export interface CredentialOffersResponse {
+  credential_offers: CredentialOfferInfo[];
+}
+
 export interface RegistrarServiceInfo {
   contract_id: string;
   operator: string;
@@ -906,6 +949,8 @@ export interface GovernanceState {
   members: string[];
   threshold: number;
   action_confirmation_timeout_microseconds?: number;
+  package_ref?: string;
+  out_of_date?: boolean;
 }
 
 export interface GovernanceStateResponse {

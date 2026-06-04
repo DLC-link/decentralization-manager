@@ -9,10 +9,7 @@ use crate::{
     noise::server::{ActiveWorkflow, NoiseServer},
     server::{ActiveWorkflowSlot, peer_status::LastSeen},
     utils,
-    workflow::{
-        COORDINATOR_STEP_STALENESS_THRESHOLD, StepStalenessWatchdog,
-        storage::{WorkflowStorage, artifact_kinds},
-    },
+    workflow::storage::{WorkflowStorage, artifact_kinds},
 };
 
 use super::{
@@ -56,12 +53,10 @@ pub async fn start_coordinator(
 
         tokio::spawn(async move {
             let mut coordinator_completed_steps = HashSet::new();
-            let mut watchdog = StepStalenessWatchdog::new(COORDINATOR_STEP_STALENESS_THRESHOLD);
 
             loop {
                 let current_step = workflow_state.current_step().await;
                 tracing::debug!("Coordinator in step: {current_step:?}");
-                watchdog.check(current_step)?;
 
                 match current_step {
                     KickStep::WaitingForPeers => {

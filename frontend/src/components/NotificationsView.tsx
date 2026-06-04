@@ -158,17 +158,17 @@ const InvitationCard = ({
   const fromLabel =
     invitation.coordinator_name ||
     `${invitation.coordinator_pubkey.slice(0, 12)}…${invitation.coordinator_pubkey.slice(-6)}`;
-  const showOnboardingMeta =
-    invitation.invitation_type === "Onboarding" &&
-    (!!invitation.prefix || (invitation.participants?.length ?? 0) > 0);
-  const showDarsMeta =
-    invitation.invitation_type === "Dars" &&
+  // Render every detail the invite payload carried, regardless of workflow
+  // type — mirrors WorkflowRunCard so the peer's invitation card is as rich
+  // as the coordinator's run card.
+  const showMeta =
+    !!invitation.prefix ||
+    !!invitation.dec_party_id ||
+    !!invitation.kicked_participant ||
+    invitation.new_threshold != null ||
+    (invitation.participants?.length ?? 0) > 0 ||
+    (invitation.package_names?.length ?? 0) > 0 ||
     (invitation.dar_filenames?.length ?? 0) > 0;
-  const showKickMeta =
-    invitation.invitation_type === "Kick" &&
-    (!!invitation.kicked_participant ||
-      invitation.new_threshold != null ||
-      !!invitation.dec_party_id);
 
   return (
     <Box
@@ -224,7 +224,7 @@ const InvitationCard = ({
         </Typography>
       </Box>
 
-      {showOnboardingMeta && (
+      {showMeta && (
         <Box
           sx={{
             display: "flex",
@@ -250,74 +250,6 @@ const InvitationCard = ({
               </Typography>
             </Box>
           )}
-          {invitation.participants && invitation.participants.length > 0 && (
-            <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
-              <Typography
-                variant="caption"
-                color="text.secondary"
-                sx={{ minWidth: 96 }}
-              >
-                Participants ({invitation.participants.length})
-              </Typography>
-              <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
-                {invitation.participants.map((id) => (
-                  <Chip
-                    key={id}
-                    size="small"
-                    variant="outlined"
-                    label={truncatePartyId(id)}
-                  />
-                ))}
-              </Box>
-            </Box>
-          )}
-        </Box>
-      )}
-
-      {showDarsMeta && (
-        <Box
-          sx={{
-            display: "flex",
-            alignItems: "baseline",
-            gap: 1,
-            px: 1.25,
-            py: 1,
-            bgcolor: "action.hover",
-            borderRadius: 1,
-          }}
-        >
-          <Typography
-            variant="caption"
-            color="text.secondary"
-            sx={{ minWidth: 96 }}
-          >
-            DARs ({invitation.dar_filenames?.length})
-          </Typography>
-          <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
-            {invitation.dar_filenames?.map((filename) => (
-              <Chip
-                key={filename}
-                size="small"
-                variant="outlined"
-                label={filename}
-              />
-            ))}
-          </Box>
-        </Box>
-      )}
-
-      {showKickMeta && (
-        <Box
-          sx={{
-            display: "flex",
-            flexDirection: "column",
-            gap: 0.75,
-            px: 1.25,
-            py: 1,
-            bgcolor: "action.hover",
-            borderRadius: 1,
-          }}
-        >
           {invitation.dec_party_id && (
             <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
               <Typography
@@ -400,6 +332,64 @@ const InvitationCard = ({
                   </Box>
                 )}
               </Typography>
+            </Box>
+          )}
+          {invitation.participants && invitation.participants.length > 0 && (
+            <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ minWidth: 96 }}
+              >
+                Participants ({invitation.participants.length})
+              </Typography>
+              <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
+                {invitation.participants.map((id) => (
+                  <Chip
+                    key={id}
+                    size="small"
+                    variant="outlined"
+                    label={truncatePartyId(id)}
+                  />
+                ))}
+              </Box>
+            </Box>
+          )}
+          {invitation.package_names && invitation.package_names.length > 0 && (
+            <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ minWidth: 96 }}
+              >
+                Packages ({invitation.package_names.length})
+              </Typography>
+              <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
+                {invitation.package_names.map((name) => (
+                  <Chip key={name} size="small" variant="outlined" label={name} />
+                ))}
+              </Box>
+            </Box>
+          )}
+          {invitation.dar_filenames && invitation.dar_filenames.length > 0 && (
+            <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ minWidth: 96 }}
+              >
+                DARs ({invitation.dar_filenames.length})
+              </Typography>
+              <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
+                {invitation.dar_filenames.map((filename) => (
+                  <Chip
+                    key={filename}
+                    size="small"
+                    variant="outlined"
+                    label={filename}
+                  />
+                ))}
+              </Box>
             </Box>
           )}
         </Box>
@@ -1140,6 +1130,80 @@ const DomainActionCard = ({
         );
       })()}
 
+      {domainAction.service_request_details && (() => {
+        const srd = domainAction.service_request_details;
+        // The proposal type itself is the action_label header above; here we
+        // surface the operator and the user/provider being onboarded.
+        const rows: { label: string; value: string; copyValue?: string }[] = [
+          {
+            label: "Operator",
+            value: truncatePartyId(srd.operator),
+            copyValue: srd.operator,
+          },
+        ];
+        if (srd.user) {
+          rows.push({
+            label: "User",
+            value: truncatePartyId(srd.user),
+            copyValue: srd.user,
+          });
+        }
+        if (srd.provider) {
+          rows.push({
+            label: "Provider",
+            value: truncatePartyId(srd.provider),
+            copyValue: srd.provider,
+          });
+        }
+        return (
+          <Box
+            sx={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 0.75,
+              px: 1.25,
+              py: 1,
+              bgcolor: "action.hover",
+              borderRadius: 1,
+            }}
+          >
+            {rows.map((r) => (
+              <Box
+                key={r.label}
+                sx={{ display: "flex", alignItems: "center", gap: 1 }}
+              >
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{ minWidth: 96 }}
+                >
+                  {r.label}
+                </Typography>
+                <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                  {r.value}
+                </Typography>
+                {r.copyValue && (
+                  <Tooltip title={`Copy ${r.label.toLowerCase()}`}>
+                    <IconButton
+                      size="small"
+                      onClick={async () => {
+                        const ok = await copyToClipboard(r.copyValue!);
+                        showSnackbar(
+                          ok ? "Copied to clipboard" : "Failed to copy",
+                        );
+                      }}
+                      sx={{ p: 0.25 }}
+                    >
+                      <ContentCopyIcon sx={{ fontSize: 14 }} />
+                    </IconButton>
+                  </Tooltip>
+                )}
+              </Box>
+            ))}
+          </Box>
+        );
+      })()}
+
       <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
         <Typography
           variant="caption"
@@ -1532,7 +1596,9 @@ const WorkflowRunCard = ({
         run.dec_party_id ||
         run.new_threshold != null ||
         run.kicked_participant ||
-        (run.participants && run.participants.length > 0)) && (
+        (run.participants && run.participants.length > 0) ||
+        (run.package_names && run.package_names.length > 0) ||
+        (run.dar_filenames && run.dar_filenames.length > 0)) && (
         <Box
           sx={{
             display: "flex",
@@ -1647,6 +1713,48 @@ const WorkflowRunCard = ({
                     size="small"
                     variant="outlined"
                     label={truncatePartyId(id)}
+                  />
+                ))}
+              </Box>
+            </Box>
+          )}
+          {run.package_names && run.package_names.length > 0 && (
+            <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ minWidth: 96 }}
+              >
+                Packages ({run.package_names.length})
+              </Typography>
+              <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
+                {run.package_names.map((name) => (
+                  <Chip
+                    key={name}
+                    size="small"
+                    variant="outlined"
+                    label={name}
+                  />
+                ))}
+              </Box>
+            </Box>
+          )}
+          {run.dar_filenames && run.dar_filenames.length > 0 && (
+            <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ minWidth: 96 }}
+              >
+                DAR files ({run.dar_filenames.length})
+              </Typography>
+              <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
+                {run.dar_filenames.map((name) => (
+                  <Chip
+                    key={name}
+                    size="small"
+                    variant="outlined"
+                    label={name}
                   />
                 ))}
               </Box>
