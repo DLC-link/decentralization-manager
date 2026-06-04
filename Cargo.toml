@@ -84,7 +84,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 utoipa = { version = "5", features = ["actix_extras"] }
 utoipa-actix-web = { version = "0.1" }
 utoipa-swagger-ui = { version = "9", features = ["actix-web"] }
-uuid = { version = "1.11", features = ["v4"] }
+uuid = { version = "1.23", features = ["v4"] }
 x509-parser = { version = "0.18" }
 zeroize = { version = "1.8", features = ["derive"] }
 
