@@ -9,10 +9,10 @@ use prost::Message;
 use sqlx::SqlitePool;
 
 use crate::{
-    config::{NetworkConfig, NodeConfig},
-    consts::MIN_PARTICIPANTS_CONTRACTS,
+    canton_id::CantonId,
+    config::NodeConfig,
+    db::schema::SchemaRead,
     error::Result,
-    participant_id::CantonId,
     utils,
     workflow::{
         contracts::{ContractsConfig, FieldDefinition},
@@ -35,16 +35,13 @@ use crate::{
 /// * `config` - Configuration with Ledger API connection details
 /// * `db` - Workflow storage backend (SqlitePool implementing `WorkflowStorage`)
 /// * `instance_name` - Workflow run instance name (key for `workflow_artifacts`)
-/// * `network_config` - Network configuration with peer settings
 /// * `contracts_config` - Contracts workflow configuration with party ID
 /// * `token` - Authentication token for Ledger API
 /// * `user_id` - User ID for Ledger API operations
-#[allow(clippy::too_many_arguments)]
 pub async fn prepare_submissions(
     config: &NodeConfig,
     db: &SqlitePool,
     instance_name: &str,
-    network_config: &NetworkConfig,
     contracts_config: &ContractsConfig,
     token: &str,
     user_id: &str,
@@ -60,14 +57,32 @@ pub async fn prepare_submissions(
     // Get participant parties from config (provided by API caller)
     let participant_parties: Vec<CantonId> = contracts_config.participant_parties.clone();
 
-    // Validate participant count
+    // Use the dec party's OWN threshold (set at onboarding, baked into its
+    // namespace definition), not a recomputed mesh majority. Contract
+    // deployment is signed by the party, so it needs at least `threshold` of
+    // its owners to sign — and the deployed governance contract should carry
+    // that same threshold. This also replaces the former hardcoded
+    // 3-participant minimum.
+    let party_threshold = db
+        .get_dec_parties_by_prefix(&decentralized_registrar.prefix)
+        .await?
+        .into_iter()
+        .find(|p| p.party_id == decentralized_registrar.to_string())
+        .map(|p| p.threshold)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Decentralized party {decentralized_registrar} not found in cache; \
+                 refresh /decentralized-parties before deploying contracts"
+            )
+        })?;
+
     if participant_parties.is_empty() {
         anyhow::bail!("No participant parties provided in contracts config");
     }
-
-    if participant_parties.len() < MIN_PARTICIPANTS_CONTRACTS {
+    if (participant_parties.len() as i64) < party_threshold {
         anyhow::bail!(
-            "At least {MIN_PARTICIPANTS_CONTRACTS} participants required for contract operations, found {count}",
+            "Need at least {party_threshold} participant(s) to meet the party's threshold \
+             for contract operations, found {count}",
             count = participant_parties.len()
         );
     }
@@ -91,7 +106,7 @@ pub async fn prepare_submissions(
         decentralized_party: decentralized_registrar.clone(),
         operator_party: operator.clone(),
         participant_parties: participant_parties.clone(),
-        governance_threshold: network_config.governance_threshold() as i64,
+        governance_threshold: party_threshold,
     };
 
     let mut submission_client = utils::create_submission_client(config, token_opt.clone()).await?;

@@ -91,8 +91,7 @@ export const GrantRightsDialog = ({
             Used once to grant <code>actAs</code> + <code>readAs</code> on the
             member and dec parties. Credentials are not stored — paste the
             Keycloak client whose service account has{" "}
-            <code>ParticipantAdmin</code> on this participant (the same one
-            your team uses in Yaak).
+            <code>ParticipantAdmin</code> on this participant.
           </Typography>
 
           <TextField
@@ -107,7 +106,7 @@ export const GrantRightsDialog = ({
             slotProps={{
               input: {
                 endAdornment: fieldHelpAdornment(
-                  "The Keycloak client ID whose service account has ParticipantAdmin rights on this participant. The same one your team uses in Yaak.",
+                  "The Keycloak client ID whose service account has ParticipantAdmin rights on this participant.",
                   "Help for Client ID",
                 ),
               },

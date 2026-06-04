@@ -4,6 +4,7 @@ mod audit;
 mod chain_audit;
 mod handlers;
 mod middleware;
+mod package_inventory;
 mod queries;
 mod transfer_context;
 mod types;
@@ -44,6 +45,7 @@ use crate::auth::{AuthRegistry, JwtValidator};
 use crate::auth::{MockAuthRegistry, MockValidator};
 use crate::{
     auth::{TokenValidator, WorkflowAuth},
+    canton_id::CantonId,
     config::{NodeConfig, PartyCredentials},
     db::schema::{Commitable, SchemaRead, SchemaWrite},
     error::Result,
@@ -51,7 +53,6 @@ use crate::{
         CHUNK_SIZE, MAX_CHUNKED_TOTAL_SIZE, MAX_PAYLOAD_SIZE, Message, MessageType, NoiseKeypair,
         load_or_generate_keypair, parse_public_key,
     },
-    participant_id::CantonId,
     server::middleware::AuthMiddleware,
     server::peer_status::LastSeen,
     utils::{self, compute_fingerprint},
@@ -161,6 +162,7 @@ enum InvitationMeta {
     Onboarding(OnboardingInvitePayload),
     Dars(DarsInvitePayload),
     Kick(KickInvitePayload),
+    Contracts(ContractsInvitePayload),
 }
 
 /// On boot, re-spawn any InProgress workflow runs that were interrupted by the
@@ -705,28 +707,49 @@ impl WorkflowTriggers {
         let mut new_threshold = None;
         let mut previous_threshold = None;
         let mut dec_party_id = None;
+        let mut package_names = Vec::new();
+        let mut workflow_instance = None;
         match meta {
             InvitationMeta::None => {}
             InvitationMeta::Onboarding(p) => {
                 prefix = Some(p.prefix);
                 participants = p.participants;
+                workflow_instance = p.workflow_instance;
             }
             InvitationMeta::Dars(p) => {
                 dar_filenames = p.dar_filenames;
+                participants = p.participants;
+                workflow_instance = p.workflow_instance;
             }
             InvitationMeta::Kick(p) => {
                 kicked_participant = Some(p.kicked_participant);
                 new_threshold = Some(p.new_threshold);
                 previous_threshold = Some(p.previous_threshold);
                 dec_party_id = Some(p.dec_party_id);
+                participants = p.participants;
+                workflow_instance = p.workflow_instance;
+            }
+            InvitationMeta::Contracts(p) => {
+                dec_party_id = Some(p.dec_party_id);
+                participants = p.participants;
+                package_names = p.package_names;
+                workflow_instance = p.workflow_instance;
             }
         }
+        // Key the id on the coordinator's run instance when available so a
+        // NEW run's invite never silently morphs an older card in place — an
+        // accept/decline racing the replacement then misses (404) instead of
+        // acting on an invitation the user never saw. Re-sends of the SAME
+        // run still dedup (same instance → same id). Invites from old
+        // coordinators (no instance) keep the legacy type+pubkey id.
+        let type_str = invitation_type.as_str().to_lowercase();
+        let pubkey_short = &coordinator_pubkey[..16];
+        let id = match &workflow_instance {
+            Some(instance) => format!("{type_str}-{pubkey_short}-{instance}"),
+            None => format!("{type_str}-{pubkey_short}"),
+        };
         let invitation = PendingInvitation {
-            id: format!(
-                "{}-{}",
-                invitation_type.as_str().to_lowercase(),
-                &coordinator_pubkey[..16]
-            ),
+            id,
             invitation_type,
             coordinator_pubkey: coordinator_pubkey.to_string(),
             coordinator_name: None,
@@ -741,10 +764,25 @@ impl WorkflowTriggers {
             new_threshold,
             previous_threshold,
             dec_party_id,
+            package_names,
+            workflow_instance,
         };
 
+        // A coordinator runs at most one workflow at a time, so a fresh
+        // invite supersedes any older invite of the same kind from the same
+        // coordinator — replace by (type, coordinator), not by id, so legacy
+        // and instance-keyed ids don't accumulate side by side.
         match self.db.begin_transaction().await {
             Ok(mut tx) => {
+                let superseded = tx
+                    .delete_pending_invitations_by_type_and_coordinator(
+                        invitation.invitation_type,
+                        coordinator_pubkey,
+                    )
+                    .await;
+                if let Err(e) = superseded {
+                    tracing::warn!("Failed to delete superseded invitations: {e}");
+                }
                 if let Err(e) = tx.upsert_pending_invitation(&invitation).await {
                     tracing::warn!("Failed to persist pending invitation: {e}");
                 } else if let Err(e) = Commitable::commit(tx).await {
@@ -755,7 +793,10 @@ impl WorkflowTriggers {
         }
 
         let mut invitations = self.pending_invitations.write().await;
-        invitations.retain(|i| i.id != invitation.id);
+        invitations.retain(|i| {
+            i.invitation_type != invitation.invitation_type
+                || i.coordinator_pubkey != invitation.coordinator_pubkey
+        });
         invitations.push(invitation);
     }
 
@@ -1310,6 +1351,7 @@ pub async fn start_server(
             .service(handlers::get_vaults_handler)
             .service(handlers::get_provider_services_handler)
             .service(handlers::get_user_services_handler)
+            .service(handlers::get_credential_offers_handler)
             .service(handlers::get_registrar_services_handler)
             .service(handlers::get_instruments_handler)
             .service(handlers::get_transfer_instructions_handler)
@@ -1373,27 +1415,19 @@ async fn run_heartbeat(
             return;
         }
     };
+    // Surface our own Noise public key at startup so operators can confirm the
+    // running node is using the key it published to peers. A mismatch fails
+    // every handshake symmetrically and is otherwise invisible in the logs.
+    tracing::info!("Noise public key: {key}", key = keypair.public_key_hex());
 
-    // Load peers from database for peer key authentication
-    let peers = match db.get_all_peers().await {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::error!("Failed to load peers from database: {e}");
-            return;
-        }
-    };
-
-    // Build peer key map for Noise authentication
-    let mut peer_keys = HashMap::new();
-    for peer in &peers {
-        if peer.participant_id == *config.participant_id() || peer.public_key.is_empty() {
-            continue;
-        }
-        if let Ok(pub_key) = parse_public_key(&peer.public_key) {
-            peer_keys.insert(peer.participant_id.to_string(), pub_key);
-        }
-    }
-    let peer_keys = Arc::new(peer_keys);
+    // Peer keys for inbound authentication are resolved LIVE from the DB on
+    // each incoming connection (see `handle_incoming_connection`) rather than
+    // snapshotted here. A frozen snapshot meant that after a `/network-config`
+    // key correction the node would accept a peer *outbound* (which reads the
+    // live DB) but keep rejecting it *inbound* until a process restart —
+    // producing asymmetric red/green across the mesh. Resolving live makes a
+    // key fix take effect for both directions immediately.
+    let self_id = config.participant_id().clone();
 
     // Listener loop: bind the always-on Noise listener and accept forever. It is
     // never paused — workflow traffic is routed in-process via the
@@ -1401,7 +1435,8 @@ async fn run_heartbeat(
     // Health / Ping) even while this node is participating in a workflow.
     let keypair_spawn = keypair.clone();
     let last_seen_spawn = last_seen.clone();
-    let peer_keys_spawn = peer_keys.clone();
+    let db_spawn = db.clone();
+    let self_id_spawn = self_id.clone();
     let triggers_spawn = triggers.clone();
 
     tokio::spawn(async move {
@@ -1415,12 +1450,14 @@ async fn run_heartbeat(
                             Ok((socket, peer_addr)) => {
                                 let keypair = keypair_spawn.clone();
                                 let last_seen = last_seen_spawn.clone();
-                                let peer_keys = peer_keys_spawn.clone();
+                                let db = db_spawn.clone();
+                                let self_id = self_id_spawn.clone();
                                 let triggers = triggers_spawn.clone();
 
                                 tokio::spawn(async move {
                                     handle_incoming_connection(
-                                        socket, peer_addr, keypair, peer_keys, triggers, last_seen,
+                                        socket, peer_addr, keypair, db, self_id, triggers,
+                                        last_seen,
                                     )
                                     .await;
                                 });
@@ -1451,15 +1488,55 @@ async fn run_heartbeat(
     run_peer_ping_loop(config, db, peer_status, last_seen, keypair).await;
 }
 
+/// Build the identity → public-key allowlist used to authenticate inbound
+/// Noise handshakes, from the current `peers` table. Skips self and any peer
+/// whose public key is empty or unparseable (the latter is logged so a bad
+/// key is visible rather than silently dropped). Read fresh per connection so
+/// `/network-config` updates take effect without a restart; a DB error yields
+/// an empty allowlist (all inbound handshakes fail closed) rather than a panic.
+async fn build_peer_key_map(
+    db: &SqlitePool,
+    self_id: &CantonId,
+) -> HashMap<String, secp256k1::PublicKey> {
+    let peers = match db.get_all_peers().await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("Failed to load peers for inbound Noise auth: {e}");
+            return HashMap::new();
+        }
+    };
+    let mut map = HashMap::new();
+    for peer in &peers {
+        if peer.participant_id == *self_id || peer.public_key.is_empty() {
+            continue;
+        }
+        match parse_public_key(&peer.public_key) {
+            Ok(pub_key) => {
+                map.insert(peer.participant_id.to_string(), pub_key);
+            }
+            Err(e) => tracing::warn!(
+                "Skipping inbound auth key for {} — unparseable public key: {e}",
+                peer.participant_id
+            ),
+        }
+    }
+    map
+}
+
 /// Handle an incoming Noise connection (either ping or invite)
 async fn handle_incoming_connection(
     socket: tokio::net::TcpStream,
     peer_addr: std::net::SocketAddr,
     keypair: Arc<NoiseKeypair>,
-    peer_keys: Arc<HashMap<String, secp256k1::PublicKey>>,
+    db: SqlitePool,
+    self_id: CantonId,
     triggers: WorkflowTriggers,
     last_seen: LastSeen,
 ) {
+    // Resolve the identity→public-key allowlist LIVE from the DB for this
+    // connection so a `/network-config` key correction authenticates inbound
+    // handshakes immediately, without a process restart (see `run_heartbeat`).
+    let peer_keys = Arc::new(build_peer_key_map(&db, &self_id).await);
     let keypair_for_closure = keypair.clone();
     let peer_keys_clone = peer_keys.clone();
     let our_public_key_hex = keypair.public_key_hex();
@@ -1947,7 +2024,19 @@ async fn handle_incoming_connection(
                                             }
                                         }
                                     }
-                                    _ => InvitationMeta::None,
+                                    InvitationType::Contracts => {
+                                        match serde_json::from_slice::<ContractsInvitePayload>(
+                                            &msg.payload,
+                                        ) {
+                                            Ok(p) => InvitationMeta::Contracts(p),
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    "Contracts invite payload was unparseable: {e}"
+                                                );
+                                                InvitationMeta::None
+                                            }
+                                        }
+                                    }
                                 }
                             };
                             if let Some(ref pubkey) = peer_pubkey_hex {

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
   Autocomplete,
   Box,
@@ -60,6 +60,8 @@ import type {
   ProviderServicesResponse,
   UserServiceInfo,
   UserServicesResponse,
+  CredentialOfferInfo,
+  CredentialOffersResponse,
   ContractWithBlob,
   ContractQueryResponse,
   Network,
@@ -301,6 +303,10 @@ export const GovernanceSection = ({
     ProviderServiceInfo[]
   >([]);
   const [userServices, setUserServices] = useState<UserServiceInfo[]>([]);
+  // Pending CredentialOffer contracts visible to this party. Powers the
+  // CredentialOffer dropdowns on the Accept Free Credential forms.
+  const [credentialOffers, setCredentialOffers] = useState<CredentialOfferInfo[]>([]);
+  const [credentialOffersLoading, setCredentialOffersLoading] = useState(false);
   const [registrarServiceContracts, setRegistrarServiceContracts] = useState<ContractWithBlob[]>([]);
   // Typed `MintRequest`/`BurnRequest` rows so the Accept dropdowns can show
   // holder → amount instrument (…cid) — mirroring the Accept Transfer UX —
@@ -532,15 +538,167 @@ export const GovernanceSection = ({
   // so the form can warn that the proposal would be a no-op.
   // SetupUtility additionally needs the ProviderService list to populate its
   // dropdown of available services to wire the utility setup against.
+  // The credential proposal forms need the UserService list to prefill their
+  // UserService dropdown.
   useEffect(() => {
     if (
       proposalType === "create_user_service_request" ||
       proposalType === "create_provider_service_request" ||
-      proposalType === "setup_utility"
+      proposalType === "setup_utility" ||
+      proposalType === "offer_free_credential" ||
+      proposalType === "accept_free_credential"
     ) {
       fetchServices();
     }
   }, [proposalType, fetchServices]);
+
+  // Fetch pending `CredentialOffer` contracts so the Accept Free Credential
+  // forms can offer a dropdown instead of a hand-pasted contract id.
+  const fetchCredentialOffers = useCallback(async () => {
+    setCredentialOffersLoading(true);
+    try {
+      const res = await authenticatedFetch(
+        `${API_BASE}/credential-offers?party_id=${encodeURIComponent(partyId)}`,
+      );
+      if (res.ok) {
+        const response: CredentialOffersResponse = await res.json();
+        setCredentialOffers(response.credential_offers);
+      }
+    } catch (e) {
+      console.error("Failed to fetch credential offers:", e);
+    } finally {
+      setCredentialOffersLoading(false);
+    }
+  }, [partyId]);
+
+  useEffect(() => {
+    if (
+      selectedActionType === "credential_accept_free" ||
+      proposalType === "accept_free_credential"
+    ) {
+      fetchCredentialOffers();
+    }
+  }, [selectedActionType, proposalType, fetchCredentialOffers]);
+
+  // Offers this party can take via the Free direction: it is the holder and
+  // the offer carries no billing params (`CredentialOffer_AcceptFree` rejects
+  // billed offers).
+  const acceptableCredentialOffers = useMemo(
+    () => credentialOffers.filter((o) => o.is_free && o.holder === partyId),
+    [credentialOffers, partyId],
+  );
+
+  // Prefill the credential proposal form's UserService once the list arrives —
+  // parties typically have exactly one.
+  useEffect(() => {
+    if (
+      (proposalType === "offer_free_credential" ||
+        proposalType === "accept_free_credential") &&
+      !proposalUserServiceCid &&
+      userServices.length > 0
+    ) {
+      setProposalUserServiceCid(userServices[0].contract_id);
+    }
+  }, [proposalType, userServices, proposalUserServiceCid]);
+
+  // Prefill the CredentialOffer cid when there's exactly one candidate. With
+  // several pending offers the operator has to pick deliberately.
+  useEffect(() => {
+    if (acceptableCredentialOffers.length !== 1) {
+      return;
+    }
+    const offerCid = acceptableCredentialOffers[0].contract_id;
+    if (proposalType === "accept_free_credential" && !proposalCredentialOfferCid) {
+      setProposalCredentialOfferCid(offerCid);
+    }
+    if (selectedActionType === "credential_accept_free" && !credentialOfferCid) {
+      setCredentialOfferCid(offerCid);
+    }
+  }, [
+    proposalType,
+    selectedActionType,
+    acceptableCredentialOffers,
+    proposalCredentialOfferCid,
+    credentialOfferCid,
+  ]);
+
+  // CredentialOffer picker shared by the direct Accept Free Credential action
+  // and the Accept Free Credential proposal form. freeSolo keeps hand-pasting
+  // a cid possible when the offer isn't visible to this participant.
+  const renderCredentialOfferAutocomplete = (
+    value: string,
+    setValue: (v: string) => void,
+  ) => (
+    <Autocomplete
+      size="small"
+      freeSolo
+      options={acceptableCredentialOffers}
+      value={value}
+      loading={credentialOffersLoading}
+      onChange={(_event, newValue) => {
+        if (typeof newValue === "string" || newValue === null) {
+          setValue(newValue ?? "");
+        } else {
+          setValue(newValue.contract_id);
+        }
+      }}
+      onInputChange={(_event, newValue, reason) => {
+        // Keep the field in sync when the user types a cid by hand
+        // (freeSolo fallback). `reset` fires when an option is selected;
+        // we already handled that via `onChange`.
+        if (reason === "input") {
+          setValue(newValue);
+        }
+      }}
+      getOptionLabel={(option) =>
+        typeof option === "string" ? option : option.contract_id
+      }
+      isOptionEqualToValue={(option, val) =>
+        typeof val === "string"
+          ? option.contract_id === val
+          : option.contract_id === val.contract_id
+      }
+      renderOption={(props, option) => {
+        if (typeof option === "string") {
+          return <li {...props}>{option}</li>;
+        }
+        const issuerName = option.issuer.split("::")[0];
+        const cidTail = option.contract_id.slice(-8);
+        return (
+          <li {...props} key={option.contract_id}>
+            <Box sx={{ display: "flex", flexDirection: "column", gap: 0.25 }}>
+              <Typography variant="body2">
+                {option.credential_id} — {issuerName} (…{cidTail})
+              </Typography>
+              {option.description && (
+                <Typography variant="caption" color="text.secondary">
+                  {option.description}
+                </Typography>
+              )}
+            </Box>
+          </li>
+        );
+      }}
+      renderInput={(params) => (
+        <TextField
+          {...params}
+          label={
+            <TextHelp text="Contract id of the pending CredentialOffer to accept.">
+              CredentialOffer Contract ID
+            </TextHelp>
+          }
+          required
+          helperText={
+            credentialOffersLoading
+              ? "Loading pending offers…"
+              : acceptableCredentialOffers.length === 0
+                ? "No pending free offers visible — paste a contract id directly if you have one"
+                : "Pick a pending offer, or paste a contract id"
+          }
+        />
+      )}
+    />
+  );
 
   // Fetch InstrumentConfiguration contracts (a.k.a. "our tokens"). Used by
   // Mint/Burn (for instrument_id + instrument_configuration_cid) and by
@@ -3179,29 +3337,21 @@ export const GovernanceSection = ({
                 <span>
                   <IconButton
                     size="small"
-                    onClick={fetchServices}
-                    disabled={servicesLoading}
+                    onClick={() => {
+                      fetchServices();
+                      fetchCredentialOffers();
+                    }}
+                    disabled={servicesLoading || credentialOffersLoading}
                   >
                     {servicesLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
                   </IconButton>
                 </span>
               </Tooltip>
             </Box>
-            <TextField
-              label="Credential Offer Contract ID"
-              value={credentialOfferCid}
-              onChange={(e) => setCredentialOfferCid(e.target.value)}
-              size="small"
-              fullWidth
-              slotProps={{
-                input: {
-                  endAdornment: fieldHelpAdornment(
-                    "Contract id of the pending CredentialOffer that this proposal will accept.",
-                    "Help for Credential Offer Contract ID",
-                  ),
-                },
-              }}
-            />
+            {renderCredentialOfferAutocomplete(
+              credentialOfferCid,
+              setCredentialOfferCid,
+            )}
           </>
         );
       case "dev_net_feature_app":
@@ -3284,6 +3434,17 @@ export const GovernanceSection = ({
         {error && (
           <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError(null)}>
             {error}
+          </Alert>
+        )}
+
+        {(data?.gov_core_out_of_date || governanceState?.out_of_date) && (
+          <Alert severity="warning" sx={{ mb: 2 }}>
+            The governance core contract is out of date
+            {data?.gov_core_package_ref || governanceState?.package_ref
+              ? ` (running on ${data?.gov_core_package_ref || governanceState?.package_ref})`
+              : ""}
+            . Actions are executed against the old package — the party should
+            be migrated to the latest governance-core package.
           </Alert>
         )}
 
@@ -3516,6 +3677,15 @@ export const GovernanceSection = ({
               </FormControl>
 
               <Divider />
+
+              {proposalType === "create_provider_service_request" &&
+                (network === "testnet" || network === "mainnet") && (
+                  <Alert severity="info">
+                    On TestNet and MainNet, a credential from Digital Asset (DA)
+                    is required before a Provider Service Request can be
+                    accepted.
+                  </Alert>
+                )}
 
               {proposalType === "generic_vote" && (
                 <TextField
@@ -4649,23 +4819,31 @@ export const GovernanceSection = ({
 
               {proposalType === "offer_free_credential" && (
                 <>
-                  <TextField
-                    size="small"
-                    label="UserService Contract ID"
-                    value={proposalUserServiceCid}
-                    onChange={(e) => setProposalUserServiceCid(e.target.value)}
-                    fullWidth
-                    required
-                    helperText="Governance party's UserService cid"
-                    slotProps={{
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          "Contract id of this governance party's UserService, used to issue the credential offer.",
-                          "Help for UserService Contract ID",
-                        ),
-                      },
-                    }}
-                  />
+                  <FormControl size="small" fullWidth required>
+                    <InputLabel>
+                      <TextHelp text="Contract id of this governance party's UserService, used to issue the credential offer.">
+                        UserService Contract ID
+                      </TextHelp>
+                    </InputLabel>
+                    <Select
+                      label="UserService Contract ID"
+                      value={proposalUserServiceCid}
+                      onChange={(e) => setProposalUserServiceCid(e.target.value)}
+                      MenuProps={{ disableScrollLock: true }}
+                    >
+                      {servicesLoading ? (
+                        <MenuItem disabled>Loading services…</MenuItem>
+                      ) : userServices.length > 0 ? (
+                        userServices.map((svc) => (
+                          <MenuItem key={svc.contract_id} value={svc.contract_id}>
+                            {svc.contract_id}
+                          </MenuItem>
+                        ))
+                      ) : (
+                        <MenuItem disabled>No user services found</MenuItem>
+                      )}
+                    </Select>
+                  </FormControl>
                   <TextField
                     size="small"
                     label="Holder Party"
@@ -4738,39 +4916,35 @@ export const GovernanceSection = ({
 
               {proposalType === "accept_free_credential" && (
                 <>
-                  <TextField
-                    size="small"
-                    label="UserService Contract ID"
-                    value={proposalUserServiceCid}
-                    onChange={(e) => setProposalUserServiceCid(e.target.value)}
-                    fullWidth
-                    required
-                    helperText="Governance party's UserService cid"
-                    slotProps={{
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          "Contract id of this governance party's UserService, used to accept the credential offer.",
-                          "Help for UserService Contract ID",
-                        ),
-                      },
-                    }}
-                  />
-                  <TextField
-                    size="small"
-                    label="CredentialOffer Contract ID"
-                    value={proposalCredentialOfferCid}
-                    onChange={(e) => setProposalCredentialOfferCid(e.target.value)}
-                    fullWidth
-                    required
-                    slotProps={{
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          "Contract id of the pending CredentialOffer that this proposal will accept.",
-                          "Help for CredentialOffer Contract ID",
-                        ),
-                      },
-                    }}
-                  />
+                  <FormControl size="small" fullWidth required>
+                    <InputLabel>
+                      <TextHelp text="Contract id of this governance party's UserService, used to accept the credential offer.">
+                        UserService Contract ID
+                      </TextHelp>
+                    </InputLabel>
+                    <Select
+                      label="UserService Contract ID"
+                      value={proposalUserServiceCid}
+                      onChange={(e) => setProposalUserServiceCid(e.target.value)}
+                      MenuProps={{ disableScrollLock: true }}
+                    >
+                      {servicesLoading ? (
+                        <MenuItem disabled>Loading services…</MenuItem>
+                      ) : userServices.length > 0 ? (
+                        userServices.map((svc) => (
+                          <MenuItem key={svc.contract_id} value={svc.contract_id}>
+                            {svc.contract_id}
+                          </MenuItem>
+                        ))
+                      ) : (
+                        <MenuItem disabled>No user services found</MenuItem>
+                      )}
+                    </Select>
+                  </FormControl>
+                  {renderCredentialOfferAutocomplete(
+                    proposalCredentialOfferCid,
+                    setProposalCredentialOfferCid,
+                  )}
                 </>
               )}
 

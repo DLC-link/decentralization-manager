@@ -12,9 +12,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use crate::{
+    canton_id::CantonId,
     config::PackageConfig,
     noise::server::ActiveWorkflow,
-    participant_id::CantonId,
     server::health::WorkflowInfo,
     workflow::contracts::{ContractDefinition, DarFile},
 };
@@ -288,6 +288,11 @@ pub struct ParticipantStatus {
     /// reported one (peers on older code report `None`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workflow: Option<WorkflowInfo>,
+    /// dec-party-manager version: this node's own version for the current
+    /// node, or the version a peer reported in its health response. `None` for
+    /// unreachable peers and peers on older code that don't report one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 /// Response for the participants status endpoint
@@ -541,6 +546,14 @@ pub struct WorkflowRun {
     /// Kick runs only: the participant being kicked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kicked_participant: Option<CantonId>,
+    /// Contracts runs only: package/contract names being deployed. Lifted from
+    /// `config_json` by the API layer (not a DB column), same as `prefix`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub package_names: Vec<String>,
+    /// Dars runs only: DAR filenames being distributed. Lifted from
+    /// `config_json` by the API layer (not a DB column).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dar_filenames: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub dismissed: bool,
@@ -615,6 +628,11 @@ impl std::str::FromStr for InvitationType {
 pub struct OnboardingInvitePayload {
     pub prefix: String,
     pub participants: Vec<CantonId>,
+    /// The coordinator's `workflow_runs` instance name for this run. Echoed
+    /// back in `DeclineInvitationPayload` so the coordinator can tell a
+    /// decline of THIS run apart from a stale invite of an earlier run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_instance: Option<String>,
 }
 
 /// Payload sent inside a `DeclineInvitation` Noise message — peer telling
@@ -625,12 +643,24 @@ pub struct DeclineInvitationPayload {
     pub kind: WorkflowKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// The coordinator run this decline targets (from the invite payload).
+    /// `None` when the invite predates this field — the coordinator then
+    /// falls back to kind + membership checks only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_instance: Option<String>,
 }
 
 /// Payload sent inside an `InviteDars` Noise message.
 #[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct DarsInvitePayload {
     pub dar_filenames: Vec<String>,
+    /// The member set (selected peers) this distribution targets, so the peer
+    /// card can render the same participant list the coordinator shows.
+    #[serde(default)]
+    pub participants: Vec<CantonId>,
+    /// The coordinator's run instance name (see `OnboardingInvitePayload`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_instance: Option<String>,
 }
 
 /// Payload sent inside an `InviteKick` Noise message — gives the peer enough
@@ -642,6 +672,29 @@ pub struct KickInvitePayload {
     pub kicked_participant: CantonId,
     pub new_threshold: i32,
     pub previous_threshold: i32,
+    /// The surviving member set the kick targets, so the peer card renders
+    /// the same participant list the coordinator shows.
+    #[serde(default)]
+    pub participants: Vec<CantonId>,
+    /// The coordinator's run instance name (see `OnboardingInvitePayload`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_instance: Option<String>,
+}
+
+/// Payload sent inside an `InviteContracts` Noise message — mirrors the rich
+/// Kick payload so the peer card can show the dec party, member set, and the
+/// package/contract names being deployed before the proposals arrive.
+#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ContractsInvitePayload {
+    pub dec_party_id: CantonId,
+    #[serde(default)]
+    pub participants: Vec<CantonId>,
+    /// Human-readable contract/package names (from `ContractDefinition.name`).
+    #[serde(default)]
+    pub package_names: Vec<String>,
+    /// The coordinator's run instance name (see `OnboardingInvitePayload`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_instance: Option<String>,
 }
 
 /// A pending invitation from a coordinator
@@ -674,6 +727,14 @@ pub struct PendingInvitation {
     /// same "Dec party" row the coordinator shows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dec_party_id: Option<CantonId>,
+    /// Contracts-only: human-readable package/contract names being deployed,
+    /// so the peer card shows the same "Packages" row the coordinator shows.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub package_names: Vec<String>,
+    /// The coordinator's run instance name from the invite payload. Echoed
+    /// back on decline so the coordinator only fails the matching run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_instance: Option<String>,
 }
 
 /// Response for pending invitations endpoint
@@ -1338,6 +1399,31 @@ pub struct DomainGovernanceAction {
     /// time.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accept_transfer_details: Option<AcceptTransferDetails>,
+    /// Operator plus the counterparty (user or provider) pulled from a
+    /// `CreateUserServiceRequest` / `CreateProviderServiceRequest` proposal so
+    /// the notification card shows the full summary — proposal type (the
+    /// `action_label`), operator party, and the user or provider party — without
+    /// the operator having to inspect the contract. Only populated for those two
+    /// proposal kinds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_request_details: Option<ServiceRequestDetails>,
+}
+
+/// Operator + counterparty parties extracted from a service-request proposal
+/// (`CreateUserServiceRequest` / `CreateProviderServiceRequest`). Surfaced
+/// inside `DomainGovernanceAction` so the pending-approval card can render who
+/// the request onboards. Exactly one of `user` / `provider` is set, matching
+/// the proposal kind.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct ServiceRequestDetails {
+    /// Operator party — present on both request kinds.
+    pub operator: CantonId,
+    /// User party — present for `CreateUserServiceRequest`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<CantonId>,
+    /// Provider party — present for `CreateProviderServiceRequest`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<CantonId>,
 }
 
 /// Recipient/amount/instrument extracted from a `TransferProposal`'s
@@ -1454,6 +1540,14 @@ pub struct GovernanceResponse {
     /// `CONTRACT_NOT_FOUND` on stale ids.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rules_contract_id: Option<String>,
+    /// True when the active governance-core rules contract is under an older
+    /// package than configured (see `GovernanceState::out_of_date`).
+    #[serde(default)]
+    pub gov_core_out_of_date: bool,
+    /// The package ref the rules contract actually lives under (for display
+    /// in the out-of-date warning).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gov_core_package_ref: Option<String>,
 }
 
 /// Request to expire a stale confirmation
@@ -1484,6 +1578,15 @@ pub struct GovernanceState {
     pub threshold: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub action_confirmation_timeout_microseconds: Option<i64>,
+    /// The package-name ref the active rules contract actually lives under,
+    /// e.g. `#governance-core-v0-rc4`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub package_ref: Option<String>,
+    /// True when the active governance-core rules contract was found under an
+    /// older package than the configured `governance_core` ref (a fallback
+    /// hit) — the party should be migrated to the latest package.
+    #[serde(default)]
+    pub out_of_date: bool,
 }
 
 /// Response for the governance state endpoint
@@ -1666,6 +1769,31 @@ pub struct InstrumentsResponse {
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct UserServicesResponse {
     pub services: Vec<UserServiceInfo>,
+}
+
+/// A pending `Utility.Credential.App.V0.Model.Offer:CredentialOffer` visible
+/// to the party. The accept-free-credential forms list offers where the party
+/// is the `holder`, so the CredentialOffer cid no longer has to be pasted in
+/// by hand.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+pub struct CredentialOfferInfo {
+    pub contract_id: String,
+    pub operator: CantonId,
+    pub issuer: CantonId,
+    pub holder: CantonId,
+    /// The template's `id` field — the credential's identifier.
+    pub credential_id: String,
+    pub description: String,
+    /// True when the offer carries no `billingParams`, i.e. it can be taken
+    /// with `CredentialOffer_AcceptFree` (the only direction the
+    /// AcceptFreeCredential governance action supports).
+    pub is_free: bool,
+}
+
+/// Response for the credential offers endpoint
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct CredentialOffersResponse {
+    pub credential_offers: Vec<CredentialOfferInfo>,
 }
 
 /// Information about a RegistrarService contract
@@ -2010,6 +2138,8 @@ mod tests {
             previous_threshold: None,
             new_threshold: None,
             kicked_participant: None,
+            package_names: Vec::new(),
+            dar_filenames: Vec::new(),
             error: None,
             dismissed: false,
             created_at: 1_700_000_000,

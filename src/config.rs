@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    canton_id::CantonId,
     consts::{DARS_DIR, DATA_DIR, DB_FILENAME, NOISE_KEY_FILENAME},
-    participant_id::CantonId,
 };
 
 /// Network configuration - list of peers in the network

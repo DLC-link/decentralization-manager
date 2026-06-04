@@ -3,7 +3,7 @@ pub mod coordinator;
 
 pub use config::DarsConfig;
 
-use crate::{noise::MessageType, workflow::state::WorkflowStep};
+use crate::{noise::MessageType, server::WorkflowKind, workflow::state::WorkflowStep};
 
 /// DARs upload workflow steps
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -68,5 +68,9 @@ impl WorkflowStep for DarsStep {
             "Complete" => Self::Complete,
             _ => return None,
         })
+    }
+
+    fn kind() -> WorkflowKind {
+        WorkflowKind::Dars
     }
 }

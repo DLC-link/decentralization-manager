@@ -5,6 +5,13 @@
 //! run must remain visible in /workflows for operator inspection (P3 never
 //! advances, so the run won't reach Completed). End by restarting P3 and
 //! cancelling+dismissing so the suite isn't poisoned.
+//!
+//! Failure injection: coordinators no longer self-fail when peers go away
+//! (wait-states are human-paced and may legitimately sit for hours), so dead
+//! peers alone can't produce the Failed row this phase needs. Instead we kill
+//! P1 and flip its persisted row to `failed` directly — simulating an
+//! active-step error — then restart it; startup recovery leaves Failed rows
+//! alone, so the run is retryable.
 
 use std::time::Duration;
 
@@ -32,37 +39,34 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     // Brief settle so peer rows persist before we kill them.
     sleep(Duration::from_secs(3)).await;
 
-    chaos::say("P2", "hard-killing both peers to force coordinator failure");
+    chaos::say("P2", "hard-killing both peers");
     processes::kill_node(f, 2).await?;
     processes::kill_node(f, 3).await?;
 
+    // Kill P1 too and inject the coordinator failure into its DB while it's
+    // down (the app is the sole writer of its sqlite file while running).
+    chaos::say(
+        "P2",
+        "killing P1 and injecting coordinator failure into its DB",
+    );
+    processes::kill_node(f, 1).await?;
     let p1_db = f.db_path(1);
-    {
-        let p1_db = p1_db.clone();
-        let inst = instance.clone();
-        chaos::poll_until_healthy(
-            f,
-            Duration::from_secs(600),
-            Duration::from_secs(60),
-            move |_| {
-                let p1_db = p1_db.clone();
-                let inst = inst.clone();
-                Box::pin(async move {
-                    Ok(matches!(
-                        db::workflow_run_status(&p1_db, &inst, "Coordinator")
-                            .await?
-                            .as_deref(),
-                        Some("failed")
-                    ))
-                })
-            },
-        )
-        .await?;
-    }
-    chaos::say("P2", "coordinator marked Failed");
+    db::inject_workflow_run_failure(
+        &p1_db,
+        &instance,
+        "Coordinator",
+        "chaos: injected active-step failure (P2 retry-with-offline-peer)",
+    )
+    .await?;
 
-    // Restart only P2; leave P3 offline.
+    // Restart P1 — recovery respawns inprogress rows only, so the run stays
+    // Failed and retryable. Restart only P2; leave P3 offline.
+    processes::spawn_only(f, 1).await?;
     processes::spawn_only(f, 2).await?;
+    chaos::say(
+        "P2",
+        "P1 + P2 back up, P3 left dead; coordinator row Failed",
+    );
 
     // POST retry — must return 200 even with P3 unreachable.
     chaos::say(

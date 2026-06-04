@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::participant_id::CantonId;
+use crate::canton_id::CantonId;
 
 /// A DAR file to upload
 #[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]

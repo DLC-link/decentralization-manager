@@ -2,7 +2,7 @@ use std::marker::PhantomData;
 
 use serde::{Deserialize, Serialize};
 
-use crate::participant_id::CantonId;
+use crate::canton_id::CantonId;
 
 /// Configuration for kick workflow
 #[derive(Clone, Debug, Deserialize, Serialize)]

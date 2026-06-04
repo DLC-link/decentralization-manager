@@ -18,20 +18,24 @@ use canton_proto_rs::com::{
 };
 
 use crate::{
+    canton_id::CantonId,
     config::{NodeConfig, PackageConfig},
     error::Result,
-    participant_id::CantonId,
     utils,
 };
 
 use super::{
     action_serializer,
+    package_inventory::{
+        fetch_package_id_to_name, fetch_package_names, newest_matching_names, package_name_prefix,
+    },
     types::{
-        AcceptTransferDetails, ActionType, ContractInfo, ContractWithBlob, DomainGovernanceAction,
-        GovernanceAction, GovernanceConfirmation, GovernanceState, HoldingInfo, InstrumentInfo,
-        PartyMetadata, PendingAction, ProviderServiceInfo, RegistrarServiceInfo, TokenRequestInfo,
-        TransferFactoryInfo, TransferInstructionInfo, TransferInstructionStatus,
-        TransferProposalDetails, UserServiceInfo, VaultInfo,
+        AcceptTransferDetails, ActionType, ContractInfo, ContractWithBlob, CredentialOfferInfo,
+        DomainGovernanceAction, GovernanceAction, GovernanceConfirmation, GovernanceState,
+        HoldingInfo, InstrumentInfo, PartyMetadata, PendingAction, ProviderServiceInfo,
+        RegistrarServiceInfo, ServiceRequestDetails, TokenRequestInfo, TransferFactoryInfo,
+        TransferInstructionInfo, TransferInstructionStatus, TransferProposalDetails,
+        UserServiceInfo, VaultInfo,
     },
 };
 
@@ -184,6 +188,15 @@ fn user_service_template(packages: &PackageConfig) -> Option<TemplateId> {
     })
 }
 
+/// CredentialOffer template identifier
+fn credential_offer_template(packages: &PackageConfig) -> Option<TemplateId> {
+    packages.utility_credential.as_ref().map(|pkg| TemplateId {
+        package_id: pkg.clone(),
+        module_name: "Utility.Credential.App.V0.Model.Offer",
+        entity_name: "CredentialOffer",
+    })
+}
+
 /// RegistrarService template identifier
 fn registrar_service_template(packages: &PackageConfig) -> Option<TemplateId> {
     packages.utility_registry.as_ref().map(|pkg| TemplateId {
@@ -332,7 +345,7 @@ pub fn sort_contracts(contracts: &mut Vec<ContractInfo>) {
     });
 }
 
-fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
+pub(crate) fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
     let mut ai = a.split('.');
     let mut bi = b.split('.');
     loop {
@@ -742,11 +755,30 @@ pub async fn get_governance_confirmations(
             // Only mark as orphaned when we successfully fetched the full
             // active-proposal set; otherwise the missing-from-map signal is
             // unreliable and we'd falsely mark everything as orphaned.
-            let (description, transfer_details, accept_transfer_details, orphaned) =
-                match proposal_infos.remove(&proposal_cid) {
-                    Some(info) => (info.description, info.transfer, info.accept_transfer, false),
-                    None => (None, None, None, proposal_infos_complete),
-                };
+            let (
+                description,
+                transfer_details,
+                accept_transfer_details,
+                service_request_info,
+                orphaned,
+            ) = match proposal_infos.remove(&proposal_cid) {
+                Some(info) => (
+                    info.description,
+                    info.transfer,
+                    info.accept_transfer,
+                    info.service_request,
+                    false,
+                ),
+                None => (None, None, None, None, proposal_infos_complete),
+            };
+            // Service-request parties are only meaningful on the two
+            // service-request proposal kinds; clear them otherwise so an
+            // unrelated proposal that happens to carry operator/provider
+            // parties doesn't render a misleading summary.
+            let service_request_details = match action_label.as_str() {
+                "CreateUserServiceRequest" | "CreateProviderServiceRequest" => service_request_info,
+                _ => None,
+            };
             let mut seen_parties = std::collections::HashSet::new();
             let unique_confirmations: Vec<GovernanceConfirmation> = confirmations
                 .into_iter()
@@ -767,6 +799,7 @@ pub async fn get_governance_confirmations(
                 orphaned,
                 transfer_details,
                 accept_transfer_details,
+                service_request_details,
             }
         })
         .collect();
@@ -1088,6 +1121,10 @@ pub struct ProposalInfo {
     pub transfer: Option<TransferProposalDetails>,
     pub accept_transfer_instruction_cid: Option<String>,
     pub accept_transfer: Option<AcceptTransferDetails>,
+    /// Operator + user/provider parties, populated only for
+    /// `Create{User,Provider}ServiceRequest` proposals so the notification card
+    /// can render the full summary.
+    pub service_request: Option<ServiceRequestDetails>,
 }
 
 /// Extract proposal info from a GovernableAction contract's create_arguments.
@@ -1124,6 +1161,7 @@ fn extract_proposal_info(
         });
 
     let transfer = extract_transfer_proposal_details(record);
+    let service_request = extract_service_request_details(record);
 
     // `AcceptTransferProposal`s carry `transferInstructionCid` instead of the
     // transfer fields. Capture it here; the post-pass in `fetch_proposal_infos`
@@ -1149,6 +1187,7 @@ fn extract_proposal_info(
             transfer,
             accept_transfer_instruction_cid,
             accept_transfer: None,
+            service_request,
         },
     );
 }
@@ -1319,6 +1358,26 @@ fn extract_transfer_proposal_details(record: &Record) -> Option<TransferProposal
     })
 }
 
+/// Pull `operator` plus the counterparty (`user` for a
+/// `CreateUserServiceRequest`, `provider` for a `CreateProviderServiceRequest`)
+/// out of a service-request proposal's create-arguments. Returns `None` when
+/// neither counterparty field is present, so non-service-request proposals are
+/// left untouched. Both templates carry the parties as top-level `Party`
+/// fields (unlike `TransferProposal`, which nests them under `transfer`).
+fn extract_service_request_details(record: &Record) -> Option<ServiceRequestDetails> {
+    let operator: CantonId = field_party(record, "operator")?.parse().ok()?;
+    let user: Option<CantonId> = field_party(record, "user").and_then(|p| p.parse().ok());
+    let provider: Option<CantonId> = field_party(record, "provider").and_then(|p| p.parse().ok());
+    if user.is_none() && provider.is_none() {
+        return None;
+    }
+    Some(ServiceRequestDetails {
+        operator,
+        user,
+        provider,
+    })
+}
+
 /// Fetch proposal infos via GovernableAction interface query (production mode).
 ///
 /// Queries active contracts implementing GovernableAction and extracts the
@@ -1428,7 +1487,12 @@ pub async fn get_governance_state(
             match fetch_governance_state_for_template(config, party_id, token.clone(), &template)
                 .await
             {
-                Ok(Some(state)) => return Ok(Some(state)),
+                Ok(Some(mut state)) => {
+                    // Found under the configured package — not out of date.
+                    state.package_ref = Some(template.package_id.clone());
+                    state.out_of_date = false;
+                    return Ok(Some(state));
+                }
                 Ok(None) => continue,
                 Err(e) => {
                     let err_str = e.to_string();
@@ -1443,8 +1507,66 @@ pub async fn get_governance_state(
                 }
             }
         }
-        Ok(None)
+        // Nothing under the configured packages — look for a GovernanceRules
+        // contract under an older governance-core package version still
+        // uploaded to the participant.
+        fetch_governance_state_fallback(config, party_id, token, packages).await
     }
+}
+
+/// Look for a GovernanceRules contract under any OLDER governance-core
+/// package version present on the participant. Runs only after the
+/// configured templates yielded nothing; returns the newest match tagged
+/// `out_of_date` with the package ref it actually lives under.
+async fn fetch_governance_state_fallback(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    packages: &PackageConfig,
+) -> Result<Option<GovernanceState>> {
+    let Some(configured) = packages.governance_core.as_deref() else {
+        return Ok(None);
+    };
+    let names = match fetch_package_names(config).await {
+        Ok(names) => names,
+        Err(e) => {
+            tracing::warn!("Fallback gov-core discovery: cannot list packages: {e:#}");
+            return Ok(None);
+        }
+    };
+    let prefix = package_name_prefix(configured);
+    let configured_name = configured.trim_start_matches('#');
+    for name in newest_matching_names(&names, &prefix) {
+        // The configured name was already tried by the caller.
+        if name == configured_name {
+            continue;
+        }
+        let template = TemplateId {
+            package_id: format!("#{name}"),
+            module_name: "Governance.Rules",
+            entity_name: "GovernanceRules",
+        };
+        match fetch_governance_state_for_template(config, party_id, token.clone(), &template).await
+        {
+            Ok(Some(mut state)) => {
+                tracing::warn!(
+                    "GovernanceRules contract for {party_id} found under fallback package \
+                     #{name} (configured {configured}); flagging as out of date"
+                );
+                state.package_ref = Some(template.package_id);
+                state.out_of_date = true;
+                return Ok(Some(state));
+            }
+            Ok(None) => continue,
+            Err(e) => {
+                if !e.to_string().contains("PACKAGE_NAMES_NOT_FOUND") {
+                    tracing::warn!("Fallback gov-core query for #{name} failed: {e}");
+                }
+                continue;
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Fetch governance state using WildcardFilter (for test mode)
@@ -1621,7 +1743,90 @@ fn extract_governance_state(created: &CreatedEvent) -> Option<GovernanceState> {
         members,
         threshold,
         action_confirmation_timeout_microseconds: timeout,
+        package_ref: None,
+        out_of_date: false,
     })
+}
+
+/// Resolve the package-name ref (`#name`) of the package an on-ledger
+/// contract was actually created under. Used to exercise choices on
+/// governance contracts that may live under an older package version than
+/// the configured one. Returns `fallback` (the configured ref) on any
+/// failure so callers degrade to the previous behavior instead of erroring.
+pub(crate) async fn resolve_contract_package_ref(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    contract_id: &str,
+    fallback: &str,
+) -> String {
+    match fetch_contract_package_ref(config, party_id, token, contract_id).await {
+        Ok(Some(package_ref)) => package_ref,
+        Ok(None) => {
+            tracing::debug!(
+                "Could not resolve package ref for {contract_id}; using configured {fallback}"
+            );
+            fallback.to_string()
+        }
+        Err(e) => {
+            tracing::debug!(
+                "Could not resolve package ref for {contract_id}: {e}; \
+                 using configured {fallback}"
+            );
+            fallback.to_string()
+        }
+    }
+}
+
+/// Look up a contract's created event and map its concrete package id back
+/// to a `#name` ref via the participant's package inventory.
+async fn fetch_contract_package_ref(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    contract_id: &str,
+) -> Result<Option<String>> {
+    let mut client = utils::create_event_query_client(config, token).await?;
+
+    let mut filters_by_party = HashMap::new();
+    filters_by_party.insert(
+        party_id.to_string(),
+        Filters {
+            cumulative: vec![CumulativeFilter {
+                identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
+                    WildcardFilter {
+                        include_created_event_blob: false,
+                    },
+                )),
+            }],
+        },
+    );
+    let request = GetEventsByContractIdRequest {
+        contract_id: contract_id.to_string(),
+        event_format: Some(EventFormat {
+            filters_by_party,
+            filters_for_any_party: None,
+            verbose: false,
+        }),
+    };
+
+    let package_id = client
+        .get_events_by_contract_id(tonic::Request::new(request))
+        .await?
+        .into_inner()
+        .created
+        .and_then(|c| c.created_event)
+        .and_then(|e| e.template_id)
+        .map(|t| t.package_id);
+    let Some(package_id) = package_id else {
+        return Ok(None);
+    };
+    // Already a `#name` ref — use it directly.
+    if package_id.starts_with('#') {
+        return Ok(Some(package_id));
+    }
+    let id_to_name = fetch_package_id_to_name(config).await?;
+    Ok(id_to_name.get(&package_id).map(|name| format!("#{name}")))
 }
 
 /// Extract a Set Party (DA.Set.Types:Set) which is stored as Record { map: GenMap<Party, Unit> }
@@ -2258,6 +2463,184 @@ fn extract_user_service_info(created: &CreatedEvent) -> Option<UserServiceInfo> 
         contract_id: created.contract_id.clone(),
         operator,
         user,
+    })
+}
+
+// ============================================================================
+// Credential Offer Queries
+// ============================================================================
+
+/// Get all CredentialOffer contracts visible to a party. Includes offers in
+/// both directions (party as `holder` or as `issuer`); the caller filters for
+/// the side it needs.
+pub async fn get_credential_offers(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    test_mode: bool,
+    packages: &PackageConfig,
+) -> Result<Vec<CredentialOfferInfo>> {
+    if test_mode {
+        fetch_credential_offers_with_wildcard(config, party_id, token).await
+    } else {
+        match credential_offer_template(packages) {
+            Some(template) => {
+                fetch_credential_offers_for_template(config, party_id, token, &template).await
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+}
+
+/// Fetch credential offers using WildcardFilter (for test mode)
+async fn fetch_credential_offers_with_wildcard(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+) -> Result<Vec<CredentialOfferInfo>> {
+    let mut state_client = utils::create_state_client(config, token).await?;
+
+    let ledger_end = state_client
+        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
+        .await?
+        .into_inner()
+        .offset;
+
+    let mut filters_by_party = HashMap::new();
+    filters_by_party.insert(
+        party_id.to_string(),
+        Filters {
+            cumulative: vec![CumulativeFilter {
+                identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
+                    WildcardFilter {
+                        include_created_event_blob: false,
+                    },
+                )),
+            }],
+        },
+    );
+
+    let acs_request = GetActiveContractsRequest {
+        active_at_offset: ledger_end,
+        event_format: Some(EventFormat {
+            filters_by_party,
+            filters_for_any_party: None,
+            verbose: true,
+        }),
+    };
+
+    let mut stream = state_client
+        .get_active_contracts(acs_request)
+        .await?
+        .into_inner();
+
+    let mut offers = Vec::new();
+    while let Some(response) = stream.message().await? {
+        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
+            && let Some(created) = active.created_event
+            && let Some(template_id) = &created.template_id
+            && template_id.module_name == "Utility.Credential.App.V0.Model.Offer"
+            && template_id.entity_name == "CredentialOffer"
+            && let Some(info) = extract_credential_offer_info(&created)
+        {
+            offers.push(info);
+        }
+    }
+
+    Ok(offers)
+}
+
+/// Fetch credential offers using TemplateFilter
+async fn fetch_credential_offers_for_template(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    template: &TemplateId,
+) -> Result<Vec<CredentialOfferInfo>> {
+    let mut state_client = utils::create_state_client(config, token).await?;
+
+    let ledger_end = state_client
+        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
+        .await?
+        .into_inner()
+        .offset;
+
+    let mut filters_by_party = HashMap::new();
+    filters_by_party.insert(
+        party_id.to_string(),
+        Filters {
+            cumulative: vec![CumulativeFilter {
+                identifier_filter: Some(cumulative_filter::IdentifierFilter::TemplateFilter(
+                    TemplateFilter {
+                        template_id: Some(Identifier {
+                            package_id: template.package_id.clone(),
+                            module_name: template.module_name.to_string(),
+                            entity_name: template.entity_name.to_string(),
+                        }),
+                        include_created_event_blob: false,
+                    },
+                )),
+            }],
+        },
+    );
+
+    let acs_request = GetActiveContractsRequest {
+        active_at_offset: ledger_end,
+        event_format: Some(EventFormat {
+            filters_by_party,
+            filters_for_any_party: None,
+            verbose: true,
+        }),
+    };
+
+    let mut stream = state_client
+        .get_active_contracts(acs_request)
+        .await?
+        .into_inner();
+
+    let mut offers = Vec::new();
+    while let Some(response) = stream.message().await? {
+        if let Some(ContractEntry::ActiveContract(active)) = response.contract_entry
+            && let Some(created) = active.created_event
+            && let Some(info) = extract_credential_offer_info(&created)
+        {
+            offers.push(info);
+        }
+    }
+
+    Ok(offers)
+}
+
+/// Extract CredentialOfferInfo from a CredentialOffer created event. An offer
+/// is free when its `billingParams : Optional BillingParams` field is `None` —
+/// only those can be taken via `CredentialOffer_AcceptFree`.
+fn extract_credential_offer_info(created: &CreatedEvent) -> Option<CredentialOfferInfo> {
+    let record = created.create_arguments.as_ref()?;
+
+    let operator: CantonId = field_party(record, "operator")?.parse().ok()?;
+    let issuer: CantonId = field_party(record, "issuer")?.parse().ok()?;
+    let holder: CantonId = field_party(record, "holder")?.parse().ok()?;
+    let credential_id = field_text(record, "id")?;
+    let description = field_text(record, "description").unwrap_or_default();
+
+    let has_billing_params = record
+        .fields
+        .iter()
+        .find(|f| f.label == "billingParams")
+        .and_then(|f| f.value.as_ref())
+        .is_some_and(|v| match &v.sum {
+            Some(value::Sum::Optional(opt)) => opt.value.is_some(),
+            _ => false,
+        });
+
+    Some(CredentialOfferInfo {
+        contract_id: created.contract_id.clone(),
+        operator,
+        issuer,
+        holder,
+        credential_id,
+        description,
+        is_free: !has_billing_params,
     })
 }
 
@@ -3739,7 +4122,9 @@ mod tests {
     // constructor match and the `executeBefore` deadline check.
     // ------------------------------------------------------------------------
 
-    use canton_proto_rs::com::daml::ledger::api::v2::{InterfaceView, RecordField, Variant};
+    use canton_proto_rs::com::daml::ledger::api::v2::{
+        InterfaceView, Optional, RecordField, Variant,
+    };
 
     fn field(label: &str, value: Value) -> RecordField {
         RecordField {
@@ -3880,5 +4265,164 @@ mod tests {
             extract_transfer_instruction_info(&make_event(TRANSFER_PENDING_RECEIVER_ACCEPTANCE, 0))
                 .expect("expired offer should still be returned, just past-deadline");
         assert_eq!(info.expires_at, 0);
+    }
+
+    // ------------------------------------------------------------------------
+    // extract_service_request_details
+    //
+    // CreateUserServiceRequest / CreateProviderServiceRequest carry operator +
+    // user/provider as top-level Party fields on the proposal contract. The
+    // notification card renders operator + the present counterparty so the
+    // operator sees the full summary alongside the action_label.
+    // ------------------------------------------------------------------------
+
+    // `<prefix>::<34-byte-multihash-hex>`; CantonId::parse rejects other shapes.
+    const SR_FP: &str = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
+
+    fn service_request_record(fields: Vec<RecordField>) -> Record {
+        Record {
+            record_id: None,
+            fields,
+        }
+    }
+
+    #[test]
+    fn extract_service_request_details_reads_user_request() {
+        let record = service_request_record(vec![
+            field("governanceParty", party_value(&format!("gov::{SR_FP}"))),
+            field("proposer", party_value(&format!("proposer::{SR_FP}"))),
+            field("operator", party_value(&format!("operator::{SR_FP}"))),
+            field("user", party_value(&format!("user::{SR_FP}"))),
+        ]);
+        let Some(details) = extract_service_request_details(&record) else {
+            panic!("user service request should yield details");
+        };
+        assert_eq!(details.operator.to_string(), format!("operator::{SR_FP}"));
+        assert_eq!(
+            details.user.map(|p| p.to_string()),
+            Some(format!("user::{SR_FP}")),
+        );
+        assert!(details.provider.is_none());
+    }
+
+    #[test]
+    fn extract_service_request_details_reads_provider_request() {
+        let record = service_request_record(vec![
+            field("governanceParty", party_value(&format!("gov::{SR_FP}"))),
+            field("proposer", party_value(&format!("proposer::{SR_FP}"))),
+            field("operator", party_value(&format!("operator::{SR_FP}"))),
+            field("provider", party_value(&format!("provider::{SR_FP}"))),
+        ]);
+        let Some(details) = extract_service_request_details(&record) else {
+            panic!("provider service request should yield details");
+        };
+        assert_eq!(details.operator.to_string(), format!("operator::{SR_FP}"));
+        assert_eq!(
+            details.provider.map(|p| p.to_string()),
+            Some(format!("provider::{SR_FP}")),
+        );
+        assert!(details.user.is_none());
+    }
+
+    #[test]
+    fn extract_service_request_details_skips_proposal_without_counterparty() {
+        // operator present but no user/provider counterparty → not a service
+        // request, so no details (keeps unrelated operator-bearing proposals
+        // from rendering a half-empty summary).
+        let record = service_request_record(vec![
+            field("governanceParty", party_value(&format!("gov::{SR_FP}"))),
+            field("proposer", party_value(&format!("proposer::{SR_FP}"))),
+            field("operator", party_value(&format!("operator::{SR_FP}"))),
+        ]);
+        assert!(extract_service_request_details(&record).is_none());
+    }
+
+    // ------------------------------------------------------------------------
+    // extract_credential_offer_info
+    //
+    // `Utility.Credential.App.V0.Model.Offer:CredentialOffer` carries the
+    // issuer/holder parties, the credential id/description, and an optional
+    // `billingParams`. Offers with `billingParams = None` are free and the only
+    // kind `AcceptFreeCredential` can take, so the extractor surfaces that as
+    // `is_free` for the accept-form dropdown to filter on.
+    // ------------------------------------------------------------------------
+
+    fn optional_value(inner: Option<Value>) -> Value {
+        Value {
+            sum: Some(value::Sum::Optional(Box::new(Optional {
+                value: inner.map(Box::new),
+            }))),
+        }
+    }
+
+    /// A CredentialOffer created event; `billing_params` is the raw value of
+    /// the template's `billingParams : Optional BillingParams` field.
+    fn credential_offer_event(billing_params: Value) -> CreatedEvent {
+        let record = Record {
+            record_id: None,
+            fields: vec![
+                field("operator", party_value(&format!("operator::{SR_FP}"))),
+                field("issuer", party_value(&format!("issuer::{SR_FP}"))),
+                field("holder", party_value(&format!("holder::{SR_FP}"))),
+                field("dso", party_value(&format!("dso::{SR_FP}"))),
+                field("id", text_value("provider-service-credential")),
+                field("description", text_value("Provider service access")),
+                field("billingParams", billing_params),
+                field("depositInitialAmountUsd", optional_value(None)),
+            ],
+        };
+        CreatedEvent {
+            offset: 0,
+            node_id: 0,
+            contract_id: "offer-cid-1".to_string(),
+            template_id: None,
+            contract_key: None,
+            create_arguments: Some(record),
+            created_event_blob: vec![],
+            interface_views: vec![],
+            witness_parties: vec![],
+            signatories: vec![],
+            observers: vec![],
+            created_at: None,
+            package_name: String::new(),
+            representative_package_id: String::new(),
+            acs_delta: false,
+        }
+    }
+
+    #[test]
+    fn extract_credential_offer_info_reads_free_offer() {
+        let event = credential_offer_event(optional_value(None));
+        let Some(info) = extract_credential_offer_info(&event) else {
+            panic!("free offer should yield info");
+        };
+        assert_eq!(info.contract_id, "offer-cid-1");
+        assert_eq!(info.operator.to_string(), format!("operator::{SR_FP}"));
+        assert_eq!(info.issuer.to_string(), format!("issuer::{SR_FP}"));
+        assert_eq!(info.holder.to_string(), format!("holder::{SR_FP}"));
+        assert_eq!(info.credential_id, "provider-service-credential");
+        assert_eq!(info.description, "Provider service access");
+        assert!(info.is_free);
+    }
+
+    #[test]
+    fn extract_credential_offer_info_marks_paid_offer_not_free() {
+        let billing = optional_value(Some(record_value(vec![field(
+            "billingPeriodDuration",
+            text_value("placeholder"),
+        )])));
+        let Some(info) = extract_credential_offer_info(&credential_offer_event(billing)) else {
+            panic!("paid offer should still yield info");
+        };
+        assert!(!info.is_free);
+    }
+
+    #[test]
+    fn extract_credential_offer_info_skips_event_without_holder() {
+        let mut event = credential_offer_event(optional_value(None));
+        if let Some(record) = event.create_arguments.as_mut() {
+            record.fields.retain(|f| f.label != "holder");
+        }
+        assert!(extract_credential_offer_info(&event).is_none());
     }
 }

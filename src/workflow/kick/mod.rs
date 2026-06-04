@@ -6,7 +6,7 @@ pub mod steps;
 pub use config::KickConfig;
 pub use steps::{create_proposals, export_state, sign_proposals, submit_kick};
 
-use crate::{noise::MessageType, workflow::state::WorkflowStep};
+use crate::{noise::MessageType, server::WorkflowKind, workflow::state::WorkflowStep};
 
 /// Kick workflow steps (removing a member from decentralized party)
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -92,5 +92,9 @@ impl WorkflowStep for KickStep {
             "Complete" => Self::Complete,
             _ => return None,
         })
+    }
+
+    fn kind() -> WorkflowKind {
+        WorkflowKind::Kick
     }
 }

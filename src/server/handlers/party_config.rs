@@ -9,10 +9,10 @@ use tokio::sync::RwLock;
 
 use crate::{
     auth::{AuthRegistry, WorkflowAuth, auth0_client_credentials},
+    canton_id::CantonId,
     config::{Auth0M2MConfig, KeycloakConfig, PartyCredentials, default_package_config},
     db::schema::{Commitable, SchemaWrite},
     error::Result,
-    participant_id::CantonId,
     server::{
         AppState,
         middleware::require_admin,
@@ -580,8 +580,8 @@ mod tests {
     use super::{discover_member_party, get_party_config, save_party_config};
     use crate::{
         auth::{MockAuthRegistry, MockValidator, TokenValidator, WorkflowAuth},
+        canton_id::CantonId,
         config::{KeycloakConfig, NodeConfig, PartyCredentials, default_package_config},
-        participant_id::CantonId,
         server::{AppState, middleware::AuthMiddleware},
     };
 

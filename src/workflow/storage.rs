@@ -14,9 +14,9 @@
 use sqlx::SqlitePool;
 
 use crate::{
+    canton_id::CantonId,
     db::schema::{Commitable, SchemaRead, SchemaWrite},
     error::Result,
-    participant_id::CantonId,
 };
 
 /// Stable string identifiers for every artefact kind we persist. Step code

@@ -13,6 +13,7 @@ use super::parties::{
     fetch_decentralized_parties, resolve_owner_keys_from_peers, store_parties_to_db,
 };
 use crate::{
+    canton_id::{CantonId, validate_party_id_prefix},
     config::{NetworkConfig, NodeConfig},
     db::schema::{Commitable, SchemaRead, SchemaWrite},
     error::Result,
@@ -20,19 +21,19 @@ use crate::{
         Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message,
         send_noise_message_with_retry,
     },
-    participant_id::CantonId,
     server::{
         AppState,
         health::classify_health_reply,
         middleware::require_admin,
         respawn_coordinator,
         types::{
-            ContractsRequest, DarsInvitePayload, DarsRequest, ErrorResponse, HttpWorkflowState,
-            KickInvitePayload, KickRequest, KickResponse, KickStatus, MessageResponse,
-            MissingEdgeKind, MissingPeerEdge, OnboardingInvitePayload, OnboardingMeshErrorResponse,
-            OnboardingRequest, OnboardingResponse, OnboardingStatus, SuccessResponse,
-            WorkflowInFlightGuard, WorkflowKind, WorkflowProgress, WorkflowResponse, WorkflowRole,
-            WorkflowRun, WorkflowRunsResponse, WorkflowStatusResponse,
+            ContractsInvitePayload, ContractsRequest, DarsInvitePayload, DarsRequest,
+            ErrorResponse, HttpWorkflowState, KickInvitePayload, KickRequest, KickResponse,
+            KickStatus, MessageResponse, MissingEdgeKind, MissingPeerEdge, OnboardingInvitePayload,
+            OnboardingMeshErrorResponse, OnboardingRequest, OnboardingResponse, OnboardingStatus,
+            SuccessResponse, WorkflowInFlightGuard, WorkflowKind, WorkflowProgress,
+            WorkflowResponse, WorkflowRole, WorkflowRun, WorkflowRunsResponse,
+            WorkflowStatusResponse,
         },
     },
     workflow::{self, ContractsStep, DarsStep, KickStep, OnboardingStep, state::WorkflowStep},
@@ -61,8 +62,8 @@ fn format_busy_peers(busy: &[(String, WorkflowKind)]) -> String {
 }
 
 /// Probe every invited peer's `Health` in parallel and return those already in a
-/// workflow. Unreachable peers are NOT treated as busy — the workflow proceeds
-/// and the existing staleness / decline paths handle a genuinely dead peer.
+/// workflow. Unreachable peers are NOT treated as busy — the workflow proceeds;
+/// a genuinely dead peer never advances the run and the operator can cancel.
 /// Peers on older code report no workflow and so aren't blocked (graceful
 /// rollout — the peer-side invite gate still protects correctness).
 async fn preflight_busy_peers(
@@ -183,6 +184,8 @@ where
         previous_threshold: None,
         new_threshold: None,
         kicked_participant: None,
+        package_names: Vec::new(),
+        dar_filenames: Vec::new(),
         error: None,
         dismissed: false,
         created_at: now,
@@ -340,6 +343,49 @@ pub async fn start_kick(
         }
     };
 
+    // Scope the kick to this dec party's actual members, not every peer this
+    // node has configured. A party can be a strict subset of the configured
+    // mesh (see start_onboarding), and basing the signer set / threshold bound
+    // / invites on the full mesh would invite outsiders and stall
+    // WaitingForPeers on peers that were never part of the party. Fall back to
+    // the full peer set only if no cached row yields a usable id — membership
+    // not cached yet, or every `participant_uid` in a legacy/invalid format —
+    // since scoping to an empty member set would reject the kick with a
+    // misleading "need at least 2 party members" error.
+    let party_member_ids: HashSet<CantonId> = match data
+        .db
+        .get_dec_party_participants(&decentralized_party_id)
+        .await
+    {
+        Ok(rows) => {
+            let parsed: HashSet<CantonId> = rows
+                .iter()
+                .filter_map(|r| CantonId::parse(&r.participant_uid).ok())
+                .collect();
+            if parsed.is_empty() {
+                tracing::warn!(
+                    "No usable cached participants for {decentralized_party_id} \
+                     ({count} rows); falling back to all configured peers for \
+                     kick scoping",
+                    count = rows.len()
+                );
+                peers.iter().map(|p| p.participant_id.clone()).collect()
+            } else {
+                parsed
+            }
+        }
+        Err(e) => {
+            tracing::error!("Failed to load dec party participants for kick: {e}");
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: "Failed to load decentralized party members".to_string(),
+            });
+        }
+    };
+    let peers: Vec<_> = peers
+        .into_iter()
+        .filter(|p| party_member_ids.contains(&p.participant_id))
+        .collect();
+
     // Preconditions for a kick: there must be at least one peer left
     // after the kick (so the surviving signer set is non-empty), and the
     // participant being kicked must be a known peer. Without these checks
@@ -348,7 +394,7 @@ pub async fn start_kick(
     if peers.len() < 2 {
         return HttpResponse::BadRequest().json(ErrorResponse {
             error: format!(
-                "Cannot kick: need at least 2 known peers (this node + the target), \
+                "Cannot kick: need at least 2 party members (this node + the target), \
                  have {n}",
                 n = peers.len(),
             ),
@@ -356,7 +402,9 @@ pub async fn start_kick(
     }
     if !peers.iter().any(|p| p.participant_id == participant_id) {
         return HttpResponse::BadRequest().json(ErrorResponse {
-            error: format!("Cannot kick {participant_id}: not in this node's peer list"),
+            error: format!(
+                "Cannot kick {participant_id}: not a member of this decentralized party"
+            ),
         });
     }
 
@@ -371,7 +419,7 @@ pub async fn start_kick(
         return HttpResponse::BadRequest().json(ErrorResponse {
             error: format!(
                 "new_threshold must be between 1 and {post_kick_member_count} \
-                 (peer count {n}, minus the participant being kicked); got {got}",
+                 (party member count {n}, minus the participant being kicked); got {got}",
                 n = peers.len(),
                 got = body.new_threshold,
             ),
@@ -430,6 +478,7 @@ pub async fn start_kick(
         });
     }
 
+    let invitees_for_invites = invitees.clone();
     *kick_state.invited_peers.write().await = invitees;
 
     // Spawn the kick workflow in the background
@@ -450,8 +499,9 @@ pub async fn start_kick(
     let join_handle = tokio::spawn(async move {
         let _workflow_guard = workflow_guard; // dropped at end → releases cross-workflow gate
 
-        // Send kick invites to all peers before starting coordinator workflow
-        let invite_result = send_kick_invites(&config, &db, &kick_config).await;
+        // Send kick invites to the surviving party members before starting workflow
+        let invite_result =
+            send_kick_invites(&config, &db, &kick_config, &invitees_for_invites).await;
         if let Err(e) = invite_result {
             tracing::error!("Failed to send kick invites: {e}");
             let msg = format!("Failed to send invites: {e}");
@@ -544,17 +594,21 @@ async fn send_kick_invites(
     config: &NodeConfig,
     db: &SqlitePool,
     kick_config: &workflow::KickConfig,
+    invitees: &[CantonId],
 ) -> Result {
     let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
 
     let current_participant_id = config.participant_id();
     let kicked_participant = &kick_config.participant_id;
+    let invitee_set: HashSet<&CantonId> = invitees.iter().collect();
     let payload = KickInvitePayload {
         dec_party_id: kick_config.decentralized_party_id.clone(),
         kicked_participant: kicked_participant.clone(),
         new_threshold: kick_config.new_threshold,
         previous_threshold: kick_config.previous_threshold,
+        participants: invitees.to_vec(),
+        workflow_instance: Some(kick_config.instance_name.clone()),
     };
     let payload_bytes = serde_json::to_vec(&payload).context("encode KickInvitePayload")?;
     let invite_message = Message::new(MessageType::InviteKick, payload_bytes);
@@ -572,6 +626,12 @@ async fn send_kick_invites(
             peer.participant_id == *current_participant_id,
             peer.participant_id == *kicked_participant
         );
+
+        // Only invite this run's surviving party members (see start_kick). The
+        // self/kicked skips below are now subsumed by this but kept for clarity.
+        if !invitee_set.contains(&peer.participant_id) {
+            continue;
+        }
 
         // Skip self
         if peer.participant_id == *current_participant_id {
@@ -664,6 +724,14 @@ pub async fn start_onboarding(
 ) -> impl Responder {
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
+    }
+
+    // Reject an invalid party prefix up-front: it becomes the identifier part
+    // of the Canton party id (`<prefix>::<namespace>`), and a bad character
+    // would otherwise fail deep in the workflow as an opaque Canton proto
+    // deserialization error ~90s later. Fail fast with a clear 400 instead.
+    if let Err(msg) = validate_party_id_prefix(&body.party_id_prefix) {
+        return HttpResponse::BadRequest().json(ErrorResponse { error: msg });
     }
 
     // Cross-workflow mutex (see `start_kick` for rationale).
@@ -815,8 +883,14 @@ pub async fn start_onboarding(
         let _workflow_guard = workflow_guard; // releases cross-workflow gate on drop
 
         // Send invites to selected peers before starting coordinator workflow
-        let invite_result =
-            send_onboarding_invites(&config, &db, &peer_ids, &party_id_prefix).await;
+        let invite_result = send_onboarding_invites(
+            &config,
+            &db,
+            &peer_ids,
+            &party_id_prefix,
+            &instance_for_task,
+        )
+        .await;
         if let Err(e) = invite_result {
             tracing::error!("Failed to send onboarding invites: {e}");
             let msg = format!("Failed to send invites: {e}");
@@ -995,6 +1069,7 @@ async fn send_onboarding_invites(
     db: &SqlitePool,
     peer_ids: &[CantonId],
     party_id_prefix: &str,
+    instance_name: &str,
 ) -> Result {
     let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
@@ -1002,6 +1077,7 @@ async fn send_onboarding_invites(
     let payload = OnboardingInvitePayload {
         prefix: party_id_prefix.to_string(),
         participants: peer_ids.to_vec(),
+        workflow_instance: Some(instance_name.to_string()),
     };
     let payload_bytes = serde_json::to_vec(&payload)?;
     let invite_message = Message::new(MessageType::InviteOnboarding, payload_bytes);
@@ -1276,12 +1352,18 @@ pub async fn start_contracts(
         instance_name,
     );
 
-    // Track invitees for /cancel: every peer except self.
+    // Scope to the party's actual signers, not every peer this node knows
+    // about. A dec party can be a strict subset of the configured mesh (see
+    // start_onboarding), so inviting/waiting for non-member peers would pull
+    // outsiders into the deployment or stall WaitingForPeers on a peer that
+    // never joins. Keep only configured peers that are this party's
+    // participants, minus self.
+    let participant_set: HashSet<CantonId> = body.participant_ids.iter().cloned().collect();
     let contracts_invitees: Vec<CantonId> = match data.db.get_all_peers().await {
         Ok(peers) => peers
             .into_iter()
             .map(|p| p.participant_id)
-            .filter(|p| p != data.config.participant_id())
+            .filter(|p| p != data.config.participant_id() && participant_set.contains(p))
             .collect(),
         Err(e) => {
             tracing::warn!("Failed to load peers for cancel-invite tracking: {e}");
@@ -1323,6 +1405,7 @@ pub async fn start_contracts(
     let active_workflow = data.active_workflow.clone();
     let party_credentials = data.party_credentials.clone();
     let last_seen = data.last_seen.clone();
+    let contracts_invitees_for_invites = contracts_invitees.clone();
     *contracts_state.invited_peers.write().await = contracts_invitees;
     let instance_for_task = instance_name_for_run.clone();
 
@@ -1337,8 +1420,14 @@ pub async fn start_contracts(
     let join_handle = tokio::spawn(async move {
         let _workflow_guard = workflow_guard; // releases cross-workflow gate on drop
 
-        // Send invites to all peers before starting coordinator workflow
-        let invite_result = send_contracts_invites(&config, &db).await;
+        // Send invites to this party's members before starting coordinator workflow
+        let invite_result = send_contracts_invites(
+            &config,
+            &db,
+            &contracts_config,
+            &contracts_invitees_for_invites,
+        )
+        .await;
         if let Err(e) = invite_result {
             tracing::error!("Failed to send contracts invites: {e}");
             let msg = format!("Failed to send invites: {e}");
@@ -1619,7 +1708,14 @@ pub async fn start_dars(
             .iter()
             .map(|f| f.filename.clone())
             .collect();
-        let invite_result = send_dars_invites(&config, &db, &peer_ids, &dar_filenames).await;
+        let invite_result = send_dars_invites(
+            &config,
+            &db,
+            &peer_ids,
+            &dar_filenames,
+            &dars_config.instance_name,
+        )
+        .await;
         if let Err(e) = invite_result {
             tracing::error!("Failed to send DARs invites: {e}");
             let mut status = dars_state_clone.status.write().await;
@@ -1713,12 +1809,17 @@ async fn send_dars_invites(
     db: &SqlitePool,
     peer_ids: &[CantonId],
     dar_filenames: &[String],
+    instance_name: &str,
 ) -> Result {
     let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
 
     let payload = DarsInvitePayload {
         dar_filenames: dar_filenames.to_vec(),
+        // Carry the member set so the peer card shows the same participant
+        // list the coordinator shows.
+        participants: peer_ids.to_vec(),
+        workflow_instance: Some(instance_name.to_string()),
     };
     let payload_bytes = serde_json::to_vec(&payload)?;
     let invite_message = Message::new(MessageType::InviteDars, payload_bytes);
@@ -1988,6 +2089,19 @@ pub async fn list_workflows(data: web::Data<AppState>) -> impl Responder {
 /// way Kick / Contracts / Dars runs (whose configs don't include a peer
 /// list) still surface their participants.
 fn enrich_from_config_json(run: &mut WorkflowRun) {
+    // A contract entry in a coordinator-side `ContractsConfig`. We only need
+    // its human-readable `name` for the card's "Packages" row.
+    #[derive(serde::Deserialize)]
+    struct ContractNameShape {
+        #[serde(default)]
+        name: String,
+    }
+    // A DAR entry in a coordinator-side `DarsConfig`.
+    #[derive(serde::Deserialize)]
+    struct DarFileShape {
+        #[serde(default)]
+        filename: String,
+    }
     #[derive(serde::Deserialize)]
     struct ConfigShape {
         #[serde(default)]
@@ -2003,6 +2117,18 @@ fn enrich_from_config_json(run: &mut WorkflowRun) {
         previous_threshold: Option<i32>,
         #[serde(default)]
         participant_id: Option<CantonId>,
+        // Contracts: `package_names` is the peer's flat list (from the invite);
+        // `contracts[].name` is the coordinator's `ContractsConfig`.
+        #[serde(default)]
+        package_names: Vec<String>,
+        #[serde(default)]
+        contracts: Vec<ContractNameShape>,
+        // Dars: `dar_filenames` is the peer's flat list (from the invite);
+        // `dar_files[].filename` is the coordinator's `DarsConfig`.
+        #[serde(default)]
+        dar_filenames: Vec<String>,
+        #[serde(default)]
+        dar_files: Vec<DarFileShape>,
     }
     if let Ok(shape) = serde_json::from_str::<ConfigShape>(&run.config_json) {
         let prefix = shape.prefix.or(shape.party_id_prefix);
@@ -2019,6 +2145,29 @@ fn enrich_from_config_json(run: &mut WorkflowRun) {
         // sent one (it defaults to 0); 0 means "unknown", render as new-only.
         run.previous_threshold = shape.previous_threshold.filter(|t| *t > 0);
         run.kicked_participant = shape.participant_id;
+        // Package names: peer's flat list wins; otherwise derive from the
+        // coordinator's contract definitions. Both converge to the same set.
+        if !shape.package_names.is_empty() {
+            run.package_names = shape.package_names;
+        } else if !shape.contracts.is_empty() {
+            run.package_names = shape
+                .contracts
+                .into_iter()
+                .map(|c| c.name)
+                .filter(|n| !n.is_empty())
+                .collect();
+        }
+        // DAR filenames: same peer-flat-list-vs-coordinator-config convergence.
+        if !shape.dar_filenames.is_empty() {
+            run.dar_filenames = shape.dar_filenames;
+        } else if !shape.dar_files.is_empty() {
+            run.dar_filenames = shape
+                .dar_files
+                .into_iter()
+                .map(|d| d.filename)
+                .filter(|n| !n.is_empty())
+                .collect();
+        }
     }
     // Fallback: if config_json didn't expose a participants list (e.g. Kick /
     // Contracts / Dars), surface the run's `expected_peers` instead so the
@@ -2318,16 +2467,47 @@ async fn broadcast_simple_message(
     Ok(())
 }
 
-/// Send contracts invites to all peers using Noise protocol
-async fn send_contracts_invites(config: &NodeConfig, db: &SqlitePool) -> Result {
+/// Send contracts invites to this party's members (`invitees`) over Noise.
+async fn send_contracts_invites(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    contracts_config: &workflow::ContractsConfig,
+    invitees: &[CantonId],
+) -> Result {
     let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
 
     let current_participant_id = config.participant_id();
-    let invite_message = Message::new_empty(MessageType::InviteContracts);
+    let invitee_set: HashSet<&CantonId> = invitees.iter().collect();
+    // Carry the dec party, member set, and package names so the peer card
+    // renders the same rich summary the coordinator shows (mirrors the Kick
+    // invite). Skip empty names, then sort+dedup — `dedup` only removes
+    // adjacent duplicates, and multiple contracts can share a package name.
+    let mut package_names: Vec<String> = contracts_config
+        .contracts
+        .iter()
+        .map(|c| c.name.clone())
+        .filter(|n| !n.is_empty())
+        .collect();
+    package_names.sort();
+    package_names.dedup();
+    let payload = ContractsInvitePayload {
+        dec_party_id: contracts_config.decentralized_party_id.clone(),
+        participants: invitees.to_vec(),
+        package_names,
+        workflow_instance: Some(contracts_config.instance_name.clone()),
+    };
+    let payload_bytes = serde_json::to_vec(&payload).context("encode ContractsInvitePayload")?;
+    let invite_message = Message::new(MessageType::InviteContracts, payload_bytes);
 
     for peer in &network_config.peers {
         if peer.participant_id == *current_participant_id {
+            continue;
+        }
+
+        // Only this party's members (see start_contracts) — never every
+        // configured peer.
+        if !invitee_set.contains(&peer.participant_id) {
             continue;
         }
 
@@ -2418,6 +2598,101 @@ mod tests {
         let other = Message::new_empty(MessageType::Wait).to_bytes();
         assert!(interpret_invite_reply(&peer, "onboarding", &other).is_ok());
 
+        Ok(())
+    }
+
+    fn test_cid(prefix: &str) -> anyhow::Result<CantonId> {
+        let ns = format!("1220{:0>64}", "a");
+        CantonId::parse(&format!("{prefix}::{ns}"))
+    }
+
+    fn enrich_run(config_json: &str, expected_peers: Vec<CantonId>) -> WorkflowRun {
+        WorkflowRun {
+            instance_name: "t".to_string(),
+            kind: WorkflowKind::Contracts,
+            role: WorkflowRole::Coordinator,
+            status: WorkflowProgress::InProgress,
+            current_step: "Active".to_string(),
+            step_index: 0,
+            step_total: 5,
+            config_json: config_json.to_string(),
+            coordinator_pubkey: None,
+            coordinator_name: None,
+            expected_peers,
+            completed_peers: Vec::new(),
+            dec_party_id: None,
+            prefix: None,
+            participants: Vec::new(),
+            previous_threshold: None,
+            new_threshold: None,
+            kicked_participant: None,
+            package_names: Vec::new(),
+            dar_filenames: Vec::new(),
+            error: None,
+            dismissed: false,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn enrich_contracts_coordinator_surfaces_packages() -> anyhow::Result<()> {
+        let peers = vec![test_cid("node1")?, test_cid("node2")?];
+        let mut run = enrich_run(
+            r#"{"contracts":[{"name":"Governance Core"},{"name":"Token Custody"}]}"#,
+            peers.clone(),
+        );
+        enrich_from_config_json(&mut run);
+        assert_eq!(run.package_names, vec!["Governance Core", "Token Custody"]);
+        // Member set comes from expected_peers when config_json has no list.
+        assert_eq!(run.participants, peers);
+        Ok(())
+    }
+
+    #[test]
+    fn enrich_contracts_peer_surfaces_packages_and_participants() -> anyhow::Result<()> {
+        let peers = vec![test_cid("node1")?, test_cid("node2")?];
+        let peers_json = serde_json::to_string(&peers)?;
+        let mut run = enrich_run(
+            &format!(r#"{{"package_names":["Governance Core"],"participants":{peers_json}}}"#),
+            Vec::new(),
+        );
+        enrich_from_config_json(&mut run);
+        assert_eq!(run.package_names, vec!["Governance Core"]);
+        assert_eq!(run.participants, peers);
+        Ok(())
+    }
+
+    #[test]
+    fn enrich_dars_surfaces_filenames_without_dec_party() -> anyhow::Result<()> {
+        let mut run = enrich_run(
+            r#"{"dar_files":[{"filename":"app.dar"},{"filename":"lib.dar"}]}"#,
+            Vec::new(),
+        );
+        enrich_from_config_json(&mut run);
+        assert_eq!(run.dar_filenames, vec!["app.dar", "lib.dar"]);
+        assert!(run.dec_party_id.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn contracts_invite_payload_roundtrips_with_defaults() -> anyhow::Result<()> {
+        let payload = ContractsInvitePayload {
+            dec_party_id: test_cid("dec")?,
+            participants: vec![test_cid("node1")?],
+            package_names: vec!["Governance Core".to_string()],
+            workflow_instance: Some("dec-contracts-1".to_string()),
+        };
+        let bytes = serde_json::to_vec(&payload)?;
+        let back: ContractsInvitePayload = serde_json::from_slice(&bytes)?;
+        assert_eq!(back.package_names, vec!["Governance Core"]);
+        assert_eq!(back.participants.len(), 1);
+        // A minimal payload (only the required dec party) still decodes, so an
+        // older coordinator stays compatible.
+        let minimal: ContractsInvitePayload =
+            serde_json::from_str(&format!(r#"{{"dec_party_id":"{}"}}"#, test_cid("dec")?))?;
+        assert!(minimal.participants.is_empty());
+        assert!(minimal.package_names.is_empty());
         Ok(())
     }
 }

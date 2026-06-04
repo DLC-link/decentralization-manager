@@ -12,7 +12,7 @@ use canton_proto_rs::com::daml::ledger::api::v2::{
     List, Optional, Record, RecordField, TextMap, Value, Variant, text_map, value,
 };
 
-use crate::{error::Result, participant_id::CantonId};
+use crate::{canton_id::CantonId, error::Result};
 
 use super::types::{
     ActionType, AppRewardBeneficiary, BillingParams, Claim, FarConfig, InstrumentAllowance,

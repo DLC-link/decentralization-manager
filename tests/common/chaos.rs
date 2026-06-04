@@ -141,45 +141,6 @@ pub async fn ensure_nodes_healthy(f: &mut Fixture) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `poll_until` variant that periodically re-runs `ensure_nodes_healthy` so
-/// the test self-heals if a node's Noise listener dies mid-poll. Used by
-/// chaos phases whose long-running polls (e.g. "wait for coordinator marked
-/// Failed", "wait for resumed run completed") can otherwise stall waiting
-/// on a coordinator whose Noise listener has crashed and never recovers.
-///
-/// Health check fires every `health_interval`; the probe is still polled
-/// every second. On a successful probe we return early — there's no point
-/// waking up a healthy peer.
-pub async fn poll_until_healthy<F>(
-    f: &mut Fixture,
-    deadline: Duration,
-    health_interval: Duration,
-    mut probe: F,
-) -> anyhow::Result<()>
-where
-    F: for<'a> FnMut(
-        &'a Fixture,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = anyhow::Result<bool>> + Send + 'a>,
-    >,
-{
-    let start = Instant::now();
-    let mut last_health = Instant::now();
-    loop {
-        if probe(f).await? {
-            return Ok(());
-        }
-        if start.elapsed() >= deadline {
-            anyhow::bail!("poll_until_healthy exhausted deadline of {deadline:?}");
-        }
-        if last_health.elapsed() >= health_interval {
-            ensure_nodes_healthy(f).await?;
-            last_health = Instant::now();
-        }
-        sleep(Duration::from_secs(1)).await;
-    }
-}
-
 /// Wait for a pending invitation of the given type to appear on `port`,
 /// returning its id. Bails after the deadline.
 pub async fn wait_for_invite(

@@ -8,7 +8,7 @@ pub use steps::{
     execute_submissions, prepare_submissions, sign_submissions, upload_dars, upload_dars_from_bytes,
 };
 
-use crate::{noise::MessageType, workflow::state::WorkflowStep};
+use crate::{noise::MessageType, server::WorkflowKind, workflow::state::WorkflowStep};
 
 /// Contracts workflow steps (contract deployment only)
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -85,5 +85,9 @@ impl WorkflowStep for ContractsStep {
             "Complete" => Self::Complete,
             _ => return None,
         })
+    }
+
+    fn kind() -> WorkflowKind {
+        WorkflowKind::Contracts
     }
 }

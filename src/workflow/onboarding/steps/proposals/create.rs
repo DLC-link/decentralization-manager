@@ -16,9 +16,9 @@ use prost::Message;
 use sqlx::SqlitePool;
 
 use crate::{
+    canton_id::CantonId,
     config::NodeConfig,
     error::Result,
-    participant_id::CantonId,
     utils::{self, MULTIHASH_SHA256_PREFIX},
     workflow::{
         onboarding::OnboardingConfig,

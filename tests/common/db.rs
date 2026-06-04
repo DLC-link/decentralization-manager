@@ -1,9 +1,11 @@
-//! SQLite read helpers for integration tests that need to inspect
+//! SQLite helpers for integration tests that need to inspect
 //! `workflow_runs`, `workflow_artifacts`, and `dec_party_identity` directly.
 //!
 //! Mirrors the bash tests' `sqlite3 "$DEV_DIR/participant-N/data/decpm.db"`
-//! invocations. All readers open a fresh connection per call so tests don't
-//! have to share a pool across phases (the queries are infrequent).
+//! invocations. All helpers open a fresh connection per call so tests don't
+//! have to share a pool across phases (the queries are infrequent). Everything
+//! is read-only except [`inject_workflow_run_failure`], which chaos phases use
+//! to fabricate a Failed run while the owning process is down.
 
 use std::path::{Path, PathBuf};
 
@@ -29,6 +31,51 @@ async fn open(path: &Path) -> anyhow::Result<SqlitePool> {
     SqlitePool::connect_with(opts)
         .await
         .with_context(|| format!("opening sqlite at {}", path.display()))
+}
+
+/// Writable connection for chaos-phase failure injection. Only safe while the
+/// owning dec-party-manager process is down — the app assumes it is the sole
+/// writer of its database.
+async fn open_rw(path: &Path) -> anyhow::Result<SqlitePool> {
+    let opts = SqliteConnectOptions::new()
+        .filename(path)
+        .read_only(false)
+        .create_if_missing(false);
+    SqlitePool::connect_with(opts)
+        .await
+        .with_context(|| format!("opening sqlite (rw) at {}", path.display()))
+}
+
+/// Chaos-only failure injection: flip a `workflow_runs` row to `failed`,
+/// mirroring the columns the server's `set_workflow_run_status` touches
+/// (status, error, updated_at). Call only while the owning process is killed;
+/// startup recovery respawns `inprogress` rows only, so on restart the row
+/// stays Failed and becomes retryable via POST /workflows/{instance}/retry.
+pub async fn inject_workflow_run_failure(
+    db_path: &Path,
+    instance_name: &str,
+    role: &str,
+    error: &str,
+) -> anyhow::Result<()> {
+    let pool = open_rw(db_path).await?;
+    let result = sqlx::query(
+        "UPDATE workflow_runs \
+         SET status = 'failed', error = ?1, updated_at = strftime('%s', 'now') \
+         WHERE instance_name = ?2 AND role = ?3",
+    )
+    .bind(error)
+    .bind(instance_name)
+    .bind(role)
+    .execute(&pool)
+    .await
+    .context("inject_workflow_run_failure")?;
+    pool.close().await;
+    anyhow::ensure!(
+        result.rows_affected() == 1,
+        "expected to flip exactly 1 row to failed for {instance_name} ({role}), affected {}",
+        result.rows_affected()
+    );
+    Ok(())
 }
 
 pub async fn count_workflow_runs_inprogress(

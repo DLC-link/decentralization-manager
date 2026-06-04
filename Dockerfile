@@ -17,6 +17,7 @@ COPY Cargo.toml Cargo.lock build.rs ./
 COPY migrations ./migrations
 COPY src ./src
 COPY frontend/src ./frontend/src
+COPY frontend/public ./frontend/public
 COPY frontend/index.html frontend/vite.config.ts frontend/tsconfig*.json frontend/eslint.config.js frontend/.env ./frontend/
 
 RUN --mount=type=ssh cargo build --release

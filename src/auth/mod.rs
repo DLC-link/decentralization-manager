@@ -22,8 +22,8 @@ pub use validators::MockValidator;
 pub use validators::{JwtValidator, OidcIntrospectionValidator};
 
 use crate::{
+    canton_id::CantonId,
     config::{Auth0M2MConfig, KeycloakConfig, PartyCredentials},
-    participant_id::CantonId,
 };
 
 /// Authentication errors

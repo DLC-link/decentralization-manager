@@ -29,7 +29,7 @@ use canton_proto_rs::com::{
     },
 };
 
-use crate::{config::NodeConfig, error::Result, participant_id::CantonId};
+use crate::{canton_id::CantonId, config::NodeConfig, error::Result};
 
 /// Multihash prefix for SHA-256 hashes in Canton
 /// - 0x12 = SHA-256 hash algorithm identifier
