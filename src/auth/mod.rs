@@ -390,8 +390,9 @@ impl AuthRegistry {
     }
 }
 
-/// Unified auth provider that works with workflows
-/// Supports both real Keycloak auth and mock auth for testing
+/// Unified auth provider that works with workflows.
+/// Supports real OAuth2 auth (Keycloak or Auth0 M2M, via the auth registry) and
+/// mock auth for testing.
 #[derive(Clone)]
 pub enum WorkflowAuth {
     Keycloak(Arc<AuthRegistry>),

@@ -125,7 +125,9 @@ pub fn encrypt_bytes(plaintext: &[u8]) -> Result<Vec<u8>> {
 ///
 /// # Errors
 ///
-/// Returns an error only if the stored blob has a malformed nonce length.
+/// In practice this never returns an error — too-short or undecryptable blobs
+/// are returned unchanged. The `Result` is kept for symmetry with the
+/// encryption path and forward-compatibility.
 pub fn decrypt_bytes(stored: &[u8]) -> Result<Vec<u8>> {
     let Some(key) = ENCRYPTION_KEY.get() else {
         return Ok(stored.to_vec());

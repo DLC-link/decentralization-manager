@@ -244,12 +244,6 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
             .await;
     }
 
-    /// Mark the run as Cancelled. Used by the cancel propagation path on
-    /// peers when they receive a `CancelWorkflow` Noise message.
-    pub async fn mark_cancelled(&self) {
-        self.persist_status(WorkflowProgress::Cancelled, None).await;
-    }
-
     async fn persist_step_progress(&self, step: S, completed: Vec<CantonId>) {
         let updated_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

@@ -82,7 +82,7 @@ pub mod identity_kinds {
     /// canonical source for sign.rs's "load my DAML signing key" lookup.
     pub const PEER_PUBLIC_KEYS: &str = "peer_public_keys";
     /// Each peer's `participant_id` file content. Coordinator's row set
-    /// holds one per peer; an peer's row set holds just their own.
+    /// holds one per peer; a peer's row set holds just their own.
     pub const PARTICIPANT_ID: &str = "participant_id";
 }
 
