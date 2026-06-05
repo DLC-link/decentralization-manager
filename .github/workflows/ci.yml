@@ -76,9 +76,12 @@ jobs:
       - name: cargo build (primes target/ for clippy + tests)
         run: cargo test --no-run --all-features
       # `--no-deps` keeps clippy lint passes scoped to workspace crates;
-      # deps were just built above and don't need re-linting.
+      # deps were just built above and don't need re-linting. `-- -D warnings`
+      # is stated explicitly (rather than relying solely on the job-level
+      # RUSTFLAGS) so the gate matches the documented standard and can't be
+      # silently weakened by an unrelated RUSTFLAGS change.
       - name: cargo clippy
-        run: cargo clippy --all-targets --all-features --no-deps
+        run: cargo clippy --all-targets --all-features --no-deps -- -D warnings
       - name: Install coverage tooling
         if: steps.cache-grcov.outputs.cache-hit != 'true'
         run: cargo install grcov --version 0.10.7
