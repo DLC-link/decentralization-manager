@@ -679,4 +679,81 @@ mod tests {
         let result = decode_length_prefixed(&data, 1);
         assert!(result.is_err());
     }
+
+    #[test]
+    fn extract_synchronizer_fingerprint_strips_version() -> Result {
+        // Three-segment form: drop only the trailing protocol version.
+        assert_eq!(
+            extract_synchronizer_fingerprint("global-domain::1220abcd::34-0")?,
+            "global-domain::1220abcd"
+        );
+        // Two-segment form: already alias::fingerprint, returned unchanged.
+        assert_eq!(
+            extract_synchronizer_fingerprint("global-domain::1220abcd")?,
+            "global-domain::1220abcd"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn extract_synchronizer_fingerprint_rejects_bad_segment_count() {
+        assert!(extract_synchronizer_fingerprint("noColons").is_err());
+        assert!(extract_synchronizer_fingerprint("a::b::c::d").is_err());
+    }
+
+    #[test]
+    fn encode_decode_files_round_trip() -> Result {
+        let files = vec![
+            ("a.txt".to_string(), b"hello".to_vec()),
+            ("b.bin".to_string(), vec![1u8, 2, 3, 0, 255]),
+            ("empty".to_string(), Vec::new()),
+        ];
+        let encoded = encode_files(&files);
+        let decoded = decode_files(&encoded)?;
+        assert_eq!(decoded, files);
+        Ok(())
+    }
+
+    #[test]
+    fn decode_files_rejects_short_payload() {
+        // Fewer than the 4 bytes needed for the count prefix.
+        assert!(decode_files(&[0u8, 0, 0]).is_err());
+    }
+
+    #[test]
+    fn decode_files_rejects_non_utf8_filename() {
+        // count = 1, then a length-prefixed [filename, data] pair whose
+        // filename bytes are not valid UTF-8.
+        let mut payload = 1u32.to_be_bytes().to_vec();
+        let bad_name: &[u8] = &[0xff, 0xfe];
+        let data: &[u8] = b"data";
+        payload.extend(encode_length_prefixed(&[bad_name, data]));
+        assert!(decode_files(&payload).is_err());
+    }
+
+    #[test]
+    fn decode_files_rejects_count_overrun() {
+        // Claims 2 files (=> 4 length-prefixed items) but only supplies 2 items.
+        let mut payload = 2u32.to_be_bytes().to_vec();
+        let a: &[u8] = b"a";
+        let b: &[u8] = b"x";
+        payload.extend(encode_length_prefixed(&[a, b]));
+        assert!(decode_files(&payload).is_err());
+    }
+
+    #[test]
+    fn read_first_message_from_bytes_rejects_empty() {
+        let result = read_first_message_from_bytes::<Timestamp>(b"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn read_first_message_from_bytes_rejects_truncated() {
+        // Length prefix claims 10 bytes but only 2 follow.
+        let mut buf: Vec<u8> = Vec::new();
+        prost::encoding::encode_varint(10, &mut buf);
+        buf.extend_from_slice(b"ab");
+        let result = read_first_message_from_bytes::<Timestamp>(&buf);
+        assert!(result.is_err());
+    }
 }

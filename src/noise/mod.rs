@@ -1013,7 +1013,15 @@ mod tests {
     async fn retry_loop_returns_terminal_error_after_two_transient_failures() {
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_clone = calls.clone();
-        let result = retry_loop("test-peer", &test_retry_config(), move || {
+        // Pin max_attempts explicitly rather than relying on the default in
+        // `test_retry_config()`, so the asserted call count (and this test's
+        // "two failures" name) stay correct if the default ever changes.
+        let config = NoiseRetryConfig {
+            per_attempt_timeout_secs: 5,
+            max_attempts: 2,
+            backoff_ms: 0,
+        };
+        let result = retry_loop("test-peer", &config, move || {
             let calls = calls_clone.clone();
             async move {
                 calls.fetch_add(1, Ordering::SeqCst);
@@ -1022,7 +1030,7 @@ mod tests {
         })
         .await;
         assert!(matches!(result, Err(NoiseError::TcpConnectionTimeout(_))));
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(calls.load(Ordering::SeqCst), config.max_attempts);
     }
 
     #[tokio::test]
