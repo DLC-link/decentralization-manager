@@ -43,6 +43,11 @@ pub async fn connect(db_path: &Path) -> Result<SqlitePool> {
 
     let options = SqliteConnectOptions::from_str(&db_url)?
         .create_if_missing(true)
+        // Enforce foreign keys explicitly. The schema relies on
+        // `ON DELETE CASCADE` (e.g. dec_party -> dec_party_owner/participant);
+        // sqlx defaults this pragma on, but pinning it here means a future
+        // driver/default change can't silently disable cascade enforcement.
+        .foreign_keys(true)
         .journal_mode(SqliteJournalMode::Wal)
         .busy_timeout(Duration::from_secs(30));
 
@@ -1354,9 +1359,20 @@ mod tests {
 
         let result = pool.get_dec_party_participants(&party_id).await?;
         assert_eq!(result.len(), 2);
-        assert_eq!(result[0].permission, "submission");
-        assert_eq!(result[0].owner_key, Some("fingerprint-1".to_string()));
-        assert_eq!(result[1].owner_key, None);
+        // Assert by participant_uid, not positional index: the backing query
+        // has no ORDER BY, so row order is not contractual and must not be
+        // relied on.
+        let node1 = result.iter().find(|p| p.participant_uid == "node1::1220aa");
+        let node2 = result.iter().find(|p| p.participant_uid == "node2::1220bb");
+        assert!(
+            matches!(node1, Some(p) if p.permission == "submission"
+                && p.owner_key.as_deref() == Some("fingerprint-1")),
+            "node1 row missing or has wrong permission/owner_key"
+        );
+        assert!(
+            matches!(node2, Some(p) if p.permission == "confirmation" && p.owner_key.is_none()),
+            "node2 row missing or has wrong permission/owner_key"
+        );
 
         Ok(())
     }
@@ -2031,6 +2047,45 @@ mod tests {
         let visible = pool.get_visible_workflow_runs().await?;
         assert!(visible.is_empty());
 
+        // A Failed run KEEPS its artefacts for post-mortem (unlike the
+        // Completed path above); only `dismiss` releases them.
+        let failed = test_run("party-b-failed", "Onboarding", "Coordinator");
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_workflow_run(&failed).await?;
+        tx.write_workflow_artifact(&failed.instance_name, "dns_proto", None, b"keep-me")
+            .await?;
+        Commitable::commit(tx).await?;
+
+        let mut tx = pool.begin_transaction().await?;
+        tx.set_workflow_run_status(
+            &failed.instance_name,
+            WorkflowProgress::Failed,
+            Some("boom"),
+            4000,
+        )
+        .await?;
+        Commitable::commit(tx).await?;
+
+        let kept = pool
+            .read_workflow_artifact(&failed.instance_name, "dns_proto", None)
+            .await?;
+        assert!(
+            kept.is_some(),
+            "Failed runs must keep artefacts for post-mortem"
+        );
+
+        // Dismissing the Failed run finally releases the artefacts.
+        let mut tx = pool.begin_transaction().await?;
+        tx.dismiss_workflow_run(&failed.instance_name).await?;
+        Commitable::commit(tx).await?;
+        let after_dismiss = pool
+            .read_workflow_artifact(&failed.instance_name, "dns_proto", None)
+            .await?;
+        assert!(
+            after_dismiss.is_none(),
+            "dismiss must drop a Failed run's artefacts"
+        );
+
         Ok(())
     }
 
@@ -2043,10 +2098,19 @@ mod tests {
         tx.upsert_workflow_run(&a).await?;
         Commitable::commit(tx).await?;
 
-        // A second InProgress run of the same (kind, role) must fail.
+        // A second InProgress run of the same (kind, role) must fail — and
+        // specifically with a UNIQUE constraint violation, not merely any
+        // error. A malformed row or a JSON-encode failure would also be
+        // `is_err()` and would let a dropped partial index slip through.
         let mut tx = pool.begin_transaction().await?;
-        let err = tx.upsert_workflow_run(&b).await;
-        assert!(err.is_err(), "expected unique-partial-index violation");
+        let Err(err) = tx.upsert_workflow_run(&b).await else {
+            panic!("expected a UNIQUE constraint violation, got Ok");
+        };
+        let full = format!("{err:#}");
+        assert!(
+            full.contains("UNIQUE constraint"),
+            "expected a UNIQUE constraint violation, got: {full}"
+        );
         // tx is poisoned — drop it
         drop(tx);
 
