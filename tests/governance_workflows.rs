@@ -117,7 +117,13 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     phases::retry_coordinator_broadcast::run(&mut f).await?; // G3
     phases::dismiss_failed_cleans_artifacts::run(&mut f).await?; // G4
     phases::generate_keys_idempotent::run(&mut f).await?; // G7
-    phases::peer_3_strikes_abort::run(&mut f).await?; // G8 (stub)
+    // G8 (peer 3-strikes abort) is intentionally NOT run. The
+    // `peer_3_strikes_abort` phase is an unimplemented stub: exercising it
+    // needs a raw-Noise-frame injection harness to feed a peer three
+    // undeserializable payloads, which doesn't exist yet. Previously it was
+    // called here and returned Ok(()) without asserting anything — a phase
+    // that always "passed", i.e. misleading coverage — so it's left out of the
+    // sequence until the harness lands. (Tracked by the TODO in that module.)
     // G9 disabled: the concurrent-kinds resume scenario flakes on the shared
     // dars_state across chaos phases — the peer-handler/abort-handle race
     // is fixed but a stalled /dars/distribute plus downstream respawns
