@@ -125,3 +125,53 @@ impl TokenValidator {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn principal_with_roles(roles: &[&str]) -> Principal {
+        Principal {
+            sub: "alice".to_string(),
+            issuer: "https://idp.example/realms/test".to_string(),
+            roles: roles.iter().map(|r| r.to_string()).collect(),
+            email: None,
+        }
+    }
+
+    #[test]
+    fn has_role_is_exact_match() {
+        let p = principal_with_roles(&["admin", "viewer"]);
+        assert!(p.has_role("admin"));
+        assert!(p.has_role("viewer"));
+        // Not a prefix, suffix, substring, or case-insensitive match — an
+        // attacker holding a "adm" or "Admin" role must not pass an "admin" gate.
+        assert!(!p.has_role("adm"));
+        assert!(!p.has_role("admin2"));
+        assert!(!p.has_role("Admin"));
+        assert!(!p.has_role(""));
+    }
+
+    #[test]
+    fn require_admin_rejects_principal_without_role() {
+        // The privilege-escalation guard: an authenticated caller that does
+        // not carry the admin role must be refused.
+        let p = principal_with_roles(&["viewer", "operator"]);
+        assert!(matches!(
+            p.require_admin("admin"),
+            Err(ValidationError::MissingRole(role)) if role == "admin"
+        ));
+    }
+
+    #[test]
+    fn require_admin_rejects_principal_with_no_roles() {
+        let p = principal_with_roles(&[]);
+        assert!(p.require_admin("admin").is_err());
+    }
+
+    #[test]
+    fn require_admin_accepts_principal_with_role() {
+        let p = principal_with_roles(&["admin"]);
+        assert!(p.require_admin("admin").is_ok());
+    }
+}

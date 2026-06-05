@@ -274,3 +274,119 @@ fn token_cache_key(token: &str) -> [u8; 32] {
     hasher.update(token.as_bytes());
     hasher.finalize().into()
 }
+
+#[cfg(test)]
+mod tests {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    use super::*;
+    use crate::error::Result;
+
+    /// Build an unsigned JWT-shaped token carrying just the `iss` claim. The
+    /// introspection validator only reads `iss` locally (to route to the right
+    /// IdP); the IdP's introspection response is authoritative, so the
+    /// signature segment is irrelevant here.
+    fn token_with_issuer(issuer: &str) -> String {
+        let payload = URL_SAFE_NO_PAD.encode(format!(r#"{{"iss":"{issuer}","sub":"alice"}}"#));
+        format!("header.{payload}.sig")
+    }
+
+    fn inbound_config(server_uri: &str) -> KeycloakConfig {
+        KeycloakConfig {
+            url: server_uri.to_string(),
+            realm: "test".to_string(),
+            client_id: "dpm".to_string(),
+            client_secret: Some("secret".to_string()),
+            username: None,
+            password: None,
+        }
+    }
+
+    fn validator(inbound: KeycloakConfig) -> OidcIntrospectionValidator {
+        OidcIntrospectionValidator::new(
+            Some(inbound),
+            Arc::new(RwLock::new(Vec::new())),
+            reqwest::Client::new(),
+        )
+    }
+
+    #[tokio::test]
+    async fn accepts_active_token_and_projects_roles() -> Result {
+        let server = MockServer::start().await;
+        let issuer = format!("{}/realms/test", server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/realms/test/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "introspection_endpoint": format!("{}/introspect", server.uri()),
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/introspect"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "active": true,
+                "sub": "alice",
+                "realm_access": { "roles": ["admin", "user"] },
+            })))
+            .mount(&server)
+            .await;
+
+        let token = token_with_issuer(&issuer);
+        let principal = validator(inbound_config(&server.uri()))
+            .validate(&token)
+            .await
+            .map_err(|e| anyhow::anyhow!("expected active token to validate: {e:?}"))?;
+
+        assert_eq!(principal.sub, "alice");
+        assert_eq!(principal.issuer, issuer);
+        assert!(principal.has_role("admin"));
+        assert!(principal.has_role("user"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejects_inactive_token() {
+        let server = MockServer::start().await;
+        let issuer = format!("{}/realms/test", server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/realms/test/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "introspection_endpoint": format!("{}/introspect", server.uri()),
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/introspect"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "active": false })),
+            )
+            .mount(&server)
+            .await;
+
+        let token = token_with_issuer(&issuer);
+        let result = validator(inbound_config(&server.uri()))
+            .validate(&token)
+            .await;
+        assert!(matches!(result, Err(ValidationError::InactiveToken)));
+    }
+
+    #[tokio::test]
+    async fn rejects_untrusted_issuer_without_calling_idp() {
+        // The issuer in the token matches no configured IdP, so validation
+        // fails before any discovery/introspection call. The mock server has
+        // no mounts — any outbound call would 404 and surface as a different
+        // error, so reaching UntrustedIssuer proves the short-circuit.
+        let server = MockServer::start().await;
+        let token = token_with_issuer("https://evil.example/realms/attacker");
+        let result = validator(inbound_config(&server.uri()))
+            .validate(&token)
+            .await;
+        assert!(matches!(result, Err(ValidationError::UntrustedIssuer(_))));
+    }
+}

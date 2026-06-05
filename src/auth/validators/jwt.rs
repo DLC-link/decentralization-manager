@@ -414,6 +414,13 @@ fn decoding_key_from_jwk(jwk: &Jwk) -> Result<DecodingKey, String> {
 
 #[cfg(test)]
 mod tests {
+    use jsonwebtoken::{EncodingKey, Header, encode};
+    use serde_json::json;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
     use super::*;
 
     fn jwk(alg: Option<&str>, kty: Option<&str>) -> Jwk {
@@ -462,5 +469,229 @@ mod tests {
             Algorithm::ES256
         );
         assert!(resolve_algorithm(&jwk(None, None)).is_err());
+    }
+
+    // ---- End-to-end `validate()` coverage ----
+    //
+    // Drives the full path: OIDC discovery + JWKS fetch (stubbed with
+    // wiremock), RS256 signature verification, alg-pinning, `exp`, issuer
+    // routing, and the `azp` cross-client check. Tokens are signed in-test
+    // with a throwaway 2048-bit RSA key whose public modulus is served as the
+    // JWK below.
+
+    const TEST_KID: &str = "test-key-1";
+    const TEST_JWK_E: &str = "AQAB";
+    /// base64url public modulus matching `TEST_RSA_PEM` below.
+    const TEST_JWK_N: &str = "uOVq7XNTobJpBBbp_54gdNkbZYlJnsZhpwc6cbq6djnNUEezDxMLic_X79SzZRiiKs-SUn43zu99zPrCmsvAYBDBZunsKnySjDyIPRIxex9blc-IPyk8n8PURFuB8ty48b6d9RR89Jj_3_ISYPE2YAsR7a7O5ao1XfnukYy57T0ZoUnqbQYqalwI3XbqNgLqiz3Yap7R_25TQLVaHFWIDWV8FL8_GzVm8YtFSSauCNGg7lG3qM7HmDan_dPM6Lg3uzAHky9i0ClGC6fWzfVPTt4u3Amlzjme1OlLz22XoS6E-xbjFXCINeQq_Ir9fSdgl0QPbuF-jkCTbaYQQXSbhQ";
+    /// Throwaway test-only RSA private key (PKCS#8). Never used outside tests.
+    const TEST_RSA_PEM: &str = r#"-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC45Wrtc1OhsmkE
+Fun/niB02RtliUmexmGnBzpxurp2Oc1QR7MPEwuJz9fv1LNlGKIqz5JSfjfO733M
++sKay8BgEMFm6ewqfJKMPIg9EjF7H1uVz4g/KTyfw9REW4Hy3Ljxvp31FHz0mP/f
+8hJg8TZgCxHtrs7lqjVd+e6RjLntPRmhSeptBipqXAjdduo2AuqLPdhqntH/blNA
+tVocVYgNZXwUvz8bNWbxi0VJJq4I0aDuUbeozseYNqf908zouDe7MAeTL2LQKUYL
+p9bN9U9O3i7cCaXOOZ7U6UvPbZehLoT7FuMVcIg15Cr8iv19J2CXRA9u4X6OQJNt
+phBBdJuFAgMBAAECggEARMMlahuKzcbhIWE4MxVmsq4Pb0qIc6EJrimVBbjRIajL
+f4C6ye9mSiFfCFWNRhrMLKm3nDBOpwoQOgxEFXeTGucAVjrG1uIvSjI05KmAd26p
+C+T7oam/XxdgOO/jOyP1MAqZCg1Nj1XbSzjmtuDePQfA6ikpzuXnJQUPQVgZyW1d
+EY65dYqY368EueeL7FxJ546vb+hcciVwaIslBuTRPLqtloZwczuXtiaBzlnBwwyq
+0jLC/AsH6YnhslU8JOBH22O6s/J4xHZ+qyR2H2fet0XaZaFdqAQt4NY+rKO9CCMj
+uk+frCBkMDS9Y0gcxJKQucseXvKlpNCK/S5JytODXQKBgQD88qnMcTY9+jJrSoZK
+WwmaTlVlmBQhmkxFrQcbe5h/1adOaTgBju0xpihVE7jBxEKDD4XF/0X/Oj1I7QMI
+H0F1rGF8QfjZHXww377QMJLj2NHGq42K5iT8b9Z+8TEDBKUoIW5CWSpyx79YF6Jy
+7VaCsQ9lJX+R+5bCD5sa/PKbUwKBgQC7IIw75QTotNspP9V+8vjT1kMn+rLO9Gal
+JDkVXAmBlD9YoH0oSuB0t4RW9GhCqRfkxmwurb77F7gG7d8PEOdbiZCQAVJ4MH5v
+g+rG8cTgqtfcoBNfV8aYUmWlWv3zuKcGmhPo+FpJ+62inBU2OPsGP+gX7mQiVciV
+ncOhLQzqxwKBgQDEhDLvJrWhiRRKzuduNTRMsbce6vwY7yt6pmbzLx7XkkIdZRmh
+/EzDWffTwTK1N6kE8bZYkW7sT271jU3hrYbJyVcjlo2jAIlP30T7sgEtC3JPC1E4
+LH1nsevPS8tsMNuvRenHmkakThOWeSY4a7PebXksd+mYnQIPWtiCKyrBCQKBgDAW
+uzMhNdO/tpqxJuKK+lsmMvfxO0ZoFIDYADt2/ZJpUKYsCD30kB4ukzntcWXAIr3O
+KDsOt4e7nrVZJ/utMmeZwKbhUBpHDBcIZatesmOyQ+sU0CWuXwECG9EUwzKA/5t4
+uSkjucBNh1/EkMbwecIvZivQPbd9KCEa/A1NkIY9AoGAA/4VLN8xRa3PvuMorbr4
+kZqMRQbQGi+rhT8I3gHMjzGwCN4AHl2GSi9VwLYZ1LBYFb7utbICW6HxWd9k9KTO
+tkEQx5ommXJH3EH/fMSMb67wtX56euE8WerI1TDyvrFgJuXCEhl3gwneFNRQ4jx9
+g9aUIAgWUtN6X8LiqVcsGU8=
+-----END PRIVATE KEY-----
+"#;
+
+    /// Stand up a wiremock OIDC provider (discovery + JWKS) and a
+    /// `JwtValidator` that trusts it. Returns `(server, validator, issuer)`;
+    /// keep `server` alive for the duration of the call.
+    async fn setup() -> (MockServer, JwtValidator, String) {
+        let server = MockServer::start().await;
+        let issuer = format!("{}/realms/test", server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/realms/test/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jwks_uri": format!("{}/jwks", server.uri()),
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "keys": [{
+                    "kid": TEST_KID,
+                    "kty": "RSA",
+                    "use": "sig",
+                    "alg": "RS256",
+                    "n": TEST_JWK_N,
+                    "e": TEST_JWK_E,
+                }],
+            })))
+            .mount(&server)
+            .await;
+
+        let inbound = KeycloakConfig {
+            url: server.uri(),
+            realm: "test".to_string(),
+            client_id: "dpm".to_string(),
+            client_secret: None,
+            username: None,
+            password: None,
+        };
+        let validator = JwtValidator::new(
+            Some(inbound),
+            None,
+            std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            reqwest::Client::new(),
+        );
+        (server, validator, issuer)
+    }
+
+    fn unix_now() -> anyhow::Result<i64> {
+        Ok(SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)?
+            .as_secs() as i64)
+    }
+
+    fn sign(header: &Header, claims: &serde_json::Value) -> anyhow::Result<String> {
+        let key = EncodingKey::from_rsa_pem(TEST_RSA_PEM.as_bytes())
+            .map_err(|e| anyhow::anyhow!("test key: {e}"))?;
+        encode(header, claims, &key).map_err(|e| anyhow::anyhow!("sign: {e}"))
+    }
+
+    /// Sign an RS256 token with the given issuer, `azp`, and `exp` offset.
+    fn rs256_token(issuer: &str, azp: &str, exp_offset_secs: i64) -> anyhow::Result<String> {
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some(TEST_KID.to_string());
+        let claims = json!({
+            "iss": issuer,
+            "sub": "alice",
+            "azp": azp,
+            "exp": unix_now()? + exp_offset_secs,
+            "email": "alice@example.com",
+            "realm_access": { "roles": ["admin", "user"] },
+        });
+        sign(&header, &claims)
+    }
+
+    #[tokio::test]
+    async fn accepts_valid_token_and_projects_roles() -> anyhow::Result<()> {
+        let (_server, validator, issuer) = setup().await;
+        let token = rs256_token(&issuer, "dpm", 3600)?;
+        let principal = validator
+            .validate(&token)
+            .await
+            .map_err(|e| anyhow::anyhow!("expected valid token to verify: {e:?}"))?;
+        assert_eq!(principal.sub, "alice");
+        assert_eq!(principal.issuer, issuer);
+        assert!(principal.has_role("admin"));
+        assert!(principal.has_role("user"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejects_expired_token() -> anyhow::Result<()> {
+        let (_server, validator, issuer) = setup().await;
+        let token = rs256_token(&issuer, "dpm", -3600)?;
+        assert!(matches!(
+            validator.validate(&token).await,
+            Err(ValidationError::InactiveToken)
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejects_tampered_signature() -> anyhow::Result<()> {
+        let (_server, validator, issuer) = setup().await;
+        let token = rs256_token(&issuer, "dpm", 3600)?;
+        // Flip the last char of the signature segment — still valid base64url,
+        // but the signature no longer verifies.
+        let (head, sig) = token
+            .rsplit_once('.')
+            .ok_or_else(|| anyhow::anyhow!("token has no signature segment"))?;
+        let mut sig_chars: Vec<char> = sig.chars().collect();
+        if let Some(last) = sig_chars.last_mut() {
+            *last = if *last == 'A' { 'B' } else { 'A' };
+        }
+        let tampered = format!("{head}.{}", sig_chars.into_iter().collect::<String>());
+        assert!(matches!(
+            validator.validate(&tampered).await,
+            Err(ValidationError::InactiveToken)
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejects_alg_confusion_hs256_header() -> anyhow::Result<()> {
+        // Forge a token whose header advertises HS256 (same kid). The JWK is
+        // RS256, so the alg-pinning check must reject it before verification —
+        // closes the classic RS256->HS256 confusion attack.
+        let (_server, validator, issuer) = setup().await;
+        let mut header = Header::new(Algorithm::HS256);
+        header.kid = Some(TEST_KID.to_string());
+        let claims = json!({
+            "iss": issuer,
+            "sub": "alice",
+            "azp": "dpm",
+            "exp": unix_now()? + 3600,
+        });
+        let key = EncodingKey::from_secret(b"attacker-chosen-secret");
+        let token = encode(&header, &claims, &key).map_err(|e| anyhow::anyhow!("{e}"))?;
+        assert!(matches!(
+            validator.validate(&token).await,
+            Err(ValidationError::InactiveToken)
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejects_cross_client_azp() -> anyhow::Result<()> {
+        // Valid signature + issuer, but `azp` is a different client in the same
+        // realm. The compensating control for `validate_aud = false` must reject.
+        let (_server, validator, issuer) = setup().await;
+        let token = rs256_token(&issuer, "some-other-client", 3600)?;
+        assert!(matches!(
+            validator.validate(&token).await,
+            Err(ValidationError::InactiveToken)
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejects_untrusted_issuer() -> anyhow::Result<()> {
+        let (_server, validator, _issuer) = setup().await;
+        let token = rs256_token("https://evil.example/realms/attacker", "dpm", 3600)?;
+        assert!(matches!(
+            validator.validate(&token).await,
+            Err(ValidationError::UntrustedIssuer(_))
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejects_missing_and_malformed_tokens() -> anyhow::Result<()> {
+        let (_server, validator, _issuer) = setup().await;
+        assert!(matches!(
+            validator.validate("").await,
+            Err(ValidationError::MissingToken)
+        ));
+        assert!(matches!(
+            validator.validate("not.a.jwt").await,
+            Err(ValidationError::MalformedToken)
+        ));
+        Ok(())
     }
 }
