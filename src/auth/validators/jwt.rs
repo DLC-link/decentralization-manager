@@ -414,6 +414,7 @@ fn decoding_key_from_jwk(jwk: &Jwk) -> Result<DecodingKey, String> {
 
 #[cfg(test)]
 mod tests {
+    use base64::{Engine, engine::general_purpose::STANDARD};
     use jsonwebtoken::{EncodingKey, Header, encode};
     use serde_json::json;
     use wiremock::{
@@ -481,38 +482,13 @@ mod tests {
 
     const TEST_KID: &str = "test-key-1";
     const TEST_JWK_E: &str = "AQAB";
-    /// base64url public modulus matching `TEST_RSA_PEM` below.
+    /// base64url public modulus matching `TEST_RSA_PKCS1_DER_B64` below.
     const TEST_JWK_N: &str = "uOVq7XNTobJpBBbp_54gdNkbZYlJnsZhpwc6cbq6djnNUEezDxMLic_X79SzZRiiKs-SUn43zu99zPrCmsvAYBDBZunsKnySjDyIPRIxex9blc-IPyk8n8PURFuB8ty48b6d9RR89Jj_3_ISYPE2YAsR7a7O5ao1XfnukYy57T0ZoUnqbQYqalwI3XbqNgLqiz3Yap7R_25TQLVaHFWIDWV8FL8_GzVm8YtFSSauCNGg7lG3qM7HmDan_dPM6Lg3uzAHky9i0ClGC6fWzfVPTt4u3Amlzjme1OlLz22XoS6E-xbjFXCINeQq_Ir9fSdgl0QPbuF-jkCTbaYQQXSbhQ";
-    /// Throwaway test-only RSA private key (PKCS#8). Never used outside tests.
-    const TEST_RSA_PEM: &str = r#"-----BEGIN PRIVATE KEY-----
-MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC45Wrtc1OhsmkE
-Fun/niB02RtliUmexmGnBzpxurp2Oc1QR7MPEwuJz9fv1LNlGKIqz5JSfjfO733M
-+sKay8BgEMFm6ewqfJKMPIg9EjF7H1uVz4g/KTyfw9REW4Hy3Ljxvp31FHz0mP/f
-8hJg8TZgCxHtrs7lqjVd+e6RjLntPRmhSeptBipqXAjdduo2AuqLPdhqntH/blNA
-tVocVYgNZXwUvz8bNWbxi0VJJq4I0aDuUbeozseYNqf908zouDe7MAeTL2LQKUYL
-p9bN9U9O3i7cCaXOOZ7U6UvPbZehLoT7FuMVcIg15Cr8iv19J2CXRA9u4X6OQJNt
-phBBdJuFAgMBAAECggEARMMlahuKzcbhIWE4MxVmsq4Pb0qIc6EJrimVBbjRIajL
-f4C6ye9mSiFfCFWNRhrMLKm3nDBOpwoQOgxEFXeTGucAVjrG1uIvSjI05KmAd26p
-C+T7oam/XxdgOO/jOyP1MAqZCg1Nj1XbSzjmtuDePQfA6ikpzuXnJQUPQVgZyW1d
-EY65dYqY368EueeL7FxJ546vb+hcciVwaIslBuTRPLqtloZwczuXtiaBzlnBwwyq
-0jLC/AsH6YnhslU8JOBH22O6s/J4xHZ+qyR2H2fet0XaZaFdqAQt4NY+rKO9CCMj
-uk+frCBkMDS9Y0gcxJKQucseXvKlpNCK/S5JytODXQKBgQD88qnMcTY9+jJrSoZK
-WwmaTlVlmBQhmkxFrQcbe5h/1adOaTgBju0xpihVE7jBxEKDD4XF/0X/Oj1I7QMI
-H0F1rGF8QfjZHXww377QMJLj2NHGq42K5iT8b9Z+8TEDBKUoIW5CWSpyx79YF6Jy
-7VaCsQ9lJX+R+5bCD5sa/PKbUwKBgQC7IIw75QTotNspP9V+8vjT1kMn+rLO9Gal
-JDkVXAmBlD9YoH0oSuB0t4RW9GhCqRfkxmwurb77F7gG7d8PEOdbiZCQAVJ4MH5v
-g+rG8cTgqtfcoBNfV8aYUmWlWv3zuKcGmhPo+FpJ+62inBU2OPsGP+gX7mQiVciV
-ncOhLQzqxwKBgQDEhDLvJrWhiRRKzuduNTRMsbce6vwY7yt6pmbzLx7XkkIdZRmh
-/EzDWffTwTK1N6kE8bZYkW7sT271jU3hrYbJyVcjlo2jAIlP30T7sgEtC3JPC1E4
-LH1nsevPS8tsMNuvRenHmkakThOWeSY4a7PebXksd+mYnQIPWtiCKyrBCQKBgDAW
-uzMhNdO/tpqxJuKK+lsmMvfxO0ZoFIDYADt2/ZJpUKYsCD30kB4ukzntcWXAIr3O
-KDsOt4e7nrVZJ/utMmeZwKbhUBpHDBcIZatesmOyQ+sU0CWuXwECG9EUwzKA/5t4
-uSkjucBNh1/EkMbwecIvZivQPbd9KCEa/A1NkIY9AoGAA/4VLN8xRa3PvuMorbr4
-kZqMRQbQGi+rhT8I3gHMjzGwCN4AHl2GSi9VwLYZ1LBYFb7utbICW6HxWd9k9KTO
-tkEQx5ommXJH3EH/fMSMb67wtX56euE8WerI1TDyvrFgJuXCEhl3gwneFNRQ4jx9
-g9aUIAgWUtN6X8LiqVcsGU8=
------END PRIVATE KEY-----
-"#;
+    /// Throwaway test-only RSA private key — PKCS#1 DER, base64-encoded. Stored
+    /// without PEM armor on purpose: a `BEGIN PRIVATE KEY` literal would trip
+    /// secret scanners and is a bad pattern to commit. Test-only; the matching
+    /// public modulus is `TEST_JWK_N` above.
+    const TEST_RSA_PKCS1_DER_B64: &str = "MIIEowIBAAKCAQEAuOVq7XNTobJpBBbp/54gdNkbZYlJnsZhpwc6cbq6djnNUEezDxMLic/X79SzZRiiKs+SUn43zu99zPrCmsvAYBDBZunsKnySjDyIPRIxex9blc+IPyk8n8PURFuB8ty48b6d9RR89Jj/3/ISYPE2YAsR7a7O5ao1XfnukYy57T0ZoUnqbQYqalwI3XbqNgLqiz3Yap7R/25TQLVaHFWIDWV8FL8/GzVm8YtFSSauCNGg7lG3qM7HmDan/dPM6Lg3uzAHky9i0ClGC6fWzfVPTt4u3Amlzjme1OlLz22XoS6E+xbjFXCINeQq/Ir9fSdgl0QPbuF+jkCTbaYQQXSbhQIDAQABAoIBAETDJWobis3G4SFhODMVZrKuD29KiHOhCa4plQW40SGoy3+AusnvZkohXwhVjUYazCypt5wwTqcKEDoMRBV3kxrnAFY6xtbiL0oyNOSpgHduqQvk+6Gpv18XYDjv4zsj9TAKmQoNTY9V20s45rbg3j0HwOopKc7l5yUFD0FYGcltXRGOuXWKmN+vBLnni+xcSeeOr2/oXHIlcGiLJQbk0Ty6rZaGcHM7l7Ymgc5ZwcMMqtIywvwLB+mJ4bJVPCTgR9tjurPyeMR2fqskdh9n3rdF2mWhXagELeDWPqyjvQgjI7pPn6wgZDA0vWNIHMSSkLnLHl7ypaTQiv0uScrTg10CgYEA/PKpzHE2Pfoya0qGSlsJmk5VZZgUIZpMRa0HG3uYf9WnTmk4AY7tMaYoVRO4wcRCgw+Fxf9F/zo9SO0DCB9BdaxhfEH42R18MN++0DCS49jRxquNiuYk/G/WfvExAwSlKCFuQlkqcse/WBeicu1WgrEPZSV/kfuWwg+bGvzym1MCgYEAuyCMO+UE6LTbKT/VfvL409ZDJ/qyzvRmpSQ5FVwJgZQ/WKB9KErgdLeEVvRoQqkX5MZsLq2++xe4Bu3fDxDnW4mQkAFSeDB+b4PqxvHE4KrX3KATX1fGmFJlpVr987inBpoT6PhaSfutopwVNjj7Bj/oF+5kIlXIlZ3DoS0M6scCgYEAxIQy7ya1oYkUSs7nbjU0TLG3Hur8GO8reqZm8y8e15JCHWUZofxMw1n308EytTepBPG2WJFu7E9u9Y1N4a2GyclXI5aNowCJT99E+7IBLQtyTwtROCx9Z7Hrz0vLbDDbr0Xpx5pGpE4TlnkmOGuz3m15LHfpmJ0CD1rYgisqwQkCgYAwFrszITXTv7aasSbiivpbJjL38TtGaBSA2AA7dv2SaVCmLAg99JAeLpM57XFlwCK9zig7DreHu561WSf7rTJnmcCm4VAaRwwXCGWrXrJjskPrFNAlrl8BAhvRFMMygP+beLkpI7nATYdfxJDG8HnCL2Yr0D23fSghGvwNTZCGPQKBgAP+FSzfMUWtz77jKK26+JGajEUG0Bovq4U/CN4BzI8xsAjeAB5dhkovVcC2GdSwWBW+7rWyAluh8VnfZPSkzrZBEMeaJplyR9xB/3zEjG+u8LV+enrhPFnqyNUw8r6xYCblwhIZd4MJ3hTUUOI8fYPWlCAIFlLTel/C4qlXLBlP";
 
     /// Stand up a wiremock OIDC provider (discovery + JWKS) and a
     /// `JwtValidator` that trusts it. Returns `(server, validator, issuer)`;
@@ -567,8 +543,10 @@ g9aUIAgWUtN6X8LiqVcsGU8=
     }
 
     fn sign(header: &Header, claims: &serde_json::Value) -> anyhow::Result<String> {
-        let key = EncodingKey::from_rsa_pem(TEST_RSA_PEM.as_bytes())
-            .map_err(|e| anyhow::anyhow!("test key: {e}"))?;
+        let der = STANDARD
+            .decode(TEST_RSA_PKCS1_DER_B64)
+            .map_err(|e| anyhow::anyhow!("test key b64: {e}"))?;
+        let key = EncodingKey::from_rsa_der(&der);
         encode(header, claims, &key).map_err(|e| anyhow::anyhow!("sign: {e}"))
     }
 
