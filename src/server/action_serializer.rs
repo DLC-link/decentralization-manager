@@ -1855,6 +1855,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+    use crate::canton_id::{NAMESPACE_LENGTH, Namespace};
 
     // Locks the AV_* constructor strings against the on-ledger
     // `Splice.Api.Token.MetadataV1.AnyValue` definition. A typo here would
@@ -1931,5 +1932,163 @@ mod tests {
                 "error should reference the Rust type, got: {err}",
             );
         }
+    }
+
+    // ---- ActionType / ProposalType wire-shape assertions ----
+    //
+    // These lock the DAML constructor names and field labels emitted for the
+    // governance actions. The labels are hand-written and consumed by the
+    // on-ledger interpreter, so a typo or a swap between the two governance
+    // serializers (`serialize_action` vs `serialize_self_action`, which
+    // deliberately use *different* labels for the same action) would only
+    // surface as a runtime interpretation error far from the source. A
+    // round-trip test cannot catch a wrong-but-symmetric label; explicit
+    // label assertions can.
+
+    /// Any valid `CantonId` — the exact value is irrelevant to these
+    /// constructor/field-name assertions.
+    fn party_id() -> CantonId {
+        CantonId::new("p".to_string(), Namespace::new([0u8; NAMESPACE_LENGTH]))
+    }
+
+    /// Unwrap a `Variant` value into `(constructor, inner)`.
+    fn as_variant(value: &Value) -> (&str, &Value) {
+        match &value.sum {
+            Some(value::Sum::Variant(v)) => match v.value.as_deref() {
+                Some(inner) => (v.constructor.as_str(), inner),
+                None => panic!("variant {} has no inner value", v.constructor),
+            },
+            other => panic!("expected Variant, got {other:?}"),
+        }
+    }
+
+    /// The ordered field labels of a `Record` value.
+    fn record_labels(value: &Value) -> Vec<&str> {
+        match &value.sum {
+            Some(value::Sum::Record(r)) => r.fields.iter().map(|f| f.label.as_str()).collect(),
+            other => panic!("expected Record, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn serialize_action_add_member_shape() {
+        let action = ActionType::GovernanceAddMember {
+            member: party_id(),
+            new_threshold: 3,
+        };
+        let value = serialize_action(&action);
+        let (outer, inner) = as_variant(&value);
+        assert_eq!(outer, "GovernanceAction");
+        let (ctor, record) = as_variant(inner);
+        assert_eq!(ctor, "Governance_AddMemberAndSetThreshold");
+        assert_eq!(record_labels(record), ["member", "newThreshold"]);
+    }
+
+    #[test]
+    fn serialize_action_set_threshold_and_timeout_shape() {
+        let threshold = serialize_action(&ActionType::GovernanceSetThreshold { new_threshold: 2 });
+        let (outer, inner) = as_variant(&threshold);
+        assert_eq!(outer, "GovernanceAction");
+        let (ctor, record) = as_variant(inner);
+        assert_eq!(ctor, "Governance_SetThreshold");
+        assert_eq!(record_labels(record), ["newThreshold"]);
+
+        let timeout = serialize_action(&ActionType::GovernanceSetTimeout {
+            new_timeout_microseconds: 1_000,
+        });
+        let (_, inner) = as_variant(&timeout);
+        let (ctor, record) = as_variant(inner);
+        assert_eq!(ctor, "Governance_SetActionConfirmationTimeout");
+        assert_eq!(record_labels(record), ["newActionConfirmationTimeout"]);
+    }
+
+    #[test]
+    fn serialize_action_utility_and_credential_and_devnet_shapes() {
+        let setup = serialize_action(&ActionType::UtilitySetup {
+            operator: party_id(),
+            provider_service_cid: "psc".to_string(),
+            user_service_cid: "usc".to_string(),
+        });
+        let (outer, inner) = as_variant(&setup);
+        assert_eq!(outer, "UtilityOnboardingAction");
+        let (ctor, record) = as_variant(inner);
+        assert_eq!(ctor, "UtilityOnboarding_SetupUtility");
+        assert_eq!(
+            record_labels(record),
+            ["operator", "providerServiceCid", "userServiceCid"]
+        );
+
+        let accept = serialize_action(&ActionType::CredentialAcceptFree {
+            operator: party_id(),
+            user_service_cid: "usc".to_string(),
+            credential_offer_cid: "coc".to_string(),
+        });
+        let (outer, inner) = as_variant(&accept);
+        assert_eq!(outer, "CredentialAction");
+        let (ctor, record) = as_variant(inner);
+        assert_eq!(ctor, "Credential_AcceptFreeCredential");
+        assert_eq!(
+            record_labels(record),
+            ["operator", "userServiceCid", "credentialOfferCid"]
+        );
+
+        // DevNet wraps a bare record (no nested action variant).
+        let devnet = serialize_action(&ActionType::DevNetFeatureApp {
+            amulet_rules_cid: "arc".to_string(),
+        });
+        let (ctor, record) = as_variant(&devnet);
+        assert_eq!(ctor, "DevNetFeatureAppAction");
+        assert_eq!(record_labels(record), ["amuletRulesCid"]);
+    }
+
+    #[test]
+    fn serialize_self_action_uses_distinct_labels_from_serialize_action() {
+        // The self-management serializer maps the SAME ActionType to DIFFERENT
+        // constructor + field names than `serialize_action`. Pin both so the
+        // two paths can't silently converge or drift.
+        let add = serialize_self_action(&ActionType::GovernanceAddMember {
+            member: party_id(),
+            new_threshold: 3,
+        });
+        let (ctor, record) = as_variant(&add);
+        assert_eq!(ctor, "SelfAction_AddMemberAndSetThreshold");
+        assert_eq!(record_labels(record), ["newMember", "newThresholdAfterAdd"]);
+
+        let remove = serialize_self_action(&ActionType::GovernanceRemoveMember {
+            member: party_id(),
+            new_threshold: 1,
+        });
+        let (ctor, record) = as_variant(&remove);
+        assert_eq!(ctor, "SelfAction_RemoveMemberAndSetThreshold");
+        assert_eq!(
+            record_labels(record),
+            ["removedMember", "newThresholdAfterRemove"]
+        );
+
+        let set_threshold =
+            serialize_self_action(&ActionType::GovernanceSetThreshold { new_threshold: 2 });
+        let (ctor, record) = as_variant(&set_threshold);
+        assert_eq!(ctor, "SelfAction_SetThreshold");
+        assert_eq!(record_labels(record), ["updatedThreshold"]);
+    }
+
+    #[test]
+    fn build_proposal_setup_cc_preapproval_shape() -> Result {
+        let proposal = ProposalType::SetupCcPreapproval {
+            provider: party_id(),
+            expected_dso: party_id(),
+        };
+        let (package, module, entity, record) =
+            build_proposal_create_args("gov", "proposer", &proposal, None)?;
+
+        assert_eq!(package, ProposalPackage::GovernanceTokenCustody);
+        assert_eq!(module, "Governance.TokenCustody.SetupCcPreapproval");
+        assert_eq!(entity, "SetupCcPreapprovalProposal");
+        let labels: Vec<&str> = record.fields.iter().map(|f| f.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            ["governanceParty", "proposer", "provider", "expectedDso"]
+        );
+        Ok(())
     }
 }
