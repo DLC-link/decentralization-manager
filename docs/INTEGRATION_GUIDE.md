@@ -50,7 +50,7 @@ Both ports must be reachable between all participants. The Noise port (9000) car
 ### Software
 
 - **Docker** (recommended) or Rust toolchain for building from source
-- `cargo` 1.75+ if building from source
+- Rust ≥ 1.85 if building from source (the crate uses edition 2024)
 
 ## Deployment
 
@@ -62,6 +62,7 @@ docker run -d \
   -p 8080:8080 \
   -p 9000:9000 \
   -v $(pwd)/data:/app/data \
+  -e DECPM_DIR=/app \
   -e DECPM_CANTON_ADMIN_HOST=canton-participant \
   -e DECPM_CANTON_ADMIN_PORT=5002 \
   -e DECPM_CANTON_LEDGER_HOST=canton-participant \
@@ -87,8 +88,14 @@ docker run -d \
   -p 9000:9000 \
   -v $(pwd)/data:/app/data \
   -v $(pwd)/.env:/app/.env:ro \
+  -e DECPM_DIR=/app \
   public.ecr.aws/dlc-link/canton-decparty-manager:latest
 ```
+
+The `-e DECPM_DIR=/app` above matches the `/app/...` mount paths and the
+Kubernetes manifest below. The shipped image defaults `DECPM_DIR=/`, so without
+it the data dir and auto-loaded `.env` would be resolved under `/` instead of
+`/app`.
 
 ### Kubernetes
 
@@ -251,11 +258,11 @@ CLI options (every flag has a matching `DECPM_*` env var; flags override env):
 
 | Flag | Env Var | Default | Description |
 |------|---------|---------|-------------|
-| `-d`, `--dir` | `DECPM_DIR` | `.` | Root directory for persistent data; loads `.env` from this dir if present |
+| `-d`, `--dir` | `DECPM_DIR` | `.` (the shipped Docker image sets `/`) | Root directory for persistent data; loads `.env` from this dir if present |
 | `--host` | `DECPM_HOST` | `0.0.0.0` | HTTP server bind address |
 | `--port` | `DECPM_PORT` | `8080` | HTTP server port |
-| `--test` | -- | `false` | Enable test mode with mock authentication |
 | `--db` | `DECPM_DB_PATH` | `{dir}/data/decpm.db` | Path to SQLite database file |
+| `--db-encryption-key` | `DECPM_DB_ENCRYPTION_KEY` | (none) | Key used to encrypt secrets stored in the database |
 | `--listen-address` | `DECPM_LISTEN_ADDRESS` | `0.0.0.0` | Noise server bind address |
 | `--noise-port` | `DECPM_NOISE_PORT` | `9000` | Noise server port |
 | `--public-address` | `DECPM_PUBLIC_ADDRESS` | (none) | External address for peers |
@@ -271,6 +278,8 @@ CLI options (every flag has a matching `DECPM_*` env var; flags override env):
 | `--auth0-domain` | `DECPM_AUTH0_DOMAIN` | (none) | Auth0 tenant domain (frontend auth gating; mutually exclusive with `--keycloak-*`) |
 | `--auth0-client-id` | `DECPM_AUTH0_CLIENT_ID` | (none) | Auth0 SPA client ID (frontend auth gating) |
 | `--auth0-audience` | `DECPM_AUTH0_AUDIENCE` | (none) | Auth0 API audience (target for SPA access tokens) |
+| `--admin-role` | `DECPM_ADMIN_ROLE` | (none) | Role that gates sensitive endpoints (`PUT /party-config`, `POST /kick`, etc.); unset treats every authenticated caller as admin |
+| `--allowed-origin` | `DECPM_ALLOWED_ORIGIN` | (none) | Origin permitted by CORS; defaults to same-origin only |
 | `--timeout-handshake` | `DECPM_TIMEOUT_HANDSHAKE` | `30` | Noise handshake timeout (seconds) |
 | `--timeout-message` | `DECPM_TIMEOUT_MESSAGE` | `120` | Noise message timeout (seconds) |
 | `--timeout-retry-attempts` | `DECPM_TIMEOUT_RETRY_ATTEMPTS` | `3` | Connection retry count |
@@ -317,6 +326,13 @@ All node configuration is provided through environment variables (or their equiv
 | `DECPM_AUTH0_DOMAIN` | `--auth0-domain` | string | (none) | Auth0 tenant domain for frontend auth gating (mutually exclusive with `DECPM_KEYCLOAK_*`) |
 | `DECPM_AUTH0_CLIENT_ID` | `--auth0-client-id` | string | (none) | Auth0 SPA client ID for frontend auth gating |
 | `DECPM_AUTH0_AUDIENCE` | `--auth0-audience` | string | (none) | Auth0 API audience targeted by SPA access tokens |
+| `DECPM_ADMIN_ROLE` | `--admin-role` | string | (none) | Role that gates sensitive endpoints (`PUT /party-config`, `POST /kick`, etc.). Unset treats every authenticated caller as admin |
+| `DECPM_ALLOWED_ORIGIN` | `--allowed-origin` | string | (none) | Origin permitted by CORS (e.g. `https://dpm.example.com`). Defaults to same-origin only |
+| `DECPM_DB_ENCRYPTION_KEY` | `--db-encryption-key` | string | (none) | Key used to encrypt secrets (client secrets, passwords) stored in the database |
+| `DECPM_DB_PATH` | `--db` | string | `{dir}/data/decpm.db` | Path to the SQLite database file |
+| `DECPM_DIR` | `-d`, `--dir` | string | `.` (the shipped Docker image sets `/`) | Root directory for persistent data; loads `.env` from this dir if present |
+| `DECPM_HOST` | `--host` | string | `0.0.0.0` | HTTP server bind address |
+| `DECPM_PORT` | `--port` | u16 | `8080` | HTTP server port |
 | `DECPM_TIMEOUT_HANDSHAKE` | `--timeout-handshake` | u64 | `30` | Noise handshake timeout in seconds |
 | `DECPM_TIMEOUT_MESSAGE` | `--timeout-message` | u64 | `120` | Noise message timeout in seconds |
 | `DECPM_TIMEOUT_RETRY_ATTEMPTS` | `--timeout-retry-attempts` | u32 | `3` | Max connection retries |
@@ -445,8 +461,8 @@ Response — Keycloak example:
   "has_password": false,
   "has_auth0_client_secret": false,
   "packages": {
-    "governance_core": "#governance-core-v0-rc4",
-    "governance_token_custody": "#governance-token-custody-v0-rc4",
+    "governance_core": "#governance-core-v1-rc1",
+    "governance_token_custody": "#governance-token-custody-v1-rc1",
     "utility_credential": "#utility-credential-app-v0",
     "utility_registry": "#utility-registry-app-v0",
     "vault": "#bitsafe-vault-v0-rc8",
@@ -489,13 +505,25 @@ For safety, changing the token endpoint URL (`keycloak_url` or `auth0_domain`) i
 
 ### Test Mode
 
-For development and testing without any IdP:
+Test mode is a **compile-time** option, not a runtime flag. It is active only when
+the binary is built with the `test-mode` Cargo feature or under `cargo test` —
+internally the server gates it on `cfg!(any(test, feature = "test-mode"))`. A
+released production binary cannot enable it at runtime; there is no `--test`
+flag, and `serve --test` errors out.
+
+To build and run with test mode for development without any IdP:
 
 ```bash
-dec-party-manager -d ./my-dir serve --test
+# Build with the test-mode feature enabled
+cargo build --features test-mode
+
+# Run normally — test mode is baked into the binary
+./target/debug/dec-party-manager -d ./my-dir serve
 ```
 
-Test mode uses a mock authentication provider that returns static tokens. All governance and ledger operations will use mock credentials.
+When active, test mode uses a mock authentication provider that returns static
+tokens (and enables the Swagger UI). All governance and ledger operations use
+mock credentials.
 
 ### Verification
 
@@ -834,7 +862,7 @@ curl -X POST http://localhost:8080/contracts \
       {
         "id": "governance-rules",
         "name": "GovernanceRules",
-        "package_id": "#governance-core-v0-rc4",
+        "package_id": "#governance-core-v1-rc1",
         "module_name": "Governance.Rules",
         "entity_name": "GovernanceRules",
         "fields": [
@@ -966,7 +994,7 @@ Each participant's Ledger API user needs:
 |--------|----------|-------------|--------------|
 | POST | `/onboarding` | Start onboarding | `{ "party_id_prefix": "...", "peer_ids": [...] }` |
 | GET | `/onboarding/status` | Get onboarding progress | -- |
-| POST | `/kick` | Start kick workflow | `{ "decentralized_party_id": "...", "participant_id": "...", "namespace_fingerprint": "...", "new_threshold": N }` |
+| POST | `/kick` | Start kick workflow | `{ "decentralized_party_id": "...", "participant_id": "...", "new_threshold": N, "previous_threshold": N }` (the request rejects unknown fields; `previous_threshold` is optional and display-only) |
 | GET | `/kick/status` | Get kick progress | -- |
 | POST | `/contracts` | Start contracts workflow | `{ "decentralized_party_id": "...", "participant_ids": [...], ... }` |
 | GET | `/contracts/status` | Get contracts progress | -- |
@@ -987,10 +1015,50 @@ Each participant's Ledger API user needs:
 
 | Method | Endpoint | Description | Response |
 |--------|----------|-------------|----------|
-| GET | `/auth-config` | Get the configured auth provider (mock or keycloak) | `{ "provider": "..." }` |
+| GET | `/auth-config` | Get the frontend auth configuration | `AuthConfigResponse` (see below) |
 | GET | `/auth/status` | Get auth status for all parties | `{ "parties": [...] }` |
 | POST | `/auth/test` | Test authentication | `{ "results": [...] }` |
 | POST | `/auth/grant-rights` | Grant Canton actAs/readAs rights to a party (admin-only) | `{ "rights": { ... } }` |
+
+#### `/auth-config` Response (`AuthConfigResponse`)
+
+The frontend reads this to decide which login flow to render. Auth0 and Keycloak
+are both first-class providers — each node configures at most one. Provider
+fields are omitted from the JSON when not set.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `auth_required` | bool | `false` in test mode or when no provider is configured; `true` otherwise |
+| `keycloak_host` | string? | Keycloak server URL (Keycloak nodes only) |
+| `keycloak_realm` | string? | Keycloak realm (Keycloak nodes only) |
+| `keycloak_client_id` | string? | Keycloak client ID (Keycloak nodes only) |
+| `auth0_domain` | string? | Auth0 tenant domain (Auth0 nodes only) |
+| `auth0_client_id` | string? | Auth0 SPA client ID (Auth0 nodes only) |
+| `auth0_audience` | string? | Auth0 API audience (Auth0 nodes only) |
+
+When Auth0 is configured it takes precedence over Keycloak. When no provider is
+configured, the server returns `{ "auth_required": false }` with all provider
+fields omitted.
+
+Keycloak example:
+```json
+{
+  "auth_required": true,
+  "keycloak_host": "https://keycloak.example.com",
+  "keycloak_realm": "canton",
+  "keycloak_client_id": "dpm-ui"
+}
+```
+
+Auth0 example:
+```json
+{
+  "auth_required": true,
+  "auth0_domain": "tenant.us.auth0.com",
+  "auth0_client_id": "spa-client-id",
+  "auth0_audience": "https://your-canton-api"
+}
+```
 
 ### Governance
 
@@ -1029,17 +1097,34 @@ All governance mutation endpoints accept a `governance_type` field that selects 
 }
 ```
 
-The server populates the `proposer` field on the proposal contract automatically (using the calling party's identity). As of `v0-rc4`, that proposer must be a member of the targeted `GovernanceRules` or appear in its `additionalProposers` allowlist; otherwise the auto-confirmation step rejects the proposal at confirm time.
+The server populates the `proposer` field on the proposal contract automatically (using the calling party's identity). As of `v1-rc1`, that proposer must be a member of the targeted `GovernanceRules` or appear in its `additionalProposers` allowlist; otherwise the auto-confirmation step rejects the proposal at confirm time.
 
-Available proposal types:
+Available proposal types (the `type` discriminator is `snake_case`). These map
+1:1 to the `ProposalType` enum in `src/server/types.rs`, which is the source of
+truth for the exact field shapes; see also the domain-action catalog in
+ARCHITECTURE.md and the serializers in `src/server/action_serializer.rs`.
 
 | Type | Fields | Description |
 |------|--------|-------------|
-| `generic_vote` | `description` | Free-text governance vote |
+| `generic_vote` | `description` | Free-text governance vote (no on-chain effect beyond recording the result) |
 | `setup_cc_preapproval` | `provider`, `expected_dso` | Set up Canton Coin transfer preapproval |
 | `setup_token_preapproval` | `operator`, `instrument_admin`, `instrument_allowances` (optional) | Set up utility token transfer preapproval |
 | `transfer` | `transfer_factory_cid`, `expected_admin`, `receiver`, `amount`, `instrument_id`, `input_holding_cids` (optional) | Transfer tokens from governance party |
 | `accept_transfer` | `transfer_instruction_cid` | Accept an incoming token transfer |
+| `mint` | `allocation_factory_cid`, `instrument_id`, `instrument_configuration_cid`, `recipient`, `amount`, `description` | Offer a mint to a recipient via `AllocationFactory_OfferMint` |
+| `burn` | `allocation_factory_cid`, `instrument_id`, `instrument_configuration_cid`, `holder`, `amount`, `description` | Offer a burn of a holder's tokens via `AllocationFactory_OfferBurn` |
+| `accept_mint_request` | `mint_request_cid`, `instrument_configuration_cid`, `description` | Accept a holder-initiated `MintRequest` |
+| `accept_burn_request` | `burn_request_cid`, `instrument_configuration_cid`, `description` | Accept a holder-initiated `BurnRequest` |
+| `offer_free_credential` | `user_service_cid`, `holder`, `id`, `description`, `claims` | Offer a free credential via the governance party's `UserService` |
+| `offer_paid_credential` | `user_service_cid`, `holder`, `id`, `description`, `claims`, `billing_params`, `deposit_initial_amount_usd` (optional) | Offer a paid credential via the governance party's `UserService` |
+| `accept_free_credential` | `user_service_cid`, `credential_offer_cid` | Accept a free credential offered to the governance party |
+| `provision_provider_service` | (none) | Provision a Utility-Registry `ProviderService` (operator = proposer) |
+| `setup_utility` | `provider_service_cid`, `operator`, `instrument_id_text`, `additional_identifiers` (optional), `create_transfer_rule`, `create_allocation_factory` | Run the full Utility-Registry onboarding in one vote |
+| `create_provider_service_request` | `operator`, `provider` | Create a `ProviderServiceRequest` |
+| `create_user_service_request` | `operator`, `user` | Create a `UserServiceRequest` |
+| `set_provider_app_reward_beneficiaries` | `instrument_configuration_cid`, `provider_app_reward_beneficiaries` (optional; `null` clears) | Set provider-app reward beneficiaries on an `InstrumentConfiguration` |
+| `set_enable_result_contracts` | `registrar_service_cid`, `enable_result_contracts` (optional) | Toggle result-contract emission on a `RegistrarService` |
+| `create_delegated_batched_markers_proxy` | `operator` | Authorize an operator to create batched activity markers via a `DelegatedBatchedMarkersProxy` |
 
 #### Confirm
 
@@ -1077,7 +1162,7 @@ Available `core_self` action types (DAML `GovernanceSelfAction` variants):
 | `governance_add_additional_proposer` | `additional_proposer` (party id) | `SelfAction_AddAdditionalProposer` |
 | `governance_remove_additional_proposer` | `additional_proposer` (party id) | `SelfAction_RemoveAdditionalProposer` |
 
-The two `*_additional_proposer` variants (added in `v0-rc4`) mutate the `additionalProposers` allowlist on `GovernanceRules`. See ARCHITECTURE.md for the proposer-authorization model.
+The two `*_additional_proposer` variants (added in `v1-rc1`) mutate the `additionalProposers` allowlist on `GovernanceRules`. See ARCHITECTURE.md for the proposer-authorization model.
 
 **For domain actions (`governance_type: "core_domain"`):**
 

@@ -43,7 +43,7 @@ The Dec Party Manager is published as a public container image:
 public.ecr.aws/dlc-link/canton-decparty-manager:<tag>
 ```
 
-Use the latest tagged release (for example `0.0.30`). Pin the version explicitly — do not use `latest`. If your cluster cannot pull from Public ECR directly, mirror the image into your own registry first.
+Use the latest tagged release (for example `0.1.7`). Pin the version explicitly — do not use `latest`. If your cluster cannot pull from Public ECR directly, mirror the image into your own registry first.
 
 To check the version of a running pod:
 

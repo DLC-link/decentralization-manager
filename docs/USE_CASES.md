@@ -6,6 +6,8 @@ Practical walkthroughs for the primary applications of the Decentralized Party M
 
 The primary use case: multiple custodians jointly managing BitsafeVault contracts through a shared decentralized party identity.
 
+> **Note:** The `#bitsafe-vault-*` DARs are external/proprietary and are not included in this repository — the repo ships only the splice, utility, and governance DARs — so this example requires those vault packages to be supplied separately.
+
 ### Scenario
 
 Three custodial organizations (Custodian A, B, C) want to jointly manage a digital asset vault. No single custodian should be able to unilaterally deploy, pause, or modify the vault. All critical operations require a 2-of-3 majority.
@@ -64,7 +66,7 @@ curl -X POST http://custodian-a:8080/contracts \
 
 This deploys a `VaultGovernanceRules` contract with all 3 members, threshold 2, and a 24-hour confirmation timeout.
 
-> **Note:** New deployments should use `GovernanceRules` (from `#governance-core-v0-rc4`) instead. See the [Integration Guide](INTEGRATION_GUIDE.md#deploying-governance-contracts) for the recommended contract deployment payload.
+> **Note:** New deployments should use `GovernanceRules` (from `#governance-core-v1-rc1`) instead. See the [Integration Guide](INTEGRATION_GUIDE.md#deploying-governance-contracts) for the recommended contract deployment payload.
 
 ### Full Deployment Flow
 
@@ -76,7 +78,7 @@ The complete end-to-end deployment of a vault system follows these steps. Each g
 | 2 | Configure party credentials | DPM (`PUT /party-config` API) | Configure OAuth credentials (Keycloak or Auth0) and package IDs for each party |
 | 3 | Grant Ledger API rights | External (Canton admin) | Grant `actAs`/`readAs` rights for member parties on the decentralized party |
 | 4 | Upload DARs | DPM (DARs workflow) | Upload DAR packages to all participant nodes |
-| 5a | Deploy GovernanceRules | DPM (contracts workflow) | Deploy `GovernanceRules` contract with package `#governance-core-v0-rc4` (recommended) |
+| 5a | Deploy GovernanceRules | DPM (contracts workflow) | Deploy `GovernanceRules` contract with package `#governance-core-v1-rc1` (recommended) |
 | 5b | Deploy VaultGovernance | DPM (contracts workflow) | Deploy `VaultGovernanceRules` contract with package `#bitsafe-vault-governance-v0-rc8` (legacy) |
 | 6 | Create ProviderService | Governance action | `utility_create_provider_request` |
 | 7 | Create UserService | Governance action | `utility_create_user_request` |
@@ -300,8 +302,8 @@ Adding a 4th custodian involves both governance and topology:
       -d '{
         "decentralized_party_id": "joint-vault::1220...",
         "participant_id": "custodian-c::1220...",
-        "namespace_fingerprint": "1220...",
-        "new_threshold": 2
+        "new_threshold": 2,
+        "previous_threshold": 3
       }'
     ```
 
@@ -702,8 +704,8 @@ The `governance-token-custody` package enables governance-controlled token opera
 
 ### Prerequisites
 
-- `GovernanceRules` contract deployed (from `#governance-core-v0-rc4`)
-- `governance-token-custody` DAR uploaded to all participants (from `#governance-token-custody-v0-rc4`)
+- `GovernanceRules` contract deployed (from `#governance-core-v1-rc1`)
+- `governance-token-custody` DAR uploaded to all participants (from `#governance-token-custody-v1-rc1`)
 - Token infrastructure deployed (transfer factories, instruments, etc.)
 
 ### Set Up Canton Coin Preapproval
@@ -841,7 +843,7 @@ curl -X POST http://custodian-a:8080/governance/confirm \
   }'
 ```
 
-**Grant propose-only rights to a non-member (`v0-rc4`+):**
+**Grant propose-only rights to a non-member (`v1-rc1`+):**
 
 ```bash
 curl -X POST http://custodian-a:8080/governance/confirm \
