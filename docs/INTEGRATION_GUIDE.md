@@ -72,7 +72,7 @@ docker run -d \
   -e DECPM_LISTEN_ADDRESS=0.0.0.0 \
   -e DECPM_NOISE_PORT=9000 \
   -e DECPM_PUBLIC_ADDRESS=your-external-address \
-  public.ecr.aws/dlc-link/canton-decparty-manager:latest
+  public.ecr.aws/dlc-link/canton-decparty-manager:0.1.7   # pin a release; avoid :latest
 ```
 
 The container expects:
@@ -89,7 +89,7 @@ docker run -d \
   -v $(pwd)/data:/app/data \
   -v $(pwd)/.env:/app/.env:ro \
   -e DECPM_DIR=/app \
-  public.ecr.aws/dlc-link/canton-decparty-manager:latest
+  public.ecr.aws/dlc-link/canton-decparty-manager:0.1.7   # pin a release; avoid :latest
 ```
 
 The `-e DECPM_DIR=/app` above matches the `/app/...` mount paths and the

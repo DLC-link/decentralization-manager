@@ -1,7 +1,8 @@
 # Canton Decentralized Party Manager - User Guide
 
 This is an operator quick-start. The application is configured entirely through
-`DECPM_*` environment variables (or a `.env` file placed in the data directory).
+`DECPM_*` environment variables (or a `.env` file placed in the directory given
+by `--dir` / `DECPM_DIR`).
 There is **no TOML config file** — every setting is an env var / CLI flag.
 
 For full configuration, authentication (Keycloak / Auth0) setup, and Kubernetes
@@ -50,9 +51,10 @@ All configuration is supplied via `DECPM_*` environment variables. The key ones:
 | `DECPM_CANTON_SYNCHRONIZER` | Canton synchronizer name | `global` |
 | `DECPM_CANTON_NETWORK` | Canton network (`devnet`, `testnet`, `mainnet`) | `devnet` |
 
-Instead of `-e` flags, you can place a `.env` file in the data directory. It is
-loaded automatically on startup (before CLI parsing), so any `DECPM_*` key set
-there takes effect:
+Instead of `-e` flags, you can place a `.env` file in the directory given by
+`--dir` / `DECPM_DIR` (its root — not the `data/` subfolder). It is loaded
+automatically on startup (before CLI parsing), so any `DECPM_*` key set there
+takes effect:
 
 ```env
 DECPM_PORT=8080
