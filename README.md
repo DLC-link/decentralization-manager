@@ -19,6 +19,7 @@ A web application for managing decentralized parties in Canton blockchain networ
 - [Architecture Overview](docs/ARCHITECTURE.md) -- System architecture, core concepts, communication protocol, and technical constraints
 - [Integration Guide](docs/INTEGRATION_GUIDE.md) -- Deployment, configuration, authentication setup, and full API reference
 - [Use Cases](docs/USE_CASES.md) -- Vault governance, FAR rewards, multi-sig wallet, and utility service walkthroughs
+- [Contributing Guide](docs/CONTRIBUTING.md) -- Development setup, coding standards, commit conventions, and the PR process
 
 ## Architecture
 
@@ -592,6 +593,13 @@ docker tag dec-party-manager:latest public.ecr.aws/your-repo/dec-party-manager:v
 # Push
 docker push public.ecr.aws/your-repo/dec-party-manager:v1.0.0
 ```
+
+## Contributing
+
+Contributions are welcome! See the [Contributing Guide](docs/CONTRIBUTING.md) for
+development setup, coding standards, commit conventions, and the pull request
+process. Please also review our [Code of Conduct](docs/CODE_OF_CONDUCT.md) and,
+for vulnerabilities, our [Security Policy](docs/SECURITY.md).
 
 ## License
 
