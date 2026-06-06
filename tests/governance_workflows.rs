@@ -109,6 +109,11 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     // dismisses the rows it creates. PIDs are tracked in `f.current_pids` so
     // restarts compose across phases.
     // ----------------------------------------------------------------------
+    // Peer-health flip (kill a peer, assert P1 reports it Unreachable, restart,
+    // assert Connected again). Runs first in the chaos block, where the mesh is
+    // known healthy; it restarts P3 before returning so later phases see all
+    // three nodes.
+    phases::peer_health_flip::run(&mut f).await?;
     phases::identity_survives_dismiss::run(&mut f).await?;
     phases::cancel_cascades::run(&mut f).await?;
     phases::start_handler_conflict_409::run(&mut f).await?;
