@@ -425,6 +425,219 @@ impl WorkflowRunRow {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Assert a `Result` is `Err`. Test-only helper that avoids `.unwrap_err()`
+    /// (forbidden by the Bitsafe standard) while keeping the call sites terse.
+    fn assert_is_err<T: std::fmt::Debug>(result: Result<T>) {
+        assert!(result.is_err(), "expected Err, got {result:?}");
+    }
+
+    fn base_pending_invitation_row() -> PendingInvitationRow {
+        PendingInvitationRow {
+            id: "inv-1".to_string(),
+            invitation_type: "Onboarding".to_string(),
+            coordinator_pubkey: "deadbeef".to_string(),
+            received_at: 0,
+            prefix: None,
+            participants: None,
+            dar_filenames: None,
+            kicked_participant: None,
+            new_threshold: None,
+            previous_threshold: None,
+            dec_party_id: None,
+            package_names: None,
+            workflow_instance: None,
+        }
+    }
+
+    #[test]
+    fn pending_invitation_unknown_type_errs() {
+        let row = PendingInvitationRow {
+            invitation_type: "Bogus".to_string(),
+            ..base_pending_invitation_row()
+        };
+
+        assert_is_err(row.into_domain());
+    }
+
+    #[test]
+    fn pending_invitation_bad_participants_json_errs() {
+        let row = PendingInvitationRow {
+            participants: Some("not json".to_string()),
+            ..base_pending_invitation_row()
+        };
+
+        assert_is_err(row.into_domain());
+    }
+
+    #[test]
+    fn pending_invitation_bad_kicked_participant_errs() {
+        let row = PendingInvitationRow {
+            kicked_participant: Some("not-a-canton-id".to_string()),
+            ..base_pending_invitation_row()
+        };
+
+        assert_is_err(row.into_domain());
+    }
+
+    #[test]
+    fn pending_invitation_valid_row_decodes() -> Result {
+        let row = base_pending_invitation_row();
+
+        let inv = row.into_domain()?;
+
+        assert_eq!(inv.id, "inv-1");
+        assert!(matches!(inv.invitation_type, InvitationType::Onboarding));
+
+        Ok(())
+    }
+
+    fn base_workflow_run_row() -> WorkflowRunRow {
+        WorkflowRunRow {
+            instance_name: "run-1".to_string(),
+            kind: "Onboarding".to_string(),
+            role: "Coordinator".to_string(),
+            status: "idle".to_string(),
+            current_step: "start".to_string(),
+            step_index: 0,
+            step_total: 1,
+            config_json: "{}".to_string(),
+            coordinator_pubkey: None,
+            expected_peers_json: "[]".to_string(),
+            completed_peers_json: "[]".to_string(),
+            dec_party_id: None,
+            error: None,
+            dismissed: 0,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn workflow_run_bad_kind_errs() {
+        let row = WorkflowRunRow {
+            kind: "Bogus".to_string(),
+            ..base_workflow_run_row()
+        };
+
+        assert_is_err(row.into_domain());
+    }
+
+    #[test]
+    fn workflow_run_bad_role_errs() {
+        let row = WorkflowRunRow {
+            role: "Bogus".to_string(),
+            ..base_workflow_run_row()
+        };
+
+        assert_is_err(row.into_domain());
+    }
+
+    #[test]
+    fn workflow_run_bad_status_errs() {
+        let row = WorkflowRunRow {
+            status: "Bogus".to_string(),
+            ..base_workflow_run_row()
+        };
+
+        assert_is_err(row.into_domain());
+    }
+
+    #[test]
+    fn workflow_run_bad_expected_peers_json_errs() {
+        let row = WorkflowRunRow {
+            expected_peers_json: "not json".to_string(),
+            ..base_workflow_run_row()
+        };
+
+        assert_is_err(row.into_domain());
+    }
+
+    #[test]
+    fn workflow_run_valid_row_decodes() -> Result {
+        let row = base_workflow_run_row();
+
+        let run = row.into_domain()?;
+
+        assert_eq!(run.instance_name, "run-1");
+        assert!(matches!(run.kind, WorkflowKind::Onboarding));
+        assert!(matches!(run.role, WorkflowRole::Coordinator));
+        assert!(matches!(run.status, WorkflowProgress::Idle));
+
+        Ok(())
+    }
+
+    fn base_party_credentials_row() -> PartyCredentialsRow {
+        // `into_domain` parses these as full CantonIds, so they need a valid
+        // 34-byte (68 hex char) namespace — unlike PARTY_A/PARTY_B above, which
+        // the other tests use as raw strings they never parse.
+        let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
+        PartyCredentialsRow {
+            dec_party_id: format!("dec::{ns}"),
+            member_party_id: format!("member::{ns}"),
+            user_id: "user-1".to_string(),
+            keycloak_url: "https://kc.example".to_string(),
+            keycloak_realm: "realm".to_string(),
+            keycloak_client_id: "kc-client".to_string(),
+            keycloak_client_secret: None,
+            keycloak_username: None,
+            keycloak_password: None,
+            auth0_domain: None,
+            auth0_audience: None,
+            auth0_client_id: None,
+            auth0_client_secret: None,
+        }
+    }
+
+    #[test]
+    fn party_credentials_full_auth0_reconstructs() -> Result {
+        // All four auth0 columns Some → the tuple match arm builds an
+        // Auth0M2MConfig. Crypto key is unset in unit tests, so encrypt/decrypt
+        // are pass-through and the plaintext values round-trip verbatim.
+        let row = PartyCredentialsRow {
+            auth0_domain: Some("tenant.us.auth0.com".to_string()),
+            auth0_audience: Some("https://api.example".to_string()),
+            auth0_client_id: Some("auth0-client".to_string()),
+            auth0_client_secret: Some("auth0-secret".to_string()),
+            ..base_party_credentials_row()
+        };
+
+        let creds = row.into_domain()?;
+
+        let auth0 = match creds.auth0 {
+            Some(a) => a,
+            None => panic!("expected auth0 to be Some for a full config"),
+        };
+        assert_eq!(auth0.domain, "tenant.us.auth0.com");
+        assert_eq!(auth0.audience, "https://api.example");
+        assert_eq!(auth0.client_id, "auth0-client");
+        assert_eq!(auth0.client_secret, "auth0-secret");
+
+        Ok(())
+    }
+
+    #[test]
+    fn party_credentials_partial_auth0_is_none() -> Result {
+        // One auth0 column missing → the `_ => None` arm drops the whole config.
+        let row = PartyCredentialsRow {
+            auth0_domain: Some("tenant.us.auth0.com".to_string()),
+            auth0_audience: Some("https://api.example".to_string()),
+            auth0_client_id: None,
+            auth0_client_secret: Some("auth0-secret".to_string()),
+            ..base_party_credentials_row()
+        };
+
+        let creds = row.into_domain()?;
+
+        assert!(creds.auth0.is_none());
+
+        Ok(())
+    }
+}
+
 #[derive(Debug, sqlx::FromRow)]
 pub struct WorkflowArtifactRow {
     pub instance_name: String,
