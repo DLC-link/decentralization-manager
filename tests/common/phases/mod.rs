@@ -9,6 +9,7 @@ pub mod distribute_dars;
 pub mod generate_keys_idempotent;
 pub mod generic_vote;
 pub mod identity_survives_dismiss;
+pub mod invitation_decline;
 pub mod kick;
 pub mod notification_feed;
 pub mod owner_key_resilience;

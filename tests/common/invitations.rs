@@ -41,3 +41,19 @@ pub async fn post_accept_invitation(
         .with_context(|| format!("accepting invitation {invitation_id}"))?;
     Ok(())
 }
+
+pub async fn post_decline_invitation(
+    f: &Fixture,
+    port: u16,
+    invitation_id: &str,
+) -> anyhow::Result<()> {
+    let _: serde_json::Value = f
+        .post_json(
+            port,
+            "/invitations/decline",
+            &json!({ "id": invitation_id }),
+        )
+        .await
+        .with_context(|| format!("declining invitation {invitation_id}"))?;
+    Ok(())
+}

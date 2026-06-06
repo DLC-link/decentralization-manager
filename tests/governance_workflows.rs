@@ -116,6 +116,7 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     phases::peer_health_flip::run(&mut f).await?;
     phases::identity_survives_dismiss::run(&mut f).await?;
     phases::cancel_cascades::run(&mut f).await?;
+    phases::invitation_decline::run(&mut f).await?;
     phases::start_handler_conflict_409::run(&mut f).await?;
     phases::restart_coordinator_resume::run(&mut f).await?; // G1
     phases::restart_peer_resume::run(&mut f).await?; // G2
