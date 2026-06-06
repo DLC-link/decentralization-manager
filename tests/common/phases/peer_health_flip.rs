@@ -73,12 +73,14 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     })
     .await?;
 
-    // Restart P2 → P1 must see it Connected again once the Noise mesh reconverges.
+    // Respawn P2 → P1 must see it Connected again once the Noise mesh
+    // reconverges. Use `spawn_only` (not `restart_node`): `kill_node` already
+    // took the tracked PID, so `restart_node` would fail with "no tracked pid".
     chaos::say(
         "PH",
-        "restarting P2; expecting P1 to report Connected again",
+        "respawning P2; expecting P1 to report Connected again",
     );
-    processes::restart_node(f, 2).await?;
+    processes::spawn_only(f, 2).await?;
     chaos::poll_until(Duration::from_secs(120), || async {
         Ok(p1_status_of(f, &p2_id).await? == Some("Connected".to_string()))
     })
