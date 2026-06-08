@@ -595,4 +595,4 @@ docker push public.ecr.aws/your-repo/dec-party-manager:v1.0.0
 
 ## License
 
-Proprietary - All rights reserved.
+Licensed under the [Apache License 2.0](LICENSE).
