@@ -111,7 +111,7 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     // ----------------------------------------------------------------------
     // Peer-health flip (kill a peer, assert P1 reports it Unreachable, restart,
     // assert Connected again). Runs first in the chaos block, where the mesh is
-    // known healthy; it restarts P3 before returning so later phases see all
+    // known healthy; it respawns P2 before returning so later phases see all
     // three nodes.
     phases::peer_health_flip::run(&mut f).await?;
     phases::identity_survives_dismiss::run(&mut f).await?;

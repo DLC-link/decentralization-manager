@@ -8,10 +8,13 @@
 //! flips it to `Unreachable`, restart P2, and assert P1 flips it back to
 //! `Connected`.
 //!
-//! We target P2 (not P3): only P1 and P2 are dpm processes the harness spawns
-//! and tracks a PID for — the third node is an externally-managed `sv` node
-//! with no tracked PID, so it can't be killed/restarted from here (the same
-//! reason every other chaos phase operates on P2).
+//! We target P2, matching every other chaos phase. The harness spawns and
+//! tracks a PID for all three participant processes (`P1_PID`/`P2_PID`/
+//! `P3_PID`); the third one's Canton identity is an `sv` (super-validator)
+//! party, so the established convention is to kill/restart P2. We use
+//! `kill_node` + `spawn_only` rather than `restart_node`: `kill_node` takes
+//! (clears) the tracked PID, so `restart_node` — which needs one — would then
+//! fail with "no tracked pid".
 //!
 //! No `workflow_runs` rows are created, so there is nothing to dismiss; the
 //! phase restarts P2 before returning so later phases see a full mesh.
