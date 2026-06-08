@@ -59,6 +59,29 @@ mod tests {
     }
 
     #[test]
+    fn should_probe_returns_false_just_before_stale() {
+        // Pins the comparison at `>= STALE_AFTER`: one nanosecond shy of the
+        // threshold must NOT probe. Without this, flipping `>=` to `>` would
+        // still pass the exact-boundary test above.
+        let mut map = HashMap::new();
+        let now = Instant::now();
+        map.insert("alice".to_string(), now);
+        assert!(!should_probe(
+            &map,
+            "alice",
+            now + STALE_AFTER - Duration::from_nanos(1)
+        ));
+    }
+
+    #[test]
+    fn should_probe_returns_true_well_past_stale() {
+        let mut map = HashMap::new();
+        let now = Instant::now();
+        map.insert("alice".to_string(), now);
+        assert!(should_probe(&map, "alice", now + STALE_AFTER * 2));
+    }
+
+    #[test]
     fn bump_inserts_when_missing() {
         let mut map = HashMap::new();
         let now = Instant::now();

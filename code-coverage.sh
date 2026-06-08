@@ -42,6 +42,11 @@ grcov "${GRCOV_ARGS[@]}"
 COVERAGE=$(jq '.coveragePercent' coverage.json)
 echo "Code coverage: $COVERAGE%"
 
+# NOTE: this measures UNIT-test coverage only. The end-to-end governance suite
+# (tests/governance_workflows.rs) is `#[ignore]`d and runs separately in the
+# `integration-test` CI job, so it contributes nothing to this number — do not
+# read it as whole-product coverage. The threshold below is a regression floor
+# for unit-tested code, not a coverage target.
 if (( $(echo "$COVERAGE < 6" | bc -l) )); then
     echo "Coverage $COVERAGE% is below threshold of 6%"
     exit 1

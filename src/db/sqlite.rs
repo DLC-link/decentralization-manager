@@ -43,6 +43,11 @@ pub async fn connect(db_path: &Path) -> Result<SqlitePool> {
 
     let options = SqliteConnectOptions::from_str(&db_url)?
         .create_if_missing(true)
+        // Enforce foreign keys explicitly. The schema relies on
+        // `ON DELETE CASCADE` (e.g. dec_party -> dec_party_owner/participant);
+        // sqlx defaults this pragma on, but pinning it here means a future
+        // driver/default change can't silently disable cascade enforcement.
+        .foreign_keys(true)
         .journal_mode(SqliteJournalMode::Wal)
         .busy_timeout(Duration::from_secs(30));
 
@@ -1083,7 +1088,7 @@ mod tests {
 
     use crate::{
         canton_id::CantonId,
-        config::{KeycloakConfig, PackageConfig, PartyCredentials, Peer},
+        config::{Auth0M2MConfig, KeycloakConfig, PackageConfig, PartyCredentials, Peer},
         db::{
             rows::{DecPartyContractRow, DecPartyParticipantRow, DecPartyRow},
             schema::{Commitable, SchemaRead, SchemaWrite},
@@ -1354,9 +1359,20 @@ mod tests {
 
         let result = pool.get_dec_party_participants(&party_id).await?;
         assert_eq!(result.len(), 2);
-        assert_eq!(result[0].permission, "submission");
-        assert_eq!(result[0].owner_key, Some("fingerprint-1".to_string()));
-        assert_eq!(result[1].owner_key, None);
+        // Assert by participant_uid, not positional index: the backing query
+        // has no ORDER BY, so row order is not contractual and must not be
+        // relied on.
+        let node1 = result.iter().find(|p| p.participant_uid == "node1::1220aa");
+        let node2 = result.iter().find(|p| p.participant_uid == "node2::1220bb");
+        assert!(
+            matches!(node1, Some(p) if p.permission == "submission"
+                && p.owner_key.as_deref() == Some("fingerprint-1")),
+            "node1 row missing or has wrong permission/owner_key"
+        );
+        assert!(
+            matches!(node2, Some(p) if p.permission == "confirmation" && p.owner_key.is_none()),
+            "node2 row missing or has wrong permission/owner_key"
+        );
 
         Ok(())
     }
@@ -2031,6 +2047,45 @@ mod tests {
         let visible = pool.get_visible_workflow_runs().await?;
         assert!(visible.is_empty());
 
+        // A Failed run KEEPS its artefacts for post-mortem (unlike the
+        // Completed path above); only `dismiss` releases them.
+        let failed = test_run("party-b-failed", "Onboarding", "Coordinator");
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_workflow_run(&failed).await?;
+        tx.write_workflow_artifact(&failed.instance_name, "dns_proto", None, b"keep-me")
+            .await?;
+        Commitable::commit(tx).await?;
+
+        let mut tx = pool.begin_transaction().await?;
+        tx.set_workflow_run_status(
+            &failed.instance_name,
+            WorkflowProgress::Failed,
+            Some("boom"),
+            4000,
+        )
+        .await?;
+        Commitable::commit(tx).await?;
+
+        let kept = pool
+            .read_workflow_artifact(&failed.instance_name, "dns_proto", None)
+            .await?;
+        assert!(
+            kept.is_some(),
+            "Failed runs must keep artefacts for post-mortem"
+        );
+
+        // Dismissing the Failed run finally releases the artefacts.
+        let mut tx = pool.begin_transaction().await?;
+        tx.dismiss_workflow_run(&failed.instance_name).await?;
+        Commitable::commit(tx).await?;
+        let after_dismiss = pool
+            .read_workflow_artifact(&failed.instance_name, "dns_proto", None)
+            .await?;
+        assert!(
+            after_dismiss.is_none(),
+            "dismiss must drop a Failed run's artefacts"
+        );
+
         Ok(())
     }
 
@@ -2043,10 +2098,19 @@ mod tests {
         tx.upsert_workflow_run(&a).await?;
         Commitable::commit(tx).await?;
 
-        // A second InProgress run of the same (kind, role) must fail.
+        // A second InProgress run of the same (kind, role) must fail — and
+        // specifically with a UNIQUE constraint violation, not merely any
+        // error. A malformed row or a JSON-encode failure would also be
+        // `is_err()` and would let a dropped partial index slip through.
         let mut tx = pool.begin_transaction().await?;
-        let err = tx.upsert_workflow_run(&b).await;
-        assert!(err.is_err(), "expected unique-partial-index violation");
+        let Err(err) = tx.upsert_workflow_run(&b).await else {
+            panic!("expected a UNIQUE constraint violation, got Ok");
+        };
+        let full = format!("{err:#}");
+        assert!(
+            full.contains("UNIQUE constraint"),
+            "expected a UNIQUE constraint violation, got: {full}"
+        );
         // tx is poisoned — drop it
         drop(tx);
 
@@ -2112,6 +2176,336 @@ mod tests {
             .list_workflow_artifacts(&run.instance_name, "signed_dns_proposal")
             .await?;
         assert!(listed.is_empty());
+
+        Ok(())
+    }
+
+    // ====================================================================
+    // delete_stale_dec_parties
+    // ====================================================================
+
+    /// Build a `DecPartyRow` with a caller-chosen `party_id` while keeping a
+    /// fixed `prefix`. `test_dec_party` ties the party_id to the prefix, so it
+    /// cannot produce several distinct parties under the same prefix — which is
+    /// exactly what the stale-delete prefix-scoping test needs.
+    fn dec_party_row(prefix: &str, party_id: &str) -> DecPartyRow {
+        DecPartyRow {
+            party_id: party_id.to_string(),
+            prefix: prefix.to_string(),
+            threshold: 2,
+            updated_at: 1000,
+            my_owner_key: None,
+        }
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_delete_stale_dec_parties_prefix_scoped(pool: SqlitePool) -> Result {
+        // Three parties under `net-a`, one under `net-b`.
+        let a1 = format!("a1::{TEST_NS}");
+        let a2 = format!("a2::{TEST_NS}");
+        let a3 = format!("a3::{TEST_NS}");
+        let b1 = format!("b1::{TEST_NS}");
+
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_dec_party(&dec_party_row("net-a", &a1)).await?;
+        tx.upsert_dec_party(&dec_party_row("net-a", &a2)).await?;
+        tx.upsert_dec_party(&dec_party_row("net-a", &a3)).await?;
+        tx.upsert_dec_party(&dec_party_row("net-b", &b1)).await?;
+        Commitable::commit(tx).await?;
+
+        assert_eq!(pool.get_dec_parties_by_prefix("net-a").await?.len(), 3);
+        assert_eq!(pool.get_dec_parties_by_prefix("net-b").await?.len(), 1);
+
+        // Keep only a1 fresh under net-a → a2/a3 must go, a1 stays, and the
+        // net-b party must be untouched (proves the `prefix = ?` scoping).
+        let mut tx = pool.begin_transaction().await?;
+        tx.delete_stale_dec_parties("net-a", std::slice::from_ref(&a1))
+            .await?;
+        Commitable::commit(tx).await?;
+
+        let net_a = pool.get_dec_parties_by_prefix("net-a").await?;
+        assert_eq!(net_a.len(), 1);
+        assert_eq!(net_a[0].party_id, a1);
+        let net_b = pool.get_dec_parties_by_prefix("net-b").await?;
+        assert_eq!(net_b.len(), 1);
+        assert_eq!(net_b[0].party_id, b1);
+
+        // Empty fresh set for net-a → the early-return prefix-wide delete fires;
+        // every net-a party goes while net-b still survives.
+        let mut tx = pool.begin_transaction().await?;
+        tx.delete_stale_dec_parties("net-a", &[]).await?;
+        Commitable::commit(tx).await?;
+
+        assert!(pool.get_dec_parties_by_prefix("net-a").await?.is_empty());
+        let net_b = pool.get_dec_parties_by_prefix("net-b").await?;
+        assert_eq!(net_b.len(), 1);
+        assert_eq!(net_b[0].party_id, b1);
+
+        Ok(())
+    }
+
+    // ====================================================================
+    // dec_party_identity
+    // ====================================================================
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_dec_party_identity_roundtrip(pool: SqlitePool) -> Result {
+        let party_id = test_party_id("net-a");
+        let kind = "peer_public_keys";
+
+        // Peers deliberately written out of order; ids sort as a, b, c.
+        let mut tx = pool.begin_transaction().await?;
+        tx.write_dec_party_identity(&party_id, kind, "c::1220cc", b"payload-c")
+            .await?;
+        tx.write_dec_party_identity(&party_id, kind, "a::1220aa", b"payload-a")
+            .await?;
+        tx.write_dec_party_identity(&party_id, kind, "b::1220bb", b"payload-b")
+            .await?;
+        Commitable::commit(tx).await?;
+
+        // read returns each peer's exact bytes.
+        assert_eq!(
+            pool.read_dec_party_identity(&party_id, kind, "a::1220aa")
+                .await?,
+            Some(b"payload-a".to_vec())
+        );
+        assert_eq!(
+            pool.read_dec_party_identity(&party_id, kind, "b::1220bb")
+                .await?,
+            Some(b"payload-b".to_vec())
+        );
+        assert_eq!(
+            pool.read_dec_party_identity(&party_id, kind, "c::1220cc")
+                .await?,
+            Some(b"payload-c".to_vec())
+        );
+
+        // A missing peer → None.
+        assert_eq!(
+            pool.read_dec_party_identity(&party_id, kind, "missing::1220dd")
+                .await?,
+            None
+        );
+        // A different artifact_kind on a known peer → None.
+        assert_eq!(
+            pool.read_dec_party_identity(&party_id, "other_kind", "a::1220aa")
+                .await?,
+            None
+        );
+
+        // list returns rows ordered a, b, c with payloads paired correctly.
+        let listed = pool.list_dec_party_identity(&party_id, kind).await?;
+        assert_eq!(
+            listed,
+            vec![
+                ("a::1220aa".to_string(), b"payload-a".to_vec()),
+                ("b::1220bb".to_string(), b"payload-b".to_vec()),
+                ("c::1220cc".to_string(), b"payload-c".to_vec()),
+            ]
+        );
+
+        // INSERT OR REPLACE: re-writing the same (party, kind, peer) replaces
+        // the payload rather than inserting a duplicate row.
+        let mut tx = pool.begin_transaction().await?;
+        tx.write_dec_party_identity(&party_id, kind, "a::1220aa", b"payload-a-v2")
+            .await?;
+        Commitable::commit(tx).await?;
+
+        assert_eq!(
+            pool.read_dec_party_identity(&party_id, kind, "a::1220aa")
+                .await?,
+            Some(b"payload-a-v2".to_vec())
+        );
+        let listed = pool.list_dec_party_identity(&party_id, kind).await?;
+        assert_eq!(listed.len(), 3);
+        assert_eq!(
+            listed[0],
+            ("a::1220aa".to_string(), b"payload-a-v2".to_vec())
+        );
+
+        Ok(())
+    }
+
+    // ====================================================================
+    // Party credentials — Auth0 round-trip
+    // ====================================================================
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_party_credentials_auth0_roundtrip(pool: SqlitePool) -> Result {
+        let mut creds = test_creds("party-a");
+        creds.auth0 = Some(Auth0M2MConfig {
+            domain: "tenant.us.auth0.com".to_string(),
+            audience: "https://api.example.com".to_string(),
+            client_id: "auth0-client-id".to_string(),
+            client_secret: "auth0-client-secret".to_string(),
+        });
+
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_party_credentials(&creds).await?;
+        Commitable::commit(tx).await?;
+
+        let assert_auth0 = |c: &PartyCredentials| {
+            let Some(a) = c.auth0.as_ref() else {
+                panic!("auth0 config did not round-trip");
+            };
+            assert_eq!(a.domain, "tenant.us.auth0.com");
+            assert_eq!(a.audience, "https://api.example.com");
+            assert_eq!(a.client_id, "auth0-client-id");
+            assert_eq!(a.client_secret, "auth0-client-secret");
+        };
+
+        let all = pool.get_all_party_credentials().await?;
+        assert_eq!(all.len(), 1);
+        assert_auth0(&all[0]);
+
+        let Some(by_id) = pool.get_party_credentials(&creds.dec_party_id).await? else {
+            panic!("credentials not found by dec_party_id");
+        };
+        assert_auth0(&by_id);
+
+        Ok(())
+    }
+
+    // ====================================================================
+    // get_all_dec_party_* — INNER JOIN + prefix scoping
+    // ====================================================================
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_get_all_dec_party_joins_and_prefix(pool: SqlitePool) -> Result {
+        let party_a = test_party_id("net-a");
+        let party_a_str = party_a.to_string();
+        let party_b = test_party_id("net-b");
+        let party_b_str = party_b.to_string();
+
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_dec_party(&test_dec_party("net-a")).await?;
+        tx.upsert_dec_party(&test_dec_party("net-b")).await?;
+
+        // net-a: 2 owners, 1 participant. net-b: 1 owner, 2 participants.
+        tx.replace_dec_party_owners(
+            &party_a,
+            &["a-owner-1".to_string(), "a-owner-2".to_string()],
+        )
+        .await?;
+        tx.replace_dec_party_owners(&party_b, &["b-owner-1".to_string()])
+            .await?;
+
+        tx.replace_dec_party_participants(
+            &party_a,
+            &[DecPartyParticipantRow {
+                dec_party_id: party_a_str.clone(),
+                participant_uid: "a-node1::1220aa".to_string(),
+                permission: "submission".to_string(),
+                owner_key: None,
+            }],
+        )
+        .await?;
+        tx.replace_dec_party_participants(
+            &party_b,
+            &[
+                DecPartyParticipantRow {
+                    dec_party_id: party_b_str.clone(),
+                    participant_uid: "b-node1::1220bb".to_string(),
+                    permission: "submission".to_string(),
+                    owner_key: None,
+                },
+                DecPartyParticipantRow {
+                    dec_party_id: party_b_str.clone(),
+                    participant_uid: "b-node2::1220cc".to_string(),
+                    permission: "confirmation".to_string(),
+                    owner_key: None,
+                },
+            ],
+        )
+        .await?;
+        Commitable::commit(tx).await?;
+
+        // Empty prefix → every JOIN-matched row across both parties.
+        let all_owners = pool.get_all_dec_party_owners("").await?;
+        assert_eq!(all_owners.len(), 3);
+        let all_participants = pool.get_all_dec_party_participants("").await?;
+        assert_eq!(all_participants.len(), 3);
+
+        // Specific prefix → only that party's rows.
+        let a_owners = pool.get_all_dec_party_owners("net-a").await?;
+        assert_eq!(a_owners.len(), 2);
+        assert!(a_owners.iter().all(|(id, _)| *id == party_a_str));
+        let b_owners = pool.get_all_dec_party_owners("net-b").await?;
+        assert_eq!(b_owners.len(), 1);
+        assert_eq!(b_owners[0], (party_b_str.clone(), "b-owner-1".to_string()));
+
+        let a_participants = pool.get_all_dec_party_participants("net-a").await?;
+        assert_eq!(a_participants.len(), 1);
+        assert_eq!(a_participants[0].participant_uid, "a-node1::1220aa");
+        let b_participants = pool.get_all_dec_party_participants("net-b").await?;
+        assert_eq!(b_participants.len(), 2);
+        assert!(b_participants.iter().all(|p| p.dec_party_id == party_b_str));
+
+        Ok(())
+    }
+
+    // ====================================================================
+    // delete_pending_invitations_by_type_and_coordinator
+    // ====================================================================
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_delete_pending_invitations_by_type_and_coordinator(pool: SqlitePool) -> Result {
+        let coordinator = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string();
+
+        // Two invites from the SAME coordinator, DIFFERENT invitation_type.
+        let onboarding = PendingInvitation {
+            id: "onboarding-eeeeeeeeeeeeeeee".to_string(),
+            invitation_type: InvitationType::Onboarding,
+            coordinator_pubkey: coordinator.clone(),
+            coordinator_name: None,
+            received_at: 1000,
+            prefix: Some("my-party".to_string()),
+            participants: Vec::new(),
+            dar_filenames: Vec::new(),
+            kicked_participant: None,
+            new_threshold: None,
+            previous_threshold: None,
+            dec_party_id: None,
+            package_names: Vec::new(),
+            workflow_instance: None,
+        };
+        let dars = PendingInvitation {
+            id: "dars-eeeeeeeeeeeeeeee".to_string(),
+            invitation_type: InvitationType::Dars,
+            coordinator_pubkey: coordinator.clone(),
+            coordinator_name: None,
+            received_at: 2000,
+            prefix: None,
+            participants: Vec::new(),
+            dar_filenames: vec!["app.dar".to_string()],
+            kicked_participant: None,
+            new_threshold: None,
+            previous_threshold: None,
+            dec_party_id: None,
+            package_names: Vec::new(),
+            workflow_instance: None,
+        };
+
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_pending_invitation(&onboarding).await?;
+        tx.upsert_pending_invitation(&dars).await?;
+        Commitable::commit(tx).await?;
+        assert_eq!(pool.get_all_pending_invitations().await?.len(), 2);
+
+        // Delete only the Onboarding type → the Dars invite from the same
+        // coordinator must survive (proves the `AND invitation_type` clause).
+        let mut tx = pool.begin_transaction().await?;
+        tx.delete_pending_invitations_by_type_and_coordinator(
+            InvitationType::Onboarding,
+            &coordinator,
+        )
+        .await?;
+        Commitable::commit(tx).await?;
+
+        let remaining = pool.get_all_pending_invitations().await?;
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, dars.id);
+        assert_eq!(remaining[0].invitation_type, InvitationType::Dars);
 
         Ok(())
     }

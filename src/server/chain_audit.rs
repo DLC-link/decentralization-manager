@@ -637,6 +637,10 @@ pub async fn save_chain_audit_cache(
 
 #[cfg(test)]
 mod tests {
+    use canton_proto_rs::com::daml::ledger::api::v2::{
+        Enum, Optional, RecordField, TextMap, Variant,
+    };
+
     use super::*;
 
     fn entry_with_event_type(event_type: &str) -> ChainAuditEntry {
@@ -680,6 +684,157 @@ mod tests {
                 "{event_type} should be dropped"
             );
         }
+    }
+
+    fn id(entity_name: &str) -> Identifier {
+        Identifier {
+            package_id: "#governance-core-v1-rc1".to_string(),
+            module_name: "Governance.Rules".to_string(),
+            entity_name: entity_name.to_string(),
+        }
+    }
+
+    fn text(s: &str) -> Value {
+        Value {
+            sum: Some(value::Sum::Text(s.to_string())),
+        }
+    }
+
+    fn variant(ctor: &str, inner: Value) -> Value {
+        Value {
+            sum: Some(value::Sum::Variant(Box::new(Variant {
+                variant_id: None,
+                constructor: ctor.to_string(),
+                value: Some(Box::new(inner)),
+            }))),
+        }
+    }
+
+    #[test]
+    fn test_classify_choice_precedence() {
+        assert_eq!(
+            classify_choice("GovernanceRules_ExecuteConfirmedAction"),
+            "execute"
+        );
+        assert_eq!(classify_choice("GovernanceRules_ConfirmAction"), "confirm");
+        assert_eq!(classify_choice("GovernanceRules_CancelAction"), "cancel");
+        assert_eq!(classify_choice("GovernanceRules_ExpireAction"), "expire");
+        assert_eq!(classify_choice("Archive"), "other");
+
+        // Precedence probe: a name containing BOTH `_Cancel` and `_Execute`.
+        // The if/else chain tests `_Cancel` first, so it wins. Pins ordering.
+        assert_eq!(classify_choice("Foo_Cancel_Execute"), "cancel");
+    }
+
+    #[test]
+    fn test_classify_created() {
+        // "Confirmation" → confirm (checked before the `Rules` / child branches).
+        assert_eq!(
+            classify_created(&id("GovernanceConfirmation"), false),
+            ("confirm".to_string(), "GovernanceConfirmation".to_string())
+        );
+        // Ends with "Rules" → create.
+        assert_eq!(
+            classify_created(&id("GovernanceRules"), false),
+            ("create".to_string(), "GovernanceRules".to_string())
+        );
+        // Contains "ExecutionResult" → execute_result.
+        assert_eq!(
+            classify_created(&id("GovernanceExecutionResult"), false),
+            (
+                "execute_result".to_string(),
+                "GovernanceExecutionResult".to_string()
+            )
+        );
+        // A plain proposal entity, not a child of an exercise → propose.
+        assert_eq!(
+            classify_created(&id("GovernanceProposal"), false),
+            ("propose".to_string(), "GovernanceProposal".to_string())
+        );
+        // The same entity, but created as a downstream effect of an exercise → create.
+        assert_eq!(
+            classify_created(&id("GovernanceProposal"), true),
+            ("create".to_string(), "GovernanceProposal".to_string())
+        );
+    }
+
+    #[test]
+    fn test_value_to_json() {
+        // Variant("AV_Text", inner Text "x")
+        assert_eq!(
+            value_to_json(&variant("AV_Text", text("x"))),
+            json!({ "_variant": "AV_Text", "value": "x" })
+        );
+
+        // An empty TextMap → unsupported-map marker.
+        let empty_map = Value {
+            sum: Some(value::Sum::TextMap(TextMap {
+                entries: Vec::new(),
+            })),
+        };
+        assert_eq!(value_to_json(&empty_map), json!({ "_unsupported": "map" }));
+
+        // Numeric is emitted as a JSON STRING to preserve financial precision.
+        let numeric = Value {
+            sum: Some(value::Sum::Numeric("1.50".to_string())),
+        };
+        assert_eq!(value_to_json(&numeric), json!("1.50"));
+
+        // Int64 → JSON number.
+        let int = Value {
+            sum: Some(value::Sum::Int64(7)),
+        };
+        assert_eq!(value_to_json(&int), json!(7));
+
+        // Optional(None) → Null.
+        let none_opt = Value {
+            sum: Some(value::Sum::Optional(Box::new(Optional { value: None }))),
+        };
+        assert_eq!(value_to_json(&none_opt), JsonValue::Null);
+
+        // Unit → Null.
+        let unit = Value {
+            sum: Some(value::Sum::Unit(())),
+        };
+        assert_eq!(value_to_json(&unit), JsonValue::Null);
+
+        // Enum constructor "Red" → JSON string.
+        let red = Value {
+            sum: Some(value::Sum::Enum(Enum {
+                enum_id: None,
+                constructor: "Red".to_string(),
+            })),
+        };
+        assert_eq!(value_to_json(&red), json!("Red"));
+    }
+
+    #[test]
+    fn test_record_to_json_inner() {
+        let record = Record {
+            record_id: None,
+            fields: vec![
+                RecordField {
+                    label: String::new(),
+                    value: Some(text("a")),
+                },
+                RecordField {
+                    label: "named".to_string(),
+                    value: Some(Value {
+                        sum: Some(value::Sum::Int64(1)),
+                    }),
+                },
+                RecordField {
+                    label: "gone".to_string(),
+                    value: None,
+                },
+            ],
+        };
+
+        let out = record_to_json_inner(&record);
+        assert_eq!(out, json!({ "_0": "a", "named": 1, "gone": null }));
+
+        // record_to_json(&None) → Null.
+        assert_eq!(record_to_json(&None), JsonValue::Null);
     }
 
     #[test]

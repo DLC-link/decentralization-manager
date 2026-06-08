@@ -27,13 +27,10 @@ pub fn is_enabled() -> bool {
     ENCRYPTION_KEY.get().is_some()
 }
 
-/// Encrypt a plaintext string. Returns base64-encoded `nonce || ciphertext`.
-/// If encryption is not enabled, returns the plaintext unchanged.
-pub fn encrypt(plaintext: &str) -> Result<String> {
-    let Some(key) = ENCRYPTION_KEY.get() else {
-        return Ok(plaintext.to_string());
-    };
-
+/// Encrypt a plaintext string with an explicit key. Returns base64-encoded
+/// `nonce || ciphertext`. Split out from [`encrypt`] so the cipher can be
+/// exercised in tests without touching the process-global [`ENCRYPTION_KEY`].
+fn encrypt_str_with_key(key: &[u8; 32], plaintext: &str) -> Result<String> {
     let cipher = Aes256Gcm::new(key.into());
     let mut nonce_bytes = [0u8; 12];
     OsRng.fill_bytes(&mut nonce_bytes);
@@ -52,15 +49,11 @@ pub fn encrypt(plaintext: &str) -> Result<String> {
     ))
 }
 
-/// Decrypt a base64-encoded `nonce || ciphertext` string.
-/// If encryption is not enabled, returns the input unchanged.
-/// If decryption fails (e.g. plaintext from before encryption was enabled),
-/// returns the input unchanged for backward compatibility.
-pub fn decrypt(stored: &str) -> Result<String> {
-    let Some(key) = ENCRYPTION_KEY.get() else {
-        return Ok(stored.to_string());
-    };
-
+/// Decrypt a base64-encoded `nonce || ciphertext` string with an explicit key.
+/// Returns the input unchanged when it does not decode as `nonce || ciphertext`
+/// or when AES-GCM authentication fails (legacy plaintext / wrong-key
+/// compatibility).
+fn decrypt_str_with_key(key: &[u8; 32], stored: &str) -> Result<String> {
     let decoded = match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, stored) {
         Ok(d) if d.len() > 12 => d,
         _ => return Ok(stored.to_string()), // Not encrypted, return as-is
@@ -68,11 +61,34 @@ pub fn decrypt(stored: &str) -> Result<String> {
 
     let (nonce_bytes, ciphertext) = decoded.split_at(12);
     let cipher = Aes256Gcm::new(key.into());
-    let nonce: [u8; 12] = nonce_bytes.try_into().unwrap();
+    let nonce: [u8; 12] = match nonce_bytes.try_into() {
+        Ok(n) => n,
+        Err(_) => return Ok(stored.to_string()),
+    };
 
     match cipher.decrypt(&nonce.into(), ciphertext) {
         Ok(plaintext) => String::from_utf8(plaintext).context("decrypted value is not valid UTF-8"),
         Err(_) => Ok(stored.to_string()), // Decryption failed, likely plaintext
+    }
+}
+
+/// Encrypt a plaintext string. Returns base64-encoded `nonce || ciphertext`.
+/// If encryption is not enabled, returns the plaintext unchanged.
+pub fn encrypt(plaintext: &str) -> Result<String> {
+    match ENCRYPTION_KEY.get() {
+        Some(key) => encrypt_str_with_key(key, plaintext),
+        None => Ok(plaintext.to_string()),
+    }
+}
+
+/// Decrypt a base64-encoded `nonce || ciphertext` string.
+/// If encryption is not enabled, returns the input unchanged.
+/// If decryption fails (e.g. plaintext from before encryption was enabled),
+/// returns the input unchanged for backward compatibility.
+pub fn decrypt(stored: &str) -> Result<String> {
+    match ENCRYPTION_KEY.get() {
+        Some(key) => decrypt_str_with_key(key, stored),
+        None => Ok(stored.to_string()),
     }
 }
 
@@ -101,10 +117,15 @@ pub fn decrypt_opt(value: Option<String>) -> Result<Option<String>> {
 ///
 /// Returns an error if AES-GCM encryption fails.
 pub fn encrypt_bytes(plaintext: &[u8]) -> Result<Vec<u8>> {
-    let Some(key) = ENCRYPTION_KEY.get() else {
-        return Ok(plaintext.to_vec());
-    };
+    match ENCRYPTION_KEY.get() {
+        Some(key) => encrypt_bytes_with_key(key, plaintext),
+        None => Ok(plaintext.to_vec()),
+    }
+}
 
+/// Encrypt a binary blob with an explicit key. Split out from [`encrypt_bytes`]
+/// so the cipher can be exercised in tests without the process-global key.
+fn encrypt_bytes_with_key(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>> {
     let cipher = Aes256Gcm::new(key.into());
     let mut nonce_bytes = [0u8; 12];
     OsRng.fill_bytes(&mut nonce_bytes);
@@ -127,10 +148,16 @@ pub fn encrypt_bytes(plaintext: &[u8]) -> Result<Vec<u8>> {
 ///
 /// Returns an error only if the stored blob has a malformed nonce length.
 pub fn decrypt_bytes(stored: &[u8]) -> Result<Vec<u8>> {
-    let Some(key) = ENCRYPTION_KEY.get() else {
-        return Ok(stored.to_vec());
-    };
+    match ENCRYPTION_KEY.get() {
+        Some(key) => decrypt_bytes_with_key(key, stored),
+        None => Ok(stored.to_vec()),
+    }
+}
 
+/// Decrypt a `nonce || ciphertext` blob with an explicit key. Returns the input
+/// unchanged for short blobs or on AES-GCM failure (legacy plaintext /
+/// wrong-key compatibility).
+fn decrypt_bytes_with_key(key: &[u8; 32], stored: &[u8]) -> Result<Vec<u8>> {
     if stored.len() <= 12 {
         return Ok(stored.to_vec());
     }
@@ -151,31 +178,78 @@ pub fn decrypt_bytes(stored: &[u8]) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_encrypt_decrypt_roundtrip() {
-        // Use a test-only key (don't use the global OnceLock for this)
-        use sha2::{Digest, Sha256};
-        let key: [u8; 32] = Sha256::digest(b"test-key").into();
-        ENCRYPTION_KEY.set(key).ok(); // May already be set by another test
+    // Test keys are passed explicitly to the `*_with_key` cores so these tests
+    // never touch the process-global `ENCRYPTION_KEY` (whose `OnceLock` made
+    // the previous round-trip test order-dependent across the whole binary).
+    const TEST_KEY: [u8; 32] = [7u8; 32];
+    const OTHER_KEY: [u8; 32] = [9u8; 32];
 
+    #[test]
+    fn string_round_trips_and_ciphertext_differs() -> Result {
         let plaintext = "my-secret-value";
-        let encrypted = encrypt(plaintext).unwrap();
-        assert_ne!(encrypted, plaintext);
-
-        let decrypted = decrypt(&encrypted).unwrap();
-        assert_eq!(decrypted, plaintext);
+        let encrypted = encrypt_str_with_key(&TEST_KEY, plaintext)?;
+        assert_ne!(
+            encrypted, plaintext,
+            "ciphertext must differ from plaintext"
+        );
+        assert_eq!(decrypt_str_with_key(&TEST_KEY, &encrypted)?, plaintext);
+        Ok(())
     }
 
     #[test]
-    fn test_decrypt_plaintext_passthrough() {
-        // Plaintext that isn't valid base64+AES should pass through
-        let result = decrypt("just-a-plain-string").unwrap();
-        assert_eq!(result, "just-a-plain-string");
+    fn string_decrypt_with_wrong_key_does_not_yield_plaintext() -> Result {
+        // AES-GCM authentication failure falls back to returning the stored
+        // value verbatim (legacy-plaintext compatibility). The security-
+        // relevant property: a wrong key never reveals the original plaintext.
+        let plaintext = "my-secret-value";
+        let encrypted = encrypt_str_with_key(&TEST_KEY, plaintext)?;
+        let out = decrypt_str_with_key(&OTHER_KEY, &encrypted)?;
+        assert_ne!(out, plaintext);
+        assert_eq!(out, encrypted);
+        Ok(())
     }
 
     #[test]
-    fn test_encrypt_opt_none() {
-        let result = encrypt_opt(&None).unwrap();
-        assert_eq!(result, None);
+    fn bytes_round_trip_and_ciphertext_differs() -> Result {
+        let plaintext: &[u8] = &[0u8, 1, 2, 255, 128, 64, 7];
+        let encrypted = encrypt_bytes_with_key(&TEST_KEY, plaintext)?;
+        assert_ne!(encrypted.as_slice(), plaintext);
+        assert_eq!(
+            decrypt_bytes_with_key(&TEST_KEY, &encrypted)?,
+            plaintext.to_vec()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn bytes_short_blob_passes_through() -> Result {
+        // A blob too short to carry a 12-byte nonce is returned unchanged.
+        let short: &[u8] = &[1, 2, 3];
+        assert_eq!(decrypt_bytes_with_key(&TEST_KEY, short)?, short.to_vec());
+        Ok(())
+    }
+
+    #[test]
+    fn bytes_decrypt_with_wrong_key_does_not_yield_plaintext() -> Result {
+        let plaintext: &[u8] = b"binary-secret-payload-1234567890";
+        let encrypted = encrypt_bytes_with_key(&TEST_KEY, plaintext)?;
+        let out = decrypt_bytes_with_key(&OTHER_KEY, &encrypted)?;
+        assert_ne!(out.as_slice(), plaintext);
+        assert_eq!(out, encrypted);
+        Ok(())
+    }
+
+    #[test]
+    fn decrypt_passes_through_plaintext_when_key_unset() -> Result {
+        // Public path with no global key: a value that isn't `nonce||ciphertext`
+        // base64 is returned unchanged.
+        assert_eq!(decrypt("just-a-plain-string")?, "just-a-plain-string");
+        Ok(())
+    }
+
+    #[test]
+    fn encrypt_opt_none_is_none() -> Result {
+        assert_eq!(encrypt_opt(&None)?, None);
+        Ok(())
     }
 }

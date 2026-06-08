@@ -733,3 +733,72 @@ async fn save_prepared_submissions_from_payload(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn peer_step_maps_known_commands_and_rejects_the_rest() {
+        // Commands that correspond to a real peer-side step for each kind.
+        let mapped = [
+            (WorkflowKind::Onboarding, MessageType::GenerateKeys),
+            (WorkflowKind::Onboarding, MessageType::SignDns),
+            (WorkflowKind::Onboarding, MessageType::SignP2p),
+            (WorkflowKind::Onboarding, MessageType::Disconnect),
+            (WorkflowKind::Kick, MessageType::SignKick),
+            (WorkflowKind::Kick, MessageType::Disconnect),
+            (WorkflowKind::Contracts, MessageType::SignSubmissions),
+            (WorkflowKind::Contracts, MessageType::Disconnect),
+            (WorkflowKind::Dars, MessageType::UploadDars),
+            (WorkflowKind::Dars, MessageType::Disconnect),
+        ];
+        for (kind, command) in mapped {
+            assert!(
+                peer_step_for_command(kind, command).is_some(),
+                "{kind:?}/{command:?} should map to a step"
+            );
+        }
+
+        // `Wait` (no transition) and an unrelated command never map, on any kind.
+        for kind in [
+            WorkflowKind::Onboarding,
+            WorkflowKind::Kick,
+            WorkflowKind::Contracts,
+            WorkflowKind::Dars,
+        ] {
+            assert!(peer_step_for_command(kind, MessageType::Wait).is_none());
+            assert!(peer_step_for_command(kind, MessageType::Ping).is_none());
+        }
+
+        // A command belonging to a different kind must not cross over.
+        assert!(peer_step_for_command(WorkflowKind::Onboarding, MessageType::SignKick).is_none());
+        assert!(peer_step_for_command(WorkflowKind::Kick, MessageType::GenerateKeys).is_none());
+        assert!(peer_step_for_command(WorkflowKind::Contracts, MessageType::UploadDars).is_none());
+        assert!(peer_step_for_command(WorkflowKind::Dars, MessageType::SignSubmissions).is_none());
+    }
+
+    #[test]
+    fn peer_step_distinguishes_steps_within_a_kind() {
+        // GenerateKeys and SignDns are different onboarding steps: distinct
+        // indices, identical totals.
+        match (
+            peer_step_for_command(WorkflowKind::Onboarding, MessageType::GenerateKeys),
+            peer_step_for_command(WorkflowKind::Onboarding, MessageType::SignDns),
+        ) {
+            (Some((_, gen_idx, total_a)), Some((_, dns_idx, total_b))) => {
+                assert_ne!(gen_idx, dns_idx);
+                assert_eq!(total_a, total_b);
+                assert!(total_a >= 2);
+            }
+            _ => panic!("onboarding commands should map to steps"),
+        }
+    }
+
+    #[test]
+    fn extract_party_id_rejects_garbage_payload() {
+        // Empty and non-proto payloads must error, not panic.
+        assert!(extract_party_id_from_p2p_payload(b"").is_err());
+        assert!(extract_party_id_from_p2p_payload(b"not-a-valid-proto-blob").is_err());
+    }
+}

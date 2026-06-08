@@ -164,6 +164,19 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
     }
 
     pub async fn peer_connected(&self, peer_id: CantonId) {
+        // Guard against non-expected peers. The auto-advance gate below uses
+        // `expected_peers.len()` as the total, so counting a peer that isn't in
+        // the expected set (stale, duplicate, or re-onboarded) could trip the
+        // gate without all expected peers having acted — advancing the workflow
+        // with a missing signature. Expected peers behave exactly as before.
+        if !self.expected_peers.contains(&peer_id) {
+            tracing::warn!(
+                "ignoring connect from unexpected peer {peer_id} (not in expected set for {})",
+                self.instance_name
+            );
+            return;
+        }
+
         let mut connected = self.connected_peers.write().await;
 
         let is_new = connected.insert(peer_id.clone());
@@ -191,6 +204,19 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
     }
 
     pub async fn peer_completed(&self, peer_id: CantonId) {
+        // Guard against non-expected peers. The auto-advance gate below uses
+        // `expected_peers.len()` as the total, so counting a peer that isn't in
+        // the expected set (stale, duplicate, or re-onboarded) could trip the
+        // gate without all expected peers having acted — advancing the workflow
+        // with a missing signature. Expected peers behave exactly as before.
+        if !self.expected_peers.contains(&peer_id) {
+            tracing::warn!(
+                "ignoring step completion from unexpected peer {peer_id} (not in expected set for {})",
+                self.instance_name
+            );
+            return;
+        }
+
         let mut completed = self.completed_peers.write().await;
         completed.insert(peer_id.clone());
 
@@ -322,5 +348,205 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
                 self.instance_name
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::canton_id::{NAMESPACE_LENGTH, Namespace};
+    use crate::db::MIGRATOR;
+
+    // `SqlitePool` and the workflow types come in via `use super::*` (the parent
+    // module already imports `sqlx::SqlitePool`).
+    use super::*;
+
+    /// Minimal three-step workflow used to exercise the generic state machine.
+    /// `Sign` is the only peer-gated step; `WaitPeers` is the connection-gated
+    /// waiting step.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    enum TestStep {
+        WaitPeers,
+        Sign,
+        Done,
+    }
+
+    impl WorkflowStep for TestStep {
+        fn to_command(&self) -> Option<MessageType> {
+            match self {
+                TestStep::Sign => Some(MessageType::SignDns),
+                _ => None,
+            }
+        }
+        fn next(&self) -> Option<Self> {
+            match self {
+                TestStep::WaitPeers => Some(TestStep::Sign),
+                TestStep::Sign => Some(TestStep::Done),
+                TestStep::Done => None,
+            }
+        }
+        fn requires_peers(&self) -> bool {
+            matches!(self, TestStep::Sign)
+        }
+        fn is_waiting_for_peers(&self) -> bool {
+            matches!(self, TestStep::WaitPeers)
+        }
+        fn step_index(&self) -> i64 {
+            match self {
+                TestStep::WaitPeers => 0,
+                TestStep::Sign => 1,
+                TestStep::Done => 2,
+            }
+        }
+        fn step_total() -> i64 {
+            3
+        }
+        fn step_name(&self) -> &'static str {
+            match self {
+                TestStep::WaitPeers => "WaitPeers",
+                TestStep::Sign => "Sign",
+                TestStep::Done => "Done",
+            }
+        }
+        fn try_from_step_name(name: &str) -> Option<Self> {
+            match name {
+                "WaitPeers" => Some(TestStep::WaitPeers),
+                "Sign" => Some(TestStep::Sign),
+                "Done" => Some(TestStep::Done),
+                _ => None,
+            }
+        }
+        fn kind() -> WorkflowKind {
+            WorkflowKind::Onboarding
+        }
+    }
+
+    /// Build a distinct, deterministic peer id from a single byte.
+    fn peer(n: u8) -> CantonId {
+        CantonId::new(format!("p{n}"), Namespace::new([n; NAMESPACE_LENGTH]))
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn peer_completed_advances_only_on_last_expected_peer(pool: SqlitePool) {
+        let state = WorkflowState::new(
+            pool,
+            "test-run".to_string(),
+            TestStep::Sign,
+            vec![peer(1), peer(2)],
+        );
+
+        state.peer_completed(peer(1)).await;
+        assert_eq!(state.current_step().await, TestStep::Sign);
+
+        state.peer_completed(peer(2)).await;
+        assert_eq!(state.current_step().await, TestStep::Done);
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn peer_completed_does_not_advance_on_non_requires_peers_step(pool: SqlitePool) {
+        let state = WorkflowState::new(
+            pool,
+            "test-run".to_string(),
+            TestStep::WaitPeers,
+            vec![peer(1)],
+        );
+
+        // WaitPeers does not require peers, so a completion must not advance it.
+        state.peer_completed(peer(1)).await;
+        assert_eq!(state.current_step().await, TestStep::WaitPeers);
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn peer_connected_advances_from_waiting_on_last_peer(pool: SqlitePool) {
+        let state = WorkflowState::new(
+            pool,
+            "test-run".to_string(),
+            TestStep::WaitPeers,
+            vec![peer(1), peer(2)],
+        );
+
+        state.peer_connected(peer(1)).await;
+        assert_eq!(state.current_step().await, TestStep::WaitPeers);
+
+        // Duplicate connect from the same peer is deduped and must not count.
+        state.peer_connected(peer(1)).await;
+        assert_eq!(state.current_step().await, TestStep::WaitPeers);
+
+        state.peer_connected(peer(2)).await;
+        assert_eq!(state.current_step().await, TestStep::Sign);
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn peer_connected_does_not_advance_when_not_waiting(pool: SqlitePool) {
+        let state = WorkflowState::new(pool, "test-run".to_string(), TestStep::Sign, vec![peer(1)]);
+
+        // Sign is not a waiting step, so a connect must not advance it.
+        state.peer_connected(peer(1)).await;
+        assert_eq!(state.current_step().await, TestStep::Sign);
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn ignores_completion_from_unexpected_peer(pool: SqlitePool) {
+        let state = WorkflowState::new(
+            pool,
+            "test-run".to_string(),
+            TestStep::Sign,
+            vec![peer(1), peer(2)],
+        );
+
+        state.peer_completed(peer(1)).await;
+        assert_eq!(state.current_step().await, TestStep::Sign);
+
+        // peer(9) is not in the expected set. Without the guard its insert would
+        // make the completed count 2 == 2 and wrongly advance to Done.
+        state.peer_completed(peer(9)).await;
+        assert_eq!(state.current_step().await, TestStep::Sign);
+
+        // The last genuinely-expected peer still advances the workflow.
+        state.peer_completed(peer(2)).await;
+        assert_eq!(state.current_step().await, TestStep::Done);
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn ignores_connect_from_unexpected_peer(pool: SqlitePool) {
+        let state = WorkflowState::new(
+            pool,
+            "test-run".to_string(),
+            TestStep::WaitPeers,
+            vec![peer(1), peer(2)],
+        );
+
+        state.peer_connected(peer(1)).await;
+        assert_eq!(state.current_step().await, TestStep::WaitPeers);
+
+        // peer(9) is not expected; it must neither count nor advance.
+        state.peer_connected(peer(9)).await;
+        assert_eq!(state.current_step().await, TestStep::WaitPeers);
+
+        state.peer_connected(peer(2)).await;
+        assert_eq!(state.current_step().await, TestStep::Sign);
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn from_persisted_resumes_without_losing_progress(pool: SqlitePool) {
+        // Resume mid-Sign with peer(1) already completed; only peer(2) remains.
+        let state = WorkflowState::from_persisted(
+            pool,
+            "test-run".to_string(),
+            TestStep::Sign,
+            vec![peer(1), peer(2)],
+            vec![peer(1)],
+        );
+
+        state.peer_completed(peer(2)).await;
+        assert_eq!(state.current_step().await, TestStep::Done);
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn advance_step_at_terminal_is_noop(pool: SqlitePool) {
+        let state = WorkflowState::new(pool, "test-run".to_string(), TestStep::Done, vec![peer(1)]);
+
+        // Done has no successor, so advancing is a no-op.
+        state.advance_step().await;
+        assert_eq!(state.current_step().await, TestStep::Done);
     }
 }

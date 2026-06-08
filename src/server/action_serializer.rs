@@ -1855,6 +1855,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+    use crate::canton_id::{NAMESPACE_LENGTH, Namespace};
 
     // Locks the AV_* constructor strings against the on-ledger
     // `Splice.Api.Token.MetadataV1.AnyValue` definition. A typo here would
@@ -1931,5 +1932,644 @@ mod tests {
                 "error should reference the Rust type, got: {err}",
             );
         }
+    }
+
+    // ---- ActionType / ProposalType wire-shape assertions ----
+    //
+    // These lock the DAML constructor names and field labels emitted for the
+    // governance actions. The labels are hand-written and consumed by the
+    // on-ledger interpreter, so a typo or a swap between the two governance
+    // serializers (`serialize_action` vs `serialize_self_action`, which
+    // deliberately use *different* labels for the same action) would only
+    // surface as a runtime interpretation error far from the source. A
+    // round-trip test cannot catch a wrong-but-symmetric label; explicit
+    // label assertions can.
+
+    /// Any valid `CantonId` — the exact value is irrelevant to these
+    /// constructor/field-name assertions.
+    fn party_id() -> CantonId {
+        CantonId::new("p".to_string(), Namespace::new([0u8; NAMESPACE_LENGTH]))
+    }
+
+    /// Unwrap a `Variant` value into `(constructor, inner)`.
+    fn as_variant(value: &Value) -> (&str, &Value) {
+        match &value.sum {
+            Some(value::Sum::Variant(v)) => match v.value.as_deref() {
+                Some(inner) => (v.constructor.as_str(), inner),
+                None => panic!("variant {} has no inner value", v.constructor),
+            },
+            other => panic!("expected Variant, got {other:?}"),
+        }
+    }
+
+    /// The ordered field labels of a `Record` value.
+    fn record_labels(value: &Value) -> Vec<&str> {
+        match &value.sum {
+            Some(value::Sum::Record(r)) => r.fields.iter().map(|f| f.label.as_str()).collect(),
+            other => panic!("expected Record, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn serialize_action_add_member_shape() {
+        let action = ActionType::GovernanceAddMember {
+            member: party_id(),
+            new_threshold: 3,
+        };
+        let value = serialize_action(&action);
+        let (outer, inner) = as_variant(&value);
+        assert_eq!(outer, "GovernanceAction");
+        let (ctor, record) = as_variant(inner);
+        assert_eq!(ctor, "Governance_AddMemberAndSetThreshold");
+        assert_eq!(record_labels(record), ["member", "newThreshold"]);
+    }
+
+    #[test]
+    fn serialize_action_set_threshold_and_timeout_shape() {
+        let threshold = serialize_action(&ActionType::GovernanceSetThreshold { new_threshold: 2 });
+        let (outer, inner) = as_variant(&threshold);
+        assert_eq!(outer, "GovernanceAction");
+        let (ctor, record) = as_variant(inner);
+        assert_eq!(ctor, "Governance_SetThreshold");
+        assert_eq!(record_labels(record), ["newThreshold"]);
+
+        let timeout = serialize_action(&ActionType::GovernanceSetTimeout {
+            new_timeout_microseconds: 1_000,
+        });
+        let (_, inner) = as_variant(&timeout);
+        let (ctor, record) = as_variant(inner);
+        assert_eq!(ctor, "Governance_SetActionConfirmationTimeout");
+        assert_eq!(record_labels(record), ["newActionConfirmationTimeout"]);
+    }
+
+    #[test]
+    fn serialize_action_utility_and_credential_and_devnet_shapes() {
+        let setup = serialize_action(&ActionType::UtilitySetup {
+            operator: party_id(),
+            provider_service_cid: "psc".to_string(),
+            user_service_cid: "usc".to_string(),
+        });
+        let (outer, inner) = as_variant(&setup);
+        assert_eq!(outer, "UtilityOnboardingAction");
+        let (ctor, record) = as_variant(inner);
+        assert_eq!(ctor, "UtilityOnboarding_SetupUtility");
+        assert_eq!(
+            record_labels(record),
+            ["operator", "providerServiceCid", "userServiceCid"]
+        );
+
+        let accept = serialize_action(&ActionType::CredentialAcceptFree {
+            operator: party_id(),
+            user_service_cid: "usc".to_string(),
+            credential_offer_cid: "coc".to_string(),
+        });
+        let (outer, inner) = as_variant(&accept);
+        assert_eq!(outer, "CredentialAction");
+        let (ctor, record) = as_variant(inner);
+        assert_eq!(ctor, "Credential_AcceptFreeCredential");
+        assert_eq!(
+            record_labels(record),
+            ["operator", "userServiceCid", "credentialOfferCid"]
+        );
+
+        // DevNet wraps a bare record (no nested action variant).
+        let devnet = serialize_action(&ActionType::DevNetFeatureApp {
+            amulet_rules_cid: "arc".to_string(),
+        });
+        let (ctor, record) = as_variant(&devnet);
+        assert_eq!(ctor, "DevNetFeatureAppAction");
+        assert_eq!(record_labels(record), ["amuletRulesCid"]);
+    }
+
+    #[test]
+    fn serialize_self_action_uses_distinct_labels_from_serialize_action() {
+        // The self-management serializer maps the SAME ActionType to DIFFERENT
+        // constructor + field names than `serialize_action`. Pin both so the
+        // two paths can't silently converge or drift.
+        let add = serialize_self_action(&ActionType::GovernanceAddMember {
+            member: party_id(),
+            new_threshold: 3,
+        });
+        let (ctor, record) = as_variant(&add);
+        assert_eq!(ctor, "SelfAction_AddMemberAndSetThreshold");
+        assert_eq!(record_labels(record), ["newMember", "newThresholdAfterAdd"]);
+
+        let remove = serialize_self_action(&ActionType::GovernanceRemoveMember {
+            member: party_id(),
+            new_threshold: 1,
+        });
+        let (ctor, record) = as_variant(&remove);
+        assert_eq!(ctor, "SelfAction_RemoveMemberAndSetThreshold");
+        assert_eq!(
+            record_labels(record),
+            ["removedMember", "newThresholdAfterRemove"]
+        );
+
+        let set_threshold =
+            serialize_self_action(&ActionType::GovernanceSetThreshold { new_threshold: 2 });
+        let (ctor, record) = as_variant(&set_threshold);
+        assert_eq!(ctor, "SelfAction_SetThreshold");
+        assert_eq!(record_labels(record), ["updatedThreshold"]);
+    }
+
+    #[test]
+    fn build_proposal_setup_cc_preapproval_shape() -> Result {
+        let proposal = ProposalType::SetupCcPreapproval {
+            provider: party_id(),
+            expected_dso: party_id(),
+        };
+        let (package, module, entity, record) =
+            build_proposal_create_args("gov", "proposer", &proposal, None)?;
+
+        assert_eq!(package, ProposalPackage::GovernanceTokenCustody);
+        assert_eq!(module, "Governance.TokenCustody.SetupCcPreapproval");
+        assert_eq!(entity, "SetupCcPreapprovalProposal");
+        let labels: Vec<&str> = record.fields.iter().map(|f| f.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            ["governanceParty", "proposer", "provider", "expectedDso"]
+        );
+        Ok(())
+    }
+
+    // ---- build_proposal_create_args financial-arm wire-shape assertions ----
+    //
+    // These lock the (package, module, entity) routing triple plus the ordered
+    // field labels for the proposal arms whose payloads carry money or descend
+    // into nested records. The module/entity strings select the on-ledger
+    // package+template, and the labels are consumed verbatim by Canton's command
+    // preprocessor — a typo or reordering surfaces only as a runtime
+    // interpretation failure, so each is pinned explicitly here.
+
+    /// Fetch a nested field's `Value` by label from an owned `Record`. Mirrors
+    /// the production `get_field` but panics (these are assertions, not
+    /// recoverable paths) so call sites stay terse.
+    fn field_value<'a>(record: &'a Record, label: &str) -> &'a Value {
+        record
+            .fields
+            .iter()
+            .find(|f| f.label == label)
+            .and_then(|f| f.value.as_ref())
+            .unwrap_or_else(|| panic!("missing field {label}"))
+    }
+
+    /// The ordered field labels of an owned `Record`.
+    fn owned_labels(record: &Record) -> Vec<&str> {
+        record.fields.iter().map(|f| f.label.as_str()).collect()
+    }
+
+    /// Unwrap a `value::Sum::Record` reference (for descending into a nested
+    /// record `Value` returned by `field_value`).
+    fn as_record(value: &Value) -> &Record {
+        match &value.sum {
+            Some(value::Sum::Record(r)) => r,
+            other => panic!("expected Record, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_proposal_transfer_shape_and_nested_records() -> Result {
+        let proposal = ProposalType::Transfer {
+            transfer_factory_cid: "tfc".to_string(),
+            expected_admin: party_id(),
+            receiver: party_id(),
+            amount: DamlDecimal::parse("1.5")?,
+            instrument_id: InstrumentId {
+                admin: "admin::ns".to_string(),
+                id: "instr-1".to_string(),
+            },
+            input_holding_cids: vec!["hc-1".to_string()],
+        };
+        let (package, module, entity, record) =
+            build_proposal_create_args("gov", "proposer", &proposal, None)?;
+
+        assert_eq!(package, ProposalPackage::GovernanceTokenCustody);
+        assert_eq!(module, "Governance.TokenCustody.TransferProposal");
+        assert_eq!(entity, "TransferProposal");
+        assert_eq!(
+            owned_labels(&record),
+            [
+                "governanceParty",
+                "proposer",
+                "transferFactoryCid",
+                "expectedAdmin",
+                "transfer",
+                "extraArgs",
+            ]
+        );
+
+        // Descend into the nested `transfer` record.
+        let transfer = as_record(field_value(&record, "transfer"));
+        assert_eq!(
+            owned_labels(transfer),
+            [
+                "sender",
+                "receiver",
+                "amount",
+                "instrumentId",
+                "requestedAt",
+                "executeBefore",
+                "inputHoldingCids",
+                "meta",
+            ]
+        );
+
+        // Nested `instrumentId` record.
+        let instrument_id = as_record(field_value(transfer, "instrumentId"));
+        assert_eq!(owned_labels(instrument_id), ["admin", "id"]);
+
+        // Placeholder timestamps must be the exposed constants so propose-time
+        // and execute-time payloads match (registrar resolves the context for
+        // these exact choice arguments).
+        assert!(matches!(
+            field_value(transfer, "requestedAt").sum,
+            Some(value::Sum::Timestamp(TRANSFER_REQUESTED_AT_MICROS)),
+        ));
+        assert!(matches!(
+            field_value(transfer, "executeBefore").sum,
+            Some(value::Sum::Timestamp(TRANSFER_EXECUTE_BEFORE_MICROS)),
+        ));
+        assert!(matches!(
+            field_value(transfer, "amount").sum,
+            Some(value::Sum::Numeric(_)),
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn build_proposal_mint_and_burn_shapes_differ_only_in_party_label() -> Result {
+        let mint = ProposalType::Mint {
+            allocation_factory_cid: "afc".to_string(),
+            instrument_id: InstrumentId {
+                admin: "admin::ns".to_string(),
+                id: "instr-1".to_string(),
+            },
+            instrument_configuration_cid: "icc".to_string(),
+            recipient: party_id(),
+            amount: DamlDecimal::parse("1.5")?,
+            description: "mint it".to_string(),
+        };
+        let (mint_package, mint_module, mint_entity, mint_record) =
+            build_proposal_create_args("gov", "proposer", &mint, None)?;
+
+        // Package enum is GovernanceUtilityOnboarding even though the module
+        // lives under `Governance.TokenIssuance`.
+        assert_eq!(mint_package, ProposalPackage::GovernanceUtilityOnboarding);
+        assert_eq!(mint_module, "Governance.TokenIssuance.MintProposal");
+        assert_eq!(mint_entity, "MintProposal");
+        assert_eq!(
+            owned_labels(&mint_record),
+            [
+                "governanceParty",
+                "proposer",
+                "allocationFactoryCid",
+                "instrumentId",
+                "instrumentConfigurationCid",
+                "recipient",
+                "amount",
+                "description",
+                "requestedAt",
+                "executeBefore",
+                "meta",
+                "extraArgsMeta",
+            ]
+        );
+
+        let burn = ProposalType::Burn {
+            allocation_factory_cid: "afc".to_string(),
+            instrument_id: InstrumentId {
+                admin: "admin::ns".to_string(),
+                id: "instr-1".to_string(),
+            },
+            instrument_configuration_cid: "icc".to_string(),
+            holder: party_id(),
+            amount: DamlDecimal::parse("1.5")?,
+            description: "burn it".to_string(),
+        };
+        let (burn_package, burn_module, burn_entity, burn_record) =
+            build_proposal_create_args("gov", "proposer", &burn, None)?;
+
+        assert_eq!(burn_package, ProposalPackage::GovernanceUtilityOnboarding);
+        assert_eq!(burn_module, "Governance.TokenIssuance.BurnProposal");
+        assert_eq!(burn_entity, "BurnProposal");
+        assert_eq!(
+            owned_labels(&burn_record),
+            [
+                "governanceParty",
+                "proposer",
+                "allocationFactoryCid",
+                "instrumentId",
+                "instrumentConfigurationCid",
+                "holder",
+                "amount",
+                "description",
+                "requestedAt",
+                "executeBefore",
+                "meta",
+                "extraArgsMeta",
+            ]
+        );
+
+        // The ONLY structural difference between the two arms is the party
+        // label: Mint carries `recipient`, Burn carries `holder`.
+        assert!(owned_labels(&mint_record).contains(&"recipient"));
+        assert!(!owned_labels(&mint_record).contains(&"holder"));
+        assert!(owned_labels(&burn_record).contains(&"holder"));
+        assert!(!owned_labels(&burn_record).contains(&"recipient"));
+
+        // Both carry the two trailing metadata fields.
+        assert!(owned_labels(&mint_record).contains(&"meta"));
+        assert!(owned_labels(&mint_record).contains(&"extraArgsMeta"));
+        assert!(owned_labels(&burn_record).contains(&"meta"));
+        assert!(owned_labels(&burn_record).contains(&"extraArgsMeta"));
+        Ok(())
+    }
+
+    #[test]
+    fn build_proposal_accept_transfer_shape_and_context_branches() -> Result {
+        let proposal = ProposalType::AcceptTransfer {
+            transfer_instruction_cid: "tic".to_string(),
+        };
+
+        // ---- No choice context: context.values is an EMPTY TextMap ----
+        let (package, module, entity, record) =
+            build_proposal_create_args("gov", "proposer", &proposal, None)?;
+        assert_eq!(package, ProposalPackage::GovernanceTokenCustody);
+        assert_eq!(module, "Governance.TokenCustody.AcceptTransfer");
+        assert_eq!(entity, "AcceptTransferProposal");
+        assert_eq!(
+            owned_labels(&record),
+            [
+                "governanceParty",
+                "proposer",
+                "transferInstructionCid",
+                "extraArgs",
+            ]
+        );
+
+        // extraArgs -> context -> values must be a TextMap (NOT a GenMap),
+        // empty, when no context was supplied.
+        let extra_args = as_record(field_value(&record, "extraArgs"));
+        let context = as_record(field_value(extra_args, "context"));
+        let values = field_value(context, "values");
+        match &values.sum {
+            Some(value::Sum::TextMap(tm)) => assert!(
+                tm.entries.is_empty(),
+                "empty-context branch must yield an empty TextMap",
+            ),
+            other => panic!("expected empty TextMap for context.values, got {other:?}"),
+        }
+
+        // ---- With a choice context: one keyed AV_ContractId entry ----
+        let key = "utility.digitalasset.com/transfer-rule".to_string();
+        let ctx = ChoiceContext {
+            values: HashMap::from([(
+                key.clone(),
+                ContextValue::ContractId("rule-cid".to_string()),
+            )]),
+        };
+        let (_, _, _, record) =
+            build_proposal_create_args("gov", "proposer", &proposal, Some(&ctx))?;
+        let extra_args = as_record(field_value(&record, "extraArgs"));
+        let context = as_record(field_value(extra_args, "context"));
+        let values = field_value(context, "values");
+        match &values.sum {
+            Some(value::Sum::TextMap(tm)) => {
+                assert_eq!(tm.entries.len(), 1, "exactly one context entry");
+                let entry = &tm.entries[0];
+                assert_eq!(entry.key, key);
+                let entry_value = entry
+                    .value
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("context entry has no value"));
+                let (ctor, _) = as_variant(entry_value);
+                assert_eq!(ctor, "AV_ContractId");
+            }
+            other => panic!("expected populated TextMap for context.values, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn build_proposal_offer_paid_credential_shape_and_billing_params() -> Result {
+        let proposal = ProposalType::OfferPaidCredential {
+            user_service_cid: "usc".to_string(),
+            holder: party_id(),
+            id: "cred-1".to_string(),
+            description: "paid".to_string(),
+            claims: vec![Claim {
+                subject: "s".to_string(),
+                property: "p".to_string(),
+                value: "v".to_string(),
+            }],
+            billing_params: BillingParams {
+                fee_per_day_usd: DamlDecimal::parse("1.5")?,
+                billing_period_minutes: 60,
+                deposit_target_amount_usd: DamlDecimal::parse("10.0")?,
+                holder_activity_weight: Some(DamlDecimal::parse("0.5")?),
+            },
+            deposit_initial_amount_usd: Some(DamlDecimal::parse("5.0")?),
+        };
+        let (package, module, entity, record) =
+            build_proposal_create_args("gov", "proposer", &proposal, None)?;
+
+        assert_eq!(package, ProposalPackage::GovernanceUtilityCredential);
+        assert_eq!(module, "Governance.UtilityCredential.OfferPaidCredential");
+        assert_eq!(entity, "OfferPaidCredential");
+        assert_eq!(
+            owned_labels(&record),
+            [
+                "governanceParty",
+                "proposer",
+                "userServiceCid",
+                "holder",
+                "id",
+                "description",
+                "claims",
+                "billingParams",
+                "depositInitialAmountUsd",
+            ]
+        );
+
+        // Descend into `billingParams`.
+        let billing = as_record(field_value(&record, "billingParams"));
+        assert_eq!(
+            owned_labels(billing),
+            [
+                "feePerDayUsd",
+                "billingPeriodMinutes",
+                "depositTargetAmountUsd",
+                "holderActivityWeight",
+            ]
+        );
+
+        // `feePerDayUsd` is itself a record wrapping a single `rate` field.
+        let fee = as_record(field_value(billing, "feePerDayUsd"));
+        assert_eq!(owned_labels(fee), ["rate"]);
+        Ok(())
+    }
+
+    #[test]
+    fn build_proposal_setup_utility_shape_and_nested_identifier() -> Result {
+        let proposal = ProposalType::SetupUtility {
+            provider_service_cid: "psc".to_string(),
+            operator: party_id(),
+            instrument_id_text: "uuid-1".to_string(),
+            additional_identifiers: vec![InstrumentIdentifier {
+                source: party_id(),
+                id: "TICK".to_string(),
+                scheme: "Ticker".to_string(),
+            }],
+            create_transfer_rule: true,
+            create_allocation_factory: false,
+        };
+        let (package, module, entity, record) =
+            build_proposal_create_args("gov", "proposer", &proposal, None)?;
+
+        assert_eq!(package, ProposalPackage::GovernanceUtilityOnboarding);
+        assert_eq!(module, "Governance.UtilityOnboarding.SetupUtility");
+        assert_eq!(entity, "SetupUtility");
+        assert_eq!(
+            owned_labels(&record),
+            [
+                "governanceParty",
+                "proposer",
+                "providerServiceCid",
+                "operator",
+                "instrumentIdText",
+                "additionalIdentifiers",
+                "createTransferRule",
+                "createAllocationFactory",
+            ]
+        );
+
+        // Descend into the first element of the `additionalIdentifiers` list.
+        let identifiers = field_value(&record, "additionalIdentifiers");
+        let first = match &identifiers.sum {
+            Some(value::Sum::List(l)) => l
+                .elements
+                .first()
+                .unwrap_or_else(|| panic!("additionalIdentifiers list is empty")),
+            other => panic!("expected List for additionalIdentifiers, got {other:?}"),
+        };
+        assert_eq!(owned_labels(as_record(first)), ["source", "id", "scheme"]);
+        Ok(())
+    }
+
+    #[test]
+    fn build_proposal_flat_record_arms_route_and_label_correctly() -> Result {
+        // Table-driven coverage for the trivial flat-record arms: pins the
+        // (package, module, entity) routing triple + ordered labels. The
+        // module/entity strings select the on-ledger package+template.
+        struct Case {
+            proposal: ProposalType,
+            package: ProposalPackage,
+            module: &'static str,
+            entity: &'static str,
+            labels: &'static [&'static str],
+        }
+
+        let cases = vec![
+            Case {
+                proposal: ProposalType::SetupTokenPreapproval {
+                    operator: party_id(),
+                    instrument_admin: party_id(),
+                    instrument_allowances: vec![InstrumentAllowance {
+                        id: "allow-1".to_string(),
+                    }],
+                },
+                package: ProposalPackage::GovernanceTokenCustody,
+                module: "Governance.TokenCustody.SetupTokenPreapproval",
+                entity: "SetupTokenPreapprovalProposal",
+                labels: &[
+                    "governanceParty",
+                    "proposer",
+                    "operator",
+                    "instrumentAdmin",
+                    "instrumentAllowances",
+                ],
+            },
+            Case {
+                proposal: ProposalType::CreateProviderServiceRequest {
+                    operator: party_id(),
+                    provider: party_id(),
+                },
+                package: ProposalPackage::GovernanceUtilityOnboarding,
+                module: "Governance.UtilityOnboarding.CreateProviderServiceRequest",
+                entity: "CreateProviderServiceRequest",
+                labels: &["governanceParty", "proposer", "operator", "provider"],
+            },
+            Case {
+                proposal: ProposalType::CreateUserServiceRequest {
+                    operator: party_id(),
+                    user: party_id(),
+                },
+                package: ProposalPackage::GovernanceUtilityOnboarding,
+                module: "Governance.UtilityOnboarding.CreateUserServiceRequest",
+                entity: "CreateUserServiceRequest",
+                labels: &["governanceParty", "proposer", "operator", "user"],
+            },
+            Case {
+                proposal: ProposalType::AcceptFreeCredential {
+                    user_service_cid: "usc".to_string(),
+                    credential_offer_cid: "coc".to_string(),
+                },
+                package: ProposalPackage::GovernanceUtilityCredential,
+                module: "Governance.UtilityCredential.AcceptFreeCredential",
+                entity: "AcceptFreeCredential",
+                labels: &[
+                    "governanceParty",
+                    "proposer",
+                    "userServiceCid",
+                    "credentialOfferCid",
+                ],
+            },
+            Case {
+                proposal: ProposalType::AcceptMintRequest {
+                    mint_request_cid: "mrc".to_string(),
+                    instrument_configuration_cid: "icc".to_string(),
+                    description: "accept mint".to_string(),
+                },
+                package: ProposalPackage::GovernanceUtilityOnboarding,
+                module: "Governance.TokenIssuance.AcceptMintRequest",
+                entity: "AcceptMintRequest",
+                labels: &[
+                    "governanceParty",
+                    "proposer",
+                    "mintRequestCid",
+                    "instrumentConfigurationCid",
+                    "description",
+                    "extraArgsMeta",
+                ],
+            },
+            Case {
+                proposal: ProposalType::AcceptBurnRequest {
+                    burn_request_cid: "brc".to_string(),
+                    instrument_configuration_cid: "icc".to_string(),
+                    description: "accept burn".to_string(),
+                },
+                package: ProposalPackage::GovernanceUtilityOnboarding,
+                module: "Governance.TokenIssuance.AcceptBurnRequest",
+                entity: "AcceptBurnRequest",
+                labels: &[
+                    "governanceParty",
+                    "proposer",
+                    "burnRequestCid",
+                    "instrumentConfigurationCid",
+                    "description",
+                    "extraArgsMeta",
+                ],
+            },
+        ];
+
+        for case in cases {
+            let (package, module, entity, record) =
+                build_proposal_create_args("gov", "proposer", &case.proposal, None)?;
+            assert_eq!(package, case.package, "package for {module}");
+            assert_eq!(module, case.module);
+            assert_eq!(entity, case.entity, "entity for {module}");
+            assert_eq!(owned_labels(&record), case.labels, "labels for {module}");
+        }
+        Ok(())
     }
 }

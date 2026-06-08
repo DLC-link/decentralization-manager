@@ -459,6 +459,7 @@ pub async fn maybe_fetch_for_proposal(
 /// Decoded view of a `TransferProposal`'s `transfer` record. Keeps the raw
 /// micros for `requestedAt` / `executeBefore` so the registry call can build a
 /// request that matches the on-chain choice arguments byte-for-byte.
+#[derive(Debug)]
 struct StoredTransfer {
     sender: String,
     receiver: String,
@@ -603,10 +604,268 @@ pub fn to_proto_disclosed_contracts(
 
 #[cfg(test)]
 mod tests {
+    use canton_proto_rs::com::daml::ledger::api::v2::{List, RecordField, Value};
+
     use super::*;
 
     const DEC_PARTY: &str = "Test01::1220c5deadbeef";
     const DSO: &str = "DSO::1220ffaabbcc";
+
+    // ---- Small `Value` constructors (mirrors action_serializer.rs:26-94, which
+    // are module-private). Kept local so the parser tests can build the proto
+    // `Record` inputs they exercise. ----
+
+    fn party(s: &str) -> Value {
+        Value {
+            sum: Some(value::Sum::Party(s.to_string())),
+        }
+    }
+
+    fn text(s: &str) -> Value {
+        Value {
+            sum: Some(value::Sum::Text(s.to_string())),
+        }
+    }
+
+    fn numeric(s: &str) -> Value {
+        Value {
+            sum: Some(value::Sum::Numeric(s.to_string())),
+        }
+    }
+
+    fn timestamp(n: i64) -> Value {
+        Value {
+            sum: Some(value::Sum::Timestamp(n)),
+        }
+    }
+
+    fn contract_id(s: &str) -> Value {
+        Value {
+            sum: Some(value::Sum::ContractId(s.to_string())),
+        }
+    }
+
+    fn list(vs: Vec<Value>) -> Value {
+        Value {
+            sum: Some(value::Sum::List(List { elements: vs })),
+        }
+    }
+
+    fn record(fields: Vec<(&str, Value)>) -> Value {
+        Value {
+            sum: Some(value::Sum::Record(Record {
+                record_id: None,
+                fields: fields
+                    .into_iter()
+                    .map(|(label, value)| RecordField {
+                        label: label.to_string(),
+                        value: Some(value),
+                    })
+                    .collect(),
+            })),
+        }
+    }
+
+    /// Unwrap a `Value` into the inner proto `Record`, panicking with a clear
+    /// message if it isn't one (test-only helper, so a panic is the assertion).
+    fn as_record(v: Value) -> Record {
+        match v.sum {
+            Some(value::Sum::Record(r)) => r,
+            other => panic!("expected a Record value, got {other:?}"),
+        }
+    }
+
+    /// A fully-populated `transfer` record nested inside a `TransferProposal`
+    /// create-arguments record, matching the field names the parser reads.
+    fn valid_transfer_inner() -> Value {
+        record(vec![
+            ("sender", party(DEC_PARTY)),
+            ("receiver", party(DSO)),
+            ("amount", numeric("12.5")),
+            (
+                "instrumentId",
+                record(vec![
+                    ("admin", party("cbtc-network::1220aa")),
+                    ("id", text("CBTC")),
+                ]),
+            ),
+            ("requestedAt", timestamp(1_700_000_000_000_000)),
+            ("executeBefore", timestamp(1_700_000_600_000_000)),
+            (
+                "inputHoldingCids",
+                list(vec![contract_id("00holdingaa"), contract_id("00holdingbb")]),
+            ),
+        ])
+    }
+
+    /// Wrap a `transfer` value in the outer `TransferProposal` create-arguments
+    /// record the parser is handed.
+    fn proposal_with_transfer(transfer: Value) -> Record {
+        as_record(record(vec![("transfer", transfer)]))
+    }
+
+    #[test]
+    fn transfer_record_from_proposal_parses_full_record() -> Result {
+        let proposal = proposal_with_transfer(valid_transfer_inner());
+
+        let parsed = transfer_record_from_proposal(&proposal)?;
+
+        assert_eq!(parsed.sender, DEC_PARTY);
+        assert_eq!(parsed.receiver, DSO);
+        assert_eq!(parsed.amount, DamlDecimal::parse("12.5")?);
+        assert_eq!(parsed.instrument_id.admin, "cbtc-network::1220aa");
+        assert_eq!(parsed.instrument_id.id, "CBTC");
+        assert_eq!(parsed.requested_at_micros, 1_700_000_000_000_000);
+        assert_eq!(parsed.execute_before_micros, 1_700_000_600_000_000);
+        assert_eq!(
+            parsed.input_holding_cids,
+            Some(vec!["00holdingaa".to_string(), "00holdingbb".to_string()]),
+        );
+
+        Ok(())
+    }
+
+    /// Assert a `Result` is `Err` and its rendered message contains `needle`.
+    /// Test-only: a non-matching error trips a `panic!` (an allowed assertion
+    /// macro), keeping the suite free of `.unwrap_err()`.
+    fn assert_err_contains<T: std::fmt::Debug>(result: Result<T>, needle: &str) {
+        match result {
+            Ok(v) => panic!("expected Err containing {needle:?}, got Ok({v:?})"),
+            Err(e) => assert!(
+                e.to_string().contains(needle),
+                "error {e:?} did not contain {needle:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn transfer_record_from_proposal_missing_transfer_field_errs() {
+        // Outer record with no `transfer` field at all.
+        let proposal = as_record(record(vec![("notTransfer", text("x"))]));
+
+        assert_err_contains(
+            transfer_record_from_proposal(&proposal),
+            "missing transfer field",
+        );
+    }
+
+    #[test]
+    fn transfer_record_from_proposal_transfer_not_record_errs() {
+        // `transfer` present but a Text, not a Record.
+        let proposal = as_record(record(vec![("transfer", text("not a record"))]));
+
+        assert_err_contains(transfer_record_from_proposal(&proposal), "is not a record");
+    }
+
+    #[test]
+    fn transfer_record_from_proposal_bad_amount_errs() {
+        let transfer = record(vec![
+            ("sender", party(DEC_PARTY)),
+            ("receiver", party(DSO)),
+            ("amount", numeric("not-a-decimal")),
+            (
+                "instrumentId",
+                record(vec![("admin", party(DSO)), ("id", text("CBTC"))]),
+            ),
+            ("requestedAt", timestamp(1)),
+            ("executeBefore", timestamp(2)),
+        ]);
+        let proposal = proposal_with_transfer(transfer);
+
+        assert_err_contains(
+            transfer_record_from_proposal(&proposal),
+            "not a valid Daml decimal",
+        );
+    }
+
+    #[test]
+    fn transfer_record_from_proposal_missing_requested_at_errs() {
+        // Everything present except `requestedAt`.
+        let transfer = record(vec![
+            ("sender", party(DEC_PARTY)),
+            ("receiver", party(DSO)),
+            ("amount", numeric("1.0")),
+            (
+                "instrumentId",
+                record(vec![("admin", party(DSO)), ("id", text("CBTC"))]),
+            ),
+            ("executeBefore", timestamp(2)),
+        ]);
+        let proposal = proposal_with_transfer(transfer);
+
+        assert_err_contains(transfer_record_from_proposal(&proposal), "requestedAt");
+    }
+
+    #[test]
+    fn transfer_record_from_proposal_missing_execute_before_errs() {
+        // Everything present except `executeBefore`.
+        let transfer = record(vec![
+            ("sender", party(DEC_PARTY)),
+            ("receiver", party(DSO)),
+            ("amount", numeric("1.0")),
+            (
+                "instrumentId",
+                record(vec![("admin", party(DSO)), ("id", text("CBTC"))]),
+            ),
+            ("requestedAt", timestamp(1)),
+        ]);
+        let proposal = proposal_with_transfer(transfer);
+
+        assert_err_contains(transfer_record_from_proposal(&proposal), "executeBefore");
+    }
+
+    #[test]
+    fn to_proto_disclosed_contracts_decodes_valid_blob() -> Result {
+        let raw = b"hello-disclosed-blob";
+        let encoded = base64::engine::general_purpose::STANDARD.encode(raw);
+        let input = vec![RegistryDisclosedContract {
+            template_id: None,
+            contract_id: "00contractcid".to_string(),
+            created_event_blob: encoded,
+            synchronizer_id: "sync::1220beef".to_string(),
+        }];
+
+        let out = to_proto_disclosed_contracts(&input)?;
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].created_event_blob, raw.to_vec());
+        assert_eq!(out[0].contract_id, "00contractcid");
+        assert_eq!(out[0].synchronizer_id, "sync::1220beef");
+
+        Ok(())
+    }
+
+    #[test]
+    fn to_proto_disclosed_contracts_rejects_invalid_base64() {
+        let input = vec![RegistryDisclosedContract {
+            template_id: None,
+            contract_id: "00contractcid".to_string(),
+            created_event_blob: "!!!".to_string(),
+            synchronizer_id: "sync::1220beef".to_string(),
+        }];
+
+        assert_err_contains(to_proto_disclosed_contracts(&input), "Invalid base64");
+    }
+
+    #[test]
+    fn micros_to_rfc3339_rejects_out_of_range() {
+        assert_err_contains(micros_to_rfc3339(i64::MAX), "out of range");
+    }
+
+    #[test]
+    fn micros_to_rfc3339_formats_normal_value() -> Result {
+        let s = micros_to_rfc3339(1_700_000_000_000_000)?;
+
+        // 1_700_000_000 s since epoch is 2023-11-14T…Z; assert it both parses
+        // back as RFC3339 and carries the expected date prefix.
+        assert!(
+            DateTime::parse_from_rfc3339(&s).is_ok(),
+            "not parseable as RFC3339: {s}"
+        );
+        assert!(s.starts_with("2023-11-14"), "unexpected timestamp: {s}");
+
+        Ok(())
+    }
 
     #[test]
     fn self_administered_utility_token_needs_registry_context() {

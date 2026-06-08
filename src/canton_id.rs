@@ -340,4 +340,56 @@ mod tests {
         let too_long = "a".repeat(MAX_PARTY_ID_PREFIX_LEN + 1);
         assert!(validate_party_id_prefix(&too_long).is_err());
     }
+
+    /// A valid 34-byte (68 hex char) namespace, reused across the rejection
+    /// tests below.
+    const VALID_NS: &str = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
+
+    #[test]
+    fn parse_rejects_malformed_input() {
+        // The parser is the gateway for every participant/peer id read from
+        // Canton and from files; its rejection branches must hold.
+        let bad_inputs = [
+            "".to_string(),                             // empty
+            "noColons".to_string(),                     // missing the "::" delimiter
+            "a::b::c".to_string(),                      // too many segments
+            "participant::".to_string(),                // empty namespace
+            "participant::zz".to_string(),              // non-hex namespace
+            format!("participant::{}", "g".repeat(68)), // right length, non-hex
+        ];
+        for bad in &bad_inputs {
+            assert!(
+                CantonId::parse(bad).is_err(),
+                "expected {bad:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn namespace_from_hex_rejects_bad_input() {
+        // Non-hex characters.
+        assert!(Namespace::from_hex("zz").is_err());
+        // Odd-length hex (hex::decode rejects).
+        assert!(Namespace::from_hex("121").is_err());
+        // Valid hex but wrong (over-) length: 35 bytes instead of 34.
+        assert!(Namespace::from_hex(&"12".repeat(NAMESPACE_LENGTH + 1)).is_err());
+        // Valid hex but wrong (under-) length: 1 byte.
+        assert!(Namespace::from_hex("12").is_err());
+    }
+
+    #[test]
+    fn parse_from_file_without_par_prefix() -> Result {
+        // The `None` branch: file content lacking the "PAR::" prefix still parses.
+        let id = CantonId::parse_from_file(&format!("participant::{VALID_NS}"))?;
+        assert_eq!(id.prefix, "participant");
+        Ok(())
+    }
+
+    #[test]
+    fn parse_from_file_trims_surrounding_whitespace() -> Result {
+        let id = CantonId::parse_from_file(&format!("  PAR::participant::{VALID_NS}\n"))?;
+        assert_eq!(id.prefix, "participant");
+        assert_eq!(id.namespace.to_hex(), VALID_NS);
+        Ok(())
+    }
 }

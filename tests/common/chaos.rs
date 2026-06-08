@@ -88,14 +88,6 @@ pub async fn dismiss_p1(f: &Fixture, instance_name: &str) {
     let _ = f.post_expect_status(f.p1.http, &path, &json!({})).await;
 }
 
-/// Best-effort dismiss on a specific port (used when the row exists on an
-/// peer too).
-pub async fn dismiss_on(f: &Fixture, port: u16, instance_name: &str) {
-    let path = format!("/workflows/{instance_name}/dismiss");
-    let _ = f.post_expect_status(f.p1.http, &path, &json!({})).await;
-    let _ = f.post_expect_status(port, &path, &json!({})).await;
-}
-
 /// Log a chaos-phase milestone using the same `[Gx]` prefix the bash tests
 /// used, so a CI log archive lines up between the two formats during the
 /// transitional period.

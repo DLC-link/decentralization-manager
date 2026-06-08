@@ -116,6 +116,38 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 })
             },
         )
+        .then(
+            "kick removed P3 from the party and lowered the threshold",
+            Duration::from_secs(60),
+            |f, _| {
+                Box::pin(async move {
+                    let prefix = f.party_prefix().ok()?.to_string();
+                    let p3_uid = f.p3.participant_id.clone();
+                    // `refresh=true` forces a fresh Canton fetch so we assert
+                    // the real topology, not the up-to-60s-stale cache that
+                    // would still list P3.
+                    let path = format!("/decentralized-parties?prefix={prefix}&refresh=true");
+                    let r: DecentralizedPartiesResponse =
+                        f.get_json(f.p1.http, &path).await.ok()?;
+                    let party = r
+                        .parties
+                        .into_iter()
+                        .find(|p| p.party_id.starts_with(&prefix))?;
+                    let p3_present = party
+                        .participants
+                        .iter()
+                        .any(|p| p.participant_uid == p3_uid);
+                    // Retry until the topology change has propagated (the kick
+                    // already reached `completed` above, so this converges
+                    // promptly); a lingering P3 or wrong threshold then surfaces
+                    // as a timeout.
+                    if p3_present || party.threshold != 2 {
+                        return None;
+                    }
+                    Some(Ok(()))
+                })
+            },
+        )
         .run(f)
         .await
 }

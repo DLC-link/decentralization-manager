@@ -439,6 +439,7 @@ impl NodeConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::canton_id::{NAMESPACE_LENGTH, Namespace};
 
     fn test_peer(index: u8, pub_key: &str) -> Peer {
         let namespace = format!("1220{:0>64}", format!("{index:02x}"));
@@ -463,6 +464,36 @@ mod tests {
         };
 
         assert_eq!(network.governance_threshold(), 2);
+    }
+
+    fn dummy_peer() -> Peer {
+        Peer {
+            participant_id: CantonId::new(
+                "node".to_string(),
+                Namespace::new([0u8; NAMESPACE_LENGTH]),
+            ),
+            name: "n".to_string(),
+            address: "127.0.0.1".to_string(),
+            port: 9000,
+            public_key: "deadbeef".to_string(),
+            party: None,
+        }
+    }
+
+    #[test]
+    fn governance_threshold_is_strict_majority_across_sizes() {
+        // (n/2 + 1): a strict majority for both odd and even member counts.
+        // The even cases (2->2, 4->3, 6->4) require strictly more than half,
+        // which is exactly where off-by-one majority bugs hide. n=0 yields 1
+        // by the formula — documented here as the degenerate-empty behavior.
+        for (n, expected) in [(0u32, 1u32), (1, 1), (2, 2), (3, 2), (4, 3), (5, 3), (6, 4)] {
+            let network = NetworkConfig::from_peers((0..n).map(|_| dummy_peer()).collect());
+            assert_eq!(
+                network.governance_threshold(),
+                expected,
+                "threshold for {n} peers"
+            );
+        }
     }
 
     #[test]
