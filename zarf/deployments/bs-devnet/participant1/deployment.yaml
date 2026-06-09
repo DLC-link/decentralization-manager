@@ -133,15 +133,6 @@ spec:
     app.kubernetes.io/name: dec-party-manager
     app.kubernetes.io/instance: participant-1
 ---
-# Admin UI is exposed on the tailnet only, at
-# https://dec-party-manager-1-devnet.tailab5f35.ts.net (MagicDNS + Tailscale
-# HTTPS cert, provisioned by the Tailscale operator from spec.tls[0].hosts[0]).
-#
-# It is deliberately NOT public: the only users are operators who already hold
-# Tailscale access (they need it to reach Keycloak at keycloak-devnet.tailab5f35
-# .ts.net). Serving the UI on a public domain broke login — the browser's Local
-# Network Access policy blocks a public-origin page from reaching the tailnet
-# (CGNAT) Keycloak token endpoint. Same address space on both ends avoids it.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
