@@ -283,7 +283,7 @@ curl http://localhost:8081/party-config/decparty::1220abc...
 
 ## API Endpoints
 
-The table below is a curated subset. The authoritative, complete API reference is the live **Swagger UI at `/swagger-ui/`** (OpenAPI document at `/api-docs/openapi.json`).
+The table below is a curated subset. A complete, interactive API reference is available via the **Swagger UI at `/swagger-ui/`** (OpenAPI document at `/api-docs/openapi.json`) — but note these endpoints are only mounted in development/test builds (`--features test-mode`); the shipped release image does not expose them.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
