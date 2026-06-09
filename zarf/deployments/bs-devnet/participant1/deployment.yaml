@@ -47,7 +47,7 @@ spec:
               mountPath: /app
       containers:
         - name: dec-party-manager
-          image: public.ecr.aws/dlc-link/canton-decparty-manager:0.1.3
+          image: public.ecr.aws/dlc-link/canton-decparty-manager:0.1.7
           imagePullPolicy: Always
           command:
             [
@@ -133,22 +133,29 @@ spec:
     app.kubernetes.io/name: dec-party-manager
     app.kubernetes.io/instance: participant-1
 ---
-apiVersion: gateway.networking.k8s.io/v1
-kind: HTTPRoute
+# Admin UI is exposed on the tailnet only, at
+# https://dec-party-manager-1-devnet.tailab5f35.ts.net (MagicDNS + Tailscale
+# HTTPS cert, provisioned by the Tailscale operator from spec.tls[0].hosts[0]).
+#
+# It is deliberately NOT public: the only users are operators who already hold
+# Tailscale access (they need it to reach Keycloak at keycloak-devnet.tailab5f35
+# .ts.net). Serving the UI on a public domain broke login — the browser's Local
+# Network Access policy blocks a public-origin page from reaching the tailnet
+# (CGNAT) Keycloak token endpoint. Same address space on both ends avoids it.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
 metadata:
   name: dec-party-manager-1
   namespace: dec-party-manager-1
+  annotations:
+    tailscale.com/tags: "tag:k8s-devnet,tag:nontech-exposed"
 spec:
-  parentRefs:
-    - name: main-gateway
-      namespace: envoy-gateway-system
-  hostnames:
-    - dec-party-manager-1.devnet.bitsafe.finance
-  rules:
-    - matches:
-        - path:
-            type: PathPrefix
-            value: /
-      backendRefs:
-        - name: dec-party-manager-1
-          port: 80
+  ingressClassName: tailscale
+  defaultBackend:
+    service:
+      name: dec-party-manager-1
+      port:
+        number: 80
+  tls:
+    - hosts:
+        - dec-party-manager-1-devnet
