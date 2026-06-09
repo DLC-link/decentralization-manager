@@ -1123,6 +1123,7 @@ mod tests {
             user_id: "test-user".to_string(),
             keycloak: KeycloakConfig {
                 url: "https://kc.example.com".to_string(),
+                internal_url: None,
                 realm: "test".to_string(),
                 client_id: "client-1".to_string(),
                 client_secret: Some("secret".to_string()),

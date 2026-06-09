@@ -52,8 +52,24 @@ impl NetworkConfig {
 /// 2. Password flow: Set `client_id`, `username`, and `password`
 #[derive(Clone, Debug, Default, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct KeycloakConfig {
-    /// Keycloak server URL (e.g., "https://keycloak.example.com")
+    /// Keycloak server URL (e.g., "https://keycloak.example.com"). This is the
+    /// URL the browser logs in against and is what appears as the token `iss`,
+    /// so it anchors issuer matching during validation.
     pub url: String,
+    /// Internal/backchannel base URL the *server* uses to reach this Keycloak
+    /// for OIDC discovery, JWKS, and introspection.
+    ///
+    /// Set this when the server cannot reach `url` directly — e.g. `url` is a
+    /// tailnet (`.ts.net`) address the browser can reach but the in-cluster pod
+    /// cannot, so the server fetches metadata via the cluster Service instead.
+    /// In OIDC terms `url` is the frontchannel (browser-facing) URL and this is
+    /// the backchannel (server-to-server) URL.
+    ///
+    /// Falls back to `url` when unset or empty, so existing single-URL configs
+    /// behave exactly as before. Does not affect issuer matching — tokens still
+    /// carry `url` as `iss`.
+    #[serde(default)]
+    pub internal_url: Option<String>,
     /// Keycloak realm name
     pub realm: String,
     /// OAuth2 client ID

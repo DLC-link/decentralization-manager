@@ -70,6 +70,7 @@ async fn main() -> Result {
             keycloak_url,
             keycloak_realm,
             keycloak_client_id,
+            keycloak_internal_url,
             auth0_domain,
             auth0_client_id,
             auth0_audience,
@@ -114,9 +115,14 @@ async fn main() -> Result {
             if let Some(net) = canton_network {
                 config.canton.network = *net;
             }
-            if keycloak_url.is_some() || keycloak_realm.is_some() || keycloak_client_id.is_some() {
+            if keycloak_url.is_some()
+                || keycloak_realm.is_some()
+                || keycloak_client_id.is_some()
+                || keycloak_internal_url.is_some()
+            {
                 let kc = config.keycloak.get_or_insert(KeycloakConfig {
                     url: String::new(),
+                    internal_url: None,
                     realm: String::new(),
                     client_id: String::new(),
                     client_secret: None,
@@ -125,6 +131,9 @@ async fn main() -> Result {
                 });
                 if let Some(url) = keycloak_url {
                     kc.url = url.clone();
+                }
+                if let Some(internal_url) = keycloak_internal_url {
+                    kc.internal_url = Some(internal_url.clone());
                 }
                 if let Some(realm) = keycloak_realm {
                     kc.realm = realm.clone();

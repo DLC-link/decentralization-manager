@@ -20,7 +20,10 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::Deserialize;
 use tokio::sync::RwLock;
 
-use super::common::{RealmAccess, auth0_issuer_of, collect_roles, extract_issuer, oidc_issuer_of};
+use super::common::{
+    RealmAccess, auth0_issuer_of, collect_roles, extract_issuer, oidc_discovery_base_of,
+    oidc_issuer_of,
+};
 use crate::{
     auth::validator::{Principal, ValidationError},
     config::{Auth0Config, KeycloakConfig, PartyCredentials},
@@ -43,6 +46,14 @@ pub struct JwtValidator {
 struct CachedJwks {
     keys: HashMap<String, KeyEntry>,
     expires_at: SystemTime,
+}
+
+/// A matched trusted issuer: the `client_id` to enforce against the token's
+/// `azp`, plus the base URL the server fetches OIDC metadata from (equal to
+/// the issuer unless a backchannel `internal_url` is configured).
+struct TrustedIssuer {
+    client_id: String,
+    discovery_base: String,
 }
 
 #[derive(Clone)]
@@ -151,15 +162,18 @@ impl JwtValidator {
         }
 
         let issuer = extract_issuer(token)?;
-        let Some(expected_client_id) = self.find_trusted_client_id(&issuer).await else {
+        let Some(trusted) = self.find_trusted(&issuer).await else {
             tracing::warn!("rejected token from untrusted issuer: {issuer}");
             return Err(ValidationError::UntrustedIssuer(issuer));
         };
+        let expected_client_id = trusted.client_id;
 
         let header = decode_header(token).map_err(|_| ValidationError::MalformedToken)?;
         let kid = header.kid.ok_or(ValidationError::MalformedToken)?;
 
-        let entry = self.resolve_key(&issuer, &kid).await?;
+        let entry = self
+            .resolve_key(&issuer, &trusted.discovery_base, &kid)
+            .await?;
 
         // Pin algorithm: reject if the token's header advertises an alg
         // different from the JWK's. Without this, an attacker who could
@@ -226,35 +240,57 @@ impl JwtValidator {
         })
     }
 
-    /// Find the expected `client_id` (for the `azp` check) corresponding to
-    /// the given issuer. Searches inbound Keycloak, inbound Auth0, and any
-    /// per-party Keycloak or Auth0 configs.
-    async fn find_trusted_client_id(&self, issuer: &str) -> Option<String> {
+    /// Find the trusted config matching the given issuer, returning both the
+    /// expected `client_id` (for the `azp` check) and the discovery base the
+    /// server should fetch OIDC metadata from. Searches inbound Keycloak,
+    /// inbound Auth0, and any per-party Keycloak or Auth0 configs.
+    ///
+    /// For Keycloak the discovery base is `oidc_discovery_base_of` (which
+    /// honors `internal_url`); for Auth0 it is the issuer itself (Auth0 has no
+    /// separate backchannel URL here).
+    async fn find_trusted(&self, issuer: &str) -> Option<TrustedIssuer> {
         if let Some(ref cfg) = self.inbound
             && oidc_issuer_of(cfg) == issuer
         {
-            return Some(cfg.client_id.clone());
+            return Some(TrustedIssuer {
+                client_id: cfg.client_id.clone(),
+                discovery_base: oidc_discovery_base_of(cfg),
+            });
         }
         if let Some(ref cfg) = self.auth0
             && auth0_issuer_of(cfg) == issuer
         {
-            return Some(cfg.client_id.clone());
+            return Some(TrustedIssuer {
+                client_id: cfg.client_id.clone(),
+                discovery_base: issuer.to_string(),
+            });
         }
         let creds = self.party_credentials.read().await;
         for party in creds.iter() {
             if let Some(ref a) = party.auth0
                 && format!("https://{}", a.domain.trim_end_matches('/')) == issuer
             {
-                return Some(a.client_id.clone());
+                return Some(TrustedIssuer {
+                    client_id: a.client_id.clone(),
+                    discovery_base: issuer.to_string(),
+                });
             }
             if oidc_issuer_of(&party.keycloak) == issuer {
-                return Some(party.keycloak.client_id.clone());
+                return Some(TrustedIssuer {
+                    client_id: party.keycloak.client_id.clone(),
+                    discovery_base: oidc_discovery_base_of(&party.keycloak),
+                });
             }
         }
         None
     }
 
-    async fn resolve_key(&self, issuer: &str, kid: &str) -> Result<KeyEntry, ValidationError> {
+    async fn resolve_key(
+        &self,
+        issuer: &str,
+        discovery_base: &str,
+        kid: &str,
+    ) -> Result<KeyEntry, ValidationError> {
         // Fast path: cached JWKS still fresh.
         {
             let cache = self.jwks_cache.read().await;
@@ -266,7 +302,7 @@ impl JwtValidator {
             }
         }
 
-        let keys = self.fetch_jwks(issuer).await?;
+        let keys = self.fetch_jwks(discovery_base, issuer).await?;
         let entry = keys
             .get(kid)
             .cloned()
@@ -286,8 +322,16 @@ impl JwtValidator {
         Ok(entry)
     }
 
-    async fn fetch_jwks(&self, issuer: &str) -> Result<HashMap<String, KeyEntry>, ValidationError> {
-        let discovery_url = format!("{issuer}/.well-known/openid-configuration");
+    /// Fetch and parse the JWKS for an issuer. `discovery_base` is where the
+    /// OIDC metadata is actually fetched from (honors `internal_url`); `issuer`
+    /// is used only for cache keys and error context. They are equal unless a
+    /// backchannel URL is configured.
+    async fn fetch_jwks(
+        &self,
+        discovery_base: &str,
+        issuer: &str,
+    ) -> Result<HashMap<String, KeyEntry>, ValidationError> {
+        let discovery_url = format!("{discovery_base}/.well-known/openid-configuration");
         let discovery: OidcDiscovery = self
             .http
             .get(&discovery_url)
@@ -521,6 +565,7 @@ mod tests {
 
         let inbound = KeycloakConfig {
             url: server.uri(),
+            internal_url: None,
             realm: "test".to_string(),
             client_id: "dpm".to_string(),
             client_secret: None,
@@ -577,6 +622,66 @@ mod tests {
         assert_eq!(principal.issuer, issuer);
         assert!(principal.has_role("admin"));
         assert!(principal.has_role("user"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fetches_metadata_from_internal_url_while_trusting_public_issuer() -> anyhow::Result<()>
+    {
+        // The server cannot reach the public `url` (an unreachable host), but
+        // `internal_url` points at the reachable IdP. Discovery + JWKS must be
+        // fetched from `internal_url`, while the token's `iss` (the public url,
+        // what a browser login carries) still anchors trust. Proves the
+        // frontchannel/backchannel split: if discovery were still derived from
+        // `iss`, this would fail to reach `unreachable.invalid`.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/realms/test/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jwks_uri": format!("{}/jwks", server.uri()),
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "keys": [{
+                    "kid": TEST_KID,
+                    "kty": "RSA",
+                    "use": "sig",
+                    "alg": "RS256",
+                    "n": TEST_JWK_N,
+                    "e": TEST_JWK_E,
+                }],
+            })))
+            .mount(&server)
+            .await;
+
+        let public_url = "https://unreachable.invalid".to_string();
+        let inbound = KeycloakConfig {
+            url: public_url.clone(),
+            internal_url: Some(server.uri()),
+            realm: "test".to_string(),
+            client_id: "dpm".to_string(),
+            client_secret: None,
+            username: None,
+            password: None,
+        };
+        let validator = JwtValidator::new(
+            Some(inbound),
+            None,
+            std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            reqwest::Client::new(),
+        );
+
+        let issuer = format!("{public_url}/realms/test");
+        let token = rs256_token(&issuer, "dpm", 3600)?;
+        let principal = validator
+            .validate(&token)
+            .await
+            .map_err(|e| anyhow::anyhow!("expected token to validate via internal_url: {e:?}"))?;
+        assert_eq!(principal.issuer, issuer);
+        assert!(principal.has_role("admin"));
         Ok(())
     }
 

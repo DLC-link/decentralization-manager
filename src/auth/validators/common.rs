@@ -33,6 +33,23 @@ pub(super) fn oidc_issuer_of(cfg: &KeycloakConfig) -> String {
     format!("{}/realms/{}", cfg.url.trim_end_matches('/'), cfg.realm)
 }
 
+/// Base URL the *server* fetches OIDC metadata from (discovery, JWKS,
+/// introspection) for a Keycloak-shaped config. Mirrors [`oidc_issuer_of`] but
+/// swaps in `internal_url` (the backchannel address) when it is set and
+/// non-empty, so a server that cannot reach the public/tailnet `url` — which
+/// remains the token `iss` — can still fetch metadata via an in-cluster
+/// address. When `internal_url` is unset this returns exactly the issuer
+/// string, so single-URL configs behave identically to before. Issuer matching
+/// continues to use [`oidc_issuer_of`].
+pub(super) fn oidc_discovery_base_of(cfg: &KeycloakConfig) -> String {
+    let base = cfg
+        .internal_url
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&cfg.url);
+    format!("{}/realms/{}", base.trim_end_matches('/'), cfg.realm)
+}
+
 /// Canonical OIDC issuer for an Auth0 tenant. Auth0 issues
 /// `https://{domain}/` in the JWT, but `extract_issuer` strips trailing
 /// slashes — match against the slash-less form so the comparison lines up.
@@ -141,6 +158,7 @@ mod tests {
     fn oidc_issuer_matches_keycloak_shape() {
         let cfg = KeycloakConfig {
             url: "https://keycloak.example.com/".to_string(),
+            internal_url: None,
             realm: "bitsafe".to_string(),
             client_id: "dpm".to_string(),
             client_secret: None,
@@ -151,6 +169,61 @@ mod tests {
             oidc_issuer_of(&cfg),
             "https://keycloak.example.com/realms/bitsafe"
         );
+    }
+
+    #[test]
+    fn discovery_base_falls_back_to_url_when_internal_unset() {
+        let cfg = KeycloakConfig {
+            url: "https://kc.example.com".to_string(),
+            internal_url: None,
+            realm: "bitsafe".to_string(),
+            client_id: "dpm".to_string(),
+            client_secret: None,
+            username: None,
+            password: None,
+        };
+        // Unset internal_url → identical to the issuer, preserving old behavior.
+        assert_eq!(oidc_discovery_base_of(&cfg), oidc_issuer_of(&cfg));
+        assert_eq!(
+            oidc_discovery_base_of(&cfg),
+            "https://kc.example.com/realms/bitsafe"
+        );
+    }
+
+    #[test]
+    fn discovery_base_uses_internal_url_when_set() {
+        let cfg = KeycloakConfig {
+            url: "https://kc.public.example/".to_string(),
+            internal_url: Some("http://kc.svc.cluster.local/".to_string()),
+            realm: "bitsafe".to_string(),
+            client_id: "dpm".to_string(),
+            client_secret: None,
+            username: None,
+            password: None,
+        };
+        // Discovery targets the internal host; issuer stays the public URL.
+        assert_eq!(
+            oidc_discovery_base_of(&cfg),
+            "http://kc.svc.cluster.local/realms/bitsafe"
+        );
+        assert_eq!(
+            oidc_issuer_of(&cfg),
+            "https://kc.public.example/realms/bitsafe"
+        );
+    }
+
+    #[test]
+    fn discovery_base_treats_empty_internal_url_as_unset() {
+        let cfg = KeycloakConfig {
+            url: "https://kc.example.com".to_string(),
+            internal_url: Some(String::new()),
+            realm: "bitsafe".to_string(),
+            client_id: "dpm".to_string(),
+            client_secret: None,
+            username: None,
+            password: None,
+        };
+        assert_eq!(oidc_discovery_base_of(&cfg), oidc_issuer_of(&cfg));
     }
 
     #[test]

@@ -106,6 +106,15 @@ pub enum Commands {
         #[arg(long, env = "DECPM_KEYCLOAK_CLIENT_ID")]
         keycloak_client_id: Option<String>,
 
+        /// Internal/backchannel Keycloak base URL the server uses for OIDC
+        /// discovery, JWKS, and introspection when it cannot reach
+        /// `DECPM_KEYCLOAK_URL` directly — e.g. that points at a tailnet
+        /// (`.ts.net`) host the browser can reach but the in-cluster pod
+        /// cannot, so the server uses the cluster Service instead. Defaults to
+        /// `DECPM_KEYCLOAK_URL` when unset; does not change the token issuer.
+        #[arg(long, env = "DECPM_KEYCLOAK_INTERNAL_URL")]
+        keycloak_internal_url: Option<String>,
+
         // Auth0 (top-level, for frontend gating). Env-only: hidden from
         // --help so operators always configure these via deploy env vars,
         // mirroring `DECPM_KEYCLOAK_*` but with no CLI flag surface.
