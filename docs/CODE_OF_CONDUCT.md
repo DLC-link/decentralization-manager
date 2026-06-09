@@ -49,7 +49,7 @@ an individual is officially representing the community in public spaces.
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
 reported to the project maintainers at
-`conduct@bitsafe.finance`.
+`eng@bitsafe.finance`.
 All complaints will be reviewed and investigated promptly and fairly. Maintainers
 are obligated to respect the privacy and security of the reporter of any incident.
 

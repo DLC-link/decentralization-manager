@@ -160,7 +160,7 @@ spec:
               mountPath: /app
       containers:
         - name: dec-party-manager
-          image: public.ecr.aws/dlc-link/canton-decparty-manager:latest
+          image: public.ecr.aws/dlc-link/canton-decparty-manager:0.1.7 # pin a release; avoid :latest
           command: ["dec-party-manager", "serve"]
           ports:
             - name: http
@@ -461,8 +461,8 @@ Response — Keycloak example:
   "has_password": false,
   "has_auth0_client_secret": false,
   "packages": {
-    "governance_core": "#governance-core-v1-rc1",
-    "governance_token_custody": "#governance-token-custody-v1-rc1",
+    "governance_core": "#governance-core-<version>",
+    "governance_token_custody": "#governance-token-custody-<version>",
     "utility_credential": "#utility-credential-app-v0",
     "utility_registry": "#utility-registry-app-v0",
     "vault": "#bitsafe-vault-v0-rc8",
@@ -862,7 +862,7 @@ curl -X POST http://localhost:8080/contracts \
       {
         "id": "governance-rules",
         "name": "GovernanceRules",
-        "package_id": "#governance-core-v1-rc1",
+        "package_id": "#governance-core-<version>",
         "module_name": "Governance.Rules",
         "entity_name": "GovernanceRules",
         "fields": [

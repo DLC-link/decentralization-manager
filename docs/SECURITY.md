@@ -9,7 +9,7 @@ Instead, use one of the following private channels:
 
 - **GitHub private vulnerability reporting** (preferred): open the repository's
   **Security** tab and choose **Report a vulnerability**.
-- **Email:** `security@bitsafe.finance`
+- **Email:** `eng@bitsafe.finance`
 
 Please include as much of the following as you can:
 

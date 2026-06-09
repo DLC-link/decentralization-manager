@@ -66,11 +66,13 @@ curl -X POST http://custodian-a:8080/contracts \
 
 This deploys a `VaultGovernanceRules` contract with all 3 members, threshold 2, and a 24-hour confirmation timeout.
 
-> **Note:** New deployments should use `GovernanceRules` (from `#governance-core-v1-rc1`) instead. See the [Integration Guide](INTEGRATION_GUIDE.md#deploying-governance-contracts) for the recommended contract deployment payload.
+> **Note:** New deployments should use `GovernanceRules` (from `#governance-core-<version>`) instead. See the [Integration Guide](INTEGRATION_GUIDE.md#deploying-governance-contracts) for the recommended contract deployment payload.
 
 ### Full Deployment Flow
 
 The complete end-to-end deployment of a vault system follows these steps. Each governance action (steps 6-15) requires threshold confirmations before execution. Steps 5a/5b show the two governance contract options.
+
+> **Note:** `#governance-*-<version>` package IDs use `<version>` as a placeholder — substitute the version of the governance packages you deployed (these are configured per party via `PUT /party-config`).
 
 | # | Step | Actor | Description |
 |---|------|-------|-------------|
@@ -78,7 +80,7 @@ The complete end-to-end deployment of a vault system follows these steps. Each g
 | 2 | Configure party credentials | DPM (`PUT /party-config` API) | Configure OAuth credentials (Keycloak or Auth0) and package IDs for each party |
 | 3 | Grant Ledger API rights | External (Canton admin) | Grant `actAs`/`readAs` rights for member parties on the decentralized party |
 | 4 | Upload DARs | DPM (DARs workflow) | Upload DAR packages to all participant nodes |
-| 5a | Deploy GovernanceRules | DPM (contracts workflow) | Deploy `GovernanceRules` contract with package `#governance-core-v1-rc1` (recommended) |
+| 5a | Deploy GovernanceRules | DPM (contracts workflow) | Deploy `GovernanceRules` contract with package `#governance-core-<version>` (recommended) |
 | 5b | Deploy VaultGovernance | DPM (contracts workflow) | Deploy `VaultGovernanceRules` contract with package `#bitsafe-vault-governance-v0-rc8` (legacy) |
 | 6 | Create ProviderService | Governance action | `utility_create_provider_request` |
 | 7 | Create UserService | Governance action | `utility_create_user_request` |
@@ -704,8 +706,8 @@ The `governance-token-custody` package enables governance-controlled token opera
 
 ### Prerequisites
 
-- `GovernanceRules` contract deployed (from `#governance-core-v1-rc1`)
-- `governance-token-custody` DAR uploaded to all participants (from `#governance-token-custody-v1-rc1`)
+- `GovernanceRules` contract deployed (from `#governance-core-<version>`)
+- `governance-token-custody` DAR uploaded to all participants (from `#governance-token-custody-<version>`)
 - Token infrastructure deployed (transfer factories, instruments, etc.)
 
 ### Set Up Canton Coin Preapproval

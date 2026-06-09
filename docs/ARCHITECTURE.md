@@ -691,10 +691,10 @@ The system depends on the following Daml packages:
 
 | Package ID | Purpose |
 |------------|---------|
-| `#governance-core-v1-rc1` | GovernanceRules, GovernableAction interface, GenericVoteProposal |
-| `#governance-token-custody-v1-rc1` | TransferProposal, AcceptTransferProposal, preapproval proposals |
-| `#governance-utility-onboarding-v1-rc1` | SetupUtility, six granular onboarding proposals, MintProposal, BurnProposal |
-| `#governance-utility-credential-v1-rc1` | Credential domain: offer/accept free and paid credentials |
+| `#governance-core-<version>` | GovernanceRules, GovernableAction interface, GenericVoteProposal |
+| `#governance-token-custody-<version>` | TransferProposal, AcceptTransferProposal, preapproval proposals |
+| `#governance-utility-onboarding-<version>` | SetupUtility, six granular onboarding proposals, MintProposal, BurnProposal |
+| `#governance-utility-credential-<version>` | Credential domain: offer/accept free and paid credentials |
 | `#bitsafe-vault-governance-v0-rc8` | Legacy VaultGovernanceRules contract templates |
 | `#bitsafe-vault-v0-rc8` | VaultRules and Vault contract templates |
 | `#utility-registry-app-v0` | ProviderService, UserService, AllocationFactory |
