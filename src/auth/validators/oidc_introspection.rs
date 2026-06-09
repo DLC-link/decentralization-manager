@@ -10,6 +10,7 @@ use tokio::sync::RwLock;
 
 use super::common::{
     RealmAccess, collect_roles, extract_issuer, oidc_discovery_base_of, oidc_issuer_of,
+    rewrite_authority,
 };
 use crate::{
     auth::validator::{Principal, ValidationError},
@@ -228,12 +229,15 @@ impl OidcIntrospectionValidator {
                 message: e.to_string(),
             })?;
 
-        let endpoint =
+        let advertised =
             doc.introspection_endpoint
                 .ok_or_else(|| ValidationError::DiscoveryFailed {
                     issuer: issuer.to_string(),
                     message: "provider does not advertise introspection_endpoint".to_string(),
                 })?;
+        // Call introspection on the host we reached discovery on, not the host
+        // the discovery doc advertises — see `rewrite_authority`.
+        let endpoint = rewrite_authority(&advertised, discovery_base);
 
         let mut cache = self.discovery_cache.write().await;
         cache.insert(

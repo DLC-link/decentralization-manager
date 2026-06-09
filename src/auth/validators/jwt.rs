@@ -22,7 +22,7 @@ use tokio::sync::RwLock;
 
 use super::common::{
     RealmAccess, auth0_issuer_of, collect_roles, extract_issuer, oidc_discovery_base_of,
-    oidc_issuer_of,
+    oidc_issuer_of, rewrite_authority,
 };
 use crate::{
     auth::validator::{Principal, ValidationError},
@@ -349,9 +349,12 @@ impl JwtValidator {
                 message: e.to_string(),
             })?;
 
+        // Fetch keys from the host we reached discovery on, not the host the
+        // discovery doc advertises — see `rewrite_authority`.
+        let jwks_uri = rewrite_authority(&discovery.jwks_uri, discovery_base);
         let jwks: JwkSet = self
             .http
-            .get(&discovery.jwks_uri)
+            .get(&jwks_uri)
             .send()
             .await
             .and_then(|r| r.error_for_status())
@@ -629,16 +632,19 @@ mod tests {
     async fn fetches_metadata_from_internal_url_while_trusting_public_issuer() -> anyhow::Result<()>
     {
         // The server cannot reach the public `url` (an unreachable host), but
-        // `internal_url` points at the reachable IdP. Discovery + JWKS must be
-        // fetched from `internal_url`, while the token's `iss` (the public url,
-        // what a browser login carries) still anchors trust. Proves the
-        // frontchannel/backchannel split: if discovery were still derived from
-        // `iss`, this would fail to reach `unreachable.invalid`.
+        // `internal_url` points at the reachable IdP. The token's `iss` (the
+        // public url, what a browser login carries) still anchors trust.
+        //
+        // Crucially, discovery here advertises a `jwks_uri` on the UNREACHABLE
+        // public host — exactly what a Keycloak with a pinned frontend hostname
+        // does. Validation must still succeed because `rewrite_authority`
+        // redirects the key fetch to the internal host we reached discovery on.
+        // Following `jwks_uri` verbatim would fail against `unreachable.invalid`.
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/realms/test/.well-known/openid-configuration"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "jwks_uri": format!("{}/jwks", server.uri()),
+                "jwks_uri": "https://unreachable.invalid/jwks",
             })))
             .mount(&server)
             .await;

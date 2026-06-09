@@ -50,6 +50,30 @@ pub(super) fn oidc_discovery_base_of(cfg: &KeycloakConfig) -> String {
     format!("{}/realms/{}", base.trim_end_matches('/'), cfg.realm)
 }
 
+/// Force `url`'s scheme + host + port to match `authority_source`, preserving
+/// path and query. Returns `url` unchanged if either input fails to parse.
+///
+/// Lets the server fetch JWKS / introspection from the same host it reached
+/// discovery on (the internal host) instead of trusting the host advertised in
+/// the discovery document, which — depending on Keycloak's hostname config —
+/// can be the public frontend host an in-cluster pod cannot reach. The token
+/// `iss` is validated separately and is unaffected.
+pub(super) fn rewrite_authority(url: &str, authority_source: &str) -> String {
+    let (Ok(mut target), Ok(src)) = (
+        reqwest::Url::parse(url),
+        reqwest::Url::parse(authority_source),
+    ) else {
+        return url.to_string();
+    };
+    if target.set_scheme(src.scheme()).is_err()
+        || target.set_host(src.host_str()).is_err()
+        || target.set_port(src.port()).is_err()
+    {
+        return url.to_string();
+    }
+    target.into()
+}
+
 /// Canonical OIDC issuer for an Auth0 tenant. Auth0 issues
 /// `https://{domain}/` in the JWT, but `extract_issuer` strips trailing
 /// slashes — match against the slash-less form so the comparison lines up.
@@ -224,6 +248,36 @@ mod tests {
             password: None,
         };
         assert_eq!(oidc_discovery_base_of(&cfg), oidc_issuer_of(&cfg));
+    }
+
+    #[test]
+    fn rewrite_authority_swaps_host_keeps_path() {
+        // Discovery advertised a public host; we rewrite it to the internal one
+        // while preserving the realm/certs path and query.
+        assert_eq!(
+            rewrite_authority(
+                "https://public.example/realms/x/protocol/openid-connect/certs?foo=bar",
+                "http://kc.svc.cluster.local:8080",
+            ),
+            "http://kc.svc.cluster.local:8080/realms/x/protocol/openid-connect/certs?foo=bar"
+        );
+    }
+
+    #[test]
+    fn rewrite_authority_is_noop_when_authority_matches() {
+        assert_eq!(
+            rewrite_authority("https://kc.example/realms/x/certs", "https://kc.example"),
+            "https://kc.example/realms/x/certs"
+        );
+    }
+
+    #[test]
+    fn rewrite_authority_returns_input_on_unparseable() {
+        assert_eq!(rewrite_authority("not a url", "http://kc.svc"), "not a url");
+        assert_eq!(
+            rewrite_authority("https://kc.example/certs", "not a url"),
+            "https://kc.example/certs"
+        );
     }
 
     #[test]
