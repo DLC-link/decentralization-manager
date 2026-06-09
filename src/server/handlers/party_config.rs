@@ -273,6 +273,7 @@ pub async fn save_party_config(
         // string still means "clear" via `filter`.
         KeycloakConfig {
             url: req.keycloak_url,
+            internal_url: None,
             realm: req.keycloak_realm,
             client_id: req.keycloak_client_id,
             client_secret: req.keycloak_client_secret.filter(|s| !s.is_empty()),
@@ -282,6 +283,7 @@ pub async fn save_party_config(
     } else {
         KeycloakConfig {
             url: req.keycloak_url,
+            internal_url: None,
             realm: req.keycloak_realm,
             client_id: req.keycloak_client_id,
             client_secret: merge_optional_secret(
@@ -661,6 +663,7 @@ mod tests {
             user_id: "test-user".to_string(),
             keycloak: KeycloakConfig {
                 url: "https://original-keycloak.example.com".to_string(),
+                internal_url: None,
                 realm: "test-realm".to_string(),
                 client_id: "test-client".to_string(),
                 client_secret: Some("super-secret".to_string()),
@@ -738,6 +741,7 @@ mod tests {
         let mut config = NodeConfig::default();
         config.keycloak = Some(KeycloakConfig {
             url: "https://deployed-keycloak.example.com".to_string(),
+            internal_url: None,
             realm: "deployed-realm".to_string(),
             client_id: "frontend-gating-client".to_string(),
             client_secret: None,

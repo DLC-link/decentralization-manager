@@ -567,13 +567,6 @@ pub struct WorkflowRunsResponse {
     pub runs: Vec<WorkflowRun>,
 }
 
-/// Payload for the `CancelWorkflow` Noise message — the coordinator tells an
-/// peer to abort its in-flight run for `instance_name`.
-#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
-pub struct CancelWorkflowPayload {
-    pub instance_name: String,
-}
-
 /// Response for key status check
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct KeyStatusResponse {

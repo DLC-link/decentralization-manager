@@ -211,7 +211,7 @@ pub async fn sign_submissions(
         .export_key_pair(tonic::Request::new(ExportKeyPairRequest {
             fingerprint: key_fingerprint.clone(),
             protocol_version: CANTON_PROTOCOL_VERSION,
-            password: String::new(), // No password encryption — see TODO in module docs
+            password: String::new(), // Empty: the exported key pair is not passphrase-protected.
         }))
         .await
         .map_err(|e| {

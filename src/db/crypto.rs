@@ -146,7 +146,9 @@ fn encrypt_bytes_with_key(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>> {
 ///
 /// # Errors
 ///
-/// Returns an error only if the stored blob has a malformed nonce length.
+/// In practice this never returns an error — too-short or undecryptable blobs
+/// are returned unchanged. The `Result` is kept for symmetry with the
+/// encryption path and forward-compatibility.
 pub fn decrypt_bytes(stored: &[u8]) -> Result<Vec<u8>> {
     match ENCRYPTION_KEY.get() {
         Some(key) => decrypt_bytes_with_key(key, stored),

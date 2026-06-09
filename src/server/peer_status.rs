@@ -1,4 +1,3 @@
-// src/server/peer_status.rs
 use std::{
     collections::HashMap,
     sync::Arc,

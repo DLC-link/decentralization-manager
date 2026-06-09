@@ -18,7 +18,11 @@ A web application for managing decentralized parties in Canton blockchain networ
 
 - [Architecture Overview](docs/ARCHITECTURE.md) -- System architecture, core concepts, communication protocol, and technical constraints
 - [Integration Guide](docs/INTEGRATION_GUIDE.md) -- Deployment, configuration, authentication setup, and full API reference
+- [User Guide](USER_GUIDE.md) -- Walkthrough of the web UI for day-to-day party and governance operations
+- [Custom DAML Templates](docs/CUSTOM_DAML_TEMPLATES.md) -- Authoring and deploying your own DAML governance templates
+- [Migration Guide](docs/MIGRATION_GUIDE.md) -- Upgrading between versions and migrating existing deployments
 - [Use Cases](docs/USE_CASES.md) -- Vault governance, FAR rewards, multi-sig wallet, and utility service walkthroughs
+- [Contributing Guide](docs/CONTRIBUTING.md) -- Development setup, coding standards, commit conventions, and the PR process
 
 ## Architecture
 
@@ -116,8 +120,7 @@ participant-dir/
 └── data/
     ├── noise.key      # Auto-generated Noise keypair
     ├── decpm.db       # SQLite database (peers, party credentials)
-    ├── dars/          # DAR files for contract deployment
-    └── workflow-data/ # Workflow data (proposals, signatures, etc.)
+    └── dars/          # DAR files for contract deployment
 ```
 
 The database file path can be overridden with the `--db` CLI flag.
@@ -126,6 +129,13 @@ The database file path can be overridden with the `--db` CLI flag.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
+| `DECPM_DIR` | Root directory for persistent data (`--dir`/`-d`) | `.` |
+| `DECPM_HOST` | Host address to bind the HTTP/UI server to | `0.0.0.0` |
+| `DECPM_PORT` | Port for the HTTP/UI server | `8080` |
+| `DECPM_DB_PATH` | SQLite database path override (CLI flag `--db`) | _(defaults to `{dir}/data/decpm.db`)_ |
+| `DECPM_DB_ENCRYPTION_KEY` | Encryption key for secrets stored in the database | _(none)_ |
+| `DECPM_ADMIN_ROLE` | Role name that gates sensitive endpoints (unset skips the role check) | _(none)_ |
+| `DECPM_ALLOWED_ORIGIN` | Origin permitted by CORS (e.g. `https://dpm.example.com`) | _(none, same-origin only)_ |
 | `DECPM_LISTEN_ADDRESS` | Address to listen on for Noise protocol connections | `0.0.0.0` |
 | `DECPM_NOISE_PORT` | Port for Noise protocol connections | `9000` |
 | `DECPM_PUBLIC_ADDRESS` | Public address that peers use to connect to this node | _(falls back to listen address)_ |
@@ -138,6 +148,7 @@ The database file path can be overridden with the `--db` CLI flag.
 | `DECPM_KEYCLOAK_URL` | Keycloak server URL for frontend auth | _(none)_ |
 | `DECPM_KEYCLOAK_REALM` | Keycloak realm name for frontend auth | _(none)_ |
 | `DECPM_KEYCLOAK_CLIENT_ID` | Keycloak client ID for frontend auth | _(none)_ |
+| `DECPM_KEYCLOAK_INTERNAL_URL` | Internal/backchannel Keycloak URL the server uses for OIDC discovery, JWKS, and introspection when it cannot reach `DECPM_KEYCLOAK_URL` directly (e.g. that is a tailnet host but the pod is in-cluster) | `DECPM_KEYCLOAK_URL` |
 | `DECPM_AUTH0_DOMAIN` | Auth0 tenant domain for frontend auth (mutually exclusive with `DECPM_KEYCLOAK_*`) | _(none)_ |
 | `DECPM_AUTH0_CLIENT_ID` | Auth0 SPA client ID for frontend auth | _(none)_ |
 | `DECPM_AUTH0_AUDIENCE` | Auth0 API audience the SPA's access tokens target | _(none)_ |
@@ -145,6 +156,9 @@ The database file path can be overridden with the `--db` CLI flag.
 | `DECPM_TIMEOUT_MESSAGE` | Noise message timeout in seconds | `120` |
 | `DECPM_TIMEOUT_RETRY_ATTEMPTS` | Connection retry attempts | `3` |
 | `DECPM_TIMEOUT_RETRY_DELAY` | Connection retry delay in seconds | `5` |
+| `DECPM_NOISE_RETRY_TIMEOUT_SEC` | Per-attempt timeout for the bounded peer-Noise retry wrapper, in seconds | `5` |
+| `DECPM_NOISE_RETRY_MAX_ATTEMPTS` | Total attempts (initial + retries) for the bounded peer-Noise retry wrapper | `2` |
+| `DECPM_NOISE_RETRY_BACKOFF_MS` | Backoff between attempts of the bounded peer-Noise retry wrapper, in milliseconds | `250` |
 
 All environment variables can also be passed as CLI arguments (e.g., `--canton-admin-host`).
 
@@ -270,10 +284,15 @@ curl http://localhost:8081/party-config/decparty::1220abc...
 
 ## API Endpoints
 
+The table below is a curated subset. A complete, interactive API reference is available via the **Swagger UI at `/swagger-ui/`** (OpenAPI document at `/api-docs/openapi.json`) — but note these endpoints are only mounted in development/test builds (`--features test-mode`); the shipped release image does not expose them.
+
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/` | GET | Serves the React frontend |
+| `/auth-config` | GET | Returns frontend auth configuration (Keycloak or Auth0) |
 | `/node-config` | GET | Returns node configuration |
+| `/network-info` | GET | Returns network info (DSO party, AmuletRules contract) |
+| `/operator-info` | GET | Returns DA Utility operator info |
 | `/network-config` | GET | Returns network peer list (from SQLite) |
 | `/network-config` | POST | Updates network peer list (saved to SQLite) |
 | `/party-config/{dec_party_id}` | GET | Returns party credentials (secrets masked) |
@@ -287,6 +306,13 @@ curl http://localhost:8081/party-config/decparty::1220abc...
 | `/contracts/status` | GET | Returns contracts progress |
 | `/kick` | POST | Starts kick workflow |
 | `/kick/status` | GET | Returns kick progress |
+| `/workflows` | GET | Lists workflow instances and their lifecycle state |
+| `/workflows/{instance_name}/dismiss` | POST | Dismisses a workflow instance |
+| `/workflows/{instance_name}/retry` | POST | Retries a failed workflow instance |
+| `/onboarding/cancel` | POST | Cancels the onboarding workflow |
+| `/contracts/cancel` | POST | Cancels the contracts workflow |
+| `/kick/cancel` | POST | Cancels the kick workflow |
+| `/dars/cancel` | POST | Cancels the DARs distribution workflow |
 | `/invitations` | GET | Returns pending workflow invitations |
 | `/invitations/accept` | POST | Accepts a pending invitation |
 | `/invitations/decline` | POST | Declines a pending invitation |
@@ -304,7 +330,6 @@ curl http://localhost:8081/party-config/decparty::1220abc...
 | `/services/registrar` | GET | Returns RegistrarService contracts |
 | `/contracts/query` | GET | Queries active contracts by template |
 | `/packages` | GET | Returns configured package IDs for a party |
-| `/amulet-rules` | GET | Returns AmuletRules contract |
 | `/token-standard-contracts` | POST | Queries token standard contracts |
 | `/dars/upload` | POST | Uploads DARs to the current node only |
 | `/dars/distribute` | POST | Distributes DARs across all participants |
@@ -587,12 +612,21 @@ Build and push to ECR:
 docker build -t dec-party-manager .
 
 # Tag for ECR
-docker tag dec-party-manager:latest public.ecr.aws/your-repo/dec-party-manager:v1.0.0
+docker tag dec-party-manager:latest public.ecr.aws/dlc-link/canton-decparty-manager:<version>
 
 # Push
-docker push public.ecr.aws/your-repo/dec-party-manager:v1.0.0
+docker push public.ecr.aws/dlc-link/canton-decparty-manager:<version>
 ```
+
+Replace the registry/org (`public.ecr.aws/dlc-link`) and `<version>` with your own.
+
+## Contributing
+
+Contributions are welcome! See the [Contributing Guide](docs/CONTRIBUTING.md) for
+development setup, coding standards, commit conventions, and the pull request
+process. Please also review our [Code of Conduct](docs/CODE_OF_CONDUCT.md) and,
+for vulnerabilities, our [Security Policy](docs/SECURITY.md).
 
 ## License
 
-Proprietary - All rights reserved.
+Licensed under the [Apache License 2.0](LICENSE).

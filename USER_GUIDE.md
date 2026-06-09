@@ -1,202 +1,87 @@
 # Canton Decentralized Party Manager - User Guide
 
+This is an operator quick-start. The application is configured entirely through
+`DECPM_*` environment variables (or a `.env` file placed in the directory given
+by `--dir` / `DECPM_DIR`).
+There is **no TOML config file** — every setting is an env var / CLI flag.
+
+For full configuration, authentication (Keycloak / Auth0) setup, and Kubernetes
+deployment, see the [Integration Guide](docs/INTEGRATION_GUIDE.md). For end-to-end
+workflow walkthroughs (onboarding a party, deploying contracts, kicking a
+participant), see the [Use Cases](docs/USE_CASES.md).
+
 ## Quick Start with Docker
 
+Build the image locally, then run a single instance:
+
 ```bash
-docker run -d \
-  --name dec-party-manager \
-  -p 8080:8080 \
-  -p 9000:9000 \
-  -v $(pwd)/config:/config \
-  -v $(pwd)/data:/data \
-  public.ecr.aws/dlc-link/canton-decparty-manager:mainnet-demo
+# Build the image
+docker build -t dec-party-manager .
+
+# Run
+docker run -p 8080:8080 -p 9000:9000 -v ./data:/data \
+  -e DECPM_PORT=8080 \
+  -e DECPM_NOISE_PORT=9000 \
+  -e DECPM_CANTON_ADMIN_HOST=canton-node \
+  -e DECPM_CANTON_ADMIN_PORT=5002 \
+  -e DECPM_CANTON_LEDGER_HOST=canton-node \
+  -e DECPM_CANTON_LEDGER_PORT=5001 \
+  -e DECPM_CANTON_SYNCHRONIZER=global \
+  -e DECPM_CANTON_NETWORK=devnet \
+  dec-party-manager
 ```
 
-Access the web UI at `http://localhost:8080`
+Then open the web UI at `http://localhost:8080`.
+
+The `-v ./data:/data` mount persists the SQLite database (peers, party
+credentials) and the auto-generated Noise keypair across restarts.
 
 ## Configuration
 
-Before running, create a `config/node.toml` file:
+All configuration is supplied via `DECPM_*` environment variables. The key ones:
 
-```toml
-[node]
-# participant_id is auto-resolved from Canton if omitted
-listen_address = "0.0.0.0"
-public_address = "your-public-ip-or-hostname"  # Address other peers will use to connect
-port = 9000
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `DECPM_PORT` | Port for the HTTP / web UI server | `8080` |
+| `DECPM_NOISE_PORT` | Port for the Noise P2P transport | `9000` |
+| `DECPM_CANTON_ADMIN_HOST` | Canton Admin API host | `127.0.0.1` |
+| `DECPM_CANTON_ADMIN_PORT` | Canton Admin API port | `5002` |
+| `DECPM_CANTON_LEDGER_HOST` | Canton Ledger API host | `127.0.0.1` |
+| `DECPM_CANTON_LEDGER_PORT` | Canton Ledger API port | `5001` |
+| `DECPM_CANTON_SYNCHRONIZER` | Canton synchronizer name | `global` |
+| `DECPM_CANTON_NETWORK` | Canton network (`devnet`, `testnet`, `mainnet`) | `devnet` |
 
-[canton]
-admin_api_host = "your-canton-node"
-admin_api_port = 5002
-ledger_api_host = "your-canton-node"
-ledger_api_port = 5001
-synchronizer = "global"
+Instead of `-e` flags, you can place a `.env` file in the directory given by
+`--dir` / `DECPM_DIR` (its root — not the `data/` subfolder). It is loaded
+automatically on startup (before CLI parsing), so any `DECPM_*` key set there
+takes effect:
 
-[timeouts]
-handshake_timeout_secs = 30
-message_timeout_secs = 120
-connection_retry_attempts = 3
-connection_retry_delay_secs = 5
+```env
+DECPM_PORT=8080
+DECPM_NOISE_PORT=9000
+DECPM_CANTON_ADMIN_HOST=canton-node
+DECPM_CANTON_ADMIN_PORT=5002
+DECPM_CANTON_LEDGER_HOST=canton-node
+DECPM_CANTON_LEDGER_PORT=5001
+DECPM_CANTON_SYNCHRONIZER=global
+DECPM_CANTON_NETWORK=devnet
 ```
 
-**Note:** The `public_address` is used when sharing your peer info with others. Set it to your actual reachable IP address or hostname. The `listen_address` should remain `0.0.0.0` to listen on all interfaces. The `participant_id` field is optional and will be auto-resolved from Canton on first startup.
+See the [Integration Guide](docs/INTEGRATION_GUIDE.md) for the complete variable
+reference, authentication configuration, and Kubernetes manifests.
 
 ## Port Requirements
 
 | Port | Purpose |
 |------|---------|
-| 8080 | Web UI and API |
-| 9000 | P2P communication between participants |
+| 8080 | HTTP / web UI (default, `DECPM_PORT`) |
+| 9000 | Noise P2P communication between participants (default, `DECPM_NOISE_PORT`) |
 
-Ensure both ports are accessible. For P2P to work, port 9000 must be reachable by other participants.
+For P2P to work, the Noise port must be reachable by the other participants.
 
-## Kubernetes Deployment
+## Next Steps
 
-```yaml
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: dec-party-manager-config
-data:
-  node.toml: |
-    [node]
-    listen_address = "0.0.0.0"
-    public_address = "dec-party-manager.your-namespace.svc.cluster.local"
-    port = 9000
-
-    [canton]
-    admin_api_host = "canton-node"
-    admin_api_port = 5002
-    ledger_api_host = "canton-node"
-    ledger_api_port = 5001
-    synchronizer = "global"
-
-    [timeouts]
-    handshake_timeout_secs = 30
-    message_timeout_secs = 120
-    connection_retry_attempts = 3
-    connection_retry_delay_secs = 5
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: dec-party-manager-data
-spec:
-  accessModes: [ReadWriteOnce]
-  resources:
-    requests:
-      storage: 1Gi
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: dec-party-manager
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: dec-party-manager
-  template:
-    metadata:
-      labels:
-        app: dec-party-manager
-    spec:
-      initContainers:
-        - name: copy-config
-          image: busybox:latest
-          command: ['sh', '-c', 'cp /config-source/* /config/']
-          volumeMounts:
-            - name: config-source
-              mountPath: /config-source
-            - name: data
-              mountPath: /config
-              subPath: config
-      containers:
-        - name: dec-party-manager
-          image: public.ecr.aws/dlc-link/canton-decparty-manager:mainnet-demo
-          ports:
-            - containerPort: 8080
-            - containerPort: 9000
-          volumeMounts:
-            - name: data
-              mountPath: /config
-              subPath: config
-            - name: data
-              mountPath: /data
-              subPath: data
-      volumes:
-        - name: config-source
-          configMap:
-            name: dec-party-manager-config
-        - name: data
-          persistentVolumeClaim:
-            claimName: dec-party-manager-data
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: dec-party-manager
-spec:
-  type: ClusterIP
-  ports:
-    - port: 80
-      targetPort: 8080
-      name: http
-    - port: 9000
-      targetPort: 9000
-      name: p2p
-  selector:
-    app: dec-party-manager
-```
-
-Apply with:
-
-```bash
-kubectl apply -f dec-party-manager.yaml
-```
-
-## Adding Peers
-
-1. Open the web UI
-2. Expand **Network Configuration**
-3. Click **Add Peer**
-4. Paste a CSV row shared by the other participant - the fields will auto-fill:
-   ```
-   participant::1220def...,Participant 2,10.0.0.2,9000,03ab12cd...,
-   ```
-5. Alternatively, fill in the fields manually:
-   - **Participant ID**: Canton participant UID (e.g., `participant::1220...`)
-   - **Name**: Display name
-   - **Address**: IP or hostname
-   - **Port**: P2P port (usually 9000)
-   - **Public Key**: Peer's public key (found in their UI under Node Configuration)
-6. Click **Save**
-
-## Removing a Participant (Kick)
-
-1. Open the web UI
-2. Select the party
-3. Click **Remove Participant**
-4. Select the participant to remove
-5. Confirm
-
-Requires majority approval from remaining participants.
-
-## Troubleshooting
-
-**Peer not connecting:**
-- Verify the peer's address, port, and public key are correct
-- Ensure port 9000 is open on both sides
-
-**Canton connection failed:**
-- Check `admin_api_host` and `ledger_api_host` in `node.toml`
-- Verify Canton node is running and accessible
-
-**View logs:**
-```bash
-# Docker
-docker logs dec-party-manager
-
-# Kubernetes
-kubectl logs deployment/dec-party-manager
-```
+- **Configure peers, authentication, and deploy to Kubernetes** —
+  [Integration Guide](docs/INTEGRATION_GUIDE.md)
+- **Walk through onboarding, deploying contracts, and kicking a participant** —
+  [Use Cases](docs/USE_CASES.md)

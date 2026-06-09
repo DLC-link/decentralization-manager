@@ -116,6 +116,10 @@ impl PartyCredentialsRow {
             user_id: self.user_id,
             keycloak: KeycloakConfig {
                 url: self.keycloak_url,
+                // Per-party credentials are not stored with a backchannel URL;
+                // the server-side internal URL is an env-configured, inbound
+                // (frontend-gating) concern. Falls back to `url`.
+                internal_url: None,
                 realm: self.keycloak_realm,
                 client_id: crypto::decrypt(&self.keycloak_client_id)?,
                 client_secret: crypto::decrypt_opt(self.keycloak_client_secret)?,

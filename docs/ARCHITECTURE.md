@@ -24,7 +24,7 @@ result = "1220" + hex(hash)   // Multihash SHA-256 prefix
 Key properties:
 - The hash is **immutable** -- it is computed once from the initial set of owners and never changes
 - Owners are sorted lexicographically before hashing for determinism
-- The threshold (minimum signers required) is `floor(n/2) + 1` (strict majority) by default
+- The threshold (minimum signers required) is `ceil(n/2)` by default; for even `n` this is a bare majority
 - Adding or removing members updates the `DecentralizedNamespaceDefinition` mapping but does not change the namespace hash itself
 
 ### PartyToParticipant (P2P)
@@ -41,7 +41,7 @@ The system uses a majority threshold for both topology changes and governance ac
 
 | Operation | Threshold |
 |-----------|-----------|
-| Topology changes (DNS/P2P) | `floor(n/2) + 1` (strict majority) of namespace owners must sign |
+| Topology changes (DNS/P2P) | `ceil(n/2)` of namespace owners must sign (bare majority for even `n`) |
 | Governance actions | Configurable per `GovernanceRules` or `VaultGovernanceRules` contract |
 
 ### Key Types
@@ -204,6 +204,11 @@ Minimum message size: 6 bytes (type + length with zero payload).
 | 0x0008 | GetNextCommand | (empty) | Peer polls for next command |
 | 0x0009 | SignKick | Config + kick proposals | Sign kick topology proposals |
 | 0x000A | Ping | (empty) | Heartbeat ping |
+| 0x000B | ListPackages | (empty) | Request peer's uploaded package list |
+| 0x000C | RequestOwnerKeys | (empty) | Request a peer's namespace owner keys |
+| 0x000D | ListPeers | (empty) | Request a peer's known-peer list |
+| 0x000E | RequestMemberParty | (empty) | Request a peer's member party |
+| 0x000F | Health | (empty) | Health probe |
 
 **Invites (0x0010 - 0x001F):** Sent during heartbeat to invite peers.
 
@@ -213,6 +218,9 @@ Minimum message size: 6 bytes (type + length with zero payload).
 | 0x0011 | InviteKick | Invite to kick workflow |
 | 0x0012 | InviteContracts | Invite to contracts workflow |
 | 0x0013 | InviteDars | Invite to DARs upload workflow |
+| 0x0014 | CancelInvite | Cancel a previously sent invitation |
+| 0x0015 | RetryWorkflow | Coordinator tells peers to retry a failed run |
+| 0x0016 | DeclineInvitation | Peer declines an invitation (frees coordinator's run) |
 
 **Responses (0x0100 - 0x01FF):** Replies from coordinator or peer.
 
@@ -224,6 +232,11 @@ Minimum message size: 6 bytes (type + length with zero payload).
 | 0x0104 | Ready | Peer is ready |
 | 0x0105 | Wait | No command ready, poll again |
 | 0x0106 | Pong | Heartbeat response |
+| 0x0107 | OwnerKeys | Namespace owner keys (reply to RequestOwnerKeys) |
+| 0x0108 | PeerList | Known-peer list (reply to ListPeers) |
+| 0x0109 | MemberPartyResponse | Member party (reply to RequestMemberParty) |
+| 0x010A | HealthResponse | Health status (reply to Health) |
+| 0x010B | Busy | Node is busy with another workflow |
 
 **Data Transfers (0x0200 - 0x02FF):** Peer data uploads to coordinator.
 
@@ -344,13 +357,14 @@ Uploads DAR packages to all participants without deploying contracts.
 
 The governance system provides multi-party approval workflows built on Daml smart contracts. It uses a **modular, interface-based architecture** where a single `GovernanceRules` contract handles consensus logic (threshold validation, confirmation lifecycle) while domain-specific actions are defined as separate templates implementing the `GovernableAction` interface.
 
-The system is split into two Daml packages:
+The system is split into the following Daml packages:
 
 | Package | Purpose |
 |---------|---------|
 | `governance-core` | Core governance engine, interfaces, confirmation lifecycle, generic voting |
 | `governance-token-custody` | Token transfer and preapproval actions |
 | `governance-utility-onboarding` | Utility-registry onboarding actions and token mint / burn |
+| `governance-utility-credential` | Credential domain: offer/accept free and paid credentials |
 
 A legacy `VaultGovernanceRules` contract (from the `bitsafe-vault-governance` package) is also supported for backward compatibility with existing vault deployments.
 
@@ -368,6 +382,8 @@ interface GovernableAction where
     controller (view this).governanceParty
   choice GovernableAction_Cancel : ()
     controller (view this).governanceParty
+  choice GovernableAction_ProposerCancel : ()
+    controller (view this).proposer
 
 data GovernableActionView = GovernableActionView with
     governanceParty : Party    -- The party whose authority is required
@@ -395,7 +411,7 @@ GovernanceRules {
 }
 ```
 
-The `additionalProposers` field (added in `v0-rc4`) lets a committee grant propose-only rights to parties that are not full voting members — for example, an admin console, a monitoring script, or a regulatory officer. The authoritative on-chain proposer set is `members ∪ fromOptional Set.empty additionalProposers`. `GovernanceRules_ConfirmAction` enforces that every proposal's `proposer` is in this set; outsider proposals are rejected at confirm time even if a member tries to confirm them. The two `SelfAction_*AdditionalProposer` variants below mutate this allowlist under the same threshold consensus as committee changes.
+The `additionalProposers` field (added in `v1-rc1`) lets a committee grant propose-only rights to parties that are not full voting members — for example, an admin console, a monitoring script, or a regulatory officer. The authoritative on-chain proposer set is `members ∪ fromOptional Set.empty additionalProposers`. `GovernanceRules_ConfirmAction` enforces that every proposal's `proposer` is in this set; outsider proposals are rejected at confirm time even if a member tries to confirm them. The two `SelfAction_*AdditionalProposer` variants below mutate this allowlist under the same threshold consensus as committee changes.
 
 The contract provides two distinct paths for governance actions:
 
@@ -494,6 +510,8 @@ GovernanceExecutionResult {
 |----------|-------------|-------------|
 | `GenericVoteProposal` | `GenericVote` | Free-text governance vote with no on-chain side effect -- the vote outcome is recorded solely via the `GovernanceExecutionResult` |
 
+The `GenericVoteProposal` template lives in module `Governance.GenericVote` (`daml/governance-core/daml/Governance/GenericVote.daml`), while the `GovernableAction` interface it implements is defined in module `Governance.Action`.
+
 #### governance-token-custody Actions
 
 | Template | Action Label | Description |
@@ -557,9 +575,9 @@ Choices on `VaultGovernanceRules`:
 
 #### Vault Action Types
 
-The vault governance system supports 19 action types across 7 categories:
+The vault governance system supports 21 action types across 7 categories:
 
-**Governance (4 actions):**
+**Governance (6 actions):**
 
 | Action | Parameters | Description |
 |--------|------------|-------------|
@@ -567,6 +585,8 @@ The vault governance system supports 19 action types across 7 categories:
 | `GovernanceRemoveMember` | member, new_threshold | Remove a governance member |
 | `GovernanceSetThreshold` | new_threshold | Change the approval threshold |
 | `GovernanceSetTimeout` | new_timeout_microseconds | Set confirmation expiry timeout |
+| `GovernanceAddAdditionalProposer` | additional_proposer | Grant propose-only rights to a non-member party |
+| `GovernanceRemoveAdditionalProposer` | additional_proposer | Revoke propose-only rights from a party |
 
 **Vault Deployment (2 actions):**
 
@@ -671,9 +691,10 @@ The system depends on the following Daml packages:
 
 | Package ID | Purpose |
 |------------|---------|
-| `#governance-core-v0-rc4` | GovernanceRules, GovernableAction interface, GenericVoteProposal |
-| `#governance-token-custody-v0-rc4` | TransferProposal, AcceptTransferProposal, preapproval proposals |
-| `#governance-utility-onboarding-v0-rc4` | SetupUtility, six granular onboarding proposals, MintProposal, BurnProposal |
+| `#governance-core-<version>` | GovernanceRules, GovernableAction interface, GenericVoteProposal |
+| `#governance-token-custody-<version>` | TransferProposal, AcceptTransferProposal, preapproval proposals |
+| `#governance-utility-onboarding-<version>` | SetupUtility, six granular onboarding proposals, MintProposal, BurnProposal |
+| `#governance-utility-credential-<version>` | Credential domain: offer/accept free and paid credentials |
 | `#bitsafe-vault-governance-v0-rc8` | Legacy VaultGovernanceRules contract templates |
 | `#bitsafe-vault-v0-rc8` | VaultRules and Vault contract templates |
 | `#utility-registry-app-v0` | ProviderService, UserService, AllocationFactory |

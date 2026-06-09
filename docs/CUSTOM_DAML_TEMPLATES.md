@@ -240,7 +240,7 @@ curl -X POST http://coordinator:8080/contracts \
     "contracts": [{
       "id":           "governance-rules",
       "name":         "GovernanceRules",
-      "package_id":   "#governance-core-v1-rc1",
+      "package_id":   "#governance-core-<version>",
       "module_name":  "Governance.Rules",
       "entity_name":  "GovernanceRules",
       "fields": [
@@ -456,7 +456,7 @@ curl 'http://localhost:8080/contracts/query?party_id=my-vault-network::1220abc..
 Set `interface=true` to query by interface id instead — useful for listing every active `GovernableAction` regardless of underlying template:
 
 ```
-package_id=#governance-action-v1-rc1
+package_id=#governance-action-<version>
 module_name=Governance.Action
 entity_name=GovernableAction
 interface=true
@@ -556,7 +556,7 @@ curl -X POST http://node:8080/governance/execute \
   }"
 
 # 4. Audit: a GovernanceExecutionResult contract now records the executed action.
-curl "http://node:8080/contracts/query?party_id=${DEC_PARTY}&package_id=%23governance-core-v1-rc1&module_name=Governance.ExecutionResult&entity_name=GovernanceExecutionResult&interface=false"
+curl "http://node:8080/contracts/query?party_id=${DEC_PARTY}&package_id=%23governance-core-<version>&module_name=Governance.ExecutionResult&entity_name=GovernanceExecutionResult&interface=false"
 ```
 
 That is the entire contract between a custom DAML template and DecMan: implement `GovernableAction`, ship the DAR, and drive the lifecycle through the existing API.

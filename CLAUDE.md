@@ -410,7 +410,7 @@ For tests that require database access, use the `#[sqlx::test]` macro with a mig
 
 ```toml
 [dependencies]
-sqlx = { version = "0.8", features = ["any", "chrono", "postgres", "runtime-tokio-rustls", "uuid"] }
+sqlx = { version = "0.8", default-features = false, features = ["macros", "migrate", "runtime-tokio-rustls", "sqlite"] }
 ```
 
 2. Create a migrations directory with numbered SQL files:
@@ -438,14 +438,14 @@ mod tests {
     use super::*;
 
     #[sqlx::test(migrator = "MIGRATOR")]
-    async fn test_insert_user(pool: PgPool) -> Result {
+    async fn test_insert_user(pool: SqlitePool) -> Result {
         // Arrange
         let username = "alice";
         let email = "alice@example.com";
 
         // Act
         sqlx::query!(
-            "INSERT INTO users (username, email) VALUES ($1, $2)",
+            "INSERT INTO users (username, email) VALUES (?, ?)",
             username,
             email
         )
@@ -453,7 +453,7 @@ mod tests {
         .await?;
 
         // Assert
-        let user = sqlx::query!("SELECT username, email FROM users WHERE username = $1", username)
+        let user = sqlx::query!("SELECT username, email FROM users WHERE username = ?", username)
             .fetch_one(&pool)
             .await?;
 
@@ -480,7 +480,7 @@ static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 // In your module (e.g., src/storage/tables/contracts.rs)
 use anyhow::Context;
-use sqlx::PgPool;
+use sqlx::SqlitePool;
 
 use crate::error::Result;
 
@@ -492,9 +492,9 @@ pub struct Contract {
 }
 
 impl Contract {
-    pub async fn insert(&self, pool: &PgPool) -> Result {
+    pub async fn insert(&self, pool: &SqlitePool) -> Result {
         sqlx::query!(
-            "INSERT INTO contracts (contract_id, template_id, created_at) VALUES ($1, $2, $3)",
+            "INSERT INTO contracts (contract_id, template_id, created_at) VALUES (?, ?, ?)",
             self.contract_id,
             self.template_id,
             self.created_at
@@ -506,10 +506,10 @@ impl Contract {
         Ok(())
     }
 
-    pub async fn get_all(pool: &PgPool, limit: i64, offset: i64) -> Result<Vec<Self>> {
+    pub async fn get_all(pool: &SqlitePool, limit: i64, offset: i64) -> Result<Vec<Self>> {
         sqlx::query_as!(
             Self,
-            "SELECT contract_id, template_id, created_at FROM contracts LIMIT $1 OFFSET $2",
+            "SELECT contract_id, template_id, created_at FROM contracts LIMIT ? OFFSET ?",
             limit,
             offset
         )
@@ -526,7 +526,7 @@ mod tests {
     use super::*;
 
     #[sqlx::test(migrator = "MIGRATOR")]
-    async fn test_get_all(pool: PgPool) -> Result {
+    async fn test_get_all(pool: SqlitePool) -> Result {
         // Test with empty database (migrations have run)
         let contracts = Contract::get_all(&pool, 100, 0).await?;
         assert_eq!(contracts.len(), 0);
@@ -535,7 +535,7 @@ mod tests {
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]
-    async fn test_insert_and_retrieve(pool: PgPool) -> Result {
+    async fn test_insert_and_retrieve(pool: SqlitePool) -> Result {
         // Insert test data
         let contract = Contract {
             contract_id: "test-123".to_string(),
