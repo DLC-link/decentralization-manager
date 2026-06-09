@@ -1,3 +1,12 @@
+//! HTTP server and always-on Noise listener.
+//!
+//! Builds the actix-web application (REST API + embedded React UI; a Swagger UI
+//! is mounted only in test/dev builds, i.e. `cfg!(any(test, feature =
+//! "test-mode"))`), wires shared [`AppState`], and runs the long-lived Noise
+//! listener that
+//! handles inbound peer messages (invites, signing, health, cancellation)
+//! independently of any coordinator-driven workflow.
+
 mod action_serializer;
 mod assets;
 mod audit;

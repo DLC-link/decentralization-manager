@@ -2,6 +2,7 @@
 name = "dec-party-manager"
 version = "0.1.7"
 edition = "2024"
+license = "Apache-2.0"
 
 [profile.release]
 opt-level = 3

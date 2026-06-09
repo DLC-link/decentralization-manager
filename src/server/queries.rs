@@ -1,3 +1,9 @@
+//! Canton ledger query layer.
+//!
+//! Read-side helpers that query the Canton Ledger API (active contracts,
+//! governance state, holdings, transfers, rewards, etc.) and shape the results
+//! into the response types served by the HTTP handlers.
+
 use std::{
     cmp::Reverse,
     collections::HashMap,
