@@ -68,7 +68,10 @@ pub struct KeycloakConfig {
     /// Falls back to `url` when unset or empty, so existing single-URL configs
     /// behave exactly as before. Does not affect issuer matching — tokens still
     /// carry `url` as `iss`.
-    #[serde(default)]
+    ///
+    /// `skip_serializing`: server-only address, must never reach the browser
+    /// via `GET /node-config`.
+    #[serde(default, skip_serializing)]
     pub internal_url: Option<String>,
     /// Keycloak realm name
     pub realm: String,
