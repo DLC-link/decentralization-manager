@@ -275,6 +275,7 @@ CLI options (every flag has a matching `DECPM_*` env var; flags override env):
 | `--keycloak-url` | `DECPM_KEYCLOAK_URL` | (none) | Keycloak server URL (frontend auth gating) |
 | `--keycloak-realm` | `DECPM_KEYCLOAK_REALM` | (none) | Keycloak realm name (frontend auth gating) |
 | `--keycloak-client-id` | `DECPM_KEYCLOAK_CLIENT_ID` | (none) | OAuth2 client ID (frontend auth gating) |
+| `--keycloak-internal-url` | `DECPM_KEYCLOAK_INTERNAL_URL` | (`DECPM_KEYCLOAK_URL`) | Internal/backchannel Keycloak URL the server uses for OIDC discovery/JWKS/introspection when it cannot reach `--keycloak-url` directly (e.g. tailnet host, in-cluster pod) |
 | `--auth0-domain` | `DECPM_AUTH0_DOMAIN` | (none) | Auth0 tenant domain (frontend auth gating; mutually exclusive with `--keycloak-*`) |
 | `--auth0-client-id` | `DECPM_AUTH0_CLIENT_ID` | (none) | Auth0 SPA client ID (frontend auth gating) |
 | `--auth0-audience` | `DECPM_AUTH0_AUDIENCE` | (none) | Auth0 API audience (target for SPA access tokens) |
@@ -323,6 +324,7 @@ All node configuration is provided through environment variables (or their equiv
 | `DECPM_KEYCLOAK_URL` | `--keycloak-url` | string | (none) | Keycloak server URL for frontend auth gating |
 | `DECPM_KEYCLOAK_REALM` | `--keycloak-realm` | string | (none) | Keycloak realm name for frontend auth gating |
 | `DECPM_KEYCLOAK_CLIENT_ID` | `--keycloak-client-id` | string | (none) | OAuth2 client ID for frontend auth gating |
+| `DECPM_KEYCLOAK_INTERNAL_URL` | `--keycloak-internal-url` | string | (`DECPM_KEYCLOAK_URL`) | Internal/backchannel Keycloak URL the server uses for OIDC discovery, JWKS, and introspection when it cannot reach `DECPM_KEYCLOAK_URL` directly (e.g. tailnet host but in-cluster pod). Does not change the token issuer |
 | `DECPM_AUTH0_DOMAIN` | `--auth0-domain` | string | (none) | Auth0 tenant domain for frontend auth gating (mutually exclusive with `DECPM_KEYCLOAK_*`) |
 | `DECPM_AUTH0_CLIENT_ID` | `--auth0-client-id` | string | (none) | Auth0 SPA client ID for frontend auth gating |
 | `DECPM_AUTH0_AUDIENCE` | `--auth0-audience` | string | (none) | Auth0 API audience targeted by SPA access tokens |
