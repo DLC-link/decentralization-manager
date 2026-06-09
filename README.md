@@ -148,6 +148,7 @@ The database file path can be overridden with the `--db` CLI flag.
 | `DECPM_KEYCLOAK_URL` | Keycloak server URL for frontend auth | _(none)_ |
 | `DECPM_KEYCLOAK_REALM` | Keycloak realm name for frontend auth | _(none)_ |
 | `DECPM_KEYCLOAK_CLIENT_ID` | Keycloak client ID for frontend auth | _(none)_ |
+| `DECPM_KEYCLOAK_INTERNAL_URL` | Internal/backchannel Keycloak URL the server uses for OIDC discovery, JWKS, and introspection when it cannot reach `DECPM_KEYCLOAK_URL` directly (e.g. that is a tailnet host but the pod is in-cluster) | `DECPM_KEYCLOAK_URL` |
 | `DECPM_AUTH0_DOMAIN` | Auth0 tenant domain for frontend auth (mutually exclusive with `DECPM_KEYCLOAK_*`) | _(none)_ |
 | `DECPM_AUTH0_CLIENT_ID` | Auth0 SPA client ID for frontend auth | _(none)_ |
 | `DECPM_AUTH0_AUDIENCE` | Auth0 API audience the SPA's access tokens target | _(none)_ |

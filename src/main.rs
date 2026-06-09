@@ -70,6 +70,7 @@ async fn main() -> Result {
             keycloak_url,
             keycloak_realm,
             keycloak_client_id,
+            keycloak_internal_url,
             auth0_domain,
             auth0_client_id,
             auth0_audience,
@@ -114,9 +115,15 @@ async fn main() -> Result {
             if let Some(net) = canton_network {
                 config.canton.network = *net;
             }
+            // `internal_url` is deliberately not in this guard: it only
+            // supplements a real Keycloak config and is meaningless on its
+            // own, so it must not by itself materialize a config with empty
+            // url/realm/client_id. It is applied below only when one of those
+            // three has already established the config.
             if keycloak_url.is_some() || keycloak_realm.is_some() || keycloak_client_id.is_some() {
                 let kc = config.keycloak.get_or_insert(KeycloakConfig {
                     url: String::new(),
+                    internal_url: None,
                     realm: String::new(),
                     client_id: String::new(),
                     client_secret: None,
@@ -126,12 +133,20 @@ async fn main() -> Result {
                 if let Some(url) = keycloak_url {
                     kc.url = url.clone();
                 }
+                if let Some(internal_url) = keycloak_internal_url {
+                    kc.internal_url = Some(internal_url.clone());
+                }
                 if let Some(realm) = keycloak_realm {
                     kc.realm = realm.clone();
                 }
                 if let Some(client_id) = keycloak_client_id {
                     kc.client_id = client_id.clone();
                 }
+            } else if keycloak_internal_url.is_some() {
+                tracing::warn!(
+                    "DECPM_KEYCLOAK_INTERNAL_URL is set but DECPM_KEYCLOAK_URL/REALM/CLIENT_ID \
+                     are not; no Keycloak config was created and the internal URL is ignored"
+                );
             }
 
             if let (Some(domain), Some(client_id)) = (auth0_domain, auth0_client_id) {
