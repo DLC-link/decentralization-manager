@@ -121,7 +121,7 @@ metadata:
     app.kubernetes.io/instance: participant-1
   annotations:
     service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
-    external-dns.alpha.kubernetes.io/hostname: "dec-party-manager-1-noise.devnet.bitsafe.finance"
+    external-dns.alpha.kubernetes.io/hostname: "dec-party-manager-1-noise.testnet.bitsafe.finance"
 spec:
   type: LoadBalancer
   ports:
@@ -134,11 +134,11 @@ spec:
     app.kubernetes.io/instance: participant-1
 ---
 # Admin UI is exposed on the tailnet only, at
-# https://dec-party-manager-1-devnet.tailab5f35.ts.net (MagicDNS + Tailscale
+# https://dec-party-manager-1-testnet.tailab5f35.ts.net (MagicDNS + Tailscale
 # HTTPS cert, provisioned by the Tailscale operator from spec.tls[0].hosts[0]).
 #
 # It is deliberately NOT public: the only users are operators who already hold
-# Tailscale access (they need it to reach Keycloak at keycloak-devnet.tailab5f35
+# Tailscale access (they need it to reach Keycloak at keycloak-testnet.tailab5f35
 # .ts.net). Serving the UI on a public domain broke login — the browser's Local
 # Network Access policy blocks a public-origin page from reaching the tailnet
 # (CGNAT) Keycloak token endpoint. Same address space on both ends avoids it.
@@ -148,7 +148,7 @@ metadata:
   name: dec-party-manager-1
   namespace: dec-party-manager-1
   annotations:
-    tailscale.com/tags: "tag:k8s-devnet,tag:nontech-exposed"
+    tailscale.com/tags: "tag:k8s-testnet,tag:nontech-exposed"
 spec:
   ingressClassName: tailscale
   defaultBackend:
@@ -158,4 +158,4 @@ spec:
         number: 80
   tls:
     - hosts:
-        - dec-party-manager-1-devnet
+        - dec-party-manager-1-testnet
