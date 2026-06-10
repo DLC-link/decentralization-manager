@@ -4,6 +4,7 @@ pub mod kick;
 pub mod onboarding;
 pub mod state;
 pub mod storage;
+pub mod topology;
 
 use anyhow::Context;
 use canton_proto_rs::com::digitalasset::canton::{
