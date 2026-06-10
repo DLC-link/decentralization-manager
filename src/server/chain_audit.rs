@@ -688,7 +688,7 @@ mod tests {
 
     fn id(entity_name: &str) -> Identifier {
         Identifier {
-            package_id: "#governance-core-v1-rc1".to_string(),
+            package_id: "#governance-core-v1".to_string(),
             module_name: "Governance.Rules".to_string(),
             entity_name: entity_name.to_string(),
         }
@@ -855,8 +855,8 @@ mod tests {
         };
         let names = vec![
             "governance-core-v0-rc4".to_string(),
-            "governance-core-v1-rc1".to_string(),
-            "governance-action-v1-rc1".to_string(),
+            "governance-core-v1".to_string(),
+            "governance-action-v1".to_string(),
             "unrelated-app-v1".to_string(),
         ];
 

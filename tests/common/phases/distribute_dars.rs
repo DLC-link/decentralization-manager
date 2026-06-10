@@ -13,10 +13,10 @@ use crate::common::{
 };
 
 const DAR_FILES: &[&str] = &[
-    "governance-action-v1-rc1-0.1.0.dar",
-    "governance-core-v1-rc1-0.1.0.dar",
-    "governance-token-custody-v1-rc1-0.1.0.dar",
-    "governance-utility-onboarding-v1-rc1-0.1.0.dar",
+    "governance-action-v1-0.1.0.dar",
+    "governance-core-v1-0.1.0.dar",
+    "governance-token-custody-v1-0.1.0.dar",
+    "governance-utility-onboarding-v1-0.1.0.dar",
 ];
 
 /// Map of expected package_id → (module_name, entity_name) of a well-known
@@ -31,17 +31,17 @@ const DAR_FILES: &[&str] = &[
 /// `governance-action` necessarily installs too.
 const DAR_PROBES: &[(&str, &str, &str)] = &[
     (
-        "%23governance-core-v1-rc1",
+        "%23governance-core-v1",
         "Governance.Rules",
         "GovernanceRules",
     ),
     (
-        "%23governance-token-custody-v1-rc1",
+        "%23governance-token-custody-v1",
         "Governance.TokenCustody.SetupTokenPreapproval",
-        "SetupTokenPreapproval",
+        "SetupTokenPreapprovalProposal",
     ),
     (
-        "%23governance-utility-onboarding-v1-rc1",
+        "%23governance-utility-onboarding-v1",
         "Governance.UtilityOnboarding.SetupUtility",
         "SetupUtility",
     ),

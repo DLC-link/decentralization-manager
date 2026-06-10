@@ -374,7 +374,7 @@ pub async fn maybe_fetch_for_proposal(
     };
 
     // Identify the proposal template by id. The package id is package-name-resolved
-    // (e.g. `#governance-token-custody-v1-rc1`) so match on the module + entity tuple.
+    // (e.g. `#governance-token-custody-v1`) so match on the module + entity tuple.
     let template = created_event.template_id.as_ref();
     let is_accept_transfer = template
         .map(|t| {

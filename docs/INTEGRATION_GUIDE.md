@@ -1099,7 +1099,7 @@ All governance mutation endpoints accept a `governance_type` field that selects 
 }
 ```
 
-The server populates the `proposer` field on the proposal contract automatically (using the calling party's identity). As of `v1-rc1`, that proposer must be a member of the targeted `GovernanceRules` or appear in its `additionalProposers` allowlist; otherwise the auto-confirmation step rejects the proposal at confirm time.
+The server populates the `proposer` field on the proposal contract automatically (using the calling party's identity). As of `v1`, that proposer must be a member of the targeted `GovernanceRules` or appear in its `additionalProposers` allowlist; otherwise the auto-confirmation step rejects the proposal at confirm time.
 
 Available proposal types (the `type` discriminator is `snake_case`). These map
 1:1 to the `ProposalType` enum in `src/server/types.rs`, which is the source of
@@ -1164,7 +1164,7 @@ Available `core_self` action types (DAML `GovernanceSelfAction` variants):
 | `governance_add_additional_proposer` | `additional_proposer` (party id) | `SelfAction_AddAdditionalProposer` |
 | `governance_remove_additional_proposer` | `additional_proposer` (party id) | `SelfAction_RemoveAdditionalProposer` |
 
-The two `*_additional_proposer` variants (added in `v1-rc1`) mutate the `additionalProposers` allowlist on `GovernanceRules`. See ARCHITECTURE.md for the proposer-authorization model.
+The two `*_additional_proposer` variants (added in `v1`) mutate the `additionalProposers` allowlist on `GovernanceRules`. See ARCHITECTURE.md for the proposer-authorization model.
 
 **For domain actions (`governance_type: "core_domain"`):**
 
