@@ -1,10 +1,19 @@
-//! G10: Start handler rejects a second InProgress run of same (kind, role).
+//! G10: Start handler rejects a duplicate `instance_name`, but allows a
+//! distinct concurrent run.
+//!
+//! Concurrent multi-instance workflows removed the global one-at-a-time gate:
+//! the start handler now rejects only a run whose `instance_name` is already
+//! registered (409), while a run with a *distinct* `instance_name` of the same
+//! kind starts side-by-side (202).
 //!
 //! Drive the coordinator into an inprogress state by posting /onboarding
-//! without accepting the invites on either peer — the coordinator stalls
-//! at `WaitingForPeers`. A second POST /onboarding must return 409. Same
-//! shape for /dars/distribute. Cleanup cancels and dismisses the leftover
-//! rows so subsequent phases run clean.
+//! without accepting the invites on either peer — the coordinator stalls at
+//! `WaitingForPeers`. A second POST with the SAME prefix (→ same
+//! `{prefix}-creation` instance) must return 409; a POST with a DISTINCT prefix
+//! must return 202 and run concurrently. /dars/distribute names are
+//! timestamp-unique, so a second post always starts a concurrent run (202).
+//! Cleanup drains and dismisses every leftover run so subsequent phases start
+//! clean.
 //!
 //! Stalling is achieved by deferring `accept_invitation` rather than by
 //! pausing peer processes — the start handler pre-flight peer-meshes
@@ -84,21 +93,44 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             })
         },
     )
-    .when("P1 posts second /onboarding — expect 409", {
+    .when("P1 posts second /onboarding, SAME prefix — expect 409", {
         let prefix = prefix.clone();
         move |f, _| {
             let prefix = prefix.clone();
             Box::pin(async move {
+                // Same prefix → same `{prefix}-creation` instance_name, which is
+                // already registered → duplicate-instance rejection.
                 let req = json!({
-                    "party_id_prefix": format!("{prefix}-second"),
+                    "party_id_prefix": prefix,
                     "peer_ids": [&f.p2.participant_id, &f.p3.participant_id],
                 });
                 let (status, body) = f.post_expect_status(f.p1.http, "/onboarding", &req).await?;
                 anyhow::ensure!(
                     status.as_u16() == 409,
-                    "expected 409 for duplicate /onboarding, got {status}: {body}"
+                    "expected 409 for same-instance /onboarding, got {status}: {body}"
                 );
-                info!("[G10] /onboarding duplicate correctly rejected (409)");
+                info!("[G10] same-instance /onboarding correctly rejected (409)");
+                Ok(())
+            })
+        }
+    })
+    .when("P1 posts third /onboarding, DISTINCT prefix — expect 202", {
+        let prefix = prefix.clone();
+        move |f, _| {
+            let prefix = prefix.clone();
+            Box::pin(async move {
+                // Distinct prefix → distinct instance → allowed to run
+                // concurrently under the new multi-instance model.
+                let req = json!({
+                    "party_id_prefix": format!("{prefix}-concurrent"),
+                    "peer_ids": [&f.p2.participant_id, &f.p3.participant_id],
+                });
+                let (status, body) = f.post_expect_status(f.p1.http, "/onboarding", &req).await?;
+                anyhow::ensure!(
+                    status.as_u16() == 202,
+                    "expected 202 for a distinct concurrent /onboarding, got {status}: {body}"
+                );
+                info!("[G10] distinct concurrent /onboarding accepted (202)");
                 Ok(())
             })
         }
@@ -165,11 +197,17 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             })
         },
     )
-    .when("P1 posts second /dars/distribute — expect 409", {
+    .when("P1 posts second /dars/distribute — expect 202 (concurrent)", {
         let dar_b64 = dar_b64.clone();
         move |f, _| {
             let dar_b64 = dar_b64.clone();
             Box::pin(async move {
+                // Dars instance names are `dars-distribute-<timestamp>` at
+                // *second* granularity, so the two posts must straddle a second
+                // boundary to get distinct instances; otherwise they collide
+                // (409). Wait >1s so the second post is deterministically a
+                // distinct, concurrently-allowed run.
+                tokio::time::sleep(Duration::from_millis(1100)).await;
                 let req = json!({
                     "dar_files": [{
                         "filename": "governance-core-v0-rc3-0.1.0.dar",
@@ -181,24 +219,31 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     .post_expect_status(f.p1.http, "/dars/distribute", &req)
                     .await?;
                 anyhow::ensure!(
-                    status.as_u16() == 409,
-                    "expected 409 for duplicate /dars/distribute, got {status}: {body}"
+                    status.as_u16() == 202,
+                    "expected 202 for a distinct concurrent /dars/distribute, got {status}: {body}"
                 );
-                info!("[G10] /dars/distribute duplicate correctly rejected (409)");
+                info!("[G10] distinct concurrent /dars/distribute accepted (202)");
                 Ok(())
             })
         }
     })
     .when("cancel + decline + dismiss leftovers", |f, _| {
         Box::pin(async move {
-            // Cancel both in-flight workflows; ignore failures because the
-            // run may have already settled.
-            let _ = f
-                .post_expect_status(f.p1.http, "/onboarding/cancel", &json!({}))
-                .await;
-            let _ = f
-                .post_expect_status(f.p1.http, "/dars/cancel", &json!({}))
-                .await;
+            // Drain every in-flight run of each kind: the per-kind cancel
+            // endpoint cancels one registered run at a time, and this phase
+            // started multiple concurrent onboarding + dars runs. Loop until a
+            // cancel reports nothing left (409 "No ... workflow in progress")
+            // or we hit a safety cap. Failures are ignored — runs may have
+            // already settled.
+            for path in ["/onboarding/cancel", "/dars/cancel"] {
+                for _ in 0..5 {
+                    match f.post_expect_status(f.p1.http, path, &json!({})).await {
+                        Ok((status, _)) if status.as_u16() == 409 => break,
+                        Ok(_) => {}
+                        Err(_) => break,
+                    }
+                }
+            }
 
             // Decline pending invitations on both peers.
             for port in [f.p2.http, f.p3.http] {

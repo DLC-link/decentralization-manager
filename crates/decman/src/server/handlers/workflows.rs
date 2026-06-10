@@ -571,10 +571,17 @@ pub async fn get_kick_status(data: web::Data<AppState>) -> impl Responder {
 }
 
 /// Summarize the status of a coordinator run of `kind` for the legacy
-/// per-kind `/{kind}/status` endpoints. With concurrent runs there can be more
-/// than one; this returns the first registered coordinator run of that kind
-/// (callers wanting per-instance detail should use `GET /workflows`). Defaults
-/// to the idle status when no run of that kind is registered.
+/// per-kind `/{kind}/status` endpoints.
+///
+/// While a run is live it is in the registry, so report its in-memory status.
+/// But the registry entry is removed the moment a run reaches a terminal
+/// status (its `WorkflowGuard` drops), so once finished there is nothing in the
+/// registry — fall back to the **latest persisted `workflow_runs` row** of this
+/// kind, which carries the terminal Completed/Failed/Cancelled status (and is
+/// the same source the `/workflows` feed uses). Without this fallback a poller
+/// watching `/{kind}/status` would never observe completion. With concurrent
+/// runs of one kind these endpoints are necessarily coarse — callers wanting
+/// per-instance detail should use `GET /workflows`.
 async fn kind_status(data: &web::Data<AppState>, kind: WorkflowKind) -> WorkflowStatusResponse {
     for inst in data.workflows.snapshot() {
         if inst.kind == kind && inst.role == WorkflowRole::Coordinator {
@@ -583,6 +590,19 @@ async fn kind_status(data: &web::Data<AppState>, kind: WorkflowKind) -> Workflow
                 error: inst.http.error.read().await.clone(),
             };
         }
+    }
+    // No live run registered — report the latest persisted coordinator run of
+    // this kind (terminal status survives in the DB after deregistration).
+    if let Ok(runs) = SchemaRead::get_visible_workflow_runs(&data.db).await
+        && let Some(run) = runs
+            .into_iter()
+            .filter(|r| r.kind == kind && r.role == WorkflowRole::Coordinator)
+            .max_by_key(|r| r.created_at)
+    {
+        return WorkflowStatusResponse {
+            status: run.status,
+            error: run.error,
+        };
     }
     WorkflowStatusResponse {
         status: WorkflowProgress::default(),
