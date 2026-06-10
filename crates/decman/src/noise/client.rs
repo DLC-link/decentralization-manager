@@ -26,12 +26,24 @@ pub struct NoiseClient {
     keypair: Arc<NoiseKeypair>,
     coordinator: Peer,
     coordinator_pub_key: PublicKey,
+    /// The coordinator's run `instance_name`. Stamped onto every outbound
+    /// command (`Message::instance`) that doesn't already carry one, so the
+    /// coordinator's always-on listener routes this peer's traffic to the right
+    /// concurrent run. Empty when the invite predated instance routing — the
+    /// coordinator then falls back to its sole active run.
+    route_instance: String,
     _p: PhantomData<()>,
 }
 
 impl NoiseClient {
-    /// Create a new Noise client to connect to a specific coordinator
-    pub async fn new(node_config: NodeConfig, coordinator: Peer) -> Result<Self, NoiseError> {
+    /// Create a new Noise client to connect to a specific coordinator.
+    /// `route_instance` is the coordinator's run identifier used to route this
+    /// peer's workflow commands; pass an empty string when unknown.
+    pub async fn new(
+        node_config: NodeConfig,
+        coordinator: Peer,
+        route_instance: String,
+    ) -> Result<Self, NoiseError> {
         // Load keypair
         let keypair = NoiseKeypair::from_file(&node_config.key_file_path()).await?;
 
@@ -43,6 +55,7 @@ impl NoiseClient {
             keypair: Arc::new(keypair),
             coordinator,
             coordinator_pub_key,
+            route_instance,
             _p: PhantomData,
         })
     }
@@ -74,7 +87,16 @@ impl NoiseClient {
 
         // Create HTTP request
         let uri = parse_flexible_uri(&format!("http://{socket_addr}/message"))?;
-        let request_body = message.to_bytes();
+        // Stamp the coordinator's run instance for routing unless the caller
+        // already set one.
+        let request_body = if message.instance.is_empty() && !self.route_instance.is_empty() {
+            message
+                .clone()
+                .with_instance(self.route_instance.clone())
+                .to_bytes()
+        } else {
+            message.to_bytes()
+        };
 
         let request = Request::builder()
             .uri(uri)

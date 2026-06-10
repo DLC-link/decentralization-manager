@@ -1,6 +1,5 @@
 use std::{
     collections::{HashMap, HashSet},
-    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -28,10 +27,10 @@ use crate::{
         respawn_coordinator,
         types::{
             ContractsInvitePayload, ContractsRequest, DarsInvitePayload, DarsRequest,
-            ErrorResponse, HttpWorkflowState, KickInvitePayload, KickRequest, KickResponse,
-            KickStatus, MessageResponse, MissingEdgeKind, MissingPeerEdge, OnboardingInvitePayload,
+            ErrorResponse, KickInvitePayload, KickRequest, KickResponse, KickStatus,
+            MessageResponse, MissingEdgeKind, MissingPeerEdge, OnboardingInvitePayload,
             OnboardingMeshErrorResponse, OnboardingRequest, OnboardingResponse, OnboardingStatus,
-            SuccessResponse, WorkflowInFlightGuard, WorkflowKind, WorkflowProgress,
+            SuccessResponse, WorkflowGuard, WorkflowInstance, WorkflowKind, WorkflowProgress,
             WorkflowResponse, WorkflowRole, WorkflowRun, WorkflowRunsResponse,
             WorkflowStatusResponse,
         },
@@ -124,17 +123,9 @@ async fn preflight_busy_peers(
 // Workflow State Types
 // ============================================================================
 
-/// State for tracking kick workflow
-pub type KickWorkflowState = HttpWorkflowState<KickStatus>;
-
-/// State for tracking onboarding workflow
-pub type OnboardingWorkflowState = HttpWorkflowState<OnboardingStatus>;
-
-/// State for tracking contracts workflow
-pub type ContractsWorkflowState = HttpWorkflowState<WorkflowProgress>;
-
-/// State for tracking DARs distribution workflow
-pub type DarsWorkflowState = HttpWorkflowState<WorkflowProgress>;
+// Per-kind workflow state is now tracked per-instance in
+// `AppState.workflows` (`WorkflowRegistry`) rather than via singleton
+// `HttpWorkflowState<S>` aliases.
 
 // ============================================================================
 // Workflow run persistence helpers
@@ -250,29 +241,11 @@ async fn mark_run_status(
 pub async fn start_kick(
     http_req: HttpRequest,
     data: web::Data<AppState>,
-    kick_state: web::Data<Arc<KickWorkflowState>>,
     body: web::Json<KickRequest>,
 ) -> impl Responder {
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
     }
-
-    // Cross-workflow mutex: at most one of kick / onboarding / contracts /
-    // dars in flight at a time. The atomic compare-and-swap closes the
-    // start-handler TOCTOU and prevents two workflows from sharing a
-    // `ListenerPauseGuard`. The guard moves into the spawned task below and
-    // drops when the task ends (success, failure, abort, or panic), so the
-    // gate cannot leak.
-    let workflow_guard = match WorkflowInFlightGuard::try_acquire(data.workflow_in_flight.clone()) {
-        Some(g) => g,
-        None => {
-            return HttpResponse::Conflict().json(ErrorResponse {
-                error: "Another workflow is already running; \
-                        wait for it to complete or cancel it first"
-                    .to_string(),
-            });
-        }
-    };
 
     tracing::info!(
         "Kick request received: party={}, participant_to_kick={}, threshold={}",
@@ -319,16 +292,6 @@ pub async fn start_kick(
             });
         }
     };
-
-    // Check if a kick is already in progress
-    {
-        let status = kick_state.status.read().await;
-        if *status == KickStatus::InProgress {
-            return HttpResponse::Conflict().json(ErrorResponse {
-                error: "A kick workflow is already in progress".to_string(),
-            });
-        }
-    }
 
     // Load peers once: we use the count to bound `new_threshold` per the
     // audit finding, then filter into `invitees`. A DB error here is fatal
@@ -439,6 +402,22 @@ pub async fn start_kick(
     // can carry the same identifier the coordinator task will use.
     let timestamp = now_secs();
     let instance_name = format!("{}-kick-{timestamp}", decentralized_party_id.prefix);
+
+    // Register this run in the shared registry. A duplicate `instance_name`
+    // (extremely unlikely given the timestamp) is the only rejection — multiple
+    // distinct kick runs may now proceed concurrently.
+    let instance = WorkflowInstance::new(
+        instance_name.clone(),
+        WorkflowKind::Kick,
+        WorkflowRole::Coordinator,
+    );
+    if !data.workflows.insert(instance.clone()) {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!("A workflow with instance {instance_name} is already running"),
+        });
+    }
+    let kick_state = &instance.http;
+
     let kick_config = workflow::KickConfig::new(
         decentralized_party_id.clone(),
         participant_id.clone(),
@@ -484,8 +463,9 @@ pub async fn start_kick(
     // Spawn the kick workflow in the background
     let config = data.config.clone();
     let db = data.db.clone();
-    let kick_state_clone = kick_state.get_ref().clone();
-    let active_workflow = data.active_workflow.clone();
+    let kick_state_clone = instance.http.clone();
+    let instance_for_coord = instance.clone();
+    let workflows = data.workflows.clone();
     let last_seen = data.last_seen.clone();
     let instance_for_task = instance_name.clone();
 
@@ -497,7 +477,8 @@ pub async fn start_kick(
     let mut error_guard = kick_state.error.write().await;
 
     let join_handle = tokio::spawn(async move {
-        let _workflow_guard = workflow_guard; // dropped at end → releases cross-workflow gate
+        // Removes this run from the registry on return (success/failure/abort).
+        let _workflow_guard = WorkflowGuard::new(workflows, instance_for_task.clone());
 
         // Send kick invites to the surviving party members before starting workflow
         let invite_result =
@@ -528,7 +509,7 @@ pub async fn start_kick(
             None, // No dars config
             None, // No auth registry for kick
             last_seen,
-            active_workflow,
+            instance_for_coord,
         )
         .await;
 
@@ -579,14 +560,28 @@ pub async fn start_kick(
     )
 )]
 #[get("/kick/status")]
-pub async fn get_kick_status(kick_state: web::Data<Arc<KickWorkflowState>>) -> impl Responder {
-    let status = kick_state.status.read().await;
-    let error = kick_state.error.read().await;
+pub async fn get_kick_status(data: web::Data<AppState>) -> impl Responder {
+    HttpResponse::Ok().json(kind_status(&data, WorkflowKind::Kick).await)
+}
 
-    HttpResponse::Ok().json(WorkflowStatusResponse {
-        status: *status,
-        error: error.clone(),
-    })
+/// Summarize the status of a coordinator run of `kind` for the legacy
+/// per-kind `/{kind}/status` endpoints. With concurrent runs there can be more
+/// than one; this returns the first registered coordinator run of that kind
+/// (callers wanting per-instance detail should use `GET /workflows`). Defaults
+/// to the idle status when no run of that kind is registered.
+async fn kind_status(data: &web::Data<AppState>, kind: WorkflowKind) -> WorkflowStatusResponse {
+    for inst in data.workflows.snapshot() {
+        if inst.kind == kind && inst.role == WorkflowRole::Coordinator {
+            return WorkflowStatusResponse {
+                status: *inst.http.status.read().await,
+                error: inst.http.error.read().await.clone(),
+            };
+        }
+    }
+    WorkflowStatusResponse {
+        status: WorkflowProgress::default(),
+        error: None,
+    }
 }
 
 /// Send kick invites to all peers using Noise protocol (excluding the peer being kicked)
@@ -719,7 +714,6 @@ async fn send_kick_invites(
 pub async fn start_onboarding(
     http_req: HttpRequest,
     data: web::Data<AppState>,
-    onboarding_state: web::Data<Arc<OnboardingWorkflowState>>,
     body: web::Json<OnboardingRequest>,
 ) -> impl Responder {
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
@@ -732,28 +726,6 @@ pub async fn start_onboarding(
     // deserialization error ~90s later. Fail fast with a clear 400 instead.
     if let Err(msg) = validate_party_id_prefix(&body.party_id_prefix) {
         return HttpResponse::BadRequest().json(ErrorResponse { error: msg });
-    }
-
-    // Cross-workflow mutex (see `start_kick` for rationale).
-    let workflow_guard = match WorkflowInFlightGuard::try_acquire(data.workflow_in_flight.clone()) {
-        Some(g) => g,
-        None => {
-            return HttpResponse::Conflict().json(ErrorResponse {
-                error: "Another workflow is already running; \
-                        wait for it to complete or cancel it first"
-                    .to_string(),
-            });
-        }
-    };
-    // Belt-and-suspenders: keep the per-workflow status check so /onboarding/status
-    // gives a precise reason when polled mid-start.
-    {
-        let status = onboarding_state.status.read().await;
-        if *status == OnboardingStatus::InProgress {
-            return HttpResponse::Conflict().json(ErrorResponse {
-                error: "An onboarding workflow is already in progress".to_string(),
-            });
-        }
     }
 
     // Pre-flight: every selected peer must have every other selected peer in
@@ -809,6 +781,17 @@ pub async fn start_onboarding(
     let party_id_prefix = body.party_id_prefix.clone();
     let peer_ids = body.peer_ids.clone();
     let instance_name = format!("{party_id_prefix}-creation");
+    let instance = WorkflowInstance::new(
+        instance_name.clone(),
+        WorkflowKind::Onboarding,
+        WorkflowRole::Coordinator,
+    );
+    if !data.workflows.insert(instance.clone()) {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!("An onboarding workflow for {instance_name} is already running"),
+        });
+    }
+    let onboarding_state = &instance.http;
     let onboarding_config =
         workflow::OnboardingConfig::new(party_id_prefix.clone(), instance_name.clone());
 
@@ -863,8 +846,9 @@ pub async fn start_onboarding(
 
     let config = data.config.clone();
     let db = data.db.clone();
-    let onboarding_state_clone = onboarding_state.get_ref().clone();
-    let active_workflow = data.active_workflow.clone();
+    let onboarding_state_clone = instance.http.clone();
+    let instance_for_coord = instance.clone();
+    let workflows = data.workflows.clone();
     *onboarding_state.invited_peers.write().await = peer_ids.clone();
     let party_credentials = data.party_credentials.clone();
     let auth_lock = data.auth.clone();
@@ -880,7 +864,7 @@ pub async fn start_onboarding(
     let mut error_guard = onboarding_state.error.write().await;
 
     let join_handle = tokio::spawn(async move {
-        let _workflow_guard = workflow_guard; // releases cross-workflow gate on drop
+        let _workflow_guard = WorkflowGuard::new(workflows, instance_for_task.clone());
 
         // Send invites to selected peers before starting coordinator workflow
         let invite_result = send_onboarding_invites(
@@ -917,7 +901,7 @@ pub async fn start_onboarding(
             None, // No dars config
             None, // No auth registry for onboarding
             last_seen,
-            active_workflow,
+            instance_for_coord,
         )
         .await;
 
@@ -1017,16 +1001,8 @@ pub async fn start_onboarding(
     )
 )]
 #[get("/onboarding/status")]
-pub async fn get_onboarding_status(
-    onboarding_state: web::Data<Arc<OnboardingWorkflowState>>,
-) -> impl Responder {
-    let status = onboarding_state.status.read().await;
-    let error = onboarding_state.error.read().await;
-
-    HttpResponse::Ok().json(WorkflowStatusResponse {
-        status: *status,
-        error: error.clone(),
-    })
+pub async fn get_onboarding_status(data: web::Data<AppState>) -> impl Responder {
+    HttpResponse::Ok().json(kind_status(&data, WorkflowKind::Onboarding).await)
 }
 
 /// Interpret a peer's reply to a workflow invite.
@@ -1308,33 +1284,10 @@ async fn verify_peer_mesh(
 pub async fn start_contracts(
     http_req: HttpRequest,
     data: web::Data<AppState>,
-    contracts_state: web::Data<Arc<ContractsWorkflowState>>,
     body: web::Json<ContractsRequest>,
 ) -> impl Responder {
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
-    }
-
-    // Cross-workflow mutex (see `start_kick` for rationale).
-    let workflow_guard = match WorkflowInFlightGuard::try_acquire(data.workflow_in_flight.clone()) {
-        Some(g) => g,
-        None => {
-            return HttpResponse::Conflict().json(ErrorResponse {
-                error: "Another workflow is already running; \
-                        wait for it to complete or cancel it first"
-                    .to_string(),
-            });
-        }
-    };
-    // Belt-and-suspenders: keep the per-workflow status check so /contracts/status
-    // gives a precise reason when polled mid-start.
-    {
-        let status = contracts_state.status.read().await;
-        if *status == WorkflowProgress::InProgress {
-            return HttpResponse::Conflict().json(ErrorResponse {
-                error: "A contracts workflow is already in progress".to_string(),
-            });
-        }
     }
 
     // Create contracts config from request
@@ -1372,6 +1325,17 @@ pub async fn start_contracts(
     };
 
     let instance_name_for_run = contracts_config.instance_name.clone();
+    let instance = WorkflowInstance::new(
+        instance_name_for_run.clone(),
+        WorkflowKind::Contracts,
+        WorkflowRole::Coordinator,
+    );
+    if !data.workflows.insert(instance.clone()) {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!("A contracts workflow for {instance_name_for_run} is already running"),
+        });
+    }
+    let contracts_state = &instance.http;
     // Refuse BEFORE persisting our run row if any selected peer is already in a
     // workflow — otherwise a busy-peer rejection leaves a phantom InProgress row.
     let busy = preflight_busy_peers(&data.config, &data.db, &contracts_invitees).await;
@@ -1401,8 +1365,9 @@ pub async fn start_contracts(
     let db = data.db.clone();
     let workflow_auth = data.auth.read().await.clone();
     let auth_lock = data.auth.clone();
-    let contracts_state_clone = contracts_state.get_ref().clone();
-    let active_workflow = data.active_workflow.clone();
+    let contracts_state_clone = instance.http.clone();
+    let instance_for_coord = instance.clone();
+    let workflows = data.workflows.clone();
     let party_credentials = data.party_credentials.clone();
     let last_seen = data.last_seen.clone();
     let contracts_invitees_for_invites = contracts_invitees.clone();
@@ -1418,7 +1383,7 @@ pub async fn start_contracts(
     let mut error_guard = contracts_state.error.write().await;
 
     let join_handle = tokio::spawn(async move {
-        let _workflow_guard = workflow_guard; // releases cross-workflow gate on drop
+        let _workflow_guard = WorkflowGuard::new(workflows, instance_for_task.clone());
 
         // Send invites to this party's members before starting coordinator workflow
         let invite_result = send_contracts_invites(
@@ -1454,7 +1419,7 @@ pub async fn start_contracts(
             None, // No dars config
             workflow_auth,
             last_seen,
-            active_workflow,
+            instance_for_coord,
         )
         .await;
 
@@ -1532,16 +1497,8 @@ pub async fn start_contracts(
     )
 )]
 #[get("/contracts/status")]
-pub async fn get_contracts_status(
-    contracts_state: web::Data<Arc<ContractsWorkflowState>>,
-) -> impl Responder {
-    let status = contracts_state.status.read().await;
-    let error = contracts_state.error.read().await;
-
-    HttpResponse::Ok().json(WorkflowStatusResponse {
-        status: *status,
-        error: error.clone(),
-    })
+pub async fn get_contracts_status(data: web::Data<AppState>) -> impl Responder {
+    HttpResponse::Ok().json(kind_status(&data, WorkflowKind::Contracts).await)
 }
 
 // ============================================================================
@@ -1605,7 +1562,6 @@ pub async fn upload_dars_local(
 pub async fn start_dars(
     http_req: HttpRequest,
     data: web::Data<AppState>,
-    dars_state: web::Data<Arc<DarsWorkflowState>>,
     body: web::Json<DarsRequest>,
 ) -> impl Responder {
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
@@ -1617,31 +1573,20 @@ pub async fn start_dars(
         });
     }
 
-    // Cross-workflow mutex (see `start_kick` for rationale).
-    let workflow_guard = match WorkflowInFlightGuard::try_acquire(data.workflow_in_flight.clone()) {
-        Some(g) => g,
-        None => {
-            return HttpResponse::Conflict().json(ErrorResponse {
-                error: "Another workflow is already running; \
-                        wait for it to complete or cancel it first"
-                    .to_string(),
-            });
-        }
-    };
-    // Belt-and-suspenders: keep the per-workflow status check so /dars/status
-    // gives a precise reason when polled mid-start.
-    {
-        let status = dars_state.status.read().await;
-        if *status == WorkflowProgress::InProgress {
-            return HttpResponse::Conflict().json(ErrorResponse {
-                error: "A DARs distribution workflow is already in progress".to_string(),
-            });
-        }
-    }
-
     // Create DARs config from request
     let timestamp = now_secs();
     let instance_name = format!("dars-distribute-{timestamp}");
+    let instance = WorkflowInstance::new(
+        instance_name.clone(),
+        WorkflowKind::Dars,
+        WorkflowRole::Coordinator,
+    );
+    if !data.workflows.insert(instance.clone()) {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!("A DARs workflow for {instance_name} is already running"),
+        });
+    }
+    let dars_state = &instance.http;
     let dars_config = workflow::DarsConfig {
         dar_files: body.dar_files.clone(),
         instance_name: instance_name.clone(),
@@ -1675,8 +1620,9 @@ pub async fn start_dars(
 
     let config = data.config.clone();
     let db = data.db.clone();
-    let dars_state_clone = dars_state.get_ref().clone();
-    let active_workflow = data.active_workflow.clone();
+    let dars_state_clone = instance.http.clone();
+    let instance_for_coord = instance.clone();
+    let workflows = data.workflows.clone();
     let last_seen = data.last_seen.clone();
     let peer_ids = body.peer_ids.clone();
     *dars_state.invited_peers.write().await = peer_ids.clone();
@@ -1700,7 +1646,7 @@ pub async fn start_dars(
     let mut error_guard = dars_state.error.write().await;
 
     let join_handle = tokio::spawn(async move {
-        let _workflow_guard = workflow_guard; // releases cross-workflow gate on drop
+        let _workflow_guard = WorkflowGuard::new(workflows, instance_for_task.clone());
 
         // Send invites to selected peers before starting coordinator workflow
         let dar_filenames: Vec<String> = dars_config
@@ -1744,7 +1690,7 @@ pub async fn start_dars(
             Some(dars_config),
             None, // No auth
             last_seen,
-            active_workflow,
+            instance_for_coord,
         )
         .await;
 
@@ -1793,14 +1739,8 @@ pub async fn start_dars(
     )
 )]
 #[get("/dars/distribute/status")]
-pub async fn get_dars_status(dars_state: web::Data<Arc<DarsWorkflowState>>) -> impl Responder {
-    let status = dars_state.status.read().await;
-    let error = dars_state.error.read().await;
-
-    HttpResponse::Ok().json(WorkflowStatusResponse {
-        status: *status,
-        error: error.clone(),
-    })
+pub async fn get_dars_status(data: web::Data<AppState>) -> impl Responder {
+    HttpResponse::Ok().json(kind_status(&data, WorkflowKind::Dars).await)
 }
 
 /// Send DARs invites to selected peers using Noise protocol
@@ -1882,11 +1822,24 @@ async fn send_dars_invites(
 
 /// Shared cancel logic. All four workflow types use HttpWorkflowState<WorkflowProgress>.
 async fn cancel_workflow_state(
-    state: &Arc<HttpWorkflowState<WorkflowProgress>>,
     data: &web::Data<AppState>,
     label: &str,
     kind: WorkflowKind,
 ) -> HttpResponse {
+    // Find a coordinator run of this kind in the registry. With concurrent
+    // runs this cancels the first registered run of the kind; per-instance
+    // cancel is available via the generic `/workflows/{instance}/cancel`.
+    let Some(instance) = data
+        .workflows
+        .snapshot()
+        .into_iter()
+        .find(|i| i.kind == kind && i.role == WorkflowRole::Coordinator)
+    else {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!("No {label} workflow in progress"),
+        });
+    };
+    let state = &instance.http;
     {
         let status = state.status.read().await;
         if *status != WorkflowProgress::InProgress {
@@ -1927,25 +1880,21 @@ async fn cancel_workflow_state(
     }
 
     // Mirror the cancel into the persisted workflow_runs row so the feed picks it up.
-    if let Ok(Some(run)) = data
-        .db
-        .get_active_workflow_run(kind, WorkflowRole::Coordinator)
-        .await
-        && let Err(e) = mark_run_status(
-            &data.db,
-            &run.instance_name,
-            WorkflowProgress::Cancelled,
-            None,
-        )
-        .await
+    if let Err(e) = mark_run_status(
+        &data.db,
+        &instance.instance_name,
+        WorkflowProgress::Cancelled,
+        None,
+    )
+    .await
     {
         tracing::warn!(
             "Failed to flip workflow_runs row {} to cancelled: {e:#}",
-            run.instance_name
+            instance.instance_name
         );
     }
 
-    tracing::info!("{label} workflow cancelled");
+    tracing::info!("{label} workflow {} cancelled", instance.instance_name);
     HttpResponse::Ok().json(MessageResponse {
         message: format!("{label} workflow cancelled"),
     })
@@ -1959,21 +1908,11 @@ async fn cancel_workflow_state(
     )
 )]
 #[post("/onboarding/cancel")]
-pub async fn cancel_onboarding(
-    http_req: HttpRequest,
-    data: web::Data<AppState>,
-    state: web::Data<Arc<OnboardingWorkflowState>>,
-) -> impl Responder {
+pub async fn cancel_onboarding(http_req: HttpRequest, data: web::Data<AppState>) -> impl Responder {
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
     }
-    cancel_workflow_state(
-        state.get_ref(),
-        &data,
-        "Onboarding",
-        WorkflowKind::Onboarding,
-    )
-    .await
+    cancel_workflow_state(&data, "Onboarding", WorkflowKind::Onboarding).await
 }
 
 #[utoipa::path(
@@ -1984,15 +1923,11 @@ pub async fn cancel_onboarding(
     )
 )]
 #[post("/kick/cancel")]
-pub async fn cancel_kick(
-    http_req: HttpRequest,
-    data: web::Data<AppState>,
-    state: web::Data<Arc<KickWorkflowState>>,
-) -> impl Responder {
+pub async fn cancel_kick(http_req: HttpRequest, data: web::Data<AppState>) -> impl Responder {
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
     }
-    cancel_workflow_state(state.get_ref(), &data, "Kick", WorkflowKind::Kick).await
+    cancel_workflow_state(&data, "Kick", WorkflowKind::Kick).await
 }
 
 #[utoipa::path(
@@ -2003,15 +1938,11 @@ pub async fn cancel_kick(
     )
 )]
 #[post("/contracts/cancel")]
-pub async fn cancel_contracts(
-    http_req: HttpRequest,
-    data: web::Data<AppState>,
-    state: web::Data<Arc<ContractsWorkflowState>>,
-) -> impl Responder {
+pub async fn cancel_contracts(http_req: HttpRequest, data: web::Data<AppState>) -> impl Responder {
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
     }
-    cancel_workflow_state(state.get_ref(), &data, "Contracts", WorkflowKind::Contracts).await
+    cancel_workflow_state(&data, "Contracts", WorkflowKind::Contracts).await
 }
 
 #[utoipa::path(
@@ -2022,15 +1953,11 @@ pub async fn cancel_contracts(
     )
 )]
 #[post("/dars/cancel")]
-pub async fn cancel_dars(
-    http_req: HttpRequest,
-    data: web::Data<AppState>,
-    state: web::Data<Arc<DarsWorkflowState>>,
-) -> impl Responder {
+pub async fn cancel_dars(http_req: HttpRequest, data: web::Data<AppState>) -> impl Responder {
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
     }
-    cancel_workflow_state(state.get_ref(), &data, "DARs", WorkflowKind::Dars).await
+    cancel_workflow_state(&data, "DARs", WorkflowKind::Dars).await
 }
 
 // ============================================================================
@@ -2269,10 +2196,6 @@ pub async fn dismiss_workflow(
 pub async fn retry_workflow(
     http_req: HttpRequest,
     data: web::Data<AppState>,
-    kick_state: web::Data<Arc<KickWorkflowState>>,
-    onboarding_state: web::Data<Arc<OnboardingWorkflowState>>,
-    contracts_state: web::Data<Arc<ContractsWorkflowState>>,
-    dars_state: web::Data<Arc<DarsWorkflowState>>,
     path: web::Path<String>,
 ) -> impl Responder {
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
@@ -2364,11 +2287,7 @@ pub async fn retry_workflow(
         data.db.clone(),
         data.config.clone(),
         &run,
-        kick_state,
-        onboarding_state,
-        contracts_state,
-        dars_state,
-        data.active_workflow.clone(),
+        data.workflows.clone(),
         data.auth.clone(),
         data.last_seen.clone(),
     )

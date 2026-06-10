@@ -10,9 +10,9 @@ use crate::{
         AppState,
         middleware::require_admin,
         types::{
-            DeclineInvitationPayload, ErrorResponse, InvitationActionRequest, InvitationType,
-            MessageResponse, PendingInvitation, PendingInvitationsResponse, WorkflowKind,
-            WorkflowProgress, WorkflowRole, WorkflowRun,
+            DeclineInvitationPayload, ErrorResponse, InvitationActionRequest, MessageResponse,
+            PeerJob, PendingInvitation, PendingInvitationsResponse, WorkflowKind, WorkflowProgress,
+            WorkflowRole, WorkflowRun,
         },
     },
     workflow::{ContractsStep, DarsStep, KickStep, OnboardingStep, state::WorkflowStep},
@@ -192,38 +192,33 @@ pub async fn accept_invitation(
 
     delete_persisted_invitation(&data, &invitation.id).await;
 
-    // Persist an peer-side workflow_runs row so the operator's feed shows
-    // "I'm participating in <kind>" until completion. The trigger listener
-    // reads `peer_run_instance` to know which row to flip on terminal status.
-    let peer_instance = insert_peer_run(&data, &invitation).await;
-    {
-        let mut slot = data.peer_run_instance.write().await;
-        *slot = peer_instance;
-    }
+    // Persist a peer-side workflow_runs row so the operator's feed shows
+    // "I'm participating in <kind>" until completion.
+    let Some(peer_instance) = insert_peer_run(&data, &invitation).await else {
+        return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": "Failed to record accepted invitation"
+        }));
+    };
 
-    // Store coordinator's public key and trigger the appropriate workflow
-    {
-        let mut coordinator_pubkey = data.coordinator_pubkey.write().await;
-        *coordinator_pubkey = Some(invitation.coordinator_pubkey.clone());
-    }
-
-    match invitation.invitation_type {
-        InvitationType::Onboarding => {
-            tracing::info!("Accepting onboarding invitation, triggering peer workflow");
-            data.onboarding_trigger.notify_one();
-        }
-        InvitationType::Kick => {
-            tracing::info!("Accepting kick invitation, triggering peer workflow");
-            data.kick_trigger.notify_one();
-        }
-        InvitationType::Contracts => {
-            tracing::info!("Accepting contracts invitation, triggering peer workflow");
-            data.contracts_trigger.notify_one();
-        }
-        InvitationType::Dars => {
-            tracing::info!("Accepting DARs invitation, triggering peer workflow");
-            data.dars_trigger.notify_one();
-        }
+    // Enqueue a peer job. Carrying the coordinator's run instance
+    // (`workflow_instance` from the invite) lets the peer route its commands
+    // back to the right concurrent run; the single queue lets this node accept
+    // many invites of any kind at once without racing over a shared slot.
+    let job = PeerJob {
+        kind: invitation.invitation_type.into(),
+        instance_name: peer_instance,
+        coordinator_instance: invitation.workflow_instance.clone().unwrap_or_default(),
+        coordinator_pubkey: invitation.coordinator_pubkey.clone(),
+    };
+    tracing::info!(
+        "Accepting {:?} invitation; enqueuing peer job {}",
+        invitation.invitation_type,
+        job.instance_name
+    );
+    if data.peer_job_sender.send(job).is_err() {
+        return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": "Peer workflow listener unavailable"
+        }));
     }
 
     HttpResponse::Ok().json(serde_json::json!({
@@ -309,7 +304,7 @@ async fn notify_coordinator_of_decline(data: &web::Data<AppState>, invitation: &
         }
     };
 
-    let client = match NoiseClient::new(data.config.clone(), coordinator).await {
+    let client = match NoiseClient::new(data.config.clone(), coordinator, String::new()).await {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!("Failed to build NoiseClient for decline notification: {e}");

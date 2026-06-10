@@ -188,10 +188,20 @@ impl MessageType {
     }
 }
 
-/// Message structure for Noise protocol communication
+/// Message structure for Noise protocol communication.
+///
+/// `instance` carries the coordinator's workflow `instance_name` so the
+/// always-on listener can route a peer's workflow-command traffic
+/// (`GetNextCommand`, signatures, …) to the correct concurrent run when a node
+/// coordinates more than one workflow at a time. It is empty for non-workflow
+/// requests (`ListPeers`, `RequestOwnerKeys`, …) and for invite/control
+/// messages, which the listener dispatches without per-instance routing. The
+/// peer learns the value from the invite's `workflow_instance` field and
+/// echoes it on every subsequent command.
 #[derive(Clone, Debug)]
 pub struct Message {
     pub msg_type: MessageType,
+    pub instance: String,
     pub payload: Vec<u8>,
     _p: PhantomData<()>,
 }
@@ -200,6 +210,7 @@ impl Message {
     pub fn new(msg_type: MessageType, payload: Vec<u8>) -> Self {
         Self {
             msg_type,
+            instance: String::new(),
             payload,
             _p: PhantomData,
         }
@@ -209,18 +220,32 @@ impl Message {
     pub fn new_empty(msg_type: MessageType) -> Self {
         Self {
             msg_type,
+            instance: String::new(),
             payload: Vec::new(),
             _p: PhantomData,
         }
     }
 
+    /// Set the routing `instance_name` (the coordinator's run identifier) so
+    /// the always-on listener can dispatch this command to the right run.
+    #[must_use]
+    pub fn with_instance(mut self, instance: impl Into<String>) -> Self {
+        self.instance = instance.into();
+        self
+    }
+
     /// Encode message to wire format:
-    /// [MessageType (2 bytes)] [PayloadLength (4 bytes)] [Payload (variable)]
+    /// `[MessageType (2)] [InstanceLen (2)] [Instance] [PayloadLength (4)] [Payload]`
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
+        let instance_bytes = self.instance.as_bytes();
+        let mut bytes = Vec::with_capacity(8 + instance_bytes.len() + self.payload.len());
 
         // Message type (2 bytes, big-endian)
         bytes.extend_from_slice(&self.msg_type.to_u16().to_be_bytes());
+
+        // Routing instance: length (2 bytes, big-endian) + UTF-8 bytes
+        bytes.extend_from_slice(&(instance_bytes.len() as u16).to_be_bytes());
+        bytes.extend_from_slice(instance_bytes);
 
         // Payload length (4 bytes, big-endian)
         bytes.extend_from_slice(&(self.payload.len() as u32).to_be_bytes());
@@ -233,9 +258,10 @@ impl Message {
 
     /// Decode message from wire format
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        if bytes.len() < 6 {
+        // Minimum: type (2) + instance_len (2) + payload_len (4) = 8 bytes.
+        if bytes.len() < 8 {
             anyhow::bail!(
-                "Message too short: expected at least 6 bytes, got {count}",
+                "Message too short: expected at least 8 bytes, got {count}",
                 count = bytes.len()
             );
         }
@@ -244,22 +270,43 @@ impl Message {
         let msg_type_value = u16::from_be_bytes([bytes[0], bytes[1]]);
         let msg_type = MessageType::try_from(msg_type_value)?;
 
+        // Parse routing instance length (2 bytes) + bytes
+        let instance_len = u16::from_be_bytes([bytes[2], bytes[3]]) as usize;
+        let instance_end = 4 + instance_len;
+        if bytes.len() < instance_end + 4 {
+            anyhow::bail!(
+                "Message instance truncated: expected {instance_len} instance bytes + 4 length \
+                 bytes, got {count} after the header",
+                count = bytes.len().saturating_sub(4)
+            );
+        }
+        let instance = String::from_utf8(bytes[4..instance_end].to_vec())
+            .map_err(|e| anyhow::anyhow!("Message instance is not valid UTF-8: {e}"))?;
+
         // Parse payload length (4 bytes)
-        let payload_len = u32::from_be_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]) as usize;
+        let len_start = instance_end;
+        let payload_len = u32::from_be_bytes([
+            bytes[len_start],
+            bytes[len_start + 1],
+            bytes[len_start + 2],
+            bytes[len_start + 3],
+        ]) as usize;
+        let payload_start = len_start + 4;
 
         // Check if we have enough bytes for the payload
-        if bytes.len() < 6 + payload_len {
+        if bytes.len() < payload_start + payload_len {
             anyhow::bail!(
                 "Message payload truncated: expected {payload_len} bytes, got {count}",
-                count = bytes.len() - 6
+                count = bytes.len() - payload_start
             );
         }
 
         // Extract payload
-        let payload = bytes[6..6 + payload_len].to_vec();
+        let payload = bytes[payload_start..payload_start + payload_len].to_vec();
 
         Ok(Self {
             msg_type,
+            instance,
             payload,
             _p: PhantomData,
         })
@@ -939,10 +986,11 @@ mod tests {
         let msg = Message::new_empty(MessageType::UploadDars);
         let bytes = msg.to_bytes();
 
-        // Should be 6 bytes: 2 for type, 4 for length (0)
-        assert_eq!(bytes.len(), 6);
+        // 8 bytes: 2 type, 2 instance_len (0), 4 payload_len (0).
+        assert_eq!(bytes.len(), 8);
         assert_eq!(bytes[0..2], [0x00, 0x01]); // Type
-        assert_eq!(bytes[2..6], [0x00, 0x00, 0x00, 0x00]); // Length
+        assert_eq!(bytes[2..4], [0x00, 0x00]); // Instance length (0)
+        assert_eq!(bytes[4..8], [0x00, 0x00, 0x00, 0x00]); // Payload length (0)
     }
 
     #[test]
@@ -951,11 +999,12 @@ mod tests {
         let msg = Message::new(MessageType::Data, payload.clone());
         let bytes = msg.to_bytes();
 
-        // Should be 10 bytes: 2 for type, 4 for length, 4 for payload
-        assert_eq!(bytes.len(), 10);
+        // 12 bytes: 2 type, 2 instance_len (0), 4 payload_len, 4 payload.
+        assert_eq!(bytes.len(), 12);
         assert_eq!(bytes[0..2], [0x01, 0x02]); // Type (Data = 0x0102)
-        assert_eq!(bytes[2..6], [0x00, 0x00, 0x00, 0x04]); // Length (4)
-        assert_eq!(bytes[6..10], payload[..]); // Payload
+        assert_eq!(bytes[2..4], [0x00, 0x00]); // Instance length (0)
+        assert_eq!(bytes[4..8], [0x00, 0x00, 0x00, 0x04]); // Payload length (4)
+        assert_eq!(bytes[8..12], payload[..]); // Payload
     }
 
     #[test]
@@ -965,13 +1014,40 @@ mod tests {
         let decoded = Message::from_bytes(&bytes)?;
 
         assert_eq!(decoded.msg_type, original.msg_type);
+        assert_eq!(decoded.instance, "");
         assert_eq!(decoded.payload, original.payload);
         Ok(())
     }
 
     #[test]
+    fn test_message_roundtrip_with_instance() -> Result {
+        // The routing instance must survive a wire round-trip so the always-on
+        // listener can dispatch concurrent same-kind workflows correctly.
+        let original = Message::new(MessageType::GetNextCommand, b"".to_vec())
+            .with_instance("onboarding-acme-1717000000");
+        let bytes = original.to_bytes();
+        let decoded = Message::from_bytes(&bytes)?;
+
+        assert_eq!(decoded.msg_type, MessageType::GetNextCommand);
+        assert_eq!(decoded.instance, "onboarding-acme-1717000000");
+        assert!(decoded.payload.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn test_message_roundtrip_instance_and_payload() -> Result {
+        let original =
+            Message::new(MessageType::KeysUpload, b"keybytes".to_vec()).with_instance("kick-xyz");
+        let decoded = Message::from_bytes(&original.to_bytes())?;
+
+        assert_eq!(decoded.instance, "kick-xyz");
+        assert_eq!(decoded.payload, b"keybytes");
+        Ok(())
+    }
+
+    #[test]
     fn test_message_decoding_too_short() {
-        let bytes = vec![0x00, 0x01]; // Only 2 bytes, need at least 6
+        let bytes = vec![0x00, 0x01]; // Only 2 bytes, need at least 8
         let result = Message::from_bytes(&bytes);
         assert!(result.is_err());
     }
@@ -979,8 +1055,19 @@ mod tests {
     #[test]
     fn test_message_decoding_truncated_payload() {
         let mut bytes = vec![0x00, 0x01]; // Type
-        bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x0A]); // Length = 10
+        bytes.extend_from_slice(&[0x00, 0x00]); // Instance length (0)
+        bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x0A]); // Payload length = 10
         bytes.extend_from_slice(&[0x01, 0x02]); // Only 2 bytes of payload
+
+        let result = Message::from_bytes(&bytes);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_message_decoding_truncated_instance() {
+        let mut bytes = vec![0x00, 0x01]; // Type
+        bytes.extend_from_slice(&[0x00, 0x10]); // Instance length = 16
+        bytes.extend_from_slice(b"short"); // but only 5 instance bytes follow
 
         let result = Message::from_bytes(&bytes);
         assert!(result.is_err());

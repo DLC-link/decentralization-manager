@@ -1,6 +1,6 @@
-use std::sync::{
-    Arc, RwLock as StdRwLock,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    collections::HashMap,
+    sync::{Arc, RwLock as StdRwLock},
 };
 
 use canton_common::decimal::DamlDecimal;
@@ -103,62 +103,177 @@ impl<S: WorkflowStatus> HttpWorkflowState<S> {
     }
 }
 
-/// Cross-workflow mutual exclusion.
+/// One in-flight workflow this node owns (coordinator- or peer-side),
+/// type-erased over kind so a single [`WorkflowRegistry`] + a single
+/// [`PeerJob`] queue hold every concurrent run regardless of kind. Keyed in
+/// the registry by `instance_name`.
+pub struct WorkflowInstance {
+    pub instance_name: String,
+    pub kind: WorkflowKind,
+    pub role: WorkflowRole,
+    /// HTTP-facing state (status, error, abort handle, invitees) the
+    /// `/workflows/{instance_name}/{status,cancel}` endpoints read and mutate.
+    /// Uniform across kinds — every kind's status collapses to
+    /// [`WorkflowProgress`].
+    pub http: Arc<HttpWorkflowState<WorkflowProgress>>,
+    /// Coordinator-only Noise handle the always-on listener routes a peer's
+    /// workflow-command traffic to. `None` for peer-side runs (peers connect
+    /// outbound as clients and are never routed to here). `std::sync::RwLock`
+    /// so the listener clones the handle out without awaiting.
+    pub active: StdRwLock<Option<ActiveWorkflow>>,
+}
+
+impl WorkflowInstance {
+    /// Build a fresh instance with empty HTTP state and no Noise handle yet.
+    pub fn new(instance_name: String, kind: WorkflowKind, role: WorkflowRole) -> Arc<Self> {
+        Arc::new(Self {
+            instance_name,
+            kind,
+            role,
+            http: Arc::new(HttpWorkflowState::new()),
+            active: StdRwLock::new(None),
+        })
+    }
+
+    /// Register the coordinator's typed Noise server so the always-on listener
+    /// can route this run's commands to it.
+    pub fn set_active(&self, workflow: ActiveWorkflow) {
+        *self.active.write().unwrap_or_else(|e| e.into_inner()) = Some(workflow);
+    }
+}
+
+/// Instance-keyed registry of every in-flight workflow this node owns. Replaces
+/// the single-tenant per-kind `HttpWorkflowState` singletons, the global
+/// in-flight gate, and the single `active_workflow` routing slot: any number of
+/// workflows (even of the same kind) run side-by-side, each addressed by
+/// `instance_name`. The always-on Noise listener routes a peer's command via
+/// [`route`](Self::route) using `Message::instance`.
 ///
-/// At most one workflow (kick / onboarding / contracts / dars) may run at
-/// a time. Each `start_*` handler must `try_acquire` this gate before
-/// spawning its coordinator task, then move the returned guard into the
-/// spawned task's async block. The guard drops at the end of the task
-/// — on success, failure, cancellation, OR panic — so the gate cannot
-/// leak past a workflow's lifetime.
-///
-/// This replaces the previous read-then-write TOCTOU on each per-workflow
-/// status `RwLock`: two concurrent `start_kick` calls would both observe
-/// `status != InProgress` and both proceed; with this gate, the second
-/// `try_acquire` fails and the second caller gets a 409.
-pub struct WorkflowInFlightGuard(Arc<AtomicBool>);
+/// Uses `std::sync::RwLock` (not tokio) so the listener holds the lock only
+/// long enough to clone a handle out — never across an await. The inner
+/// `HttpWorkflowState` locks are tokio and are awaited only after the `Arc`
+/// has been cloned out and the registry lock released.
+#[derive(Clone, Default)]
+pub struct WorkflowRegistry {
+    inner: Arc<StdRwLock<HashMap<String, Arc<WorkflowInstance>>>>,
+}
 
-impl WorkflowInFlightGuard {
-    /// Returns `Some(guard)` if the gate was free and is now held; `None`
-    /// if another workflow already holds it.
-    pub fn try_acquire(flag: Arc<AtomicBool>) -> Option<Self> {
-        flag.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .ok()
-            .map(|_| Self(flag))
+impl WorkflowRegistry {
+    /// Build an empty registry.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Insert a freshly-built instance. Returns `false` (and inserts nothing)
+    /// if a run is already registered under that `instance_name` — the caller
+    /// turns that into a 409.
+    pub fn insert(&self, instance: Arc<WorkflowInstance>) -> bool {
+        let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
+        if guard.contains_key(&instance.instance_name) {
+            return false;
+        }
+        guard.insert(instance.instance_name.clone(), instance);
+        true
+    }
+
+    /// Look up the instance registered under `instance_name`.
+    pub fn get(&self, instance_name: &str) -> Option<Arc<WorkflowInstance>> {
+        self.inner
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(instance_name)
+            .cloned()
+    }
+
+    /// Remove and return the instance for `instance_name`. Called once a run
+    /// reaches a terminal status so the registry doesn't accumulate stale
+    /// entries (see also [`WorkflowGuard`], which does this on drop).
+    pub fn remove(&self, instance_name: &str) -> Option<Arc<WorkflowInstance>> {
+        self.inner
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(instance_name)
+    }
+
+    /// Clone out the coordinator Noise handle to route a workflow command to,
+    /// without awaiting. When `instance_name` is non-empty, looks up that exact
+    /// run. When it is empty — a peer that predates instance routing, or a
+    /// resumed peer with no stored coordinator instance — falls back to the
+    /// sole active coordinator run *if there is exactly one*; with zero or more
+    /// than one active run an empty key cannot be disambiguated, so returns
+    /// `None` (the listener then replies 503 and the peer's bounded retry
+    /// finalizes the run).
+    pub fn route(&self, instance_name: &str) -> Option<ActiveWorkflow> {
+        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        if !instance_name.is_empty() {
+            return guard
+                .get(instance_name)
+                .and_then(|i| i.active.read().unwrap_or_else(|e| e.into_inner()).clone());
+        }
+        let mut actives = guard
+            .values()
+            .filter_map(|i| i.active.read().unwrap_or_else(|e| e.into_inner()).clone());
+        let first = actives.next();
+        match actives.next() {
+            Some(_) => None,
+            None => first,
+        }
+    }
+
+    /// Snapshot every registered instance.
+    pub fn snapshot(&self) -> Vec<Arc<WorkflowInstance>> {
+        self.inner
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .cloned()
+            .collect()
     }
 }
 
-impl Drop for WorkflowInFlightGuard {
+/// Removes a [`WorkflowInstance`] from the [`WorkflowRegistry`] on drop —
+/// including on coordinator/peer task panic or abort — so a finished or
+/// cancelled run can never linger and misroute later commands. Removing by the
+/// guard's own `instance_name` means one finishing run never deregisters a
+/// different concurrent run.
+pub struct WorkflowGuard {
+    registry: WorkflowRegistry,
+    instance_name: String,
+}
+
+impl WorkflowGuard {
+    /// Tie `instance_name`'s registry entry to the returned guard's lifetime.
+    pub fn new(registry: WorkflowRegistry, instance_name: String) -> Self {
+        Self {
+            registry,
+            instance_name,
+        }
+    }
+}
+
+impl Drop for WorkflowGuard {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
+        self.registry.remove(&self.instance_name);
     }
 }
 
-/// Shared slot holding the coordinator's in-flight workflow, or `None` when
-/// idle. Uses `std::sync::RwLock` (not tokio) so the listener holds it only
-/// long enough to clone the handle out — never across an await — and `Drop`
-/// can clear it synchronously. This replaces `ListenerPauseGuard`: instead of
-/// pausing the listener for a workflow, the workflow registers itself here and
-/// the always-on listener routes its commands.
-pub type ActiveWorkflowSlot = Arc<StdRwLock<Option<ActiveWorkflow>>>;
-
-/// Registers an [`ActiveWorkflow`] in the slot for the guard's lifetime and
-/// clears it on drop — including on coordinator task panic or abort.
-pub struct ActiveWorkflowGuard(ActiveWorkflowSlot);
-
-impl ActiveWorkflowGuard {
-    /// Register `workflow` as this node's active workflow until the returned
-    /// guard is dropped.
-    pub fn register(slot: ActiveWorkflowSlot, workflow: ActiveWorkflow) -> Self {
-        *slot.write().unwrap_or_else(|e| e.into_inner()) = Some(workflow);
-        Self(slot)
-    }
-}
-
-impl Drop for ActiveWorkflowGuard {
-    fn drop(&mut self) {
-        *self.0.write().unwrap_or_else(|e| e.into_inner()) = None;
-    }
+/// A peer-side workflow job: emitted by `accept_invitation` / the
+/// `RetryWorkflow` listener arm onto the single `mpsc::UnboundedSender` and
+/// consumed by the peer listener, which spawns `workflow::start_peer` for it.
+/// Carrying `kind`, `instance_name`, and `coordinator_pubkey` on the message
+/// means concurrent accepts of any kind no longer race over a global slot.
+#[derive(Clone, Debug)]
+pub struct PeerJob {
+    pub kind: WorkflowKind,
+    /// The peer-side `workflow_runs` row primary key (local synthetic name).
+    pub instance_name: String,
+    /// The coordinator's own run `instance_name`, taken from the invite's
+    /// `workflow_instance`. The peer tags every workflow command with it
+    /// (`Message::instance`) so the coordinator's always-on listener routes the
+    /// command to the right concurrent run. Empty if the invite predated
+    /// instance routing — the coordinator then falls back to its sole run.
+    pub coordinator_instance: String,
+    pub coordinator_pubkey: String,
 }
 
 // `WorkflowProgress` is now defined in `common::types` and re-exported above.
