@@ -3401,6 +3401,16 @@ export const GovernanceSection = ({
 
   return (
     <Box sx={{ mt: 2 }}>
+      {/* Shared across both halves: the proposals view (`view="proposals"`)
+          does not render `showActionsHalf`, so keeping the error here ensures
+          a failed `/governance/propose` (or action) surfaces in either view
+          instead of failing silently. */}
+      {error && (
+        <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError(null)}>
+          {error}
+        </Alert>
+      )}
+
       {showActionsHalf && (
       <>
       {view !== "actions" && (
@@ -3431,12 +3441,6 @@ export const GovernanceSection = ({
       )}
 
       <Collapse in={expanded}>
-        {error && (
-          <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError(null)}>
-            {error}
-          </Alert>
-        )}
-
         {(data?.gov_core_out_of_date || governanceState?.out_of_date) && (
           <Alert severity="warning" sx={{ mb: 2 }}>
             The governance core contract is out of date
