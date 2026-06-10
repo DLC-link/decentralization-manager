@@ -411,11 +411,6 @@ pub async fn start_kick(
         WorkflowKind::Kick,
         WorkflowRole::Coordinator,
     );
-    if !data.workflows.insert(instance.clone()) {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format!("A workflow with instance {instance_name} is already running"),
-        });
-    }
     let kick_state = &instance.http;
 
     let kick_config = workflow::KickConfig::new(
@@ -458,6 +453,17 @@ pub async fn start_kick(
     }
 
     let invitees_for_invites = invitees.clone();
+    // Register only now — after all validation + DB persistence succeeded —
+    // so no early-return path can leak a stale registry entry. A duplicate
+    // instance_name (e.g. onboarding's deterministic name) is rejected here.
+    if !data.workflows.insert(instance.clone()) {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!(
+                "A workflow with instance {} is already running",
+                instance.instance_name
+            ),
+        });
+    }
     *kick_state.invited_peers.write().await = invitees;
 
     // Spawn the kick workflow in the background
@@ -786,11 +792,6 @@ pub async fn start_onboarding(
         WorkflowKind::Onboarding,
         WorkflowRole::Coordinator,
     );
-    if !data.workflows.insert(instance.clone()) {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format!("An onboarding workflow for {instance_name} is already running"),
-        });
-    }
     let onboarding_state = &instance.http;
     let onboarding_config =
         workflow::OnboardingConfig::new(party_id_prefix.clone(), instance_name.clone());
@@ -849,6 +850,17 @@ pub async fn start_onboarding(
     let onboarding_state_clone = instance.http.clone();
     let instance_for_coord = instance.clone();
     let workflows = data.workflows.clone();
+    // Register only now — after all validation + DB persistence succeeded —
+    // so no early-return path can leak a stale registry entry. A duplicate
+    // instance_name (e.g. onboarding's deterministic name) is rejected here.
+    if !data.workflows.insert(instance.clone()) {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!(
+                "A workflow with instance {} is already running",
+                instance.instance_name
+            ),
+        });
+    }
     *onboarding_state.invited_peers.write().await = peer_ids.clone();
     let party_credentials = data.party_credentials.clone();
     let auth_lock = data.auth.clone();
@@ -1330,11 +1342,6 @@ pub async fn start_contracts(
         WorkflowKind::Contracts,
         WorkflowRole::Coordinator,
     );
-    if !data.workflows.insert(instance.clone()) {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format!("A contracts workflow for {instance_name_for_run} is already running"),
-        });
-    }
     let contracts_state = &instance.http;
     // Refuse BEFORE persisting our run row if any selected peer is already in a
     // workflow — otherwise a busy-peer rejection leaves a phantom InProgress row.
@@ -1371,6 +1378,17 @@ pub async fn start_contracts(
     let party_credentials = data.party_credentials.clone();
     let last_seen = data.last_seen.clone();
     let contracts_invitees_for_invites = contracts_invitees.clone();
+    // Register only now — after all validation + DB persistence succeeded —
+    // so no early-return path can leak a stale registry entry. A duplicate
+    // instance_name (e.g. onboarding's deterministic name) is rejected here.
+    if !data.workflows.insert(instance.clone()) {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!(
+                "A workflow with instance {} is already running",
+                instance.instance_name
+            ),
+        });
+    }
     *contracts_state.invited_peers.write().await = contracts_invitees;
     let instance_for_task = instance_name_for_run.clone();
 
@@ -1581,11 +1599,6 @@ pub async fn start_dars(
         WorkflowKind::Dars,
         WorkflowRole::Coordinator,
     );
-    if !data.workflows.insert(instance.clone()) {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format!("A DARs workflow for {instance_name} is already running"),
-        });
-    }
     let dars_state = &instance.http;
     let dars_config = workflow::DarsConfig {
         dar_files: body.dar_files.clone(),
@@ -1625,6 +1638,17 @@ pub async fn start_dars(
     let workflows = data.workflows.clone();
     let last_seen = data.last_seen.clone();
     let peer_ids = body.peer_ids.clone();
+    // Register only now — after all validation + DB persistence succeeded —
+    // so no early-return path can leak a stale registry entry. A duplicate
+    // instance_name (e.g. onboarding's deterministic name) is rejected here.
+    if !data.workflows.insert(instance.clone()) {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!(
+                "A workflow with instance {} is already running",
+                instance.instance_name
+            ),
+        });
+    }
     *dars_state.invited_peers.write().await = peer_ids.clone();
     let instance_for_task = instance_name.clone();
 

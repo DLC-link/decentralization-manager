@@ -304,7 +304,10 @@ async fn notify_coordinator_of_decline(data: &web::Data<AppState>, invitation: &
         }
     };
 
-    let client = match NoiseClient::new(data.config.clone(), coordinator, String::new()).await {
+    // Route the decline to the coordinator's matching run so it fails only that
+    // run when multiple workflows are active.
+    let route_instance = invitation.workflow_instance.clone().unwrap_or_default();
+    let client = match NoiseClient::new(data.config.clone(), coordinator, route_instance).await {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!("Failed to build NoiseClient for decline notification: {e}");

@@ -243,7 +243,15 @@ impl Message {
         // Message type (2 bytes, big-endian)
         bytes.extend_from_slice(&self.msg_type.to_u16().to_be_bytes());
 
-        // Routing instance: length (2 bytes, big-endian) + UTF-8 bytes
+        // Routing instance: length (2 bytes, big-endian) + UTF-8 bytes.
+        // Instance names are workflow `instance_name`s (party prefix + kind +
+        // timestamp), always far below the 16-bit length ceiling; assert rather
+        // than silently emit a truncated, undecodable frame if that ever breaks.
+        debug_assert!(
+            instance_bytes.len() <= u16::MAX as usize,
+            "Message.instance exceeds {} bytes and would truncate on the wire",
+            u16::MAX
+        );
         bytes.extend_from_slice(&(instance_bytes.len() as u16).to_be_bytes());
         bytes.extend_from_slice(instance_bytes);
 
