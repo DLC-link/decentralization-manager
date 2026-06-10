@@ -1344,15 +1344,16 @@ async fn handle_incoming_connection(
                         MessageType::GetChunk => {
                             // GetChunk serves BOTH the chunked ListPackages transfer and a
                             // workflow's chunked command, and the two are indistinguishable
-                            // on the wire. Prefer the active workflow: a peer's ListPackages
-                            // chunk cache entry lives until its TTL and routinely lingers
-                            // from an earlier phase (e.g. a package check) into a later
-                            // workflow, so routing by "a cache entry exists" would feed a
-                            // workflow's chunk requests stale ListPackages bytes and corrupt
-                            // the transfer. While a workflow is in flight a peer's GetChunks
-                            // belong to it; the cache below serves chunks only when no
-                            // workflow is active (ListPackages and workflows never overlap
-                            // for a given node, so this can't strand a real ListPackages).
+                            // on the wire. Prefer the workflow the command routes to: a
+                            // peer's ListPackages chunk cache entry lives until its TTL and
+                            // routinely lingers from an earlier phase (e.g. a package check)
+                            // into a later workflow, so routing by "a cache entry exists"
+                            // would feed a workflow's chunk requests stale ListPackages bytes
+                            // and corrupt the transfer. The chunk cache below is consulted
+                            // only when `route(msg.instance)` finds no matching workflow
+                            // (no/empty routing key, or no live run under it) — ListPackages
+                            // and workflow GetChunks never overlap for a given peer, so this
+                            // can't strand a real ListPackages.
                             let active = triggers.workflows.route(&msg.instance);
                             if let Some(wf) = active
                                 && let Some(pid) =

@@ -244,14 +244,25 @@ impl Message {
         bytes.extend_from_slice(&self.msg_type.to_u16().to_be_bytes());
 
         // Routing instance: length (2 bytes, big-endian) + UTF-8 bytes.
-        // Instance names are workflow `instance_name`s (party prefix + kind +
-        // timestamp), always far below the 16-bit length ceiling; assert rather
-        // than silently emit a truncated, undecodable frame if that ever breaks.
-        debug_assert!(
-            instance_bytes.len() <= u16::MAX as usize,
-            "Message.instance exceeds {} bytes and would truncate on the wire",
-            u16::MAX
-        );
+        // Instance names are workflow `instance_name`s (validated party prefix +
+        // kind + timestamp), always far below the 16-bit length ceiling. Enforce
+        // it in ALL builds, not just debug: the instance can originate from a
+        // peer's invite, so a `len() as u16` truncation would emit an
+        // undecodable frame (and the value is attacker-influenceable). If it
+        // ever exceeds the ceiling, log loudly and emit an EMPTY instance — the
+        // frame stays valid; routing simply misses → 503 → bounded retry —
+        // rather than corrupting the stream or panicking the encoder.
+        let instance_bytes: &[u8] = if instance_bytes.len() > u16::MAX as usize {
+            tracing::error!(
+                "Message.instance is {} bytes (> {}); dropping the routing key to keep the \
+                 frame decodable",
+                instance_bytes.len(),
+                u16::MAX
+            );
+            &[]
+        } else {
+            instance_bytes
+        };
         bytes.extend_from_slice(&(instance_bytes.len() as u16).to_be_bytes());
         bytes.extend_from_slice(instance_bytes);
 
