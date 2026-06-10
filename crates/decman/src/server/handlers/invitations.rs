@@ -85,6 +85,9 @@ async fn insert_peer_run(
         })
         .to_string(),
         coordinator_pubkey: Some(invitation.coordinator_pubkey.clone()),
+        // The coordinator run this peer row belongs to — keys instance-scoped
+        // CancelInvite/RetryWorkflow and peer-resume routing.
+        coordinator_instance: invitation.workflow_instance.clone(),
         coordinator_name: None,
         // The participants list is the authoritative peer set carried in the
         // invite (all four kinds send one).

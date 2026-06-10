@@ -1158,6 +1158,7 @@ mod tests {
             step_total: 7,
             config_json: r#"{"prefix":"test-network-1"}"#.to_string(),
             coordinator_pubkey: None,
+            coordinator_instance: None,
             coordinator_name: None,
             expected_peers: vec![peer_a.clone(), peer_b.clone()],
             completed_peers: vec![peer_a],

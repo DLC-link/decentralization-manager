@@ -16,13 +16,9 @@ use crate::{
     config::{NetworkConfig, NodeConfig},
     db::schema::{Commitable, SchemaRead, SchemaWrite},
     error::Result,
-    noise::{
-        Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message,
-        send_noise_message_with_retry,
-    },
+    noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
     server::{
         AppState,
-        health::classify_health_reply,
         middleware::require_admin,
         respawn_coordinator,
         types::{
@@ -37,87 +33,6 @@ use crate::{
     },
     workflow::{self, ContractsStep, DarsStep, KickStep, OnboardingStep, state::WorkflowStep},
 };
-
-// ============================================================================
-// Pre-flight busy check
-// ============================================================================
-
-/// Format the operator-facing 409 message naming each busy peer and the
-/// workflow it is currently participating in.
-fn format_busy_peers(busy: &[(String, WorkflowKind)]) -> String {
-    busy.iter()
-        .map(|(id, kind)| {
-            let article = if matches!(kind, WorkflowKind::Onboarding) {
-                "an"
-            } else {
-                "a"
-            };
-            format!(
-                "Peer {id} is participating in {article} {kind} workflow, please try again later."
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-/// Probe every invited peer's `Health` in parallel and return those already in a
-/// workflow. Unreachable peers are NOT treated as busy — the workflow proceeds;
-/// a genuinely dead peer never advances the run and the operator can cancel.
-/// Peers on older code report no workflow and so aren't blocked (graceful
-/// rollout — the peer-side invite gate still protects correctness).
-async fn preflight_busy_peers(
-    config: &NodeConfig,
-    db: &SqlitePool,
-    invitees: &[CantonId],
-) -> Vec<(String, WorkflowKind)> {
-    let Ok(peers) = db.get_all_peers().await else {
-        return Vec::new();
-    };
-    let Ok(keypair) = NoiseKeypair::from_file(&config.key_file_path()).await else {
-        return Vec::new();
-    };
-    let identity = config.participant_id().to_string();
-    let invitee_set: HashSet<String> = invitees.iter().map(CantonId::to_string).collect();
-
-    let mut probes = Vec::new();
-    for peer in peers
-        .into_iter()
-        .filter(|p| invitee_set.contains(&p.participant_id.to_string()))
-    {
-        let Ok(pubkey) = parse_public_key(&peer.public_key) else {
-            continue;
-        };
-        let psk = keypair.derive_psk(&pubkey);
-        let id = peer.participant_id.to_string();
-        let address = peer.address.clone();
-        let port = peer.port;
-        let identity = identity.clone();
-        let retry = config.noise_retry.clone();
-        probes.push(tokio::spawn(async move {
-            match send_noise_message_with_retry(
-                &address,
-                port,
-                &psk,
-                identity.as_bytes(),
-                &Message::new_empty(MessageType::Health),
-                &retry,
-            )
-            .await
-            {
-                Ok(response) => classify_health_reply(&response).1.map(|w| (id, w.kind)),
-                Err(_) => None,
-            }
-        }));
-    }
-
-    let mut busy = Vec::new();
-    for probe in probes {
-        if let Ok(Some(hit)) = probe.await {
-            busy.push(hit);
-        }
-    }
-    busy
-}
 
 // ============================================================================
 // Workflow State Types
@@ -166,6 +81,7 @@ where
         config_json: serde_json::to_string(config)
             .map_err(|e| anyhow::anyhow!("encode workflow config: {e}"))?,
         coordinator_pubkey: None,
+        coordinator_instance: None,
         coordinator_name: None,
         expected_peers: invitees.to_vec(),
         completed_peers: Vec::new(),
@@ -421,15 +337,6 @@ pub async fn start_kick(
         body.previous_threshold,
         instance_name.clone(),
     );
-
-    // Refuse BEFORE registering/persisting if any selected peer is already in a
-    // workflow — otherwise a busy-peer rejection leaves a phantom row.
-    let busy = preflight_busy_peers(&data.config, &data.db, &invitees).await;
-    if !busy.is_empty() {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format_busy_peers(&busy),
-        });
-    }
 
     // Register in the registry FIRST — atomic dedup. A racing request for the
     // same instance_name must be rejected here, BEFORE we persist, so it can't
@@ -842,14 +749,6 @@ pub async fn start_onboarding(
         Err(e) => {
             tracing::warn!("Failed to check for duplicate-prefix party: {e:#}");
         }
-    }
-
-    // Refuse BEFORE registering/persisting if any selected peer is busy.
-    let busy = preflight_busy_peers(&data.config, &data.db, &peer_ids).await;
-    if !busy.is_empty() {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format_busy_peers(&busy),
-        });
     }
 
     // Register FIRST — atomic dedup before persist. Onboarding's instance_name
@@ -1371,14 +1270,6 @@ pub async fn start_contracts(
         WorkflowRole::Coordinator,
     );
     let contracts_state = &instance.http;
-    // Refuse BEFORE registering/persisting if any selected peer is busy.
-    let busy = preflight_busy_peers(&data.config, &data.db, &contracts_invitees).await;
-    if !busy.is_empty() {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format_busy_peers(&busy),
-        });
-    }
-
     // Register FIRST — atomic dedup before persist (a racing same-instance
     // request can't upsert/clobber the in-flight run's row).
     if !data.workflows.insert(instance.clone()) {
@@ -1635,14 +1526,6 @@ pub async fn start_dars(
         instance_name: instance_name.clone(),
         peer_ids: body.peer_ids.clone(),
     };
-
-    // Refuse BEFORE registering/persisting if any selected peer is busy.
-    let busy = preflight_busy_peers(&data.config, &data.db, &body.peer_ids).await;
-    if !busy.is_empty() {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format_busy_peers(&busy),
-        });
-    }
 
     // Register FIRST — atomic dedup before persist (no clobber on a race).
     if !data.workflows.insert(instance.clone()) {
@@ -1923,7 +1806,8 @@ async fn cancel_workflow_state(
 
     let invitees = state.invited_peers.read().await.clone();
     if !invitees.is_empty()
-        && let Err(e) = send_cancel_invites(&data.config, &data.db, &invitees).await
+        && let Err(e) =
+            send_cancel_invites(&data.config, &data.db, &invitees, &instance.instance_name).await
     {
         tracing::warn!("send_cancel_invites failed during {label} cancel: {e}");
     }
@@ -2338,7 +2222,14 @@ pub async fn retry_workflow(
     // Tell every previously-invited peer to flip their Failed row back to
     // InProgress and re-spin start_peer. Best-effort — peers that are
     // unreachable now will stay Failed; operator can dismiss + re-accept.
-    if let Err(e) = send_retry_workflow(&data.config, &data.db, &run.expected_peers).await {
+    if let Err(e) = send_retry_workflow(
+        &data.config,
+        &data.db,
+        &run.expected_peers,
+        &run.instance_name,
+    )
+    .await
+    {
         tracing::warn!("Failed to broadcast RetryWorkflow: {e:#}");
     }
     respawn_coordinator(
@@ -2369,16 +2260,20 @@ async fn find_party_with_prefix(db: &SqlitePool, prefix: &str) -> Result<Option<
     Ok(parties.into_iter().next().map(|p| p.party_id))
 }
 
+/// `instance` is the cancelled run's `instance_name`, stamped onto the message
+/// so peers cancel only that run's invite/peer-run — not every run they hold
+/// from this coordinator (which may have other concurrent runs in flight).
 async fn send_cancel_invites(
     config: &NodeConfig,
     db: &SqlitePool,
     peer_ids: &[CantonId],
+    instance: &str,
 ) -> Result {
     broadcast_simple_message(
         config,
         db,
         peer_ids,
-        Message::new_empty(MessageType::CancelInvite),
+        Message::new_empty(MessageType::CancelInvite).with_instance(instance),
         "CancelInvite",
     )
     .await
@@ -2386,17 +2281,19 @@ async fn send_cancel_invites(
 
 /// Best-effort: notify previously-invited peers that the coordinator is
 /// retrying the workflow so they flip their Failed row back to InProgress
-/// and re-spin `start_peer`.
+/// and re-spin `start_peer`. `instance` scopes the retry to this run's peer
+/// rows (see `send_cancel_invites`).
 async fn send_retry_workflow(
     config: &NodeConfig,
     db: &SqlitePool,
     peer_ids: &[CantonId],
+    instance: &str,
 ) -> Result {
     broadcast_simple_message(
         config,
         db,
         peer_ids,
-        Message::new_empty(MessageType::RetryWorkflow),
+        Message::new_empty(MessageType::RetryWorkflow).with_instance(instance),
         "RetryWorkflow",
     )
     .await
@@ -2547,17 +2444,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn busy_message_names_each_peer_and_kind() {
-        let busy = vec![
-            ("participant2".to_string(), WorkflowKind::Onboarding),
-            ("participant3".to_string(), WorkflowKind::Kick),
-        ];
-        let msg = format_busy_peers(&busy);
-        assert!(msg.contains("participant2 is participating in an Onboarding workflow"));
-        assert!(msg.contains("participant3 is participating in a Kick workflow"));
-    }
-
-    #[test]
     fn invite_reply_aborts_on_busy_only() -> anyhow::Result<()> {
         let peer = CantonId::parse(
             "participant::12200ad4539c269a7b13af6806fb2ee326e7c0d7233fa6144004c416502a2c73fb0b",
@@ -2594,6 +2480,7 @@ mod tests {
             step_total: 5,
             config_json: config_json.to_string(),
             coordinator_pubkey: None,
+            coordinator_instance: None,
             coordinator_name: None,
             expected_peers,
             completed_peers: Vec::new(),

@@ -314,6 +314,7 @@ pub struct WorkflowRunRow {
     pub step_total: i64,
     pub config_json: String,
     pub coordinator_pubkey: Option<String>,
+    pub coordinator_instance: Option<String>,
     pub expected_peers_json: String,
     pub completed_peers_json: String,
     pub dec_party_id: Option<String>,
@@ -362,6 +363,7 @@ impl WorkflowRunRow {
             step_total: r.step_total,
             config_json: r.config_json.clone(),
             coordinator_pubkey: r.coordinator_pubkey.clone(),
+            coordinator_instance: r.coordinator_instance.clone(),
             expected_peers_json: serde_json::to_string(&r.expected_peers)
                 .context("encode expected_peers")?,
             completed_peers_json: serde_json::to_string(&r.completed_peers)
@@ -407,6 +409,7 @@ impl WorkflowRunRow {
             step_total: self.step_total,
             config_json: self.config_json,
             coordinator_pubkey: self.coordinator_pubkey,
+            coordinator_instance: self.coordinator_instance,
             coordinator_name: None,
             expected_peers,
             completed_peers,
@@ -510,6 +513,7 @@ mod tests {
             step_total: 1,
             config_json: "{}".to_string(),
             coordinator_pubkey: None,
+            coordinator_instance: None,
             expected_peers_json: "[]".to_string(),
             completed_peers_json: "[]".to_string(),
             dec_party_id: None,

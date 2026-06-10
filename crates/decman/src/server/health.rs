@@ -91,12 +91,6 @@ pub(crate) fn classify_health_reply(
     (ConnectionStatus::Connected, None, None)
 }
 
-/// The `Busy` invite-reply payload: the in-flight `WorkflowKind` as a string,
-/// so the inviting coordinator can report which workflow the busy peer is in.
-pub fn busy_payload(kind: WorkflowKind) -> Vec<u8> {
-    kind.as_str().as_bytes().to_vec()
-}
-
 #[cfg(test)]
 mod tests {
     use anyhow::Context;

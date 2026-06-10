@@ -869,6 +869,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                 step_total,
                 config_json,
                 coordinator_pubkey,
+                coordinator_instance,
                 expected_peers_json,
                 completed_peers_json,
                 dec_party_id,
@@ -876,7 +877,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                 dismissed,
                 created_at,
                 updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(instance_name) DO UPDATE SET
                 kind                     = excluded.kind,
                 role                     = excluded.role,
@@ -886,6 +887,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                 step_total               = excluded.step_total,
                 config_json              = excluded.config_json,
                 coordinator_pubkey       = excluded.coordinator_pubkey,
+                coordinator_instance     = excluded.coordinator_instance,
                 expected_peers_json  = excluded.expected_peers_json,
                 completed_peers_json = excluded.completed_peers_json,
                 dec_party_id             = excluded.dec_party_id,
@@ -903,6 +905,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         .bind(row.step_total)
         .bind(&row.config_json)
         .bind(&row.coordinator_pubkey)
+        .bind(&row.coordinator_instance)
         .bind(&row.expected_peers_json)
         .bind(&row.completed_peers_json)
         .bind(&row.dec_party_id)
@@ -1970,6 +1973,7 @@ mod tests {
             step_total: 7,
             config_json: r#"{"foo":"bar"}"#.to_string(),
             coordinator_pubkey: Some("aaaa".to_string()),
+            coordinator_instance: None,
             coordinator_name: None,
             expected_peers: vec![
                 CantonId::parse(&format!("a::{TEST_NS}")).unwrap(),
@@ -1989,6 +1993,28 @@ mod tests {
             created_at: 1000,
             updated_at: 1000,
         }
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_workflow_run_coordinator_instance_roundtrip(pool: SqlitePool) -> Result {
+        // Migration 000014: a peer row's `coordinator_instance` (the
+        // coordinator run it belongs to) must survive a persist/load
+        // round-trip — instance-scoped CancelInvite/RetryWorkflow and
+        // peer-resume routing key off it.
+        let mut run = test_run("peer-onboarding-abc-1", "Onboarding", "Peer");
+        run.coordinator_instance = Some("test32-creation".to_string());
+
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_workflow_run(&run).await?;
+        Commitable::commit(tx).await?;
+
+        let loaded = pool.get_workflow_run(&run.instance_name).await?.unwrap();
+        assert_eq!(
+            loaded.coordinator_instance.as_deref(),
+            Some("test32-creation")
+        );
+
+        Ok(())
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]

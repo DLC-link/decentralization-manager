@@ -376,10 +376,11 @@ pub(crate) fn refire_peer(run: &WorkflowRun, peer_job_sender: &mpsc::UnboundedSe
     let job = PeerJob {
         kind: run.kind,
         instance_name: run.instance_name.clone(),
-        // Resume path: the coordinator's instance is not persisted on the peer
-        // row, so routing falls back to the coordinator's sole run. Peer-resume
-        // already has documented limitations when the coordinator has advanced.
-        coordinator_instance: String::new(),
+        // Persisted at accept time (the invite's `workflow_instance`), so a
+        // resumed peer routes its commands to the exact coordinator run instead
+        // of relying on the sole-active fallback. Empty only for rows that
+        // predate instance routing.
+        coordinator_instance: run.coordinator_instance.clone().unwrap_or_default(),
         coordinator_pubkey: pk,
     };
     if peer_job_sender.send(job).is_err() {
@@ -530,13 +531,41 @@ impl WorkflowTriggers {
         invitations.push(invitation);
     }
 
-    async fn drop_invitations_from(&self, coordinator_pubkey: &str) {
+    /// Drop pending invitations from `coordinator_pubkey`. When `instance` is
+    /// non-empty (the CancelInvite was stamped with the cancelled run's
+    /// `instance_name`), drop only the invitation(s) for that run so a sibling
+    /// concurrent run's invite survives. An empty `instance` (legacy
+    /// coordinator) keeps the old drop-everything-from-sender behaviour.
+    async fn drop_invitations_from(&self, coordinator_pubkey: &str, instance: &str) {
+        let mut invitations = self.pending_invitations.write().await;
+        let matches = |i: &PendingInvitation| {
+            i.coordinator_pubkey == coordinator_pubkey
+                && (instance.is_empty() || i.workflow_instance.as_deref() == Some(instance))
+        };
+        let dropped_ids: Vec<String> = invitations
+            .iter()
+            .filter(|i| matches(i))
+            .map(|i| i.id.clone())
+            .collect();
+        invitations.retain(|i| !matches(i));
+        drop(invitations);
+
         match self.db.begin_transaction().await {
             Ok(mut tx) => {
-                if let Err(e) = tx
-                    .delete_pending_invitations_by_coordinator(coordinator_pubkey)
-                    .await
-                {
+                let result = if instance.is_empty() {
+                    tx.delete_pending_invitations_by_coordinator(coordinator_pubkey)
+                        .await
+                } else {
+                    let mut res = Ok(());
+                    for id in &dropped_ids {
+                        if let Err(e) = tx.delete_pending_invitation(id).await {
+                            res = Err(e);
+                            break;
+                        }
+                    }
+                    res
+                };
+                if let Err(e) = result {
                     tracing::warn!("Failed to delete persisted invitations: {e}");
                 } else if let Err(e) = Commitable::commit(tx).await {
                     tracing::warn!("Failed to commit invitation deletion: {e}");
@@ -544,17 +573,17 @@ impl WorkflowTriggers {
             }
             Err(e) => tracing::warn!("Failed to begin tx for invitation deletion: {e}"),
         }
-
-        let mut invitations = self.pending_invitations.write().await;
-        invitations.retain(|i| i.coordinator_pubkey != coordinator_pubkey);
     }
 
-    /// Cancel any peer-side workflow_runs we have InProgress whose
-    /// coordinator matches the sender of a CancelInvite. Same authority — the
-    /// coordinator who started the workflow is also the one who's allowed to
-    /// abort it. Used by the CancelInvite listener arm so a single message
-    /// covers both un-accepted invites AND accepted-but-running runs.
-    async fn cancel_peer_runs_from(&self, coordinator_pubkey: &str) {
+    /// Cancel peer-side workflow_runs whose coordinator matches the sender of
+    /// a CancelInvite. Same authority — the coordinator who started the
+    /// workflow is also the one who's allowed to abort it. Used by the
+    /// CancelInvite listener arm so a single message covers both un-accepted
+    /// invites AND accepted-but-running runs. When `instance` is non-empty,
+    /// only the run(s) belonging to that coordinator run are cancelled —
+    /// sibling concurrent runs from the same coordinator keep going; empty
+    /// (legacy sender) cancels everything from the sender as before.
+    async fn cancel_peer_runs_from(&self, coordinator_pubkey: &str, instance: &str) {
         let runs = match SchemaRead::get_in_progress_workflow_runs(&self.db).await {
             Ok(r) => r,
             Err(e) => {
@@ -569,6 +598,7 @@ impl WorkflowTriggers {
         for run in runs.into_iter().filter(|r| {
             r.role == WorkflowRole::Peer
                 && r.coordinator_pubkey.as_deref() == Some(coordinator_pubkey)
+                && (instance.is_empty() || r.coordinator_instance.as_deref() == Some(instance))
         }) {
             let mut tx = match self.db.begin_transaction().await {
                 Ok(t) => t,
@@ -606,12 +636,14 @@ impl WorkflowTriggers {
         }
     }
 
-    /// Coordinator-initiated retry: find any Failed peer rows whose
+    /// Coordinator-initiated retry: find Failed peer rows whose
     /// `coordinator_pubkey` matches the sender, flip them back to InProgress,
-    /// and fire the per-kind trigger so `start_peer` re-spins. Same
-    /// authority model as `cancel_peer_runs_from` — the coordinator who
-    /// started the run is also the one allowed to retry it.
-    async fn retry_peer_runs_from(&self, coordinator_pubkey: &str) {
+    /// and re-enqueue their peer jobs. Same authority model as
+    /// `cancel_peer_runs_from` — the coordinator who started the run is also
+    /// the one allowed to retry it. When `instance` is non-empty, only the
+    /// run(s) belonging to that coordinator run are retried; empty (legacy
+    /// sender) retries every Failed run from the sender as before.
+    async fn retry_peer_runs_from(&self, coordinator_pubkey: &str, instance: &str) {
         let runs = match SchemaRead::get_visible_workflow_runs(&self.db).await {
             Ok(r) => r,
             Err(e) => {
@@ -627,6 +659,7 @@ impl WorkflowTriggers {
             r.role == WorkflowRole::Peer
                 && r.status == WorkflowProgress::Failed
                 && r.coordinator_pubkey.as_deref() == Some(coordinator_pubkey)
+                && (instance.is_empty() || r.coordinator_instance.as_deref() == Some(instance))
         }) {
             let mut tx = match self.db.begin_transaction().await {
                 Ok(t) => t,
@@ -1571,25 +1604,13 @@ async fn handle_incoming_connection(
                         | MessageType::InviteKick
                         | MessageType::InviteContracts
                         | MessageType::InviteDars => {
-                            // Refuse a new invite while already in a workflow, so a
-                            // busy node doesn't silently queue a second one. The DB
-                            // is the single source of truth for both coordinator and
-                            // peer roles.
-                            let health = health::build_health_response(
-                                &triggers.db,
-                                &triggers.config.participant_id().to_string(),
-                            )
-                            .await;
-                            if let Some(wf) = health.workflow {
-                                let kind = wf.kind;
-                                tracing::info!(
-                                    "Refusing invite — node is already in a {kind} workflow"
-                                );
-                                return Ok(Response::new(Body::from(
-                                    Message::new(MessageType::Busy, health::busy_payload(kind))
-                                        .to_bytes(),
-                                )));
-                            }
+                            // Invites are accepted unconditionally: workflows are
+                            // multi-instance now, so a node already coordinating or
+                            // participating in runs can take part in more
+                            // concurrently. Each invite surfaces as its own pending
+                            // card (deduped by id, which carries the coordinator's
+                            // run instance); the old refuse-while-busy gate was a
+                            // one-workflow-at-a-time leftover.
                             let invitation_type = match msg.msg_type {
                                 MessageType::InviteOnboarding => InvitationType::Onboarding,
                                 MessageType::InviteKick => InvitationType::Kick,
@@ -1671,13 +1692,17 @@ async fn handle_incoming_connection(
                                 .unwrap());
                         }
                         MessageType::CancelInvite => {
+                            // `msg.instance` scopes the cancel to one coordinator
+                            // run; empty (legacy sender) cancels everything from
+                            // the sender.
                             tracing::info!(
-                                "Received CancelInvite, dropping pending invites + cancelling \
-                                 any in-flight peer runs from sender"
+                                "Received CancelInvite (instance: {:?}), dropping pending \
+                                 invites + cancelling matching in-flight peer runs from sender",
+                                msg.instance
                             );
                             if let Some(ref pubkey) = peer_pubkey_hex {
-                                triggers.drop_invitations_from(pubkey).await;
-                                triggers.cancel_peer_runs_from(pubkey).await;
+                                triggers.drop_invitations_from(pubkey, &msg.instance).await;
+                                triggers.cancel_peer_runs_from(pubkey, &msg.instance).await;
                             }
                             let ack = Message::new_empty(MessageType::Ack);
                             return Ok(Response::builder()
@@ -1686,12 +1711,16 @@ async fn handle_incoming_connection(
                                 .unwrap());
                         }
                         MessageType::RetryWorkflow => {
+                            // `msg.instance` scopes the retry to one coordinator
+                            // run; empty (legacy sender) retries every Failed run
+                            // from the sender.
                             tracing::info!(
-                                "Received RetryWorkflow, retrying any Failed peer runs from \
-                                 sender"
+                                "Received RetryWorkflow (instance: {:?}), retrying matching \
+                                 Failed peer runs from sender",
+                                msg.instance
                             );
                             if let Some(ref pubkey) = peer_pubkey_hex {
-                                triggers.retry_peer_runs_from(pubkey).await;
+                                triggers.retry_peer_runs_from(pubkey, &msg.instance).await;
                             }
                             let ack = Message::new_empty(MessageType::Ack);
                             return Ok(Response::builder()
