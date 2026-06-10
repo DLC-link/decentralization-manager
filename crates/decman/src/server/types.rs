@@ -198,25 +198,27 @@ impl WorkflowRegistry {
     /// Clone out the coordinator Noise handle to route a workflow command to,
     /// without awaiting.
     ///
-    /// Prefers the exact run named by `instance_name`. On any miss — empty key
-    /// (peer predates instance routing, or a resumed peer with no stored
-    /// coordinator instance), a stale/mismatched key, or the named run not yet
-    /// having registered its Noise handle — falls back to the *sole* active
-    /// coordinator run if there is exactly one. This keeps the single-workflow
-    /// case bulletproof (there is only ever one run to route to) while still
-    /// routing exactly when multiple runs are concurrently active. With zero or
-    /// more than one active run and no exact match, returns `None` (the listener
-    /// replies 503 and the peer's bounded retry finalizes the run).
+    /// When `instance_name` is non-empty (the peer learned the coordinator's run
+    /// from the invite and stamps every command with it), route by **exact
+    /// match only**. If that run isn't registered, or hasn't set its Noise
+    /// handle yet (coordinator still spinning up), return `None` — the listener
+    /// replies 503 and the peer's bounded retry waits for it. Never fall back to
+    /// a *different* run for a peer that named its own: in rapid start/restart
+    /// sequences a sole-active fallback would hand the command to a
+    /// stale/completing workflow, which `Disconnect`s the peer and ends its run
+    /// with no work done.
+    ///
+    /// Only an empty key — a peer that predates instance routing, or a resumed
+    /// peer with no stored coordinator instance — falls back to the sole active
+    /// run (if exactly one), since it has no key to match on.
     pub fn route(&self, instance_name: &str) -> Option<ActiveWorkflow> {
         let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
-        if !instance_name.is_empty()
-            && let Some(wf) = guard
+        if !instance_name.is_empty() {
+            return guard
                 .get(instance_name)
-                .and_then(|i| i.active.read().unwrap_or_else(|e| e.into_inner()).clone())
-        {
-            return Some(wf);
+                .and_then(|i| i.active.read().unwrap_or_else(|e| e.into_inner()).clone());
         }
-        // Fallback: the sole active run, if exactly one.
+        // Empty key: fall back to the sole active run, if exactly one.
         let mut actives = guard
             .values()
             .filter_map(|i| i.active.read().unwrap_or_else(|e| e.into_inner()).clone());
