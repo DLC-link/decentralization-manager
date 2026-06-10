@@ -3841,8 +3841,9 @@ async fn fetch_holding_views(
     Ok(holdings)
 }
 
-/// Intermediate parse result that retains `owner` so callers can drop holdings
-/// the party can see (via interface visibility) but doesn't actually own.
+/// Intermediate parse result. `owner` lets `fetch_holding_views` drop holdings
+/// the party can see (via interface visibility) but doesn't actually own,
+/// before the views reach any caller.
 struct HoldingView {
     contract_id: String,
     owner: String,
