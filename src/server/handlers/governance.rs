@@ -35,7 +35,7 @@ use crate::{
             get_holdings, get_instruments, get_open_burn_requests, get_open_mint_requests,
             get_open_transfer_instructions, get_provider_services, get_registrar_services,
             get_transfer_factories, get_user_services, get_vaults, query_contracts_by_template,
-            resolve_contract_package_ref,
+            resolve_contract_package_ref, select_input_holdings,
         },
         transfer_context::{
             AcceptTransferContext, ProposeTransferArgs, fetch as fetch_accept_transfer_context,
@@ -1141,6 +1141,38 @@ pub async fn propose_action(
                     });
                 }
             };
+            // The token-standard transfer factory rejects an empty
+            // `inputHoldingCids` ("No holdings provided"). When the caller
+            // didn't pin specific holdings, fund the transfer with every
+            // Holding the sender owns for this instrument and let the choice
+            // consume what it needs (returning change).
+            if input_holding_cids.is_empty() {
+                match select_input_holdings(
+                    &data.config,
+                    party_id,
+                    Some(token.clone()),
+                    &admin,
+                    &instrument_id.id,
+                )
+                .await
+                {
+                    Ok(cids) if cids.is_empty() => {
+                        return HttpResponse::BadRequest().json(ErrorResponse {
+                            error: format!(
+                                "No holdings of instrument {} owned by {} to fund the transfer",
+                                instrument_id.id, party_id
+                            ),
+                        });
+                    }
+                    Ok(cids) => *input_holding_cids = cids,
+                    Err(e) => {
+                        tracing::warn!("Failed to select input holdings for transfer: {e:#}");
+                        return HttpResponse::InternalServerError().json(ErrorResponse {
+                            error: format!("Failed to select input holdings: {e}"),
+                        });
+                    }
+                }
+            }
             match fetch_factory_for_propose(
                 data.config.canton.network,
                 ProposeTransferArgs {

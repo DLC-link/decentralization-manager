@@ -2,9 +2,17 @@
 
 set -e
 
+KUBE_CONTEXT="$(kubectl config current-context)"
+if [[ "$KUBE_CONTEXT" != *devnet* ]]; then
+  echo "Refusing to deploy: current kube context '$KUBE_CONTEXT' does not contain 'devnet'." >&2
+  echo "Switch to a devnet context with 'kubectl config use-context <ctx>' and retry." >&2
+  exit 1
+fi
+echo "Using kube context: $KUBE_CONTEXT"
+
 aws sso login
 
-TAG="0.1.7"
+TAG="0.1.8"
 IMAGE="public.ecr.aws/dlc-link/canton-decparty-manager"
 DEPLOY_DIR="zarf/deployments/devnet"
 

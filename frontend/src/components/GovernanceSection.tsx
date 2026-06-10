@@ -3401,6 +3401,16 @@ export const GovernanceSection = ({
 
   return (
     <Box sx={{ mt: 2 }}>
+      {/* Shared across both halves: the proposals view (`view="proposals"`)
+          does not render `showActionsHalf`, so keeping the error here ensures
+          a failed `/governance/propose` (or action) surfaces in either view
+          instead of failing silently. */}
+      {error && (
+        <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError(null)}>
+          {error}
+        </Alert>
+      )}
+
       {showActionsHalf && (
       <>
       {view !== "actions" && (
@@ -3431,12 +3441,6 @@ export const GovernanceSection = ({
       )}
 
       <Collapse in={expanded}>
-        {error && (
-          <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError(null)}>
-            {error}
-          </Alert>
-        )}
-
         {(data?.gov_core_out_of_date || governanceState?.out_of_date) && (
           <Alert severity="warning" sx={{ mb: 2 }}>
             The governance core contract is out of date
@@ -4006,11 +4010,11 @@ export const GovernanceSection = ({
                         setProposalInputHoldingCids(e.target.value)
                       }
                       fullWidth
-                      helperText="Optional — pin specific Holding contracts to spend. Leave empty to let Canton auto-select holdings of the chosen instrument up to the amount."
+                      helperText="Optional — pin specific Holding contracts to spend. Leave empty to let the server select your holdings of the chosen instrument automatically (change is returned)."
                       slotProps={{
                         input: {
                           endAdornment: fieldHelpAdornment(
-                            "Optional list of specific Holding contract ids to spend, comma-separated. Leave empty to let Canton auto-select holdings up to the amount.",
+                            "Optional list of specific Holding contract ids to spend, comma-separated. Leave empty to let the server select your holdings of the chosen instrument automatically; the transfer consumes what it needs and returns change.",
                             "Help for Input Holding CIDs",
                           ),
                         },

@@ -129,7 +129,13 @@ pub async fn fetch_factory_for_propose(
                 requested_at: micros_to_rfc3339(args.requested_at_micros)?,
                 execute_before: micros_to_rfc3339(args.execute_before_micros)?,
                 input_holding_cids: Some(args.input_holding_cids.to_vec()),
-                meta: Some(Meta { values: None }),
+                // `values` has no skip_serializing_if, so `None` serializes as
+                // `"values": null`. The registry's token-standard Metadata
+                // decoder expects an object — `null` fails with
+                // "Expected { but was null". Send an empty map instead.
+                meta: Some(Meta {
+                    values: Some(HashMap::new()),
+                }),
             },
             extra_args: ExtraArgs {
                 context: Context {
