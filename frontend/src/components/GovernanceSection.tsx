@@ -4010,11 +4010,11 @@ export const GovernanceSection = ({
                         setProposalInputHoldingCids(e.target.value)
                       }
                       fullWidth
-                      helperText="Optional — pin specific Holding contracts to spend. Leave empty to let Canton auto-select holdings of the chosen instrument up to the amount."
+                      helperText="Optional — pin specific Holding contracts to spend. Leave empty to spend all of your holdings of the chosen instrument (change is returned)."
                       slotProps={{
                         input: {
                           endAdornment: fieldHelpAdornment(
-                            "Optional list of specific Holding contract ids to spend, comma-separated. Leave empty to let Canton auto-select holdings up to the amount.",
+                            "Optional list of specific Holding contract ids to spend, comma-separated. Leave empty to spend all of your holdings of the chosen instrument; the transfer consumes what it needs and returns change.",
                             "Help for Input Holding CIDs",
                           ),
                         },

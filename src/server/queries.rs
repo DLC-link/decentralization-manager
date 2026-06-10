@@ -3844,6 +3844,7 @@ async fn fetch_holding_views(
 /// Intermediate parse result that retains `owner` so callers can drop holdings
 /// the party can see (via interface visibility) but doesn't actually own.
 struct HoldingView {
+    contract_id: String,
     owner: String,
     instrument_admin: CantonId,
     instrument_id: String,
@@ -3874,11 +3875,33 @@ fn extract_holding_view(created: &CreatedEvent) -> Option<HoldingView> {
     let instrument_id = field_text(instrument_record, "id")?;
 
     Some(HoldingView {
+        contract_id: created.contract_id.clone(),
         owner,
         instrument_admin,
         instrument_id,
         amount,
     })
+}
+
+/// Collect the contract ids of every `Holding` the party owns for a given
+/// instrument `(admin, id)`. Used by the Transfer proposal flow to fund the
+/// transfer when the caller doesn't pin specific holdings: the token-standard
+/// transfer factory rejects an empty `inputHoldingCids` ("No holdings
+/// provided"), so we hand it every matching holding and let the choice consume
+/// what it needs and return change.
+pub async fn select_input_holdings(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    instrument_admin: &CantonId,
+    instrument_id: &str,
+) -> Result<Vec<String>> {
+    let raw = fetch_holding_views(config, party_id, token).await?;
+    Ok(raw
+        .into_iter()
+        .filter(|h| h.instrument_admin == *instrument_admin && h.instrument_id == instrument_id)
+        .map(|h| h.contract_id)
+        .collect())
 }
 
 /// Result of the per-party preapproval lookup. `utility` is the set of
