@@ -7,7 +7,7 @@ use crate::{
     db::schema::{Commitable, SchemaRead, SchemaWrite},
     noise::client::NoiseClient,
     server::{
-        AppState,
+        AppState, mark_failed_via_pool,
         middleware::require_admin,
         types::{
             DeclineInvitationPayload, ErrorResponse, InvitationActionRequest, MessageResponse,
@@ -41,9 +41,18 @@ fn step_total_for(kind: WorkflowKind) -> i64 {
 }
 
 /// Insert the peer-side `workflow_runs` row for a freshly-accepted invite.
-/// The synthetic instance_name is `peer-<kind>-<coord_pubkey[..16]>-<ts>`
-/// — only one accepted invite can be active per node at a time so the
-/// timestamp suffix is enough to keep older completed rows distinct.
+///
+/// The synthetic instance_name is keyed on the coordinator's run instance
+/// (`peer-<kind>-<coord_pubkey[..16]>-<workflow_instance>`): with concurrent
+/// workflows a node can accept several same-kind invites from the SAME
+/// coordinator back to back, and a timestamp suffix at seconds resolution
+/// would collide — the second accept's upsert (ON CONFLICT(instance_name) DO
+/// UPDATE) silently merging two distinct runs into one row, cross-wiring
+/// their artefacts and statuses. Keying on the coordinator run makes the row
+/// unique per run and stable across a re-sent invite of the same run (the
+/// re-accept resumes the same row instead of duplicating it). Invites from
+/// coordinators that predate instance routing carry no `workflow_instance`;
+/// they fall back to the old timestamp suffix.
 async fn insert_peer_run(
     data: &web::Data<AppState>,
     invitation: &PendingInvitation,
@@ -55,11 +64,15 @@ async fn insert_peer_run(
         .unwrap_or(0);
     let pubkey_short =
         &invitation.coordinator_pubkey[..invitation.coordinator_pubkey.len().min(16)];
+    let run_suffix = match invitation.workflow_instance.as_deref() {
+        Some(coord_instance) if !coord_instance.is_empty() => coord_instance.to_string(),
+        _ => now.to_string(),
+    };
     let instance_name = format!(
         "peer-{}-{}-{}",
         kind.as_str().to_lowercase(),
         pubkey_short,
-        now
+        run_suffix
     );
     let run = WorkflowRun {
         instance_name: instance_name.clone(),
@@ -218,7 +231,17 @@ pub async fn accept_invitation(
         invitation.invitation_type,
         job.instance_name
     );
+    let peer_instance_for_err = job.instance_name.clone();
     if data.peer_job_sender.send(job).is_err() {
+        // The row was just persisted InProgress; without a listener nothing
+        // will ever drive it, so mark it Failed instead of leaving a stale
+        // in-progress card in the feed.
+        mark_failed_via_pool(
+            &data.db,
+            &peer_instance_for_err,
+            "Peer workflow listener unavailable",
+        )
+        .await;
         return HttpResponse::InternalServerError().json(serde_json::json!({
             "error": "Peer workflow listener unavailable"
         }));

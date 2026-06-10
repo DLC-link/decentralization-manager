@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -462,6 +463,7 @@ pub async fn start_kick(
     HttpResponse::Accepted().json(KickResponse {
         status: KickStatus::InProgress,
         message: "Kick workflow started".to_string(),
+        instance_name,
     })
 }
 
@@ -929,6 +931,7 @@ pub async fn start_onboarding(
     HttpResponse::Accepted().json(OnboardingResponse {
         status: OnboardingStatus::InProgress,
         message: "Onboarding workflow started".to_string(),
+        instance_name,
     })
 }
 
@@ -1425,6 +1428,7 @@ pub async fn start_contracts(
     HttpResponse::Accepted().json(WorkflowResponse {
         status: WorkflowProgress::InProgress,
         message: "Contracts workflow started".to_string(),
+        instance_name: instance_name_for_run,
     })
 }
 
@@ -1666,6 +1670,7 @@ pub async fn start_dars(
     HttpResponse::Accepted().json(WorkflowResponse {
         status: WorkflowProgress::InProgress,
         message: "DARs distribution workflow started".to_string(),
+        instance_name,
     })
 }
 
@@ -1758,16 +1763,16 @@ async fn send_dars_invites(
     Ok(())
 }
 
-/// Shared cancel logic. All four workflow types use HttpWorkflowState<WorkflowProgress>.
+/// Shared cancel logic for the legacy per-kind endpoints. Picks the
+/// coordinator run of `kind` deterministically (lowest instance_name) —
+/// `snapshot()` is HashMap-ordered, so with concurrent same-kind runs an
+/// arbitrary pick would cancel a different instance each call. Callers that
+/// know which run they mean should use `POST /workflows/{instance}/cancel`.
 async fn cancel_workflow_state(
     data: &web::Data<AppState>,
     label: &str,
     kind: WorkflowKind,
 ) -> HttpResponse {
-    // Pick the coordinator run of this kind deterministically (lowest
-    // instance_name) — `snapshot()` is HashMap-ordered, so with concurrent
-    // same-kind runs an arbitrary pick would cancel a different instance each
-    // call. Per-instance cancel is available via `/workflows/{instance}/cancel`.
     let mut candidates: Vec<_> = data
         .workflows
         .snapshot()
@@ -1780,6 +1785,17 @@ async fn cancel_workflow_state(
             error: format!("No {label} workflow in progress"),
         });
     };
+    cancel_instance(data, &instance, label).await
+}
+
+/// Cancel exactly one registered coordinator run: abort its task, notify its
+/// invitees with an instance-stamped CancelInvite (sibling runs on the peers
+/// survive), and mirror Cancelled onto the persisted row.
+async fn cancel_instance(
+    data: &web::Data<AppState>,
+    instance: &Arc<WorkflowInstance>,
+    label: &str,
+) -> HttpResponse {
     let state = &instance.http;
     {
         let status = state.status.read().await;
@@ -1900,6 +1916,41 @@ pub async fn cancel_dars(http_req: HttpRequest, data: web::Data<AppState>) -> im
         return resp;
     }
     cancel_workflow_state(&data, "DARs", WorkflowKind::Dars).await
+}
+
+/// Cancel one specific in-flight coordinator run by its `instance_name`. With
+/// concurrent runs of the same kind, this is the only unambiguous cancel — the
+/// legacy per-kind `/{kind}/cancel` endpoints pick a run deterministically but
+/// cannot target a chosen card.
+#[utoipa::path(
+    tag = "Workflows",
+    responses(
+        (status = 200, description = "Workflow cancelled", body = MessageResponse),
+        (status = 409, description = "No in-flight run with this instance_name", body = ErrorResponse)
+    )
+)]
+#[post("/workflows/{instance_name}/cancel")]
+pub async fn cancel_workflow_instance(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    path: web::Path<String>,
+) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
+    let instance_name = path.into_inner();
+    let Some(instance) = data.workflows.get(&instance_name) else {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!("No in-flight workflow run named {instance_name}"),
+        });
+    };
+    if instance.role != WorkflowRole::Coordinator {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!("Run {instance_name} is not coordinated by this node"),
+        });
+    }
+    let label = instance.kind.as_str();
+    cancel_instance(&data, &instance, label).await
 }
 
 // ============================================================================

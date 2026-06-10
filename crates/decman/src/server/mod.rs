@@ -405,7 +405,7 @@ async fn mark_completed_via_pool(db: &SqlitePool, instance_name: &str) {
     }
 }
 
-async fn mark_failed_via_pool(db: &SqlitePool, instance_name: &str, error: &str) {
+pub(crate) async fn mark_failed_via_pool(db: &SqlitePool, instance_name: &str, error: &str) {
     if let Err(e) = set_run_status(
         db,
         instance_name,
@@ -997,6 +997,7 @@ pub async fn start_server(
             .service(handlers::list_workflows)
             .service(handlers::dismiss_workflow)
             .service(handlers::retry_workflow)
+            .service(handlers::cancel_workflow_instance)
             .service(handlers::get_key_status)
             .service(handlers::get_invitations)
             .service(handlers::accept_invitation)

@@ -1129,8 +1129,120 @@ pub fn chain_audit_entry_from_row(row: crate::db::rows::ChainAuditCacheRow) -> C
 #[cfg(test)]
 mod tests {
     use serde_json::Value;
+    use sqlx::SqlitePool;
 
     use super::*;
+    use crate::{
+        config::{NetworkConfig, NodeConfig},
+        db::MIGRATOR,
+        error::Result,
+        noise::{load_or_generate_keypair, server::NoiseServer},
+        server::peer_status::LastSeen,
+        workflow::OnboardingStep,
+    };
+
+    /// Build a real `ActiveWorkflow` (the enum is over `NoiseServer<S>`, which
+    /// has no test double) for registry routing tests. `dir` must outlive the
+    /// call — `NoiseServer::new` reads the keypair from it.
+    async fn test_active_workflow(
+        pool: &SqlitePool,
+        dir: &tempfile::TempDir,
+        instance: &str,
+    ) -> Result<ActiveWorkflow> {
+        let config = NodeConfig::default().with_root_dir(dir.path());
+        tokio::fs::create_dir_all(config.data_dir()).await?;
+        load_or_generate_keypair(config.key_file_path()).await?;
+        let last_seen: LastSeen = Arc::new(RwLock::new(HashMap::new()));
+        let server = NoiseServer::new(
+            config,
+            NetworkConfig::from_peers(Vec::new()),
+            pool.clone(),
+            instance.to_string(),
+            OnboardingStep::WaitingForPeers,
+            None,
+            last_seen,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("NoiseServer::new: {e}"))?;
+        Ok(ActiveWorkflow::Onboarding(Arc::new(server)))
+    }
+
+    #[test]
+    fn registry_rejects_duplicate_instance_and_guard_removes_own_entry() {
+        let registry = WorkflowRegistry::new();
+        let a = WorkflowInstance::new(
+            "a-creation".to_string(),
+            WorkflowKind::Onboarding,
+            WorkflowRole::Coordinator,
+        );
+        let a_dup = WorkflowInstance::new(
+            "a-creation".to_string(),
+            WorkflowKind::Onboarding,
+            WorkflowRole::Coordinator,
+        );
+        let b = WorkflowInstance::new(
+            "b-creation".to_string(),
+            WorkflowKind::Onboarding,
+            WorkflowRole::Coordinator,
+        );
+
+        assert!(registry.insert(a));
+        // Same-instance registration must be rejected (the start handlers turn
+        // this into a 409) while a distinct sibling registers fine.
+        assert!(!registry.insert(a_dup));
+        assert!(registry.insert(b));
+
+        // A guard dropping removes exactly its own entry — never a sibling's.
+        let guard = WorkflowGuard::new(registry.clone(), "a-creation".to_string());
+        drop(guard);
+        assert!(registry.get("a-creation").is_none());
+        assert!(registry.get("b-creation").is_some());
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn route_is_exact_for_keyed_peers_with_sole_active_fallback_for_legacy(
+        pool: SqlitePool,
+    ) -> Result {
+        let dir = tempfile::tempdir()?;
+        let registry = WorkflowRegistry::new();
+
+        // Run A is fully live (registered + Noise handle set); run B is
+        // registered but still spinning up (no handle yet) — the exact window
+        // the routing rules exist for.
+        let a = WorkflowInstance::new(
+            "a-creation".to_string(),
+            WorkflowKind::Onboarding,
+            WorkflowRole::Coordinator,
+        );
+        let b = WorkflowInstance::new(
+            "b-creation".to_string(),
+            WorkflowKind::Onboarding,
+            WorkflowRole::Coordinator,
+        );
+        assert!(registry.insert(a.clone()));
+        assert!(registry.insert(b.clone()));
+        a.set_active(test_active_workflow(&pool, &dir, "a-creation").await?);
+
+        // Keyed peers route exactly: A's traffic reaches A.
+        assert!(registry.route("a-creation").is_some());
+        // A peer naming run B must get None (503 -> bounded retry) while B
+        // spins up — NEVER a fallback onto sibling A, which would Disconnect
+        // it (the G3 regression this rule fixed).
+        assert!(registry.route("b-creation").is_none());
+        // An unknown key (cancelled/dismissed run) also gets None.
+        assert!(registry.route("no-such-run").is_none());
+        // A legacy/resumed peer with no key falls back to the sole active run.
+        assert!(registry.route("").is_some());
+
+        // Once B is live too, exact keys both route, but an empty key is
+        // ambiguous and must refuse rather than guess.
+        b.set_active(test_active_workflow(&pool, &dir, "b-creation").await?);
+        assert!(registry.route("a-creation").is_some());
+        assert!(registry.route("b-creation").is_some());
+        assert!(registry.route("").is_none());
+
+        Ok(())
+    }
 
     /// P3: locks the wire shape of `WorkflowRun` so the `String → CantonId`
     /// typing change for participant-id fields cannot silently switch from

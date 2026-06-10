@@ -4,7 +4,7 @@ use sqlx::SqlitePool;
 use crate::{
     db::schema::SchemaRead,
     noise::{Message, MessageType},
-    server::{ConnectionStatus, WorkflowKind},
+    server::ConnectionStatus,
 };
 
 // `WorkflowInfo` now lives in the shared `common` crate (consumed by both this
@@ -21,7 +21,13 @@ pub use common::types::WorkflowInfo;
 pub struct HealthResponse {
     pub participant_id: String,
     pub in_workflow: bool,
+    /// The oldest in-progress run (deterministic; see `build_health_response`).
     pub workflow: Option<WorkflowInfo>,
+    /// Total in-progress runs on this node — with concurrent workflows a node
+    /// can hold several; `workflow` alone shows only one of them. `default`
+    /// so payloads from nodes that predate this field still parse.
+    #[serde(default)]
+    pub workflow_count: usize,
     pub version: String,
 }
 
@@ -45,8 +51,10 @@ impl HealthResponse {
 
 /// Build this node's health report from the DB's in-progress workflow runs.
 ///
-/// A node runs at most one workflow at a time (the global in-flight mutex), so
-/// we report the first in-progress run if present.
+/// With concurrent workflows a node can hold any number of in-progress runs;
+/// `workflow` reports the oldest one (`get_in_progress_workflow_runs` orders
+/// by `created_at ASC`, so repeated probes don't flip between runs) and
+/// `workflow_count` carries the total.
 pub async fn build_health_response(db: &SqlitePool, participant_id: &str) -> HealthResponse {
     let runs = match db.get_in_progress_workflow_runs().await {
         Ok(runs) => runs,
@@ -59,6 +67,7 @@ pub async fn build_health_response(db: &SqlitePool, participant_id: &str) -> Hea
             Vec::new()
         }
     };
+    let workflow_count = runs.len();
     let workflow = runs.into_iter().next().map(|r| WorkflowInfo {
         kind: r.kind,
         role: r.role,
@@ -71,6 +80,7 @@ pub async fn build_health_response(db: &SqlitePool, participant_id: &str) -> Hea
         participant_id: participant_id.to_string(),
         in_workflow: workflow.is_some(),
         workflow,
+        workflow_count,
         version: env!("CARGO_PKG_VERSION").to_string(),
     }
 }
@@ -95,7 +105,11 @@ pub(crate) fn classify_health_reply(
 mod tests {
     use anyhow::Context;
 
-    use crate::{db::MIGRATOR, error::Result, server::WorkflowRole};
+    use crate::{
+        db::MIGRATOR,
+        error::Result,
+        server::{WorkflowKind, WorkflowRole},
+    };
 
     use super::*;
 
@@ -111,6 +125,7 @@ mod tests {
                 step_index: 3,
                 step_total: 8,
             }),
+            workflow_count: 1,
             version: "0.1.0".into(),
         };
         let back =
@@ -134,6 +149,7 @@ mod tests {
                 step_index: 3,
                 step_total: 8,
             }),
+            workflow_count: 1,
             version: "0.1.0".into(),
         };
         let reply = Message::new(MessageType::HealthResponse, hr.to_payload()).to_bytes();
