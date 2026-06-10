@@ -2,6 +2,8 @@
 
 pub mod cancel_cascades;
 pub mod check_peer_dars;
+pub mod concurrent_cross_workflows;
+pub mod concurrent_sibling_cancel;
 pub mod create_dec_party;
 pub mod deploy_gov_core;
 pub mod dismiss_failed_cleans_artifacts;

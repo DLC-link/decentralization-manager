@@ -84,8 +84,60 @@ pub async fn post_onboarding(f: &Fixture, prefix: &str) -> anyhow::Result<()> {
 /// because chaos cleanup is non-essential — the next phase generates a fresh
 /// prefix anyway.
 pub async fn dismiss_p1(f: &Fixture, instance_name: &str) {
+    dismiss_on(f, f.p1.http, instance_name).await;
+}
+
+/// Best-effort dismiss of a terminal workflow run on an arbitrary node.
+pub async fn dismiss_on(f: &Fixture, port: u16, instance_name: &str) {
     let path = format!("/workflows/{instance_name}/dismiss");
-    let _ = f.post_expect_status(f.p1.http, &path, &json!({})).await;
+    let _ = f.post_expect_status(port, &path, &json!({})).await;
+}
+
+/// POST a workflow-start request on `port` and return the `instance_name`
+/// the server allocated for the run.
+pub async fn start_workflow_on(
+    f: &Fixture,
+    port: u16,
+    path: &str,
+    req: &serde_json::Value,
+) -> anyhow::Result<String> {
+    let resp: serde_json::Value = f
+        .post_json(port, path, req)
+        .await
+        .with_context(|| format!("POST {path} on port {port}"))?;
+    resp.get("instance_name")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .with_context(|| format!("POST {path} response missing instance_name: {resp}"))
+}
+
+/// Wait until the invitation belonging to coordinator run `instance` is
+/// visible on `port`, then return its id.
+pub async fn wait_for_invite_for_instance(
+    f: &Fixture,
+    port: u16,
+    instance: &str,
+    deadline: Duration,
+) -> anyhow::Result<String> {
+    let start = std::time::Instant::now();
+    loop {
+        let r: crate::common::types::PendingInvitationsResponse =
+            f.get_json(port, "/invitations").await?;
+        if let Some(inv) = r
+            .invitations
+            .into_iter()
+            .find(|i| i.workflow_instance.as_deref() == Some(instance))
+        {
+            return Ok(inv.id);
+        }
+        if start.elapsed() >= deadline {
+            anyhow::bail!(
+                "invitation for coordinator run {instance} not visible on port {port} \
+                 within {deadline:?}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
 }
 
 /// Log a chaos-phase milestone using the same `[Gx]` prefix the bash tests

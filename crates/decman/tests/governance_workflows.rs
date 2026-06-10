@@ -129,13 +129,21 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     // called here and returned Ok(()) without asserting anything — a phase
     // that always "passed", i.e. misleading coverage — so it's left out of the
     // sequence until the harness lands. (Tracked by the TODO in that module.)
-    // G9 disabled: the concurrent-kinds resume scenario flakes on the shared
-    // dars_state across chaos phases — the peer-handler/abort-handle race
-    // is fixed but a stalled /dars/distribute plus downstream respawns
-    // can still leave the row in a state where a fresh /dars/distribute
-    // 409s. Re-enable once we've drained the pre-G9 dars_state more
-    // aggressively (or moved G9 to its own fixture).
-    // phases::restart_with_concurrent_kinds::run(&mut f).await?; // G9
+    // G9: restart with two concurrent kinds in flight — under the registry
+    // model the recovery path must resume BOTH InProgress coordinator rows
+    // (the old single-slot model resumed only the newest). Its original
+    // disable reason (the shared per-kind dars_state singleton) no longer
+    // exists.
+    phases::restart_with_concurrent_kinds::run(&mut f).await?; // G9
     phases::retry_with_offline_peer::run(&mut f).await?; // P2
+    // G12: cancelling one of two concurrent sibling runs must leave the
+    // other's invites and peer rows untouched (instance-scoped CancelInvite +
+    // per-instance cancel endpoint).
+    phases::concurrent_sibling_cancel::run(&mut f).await?; // G12
+    // G11 runs LAST: it is the heaviest phase (six concurrent coordinator
+    // runs, twelve peer runs) and the full-feature test of concurrent
+    // multi-instance workflows — full-mesh cross-acceptance of simultaneous
+    // Onboarding + DARs coordinators on every node.
+    phases::concurrent_cross_workflows::run(&mut f).await?; // G11
     Ok(())
 }

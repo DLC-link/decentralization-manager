@@ -81,6 +81,10 @@ pub struct ContractsQueryResponse {
 pub struct PendingInvitation {
     pub id: String,
     pub invitation_type: String,
+    /// The coordinator run this invite belongs to — lets concurrent-workflow
+    /// phases match each card to the run that produced it.
+    #[serde(default)]
+    pub workflow_instance: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
