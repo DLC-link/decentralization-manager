@@ -38,7 +38,7 @@ const DAR_PROBES: &[(&str, &str, &str)] = &[
     (
         "%23governance-token-custody-v1",
         "Governance.TokenCustody.SetupTokenPreapproval",
-        "SetupTokenPreapproval",
+        "SetupTokenPreapprovalProposal",
     ),
     (
         "%23governance-utility-onboarding-v1",
