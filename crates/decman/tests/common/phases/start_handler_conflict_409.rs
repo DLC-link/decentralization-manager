@@ -59,9 +59,10 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             |f, _| {
                 let db_path = f.db_path(1);
                 Box::pin(async move {
-                    let n = db::count_workflow_runs_inprogress(&db_path, "Onboarding", "Coordinator")
-                        .await
-                        .ok()?;
+                    let n =
+                        db::count_workflow_runs_inprogress(&db_path, "Onboarding", "Coordinator")
+                            .await
+                            .ok()?;
                     (n >= 1).then_some(Ok(()))
                 })
             },
@@ -77,7 +78,8 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         "party_id_prefix": prefix,
                         "peer_ids": [&f.p2.participant_id, &f.p3.participant_id],
                     });
-                    let (status, body) = f.post_expect_status(f.p1.http, "/onboarding", &req).await?;
+                    let (status, body) =
+                        f.post_expect_status(f.p1.http, "/onboarding", &req).await?;
                     anyhow::ensure!(
                         status.as_u16() == 409,
                         "expected 409 for same-instance /onboarding, got {status}: {body}"
