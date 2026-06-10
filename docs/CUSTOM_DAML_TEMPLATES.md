@@ -13,7 +13,7 @@ For background, read these first:
 
 A custom template is fully supported by DecMan when:
 
-1. It implements the `GovernableAction` interface from `governance-action-v1-rc1` (`Governance.Action`).
+1. It implements the `GovernableAction` interface from `governance-action-v1` (`Governance.Action`).
 2. Its DAR can be distributed to every participant via `POST /dars/distribute`.
 3. Its proposal contract can either be (a) created via `POST /contracts` using the field-type system, or (b) created by an external DAML script / app that the governance party can read.
 4. It can be confirmed via `POST /governance/confirm` with `governance_type: "core_domain"` (no DecMan code change needed — confirmation works on the `ContractId GovernableAction` produced by step 3).
@@ -25,7 +25,7 @@ Anything beyond that — for example a bespoke proposal type wired into `POST /g
 
 ## The `GovernableAction` interface
 
-Every governable template must implement [`Governance.Action.GovernableAction`](../daml/governance-action-v1-rc1/daml/Governance/Action.daml):
+Every governable template must implement [`Governance.Action.GovernableAction`](../daml/governance-action-v1/daml/Governance/Action.daml):
 
 ```daml
 data GovernableActionView = GovernableActionView with
@@ -132,7 +132,7 @@ dependencies:
   - daml-prim
   - daml-stdlib
 data-dependencies:
-  - ../governance-action-v1-rc1/.daml/dist/governance-action-v1-rc1-0.1.0.dar
+  - ../governance-action-v1/.daml/dist/governance-action-v1-0.1.0.dar
   # add any other DARs whose contracts you exercise from executeImpl
 build-options:
   - --target=2.2
@@ -142,7 +142,7 @@ build-options:
 
 Notes:
 
-- The `governance-action-v1-rc1` DAR is the only **required** data-dependency. It exports the `GovernableAction` interface; `governance-core` is *not* a build-time dependency of your package.
+- The `governance-action-v1` DAR is the only **required** data-dependency. It exports the `GovernableAction` interface; `governance-core` is *not* a build-time dependency of your package.
 - Use `data-dependencies` (not `dependencies`) for every governance / utility-registry DAR — they ship as pre-built DARs, not source.
 - Keep the package name suffixed with a version qualifier (`-v0`, `-v1`, …). The DAML resolver treats package names with different version suffixes as distinct, which lets you ship a breaking change without touching deployed instances of the old version.
 
@@ -152,7 +152,7 @@ Add your package so `daml build --all` picks it up:
 
 ```yaml
 packages:
-  - governance-action-v1-rc1
+  - governance-action-v1
   - governance-core
   - governance-core-test
   # …existing entries…

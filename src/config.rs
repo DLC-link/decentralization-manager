@@ -349,11 +349,11 @@ impl Network {
 /// Default package identifiers used for new party configurations
 pub fn default_package_config() -> PackageConfig {
     PackageConfig {
-        governance_action: Some("#governance-action-v1-rc1".to_string()),
-        governance_core: Some("#governance-core-v1-rc1".to_string()),
-        governance_token_custody: Some("#governance-token-custody-v1-rc1".to_string()),
-        governance_utility_credential: Some("#governance-utility-credential-v1-rc1".to_string()),
-        governance_utility_onboarding: Some("#governance-utility-onboarding-v1-rc1".to_string()),
+        governance_action: Some("#governance-action-v1".to_string()),
+        governance_core: Some("#governance-core-v1".to_string()),
+        governance_token_custody: Some("#governance-token-custody-v1".to_string()),
+        governance_utility_credential: Some("#governance-utility-credential-v1".to_string()),
+        governance_utility_onboarding: Some("#governance-utility-onboarding-v1".to_string()),
         utility_credential: Some("#utility-credential-app-v0".to_string()),
         utility_registry: Some("#utility-registry-app-v0".to_string()),
         vault: Some("#bitsafe-vault-v0-rc8".to_string()),
@@ -552,23 +552,23 @@ mod tests {
         let packages = default_package_config();
         assert_eq!(
             packages.governance_action.as_deref(),
-            Some("#governance-action-v1-rc1"),
+            Some("#governance-action-v1"),
         );
         assert_eq!(
             packages.governance_core.as_deref(),
-            Some("#governance-core-v1-rc1"),
+            Some("#governance-core-v1"),
         );
         assert_eq!(
             packages.governance_token_custody.as_deref(),
-            Some("#governance-token-custody-v1-rc1"),
+            Some("#governance-token-custody-v1"),
         );
         assert_eq!(
             packages.governance_utility_credential.as_deref(),
-            Some("#governance-utility-credential-v1-rc1"),
+            Some("#governance-utility-credential-v1"),
         );
         assert_eq!(
             packages.governance_utility_onboarding.as_deref(),
-            Some("#governance-utility-onboarding-v1-rc1"),
+            Some("#governance-utility-onboarding-v1"),
         );
         assert_eq!(
             packages.utility_credential.as_deref(),

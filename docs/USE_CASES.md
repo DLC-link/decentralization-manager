@@ -845,7 +845,7 @@ curl -X POST http://custodian-a:8080/governance/confirm \
   }'
 ```
 
-**Grant propose-only rights to a non-member (`v1-rc1`+):**
+**Grant propose-only rights to a non-member (`v1`+):**
 
 ```bash
 curl -X POST http://custodian-a:8080/governance/confirm \

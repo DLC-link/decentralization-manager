@@ -411,7 +411,7 @@ GovernanceRules {
 }
 ```
 
-The `additionalProposers` field (added in `v1-rc1`) lets a committee grant propose-only rights to parties that are not full voting members — for example, an admin console, a monitoring script, or a regulatory officer. The authoritative on-chain proposer set is `members ∪ fromOptional Set.empty additionalProposers`. `GovernanceRules_ConfirmAction` enforces that every proposal's `proposer` is in this set; outsider proposals are rejected at confirm time even if a member tries to confirm them. The two `SelfAction_*AdditionalProposer` variants below mutate this allowlist under the same threshold consensus as committee changes.
+The `additionalProposers` field (added in `v1`) lets a committee grant propose-only rights to parties that are not full voting members — for example, an admin console, a monitoring script, or a regulatory officer. The authoritative on-chain proposer set is `members ∪ fromOptional Set.empty additionalProposers`. `GovernanceRules_ConfirmAction` enforces that every proposal's `proposer` is in this set; outsider proposals are rejected at confirm time even if a member tries to confirm them. The two `SelfAction_*AdditionalProposer` variants below mutate this allowlist under the same threshold consensus as committee changes.
 
 The contract provides two distinct paths for governance actions:
 
