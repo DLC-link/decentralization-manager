@@ -196,20 +196,27 @@ impl WorkflowRegistry {
     }
 
     /// Clone out the coordinator Noise handle to route a workflow command to,
-    /// without awaiting. When `instance_name` is non-empty, looks up that exact
-    /// run. When it is empty — a peer that predates instance routing, or a
-    /// resumed peer with no stored coordinator instance — falls back to the
-    /// sole active coordinator run *if there is exactly one*; with zero or more
-    /// than one active run an empty key cannot be disambiguated, so returns
-    /// `None` (the listener then replies 503 and the peer's bounded retry
-    /// finalizes the run).
+    /// without awaiting.
+    ///
+    /// Prefers the exact run named by `instance_name`. On any miss — empty key
+    /// (peer predates instance routing, or a resumed peer with no stored
+    /// coordinator instance), a stale/mismatched key, or the named run not yet
+    /// having registered its Noise handle — falls back to the *sole* active
+    /// coordinator run if there is exactly one. This keeps the single-workflow
+    /// case bulletproof (there is only ever one run to route to) while still
+    /// routing exactly when multiple runs are concurrently active. With zero or
+    /// more than one active run and no exact match, returns `None` (the listener
+    /// replies 503 and the peer's bounded retry finalizes the run).
     pub fn route(&self, instance_name: &str) -> Option<ActiveWorkflow> {
         let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
-        if !instance_name.is_empty() {
-            return guard
+        if !instance_name.is_empty()
+            && let Some(wf) = guard
                 .get(instance_name)
-                .and_then(|i| i.active.read().unwrap_or_else(|e| e.into_inner()).clone());
+                .and_then(|i| i.active.read().unwrap_or_else(|e| e.into_inner()).clone())
+        {
+            return Some(wf);
         }
+        // Fallback: the sole active run, if exactly one.
         let mut actives = guard
             .values()
             .filter_map(|i| i.active.read().unwrap_or_else(|e| e.into_inner()).clone());
