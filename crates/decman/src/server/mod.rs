@@ -508,21 +508,14 @@ impl WorkflowTriggers {
             workflow_instance,
         };
 
-        // A coordinator runs at most one workflow at a time, so a fresh
-        // invite supersedes any older invite of the same kind from the same
-        // coordinator — replace by (type, coordinator), not by id, so legacy
-        // and instance-keyed ids don't accumulate side by side.
+        // Dedup by `id` (which includes the coordinator's run `instance`), not
+        // by (type, coordinator): a coordinator can now run several workflows
+        // of the same kind concurrently, so each distinct run must surface as
+        // its own card. Only a re-send of the SAME run (same id) replaces the
+        // existing card; `upsert_pending_invitation` is keyed on `id`, so the
+        // upsert alone dedups same-run re-sends without dropping sibling runs.
         match self.db.begin_transaction().await {
             Ok(mut tx) => {
-                let superseded = tx
-                    .delete_pending_invitations_by_type_and_coordinator(
-                        invitation.invitation_type,
-                        coordinator_pubkey,
-                    )
-                    .await;
-                if let Err(e) = superseded {
-                    tracing::warn!("Failed to delete superseded invitations: {e}");
-                }
                 if let Err(e) = tx.upsert_pending_invitation(&invitation).await {
                     tracing::warn!("Failed to persist pending invitation: {e}");
                 } else if let Err(e) = Commitable::commit(tx).await {
@@ -533,10 +526,7 @@ impl WorkflowTriggers {
         }
 
         let mut invitations = self.pending_invitations.write().await;
-        invitations.retain(|i| {
-            i.invitation_type != invitation.invitation_type
-                || i.coordinator_pubkey != invitation.coordinator_pubkey
-        });
+        invitations.retain(|i| i.id != invitation.id);
         invitations.push(invitation);
     }
 
