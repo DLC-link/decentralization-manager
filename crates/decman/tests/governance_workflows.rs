@@ -146,6 +146,9 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     // G14: declining one of two sibling invites fails only that run — the
     // peer-side mirror of G12 (decline routing + instance-stamped teardown).
     phases::concurrent_sibling_decline::run(&mut f).await?; // G14
+    // G15: pending invitations from one coordinator are capped at 16, oldest
+    // evicted — the only bound on invite intake now that busy-gating is gone.
+    phases::invite_cap::run(&mut f).await?; // G15
     // G11 runs LAST: it is the heaviest phase (six concurrent coordinator
     // runs, twelve peer runs) and the full-feature test of concurrent
     // multi-instance workflows — full-mesh cross-acceptance of simultaneous

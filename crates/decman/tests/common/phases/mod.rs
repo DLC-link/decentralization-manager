@@ -12,6 +12,7 @@ pub mod distribute_dars;
 pub mod generate_keys_idempotent;
 pub mod generic_vote;
 pub mod identity_survives_dismiss;
+pub mod invite_cap;
 pub mod invite_survives_peer_restart;
 pub mod kick;
 pub mod notification_feed;

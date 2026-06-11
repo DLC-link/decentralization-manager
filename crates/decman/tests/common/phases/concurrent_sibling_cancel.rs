@@ -151,6 +151,33 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         "scoped cancel verified: sibling invite + peer row survived",
     );
 
+    // Regression guard for the GetChunk routing fix: P1 now has EXACTLY ONE
+    // live run (sibling A) — the window where the old sole-active fallback
+    // misrouted an empty-routing-key chunked ListPackages INTO the workflow's
+    // chunk server. A cross-node package comparison from P2 fans ListPackages
+    // to P1; its chunked fetch must hit P1's chunk cache and succeed.
+    let v: serde_json::Value = f
+        .get_json(f.p2.http, "/packages/compare-peers")
+        .await
+        .context("packages/compare-peers from P2 while P1 has one live run")?;
+    let p1_has_packages = v
+        .get("peers")
+        .and_then(|p| p.as_array())
+        .map(|peers| {
+            peers.iter().any(|peer| {
+                peer.get("packages")
+                    .and_then(|x| x.as_array())
+                    .is_some_and(|x| !x.is_empty())
+            })
+        })
+        .unwrap_or(false);
+    anyhow::ensure!(
+        p1_has_packages,
+        "cross-node package listing failed while a workflow was live — chunked \
+         ListPackages was likely misrouted into the workflow's chunk server: {v}"
+    );
+    chaos::say("G12", "chunked ListPackages unaffected by the live run");
+
     // Sibling A must still complete end to end: P2 accepts its surviving
     // invite, and A drives through on all three nodes.
     post_accept_invitation(f, f.p2.http, &p2_keep).await?;
