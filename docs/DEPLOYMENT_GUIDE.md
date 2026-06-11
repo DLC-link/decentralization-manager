@@ -390,8 +390,9 @@ The peer list and party credentials do **not** carry over: those live in the SQL
 ## Upgrading an existing mesh to concurrent workflows
 
 The concurrent multi-instance workflow release changes the **Noise wire
-format**: every message now carries an instance-routing field, and frames from
-older builds are mutually unparseable with newer ones. A mixed-version mesh
+format**: every frame now starts with a protocol-version byte and carries an
+instance-routing field. Frames from older builds are rejected with an explicit
+"protocol version mismatch" error (and old builds cannot parse new frames). A mixed-version mesh
 does not degrade gracefully — every cross-node call (heartbeats, invites,
 workflow commands) fails until all nodes run the same side of the change.
 

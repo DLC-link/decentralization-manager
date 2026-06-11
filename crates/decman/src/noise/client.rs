@@ -88,12 +88,10 @@ impl NoiseClient {
         // Create HTTP request
         let uri = parse_flexible_uri(&format!("http://{socket_addr}/message"))?;
         // Stamp the coordinator's run instance for routing unless the caller
-        // already set one.
+        // already set one. encode_with_instance substitutes the routing key at
+        // encode time — no clone of the (potentially chunk-sized) payload.
         let request_body = if message.instance.is_empty() && !self.route_instance.is_empty() {
-            message
-                .clone()
-                .with_instance(self.route_instance.clone())
-                .to_bytes()
+            message.encode_with_instance(&self.route_instance)
         } else {
             message.to_bytes()
         };

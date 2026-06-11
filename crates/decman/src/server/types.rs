@@ -210,7 +210,12 @@ impl WorkflowRegistry {
     ///
     /// Only an empty key — a peer that predates instance routing, or a resumed
     /// peer with no stored coordinator instance — falls back to the sole active
-    /// run (if exactly one), since it has no key to match on.
+    /// run (if exactly one), since it has no key to match on. Note the
+    /// fallback's inherent imprecision: if the no-key peer's true run is
+    /// registered-but-not-yet-active while a sibling IS active, it gets routed
+    /// to the sibling. Post-upgrade only pre-migration resumed rows produce
+    /// no-key traffic (the wire break forces lockstep upgrades), so the
+    /// exposure is one resume window per legacy row.
     pub fn route(&self, instance_name: &str) -> Option<ActiveWorkflow> {
         let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
         if !instance_name.is_empty() {

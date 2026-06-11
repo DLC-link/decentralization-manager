@@ -188,6 +188,16 @@ impl MessageType {
     }
 }
 
+/// Noise application-frame protocol version. First byte of every frame, so a
+/// peer on an incompatible build is detected explicitly instead of surfacing
+/// as garbled length/UTF-8 parse errors. Chosen >= 0x04 because legacy
+/// (pre-version-byte) frames started with a `MessageType` whose high byte is
+/// always 0x00..=0x03 — an old frame can never alias a valid version.
+/// Bump this on any framing change; the decoder rejects mismatches with a
+/// clear error, and future versions can branch on it instead of forcing
+/// another lockstep upgrade.
+pub const WIRE_VERSION: u8 = 0xD1;
+
 /// Message structure for Noise protocol communication.
 ///
 /// `instance` carries the coordinator's workflow `instance_name` so the
@@ -235,10 +245,20 @@ impl Message {
     }
 
     /// Encode message to wire format:
-    /// `[MessageType (2)] [InstanceLen (2)] [Instance] [PayloadLength (4)] [Payload]`
+    /// `[Version (1)] [MessageType (2)] [InstanceLen (2)] [Instance] [PayloadLength (4)] [Payload]`
     pub fn to_bytes(&self) -> Vec<u8> {
-        let instance_bytes = self.instance.as_bytes();
-        let mut bytes = Vec::with_capacity(8 + instance_bytes.len() + self.payload.len());
+        self.encode_with_instance(&self.instance)
+    }
+
+    /// Encode with `instance` substituted for the message's own routing field
+    /// — lets `NoiseClient` stamp its per-run instance without cloning the
+    /// (potentially chunk-sized) payload first.
+    pub fn encode_with_instance(&self, instance: &str) -> Vec<u8> {
+        let instance_bytes = instance.as_bytes();
+        let mut bytes = Vec::with_capacity(9 + instance_bytes.len() + self.payload.len());
+
+        // Protocol version (1 byte)
+        bytes.push(WIRE_VERSION);
 
         // Message type (2 bytes, big-endian)
         bytes.extend_from_slice(&self.msg_type.to_u16().to_be_bytes());
@@ -277,29 +297,42 @@ impl Message {
 
     /// Decode message from wire format
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        // Minimum: type (2) + instance_len (2) + payload_len (4) = 8 bytes.
-        if bytes.len() < 8 {
+        // Minimum: version (1) + type (2) + instance_len (2) + payload_len (4).
+        if bytes.len() < 9 {
             anyhow::bail!(
-                "Message too short: expected at least 8 bytes, got {count}",
+                "Message too short: expected at least 9 bytes, got {count}",
                 count = bytes.len()
             );
         }
 
+        // Protocol version FIRST, so an incompatible peer surfaces as exactly
+        // that — not as a garbled-length or UTF-8 parse error downstream.
+        // Legacy (pre-version) frames start with a MessageType high byte of
+        // 0x00..=0x03, which can never equal WIRE_VERSION.
+        if bytes[0] != WIRE_VERSION {
+            anyhow::bail!(
+                "Noise protocol version mismatch: got 0x{got:02x}, expected 0x{want:02x} — \
+                 the peer is running an incompatible dec-party-manager build",
+                got = bytes[0],
+                want = WIRE_VERSION
+            );
+        }
+
         // Parse message type (2 bytes)
-        let msg_type_value = u16::from_be_bytes([bytes[0], bytes[1]]);
+        let msg_type_value = u16::from_be_bytes([bytes[1], bytes[2]]);
         let msg_type = MessageType::try_from(msg_type_value)?;
 
         // Parse routing instance length (2 bytes) + bytes
-        let instance_len = u16::from_be_bytes([bytes[2], bytes[3]]) as usize;
-        let instance_end = 4 + instance_len;
+        let instance_len = u16::from_be_bytes([bytes[3], bytes[4]]) as usize;
+        let instance_end = 5 + instance_len;
         if bytes.len() < instance_end + 4 {
             anyhow::bail!(
                 "Message instance truncated: expected {instance_len} instance bytes + 4 length \
                  bytes, got {count} after the header",
-                count = bytes.len().saturating_sub(4)
+                count = bytes.len().saturating_sub(5)
             );
         }
-        let instance = String::from_utf8(bytes[4..instance_end].to_vec())
+        let instance = String::from_utf8(bytes[5..instance_end].to_vec())
             .map_err(|e| anyhow::anyhow!("Message instance is not valid UTF-8: {e}"))?;
 
         // Parse payload length (4 bytes)
@@ -1005,11 +1038,12 @@ mod tests {
         let msg = Message::new_empty(MessageType::UploadDars);
         let bytes = msg.to_bytes();
 
-        // 8 bytes: 2 type, 2 instance_len (0), 4 payload_len (0).
-        assert_eq!(bytes.len(), 8);
-        assert_eq!(bytes[0..2], [0x00, 0x01]); // Type
-        assert_eq!(bytes[2..4], [0x00, 0x00]); // Instance length (0)
-        assert_eq!(bytes[4..8], [0x00, 0x00, 0x00, 0x00]); // Payload length (0)
+        // 9 bytes: 1 version, 2 type, 2 instance_len (0), 4 payload_len (0).
+        assert_eq!(bytes.len(), 9);
+        assert_eq!(bytes[0], WIRE_VERSION);
+        assert_eq!(bytes[1..3], [0x00, 0x01]); // Type
+        assert_eq!(bytes[3..5], [0x00, 0x00]); // Instance length (0)
+        assert_eq!(bytes[5..9], [0x00, 0x00, 0x00, 0x00]); // Payload length (0)
     }
 
     #[test]
@@ -1018,12 +1052,41 @@ mod tests {
         let msg = Message::new(MessageType::Data, payload.clone());
         let bytes = msg.to_bytes();
 
-        // 12 bytes: 2 type, 2 instance_len (0), 4 payload_len, 4 payload.
-        assert_eq!(bytes.len(), 12);
-        assert_eq!(bytes[0..2], [0x01, 0x02]); // Type (Data = 0x0102)
-        assert_eq!(bytes[2..4], [0x00, 0x00]); // Instance length (0)
-        assert_eq!(bytes[4..8], [0x00, 0x00, 0x00, 0x04]); // Payload length (4)
-        assert_eq!(bytes[8..12], payload[..]); // Payload
+        // 13 bytes: 1 version, 2 type, 2 instance_len (0), 4 payload_len, 4 payload.
+        assert_eq!(bytes.len(), 13);
+        assert_eq!(bytes[0], WIRE_VERSION);
+        assert_eq!(bytes[1..3], [0x01, 0x02]); // Type (Data = 0x0102)
+        assert_eq!(bytes[3..5], [0x00, 0x00]); // Instance length (0)
+        assert_eq!(bytes[5..9], [0x00, 0x00, 0x00, 0x04]); // Payload length (4)
+        assert_eq!(bytes[9..13], payload[..]); // Payload
+    }
+
+    #[test]
+    fn test_message_rejects_version_mismatch() {
+        // A legacy (pre-version-byte) frame: starts with the MessageType high
+        // byte (0x00..=0x03) where the version now lives. The decoder must
+        // name the real problem instead of a confusing downstream parse error.
+        let mut legacy = vec![0x00, 0x01]; // old Type
+        legacy.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // old payload_len
+        legacy.extend_from_slice(&[0x00, 0x00, 0x00]); // padding to pass min-length
+        let err = match Message::from_bytes(&legacy) {
+            Err(e) => format!("{e}"),
+            Ok(_) => String::new(),
+        };
+        assert!(
+            err.contains("version mismatch"),
+            "expected a version-mismatch error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_encode_with_instance_substitutes_routing_key() {
+        // The clone-free stamping path used by NoiseClient must produce the
+        // same frame as stamping via with_instance + to_bytes.
+        let msg = Message::new(MessageType::GetChunk, vec![0, 0, 0, 7]);
+        let direct = msg.encode_with_instance("run-x");
+        let via_clone = msg.clone().with_instance("run-x").to_bytes();
+        assert_eq!(direct, via_clone);
     }
 
     #[test]
@@ -1066,14 +1129,15 @@ mod tests {
 
     #[test]
     fn test_message_decoding_too_short() {
-        let bytes = vec![0x00, 0x01]; // Only 2 bytes, need at least 8
+        let bytes = vec![WIRE_VERSION, 0x01]; // Only 2 bytes, need at least 9
         let result = Message::from_bytes(&bytes);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_message_decoding_truncated_payload() {
-        let mut bytes = vec![0x00, 0x01]; // Type
+        let mut bytes = vec![WIRE_VERSION];
+        bytes.extend_from_slice(&[0x00, 0x01]); // Type
         bytes.extend_from_slice(&[0x00, 0x00]); // Instance length (0)
         bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x0A]); // Payload length = 10
         bytes.extend_from_slice(&[0x01, 0x02]); // Only 2 bytes of payload
@@ -1084,7 +1148,8 @@ mod tests {
 
     #[test]
     fn test_message_decoding_truncated_instance() {
-        let mut bytes = vec![0x00, 0x01]; // Type
+        let mut bytes = vec![WIRE_VERSION];
+        bytes.extend_from_slice(&[0x00, 0x01]); // Type
         bytes.extend_from_slice(&[0x00, 0x10]); // Instance length = 16
         bytes.extend_from_slice(b"short"); // but only 5 instance bytes follow
 

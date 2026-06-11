@@ -31,6 +31,28 @@ async fn delete_persisted_invitation(data: &web::Data<AppState>, id: &str) {
     }
 }
 
+/// Put a removed invitation back (memory + DB) after an accept failed
+/// part-way: removal happens FIRST (under the write lock, so a double accept
+/// 404s), which means a failure after that point would otherwise strand the
+/// run — the card is gone, the operator can't retry, and the coordinator's
+/// human-paced WaitingForPeers waits forever.
+async fn restore_invitation(data: &web::Data<AppState>, invitation: &PendingInvitation) {
+    match data.db.begin_transaction().await {
+        Ok(mut tx) => {
+            if let Err(e) = tx.upsert_pending_invitation(invitation).await {
+                tracing::warn!("Failed to re-persist restored invitation: {e}");
+            } else if let Err(e) = Commitable::commit(tx).await {
+                tracing::warn!("Failed to commit restored invitation: {e}");
+            }
+        }
+        Err(e) => tracing::warn!("Failed to begin tx to restore invitation: {e}"),
+    }
+    let mut invitations = data.pending_invitations.write().await;
+    if !invitations.iter().any(|i| i.id == invitation.id) {
+        invitations.push(invitation.clone());
+    }
+}
+
 fn step_total_for(kind: WorkflowKind) -> i64 {
     match kind {
         WorkflowKind::Onboarding => OnboardingStep::step_total(),
@@ -240,8 +262,10 @@ pub async fn accept_invitation(
     // Persist a peer-side workflow_runs row so the operator's feed shows
     // "I'm participating in <kind>" until completion.
     let Some(peer_instance) = insert_peer_run(&data, &invitation).await else {
+        // Put the card back so the operator can retry the accept.
+        restore_invitation(&data, &invitation).await;
         return HttpResponse::InternalServerError().json(serde_json::json!({
-            "error": "Failed to record accepted invitation"
+            "error": "Failed to record accepted invitation; the invitation was kept"
         }));
     };
 
@@ -264,15 +288,17 @@ pub async fn accept_invitation(
     if data.peer_job_sender.send(job).is_err() {
         // The row was just persisted InProgress; without a listener nothing
         // will ever drive it, so mark it Failed instead of leaving a stale
-        // in-progress card in the feed.
+        // in-progress card in the feed — and put the invitation back so the
+        // operator can retry once the listener recovers.
         mark_failed_via_pool(
             &data.db,
             &peer_instance_for_err,
             "Peer workflow listener unavailable",
         )
         .await;
+        restore_invitation(&data, &invitation).await;
         return HttpResponse::InternalServerError().json(serde_json::json!({
-            "error": "Peer workflow listener unavailable"
+            "error": "Peer workflow listener unavailable; the invitation was kept"
         }));
     }
 
