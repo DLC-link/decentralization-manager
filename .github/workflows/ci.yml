@@ -131,6 +131,15 @@ jobs:
         run: DECMAN_SKIP_FRONTEND=1 cargo run -p decman --features typegen --bin gen-types
       - name: Run integration tests
         run: ./integration-tests/run.sh
+        env:
+          DPM_IT_LOG_DIR: ${{ github.workspace }}/it-node-logs
+      - name: Upload node logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: it-node-logs
+          path: it-node-logs/
+          retention-days: 7
 
   cargo-audit:
     name: Cargo Audit
