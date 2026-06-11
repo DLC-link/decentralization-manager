@@ -472,6 +472,10 @@ export type ProposalType =
       amount: string;
       instrument_id: { admin: string; id: string };
       input_holding_cids: string[];
+      /** How long the transfer/offer stays valid, in hours. Omitted = backend
+       *  default (24h). Lets an unaccepted two-step offer expire and release
+       *  escrow instead of locking funds indefinitely. */
+      validity_window_hours?: number;
     }
   | {
       type: "accept_transfer";
@@ -926,7 +930,11 @@ export interface TransferPreapprovalsResponse {
 export interface Holding {
   instrument_admin: string;
   instrument_id: string;
+  /** Total held across all Holding contracts, including locked ones. */
   amount: string;
+  /** Portion of `amount` locked (escrowed for an in-flight transfer) and not
+   *  freely transferable. Available = amount - locked_amount. */
+  locked_amount: string;
   preapproval_set_up: boolean;
 }
 

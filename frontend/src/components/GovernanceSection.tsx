@@ -133,6 +133,16 @@ const defaultFarConfig: FarConfig = {
 const defaultVaultRulesCid = DEVNET_VAULT_RULES.contract_id;
 const defaultVaultBackendSignatory = DEVNET_VAULT_BACKEND_SIGNATORY;
 
+/// Freely-transferable balance of a holding: total minus the locked
+/// (escrowed) portion. A transfer can only be funded from unlocked holdings,
+/// so the amount field is capped on this rather than `amount`.
+const holdingAvailable = (h: Holding): number =>
+  Number(h.amount) - Number(h.locked_amount);
+
+/// Default validity window (hours) for a Transfer proposal / two-step offer.
+/// Mirrors the backend default; overridable per-transfer in the form.
+const DEFAULT_TRANSFER_EXPIRY_HOURS = 24;
+
 export const GovernanceSection = ({
   partyId,
   rulesContractId: initialRulesContractId,
@@ -177,6 +187,11 @@ export const GovernanceSection = ({
   const [proposalInstrumentIdAdmin, setProposalInstrumentIdAdmin] = useState("");
   const [proposalInstrumentIdId, setProposalInstrumentIdId] = useState("");
   const [proposalInputHoldingCids, setProposalInputHoldingCids] = useState("");
+  // Validity window (hours) for a Transfer proposal / two-step offer. Defaults
+  // to the backend's default (24h) but is overridable; bounding it lets an
+  // unaccepted offer expire and release escrow instead of locking funds.
+  const [proposalTransferExpiryHours, setProposalTransferExpiryHours] =
+    useState(String(DEFAULT_TRANSFER_EXPIRY_HOURS));
   const [proposalTransferInstructionCid, setProposalTransferInstructionCid] = useState("");
   const [proposalDescription, setProposalDescription] = useState("");
   // Utility-onboarding proposal state
@@ -1355,6 +1370,7 @@ export const GovernanceSection = ({
     );
     setProposalInstrumentIdId("");
     setProposalInputHoldingCids("");
+    setProposalTransferExpiryHours(String(DEFAULT_TRANSFER_EXPIRY_HOURS));
     setProposalTransferInstructionCid("");
     setProposalDescription("");
     setProposalProviderServiceCid("");
@@ -1402,7 +1418,17 @@ export const GovernanceSection = ({
               .map(({ id }) => ({ id })),
           };
           break;
-        case "transfer":
+        case "transfer": {
+          // Send the override only when it's a valid positive integer that
+          // differs from the default; otherwise omit it and let the backend
+          // apply its default window.
+          const expiryHours = Number(proposalTransferExpiryHours);
+          const validityWindowHours =
+            Number.isInteger(expiryHours) &&
+            expiryHours > 0 &&
+            expiryHours !== DEFAULT_TRANSFER_EXPIRY_HOURS
+              ? expiryHours
+              : undefined;
           proposal = {
             type: "transfer",
             transfer_factory_cid: proposalTransferFactoryCid,
@@ -1411,8 +1437,12 @@ export const GovernanceSection = ({
             amount: proposalAmount,
             instrument_id: { admin: proposalInstrumentIdAdmin, id: proposalInstrumentIdId },
             input_holding_cids: proposalInputHoldingCids ? proposalInputHoldingCids.split(",").map((s) => s.trim()).filter(Boolean) : [],
+            ...(validityWindowHours !== undefined && {
+              validity_window_hours: validityWindowHours,
+            }),
           };
           break;
+        }
         case "accept_transfer":
           proposal = {
             type: "accept_transfer",
@@ -3898,7 +3928,9 @@ export const GovernanceSection = ({
                           value={key}
                           disabled={!hasFactory}
                         >
-                          {label} — balance {h.amount}
+                          {label} — available {holdingAvailable(h)}
+                          {Number(h.locked_amount) > 0 &&
+                            ` (${h.locked_amount} locked)`}
                           {!hasFactory && " (no factory available)"}
                         </MenuItem>
                       );
@@ -3922,9 +3954,17 @@ export const GovernanceSection = ({
                         >
                           <Chip
                             size="small"
-                            label={`Available balance: ${holding.amount}`}
+                            label={`Available balance: ${holdingAvailable(holding)}`}
                             color="primary"
                           />
+                          {Number(holding.locked_amount) > 0 && (
+                            <Chip
+                              size="small"
+                              label={`Locked: ${holding.locked_amount}`}
+                              variant="outlined"
+                              color="warning"
+                            />
+                          )}
                           <Chip
                             size="small"
                             label={`Admin: ${holding.instrument_admin}`}
@@ -3975,7 +4015,7 @@ export const GovernanceSection = ({
                           `${h.instrument_admin}::${h.instrument_id}` ===
                           selectedHoldingKey,
                       );
-                      return holding ? n > Number(holding.amount) : false;
+                      return holding ? n > holdingAvailable(holding) : false;
                     })()}
                     helperText={(() => {
                       if (!proposalAmount) return "";
@@ -3987,8 +4027,44 @@ export const GovernanceSection = ({
                           `${h.instrument_admin}::${h.instrument_id}` ===
                           selectedHoldingKey,
                       );
-                      if (holding && n > Number(holding.amount)) {
-                        return `Exceeds available balance (${holding.amount})`;
+                      if (holding && n > holdingAvailable(holding)) {
+                        return `Exceeds available balance (${holdingAvailable(holding)})`;
+                      }
+                      return "";
+                    })()}
+                  />
+                  <TextField
+                    size="small"
+                    label="Offer expiry (hours)"
+                    value={proposalTransferExpiryHours}
+                    onChange={(e) =>
+                      setProposalTransferExpiryHours(e.target.value)
+                    }
+                    fullWidth
+                    type="number"
+                    slotProps={{
+                      htmlInput: { min: 1, step: 1 },
+                      input: {
+                        endAdornment: fieldHelpAdornment(
+                          `How long the transfer stays valid (default ${DEFAULT_TRANSFER_EXPIRY_HOURS}h). If the recipient isn't preapproved, this becomes an offer they must accept before it expires; after expiry the escrowed funds are released back to you.`,
+                          "Help for Offer expiry",
+                        ),
+                      },
+                    }}
+                    error={(() => {
+                      const n = Number(proposalTransferExpiryHours);
+                      return (
+                        proposalTransferExpiryHours !== "" &&
+                        (!Number.isInteger(n) || n <= 0)
+                      );
+                    })()}
+                    helperText={(() => {
+                      const n = Number(proposalTransferExpiryHours);
+                      if (
+                        proposalTransferExpiryHours !== "" &&
+                        (!Number.isInteger(n) || n <= 0)
+                      ) {
+                        return "Enter a positive whole number of hours";
                       }
                       return "";
                     })()}
