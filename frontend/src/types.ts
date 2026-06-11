@@ -926,7 +926,11 @@ export interface TransferPreapprovalsResponse {
 export interface Holding {
   instrument_admin: string;
   instrument_id: string;
+  /** Total held across all Holding contracts, including locked ones. */
   amount: string;
+  /** Portion of `amount` locked (escrowed for an in-flight transfer) and not
+   *  freely transferable. Available = amount - locked_amount. */
+  locked_amount: string;
   preapproval_set_up: boolean;
 }
 

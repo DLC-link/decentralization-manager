@@ -1097,6 +1097,13 @@ pub async fn propose_action(
     //     the dec party's ACS, so we also substitute the resolved factory cid.
     //     Canton Coin is excluded — its `AmuletRules` factory and context come
     //     from the DSO scan API. See `needs_registry_context`.
+    // Bounded validity window for any Transfer proposal, captured ONCE so the
+    // registry choice-context fetch and the on-chain create args agree
+    // byte-for-byte. A bounded `executeBefore` lets an unaccepted two-step offer
+    // expire and release its escrow instead of locking funds forever.
+    let transfer_validity =
+        action_serializer::TransferValidity::from_now(chrono::Utc::now().timestamp_micros());
+
     let mut resolved_proposal = body.proposal.clone();
     let transfer_choice_context = match &mut resolved_proposal {
         ProposalType::AcceptTransfer {
@@ -1182,8 +1189,8 @@ pub async fn propose_action(
                     instrument_admin: &admin,
                     instrument_id: &instrument_id.id,
                     input_holding_cids,
-                    requested_at_micros: action_serializer::TRANSFER_REQUESTED_AT_MICROS,
-                    execute_before_micros: action_serializer::TRANSFER_EXECUTE_BEFORE_MICROS,
+                    requested_at_micros: transfer_validity.requested_at_micros,
+                    execute_before_micros: transfer_validity.execute_before_micros,
                 },
             )
             .await
@@ -1217,6 +1224,7 @@ pub async fn propose_action(
             &member_party_id.to_string(),
             &resolved_proposal,
             transfer_choice_context.as_ref().map(|r| &r.context),
+            Some(transfer_validity),
         ) {
             Ok(args) => args,
             Err(e) => {

@@ -184,6 +184,14 @@ export const HoldingsSection = ({
                 align="right"
               >
                 {h.amount}
+                {Number(h.locked_amount) > 0 && (
+                  <Box
+                    component="span"
+                    sx={{ color: "warning.main", ml: 0.5 }}
+                  >
+                    ({h.locked_amount} locked)
+                  </Box>
+                )}
               </TableCell>
               <TableCell sx={{ py: 1 }}>
                 <Chip

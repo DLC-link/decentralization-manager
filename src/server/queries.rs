@@ -3718,22 +3718,33 @@ pub async fn get_holdings(
     let raw = fetch_holding_views(config, party_id, token.clone()).await?;
 
     // Aggregate amounts by (admin, id). A party can own many Holding contracts
-    // for the same instrument (one per UTXO-style entry).
-    let mut totals: HashMap<(String, String), (CantonId, String, DamlDecimal)> = HashMap::new();
+    // for the same instrument (one per UTXO-style entry). Track the locked
+    // subtotal separately: locked holdings are escrowed for an in-flight
+    // transfer/allocation and can't fund a new one, so the UI shows them apart
+    // from the freely-transferable balance.
+    let mut totals: HashMap<(String, String), (CantonId, String, DamlDecimal, DamlDecimal)> =
+        HashMap::new();
     for raw_holding in raw {
         let key = (
             raw_holding.instrument_admin.to_string(),
             raw_holding.instrument_id.clone(),
         );
+        let locked_delta = if raw_holding.is_locked {
+            raw_holding.amount
+        } else {
+            DamlDecimal::ZERO
+        };
         totals
             .entry(key)
-            .and_modify(|(_, _, total)| {
+            .and_modify(|(_, _, total, locked)| {
                 *total += raw_holding.amount;
+                *locked += locked_delta;
             })
             .or_insert((
                 raw_holding.instrument_admin,
                 raw_holding.instrument_id,
                 raw_holding.amount,
+                locked_delta,
             ));
     }
 
@@ -3746,7 +3757,7 @@ pub async fn get_holdings(
 
     let mut holdings: Vec<HoldingInfo> = totals
         .into_values()
-        .map(|(instrument_admin, instrument_id, amount)| {
+        .map(|(instrument_admin, instrument_id, amount, locked_amount)| {
             let preapproval_set_up = if instrument_id == AMULET_INSTRUMENT_ID {
                 preapprovals.has_amulet
             } else {
@@ -3762,6 +3773,7 @@ pub async fn get_holdings(
                 instrument_admin,
                 instrument_id,
                 amount,
+                locked_amount,
                 preapproval_set_up,
             }
         })
@@ -3843,13 +3855,16 @@ async fn fetch_holding_views(
 
 /// Intermediate parse result. `owner` lets `fetch_holding_views` drop holdings
 /// the party can see (via interface visibility) but doesn't actually own,
-/// before the views reach any caller.
+/// before the views reach any caller. `is_locked` is `true` when the Holding
+/// carries a `lock` (it's reserved for an in-flight transfer/allocation); such
+/// holdings can't fund a new `TransferFactory_Transfer`.
 struct HoldingView {
     contract_id: String,
     owner: String,
     instrument_admin: CantonId,
     instrument_id: String,
     amount: DamlDecimal,
+    is_locked: bool,
 }
 
 fn extract_holding_view(created: &CreatedEvent) -> Option<HoldingView> {
@@ -3875,21 +3890,38 @@ fn extract_holding_view(created: &CreatedEvent) -> Option<HoldingView> {
     let instrument_admin: CantonId = field_party(instrument_record, "admin")?.parse().ok()?;
     let instrument_id = field_text(instrument_record, "id")?;
 
+    // `lock : Optional Lock` — present (`Some`) means the holding is locked for
+    // an in-flight transfer/allocation. A missing field is treated as unlocked.
+    let is_locked = view_record
+        .fields
+        .iter()
+        .find(|f| f.label == "lock")
+        .and_then(|f| f.value.as_ref())
+        .is_some_and(|v| match &v.sum {
+            Some(value::Sum::Optional(opt)) => opt.value.is_some(),
+            _ => false,
+        });
+
     Some(HoldingView {
         contract_id: created.contract_id.clone(),
         owner,
         instrument_admin,
         instrument_id,
         amount,
+        is_locked,
     })
 }
 
-/// Collect the contract ids of every `Holding` the party owns for a given
-/// instrument `(admin, id)`. Used by the Transfer proposal flow to fund the
-/// transfer when the caller doesn't pin specific holdings: the token-standard
+/// Collect the contract ids of every *unlocked* `Holding` the party owns for a
+/// given instrument `(admin, id)`. Used by the Transfer proposal flow to fund
+/// the transfer when the caller doesn't pin specific holdings: the token-standard
 /// transfer factory rejects an empty `inputHoldingCids` ("No holdings
 /// provided"), so we hand it every matching holding and let the choice consume
 /// what it needs and return change.
+///
+/// Locked holdings are excluded: they're reserved for an in-flight
+/// transfer/allocation, and feeding one to `TransferFactory_Transfer` fails at
+/// execute time with `AssertionFailed: Input holding lock must match`.
 pub async fn select_input_holdings(
     config: &NodeConfig,
     party_id: &CantonId,
@@ -3900,7 +3932,11 @@ pub async fn select_input_holdings(
     let raw = fetch_holding_views(config, party_id, token).await?;
     Ok(raw
         .into_iter()
-        .filter(|h| h.instrument_admin == *instrument_admin && h.instrument_id == instrument_id)
+        .filter(|h| {
+            !h.is_locked
+                && h.instrument_admin == *instrument_admin
+                && h.instrument_id == instrument_id
+        })
         .map(|h| h.contract_id)
         .collect())
 }
@@ -4295,6 +4331,85 @@ mod tests {
             extract_transfer_instruction_info(&make_event(TRANSFER_PENDING_RECEIVER_ACCEPTANCE, 0))
                 .expect("expired offer should still be returned, just past-deadline");
         assert_eq!(info.expires_at, 0);
+    }
+
+    // ------------------------------------------------------------------------
+    // extract_holding_view
+    //
+    // The `lock` field on the Holding interface view decides whether a holding
+    // can fund a transfer. A locked holding fed to TransferFactory_Transfer
+    // fails at execute time with "Input holding lock must match", so the parser
+    // must surface `is_locked` for select_input_holdings to filter on.
+    // ------------------------------------------------------------------------
+
+    // `<prefix>::<34-byte-multihash-hex>`; CantonId::parse rejects other shapes.
+    const HOLDING_FP: &str = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
+
+    /// Build a `CreatedEvent` carrying a `HoldingV1.Holding` interface view.
+    /// `lock` populates the optional `lock` field — `None` for an unlocked
+    /// holding, `Some` (any record) for a locked one.
+    fn make_holding_event(amount: &str, lock: Option<Value>) -> CreatedEvent {
+        let view = InterfaceView {
+            interface_id: Some(Identifier {
+                package_id: "#splice-api-token-holding-v1".to_string(),
+                module_name: "Splice.Api.Token.HoldingV1".to_string(),
+                entity_name: "Holding".to_string(),
+            }),
+            view_status: None,
+            view_value: Some(Record {
+                record_id: None,
+                fields: vec![
+                    field("owner", party_value(&format!("owner::{HOLDING_FP}"))),
+                    field("amount", numeric_value(amount)),
+                    field(
+                        "instrumentId",
+                        record_value(vec![
+                            field("admin", party_value(&format!("admin::{HOLDING_FP}"))),
+                            field("id", text_value("Test01")),
+                        ]),
+                    ),
+                    field("lock", optional_value(lock)),
+                ],
+            }),
+        };
+        CreatedEvent {
+            offset: 0,
+            node_id: 0,
+            contract_id: "holding-cid".to_string(),
+            template_id: None,
+            contract_key: None,
+            create_arguments: None,
+            created_event_blob: vec![],
+            interface_views: vec![view],
+            witness_parties: vec![],
+            signatories: vec![],
+            observers: vec![],
+            created_at: None,
+            package_name: String::new(),
+            representative_package_id: String::new(),
+            acs_delta: false,
+        }
+    }
+
+    #[test]
+    fn extract_holding_view_unlocked_when_lock_absent() {
+        let view = extract_holding_view(&make_holding_event("20.0", None))
+            .expect("unlocked holding view should parse");
+        assert!(!view.is_locked);
+        assert_eq!(view.instrument_id, "Test01");
+        assert_eq!(view.amount, DamlDecimal::parse("20.0").expect("decimal"));
+    }
+
+    #[test]
+    fn extract_holding_view_locked_when_lock_present() {
+        // A non-empty record stands in for the Lock payload; only presence matters.
+        let lock = record_value(vec![field(
+            "holders",
+            party_value(&format!("locker::{HOLDING_FP}")),
+        )]);
+        let view = extract_holding_view(&make_holding_event("5.0", Some(lock)))
+            .expect("locked holding view should still parse");
+        assert!(view.is_locked);
     }
 
     // ------------------------------------------------------------------------

@@ -121,14 +121,46 @@ fn make_empty_extra_args() -> Value {
     make_extra_args(make_empty_text_map())
 }
 
-/// Placeholder timestamps used when serializing a `Transfer` record into a
-/// `TransferProposal`. Exposed so the registry choice-context fetch uses the
-/// *same* values — the registrar resolves the context for these exact choice
-/// arguments, so any drift between propose-time and execute-time payloads
-/// fails interpretation. `0` is epoch and `i64::MAX / 1000` is the maximum
-/// Daml `Time` value (well past any realistic deadline).
+/// Fallback timestamps for serializing a `Transfer` record when no explicit
+/// validity window is supplied (tests only — the propose handler always passes
+/// a real, bounded window). `0` is epoch and `i64::MAX / 1000` is the maximum
+/// Daml `Time` value.
+///
+/// These were the *production* values once, but an effectively-infinite
+/// `executeBefore` meant a two-step transfer offer the receiver never accepted
+/// locked the sender's holdings forever. Production now bounds the window via
+/// [`TransferValidity`]; see [`TRANSFER_VALIDITY_WINDOW_MICROS`].
 pub const TRANSFER_REQUESTED_AT_MICROS: i64 = 0;
 pub const TRANSFER_EXECUTE_BEFORE_MICROS: i64 = i64::MAX / 1000;
+
+/// How long a `Transfer` proposal (and, for two-step transfers, the resulting
+/// offer) stays executable/acceptable after creation. Bounding this means an
+/// unaccepted offer expires and its escrowed holdings can be reclaimed, rather
+/// than locking funds indefinitely. 24h matches the daml test fixtures and the
+/// governance action timeout.
+pub const TRANSFER_VALIDITY_WINDOW_MICROS: i64 = 24 * 60 * 60 * 1_000_000;
+
+/// The `requestedAt` / `executeBefore` pair stamped onto a `Transfer`. The same
+/// instance must be used for both the registry choice-context fetch and the
+/// on-chain `TransferProposal` create args — the registrar resolves the context
+/// for these exact values, so any drift fails interpretation at execute time.
+#[derive(Clone, Copy, Debug)]
+pub struct TransferValidity {
+    pub requested_at_micros: i64,
+    pub execute_before_micros: i64,
+}
+
+impl TransferValidity {
+    /// A window starting at `now_micros` and lasting
+    /// [`TRANSFER_VALIDITY_WINDOW_MICROS`]. `now_micros` is captured once by the
+    /// caller so the registry and on-chain payloads agree byte-for-byte.
+    pub fn from_now(now_micros: i64) -> Self {
+        Self {
+            requested_at_micros: now_micros,
+            execute_before_micros: now_micros.saturating_add(TRANSFER_VALIDITY_WINDOW_MICROS),
+        }
+    }
+}
 
 fn make_extra_args(context_values: Value) -> Value {
     make_record(vec![
@@ -871,7 +903,14 @@ pub fn build_proposal_create_args(
     proposer: &str,
     proposal: &ProposalType,
     transfer_choice_context: Option<&ChoiceContext>,
+    transfer_validity: Option<TransferValidity>,
 ) -> Result<(ProposalPackage, &'static str, &'static str, Record)> {
+    // Fall back to the (unbounded) const window only when no explicit validity
+    // is supplied — i.e. tests; the propose handler always passes a real one.
+    let validity = transfer_validity.unwrap_or(TransferValidity {
+        requested_at_micros: TRANSFER_REQUESTED_AT_MICROS,
+        execute_before_micros: TRANSFER_EXECUTE_BEFORE_MICROS,
+    });
     Ok(match proposal {
         ProposalType::SetupCcPreapproval {
             provider,
@@ -941,13 +980,13 @@ pub fn build_proposal_create_args(
                 field(
                     "requestedAt",
                     Value {
-                        sum: Some(value::Sum::Timestamp(TRANSFER_REQUESTED_AT_MICROS)),
+                        sum: Some(value::Sum::Timestamp(validity.requested_at_micros)),
                     },
                 ),
                 field(
                     "executeBefore",
                     Value {
-                        sum: Some(value::Sum::Timestamp(TRANSFER_EXECUTE_BEFORE_MICROS)),
+                        sum: Some(value::Sum::Timestamp(validity.execute_before_micros)),
                     },
                 ),
                 field(
@@ -1857,6 +1896,26 @@ mod tests {
     use super::*;
     use crate::canton_id::{NAMESPACE_LENGTH, Namespace};
 
+    #[test]
+    fn transfer_validity_from_now_bounds_the_window() {
+        let now = 1_700_000_000_000_000;
+        let v = TransferValidity::from_now(now);
+        assert_eq!(v.requested_at_micros, now);
+        assert_eq!(
+            v.execute_before_micros,
+            now + TRANSFER_VALIDITY_WINDOW_MICROS
+        );
+        // The window is finite (24h), not the old effectively-infinite deadline.
+        assert!(v.execute_before_micros < TRANSFER_EXECUTE_BEFORE_MICROS);
+    }
+
+    #[test]
+    fn transfer_validity_from_now_saturates_instead_of_overflowing() {
+        // A near-max `now` must not panic on overflow; it saturates.
+        let v = TransferValidity::from_now(i64::MAX - 5);
+        assert_eq!(v.execute_before_micros, i64::MAX);
+    }
+
     // Locks the AV_* constructor strings against the on-ledger
     // `Splice.Api.Token.MetadataV1.AnyValue` definition. A typo here would
     // surface as a runtime interpretation error far from the source, so the
@@ -2079,7 +2138,7 @@ mod tests {
             expected_dso: party_id(),
         };
         let (package, module, entity, record) =
-            build_proposal_create_args("gov", "proposer", &proposal, None)?;
+            build_proposal_create_args("gov", "proposer", &proposal, None, None)?;
 
         assert_eq!(package, ProposalPackage::GovernanceTokenCustody);
         assert_eq!(module, "Governance.TokenCustody.SetupCcPreapproval");
@@ -2141,7 +2200,7 @@ mod tests {
             input_holding_cids: vec!["hc-1".to_string()],
         };
         let (package, module, entity, record) =
-            build_proposal_create_args("gov", "proposer", &proposal, None)?;
+            build_proposal_create_args("gov", "proposer", &proposal, None, None)?;
 
         assert_eq!(package, ProposalPackage::GovernanceTokenCustody);
         assert_eq!(module, "Governance.TokenCustody.TransferProposal");
@@ -2210,7 +2269,7 @@ mod tests {
             description: "mint it".to_string(),
         };
         let (mint_package, mint_module, mint_entity, mint_record) =
-            build_proposal_create_args("gov", "proposer", &mint, None)?;
+            build_proposal_create_args("gov", "proposer", &mint, None, None)?;
 
         // Package enum is GovernanceUtilityOnboarding even though the module
         // lives under `Governance.TokenIssuance`.
@@ -2247,7 +2306,7 @@ mod tests {
             description: "burn it".to_string(),
         };
         let (burn_package, burn_module, burn_entity, burn_record) =
-            build_proposal_create_args("gov", "proposer", &burn, None)?;
+            build_proposal_create_args("gov", "proposer", &burn, None, None)?;
 
         assert_eq!(burn_package, ProposalPackage::GovernanceUtilityOnboarding);
         assert_eq!(burn_module, "Governance.TokenIssuance.BurnProposal");
@@ -2293,7 +2352,7 @@ mod tests {
 
         // ---- No choice context: context.values is an EMPTY TextMap ----
         let (package, module, entity, record) =
-            build_proposal_create_args("gov", "proposer", &proposal, None)?;
+            build_proposal_create_args("gov", "proposer", &proposal, None, None)?;
         assert_eq!(package, ProposalPackage::GovernanceTokenCustody);
         assert_eq!(module, "Governance.TokenCustody.AcceptTransfer");
         assert_eq!(entity, "AcceptTransferProposal");
@@ -2329,7 +2388,7 @@ mod tests {
             )]),
         };
         let (_, _, _, record) =
-            build_proposal_create_args("gov", "proposer", &proposal, Some(&ctx))?;
+            build_proposal_create_args("gov", "proposer", &proposal, Some(&ctx), None)?;
         let extra_args = as_record(field_value(&record, "extraArgs"));
         let context = as_record(field_value(extra_args, "context"));
         let values = field_value(context, "values");
@@ -2371,7 +2430,7 @@ mod tests {
             deposit_initial_amount_usd: Some(DamlDecimal::parse("5.0")?),
         };
         let (package, module, entity, record) =
-            build_proposal_create_args("gov", "proposer", &proposal, None)?;
+            build_proposal_create_args("gov", "proposer", &proposal, None, None)?;
 
         assert_eq!(package, ProposalPackage::GovernanceUtilityCredential);
         assert_eq!(module, "Governance.UtilityCredential.OfferPaidCredential");
@@ -2424,7 +2483,7 @@ mod tests {
             create_allocation_factory: false,
         };
         let (package, module, entity, record) =
-            build_proposal_create_args("gov", "proposer", &proposal, None)?;
+            build_proposal_create_args("gov", "proposer", &proposal, None, None)?;
 
         assert_eq!(package, ProposalPackage::GovernanceUtilityOnboarding);
         assert_eq!(module, "Governance.UtilityOnboarding.SetupUtility");
@@ -2564,7 +2623,7 @@ mod tests {
 
         for case in cases {
             let (package, module, entity, record) =
-                build_proposal_create_args("gov", "proposer", &case.proposal, None)?;
+                build_proposal_create_args("gov", "proposer", &case.proposal, None, None)?;
             assert_eq!(package, case.package, "package for {module}");
             assert_eq!(module, case.module);
             assert_eq!(entity, case.entity, "entity for {module}");

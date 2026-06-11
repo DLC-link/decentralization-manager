@@ -1708,8 +1708,15 @@ pub struct BurnRequestsResponse {
 pub struct HoldingInfo {
     pub instrument_admin: CantonId,
     pub instrument_id: String,
+    /// Total amount held, summed across every active `Holding` contract for
+    /// this instrument — including locked ones.
     #[schema(value_type = String)]
     pub amount: DamlDecimal,
+    /// Portion of `amount` that is locked (escrowed for an in-flight
+    /// transfer/allocation) and therefore not freely transferable. The
+    /// available balance is `amount - locked_amount`.
+    #[schema(value_type = String)]
+    pub locked_amount: DamlDecimal,
     /// True if a `TransferPreapproval` is in place for this party for this
     /// instrument. CC (Amulet) holdings match when any
     /// `Splice.AmuletRules:TransferPreapproval` exists; utility-token holdings
