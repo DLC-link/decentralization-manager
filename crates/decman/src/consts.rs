@@ -67,6 +67,19 @@ pub const MAX_CONSECUTIVE_STEP_FAILURES: usize = 6;
 /// We instead give up after this many polls. The counter resets on any real
 /// reply, so case 1 rides through. 4 polls × 5s ≈ 20s: long enough to cover a
 /// slow resume, short enough that a dismissed run is cleaned up promptly.
+/// Retry budget for the peer's decline notification to the coordinator.
+///
+/// Deliberately NOT the fast-transport `noise_retry` profile (2 attempts,
+/// 250 ms backoff): a coordinator run only becomes routable once its spawned
+/// task has sent invites, slept its peer-grace period, and called
+/// `set_active` — ~2s after start. A peer declining the moment the invite
+/// card appears (a real operator pattern, reproduced by G14 in CI) hits that
+/// window and gets 503s; the fast profile's retries are exhausted inside it
+/// and the coordinator's human-paced run then hangs forever. 5 attempts at
+/// 2s spacing rides out any plausible init window.
+pub const DECLINE_NOTIFY_MAX_ATTEMPTS: usize = 5;
+pub const DECLINE_NOTIFY_BACKOFF_SECS: u64 = 2;
+
 pub const MAX_CONSECUTIVE_NO_WORKFLOW_POLLS: usize = 4;
 
 /// Canton protocol version used for key export and topology operations

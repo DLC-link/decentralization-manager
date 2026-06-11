@@ -4,6 +4,7 @@ use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 
 use crate::{
     config::Peer,
+    consts::{DECLINE_NOTIFY_BACKOFF_SECS, DECLINE_NOTIFY_MAX_ATTEMPTS},
     db::schema::{Commitable, SchemaRead, SchemaWrite},
     noise::client::NoiseClient,
     server::{
@@ -397,15 +398,18 @@ async fn notify_coordinator_of_decline(data: &web::Data<AppState>, invitation: &
     };
 
     // Bounded retries: this is the only signal that fails the coordinator's
-    // run — its WaitingForPeers is human-paced (no timeout), so a single
-    // dropped notification would leave that run hanging until a manual
-    // cancel. Every other cross-node workflow call retries; so does this.
-    // Spawned: each attempt can block for the full Noise request timeout, and
-    // the decline HTTP response must not hang the operator's UI on an
-    // unreachable coordinator — the notification is explicitly best-effort.
-    let retry = data.config.noise_retry.clone();
+    // run — its WaitingForPeers is human-paced (no timeout), so a dropped
+    // notification leaves that run hanging until a manual cancel. The budget
+    // is the dedicated DECLINE_NOTIFY profile, NOT the fast-transport
+    // noise_retry one: a decline sent the moment the invite card appears
+    // races the coordinator's ~2s init window (invites are sent before the
+    // run registers its Noise handle), during which the listener answers 503
+    // — the retries must outlive that window (see consts.rs). Spawned: each
+    // attempt can block for the full Noise request timeout, and the decline
+    // HTTP response must not hang the operator's UI on an unreachable
+    // coordinator — the notification is explicitly best-effort.
     tokio::spawn(async move {
-        let max_attempts = retry.max_attempts.max(1);
+        let max_attempts = DECLINE_NOTIFY_MAX_ATTEMPTS.max(1);
         for attempt in 1..=max_attempts {
             match client.send_decline_invitation(payload_bytes.clone()).await {
                 Ok(()) => return,
@@ -414,7 +418,7 @@ async fn notify_coordinator_of_decline(data: &web::Data<AppState>, invitation: &
                         "Decline notification to coordinator failed \
                          (attempt {attempt}/{max_attempts}), retrying: {e}"
                     );
-                    tokio::time::sleep(Duration::from_millis(retry.backoff_ms)).await;
+                    tokio::time::sleep(Duration::from_secs(DECLINE_NOTIFY_BACKOFF_SECS)).await;
                 }
                 Err(e) => {
                     tracing::warn!(
