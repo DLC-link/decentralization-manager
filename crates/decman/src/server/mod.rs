@@ -529,6 +529,54 @@ impl WorkflowTriggers {
         let mut invitations = self.pending_invitations.write().await;
         invitations.retain(|i| i.id != invitation.id);
         invitations.push(invitation);
+
+        // Bound the per-coordinator backlog: invites are recorded
+        // unconditionally now (no busy-gating), so a buggy or hostile —
+        // though authenticated — peer could otherwise grow
+        // pending_invitations without limit by inventing fresh instances.
+        // Keep the newest MAX_PENDING_INVITES_PER_COORDINATOR per sender,
+        // evicting the oldest.
+        const MAX_PENDING_INVITES_PER_COORDINATOR: usize = 16;
+        let coordinator = invitations
+            .last()
+            .map(|i| i.coordinator_pubkey.clone())
+            .unwrap_or_default();
+        let mut from_sender: Vec<(i64, String)> = invitations
+            .iter()
+            .filter(|i| i.coordinator_pubkey == coordinator)
+            .map(|i| (i.received_at, i.id.clone()))
+            .collect();
+        if from_sender.len() > MAX_PENDING_INVITES_PER_COORDINATOR {
+            from_sender.sort_by_key(|(at, _)| *at);
+            let evict: Vec<String> = from_sender
+                [..from_sender.len() - MAX_PENDING_INVITES_PER_COORDINATOR]
+                .iter()
+                .map(|(_, id)| id.clone())
+                .collect();
+            tracing::warn!(
+                "Pending-invitation cap hit for coordinator {coordinator}: evicting {} \
+                 oldest invite(s)",
+                evict.len()
+            );
+            invitations.retain(|i| !evict.contains(&i.id));
+            drop(invitations);
+            match self.db.begin_transaction().await {
+                Ok(mut tx) => {
+                    let mut ok = true;
+                    for id in &evict {
+                        if let Err(e) = tx.delete_pending_invitation(id).await {
+                            tracing::warn!("Failed to delete evicted invitation {id}: {e}");
+                            ok = false;
+                            break;
+                        }
+                    }
+                    if ok && let Err(e) = Commitable::commit(tx).await {
+                        tracing::warn!("Failed to commit invitation eviction: {e}");
+                    }
+                }
+                Err(e) => tracing::warn!("Failed to begin tx for invitation eviction: {e}"),
+            }
+        }
     }
 
     /// Drop pending invitations from `coordinator_pubkey`. When `instance` is
@@ -1377,25 +1425,37 @@ async fn handle_incoming_connection(
                         }
                         MessageType::GetChunk => {
                             // GetChunk serves BOTH the chunked ListPackages transfer and a
-                            // workflow's chunked command, and the two are indistinguishable
-                            // on the wire. Prefer the workflow the command routes to: a
-                            // peer's ListPackages chunk cache entry lives until its TTL and
-                            // routinely lingers from an earlier phase (e.g. a package check)
-                            // into a later workflow, so routing by "a cache entry exists"
-                            // would feed a workflow's chunk requests stale ListPackages bytes
-                            // and corrupt the transfer. The chunk cache below is consulted
-                            // only when `route(msg.instance)` finds no matching workflow
-                            // (no/empty routing key, or no live run under it) — ListPackages
-                            // and workflow GetChunks never overlap for a given peer, so this
-                            // can't strand a real ListPackages.
-                            let active = triggers.workflows.route(&msg.instance);
-                            if let Some(wf) = active
-                                && let Some(pid) =
-                                    peer_id_str.as_deref().and_then(|s| CantonId::parse(s).ok())
-                            {
-                                let resp = wf.handle_command(pid, msg).await.unwrap_or_else(|e| {
-                                    Message::new(MessageType::Error, format!("{e}").into_bytes())
-                                });
+                            // workflow's chunked command. The routing key disambiguates:
+                            // workflow chunk requests are ALWAYS stamped with their
+                            // coordinator run's instance (NoiseClient stamps every command),
+                            // so a keyed GetChunk routes to exactly that run — and an
+                            // EMPTY key means a ListPackages transfer and goes straight to
+                            // the chunk cache below. No sole-active fallback here: with
+                            // concurrent workflows a node is routinely mid-run while a peer
+                            // fetches packages, and falling back would feed the
+                            // ListPackages transfer INTO a live workflow's chunk server.
+                            if !msg.instance.is_empty() {
+                                let active = triggers.workflows.route(&msg.instance);
+                                let peer =
+                                    peer_id_str.as_deref().and_then(|s| CantonId::parse(s).ok());
+                                let resp = match (active, peer) {
+                                    (Some(wf), Some(pid)) => {
+                                        wf.handle_command(pid, msg).await.unwrap_or_else(|e| {
+                                            Message::new(
+                                                MessageType::Error,
+                                                format!("{e}").into_bytes(),
+                                            )
+                                        })
+                                    }
+                                    (None, _) => {
+                                        // The named run is gone (cancelled/finished) —
+                                        // 503 so the peer's bounded retry gives up.
+                                        let mut resp = Response::new(Body::empty());
+                                        *resp.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
+                                        return Ok(resp);
+                                    }
+                                    (Some(_), None) => Message::new_empty(MessageType::Wait),
+                                };
                                 return Ok(Response::new(Body::from(resp.to_bytes())));
                             }
                             if msg.payload.len() < 4 {

@@ -854,9 +854,9 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         let row = WorkflowRunRow::from_domain(run)?;
 
         // ON CONFLICT(instance_name) so re-saving the same run (resume,
-        // step advance, etc.) replaces in place. Conflicts on the partial
-        // unique index `idx_workflow_runs_inprogress_per_kind` propagate as
-        // an error — that's what enforces "one InProgress run per (kind, role)".
+        // step advance, etc.) replaces in place. Migration 000013 dropped the
+        // partial unique index that once forbade two InProgress runs per
+        // (kind, role) — concurrency is governed by the in-memory registry.
         sqlx::query(
             r"
             INSERT INTO workflow_runs (

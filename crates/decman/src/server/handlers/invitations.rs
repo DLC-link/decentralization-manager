@@ -208,6 +208,35 @@ pub async fn accept_invitation(
 
     delete_persisted_invitation(&data, &invitation.id).await;
 
+    // Refuse a second accept for a run we're already driving: a resurrected
+    // card (e.g. an in-flight invite delivered after a scoped cancel, or a
+    // re-broadcast) would otherwise upsert the SAME peer row and enqueue a
+    // SECOND start_peer loop for it — two loops double-executing commands
+    // against one row. Legacy invites without an instance skip the check.
+    if let Some(coord_instance) = invitation
+        .workflow_instance
+        .as_deref()
+        .filter(|i| !i.is_empty())
+    {
+        let already_running = SchemaRead::get_in_progress_workflow_runs(&data.db)
+            .await
+            .unwrap_or_default()
+            .iter()
+            .any(|r| {
+                r.role == WorkflowRole::Peer
+                    && r.coordinator_instance.as_deref() == Some(coord_instance)
+                    && r.coordinator_pubkey.as_deref() == Some(&invitation.coordinator_pubkey)
+            });
+        if already_running {
+            return HttpResponse::Conflict().json(serde_json::json!({
+                "error": format!(
+                    "Already participating in workflow run {coord_instance} from this \
+                     coordinator"
+                )
+            }));
+        }
+    }
+
     // Persist a peer-side workflow_runs row so the operator's feed shows
     // "I'm participating in <kind>" until completion.
     let Some(peer_instance) = insert_peer_run(&data, &invitation).await else {
@@ -345,25 +374,31 @@ async fn notify_coordinator_of_decline(data: &web::Data<AppState>, invitation: &
     // run — its WaitingForPeers is human-paced (no timeout), so a single
     // dropped notification would leave that run hanging until a manual
     // cancel. Every other cross-node workflow call retries; so does this.
-    let max_attempts = 3u32;
-    for attempt in 1..=max_attempts {
-        match client.send_decline_invitation(payload_bytes.clone()).await {
-            Ok(()) => return,
-            Err(e) if attempt < max_attempts => {
-                tracing::warn!(
-                    "Decline notification to coordinator failed \
-                     (attempt {attempt}/{max_attempts}), retrying: {e}"
-                );
-                tokio::time::sleep(Duration::from_secs(2)).await;
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Best-effort decline notification to coordinator failed after \
-                     {max_attempts} attempts: {e}"
-                );
+    // Spawned: each attempt can block for the full Noise request timeout, and
+    // the decline HTTP response must not hang the operator's UI on an
+    // unreachable coordinator — the notification is explicitly best-effort.
+    let retry = data.config.noise_retry.clone();
+    tokio::spawn(async move {
+        let max_attempts = retry.max_attempts.max(1);
+        for attempt in 1..=max_attempts {
+            match client.send_decline_invitation(payload_bytes.clone()).await {
+                Ok(()) => return,
+                Err(e) if attempt < max_attempts => {
+                    tracing::warn!(
+                        "Decline notification to coordinator failed \
+                         (attempt {attempt}/{max_attempts}), retrying: {e}"
+                    );
+                    tokio::time::sleep(Duration::from_millis(retry.backoff_ms)).await;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Best-effort decline notification to coordinator failed after \
+                         {max_attempts} attempts: {e}"
+                    );
+                }
             }
         }
-    }
+    });
 }
 
 /// Look up the `Peer` record that owns the given Noise public key. The

@@ -176,9 +176,8 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
 
     // Cleanup: dismiss every row this phase created so later phases (and the
     // operator feed) start clean.
-    for (idx, port, inst) in &all_insts {
+    for (_, port, inst) in &all_insts {
         chaos::dismiss_on(f, *port, inst).await;
-        let _ = idx;
     }
     for (idx, port, _) in &nodes {
         let peers = db::list_undismissed_terminal_runs(

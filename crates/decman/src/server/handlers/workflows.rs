@@ -55,8 +55,10 @@ fn now_secs() -> i64 {
 }
 
 /// Insert the coordinator-side `workflow_runs` row for a freshly-started run.
-/// The partial unique index enforces "one InProgress run per (kind, role)" so a
-/// duplicate insert here surfaces as the right error to bubble back as 409.
+/// Duplicate-instance protection lives in the registry insert that precedes
+/// this call (migration 000013 dropped the one-InProgress-per-(kind, role)
+/// unique index — concurrent same-kind runs are allowed); a failure here is a
+/// genuine persistence error and bubbles back as 409.
 async fn insert_coordinator_run<S, C>(
     db: &SqlitePool,
     instance_name: &str,
@@ -338,6 +340,21 @@ pub async fn start_kick(
         body.previous_threshold,
         instance_name.clone(),
     );
+
+    // Refuse a second workflow targeting the SAME decentralized party — the
+    // party's topology mutations must not interleave (two kicks, or a kick
+    // racing a contracts deployment, conflict at the Canton layer with
+    // confusing step failures).
+    if let Some((run, kind)) =
+        find_inprogress_run_for_party(&data.db, &decentralized_party_id).await
+    {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!(
+                "Party {decentralized_party_id} already has a {kind} workflow in flight \
+                 (run {run}); wait for it to finish or cancel it first"
+            ),
+        });
+    }
 
     // Register in the registry FIRST — atomic dedup. A racing request for the
     // same instance_name must be rejected here, BEFORE we persist, so it can't
@@ -1273,6 +1290,20 @@ pub async fn start_contracts(
         WorkflowRole::Coordinator,
     );
     let contracts_state = &instance.http;
+    // Refuse a second workflow targeting the SAME decentralized party (see
+    // `find_inprogress_run_for_party`).
+    if let Some((run, kind)) =
+        find_inprogress_run_for_party(&data.db, &body.decentralized_party_id).await
+    {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!(
+                "Party {} already has a {kind} workflow in flight (run {run}); wait for it \
+                 to finish or cancel it first",
+                body.decentralized_party_id
+            ),
+        });
+    }
+
     // Register FIRST — atomic dedup before persist (a racing same-instance
     // request can't upsert/clobber the in-flight run's row).
     if !data.workflows.insert(instance.clone()) {
@@ -1810,6 +1841,10 @@ async fn cancel_instance(
     // hasn't finished setting itself up yet; refuse the cancel rather than mark the
     // workflow Cancelled while the spawned task is still alive. Start paths always
     // populate abort_handle before they let any await reach this point.
+    // NOTE: an abort landing in the narrow window between the workflow task's
+    // Ok(result) and its mark_completed write can leave the row Cancelled for
+    // a run that de-facto finished — rare and benign (the work itself is
+    // already committed on-ledger; only the feed status differs).
     let Some(handle) = state.abort_handle.lock().await.take() else {
         tracing::warn!(
             "{label} cancel arrived before the workflow finished initializing — refusing"
@@ -2227,10 +2262,9 @@ pub async fn retry_workflow(
         });
     }
 
-    // Flip the row back to InProgress so the partial unique index reserves
-    // (kind, role) again before we spawn the resumed task. If a fresh run of
-    // the same kind+role has been started since this one failed, that index
-    // will reject this update and we surface a 409.
+    // Flip the row back to InProgress before re-spawning the task. Concurrent
+    // same-kind runs are allowed now (no unique index); the registry insert in
+    // respawn_coordinator still rejects a same-instance duplicate.
     let mut tx = match data.db.begin_transaction().await {
         Ok(t) => t,
         Err(e) => {
@@ -2304,6 +2338,25 @@ pub async fn retry_workflow(
 /// Look for an existing decentralized party whose human-readable prefix
 /// equals `prefix`. Returns the matching `party_id` if found — used by the
 /// onboarding pre-flight to refuse duplicate-prefix runs.
+/// Any in-progress run on this node (either role) already targeting the given
+/// decentralized party. The old global one-at-a-time gate incidentally
+/// prevented two workflows from mutating the same party's topology
+/// concurrently (e.g. two kicks, or a kick racing a contracts deployment);
+/// with concurrent workflows that protection must be explicit. Local-node
+/// guard only — two DIFFERENT nodes coordinating conflicting workflows on the
+/// same party is a distributed conflict Canton itself surfaces.
+async fn find_inprogress_run_for_party(
+    db: &SqlitePool,
+    party: &CantonId,
+) -> Option<(String, WorkflowKind)> {
+    SchemaRead::get_in_progress_workflow_runs(db)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .find(|r| r.dec_party_id.as_ref() == Some(party))
+        .map(|r| (r.instance_name, r.kind))
+}
+
 async fn find_party_with_prefix(db: &SqlitePool, prefix: &str) -> Result<Option<String>> {
     use crate::db::schema::SchemaRead;
 
