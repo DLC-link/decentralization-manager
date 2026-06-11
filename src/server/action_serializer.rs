@@ -151,18 +151,25 @@ pub struct TransferValidity {
 }
 
 impl TransferValidity {
-    /// A window starting at `now_micros` and lasting
-    /// [`TRANSFER_VALIDITY_WINDOW_MICROS`]. `now_micros` is captured once by the
-    /// caller so the registry and on-chain payloads agree byte-for-byte.
+    /// A window starting at `now_micros` and lasting the default
+    /// [`TRANSFER_VALIDITY_WINDOW_MICROS`].
+    pub fn from_now(now_micros: i64) -> Self {
+        Self::from_now_with_window(now_micros, TRANSFER_VALIDITY_WINDOW_MICROS)
+    }
+
+    /// A window starting at `now_micros` and lasting `window_micros`. Used when
+    /// the caller (e.g. the propose handler) lets the user override the default
+    /// expiry. `now_micros` is captured once so the registry and on-chain
+    /// payloads agree byte-for-byte.
     ///
     /// `executeBefore` is clamped to [`TRANSFER_EXECUTE_BEFORE_MICROS`] (the
-    /// module's max Daml `Time`) so an unexpectedly large `now_micros` can never
-    /// serialize an out-of-range timestamp.
-    pub fn from_now(now_micros: i64) -> Self {
+    /// module's max Daml `Time`) so a large `now_micros`/`window_micros` can
+    /// never serialize an out-of-range timestamp.
+    pub fn from_now_with_window(now_micros: i64, window_micros: i64) -> Self {
         Self {
             requested_at_micros: now_micros,
             execute_before_micros: now_micros
-                .saturating_add(TRANSFER_VALIDITY_WINDOW_MICROS)
+                .saturating_add(window_micros)
                 .min(TRANSFER_EXECUTE_BEFORE_MICROS),
         }
     }
@@ -971,6 +978,9 @@ pub fn build_proposal_create_args(
             amount,
             instrument_id,
             input_holding_cids,
+            // The validity window is applied via `transfer_validity` (the
+            // timestamps below), not serialized as its own field.
+            validity_window_hours: _,
         } => {
             let transfer_record = make_record(vec![
                 field("sender", make_party(governance_party)),
@@ -2205,6 +2215,7 @@ mod tests {
                 id: "instr-1".to_string(),
             },
             input_holding_cids: vec!["hc-1".to_string()],
+            validity_window_hours: None,
         };
         let (package, module, entity, record) =
             build_proposal_create_args("gov", "proposer", &proposal, None, None)?;

@@ -1206,6 +1206,11 @@ pub enum ProposalType {
         instrument_id: InstrumentId,
         #[serde(default)]
         input_holding_cids: Vec<String>,
+        /// How long the transfer (and, for two-step transfers, the resulting
+        /// offer) stays valid, in hours. `None` uses the default window. A
+        /// bounded window lets an unaccepted offer expire and release escrow.
+        #[serde(default)]
+        validity_window_hours: Option<u32>,
     },
     /// Accept an incoming token transfer
     AcceptTransfer { transfer_instruction_cid: String },
@@ -1328,9 +1333,20 @@ impl ProposalType {
     /// submission error after a proposal contract is already created.
     pub fn validate(&self) -> Result<(), String> {
         match self {
-            ProposalType::Transfer { amount, .. }
-            | ProposalType::Mint { amount, .. }
-            | ProposalType::Burn { amount, .. } => validate_positive_amount(amount, "amount"),
+            ProposalType::Transfer {
+                amount,
+                validity_window_hours,
+                ..
+            } => {
+                validate_positive_amount(amount, "amount")?;
+                if *validity_window_hours == Some(0) {
+                    return Err("validity_window_hours must be greater than 0".to_string());
+                }
+                Ok(())
+            }
+            ProposalType::Mint { amount, .. } | ProposalType::Burn { amount, .. } => {
+                validate_positive_amount(amount, "amount")
+            }
             ProposalType::OfferPaidCredential {
                 deposit_initial_amount_usd: Some(d),
                 ..
@@ -2227,7 +2243,7 @@ mod tests {
         let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
         let to = CantonId::parse(&format!("recv::{ns}")).unwrap();
         let admin = CantonId::parse(&format!("admin::{ns}")).unwrap();
-        let mk = |amount: &str| ProposalType::Transfer {
+        let mk = |amount: &str, window: Option<u32>| ProposalType::Transfer {
             transfer_factory_cid: "tf".to_string(),
             expected_admin: admin.clone(),
             receiver: to.clone(),
@@ -2237,9 +2253,13 @@ mod tests {
                 id: "i".into(),
             },
             input_holding_cids: Vec::new(),
+            validity_window_hours: window,
         };
-        assert!(mk("0").validate().is_err());
-        assert!(mk("-1.5").validate().is_err());
-        assert!(mk("0.0001").validate().is_ok());
+        assert!(mk("0", None).validate().is_err());
+        assert!(mk("-1.5", None).validate().is_err());
+        assert!(mk("0.0001", None).validate().is_ok());
+        // A custom (positive) window is accepted; a zero-hour window is rejected.
+        assert!(mk("1.0", Some(48)).validate().is_ok());
+        assert!(mk("1.0", Some(0)).validate().is_err());
     }
 }

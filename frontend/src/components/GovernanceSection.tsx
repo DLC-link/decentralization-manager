@@ -139,6 +139,10 @@ const defaultVaultBackendSignatory = DEVNET_VAULT_BACKEND_SIGNATORY;
 const holdingAvailable = (h: Holding): number =>
   Number(h.amount) - Number(h.locked_amount);
 
+/// Default validity window (hours) for a Transfer proposal / two-step offer.
+/// Mirrors the backend default; overridable per-transfer in the form.
+const DEFAULT_TRANSFER_EXPIRY_HOURS = 24;
+
 export const GovernanceSection = ({
   partyId,
   rulesContractId: initialRulesContractId,
@@ -183,6 +187,11 @@ export const GovernanceSection = ({
   const [proposalInstrumentIdAdmin, setProposalInstrumentIdAdmin] = useState("");
   const [proposalInstrumentIdId, setProposalInstrumentIdId] = useState("");
   const [proposalInputHoldingCids, setProposalInputHoldingCids] = useState("");
+  // Validity window (hours) for a Transfer proposal / two-step offer. Defaults
+  // to the backend's default (24h) but is overridable; bounding it lets an
+  // unaccepted offer expire and release escrow instead of locking funds.
+  const [proposalTransferExpiryHours, setProposalTransferExpiryHours] =
+    useState(String(DEFAULT_TRANSFER_EXPIRY_HOURS));
   const [proposalTransferInstructionCid, setProposalTransferInstructionCid] = useState("");
   const [proposalDescription, setProposalDescription] = useState("");
   // Utility-onboarding proposal state
@@ -1361,6 +1370,7 @@ export const GovernanceSection = ({
     );
     setProposalInstrumentIdId("");
     setProposalInputHoldingCids("");
+    setProposalTransferExpiryHours(String(DEFAULT_TRANSFER_EXPIRY_HOURS));
     setProposalTransferInstructionCid("");
     setProposalDescription("");
     setProposalProviderServiceCid("");
@@ -1408,7 +1418,17 @@ export const GovernanceSection = ({
               .map(({ id }) => ({ id })),
           };
           break;
-        case "transfer":
+        case "transfer": {
+          // Send the override only when it's a valid positive integer that
+          // differs from the default; otherwise omit it and let the backend
+          // apply its default window.
+          const expiryHours = Number(proposalTransferExpiryHours);
+          const validityWindowHours =
+            Number.isInteger(expiryHours) &&
+            expiryHours > 0 &&
+            expiryHours !== DEFAULT_TRANSFER_EXPIRY_HOURS
+              ? expiryHours
+              : undefined;
           proposal = {
             type: "transfer",
             transfer_factory_cid: proposalTransferFactoryCid,
@@ -1417,8 +1437,12 @@ export const GovernanceSection = ({
             amount: proposalAmount,
             instrument_id: { admin: proposalInstrumentIdAdmin, id: proposalInstrumentIdId },
             input_holding_cids: proposalInputHoldingCids ? proposalInputHoldingCids.split(",").map((s) => s.trim()).filter(Boolean) : [],
+            ...(validityWindowHours !== undefined && {
+              validity_window_hours: validityWindowHours,
+            }),
           };
           break;
+        }
         case "accept_transfer":
           proposal = {
             type: "accept_transfer",
@@ -4005,6 +4029,42 @@ export const GovernanceSection = ({
                       );
                       if (holding && n > holdingAvailable(holding)) {
                         return `Exceeds available balance (${holdingAvailable(holding)})`;
+                      }
+                      return "";
+                    })()}
+                  />
+                  <TextField
+                    size="small"
+                    label="Offer expiry (hours)"
+                    value={proposalTransferExpiryHours}
+                    onChange={(e) =>
+                      setProposalTransferExpiryHours(e.target.value)
+                    }
+                    fullWidth
+                    type="number"
+                    slotProps={{
+                      htmlInput: { min: 1, step: 1 },
+                      input: {
+                        endAdornment: fieldHelpAdornment(
+                          `How long the transfer stays valid (default ${DEFAULT_TRANSFER_EXPIRY_HOURS}h). If the recipient isn't preapproved, this becomes an offer they must accept before it expires; after expiry the escrowed funds are released back to you.`,
+                          "Help for Offer expiry",
+                        ),
+                      },
+                    }}
+                    error={(() => {
+                      const n = Number(proposalTransferExpiryHours);
+                      return (
+                        proposalTransferExpiryHours !== "" &&
+                        (!Number.isInteger(n) || n <= 0)
+                      );
+                    })()}
+                    helperText={(() => {
+                      const n = Number(proposalTransferExpiryHours);
+                      if (
+                        proposalTransferExpiryHours !== "" &&
+                        (!Number.isInteger(n) || n <= 0)
+                      ) {
+                        return "Enter a positive whole number of hours";
                       }
                       return "";
                     })()}

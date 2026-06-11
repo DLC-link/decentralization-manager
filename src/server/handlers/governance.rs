@@ -1100,9 +1100,19 @@ pub async fn propose_action(
     // Bounded validity window for any Transfer proposal, captured ONCE so the
     // registry choice-context fetch and the on-chain create args agree
     // byte-for-byte. A bounded `executeBefore` lets an unaccepted two-step offer
-    // expire and release its escrow instead of locking funds forever.
-    let transfer_validity =
-        action_serializer::TransferValidity::from_now(chrono::Utc::now().timestamp_micros());
+    // expire and release its escrow instead of locking funds forever. The
+    // window defaults to 24h but the caller may override it per-transfer.
+    let now_micros = chrono::Utc::now().timestamp_micros();
+    let transfer_validity = match &body.proposal {
+        ProposalType::Transfer {
+            validity_window_hours: Some(hours),
+            ..
+        } => action_serializer::TransferValidity::from_now_with_window(
+            now_micros,
+            i64::from(*hours).saturating_mul(60 * 60 * 1_000_000),
+        ),
+        _ => action_serializer::TransferValidity::from_now(now_micros),
+    };
 
     let mut resolved_proposal = body.proposal.clone();
     let transfer_choice_context = match &mut resolved_proposal {

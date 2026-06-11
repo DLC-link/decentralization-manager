@@ -472,6 +472,10 @@ export type ProposalType =
       amount: string;
       instrument_id: { admin: string; id: string };
       input_holding_cids: string[];
+      /** How long the transfer/offer stays valid, in hours. Omitted = backend
+       *  default (24h). Lets an unaccepted two-step offer expire and release
+       *  escrow instead of locking funds indefinitely. */
+      validity_window_hours?: number;
     }
   | {
       type: "accept_transfer";
