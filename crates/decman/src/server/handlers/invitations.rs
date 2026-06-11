@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 
@@ -341,8 +341,28 @@ async fn notify_coordinator_of_decline(data: &web::Data<AppState>, invitation: &
         }
     };
 
-    if let Err(e) = client.send_decline_invitation(payload_bytes).await {
-        tracing::warn!("Best-effort decline notification to coordinator failed: {e}");
+    // Bounded retries: this is the only signal that fails the coordinator's
+    // run — its WaitingForPeers is human-paced (no timeout), so a single
+    // dropped notification would leave that run hanging until a manual
+    // cancel. Every other cross-node workflow call retries; so does this.
+    let max_attempts = 3u32;
+    for attempt in 1..=max_attempts {
+        match client.send_decline_invitation(payload_bytes.clone()).await {
+            Ok(()) => return,
+            Err(e) if attempt < max_attempts => {
+                tracing::warn!(
+                    "Decline notification to coordinator failed \
+                     (attempt {attempt}/{max_attempts}), retrying: {e}"
+                );
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Best-effort decline notification to coordinator failed after \
+                     {max_attempts} attempts: {e}"
+                );
+            }
+        }
     }
 }
 
