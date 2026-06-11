@@ -4392,12 +4392,29 @@ mod tests {
     }
 
     #[test]
-    fn extract_holding_view_unlocked_when_lock_absent() {
+    fn extract_holding_view_unlocked_when_lock_none() {
+        // The `lock` field is present but an empty `Optional` (None) — the
+        // on-ledger shape for an unlocked holding.
         let view = extract_holding_view(&make_holding_event("20.0", None))
             .expect("unlocked holding view should parse");
         assert!(!view.is_locked);
         assert_eq!(view.instrument_id, "Test01");
         assert_eq!(view.amount, DamlDecimal::parse("20.0").expect("decimal"));
+    }
+
+    #[test]
+    fn extract_holding_view_unlocked_when_lock_field_missing() {
+        // Defensive path: if the interface view omits the `lock` field entirely,
+        // the holding is treated as unlocked rather than failing to parse.
+        let mut event = make_holding_event("7.0", None);
+        if let Some(view) = event.interface_views.first_mut()
+            && let Some(record) = view.view_value.as_mut()
+        {
+            record.fields.retain(|f| f.label != "lock");
+        }
+        let view =
+            extract_holding_view(&event).expect("holding view without a lock field should parse");
+        assert!(!view.is_locked);
     }
 
     #[test]

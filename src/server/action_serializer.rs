@@ -154,10 +154,16 @@ impl TransferValidity {
     /// A window starting at `now_micros` and lasting
     /// [`TRANSFER_VALIDITY_WINDOW_MICROS`]. `now_micros` is captured once by the
     /// caller so the registry and on-chain payloads agree byte-for-byte.
+    ///
+    /// `executeBefore` is clamped to [`TRANSFER_EXECUTE_BEFORE_MICROS`] (the
+    /// module's max Daml `Time`) so an unexpectedly large `now_micros` can never
+    /// serialize an out-of-range timestamp.
     pub fn from_now(now_micros: i64) -> Self {
         Self {
             requested_at_micros: now_micros,
-            execute_before_micros: now_micros.saturating_add(TRANSFER_VALIDITY_WINDOW_MICROS),
+            execute_before_micros: now_micros
+                .saturating_add(TRANSFER_VALIDITY_WINDOW_MICROS)
+                .min(TRANSFER_EXECUTE_BEFORE_MICROS),
         }
     }
 }
@@ -1910,10 +1916,11 @@ mod tests {
     }
 
     #[test]
-    fn transfer_validity_from_now_saturates_instead_of_overflowing() {
-        // A near-max `now` must not panic on overflow; it saturates.
+    fn transfer_validity_from_now_clamps_to_max_daml_time() {
+        // A near-max `now` must neither panic on overflow nor serialize past the
+        // module's max Daml `Time`; it clamps to TRANSFER_EXECUTE_BEFORE_MICROS.
         let v = TransferValidity::from_now(i64::MAX - 5);
-        assert_eq!(v.execute_before_micros, i64::MAX);
+        assert_eq!(v.execute_before_micros, TRANSFER_EXECUTE_BEFORE_MICROS);
     }
 
     // Locks the AV_* constructor strings against the on-ledger
