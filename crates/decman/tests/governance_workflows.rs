@@ -140,6 +140,12 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     // other's invites and peer rows untouched (instance-scoped CancelInvite +
     // per-instance cancel endpoint).
     phases::concurrent_sibling_cancel::run(&mut f).await?; // G12
+    // G13: a delivered invitation must survive a peer restart (persisted +
+    // reloaded at boot) and still be acceptable afterwards.
+    phases::invite_survives_peer_restart::run(&mut f).await?; // G13
+    // G14: declining one of two sibling invites fails only that run — the
+    // peer-side mirror of G12 (decline routing + instance-stamped teardown).
+    phases::concurrent_sibling_decline::run(&mut f).await?; // G14
     // G11 runs LAST: it is the heaviest phase (six concurrent coordinator
     // runs, twelve peer runs) and the full-feature test of concurrent
     // multi-instance workflows — full-mesh cross-acceptance of simultaneous
