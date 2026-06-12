@@ -15,11 +15,16 @@ use super::parties::{
 use crate::{
     canton_id::{CantonId, validate_party_id_prefix},
     config::{NetworkConfig, NodeConfig},
+    consts::MIN_PEER_VERSION,
     db::schema::{Commitable, SchemaRead, SchemaWrite},
     error::Result,
-    noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
+    noise::{
+        Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message,
+        send_noise_message_with_retry,
+    },
     server::{
         AppState,
+        health::classify_health_reply,
         middleware::require_admin,
         respawn_coordinator,
         types::{
@@ -32,6 +37,7 @@ use crate::{
             WorkflowStatusResponse,
         },
     },
+    utils,
     workflow::{self, ContractsStep, DarsStep, KickStep, OnboardingStep, state::WorkflowStep},
 };
 
@@ -353,6 +359,15 @@ pub async fn start_kick(
                 "Party {decentralized_party_id} already has a {kind} workflow in flight \
                  (run {run}); wait for it to finish or cancel it first"
             ),
+        });
+    }
+
+    // Refuse to invite any peer that can't speak the concurrent-workflows wire
+    // format — NO invites are sent if even one invitee fails the version gate.
+    let incompatible = preflight_incompatible_peers(&data.config, &data.db, &invitees).await;
+    if !incompatible.is_empty() {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format_incompatible_peers(&incompatible),
         });
     }
 
@@ -768,6 +783,15 @@ pub async fn start_onboarding(
         Err(e) => {
             tracing::warn!("Failed to check for duplicate-prefix party: {e:#}");
         }
+    }
+
+    // Refuse to invite any peer that can't speak the concurrent-workflows wire
+    // format — NO invites are sent if even one invitee fails the version gate.
+    let incompatible = preflight_incompatible_peers(&data.config, &data.db, &peer_ids).await;
+    if !incompatible.is_empty() {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format_incompatible_peers(&incompatible),
+        });
     }
 
     // Register FIRST — atomic dedup before persist. Onboarding's instance_name
@@ -1304,6 +1328,16 @@ pub async fn start_contracts(
         });
     }
 
+    // Refuse to invite any peer that can't speak the concurrent-workflows wire
+    // format — NO invites are sent if even one invitee fails the version gate.
+    let incompatible =
+        preflight_incompatible_peers(&data.config, &data.db, &contracts_invitees).await;
+    if !incompatible.is_empty() {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format_incompatible_peers(&incompatible),
+        });
+    }
+
     // Register FIRST — atomic dedup before persist (a racing same-instance
     // request can't upsert/clobber the in-flight run's row).
     if !data.workflows.insert(instance.clone()) {
@@ -1561,6 +1595,15 @@ pub async fn start_dars(
         instance_name: instance_name.clone(),
         peer_ids: body.peer_ids.clone(),
     };
+
+    // Refuse to invite any peer that can't speak the concurrent-workflows wire
+    // format — NO invites are sent if even one invitee fails the version gate.
+    let incompatible = preflight_incompatible_peers(&data.config, &data.db, &body.peer_ids).await;
+    if !incompatible.is_empty() {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format_incompatible_peers(&incompatible),
+        });
+    }
 
     // Register FIRST — atomic dedup before persist (no clobber on a race).
     if !data.workflows.insert(instance.clone()) {
@@ -2338,6 +2381,89 @@ pub async fn retry_workflow(
 /// Look for an existing decentralized party whose human-readable prefix
 /// equals `prefix`. Returns the matching `party_id` if found — used by the
 /// onboarding pre-flight to refuse duplicate-prefix runs.
+/// Probe every invitee's `Health` and return those that cannot POSITIVELY be
+/// verified to run dec-party-manager >= [`MIN_PEER_VERSION`]. 0.1.9's Noise
+/// wire format is breaking — an older peer cannot parse our frames at all, so
+/// inviting it would strand the run. An old build answers the probe with a
+/// 503 (it can't decode the request), so any failure to obtain a parseable
+/// version report blocks the start: for this gate, unverifiable means
+/// incompatible, never "assume OK".
+async fn preflight_incompatible_peers(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    invitees: &[CantonId],
+) -> Vec<(String, String)> {
+    let Ok(peers) = db.get_all_peers().await else {
+        return Vec::new();
+    };
+    let Ok(keypair) = NoiseKeypair::from_file(&config.key_file_path()).await else {
+        return Vec::new();
+    };
+    let identity = config.participant_id().to_string();
+    let invitee_set: HashSet<String> = invitees.iter().map(CantonId::to_string).collect();
+
+    let mut probes = Vec::new();
+    for peer in peers
+        .into_iter()
+        .filter(|p| invitee_set.contains(&p.participant_id.to_string()))
+    {
+        let Ok(pubkey) = parse_public_key(&peer.public_key) else {
+            continue;
+        };
+        let psk = keypair.derive_psk(&pubkey);
+        let id = peer.participant_id.to_string();
+        let address = peer.address.clone();
+        let port = peer.port;
+        let identity = identity.clone();
+        let retry = config.noise_retry.clone();
+        probes.push(tokio::spawn(async move {
+            match send_noise_message_with_retry(
+                &address,
+                port,
+                &psk,
+                identity.as_bytes(),
+                &Message::new_empty(MessageType::Health),
+                &retry,
+            )
+            .await
+            {
+                Ok(response) => match classify_health_reply(&response).2 {
+                    Some(v) if utils::version_at_least(&v, MIN_PEER_VERSION) => None,
+                    Some(v) => Some((id, format!("running version {v}"))),
+                    None => Some((
+                        id,
+                        "reachable but reported no version (pre-0.1.9 build)".to_string(),
+                    )),
+                },
+                Err(e) => Some((id, format!("could not verify version: {e}"))),
+            }
+        }));
+    }
+
+    let mut incompatible = Vec::new();
+    for probe in probes {
+        if let Ok(Some(hit)) = probe.await {
+            incompatible.push(hit);
+        }
+    }
+    incompatible
+}
+
+/// Operator-facing 409 message naming each peer that blocks the start and why.
+fn format_incompatible_peers(incompatible: &[(String, String)]) -> String {
+    let list = incompatible
+        .iter()
+        .map(|(id, reason)| format!("{id} ({reason})"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!(
+        "Cannot start the workflow: every invited peer must run dec-party-manager \
+         >= {MIN_PEER_VERSION} (concurrent workflows changed the Noise wire format, \
+         older builds cannot participate). Blocking peer(s): {list}. Upgrade or \
+         deselect them and retry."
+    )
+}
+
 /// Any in-progress run on this node (either role) already targeting the given
 /// decentralized party. The old global one-at-a-time gate incidentally
 /// prevented two workflows from mutating the same party's topology

@@ -411,6 +411,11 @@ their resumed command streams route via a single-active-run fallback, which
 cannot be disambiguated if the coordinator is already running several
 workflows — another reason to upgrade with nothing in flight.
 
+Both directions of the incompatibility are guarded at runtime: a 0.1.9+
+coordinator refuses to start a workflow (409, naming the peers) unless every
+invitee positively reports >= 0.1.9, and a 0.1.9+ node denies requests from
+older builds with an explicit version-mismatch error in its logs.
+
 Downgrading requires reversing migration `000014` and `000013`; note the
 `000013` down-migration fails while concurrent InProgress rows exist (finish
 or dismiss them first).
