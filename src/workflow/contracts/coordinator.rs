@@ -77,12 +77,14 @@ async fn run_workflow(
     let instance_name = config.instance_name.clone();
     let dec_party_id = config.decentralized_party_id.clone();
 
-    // Get credentials for the decentralized party
+    // Auth handle for the decentralized party. We deliberately fetch a fresh
+    // token at each ledger-touching step rather than caching one snapshot up
+    // front: a workflow can sit in `WaitingForPeers` for an arbitrarily long
+    // time, and a token captured before that wait would be expired by the time
+    // Prepare/Execute run automatically once peers accept. `get_credentials`
+    // returns a cached-with-refresh token, so per-step calls are cheap.
     let auth = workflow_auth
         .ok_or_else(|| anyhow::anyhow!("Auth not configured, cannot run contracts workflow"))?;
-    let creds = auth.get_credentials(&config.decentralized_party_id).await?;
-    let token = creds.token;
-    let user_id = creds.user_id;
 
     loop {
         let current_step = workflow_state.current_step().await;
@@ -93,8 +95,16 @@ async fn run_workflow(
             }
             ContractsStep::PrepareSubmissions => {
                 tracing::info!("Coordinator executing: Prepare submissions");
-                prepare_submissions(&node_config, &db, &instance_name, &config, &token, &user_id)
-                    .await?;
+                let creds = auth.get_credentials(&config.decentralized_party_id).await?;
+                prepare_submissions(
+                    &node_config,
+                    &db,
+                    &instance_name,
+                    &config,
+                    &creds.token,
+                    &creds.user_id,
+                )
+                .await?;
 
                 // Load prepared submissions from storage to ship to peers with the
                 // SignSubmissions command. Pair with the contracts config so the
@@ -134,8 +144,16 @@ async fn run_workflow(
                 }
                 workflow_state.clear_peer_data().await;
 
-                execute_submissions(&node_config, &db, &instance_name, &config, &token, &user_id)
-                    .await?;
+                let creds = auth.get_credentials(&config.decentralized_party_id).await?;
+                execute_submissions(
+                    &node_config,
+                    &db,
+                    &instance_name,
+                    &config,
+                    &creds.token,
+                    &creds.user_id,
+                )
+                .await?;
                 workflow_state.advance_step().await;
             }
             ContractsStep::Complete => {
