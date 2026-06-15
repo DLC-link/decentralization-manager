@@ -88,11 +88,21 @@ pub enum MessageType {
     Chunk = 0x0302,
 }
 
-/// Maximum payload size before chunking is required (1KB to stay safely under Noise frame limits)
-pub const MAX_PAYLOAD_SIZE: usize = 1024;
+/// Maximum payload size sent inline in a single message before the chunked
+/// fetch protocol kicks in. Matched to `CHUNK_SIZE` so any payload that fits
+/// in one chunk is delivered in a single round-trip; larger payloads are
+/// split into `CHUNK_SIZE` chunks. The `tokio-noise` transport streams and
+/// auto-fragments writes, so this is not constrained by the Noise frame size.
+pub const MAX_PAYLOAD_SIZE: usize = 1024 * 1024;
 
-/// Chunk size for large payloads
-pub const CHUNK_SIZE: usize = 1024;
+/// Chunk size for large payloads (1 MiB).
+///
+/// Each chunk is fetched in its own Noise call (a fresh TCP connect, handshake,
+/// and one round-trip), so fewer and larger chunks mean far fewer round-trips
+/// over high-latency links. The `tokio-noise` transport streams writes and
+/// auto-fragments them into ~2 KiB frames, so this is not bound by the Noise
+/// frame size — only by `MAX_CHUNKED_TOTAL_SIZE`.
+pub const CHUNK_SIZE: usize = 1024 * 1024;
 
 /// Hard ceiling on the assembled size of a chunked response. Bounds peer-supplied
 /// `total_size` so a malicious or buggy peer can't ask the client to allocate
