@@ -66,7 +66,7 @@ curl -X POST http://custodian-a:8080/contracts \
 
 This deploys a `VaultGovernanceRules` contract with all 3 members, threshold 2, and a 24-hour confirmation timeout.
 
-> **Note:** New deployments should use `GovernanceRules` (from `#governance-core-<version>`) instead. See the [Integration Guide](INTEGRATION_GUIDE.md#deploying-governance-contracts) for the recommended contract deployment payload.
+> **Note:** New deployments should use `GovernanceRules` (from `#governance-core-<version>`) instead.
 
 ### Full Deployment Flow
 

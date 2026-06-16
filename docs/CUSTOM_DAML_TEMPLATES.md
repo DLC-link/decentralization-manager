@@ -7,7 +7,6 @@ The extension model is **interface-based**. DecMan's governance engine (`Governa
 For background, read these first:
 
 - [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) — governance engine, `GovernableAction` interface, action lifecycle
-- [`docs/INTEGRATION_GUIDE.md`](INTEGRATION_GUIDE.md) — `/contracts`, `/dars`, `/governance/*` endpoints and the field-type system
 
 ## What "fully supported" means
 
