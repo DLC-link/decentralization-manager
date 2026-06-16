@@ -17,7 +17,6 @@ A web application for managing decentralized parties in Canton blockchain networ
 ## Documentation
 
 - [Architecture Overview](docs/ARCHITECTURE.md) -- System architecture, core concepts, communication protocol, and technical constraints
-- [Integration Guide](docs/INTEGRATION_GUIDE.md) -- Deployment, configuration, authentication setup, and full API reference
 - [User Guide](USER_GUIDE.md) -- Walkthrough of the web UI for day-to-day party and governance operations
 - [Custom DAML Templates](docs/CUSTOM_DAML_TEMPLATES.md) -- Authoring and deploying your own DAML governance templates
 - [Migration Guide](docs/MIGRATION_GUIDE.md) -- Upgrading between versions and migrating existing deployments

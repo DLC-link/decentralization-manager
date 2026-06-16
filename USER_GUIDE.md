@@ -5,10 +5,8 @@ This is an operator quick-start. The application is configured entirely through
 by `--dir` / `DECPM_DIR`).
 There is **no TOML config file** — every setting is an env var / CLI flag.
 
-For full configuration, authentication (Keycloak / Auth0) setup, and Kubernetes
-deployment, see the [Integration Guide](docs/INTEGRATION_GUIDE.md). For end-to-end
-workflow walkthroughs (onboarding a party, deploying contracts, kicking a
-participant), see the [Use Cases](docs/USE_CASES.md).
+For end-to-end workflow walkthroughs (onboarding a party, deploying contracts,
+kicking a participant), see the [Use Cases](docs/USE_CASES.md).
 
 ## Quick Start with Docker
 
@@ -67,9 +65,6 @@ DECPM_CANTON_SYNCHRONIZER=global
 DECPM_CANTON_NETWORK=devnet
 ```
 
-See the [Integration Guide](docs/INTEGRATION_GUIDE.md) for the complete variable
-reference, authentication configuration, and Kubernetes manifests.
-
 ## Port Requirements
 
 | Port | Purpose |
@@ -81,7 +76,5 @@ For P2P to work, the Noise port must be reachable by the other participants.
 
 ## Next Steps
 
-- **Configure peers, authentication, and deploy to Kubernetes** —
-  [Integration Guide](docs/INTEGRATION_GUIDE.md)
 - **Walk through onboarding, deploying contracts, and kicking a participant** —
   [Use Cases](docs/USE_CASES.md)
