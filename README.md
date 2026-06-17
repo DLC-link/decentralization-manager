@@ -619,6 +619,13 @@ docker push public.ecr.aws/dlc-link/canton-decparty-manager:<version>
 
 Replace the registry/org (`public.ecr.aws/dlc-link`) and `<version>` with your own.
 
+## Deployment
+
+The container image built above is self-contained. Kubernetes deployment
+manifests are maintained separately, outside this repository. For a from-scratch
+deployment walkthrough — Secret, Deployment + PVC, Service, and Ingress manifests
+with all required configuration — see the [Migration Guide](docs/MIGRATION_GUIDE.md).
+
 ## Contributing
 
 Contributions are welcome! See the [Contributing Guide](docs/CONTRIBUTING.md) for
