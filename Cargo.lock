@@ -1111,7 +1111,7 @@ checksum = "092966b41edc516079bdf31ec78a2e0588d1d0c08f78b91d8307215928642b2b"
 
 [[package]]
 name = "dec-party-manager"
-version = "0.1.8"
+version = "0.1.10"
 dependencies = [
  "actix-cors",
  "actix-web",
@@ -4304,8 +4304,7 @@ dependencies = [
 [[package]]
 name = "tokio-noise"
 version = "0.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "616a12b07009d6d8b98eea1117fb073e862c5a035caa22cb8208224c58911323"
+source = "git+https://github.com/DLC-link/tokio-noise?rev=5826090637d1c06aab396d0c55dc3303a1fffe5f#5826090637d1c06aab396d0c55dc3303a1fffe5f"
 dependencies = [
  "log",
  "snow",

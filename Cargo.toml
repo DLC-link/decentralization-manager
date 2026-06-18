@@ -1,6 +1,6 @@
 [package]
 name = "dec-party-manager"
-version = "0.1.8"
+version = "0.1.10"
 edition = "2024"
 license = "Apache-2.0"
 
@@ -98,3 +98,13 @@ keycloak = { git = "ssh://git@github.com/DLC-link/canton-lib", branch = "main" }
 static_assertions = { version = "1.1" }
 tempfile = { version = "3.14" }
 wiremock = { version = "0.6" }
+
+[patch.crates-io]
+# Fork of tokio-noise 0.0.4. Upstream's `poll_write` asserts the kernel accepted
+# the whole noise packet in one write and panics otherwise; under sustained load
+# on a real link (e.g. 1 MiB DAR chunks over testnet) the TCP send buffer fills,
+# the write goes partial, and the coordinator's connection task panics — peers
+# see "persistent communication errors with coordinator". The fork buffers the
+# unflushed ciphertext instead. Applies to hyper-noise's transitive dependency
+# too. Drop this once upstream ships a fix. Branch: fix/partial-write.
+tokio-noise = { git = "https://github.com/DLC-link/tokio-noise", rev = "5826090637d1c06aab396d0c55dc3303a1fffe5f" }
