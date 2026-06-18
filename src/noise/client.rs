@@ -10,9 +10,14 @@ use crate::{
     config::{NodeConfig, Peer},
     noise::{
         Message, MessageType, NOISE_CHUNK_TIMEOUT, NOISE_REQUEST_TIMEOUT, NoiseError, NoiseKeypair,
-        parse_flexible_uri, parse_public_key,
+        is_transient, parse_flexible_uri, parse_public_key,
     },
 };
+
+/// Max attempts to fetch a single chunk (each on a fresh connection) before the
+/// chunked transfer gives up. Lets a transient stall/reset recover in place
+/// instead of restarting the whole download.
+const CHUNK_FETCH_MAX_ATTEMPTS: usize = 3;
 
 /// Client for connecting to the coordinator
 pub struct NoiseClient {
@@ -267,10 +272,13 @@ impl NoiseClient {
             "Receiving chunked payload for {command:?}: {total_size} bytes in {chunk_count} chunks"
         );
 
-        // Fetch all chunks
+        // Fetch all chunks. Each chunk is retried in place on a fresh
+        // connection so a single slow/stalled chunk (e.g. transient coordinator
+        // load) doesn't discard every already-downloaded chunk and force the
+        // whole transfer to restart from chunk 0.
         let mut payload = Vec::with_capacity(total_size);
         for chunk_index in 0..chunk_count {
-            let chunk_data = self.request_chunk(chunk_index as u32).await?;
+            let chunk_data = self.request_chunk_with_retry(chunk_index as u32).await?;
             payload.extend_from_slice(&chunk_data);
         }
 
@@ -280,6 +288,27 @@ impl NoiseClient {
         );
 
         Ok(Message::new(command, payload))
+    }
+
+    /// Request a chunk, retrying transient failures (connection reset, timeout,
+    /// truncated body) on a fresh connection up to `CHUNK_FETCH_MAX_ATTEMPTS`.
+    /// Non-transient errors (bad message, decode failure) fail immediately.
+    async fn request_chunk_with_retry(&self, chunk_index: u32) -> Result<Vec<u8>, NoiseError> {
+        let mut attempt = 1;
+        loop {
+            match self.request_chunk(chunk_index).await {
+                Ok(data) => return Ok(data),
+                Err(e) if attempt < CHUNK_FETCH_MAX_ATTEMPTS && is_transient(&e) => {
+                    tracing::warn!(
+                        "chunk {chunk_index} fetch attempt {attempt}/{CHUNK_FETCH_MAX_ATTEMPTS} \
+                         failed: {e}; retrying"
+                    );
+                    attempt += 1;
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     /// Request a specific chunk from the coordinator

@@ -617,7 +617,7 @@ pub async fn load_or_generate_keypair<P: AsRef<Path>>(path: P) -> Result<NoiseKe
 ///
 /// Exhaustive match (no wildcard) — adding a new `NoiseError` variant will
 /// fail to compile here until it's explicitly classified as retryable or not.
-fn is_transient(err: &NoiseError) -> bool {
+pub(crate) fn is_transient(err: &NoiseError) -> bool {
     match err {
         NoiseError::TcpConnectionTimeout(_)
         | NoiseError::TcpConnectionFailed(_)
