@@ -135,27 +135,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      # The action runs cargo-deny in its own Docker container, so host-side
-      # SSH setup is invisible to it — pass the bot key + github.com host
-      # keys via the action's inputs, and force git-cli so cargo doesn't
-      # fall back to libgit2's ssh-agent path (which has no key inside the
-      # container).
-      - name: Capture github.com host keys
-        id: keyscan
+      # Authenticate the private `common` git dependency over HTTPS using the
+      # workflow GITHUB_TOKEN instead of a bot SSH deploy key. cargo-deny runs
+      # on the host (not the action's Docker container) so this git credential
+      # config is visible to cargo's dependency fetch.
+      - name: Configure git auth for private deps
         run: |
-          {
-            echo 'known-hosts<<KNOWN_HOSTS_EOF'
-            ssh-keyscan github.com
-            echo KNOWN_HOSTS_EOF
-          } >> "$GITHUB_OUTPUT"
+          git config --global \
+            url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "git@github.com:"
+          git config --global --add \
+            url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "ssh://git@github.com/"
+      - name: Install cargo-deny
+        run: |
+          VERSION=0.19.8
+          curl --silent -L "https://github.com/EmbarkStudios/cargo-deny/releases/download/${VERSION}/cargo-deny-${VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+            | sudo tar -xz --strip-components=1 -C /usr/local/bin
       # Only `advisories` until a deny.toml is checked in; bans, licenses,
       # and sources need policy decisions to be useful.
-      - uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          command: check advisories
-          ssh-key: ${{ secrets.BOT_SSH_PRIVATE_KEY }}
-          ssh-known-hosts: ${{ steps.keyscan.outputs.known-hosts }}
-          use-git-cli: true
+      - name: cargo-deny check advisories
+        run: cargo-deny check advisories
 
   daml:
     name: DAML Build & Test
