@@ -121,8 +121,19 @@ impl NoiseClient {
             return Err(NoiseError::BadStatusCode(response.status()));
         }
 
-        // Read response body
-        let resp_body_bytes = hyper::body::to_bytes(response.body_mut()).await?;
+        // Read response body, bounded by `request_timeout`. `send_request`'s
+        // timeout only covers receiving the response *head*, not streaming the
+        // body — so without this, a stalled large body (e.g. a chunk that
+        // freezes mid-transfer) would hang until the server closes the
+        // connection instead of failing fast here and letting the caller retry.
+        let resp_body_bytes =
+            match tokio::time::timeout(request_timeout, hyper::body::to_bytes(response.body_mut()))
+                .await
+            {
+                Ok(Ok(bytes)) => bytes,
+                Ok(Err(e)) => return Err(NoiseError::from(e)),
+                Err(_) => return Err(NoiseError::RequestTimeout),
+            };
 
         tracing::debug!(
             "Received response from coordinator: {count} bytes",

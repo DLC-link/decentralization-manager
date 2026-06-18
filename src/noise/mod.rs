@@ -24,17 +24,20 @@ use crate::{config::NoiseRetryConfig, error::Result};
 /// dead coordinator is detected quickly.
 pub const NOISE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Timeout for streaming a single large chunk (up to `CHUNK_SIZE`). A 1 MiB
-/// chunk can take far longer than the control-plane timeout to stream over a
-/// CPU-constrained or high-latency link (e.g. while the coordinator is also
-/// uploading its own DARs), so chunk fetches get a longer budget.
-pub const NOISE_CHUNK_TIMEOUT: Duration = Duration::from_secs(60);
+/// Per-phase timeout for fetching a single chunk (connect, request, and the
+/// response-body read are each bounded by this). A healthy 1 MiB chunk
+/// transfers in well under a second; this is sized to absorb load spikes while
+/// still catching a *stalled* chunk quickly so the caller can retry it on a
+/// fresh connection (see `request_chunk_with_retry`) rather than waiting on the
+/// server's handler timeout.
+pub const NOISE_CHUNK_TIMEOUT: Duration = Duration::from_secs(25);
 
-/// Server-side per-connection handler timeout. `hyper-noise` counts the full
-/// response write against this, so it MUST exceed `NOISE_CHUNK_TIMEOUT` — the
-/// server must never cancel a chunk response the client is still willing to
-/// read.
-pub const NOISE_HANDLER_TIMEOUT: Duration = Duration::from_secs(120);
+/// Server-side per-connection handler timeout (`hyper-noise` counts the full
+/// response write against it). Acts as a backstop — the client now bounds its
+/// own chunk reads via `NOISE_CHUNK_TIMEOUT`, so the client gives up (and
+/// retries) first; this just bounds a connection the client already abandoned.
+/// Kept comfortably above `NOISE_CHUNK_TIMEOUT`.
+pub const NOISE_HANDLER_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Message types for the Noise protocol communication
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
