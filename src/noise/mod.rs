@@ -19,8 +19,22 @@ use zeroize::Zeroizing;
 
 use crate::{config::NoiseRetryConfig, error::Result};
 
-/// Timeout for Noise protocol operations
+/// Timeout for control-plane Noise requests (command polls, acks, small
+/// messages): covers connect + handshake + one round-trip. Kept short so a
+/// dead coordinator is detected quickly.
 pub const NOISE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Timeout for streaming a single large chunk (up to `CHUNK_SIZE`). A 1 MiB
+/// chunk can take far longer than the control-plane timeout to stream over a
+/// CPU-constrained or high-latency link (e.g. while the coordinator is also
+/// uploading its own DARs), so chunk fetches get a longer budget.
+pub const NOISE_CHUNK_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Server-side per-connection handler timeout. `hyper-noise` counts the full
+/// response write against this, so it MUST exceed `NOISE_CHUNK_TIMEOUT` — the
+/// server must never cancel a chunk response the client is still willing to
+/// read.
+pub const NOISE_HANDLER_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Message types for the Noise protocol communication
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

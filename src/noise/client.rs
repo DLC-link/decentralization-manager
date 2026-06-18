@@ -1,4 +1,4 @@
-use std::{marker::PhantomData, sync::Arc};
+use std::{marker::PhantomData, sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use hyper::{Body, Request};
@@ -9,8 +9,8 @@ use tokio_noise::handshakes::nn_psk2::Initiator;
 use crate::{
     config::{NodeConfig, Peer},
     noise::{
-        Message, MessageType, NOISE_REQUEST_TIMEOUT, NoiseError, NoiseKeypair, parse_flexible_uri,
-        parse_public_key,
+        Message, MessageType, NOISE_CHUNK_TIMEOUT, NOISE_REQUEST_TIMEOUT, NoiseError, NoiseKeypair,
+        parse_flexible_uri, parse_public_key,
     },
 };
 
@@ -41,8 +41,20 @@ impl NoiseClient {
         })
     }
 
-    /// Send a message to the coordinator
+    /// Send a message to the coordinator with the default control-plane timeout.
     pub async fn send_message(&self, message: &Message) -> Result<Bytes, NoiseError> {
+        self.send_message_with_timeout(message, NOISE_REQUEST_TIMEOUT)
+            .await
+    }
+
+    /// Send a message to the coordinator, applying `request_timeout` to both the
+    /// TCP connect and the Noise/HTTP round-trip. Used so large chunk fetches can
+    /// run on a longer budget than fast control-plane polls.
+    pub async fn send_message_with_timeout(
+        &self,
+        message: &Message,
+        request_timeout: Duration,
+    ) -> Result<Bytes, NoiseError> {
         let socket_addr = format!(
             "{address}:{port}",
             address = self.coordinator.address,
@@ -65,7 +77,7 @@ impl NoiseClient {
 
         // Connect with timeout
         let tcp_stream =
-            match tokio::time::timeout(NOISE_REQUEST_TIMEOUT, TcpStream::connect(&socket_addr))
+            match tokio::time::timeout(request_timeout, TcpStream::connect(&socket_addr))
                 .await
             {
                 Ok(Ok(stream)) => stream,
@@ -95,7 +107,7 @@ impl NoiseClient {
             tcp_stream,
             initiator,
             request,
-            Some(NOISE_REQUEST_TIMEOUT),
+            Some(request_timeout),
         )
         .await?;
 
@@ -273,7 +285,11 @@ impl NoiseClient {
     /// Request a specific chunk from the coordinator
     async fn request_chunk(&self, chunk_index: u32) -> Result<Vec<u8>, NoiseError> {
         let message = Message::new(MessageType::GetChunk, chunk_index.to_be_bytes().to_vec());
-        let response = self.send_message(&message).await?;
+        // Chunks can be up to CHUNK_SIZE (1 MiB); give them the longer budget so
+        // a slow stream isn't cut short by the control-plane timeout.
+        let response = self
+            .send_message_with_timeout(&message, NOISE_CHUNK_TIMEOUT)
+            .await?;
 
         let resp_msg = Message::from_bytes(&response).map_err(|_| NoiseError::InvalidMessage)?;
 

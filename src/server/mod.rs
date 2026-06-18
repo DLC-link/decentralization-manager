@@ -59,8 +59,8 @@ use crate::{
     db::schema::{Commitable, SchemaRead, SchemaWrite},
     error::Result,
     noise::{
-        CHUNK_SIZE, MAX_CHUNKED_TOTAL_SIZE, MAX_PAYLOAD_SIZE, Message, MessageType, NoiseKeypair,
-        load_or_generate_keypair, parse_public_key,
+        CHUNK_SIZE, MAX_CHUNKED_TOTAL_SIZE, MAX_PAYLOAD_SIZE, Message, MessageType,
+        NOISE_HANDLER_TIMEOUT, NoiseKeypair, load_or_generate_keypair, parse_public_key,
     },
     server::middleware::AuthMiddleware,
     server::peer_status::LastSeen,
@@ -2098,7 +2098,11 @@ async fn handle_incoming_connection(
                 Ok(Response::new(Body::empty()))
             }
         },
-        Some(Duration::from_secs(5)),
+        // Must exceed the client's per-chunk timeout (NOISE_CHUNK_TIMEOUT) — this
+        // bounds the whole response write, and a 1 MiB chunk can take well over
+        // the old 5s on a CPU-constrained node, which truncated DAR transfers
+        // mid-body ("end of file before message length reached").
+        Some(NOISE_HANDLER_TIMEOUT),
     )
     .await;
 
