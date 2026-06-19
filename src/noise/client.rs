@@ -83,9 +83,7 @@ impl NoiseClient {
 
         // Connect with timeout
         let tcp_stream =
-            match tokio::time::timeout(request_timeout, TcpStream::connect(&socket_addr))
-                .await
-            {
+            match tokio::time::timeout(request_timeout, TcpStream::connect(&socket_addr)).await {
                 Ok(Ok(stream)) => stream,
                 Ok(Err(e)) => {
                     return Err(NoiseError::TcpConnectionFailed(format!(
