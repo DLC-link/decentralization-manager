@@ -3,6 +3,68 @@ import {
   openParticipants, gotoTab, acceptInvitation, acceptInvitationOnAny, expectWorkflowCompleted,
   resolvePartyId, PORTS,
 } from "../fixtures/participants.js";
+import { getAuthConfig, fetchRopcTokens } from "../fixtures/auth.js";
+
+const PACKAGES = {
+  governance_action: "#governance-action-v1",
+  governance_core: "#governance-core-v1",
+  governance_token_custody: "#governance-token-custody-v1",
+  governance_utility_onboarding: "#governance-utility-onboarding-v1",
+  utility_registry: "#utility-registry-app-v0",
+};
+
+function env(name: string): string {
+  const v = process.env[name];
+  if (!v) throw new Error(`required env var ${name} is not set (source integration-tests/devnet.env.sh)`);
+  return v;
+}
+
+// Mirrors deploy_gov_core.rs update_party_config + grant_rights_devnet, but via
+// the same HTTP endpoints the PartyConfigDialog / grant-rights flow call.
+async function configurePartyForGovCore(partyId: string) {
+  const nodes = [
+    { port: 8081, n: "1" },
+    { port: 8082, n: "2" },
+    { port: 8083, n: "3" },
+  ];
+  for (const { port, n } of nodes) {
+    const cfg = await getAuthConfig(port);
+    const { access_token } = await fetchRopcTokens(cfg);
+    const authHeaders = { authorization: `Bearer ${access_token}`, "content-type": "application/json" };
+
+    // PUT /party-config
+    const cfgRes = await fetch(`http://localhost:${port}/party-config`, {
+      method: "PUT",
+      headers: authHeaders,
+      body: JSON.stringify({
+        dec_party_id: partyId,
+        member_party_id: env(`P${n}_MEMBER_PARTY_ID`),
+        user_id: env(`P${n}_MEMBER_USER_ID`),
+        keycloak_url: env("DECPM_KEYCLOAK_URL"),
+        keycloak_realm: env("DECPM_KEYCLOAK_REALM"),
+        keycloak_client_id: env(`P${n}_MEMBER_KEYCLOAK_CLIENT_ID`),
+        keycloak_client_secret: env(`P${n}_MEMBER_KEYCLOAK_CLIENT_SECRET`),
+        packages: PACKAGES,
+      }),
+    });
+    if (!cfgRes.ok) throw new Error(`PUT /party-config on :${port} → ${cfgRes.status}: ${await cfgRes.text()}`);
+  }
+  // grant-rights must run AFTER all party-configs are persisted (IT comment).
+  for (const { port, n } of nodes) {
+    const cfg = await getAuthConfig(port);
+    const { access_token } = await fetchRopcTokens(cfg);
+    const grRes = await fetch(`http://localhost:${port}/auth/grant-rights`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${access_token}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        dec_party_id: partyId,
+        admin_client_id: env(`P${n}_PARTICIPANT_ADMIN_KEYCLOAK_CLIENT_ID`),
+        admin_client_secret: env(`P${n}_PARTICIPANT_ADMIN_KEYCLOAK_CLIENT_SECRET`),
+      }),
+    });
+    if (!grRes.ok) throw new Error(`POST /auth/grant-rights on :${port} → ${grRes.status}: ${await grRes.text()}`);
+  }
+}
 
 test.describe.serial("governance happy path", () => {
   let parts: Awaited<ReturnType<typeof openParticipants>>;
@@ -123,5 +185,31 @@ test.describe.serial("governance happy path", () => {
     await test.info().attach("Peer DAR comparison (P1 sees P2 + P3)", {
       body: await parts.p1.screenshot({ fullPage: true }), contentType: "image/png",
     });
+  });
+
+  test("05 deploy governance core", async () => {
+    test.skip(!shared.partyId, "no party from phase 02");
+
+    // (a+b) Setup: party-config + grant-rights on all 3 nodes (API, mirrors IT).
+    await configurePartyForGovCore(shared.partyId!);
+
+    // (c) Deploy Governance Core via the UI (ContractsDialog). The gov-core card
+    //     is enabled because the governance-core DAR was distributed in phase 03.
+    await gotoTab(parts.p1, "Parties");
+    await parts.p1.getByRole("row", { name: new RegExp(shared.partyPrefix!) }).click();
+    await parts.p1.getByRole("button", { name: "Deploy Contracts" }).click();
+    const dialog = parts.p1.getByRole("dialog");
+    await dialog.getByText("Governance Core").click();        // the gov-core card
+    await dialog.getByRole("button", { name: "Deploy Contracts" }).click();
+
+    await acceptInvitation(parts.p2, /Contracts/);
+    await acceptInvitation(parts.p3, /Contracts/);
+    await expectWorkflowCompleted(parts.p1, /Contracts/, shared.partyPrefix!);
+
+    // Gov-core rules now exist → PartyDetail exposes "New Proposal" (IT's
+    // GovernanceRules-visible assertion, expressed through the UI). Needed by phase 06.
+    await gotoTab(parts.p1, "Parties");
+    await parts.p1.getByRole("row", { name: new RegExp(shared.partyPrefix!) }).click();
+    await expect(parts.p1.getByRole("button", { name: /New Proposal/i })).toBeVisible({ timeout: 60_000 });
   });
 });
