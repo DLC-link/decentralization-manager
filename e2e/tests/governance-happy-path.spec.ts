@@ -1,6 +1,7 @@
 import { test, expect, type Page } from "@playwright/test";
 import {
   openParticipants, gotoTab, acceptInvitation, acceptInvitationOnAny, expectWorkflowCompleted,
+  resolvePartyId, PORTS,
 } from "../fixtures/participants.js";
 
 test.describe.serial("governance happy path", () => {
@@ -24,27 +25,42 @@ test.describe.serial("governance happy path", () => {
     await coordinator.getByRole("button", { name: "Create Party" }).click();
     const dialog = coordinator.getByRole("dialog");
     await expect(dialog.getByText("Create Decentralized Party")).toBeVisible();
-    await dialog.getByLabel("Party ID Prefix").fill(prefix);
+    await dialog.getByPlaceholder("e.g., my-network").fill(prefix);
+    // Wait for the peer list to finish loading (checkboxes render + default
+    // selection applied) before touching or submitting — otherwise the full-mesh
+    // path can click Start before peers are selected.
+    const boxes = dialog.getByRole("checkbox");
+    await expect(boxes.first()).toBeVisible({ timeout: 30_000 });
     if (opts.onlyOnePeer) {
-      const boxes = dialog.getByRole("checkbox");
       const count = await boxes.count();
       for (let i = 1; i < count; i++) {
         if (await boxes.nth(i).isChecked()) await boxes.nth(i).uncheck();
       }
     }
-    await dialog.getByRole("button", { name: "Start Onboarding" }).click();
+    const start = dialog.getByRole("button", { name: "Start Onboarding" });
+    await expect(start).toBeEnabled({ timeout: 15_000 });
+    // On success the handler closes the dialog (OnboardingDialog.tsx:221). Back-to-back
+    // onboardings can transiently 409 ("Another workflow is already running…") because the
+    // coordinator's in-flight guard releases just after the prior run's card shows completed;
+    // re-clicking Start re-submits once the guard frees. A persistent error (e.g. a real mesh
+    // hole) keeps failing and surfaces when this times out.
+    await expect(async () => {
+      if (await dialog.isHidden()) return;
+      await start.click();
+      await expect(dialog).toBeHidden({ timeout: 8_000 });
+    }).toPass({ timeout: 90_000, intervals: [3000, 3000, 5000] });
   }
 
   test("01 two-member party (coordinator + exactly one peer)", async () => {
     const prefix = `e2e-two-${Date.now()}`;
     await startOnboarding(parts.p1, prefix, { onlyOnePeer: true });
     const peer = await acceptInvitationOnAny([parts.p2, parts.p3], /Onboarding/);
-    await expectWorkflowCompleted(parts.p1, /Onboarding/);
-    await expectWorkflowCompleted(peer, /Onboarding/);
-    // Party visible on P1's Parties tab.
-    await gotoTab(parts.p1, "Parties");
-    await expect(parts.p1.getByText(new RegExp(prefix))).toBeVisible({ timeout: 60_000 });
-    await test.info().attach(`Two-member party created: ${prefix}`, {
+    // Success = this run's Onboarding workflow card shows completed on the
+    // coordinator and the one invited peer (prefix-scoped, so a stale completed
+    // card can't satisfy it; immediate, unlike the lagging Parties list).
+    await expectWorkflowCompleted(parts.p1, /Onboarding/, prefix);
+    await expectWorkflowCompleted(peer, /Onboarding/, prefix);
+    await test.info().attach(`Two-member onboarding completed: ${prefix}`, {
       body: await parts.p1.screenshot({ fullPage: true }), contentType: "image/png",
     });
   });
@@ -55,14 +71,15 @@ test.describe.serial("governance happy path", () => {
     await startOnboarding(parts.p1, prefix); // full mesh: all peers stay checked
     await acceptInvitation(parts.p2, /Onboarding/);
     await acceptInvitation(parts.p3, /Onboarding/);
-    await expectWorkflowCompleted(parts.p1, /Onboarding/);
-    await expectWorkflowCompleted(parts.p2, /Onboarding/);
-    await expectWorkflowCompleted(parts.p3, /Onboarding/);
-    await gotoTab(parts.p1, "Parties");
-    const row = parts.p1.getByRole("row", { name: new RegExp(prefix) });
-    await expect(row).toBeVisible({ timeout: 60_000 });
-    await row.click(); // open PartyDetail to read the full party id
-    shared.partyId = await parts.p1.getByText(/::1220[0-9a-f]+/i).first().innerText();
-    await test.info().annotations.push({ type: "party id", description: shared.partyId });
+    await expectWorkflowCompleted(parts.p1, /Onboarding/, prefix);
+    await expectWorkflowCompleted(parts.p2, /Onboarding/, prefix);
+    await expectWorkflowCompleted(parts.p3, /Onboarding/, prefix);
+    // Capture the full party id for downstream phases (prefix-scoped refresh —
+    // the UI Parties list lags without a forced refresh).
+    shared.partyId = await resolvePartyId(PORTS.p1, prefix);
+    test.info().annotations.push({ type: "party id", description: shared.partyId });
+    await test.info().attach(`Full-mesh party created: ${shared.partyId}`, {
+      body: await parts.p1.screenshot({ fullPage: true }), contentType: "image/png",
+    });
   });
 });

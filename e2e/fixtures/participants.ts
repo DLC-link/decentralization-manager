@@ -34,40 +34,69 @@ export async function gotoTab(page: Page, tab: string) {
   await page.getByRole("button", { name: tab }).first().click();
 }
 
+// The Pending-approvals feed auto-polls (/invitations every ~2s, /workflows for
+// run status), so we navigate to the tab ONCE and let Playwright's auto-waiting
+// ride the app's polling — reloading would reset to the Parties tab and wipe the
+// just-fetched feed before it populates.
 export async function acceptInvitation(page: Page, type: RegExp) {
   await gotoTab(page, "Pending approvals");
-  // The Accept button lives in the same invitation card.
-  await expect(async () => {
-    await gotoTab(page, "Pending approvals");
-    await expect(page.getByText(new RegExp(`${type.source} invitation`, "i"))).toBeVisible();
-  }).toPass({ timeout: 60_000 });
+  const label = new RegExp(`${type.source} invitation`, "i");
+  await expect(page.getByText(label).first()).toBeVisible({ timeout: 90_000 });
   await page.getByRole("button", { name: "Accept" }).first().click();
 }
 
 export async function acceptInvitationOnAny(pages: Page[], type: RegExp): Promise<Page> {
-  let target: Page | undefined;
   const label = new RegExp(`${type.source} invitation`, "i");
+  for (const p of pages) await gotoTab(p, "Pending approvals");
+  let target: Page | undefined;
   await expect(async () => {
     for (const p of pages) {
-      await gotoTab(p, "Pending approvals");
-      await p.reload();
-      await gotoTab(p, "Pending approvals");
       if (await p.getByText(label).count()) { target = p; return; }
     }
     throw new Error("invitation not yet visible on any peer");
-  }).toPass({ timeout: 60_000 });
+  }).toPass({ timeout: 90_000, intervals: [2000, 2000, 3000] });
   await target!.getByRole("button", { name: "Accept" }).first().click();
   return target!;
 }
 
-export async function expectWorkflowCompleted(page: Page, kind: RegExp) {
-  await expect(async () => {
-    await gotoTab(page, "Pending approvals");
-    await page.reload();
-    await gotoTab(page, "Pending approvals");
-    const card = page.getByText(new RegExp(`${kind.source} workflow`, "i")).first();
-    await expect(card).toBeVisible();
-    // status chip text within the same feed; "completed" rendering per WorkflowRunCard.
-    await expect(page.getByText(/completed/i).first()).toBeVisible();
-  }).toPass({ timeout: 240_000 });
+// Assert the workflow for THIS run completed, scoped by its prefix. The
+// WorkflowRunCard shows a prefix chip + a "completed" status chip; we match a
+// feed card containing BOTH so a stale completed run from an earlier prefix
+// can't satisfy it, and the feed's own /workflows polling flips it to completed
+// without a reload.
+export async function expectWorkflowCompleted(page: Page, _kind: RegExp, prefix: string) {
+  await gotoTab(page, "Pending approvals");
+  const card = page.locator("div").filter({ hasText: prefix }).filter({ hasText: /completed/i });
+  await expect(card.first()).toBeVisible({ timeout: 240_000 });
+}
+
+// Resolve the full party id (<prefix>::1220…) for a freshly-onboarded party.
+// Uses the prefix-scoped refresh lookup (the UI's plain prefix filter does NOT
+// force a refresh, so a brand-new party lags there). Used to thread state to
+// downstream phases.
+export async function resolvePartyId(port: number, prefix: string): Promise<string> {
+  const cfg = await getAuthConfig(port);
+  const deadline = Date.now() + 90_000;
+  let last = "no response";
+  // A freshly-onboarded party can lag the topology view briefly even with
+  // refresh=true, so poll until it surfaces.
+  while (Date.now() < deadline) {
+    const { access_token } = await fetchRopcTokens(cfg);
+    const res = await fetch(
+      `http://localhost:${port}/decentralized-parties?prefix=${encodeURIComponent(prefix)}&refresh=true`,
+      { headers: { authorization: `Bearer ${access_token}` } },
+    );
+    if (res.ok) {
+      const data = await res.json();
+      const party = (data.parties ?? []).find((p: { party_id?: string }) =>
+        (p.party_id ?? "").startsWith(`${prefix}::`),
+      );
+      if (party) return party.party_id as string;
+      last = "not in topology yet";
+    } else {
+      last = `status ${res.status}`;
+    }
+    await new Promise((r) => setTimeout(r, 3000));
+  }
+  throw new Error(`party with prefix ${prefix} not found on :${port} after 90s (${last})`);
 }
