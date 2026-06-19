@@ -4304,7 +4304,7 @@ dependencies = [
 [[package]]
 name = "tokio-noise"
 version = "0.0.4"
-source = "git+https://github.com/DLC-link/tokio-noise?rev=5826090637d1c06aab396d0c55dc3303a1fffe5f#5826090637d1c06aab396d0c55dc3303a1fffe5f"
+source = "git+https://github.com/DLC-link/tokio-noise?rev=a021216e534d239255581dc002d3892f1080463e#a021216e534d239255581dc002d3892f1080463e"
 dependencies = [
  "log",
  "snow",

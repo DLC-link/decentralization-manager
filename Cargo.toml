@@ -100,11 +100,13 @@ tempfile = { version = "3.14" }
 wiremock = { version = "0.6" }
 
 [patch.crates-io]
-# Fork of tokio-noise 0.0.4. Upstream's `poll_write` asserts the kernel accepted
-# the whole noise packet in one write and panics otherwise; under sustained load
-# on a real link (e.g. 1 MiB DAR chunks over testnet) the TCP send buffer fills,
-# the write goes partial, and the coordinator's connection task panics — peers
-# see "persistent communication errors with coordinator". The fork buffers the
-# unflushed ciphertext instead. Applies to hyper-noise's transitive dependency
-# too. Drop this once upstream ships a fix. Branch: fix/partial-write.
-tokio-noise = { git = "https://github.com/DLC-link/tokio-noise", rev = "5826090637d1c06aab396d0c55dc3303a1fffe5f" }
+# Fork of tokio-noise 0.0.4 (also replaces hyper-noise's transitive dep).
+# Upstream's `poll_write` asserts the kernel accepted the whole noise packet in
+# one write and panics on a partial write; under sustained load on a real link
+# (e.g. 1 MiB DAR chunks over testnet) the send buffer fills and the
+# coordinator's connection task panics — peers see "persistent communication
+# errors with coordinator". The fork buffers the unflushed ciphertext, and also
+# drains it from `poll_read` so a request/response flow can't deadlock with
+# bytes stuck in the write buffer. Drop this once upstream ships a fix.
+# Pinned to commit a021216 (branch fix/partial-write of DLC-link/tokio-noise).
+tokio-noise = { git = "https://github.com/DLC-link/tokio-noise", rev = "a021216e534d239255581dc002d3892f1080463e" }

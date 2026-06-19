@@ -9,8 +9,9 @@ use tokio_noise::handshakes::nn_psk2::Initiator;
 use crate::{
     config::{NodeConfig, Peer},
     noise::{
-        Message, MessageType, NOISE_CHUNK_TIMEOUT, NOISE_REQUEST_TIMEOUT, NoiseError, NoiseKeypair,
-        is_transient, parse_flexible_uri, parse_public_key,
+        CHUNK_SIZE, MAX_CHUNK_COUNT, MAX_CHUNKED_TOTAL_SIZE, Message, MessageType,
+        NOISE_CHUNK_TIMEOUT, NOISE_REQUEST_TIMEOUT, NoiseError, NoiseKeypair, is_transient,
+        parse_flexible_uri, parse_public_key,
     },
 };
 
@@ -279,6 +280,26 @@ impl NoiseClient {
         let command =
             MessageType::try_from(command_type).map_err(|_| NoiseError::InvalidMessage)?;
 
+        // Bound coordinator-supplied metadata before allocating or looping
+        // (mirrors `send_noise_message_with_chunked_response`): a malicious or
+        // buggy coordinator could otherwise advertise multi-GB sizes and OOM
+        // us, or send a chunk_count inconsistent with total_size.
+        if total_size > MAX_CHUNKED_TOTAL_SIZE || chunk_count > MAX_CHUNK_COUNT {
+            tracing::warn!(
+                "chunked-response metadata exceeds caps: total_size={total_size} \
+                 chunk_count={chunk_count}"
+            );
+            return Err(NoiseError::InvalidMessage);
+        }
+        let expected_chunks = total_size.div_ceil(CHUNK_SIZE);
+        if chunk_count != expected_chunks {
+            tracing::warn!(
+                "chunked-response chunk_count {chunk_count} inconsistent with total_size \
+                 {total_size} (expected {expected_chunks})"
+            );
+            return Err(NoiseError::InvalidMessage);
+        }
+
         tracing::info!(
             "Receiving chunked payload for {command:?}: {total_size} bytes in {chunk_count} chunks"
         );
@@ -291,6 +312,14 @@ impl NoiseClient {
         for chunk_index in 0..chunk_count {
             let chunk_data = self.request_chunk_with_retry(chunk_index as u32).await?;
             payload.extend_from_slice(&chunk_data);
+        }
+
+        if payload.len() != total_size {
+            tracing::warn!(
+                "chunked-response assembly produced {} bytes but metadata declared {total_size}",
+                payload.len()
+            );
+            return Err(NoiseError::InvalidMessage);
         }
 
         tracing::info!(
@@ -337,7 +366,22 @@ impl NoiseClient {
             return Err(NoiseError::InvalidMessage);
         }
 
-        // Chunk response: [chunk_index (4 bytes)] [chunk_data (variable)]
+        // Chunk response: [chunk_index (4 bytes)] [chunk_data (variable)].
+        // Verify the echoed index matches what we asked for so a server bug or
+        // cross-peer cache mix-up can't silently corrupt the assembled payload.
+        let received_index = u32::from_be_bytes([
+            resp_msg.payload[0],
+            resp_msg.payload[1],
+            resp_msg.payload[2],
+            resp_msg.payload[3],
+        ]);
+        if received_index != chunk_index {
+            tracing::warn!(
+                "chunk response carried wrong index: requested {chunk_index}, got {received_index}"
+            );
+            return Err(NoiseError::InvalidMessage);
+        }
+
         Ok(resp_msg.payload[4..].to_vec())
     }
 }
