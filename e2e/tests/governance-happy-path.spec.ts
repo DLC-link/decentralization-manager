@@ -82,4 +82,44 @@ test.describe.serial("governance happy path", () => {
       body: await parts.p1.screenshot({ fullPage: true }), contentType: "image/png",
     });
   });
+
+  test("03 distribute DARs", async () => {
+    // DARs are committed under releases/v0/release (repo root); cwd is e2e/.
+    const darDir = "../releases/v0/release";
+    const dars = [
+      "governance-action-v1-0.1.0.dar",
+      "governance-core-v1-0.1.0.dar",
+      "governance-token-custody-v1-0.1.0.dar",
+      "governance-utility-onboarding-v1-0.1.0.dar",
+    ].map((f) => `${darDir}/${f}`);
+
+    await gotoTab(parts.p1, "Packages");
+    await parts.p1.getByRole("button", { name: "Upload DARs" }).click();
+    let dialog = parts.p1.getByRole("dialog");
+    await dialog.locator('input[type="file"]').setInputFiles(dars);
+    await dialog.getByRole("button", { name: "Upload DARs" }).click();
+    await expect(dialog.getByText(/uploaded to this node successfully/i)).toBeVisible({ timeout: 120_000 });
+    await dialog.getByRole("button", { name: "Close" }).click();
+
+    await parts.p1.getByRole("button", { name: "Distribute DARs" }).click();
+    dialog = parts.p1.getByRole("dialog");
+    await dialog.locator('input[type="file"]').setInputFiles(dars);
+    await dialog.getByRole("button", { name: "Distribute DARs" }).click();
+
+    await acceptInvitation(parts.p2, /Dars/);
+    await acceptInvitation(parts.p3, /Dars/);
+    await expectWorkflowCompleted(parts.p1, /Dars/, shared.partyPrefix!);
+  });
+
+  test("04 check peer DARs", async () => {
+    await gotoTab(parts.p1, "Packages");
+    await parts.p1.getByRole("button", { name: "Check Peer DARs" }).click();
+    // Comparison table renders peer columns; matches show a success (CheckCircle) icon.
+    // Assert the governance-core package row shows matches for both peers (no error/"-").
+    await expect(parts.p1.getByText(/governance-core/i).first()).toBeVisible({ timeout: 60_000 });
+    await expect(parts.p1.getByText(/^-$/)).toHaveCount(0); // no "unreachable" cells
+    await test.info().attach("Peer DAR comparison (P1 sees P2 + P3)", {
+      body: await parts.p1.screenshot({ fullPage: true }), contentType: "image/png",
+    });
+  });
 });
