@@ -34,7 +34,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/setup-build-env
         with:
-          ssh-private-key: ${{ secrets.BOT_SSH_PRIVATE_KEY }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           extra-packages: jq bc curl
       # rust-cache trims target/ to only artifacts referenced by the
       # current Cargo.lock (drops orphaned rlibs, build script junk) and
@@ -96,7 +96,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/setup-build-env
         with:
-          ssh-private-key: ${{ secrets.BOT_SSH_PRIVATE_KEY }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           extra-packages: jq curl
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
