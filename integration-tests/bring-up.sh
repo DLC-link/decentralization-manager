@@ -36,6 +36,13 @@ if [[ "${1:-}" == "--teardown" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Build the binary first (devnet uses no --features flag; test-mode is
+# localnet-only). Mirrors run.sh lines 151-157 exactly, omitting the
+# FEATURES_FLAG block since bring-up is devnet-only.
+# ---------------------------------------------------------------------------
+cargo build --profile release-ci
+
+# ---------------------------------------------------------------------------
 # Source devnet.env.sh — it sources common.sh itself (line 13 of devnet.env.sh),
 # validates Keycloak credentials, exports all per-participant port variables
 # (P{1,2,3}_HTTP, P{1,2,3}_NOISE, P{1,2,3}_CANTON_*), exports BINARY and
@@ -49,6 +56,30 @@ source "$SCRIPT_DIR/devnet.env.sh"
 # PIDS is appended to by common.sh:start_nodes. Declare it here (devnet.env.sh
 # does not declare it; env.sh localnet does — but we are not sourcing env.sh).
 PIDS=()
+
+# ---------------------------------------------------------------------------
+# Failure trap: clean up tunnels and nodes if the bring-up aborts before
+# the PID file is written. Without this, start_localnet's kubectl port-forwards
+# and any DPM processes spawned by start_nodes leak when set -e fires mid-run
+# (e.g. participant-1 fails to start, configure_peers HTTP error).
+#
+# _BRING_UP_COMPLETE is set to 1 just before the PID file write. The trap
+# checks this flag so it is a no-op on the normal success path (where we
+# intentionally leave the stack running for Playwright) and only cleans up on
+# a failed/early exit. The explicit --teardown path is unaffected.
+#
+# stop_nodes is defined in common.sh (line 219); stop_canton_tunnels is defined
+# in devnet.env.sh (line 253). Both are sourced transitively above.
+# ---------------------------------------------------------------------------
+_BRING_UP_COMPLETE=0
+_bring_up_failure_cleanup() {
+    if [[ "$_BRING_UP_COMPLETE" -eq 0 ]]; then
+        echo "bring-up.sh: bring-up failed — cleaning up tunnels and nodes" >&2
+        stop_nodes 2>/dev/null || true
+        stop_canton_tunnels 2>/dev/null || true
+    fi
+}
+trap _bring_up_failure_cleanup EXIT
 
 # ---------------------------------------------------------------------------
 # Mirror run.sh's bring-up sequence (lines 160-170):
@@ -70,7 +101,10 @@ configure_peers
 # Write all process PIDs to the PID file so --teardown can stop them.
 # Both DPM PIDs (PIDS[]) and Canton tunnel PIDs (CANTON_TUNNEL_PIDS[]) are
 # included so a single --teardown call cleans up the entire stack.
+# Mark bring-up complete BEFORE writing the PID file so the failure trap
+# becomes a no-op from this point forward.
 # ---------------------------------------------------------------------------
+_BRING_UP_COMPLETE=1
 : > "$PID_FILE"
 for pid in "${PIDS[@]}"; do echo "$pid" >> "$PID_FILE"; done
 for pid in "${CANTON_TUNNEL_PIDS[@]+"${CANTON_TUNNEL_PIDS[@]}"}"; do echo "$pid" >> "$PID_FILE"; done
