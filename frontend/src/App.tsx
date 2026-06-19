@@ -921,6 +921,7 @@ const App = () => {
             <Tooltip title="Create Party" arrow>
               <Fab
                 color="primary"
+                aria-label="Create Party"
                 onClick={() => setOnboardingDialogOpen(true)}
                 sx={{
                   position: "fixed",
