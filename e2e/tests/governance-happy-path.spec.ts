@@ -105,10 +105,12 @@ test.describe.serial("governance happy path", () => {
     dialog = parts.p1.getByRole("dialog");
     await dialog.locator('input[type="file"]').setInputFiles(dars);
     await dialog.getByRole("button", { name: "Distribute DARs" }).click();
-
+    // Distribute, like onboarding, starts the workflow and closes the dialog
+    // (DarsDialog.tsx:231). Peers then accept; completion (DARs vetted on peers)
+    // is verified by the peer-DAR comparison in phase 04.
+    await expect(dialog).toBeHidden({ timeout: 30_000 });
     await acceptInvitation(parts.p2, /Dars/);
     await acceptInvitation(parts.p3, /Dars/);
-    await expectWorkflowCompleted(parts.p1, /Dars/, shared.partyPrefix!);
   });
 
   test("04 check peer DARs", async () => {
