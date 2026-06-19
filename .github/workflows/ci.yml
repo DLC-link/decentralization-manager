@@ -15,7 +15,7 @@ env:
 jobs:
   cargo:
     name: Format, Clippy & Unit Tests
-    runs-on: ubuntu-8-core
+    runs-on: ubuntu-latest # TEMP stopgap: ubuntu-8-core larger runners unavailable — revert once restored
     container: rust:slim-bookworm
     # Pin coverage instrumentation AND incremental at the job level so the
     # build, clippy, and coverage steps share one fingerprint and reuse
@@ -90,7 +90,7 @@ jobs:
 
   integration-test:
     name: Integration Tests
-    runs-on: ubuntu-8-core
+    runs-on: ubuntu-latest # TEMP stopgap: ubuntu-8-core larger runners unavailable — revert once restored
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
@@ -157,7 +157,7 @@ jobs:
 
   daml:
     name: DAML Build & Test
-    runs-on: ubuntu-8-core
+    runs-on: ubuntu-latest # TEMP stopgap: ubuntu-8-core larger runners unavailable — revert once restored
     defaults:
       run:
         working-directory: daml
