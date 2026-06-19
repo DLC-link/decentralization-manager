@@ -7,6 +7,8 @@ export default defineConfig({
   retries: 0,
   timeout: 5 * 60_000,
   expect: { timeout: 30_000 },
+  globalSetup: "./global-setup.ts",
+  globalTeardown: "./global-teardown.ts",
   reporter: [["html", { open: "never" }], ["list"]],
   use: {
     screenshot: "on",
