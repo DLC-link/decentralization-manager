@@ -19,7 +19,7 @@ A web application for managing decentralized parties in Canton blockchain networ
 - [Architecture Overview](docs/ARCHITECTURE.md) -- System architecture, core concepts, communication protocol, and technical constraints
 - [User Guide](USER_GUIDE.md) -- Walkthrough of the web UI for day-to-day party and governance operations
 - [Custom DAML Templates](docs/CUSTOM_DAML_TEMPLATES.md) -- Authoring and deploying your own DAML governance templates
-- [Migration Guide](docs/MIGRATION_GUIDE.md) -- Upgrading between versions and migrating existing deployments
+- [Deployment Guide](docs/DEPLOYMENT_GUIDE.md) -- Deploying a node to Kubernetes from scratch: manifests, identity-provider setup, and configuration reference
 - [Use Cases](docs/USE_CASES.md) -- Vault governance, FAR rewards, multi-sig wallet, and utility service walkthroughs
 - [Contributing Guide](docs/CONTRIBUTING.md) -- Development setup, coding standards, commit conventions, and the PR process
 
@@ -621,10 +621,9 @@ Replace the registry/org (`public.ecr.aws/dlc-link`) and `<version>` with your o
 
 ## Deployment
 
-The container image built above is self-contained. Kubernetes deployment
-manifests are maintained separately, outside this repository. For a from-scratch
+The container image built above is self-contained. For a from-scratch
 deployment walkthrough — Secret, Deployment + PVC, Service, and Ingress manifests
-with all required configuration — see the [Migration Guide](docs/MIGRATION_GUIDE.md).
+with all required configuration — see the [Deployment Guide](docs/DEPLOYMENT_GUIDE.md).
 
 ## Contributing
 
