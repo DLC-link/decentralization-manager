@@ -1,4 +1,4 @@
-use std::{marker::PhantomData, sync::Arc};
+use std::{marker::PhantomData, sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use hyper::{Body, Request};
@@ -9,10 +9,16 @@ use tokio_noise::handshakes::nn_psk2::Initiator;
 use crate::{
     config::{NodeConfig, Peer},
     noise::{
-        Message, MessageType, NOISE_REQUEST_TIMEOUT, NoiseError, NoiseKeypair, parse_flexible_uri,
-        parse_public_key,
+        CHUNK_SIZE, MAX_CHUNK_COUNT, MAX_CHUNKED_TOTAL_SIZE, Message, MessageType,
+        NOISE_CHUNK_TIMEOUT, NOISE_REQUEST_TIMEOUT, NoiseError, NoiseKeypair, is_transient,
+        parse_flexible_uri, parse_public_key,
     },
 };
+
+/// Max attempts to fetch a single chunk (each on a fresh connection) before the
+/// chunked transfer gives up. Lets a transient stall/reset recover in place
+/// instead of restarting the whole download.
+const CHUNK_FETCH_MAX_ATTEMPTS: usize = 3;
 
 /// Client for connecting to the coordinator
 pub struct NoiseClient {
@@ -41,8 +47,20 @@ impl NoiseClient {
         })
     }
 
-    /// Send a message to the coordinator
+    /// Send a message to the coordinator with the default control-plane timeout.
     pub async fn send_message(&self, message: &Message) -> Result<Bytes, NoiseError> {
+        self.send_message_with_timeout(message, NOISE_REQUEST_TIMEOUT)
+            .await
+    }
+
+    /// Send a message to the coordinator, applying `request_timeout` to both the
+    /// TCP connect and the Noise/HTTP round-trip. Used so large chunk fetches can
+    /// run on a longer budget than fast control-plane polls.
+    pub async fn send_message_with_timeout(
+        &self,
+        message: &Message,
+        request_timeout: Duration,
+    ) -> Result<Bytes, NoiseError> {
         let socket_addr = format!(
             "{address}:{port}",
             address = self.coordinator.address,
@@ -65,9 +83,7 @@ impl NoiseClient {
 
         // Connect with timeout
         let tcp_stream =
-            match tokio::time::timeout(NOISE_REQUEST_TIMEOUT, TcpStream::connect(&socket_addr))
-                .await
-            {
+            match tokio::time::timeout(request_timeout, TcpStream::connect(&socket_addr)).await {
                 Ok(Ok(stream)) => stream,
                 Ok(Err(e)) => {
                     return Err(NoiseError::TcpConnectionFailed(format!(
@@ -95,7 +111,7 @@ impl NoiseClient {
             tcp_stream,
             initiator,
             request,
-            Some(NOISE_REQUEST_TIMEOUT),
+            Some(request_timeout),
         )
         .await?;
 
@@ -104,8 +120,19 @@ impl NoiseClient {
             return Err(NoiseError::BadStatusCode(response.status()));
         }
 
-        // Read response body
-        let resp_body_bytes = hyper::body::to_bytes(response.body_mut()).await?;
+        // Read response body, bounded by `request_timeout`. `send_request`'s
+        // timeout only covers receiving the response *head*, not streaming the
+        // body — so without this, a stalled large body (e.g. a chunk that
+        // freezes mid-transfer) would hang until the server closes the
+        // connection instead of failing fast here and letting the caller retry.
+        let resp_body_bytes =
+            match tokio::time::timeout(request_timeout, hyper::body::to_bytes(response.body_mut()))
+                .await
+            {
+                Ok(Ok(bytes)) => bytes,
+                Ok(Err(e)) => return Err(NoiseError::from(e)),
+                Err(_) => return Err(NoiseError::RequestTimeout),
+            };
 
         tracing::debug!(
             "Received response from coordinator: {count} bytes",
@@ -251,15 +278,46 @@ impl NoiseClient {
         let command =
             MessageType::try_from(command_type).map_err(|_| NoiseError::InvalidMessage)?;
 
+        // Bound coordinator-supplied metadata before allocating or looping
+        // (mirrors `send_noise_message_with_chunked_response`): a malicious or
+        // buggy coordinator could otherwise advertise multi-GB sizes and OOM
+        // us, or send a chunk_count inconsistent with total_size.
+        if total_size > MAX_CHUNKED_TOTAL_SIZE || chunk_count > MAX_CHUNK_COUNT {
+            tracing::warn!(
+                "chunked-response metadata exceeds caps: total_size={total_size} \
+                 chunk_count={chunk_count}"
+            );
+            return Err(NoiseError::InvalidMessage);
+        }
+        let expected_chunks = total_size.div_ceil(CHUNK_SIZE);
+        if chunk_count != expected_chunks {
+            tracing::warn!(
+                "chunked-response chunk_count {chunk_count} inconsistent with total_size \
+                 {total_size} (expected {expected_chunks})"
+            );
+            return Err(NoiseError::InvalidMessage);
+        }
+
         tracing::info!(
             "Receiving chunked payload for {command:?}: {total_size} bytes in {chunk_count} chunks"
         );
 
-        // Fetch all chunks
+        // Fetch all chunks. Each chunk is retried in place on a fresh
+        // connection so a single slow/stalled chunk (e.g. transient coordinator
+        // load) doesn't discard every already-downloaded chunk and force the
+        // whole transfer to restart from chunk 0.
         let mut payload = Vec::with_capacity(total_size);
         for chunk_index in 0..chunk_count {
-            let chunk_data = self.request_chunk(chunk_index as u32).await?;
+            let chunk_data = self.request_chunk_with_retry(chunk_index as u32).await?;
             payload.extend_from_slice(&chunk_data);
+        }
+
+        if payload.len() != total_size {
+            tracing::warn!(
+                "chunked-response assembly produced {} bytes but metadata declared {total_size}",
+                payload.len()
+            );
+            return Err(NoiseError::InvalidMessage);
         }
 
         tracing::info!(
@@ -270,10 +328,35 @@ impl NoiseClient {
         Ok(Message::new(command, payload))
     }
 
+    /// Request a chunk, retrying transient failures (connection reset, timeout,
+    /// truncated body) on a fresh connection up to `CHUNK_FETCH_MAX_ATTEMPTS`.
+    /// Non-transient errors (bad message, decode failure) fail immediately.
+    async fn request_chunk_with_retry(&self, chunk_index: u32) -> Result<Vec<u8>, NoiseError> {
+        let mut attempt = 1;
+        loop {
+            match self.request_chunk(chunk_index).await {
+                Ok(data) => return Ok(data),
+                Err(e) if attempt < CHUNK_FETCH_MAX_ATTEMPTS && is_transient(&e) => {
+                    tracing::warn!(
+                        "chunk {chunk_index} fetch attempt {attempt}/{CHUNK_FETCH_MAX_ATTEMPTS} \
+                         failed: {e}; retrying"
+                    );
+                    attempt += 1;
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
     /// Request a specific chunk from the coordinator
     async fn request_chunk(&self, chunk_index: u32) -> Result<Vec<u8>, NoiseError> {
         let message = Message::new(MessageType::GetChunk, chunk_index.to_be_bytes().to_vec());
-        let response = self.send_message(&message).await?;
+        // Chunks can be up to CHUNK_SIZE (1 MiB); give them the longer budget so
+        // a slow stream isn't cut short by the control-plane timeout.
+        let response = self
+            .send_message_with_timeout(&message, NOISE_CHUNK_TIMEOUT)
+            .await?;
 
         let resp_msg = Message::from_bytes(&response).map_err(|_| NoiseError::InvalidMessage)?;
 
@@ -281,7 +364,22 @@ impl NoiseClient {
             return Err(NoiseError::InvalidMessage);
         }
 
-        // Chunk response: [chunk_index (4 bytes)] [chunk_data (variable)]
+        // Chunk response: [chunk_index (4 bytes)] [chunk_data (variable)].
+        // Verify the echoed index matches what we asked for so a server bug or
+        // cross-peer cache mix-up can't silently corrupt the assembled payload.
+        let received_index = u32::from_be_bytes([
+            resp_msg.payload[0],
+            resp_msg.payload[1],
+            resp_msg.payload[2],
+            resp_msg.payload[3],
+        ]);
+        if received_index != chunk_index {
+            tracing::warn!(
+                "chunk response carried wrong index: requested {chunk_index}, got {received_index}"
+            );
+            return Err(NoiseError::InvalidMessage);
+        }
+
         Ok(resp_msg.payload[4..].to_vec())
     }
 }

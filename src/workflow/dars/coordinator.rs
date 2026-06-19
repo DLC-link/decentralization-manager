@@ -67,8 +67,6 @@ async fn run_workflow(
     let dar_payload = encode_dars_payload(&config)?;
     workflow_state.set_command_payload(dar_payload).await;
 
-    let mut coordinator_completed = false;
-
     loop {
         let current_step = workflow_state.current_step().await;
 
@@ -77,14 +75,21 @@ async fn run_workflow(
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             }
             DarsStep::UploadDars => {
-                if !coordinator_completed {
-                    tracing::info!("Coordinator executing: Upload DARs");
-                    contracts::upload_dars(&node_config, &config.dar_files).await?;
-                    coordinator_completed = true;
-                }
+                // While peers are downloading, this node ONLY serves chunks
+                // (handled by the Noise listener). The coordinator's own DAR
+                // upload is deferred to `Complete` so its CPU/IO doesn't
+                // contend with — and stall — the chunk transfer to peers on
+                // CPU-limited nodes.
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             }
             DarsStep::Complete => {
+                // All peers have finished downloading (the step only advances
+                // here once every peer completed UploadDars), so there's no
+                // chunk-serving load left to compete with. Upload our own DARs
+                // now. (Reached once, then we break — re-runs only on a resume,
+                // where re-uploading is idempotent.)
+                tracing::info!("Coordinator executing: Upload DARs");
+                contracts::upload_dars(&node_config, &config.dar_files).await?;
                 tracing::info!("DARs upload workflow complete!");
                 tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                 break;

@@ -19,8 +19,25 @@ use zeroize::Zeroizing;
 
 use crate::{config::NoiseRetryConfig, error::Result};
 
-/// Timeout for Noise protocol operations
+/// Timeout for control-plane Noise requests (command polls, acks, small
+/// messages): covers connect + handshake + one round-trip. Kept short so a
+/// dead coordinator is detected quickly.
 pub const NOISE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Per-phase timeout for fetching a single chunk (connect, request, and the
+/// response-body read are each bounded by this). A healthy 1 MiB chunk
+/// transfers in well under a second; this is sized to absorb load spikes while
+/// still catching a *stalled* chunk quickly so the caller can retry it on a
+/// fresh connection (see `request_chunk_with_retry`) rather than waiting on the
+/// server's handler timeout.
+pub const NOISE_CHUNK_TIMEOUT: Duration = Duration::from_secs(25);
+
+/// Server-side per-connection handler timeout (`hyper-noise` counts the full
+/// response write against it). Acts as a backstop — the client now bounds its
+/// own chunk reads via `NOISE_CHUNK_TIMEOUT`, so the client gives up (and
+/// retries) first; this just bounds a connection the client already abandoned.
+/// Kept comfortably above `NOISE_CHUNK_TIMEOUT`.
+pub const NOISE_HANDLER_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Message types for the Noise protocol communication
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -603,7 +620,7 @@ pub async fn load_or_generate_keypair<P: AsRef<Path>>(path: P) -> Result<NoiseKe
 ///
 /// Exhaustive match (no wildcard) — adding a new `NoiseError` variant will
 /// fail to compile here until it's explicitly classified as retryable or not.
-fn is_transient(err: &NoiseError) -> bool {
+pub(crate) fn is_transient(err: &NoiseError) -> bool {
     match err {
         NoiseError::TcpConnectionTimeout(_)
         | NoiseError::TcpConnectionFailed(_)
