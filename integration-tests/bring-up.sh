@@ -13,7 +13,6 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PID_FILE="${E2E_PID_FILE:-$SCRIPT_DIR/.e2e-pids}"
 
 teardown() {
@@ -23,6 +22,12 @@ teardown() {
         done < "$PID_FILE"
         rm -f "$PID_FILE"
     fi
+    # Kill kubectl port-forward grandchildren that were reparented to init when
+    # the retry-loop subshells above were killed. Mirrors stop_canton_tunnels in
+    # devnet.env.sh (see #142 for why bare `kill` on the loop PID is not enough).
+    # KUBE_CONTEXT_DEVNET default must match devnet.env.sh line 188.
+    local _ctx="${KUBE_CONTEXT_DEVNET:-ieu-devnet}"
+    pkill -f "kubectl --context=$_ctx port-forward svc/participant-ibtc-devnet" 2>/dev/null || true
 }
 
 if [[ "${1:-}" == "--teardown" ]]; then
