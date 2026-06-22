@@ -53,8 +53,12 @@ fn build_frontend() {
     }
 
     println!("cargo:info=Building frontend...");
+    // Surface the crate version to the frontend build so the UI can display
+    // the build version (see vite.config.ts `__APP_VERSION__`).
+    let version = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "dev".to_string());
     let status = Command::new("npm")
         .args(["run", "build"])
+        .env("APP_VERSION", &version)
         .current_dir(frontend_dir)
         .status()
         .expect("Failed to run npm build");
