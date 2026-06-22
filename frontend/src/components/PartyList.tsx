@@ -122,7 +122,16 @@ export const PartyList = ({
                   sx={{ py: 1, width: "1%", whiteSpace: "nowrap", pl: 4 }}
                   align="center"
                 >
-                  <AuthStatusIcon status={auth} />
+                  <Box
+                    sx={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      minHeight: 30,
+                    }}
+                  >
+                    <AuthStatusIcon status={auth} />
+                  </Box>
                 </TableCell>
                 <TableCell sx={{ py: 1, width: 56 }} align="center">
                   <Tooltip title={hidden ? "Unhide party" : "Hide party"}>
