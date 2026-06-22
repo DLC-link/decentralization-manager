@@ -200,7 +200,7 @@ const InvitationCard = ({
               {invitation.coordinator_name ? (
                 fromLabel
               ) : (
-                <Box component="span" sx={{ fontFamily: "monospace" }}>
+                <Box component="span" sx={{ fontFamily: "var(--font-mono)" }}>
                   {fromLabel}
                 </Box>
               )}
@@ -264,7 +264,7 @@ const InvitationCard = ({
                 variant="caption"
                 onClick={() => onSelectParty(invitation.dec_party_id!)}
                 sx={{
-                  fontFamily: "monospace",
+                  fontFamily: "var(--font-mono)",
                   color: "primary.main",
                   cursor: "pointer",
                   "&:hover": { textDecoration: "underline" },
@@ -285,7 +285,7 @@ const InvitationCard = ({
               </Typography>
               <Typography
                 variant="body2"
-                sx={{ fontWeight: 600, fontFamily: "monospace" }}
+                sx={{ fontWeight: 600, fontFamily: "var(--font-mono)" }}
               >
                 {truncatePartyId(invitation.kicked_participant)}
               </Typography>
@@ -579,7 +579,7 @@ const ActionCard = ({
               variant="caption"
               onClick={() => onSelectParty(party.partyId)}
               sx={{
-                fontFamily: "monospace",
+                fontFamily: "var(--font-mono)",
                 color: "primary.main",
                 cursor: "pointer",
                 "&:hover": { textDecoration: "underline" },
@@ -686,7 +686,7 @@ const ActionCard = ({
                     <Typography
                       variant="caption"
                       sx={{
-                        fontFamily: "monospace",
+                        fontFamily: "var(--font-mono)",
                         color: isExpired
                           ? "text.disabled"
                           : isOwn
@@ -968,7 +968,7 @@ const DomainActionCard = ({
               variant="caption"
               onClick={() => onSelectParty(party.partyId)}
               sx={{
-                fontFamily: "monospace",
+                fontFamily: "var(--font-mono)",
                 color: "primary.main",
                 cursor: "pointer",
                 "&:hover": { textDecoration: "underline" },
@@ -1208,7 +1208,7 @@ const DomainActionCard = ({
         <Typography
           variant="caption"
           color="text.secondary"
-          sx={{ fontFamily: "monospace" }}
+          sx={{ fontFamily: "var(--font-mono)" }}
         >
           {domainAction.proposal_cid.slice(0, 16)}…
         </Typography>
@@ -1265,7 +1265,7 @@ const DomainActionCard = ({
                     <Typography
                       variant="caption"
                       sx={{
-                        fontFamily: "monospace",
+                        fontFamily: "var(--font-mono)",
                         color: isExpired
                           ? "text.disabled"
                           : isOwn
@@ -1658,7 +1658,7 @@ const WorkflowRunCard = ({
                 variant="caption"
                 onClick={() => onSelectParty(run.dec_party_id!)}
                 sx={{
-                  fontFamily: "monospace",
+                  fontFamily: "var(--font-mono)",
                   color: "primary.main",
                   cursor: "pointer",
                   "&:hover": { textDecoration: "underline" },
@@ -1679,7 +1679,7 @@ const WorkflowRunCard = ({
               </Typography>
               <Typography
                 variant="body2"
-                sx={{ fontWeight: 600, fontFamily: "monospace" }}
+                sx={{ fontWeight: 600, fontFamily: "var(--font-mono)" }}
               >
                 {truncatePartyId(run.kicked_participant)}
               </Typography>

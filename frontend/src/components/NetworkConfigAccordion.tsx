@@ -414,12 +414,12 @@ export const NetworkConfigAccordion = ({
                     {selfEntry.address}:{selfEntry.port}
                   </TableCell>
                   <TableCell
-                    sx={{ fontFamily: "monospace", fontSize: "0.75rem", py: 1 }}
+                    sx={{ fontFamily: "var(--font-mono)", fontSize: "0.75rem", py: 1 }}
                   >
                     {truncateKey(selfEntry.public_key)}
                   </TableCell>
                   <TableCell
-                    sx={{ fontFamily: "monospace", fontSize: "0.75rem", py: 1, whiteSpace: "nowrap" }}
+                    sx={{ fontFamily: "var(--font-mono)", fontSize: "0.75rem", py: 1, whiteSpace: "nowrap" }}
                   >
                     {getStat(selfEntry.participant_id)?.version ??
                       nodeConfig?.version ??
@@ -469,12 +469,12 @@ export const NetworkConfigAccordion = ({
                       {p.address}:{p.port}
                     </TableCell>
                     <TableCell
-                      sx={{ fontFamily: "monospace", fontSize: "0.75rem", py: 1 }}
+                      sx={{ fontFamily: "var(--font-mono)", fontSize: "0.75rem", py: 1 }}
                     >
                       {truncateKey(p.public_key)}
                     </TableCell>
                     <TableCell
-                      sx={{ fontFamily: "monospace", fontSize: "0.75rem", py: 1, whiteSpace: "nowrap" }}
+                      sx={{ fontFamily: "var(--font-mono)", fontSize: "0.75rem", py: 1, whiteSpace: "nowrap" }}
                     >
                       {st?.version ?? "—"}
                     </TableCell>

@@ -328,7 +328,7 @@ export const GovernanceAuditTrail = ({
                           <Typography
                             variant="body2"
                             sx={{
-                              fontFamily: "monospace",
+                              fontFamily: "var(--font-mono)",
                               fontSize: "0.8rem",
                               whiteSpace: "nowrap",
                               overflow: "hidden",

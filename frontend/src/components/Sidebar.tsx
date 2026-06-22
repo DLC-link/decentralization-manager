@@ -218,7 +218,7 @@ export const Sidebar = ({
           <Typography
             variant="caption"
             color="text.secondary"
-            sx={{ fontFamily: "monospace", fontSize: "0.66rem", letterSpacing: "0.02em" }}
+            sx={{ fontFamily: "var(--font-mono)", fontSize: "0.66rem", letterSpacing: "0.02em" }}
           >
             {BUILD_INFO}
           </Typography>

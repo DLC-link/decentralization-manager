@@ -161,7 +161,7 @@ export const HoldingsSection = ({
               sx={zebraRow(idx)}
             >
               <TableCell
-                sx={{ py: 1, fontFamily: "monospace", fontSize: "0.85rem" }}
+                sx={{ py: 1, fontFamily: "var(--font-mono)", fontSize: "0.85rem" }}
               >
                 {/* Canton Coin's instrument id on the Splice token-standard
                   * is the literal "Amulet" — display it as "CC" since that's
@@ -178,7 +178,7 @@ export const HoldingsSection = ({
               <TableCell
                 sx={{
                   py: 1,
-                  fontFamily: "monospace",
+                  fontFamily: "var(--font-mono)",
                   fontSize: "0.85rem",
                 }}
                 align="right"
