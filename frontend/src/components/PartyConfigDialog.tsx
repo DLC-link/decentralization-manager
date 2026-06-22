@@ -11,12 +11,14 @@ import {
   CircularProgress,
   Alert,
   Divider,
-  ToggleButtonGroup,
-  ToggleButton,
+  // Username/password credentials toggle is disabled — re-enable these with
+  // the commented-out toggle in the Keycloak section below.
+  // ToggleButtonGroup,
+  // ToggleButton,
 } from "@mui/material";
 import { API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
-import { fieldHelpAdornment, FieldHelp } from "./FieldHelp";
+import { fieldHelpAdornment /*, FieldHelp */ } from "./FieldHelp";
 import type {
   AuthConfig,
   PartyConfigResponse,
@@ -143,11 +145,9 @@ export const PartyConfigDialog = ({
         setKeycloakClientSecret("");
         setKeycloakUsername("");
         setKeycloakPassword("");
-        setAuthMethod(
-          data.has_username || data.has_password
-            ? "password"
-            : "client_credentials",
-        );
+        // Username/password (password grant) login is disabled; force client
+        // credentials so the save path always sends client ID + secret.
+        setAuthMethod("client_credentials");
 
         setAuth0Domain(data.auth0_domain ?? "");
         setAuth0Audience(data.auth0_audience ?? "");
@@ -483,118 +483,120 @@ export const PartyConfigDialog = ({
                     }}
                   />
 
-                  <Box>
-                    <Box
-                      sx={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 0.5,
-                        mb: 1,
-                      }}
-                    >
-                      <Typography variant="body2" color="text.secondary">
-                        Credentials
-                      </Typography>
-                      <FieldHelp
-                        text="How this node authenticates to Keycloak. Choose Client ID + Secret for a confidential client (service account flow), or Username + Password to sign in as a specific Keycloak user via the password grant."
-                        ariaLabel="Help for Keycloak credentials method"
-                      />
+                  {/*
+                    Username + Password (password grant) login is disabled — only
+                    Client ID + Secret currently works, so the credentials toggle
+                    and the username/password fields are commented out to avoid
+                    confusing users. To re-enable, restore this toggle, the fields
+                    below, and the ToggleButton/ToggleButtonGroup/FieldHelp imports.
+
+                    <Box>
+                      <Box
+                        sx={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 0.5,
+                          mb: 1,
+                        }}
+                      >
+                        <Typography variant="body2" color="text.secondary">
+                          Credentials
+                        </Typography>
+                        <FieldHelp
+                          text="How this node authenticates to Keycloak. Choose Client ID + Secret for a confidential client (service account flow), or Username + Password to sign in as a specific Keycloak user via the password grant."
+                          ariaLabel="Help for Keycloak credentials method"
+                        />
+                      </Box>
+                      <ToggleButtonGroup
+                        value={authMethod}
+                        exclusive
+                        onChange={(_, val) => val && setAuthMethod(val)}
+                        size="small"
+                        disabled={saving}
+                        fullWidth
+                      >
+                        <ToggleButton value="client_credentials">
+                          Client ID + Secret
+                        </ToggleButton>
+                        <ToggleButton value="password">
+                          Username + Password
+                        </ToggleButton>
+                      </ToggleButtonGroup>
                     </Box>
-                    <ToggleButtonGroup
-                      value={authMethod}
-                      exclusive
-                      onChange={(_, val) => val && setAuthMethod(val)}
+                  */}
+
+                  <TextField
+                    label="Client ID"
+                    value={keycloakClientId}
+                    onChange={(e) => setKeycloakClientId(e.target.value)}
+                    fullWidth
+                    size="small"
+                    disabled={saving}
+                    slotProps={{
+                      input: {
+                        endAdornment: fieldHelpAdornment(
+                          "The Client ID of a confidential Keycloak client with a service account. Found in the Keycloak admin console under Clients, on the client's Settings tab.",
+                          "Help for Keycloak Client ID",
+                        ),
+                      },
+                    }}
+                  />
+                  <TextField
+                    label="Client Secret"
+                    value={keycloakClientSecret}
+                    onChange={(e) => setKeycloakClientSecret(e.target.value)}
+                    fullWidth
+                    size="small"
+                    type="password"
+                    disabled={saving}
+                    placeholder="Enter new or leave empty to keep existing"
+                    slotProps={{
+                      input: {
+                        endAdornment: fieldHelpAdornment(
+                          "The secret for the Keycloak client above. Found in the Keycloak admin console on the same client's Credentials tab; leave empty to keep the previously stored secret.",
+                          "Help for Keycloak Client Secret",
+                        ),
+                      },
+                    }}
+                  />
+
+                  {/* Username + Password fields — disabled (see note above).
+                    <TextField
+                      label="Username"
+                      value={keycloakUsername}
+                      onChange={(e) => setKeycloakUsername(e.target.value)}
+                      fullWidth
                       size="small"
                       disabled={saving}
+                      placeholder="Enter new or leave empty to keep existing"
+                      slotProps={{
+                        input: {
+                          endAdornment: fieldHelpAdornment(
+                            "Username of a Keycloak account in this realm that has rights on the member party. Found in the Keycloak admin console under Users; leave empty to keep the previously stored username.",
+                            "Help for Keycloak Username",
+                          ),
+                        },
+                      }}
+                    />
+                    <TextField
+                      label="Password"
+                      value={keycloakPassword}
+                      onChange={(e) => setKeycloakPassword(e.target.value)}
                       fullWidth
-                    >
-                      <ToggleButton value="client_credentials">
-                        Client ID + Secret
-                      </ToggleButton>
-                      <ToggleButton value="password">
-                        Username + Password
-                      </ToggleButton>
-                    </ToggleButtonGroup>
-                  </Box>
-
-                  {authMethod === "client_credentials" ? (
-                    <>
-                      <TextField
-                        label="Client ID"
-                        value={keycloakClientId}
-                        onChange={(e) => setKeycloakClientId(e.target.value)}
-                        fullWidth
-                        size="small"
-                        disabled={saving}
-                        slotProps={{
-                          input: {
-                            endAdornment: fieldHelpAdornment(
-                              "The Client ID of a confidential Keycloak client with a service account. Found in the Keycloak admin console under Clients, on the client's Settings tab.",
-                              "Help for Keycloak Client ID",
-                            ),
-                          },
-                        }}
-                      />
-                      <TextField
-                        label="Client Secret"
-                        value={keycloakClientSecret}
-                        onChange={(e) =>
-                          setKeycloakClientSecret(e.target.value)
-                        }
-                        fullWidth
-                        size="small"
-                        type="password"
-                        disabled={saving}
-                        placeholder="Enter new or leave empty to keep existing"
-                        slotProps={{
-                          input: {
-                            endAdornment: fieldHelpAdornment(
-                              "The secret for the Keycloak client above. Found in the Keycloak admin console on the same client's Credentials tab; leave empty to keep the previously stored secret.",
-                              "Help for Keycloak Client Secret",
-                            ),
-                          },
-                        }}
-                      />
-                    </>
-                  ) : (
-                    <>
-                      <TextField
-                        label="Username"
-                        value={keycloakUsername}
-                        onChange={(e) => setKeycloakUsername(e.target.value)}
-                        fullWidth
-                        size="small"
-                        disabled={saving}
-                        placeholder="Enter new or leave empty to keep existing"
-                        slotProps={{
-                          input: {
-                            endAdornment: fieldHelpAdornment(
-                              "Username of a Keycloak account in this realm that has rights on the member party. Found in the Keycloak admin console under Users; leave empty to keep the previously stored username.",
-                              "Help for Keycloak Username",
-                            ),
-                          },
-                        }}
-                      />
-                      <TextField
-                        label="Password"
-                        value={keycloakPassword}
-                        onChange={(e) => setKeycloakPassword(e.target.value)}
-                        fullWidth
-                        size="small"
-                        type="password"
-                        disabled={saving}
-                        placeholder="Enter new or leave empty to keep existing"
-                        slotProps={{
-                          input: {
-                            endAdornment: fieldHelpAdornment(
-                              "Password for the Keycloak user above. Set or reset it in the Keycloak admin console on the user's Credentials tab; leave empty to keep the previously stored password.",
-                              "Help for Keycloak Password",
-                            ),
-                          },
-                        }}
-                      />
-                    </>
-                  )}
+                      size="small"
+                      type="password"
+                      disabled={saving}
+                      placeholder="Enter new or leave empty to keep existing"
+                      slotProps={{
+                        input: {
+                          endAdornment: fieldHelpAdornment(
+                            "Password for the Keycloak user above. Set or reset it in the Keycloak admin console on the user's Credentials tab; leave empty to keep the previously stored password.",
+                            "Help for Keycloak Password",
+                          ),
+                        },
+                      }}
+                    />
+                  */}
                 </>
               )}
 
