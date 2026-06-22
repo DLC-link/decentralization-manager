@@ -379,12 +379,12 @@ export const PackagesPanel = ({
               </Table>
             ) : (
               /* Default local-only table */
-              <Table size="small" sx={{ minWidth: 650 }}>
+              <Table size="small" sx={{ minWidth: 650, tableLayout: "fixed" }}>
                 <TableHead>
                   <TableRow>
-                    <TableCell sx={{ py: 1 }}>Package Name</TableCell>
-                    <TableCell sx={{ py: 1 }}>Version</TableCell>
-                    <TableCell sx={{ py: 1 }}>Package ID</TableCell>
+                    <TableCell sx={{ py: 1, width: "48%" }}>Package Name</TableCell>
+                    <TableCell sx={{ py: 1, width: "16%" }}>Version</TableCell>
+                    <TableCell sx={{ py: 1, width: "36%" }}>Package ID</TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>
