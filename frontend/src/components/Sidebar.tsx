@@ -78,14 +78,11 @@ export const Sidebar = ({
 
   const countFor = (index: number) =>
     index === 0 ? partyCount : index === 1 ? packageCount : index === 3 ? notificationCount : 0;
+  // A selected nav item has an accent background, so its badge flips to
+  // `secondary` (white on dark) for contrast. Unselected: notifications red,
+  // the rest accent.
   const badgeColor = (index: number): "primary" | "secondary" | "error" =>
-    index === 3
-      ? activeTab === 3
-        ? "primary"
-        : "error"
-      : activeTab === index
-        ? "secondary"
-        : "primary";
+    activeTab === index ? "secondary" : index === 3 ? "error" : "primary";
 
   return (
     <Box
