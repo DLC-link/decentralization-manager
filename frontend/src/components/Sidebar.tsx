@@ -222,8 +222,15 @@ export const Sidebar = ({
               }}
             >
               <ListItemIcon sx={{ minWidth: collapsed ? 0 : 40, justifyContent: "center" }}>
-                {collapsed && count > 0 ? (
-                  <Badge badgeContent={count} color={badgeColor(item.index)} overlap="circular">
+                {collapsed ? (
+                  // Number badges would clip on the narrow rail — show a small
+                  // dot instead (count is visible when expanded).
+                  <Badge
+                    variant="dot"
+                    color={badgeColor(item.index)}
+                    invisible={count === 0}
+                    overlap="circular"
+                  >
                     {item.icon}
                   </Badge>
                 ) : (
@@ -298,7 +305,7 @@ export const Sidebar = ({
           gap: 1,
         }}
       >
-        {!collapsed && <ThemeSwitcher />}
+        <ThemeSwitcher orientation={collapsed ? "vertical" : "horizontal"} />
         {token && (
           <Tooltip title="Log out" placement="right" arrow>
             <IconButton size="small" onClick={logout} color="inherit">
