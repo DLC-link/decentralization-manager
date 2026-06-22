@@ -175,9 +175,19 @@ const getDesignTokens = (mode: "light" | "dark") => ({
     },
     MuiTableCell: {
       styleOverrides: {
+        // Unified row height across every list — one vertical padding for
+        // default and small (size="small") cells so tables line up.
         root: {
           borderBottom: `1px solid ${mode === "light" ? "#e8e8e8" : "#3a3a3a"}`,
-          padding: "12px 16px",
+          padding: "8px 16px",
+          // Fixed row height so every list lines up regardless of whether a
+          // row carries a copy button / chip or just text. Cells that must
+          // opt out (e.g. collapsible detail rows) set `height: "auto"`.
+          height: 48,
+        },
+        sizeSmall: {
+          padding: "8px 16px",
+          height: 48,
         },
       },
     },
