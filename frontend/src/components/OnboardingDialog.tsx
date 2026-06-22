@@ -1,20 +1,16 @@
 import { useState, useEffect, useCallback } from "react";
 import {
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  DialogActions,
-  Button,
-  Typography,
-  CircularProgress,
   Alert,
   Box,
+  Button,
+  CircularProgress,
+  Dialog,
+  InputAdornment,
   TextField,
-  FormGroup,
-  FormControlLabel,
-  Checkbox,
-  Divider,
+  Typography,
 } from "@mui/material";
+import CheckIcon from "@mui/icons-material/Check";
+import SearchIcon from "@mui/icons-material/Search";
 import { API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
 import { useSnackbar } from "../contexts";
@@ -38,7 +34,7 @@ const partyPrefixError = (prefix: string): string | null => {
     return `Must be at most ${MAX_PARTY_ID_PREFIX_LEN} characters`;
   if (!/^[A-Za-z]/.test(prefix)) return "Must start with a letter (a–z, A–Z)";
   if (!/^[A-Za-z0-9_-]+$/.test(prefix))
-    return "Only letters, digits, '-' and '_' are allowed";
+    return "Only letters, digits, “-” and “_” are allowed";
   return null;
 };
 
@@ -65,6 +61,7 @@ export const OnboardingDialog = ({
   const [selectedPeerIds, setSelectedPeerIds] = useState<Set<string>>(
     new Set(),
   );
+  const [filter, setFilter] = useState("");
   const [loadingPeers, setLoadingPeers] = useState(false);
   const { showSnackbar } = useSnackbar();
 
@@ -78,23 +75,15 @@ export const OnboardingDialog = ({
             authenticatedFetch(`${API_BASE}/network-config`),
             authenticatedFetch(`${API_BASE}/node-config`),
           ]);
-          let self: string | null = null;
           if (nodeRes.ok) {
             const nodeData: NodeConfig = await nodeRes.json();
-            self = nodeData.node.participant_id;
-            setSelfNodeId(self);
+            setSelfNodeId(nodeData.node.participant_id);
           }
           if (networkRes.ok) {
             const data = await networkRes.json();
             const allPeers: Peer[] = data.peers || [];
             setPeers(allPeers);
-            // Select all peers by default, excluding self
-            const allPeerIds = new Set<string>(
-              allPeers
-                .filter((p) => p.participant_id !== self)
-                .map((p) => p.participant_id),
-            );
-            setSelectedPeerIds(allPeerIds);
+            // Nothing is preselected — the operator opts peers in explicitly.
           }
         } catch {
           // Ignore fetch errors
@@ -114,6 +103,7 @@ export const OnboardingDialog = ({
       setLoading(false);
       setPartyIdPrefix("");
       setSelectedPeerIds(new Set());
+      setFilter("");
     }
   }, [open]);
 
@@ -133,6 +123,35 @@ export const OnboardingDialog = ({
   const selectablePeers = peers.filter(
     (p) => p.participant_id !== selfNodeId,
   );
+
+  // Apply the free-text filter (name or address) to the selectable peers.
+  const visiblePeers = selectablePeers.filter((p) => {
+    const q = filter.trim().toLowerCase();
+    if (!q) return true;
+    return (
+      (p.name || p.participant_id).toLowerCase().includes(q) ||
+      `${p.address}:${p.port}`.toLowerCase().includes(q)
+    );
+  });
+
+  const allVisibleSelected =
+    visiblePeers.length > 0 &&
+    visiblePeers.every((p) => selectedPeerIds.has(p.participant_id));
+
+  const toggleAllVisible = () => {
+    setSelectedPeerIds((prev) => {
+      const next = new Set(prev);
+      if (allVisibleSelected) {
+        visiblePeers.forEach((p) => next.delete(p.participant_id));
+      } else {
+        visiblePeers.forEach((p) => next.add(p.participant_id));
+      }
+      return next;
+    });
+  };
+
+  // The filter only earns its space once the list is long enough to scan.
+  const showFilter = selectablePeers.length > 6;
 
   const pollStatus = useCallback(async () => {
     try {
@@ -290,29 +309,83 @@ export const OnboardingDialog = ({
     return Array.from(set);
   })();
 
-  return (
-    <Dialog open={open} onClose={handleClose} maxWidth="sm" fullWidth>
-      <DialogTitle>Create Decentralized Party</DialogTitle>
-      <DialogContent>
-        <Box sx={{ display: "flex", flexDirection: "column", gap: 2, mt: 1 }}>
-          <Typography variant="body2" color="text.secondary">
-            Start the onboarding workflow to create a new decentralized party.
-            This will coordinate with other participants to establish the party
-            topology and namespace definition.
-          </Typography>
+  const controlsDisabled = loading || status?.status === "inprogress";
+  const isStartState =
+    !status?.status || status.status === "idle" || status.status === "failed";
+  const prefixValid =
+    !!partyIdPrefix.trim() && !partyPrefixError(partyIdPrefix.trim());
+  const footerNote =
+    selectedPeerIds.size === 0
+      ? "Select at least one peer"
+      : !prefixValid
+        ? "Enter a party ID prefix"
+        : `${selectedPeerIds.size} ${
+            selectedPeerIds.size === 1 ? "peer" : "peers"
+          } selected`;
 
+  return (
+    <Dialog
+      open={open}
+      onClose={handleClose}
+      maxWidth={false}
+      slotProps={{
+        paper: {
+          sx: {
+            width: 480,
+            maxWidth: "calc(100% - 32px)",
+            maxHeight: "min(90vh, 720px)",
+            borderRadius: "12px",
+            border: "1px solid",
+            borderColor: "divider",
+            backgroundImage: "none",
+            display: "flex",
+            flexDirection: "column",
+          },
+        },
+      }}
+    >
+      {/* Header */}
+      <Box sx={{ p: "24px 24px 0" }}>
+        <Typography
+          component="h2"
+          sx={{ fontSize: 22, fontWeight: 500, letterSpacing: "-0.01em" }}
+        >
+          Create a decentralized party
+        </Typography>
+        <Typography
+          sx={{ fontSize: 13, lineHeight: 1.5, color: "text.secondary", mt: 1 }}
+        >
+          Starts an onboarding workflow that coordinates with the selected peers
+          to establish the party topology and namespace.
+        </Typography>
+      </Box>
+
+      {/* Body — fills the modal; only the peer list scrolls. */}
+      <Box
+        sx={{
+          p: "20px 24px",
+          flex: 1,
+          minHeight: 0,
+          overflow: "hidden",
+          display: "flex",
+          flexDirection: "column",
+          gap: 2.25,
+        }}
+      >
+        <Box sx={{ flexShrink: 0 }}>
           <TextField
-            label="Party ID Prefix"
+            label="Party ID prefix"
             value={partyIdPrefix}
             onChange={(e) => setPartyIdPrefix(e.target.value)}
-            placeholder="e.g., my-network"
+            placeholder="my-network"
             fullWidth
-            disabled={loading || status?.status === "inprogress"}
+            disabled={controlsDisabled}
             error={!!partyPrefixError(partyIdPrefix.trim())}
             helperText={
               partyPrefixError(partyIdPrefix.trim()) ??
-              "A unique identifier prefix for the decentralized party"
+              "Letters, digits, “-” and “_”. Must start with a letter."
             }
+            sx={{ "& input": { fontFamily: "var(--font-mono)" } }}
             slotProps={{
               input: {
                 endAdornment: fieldHelpAdornment(
@@ -322,144 +395,351 @@ export const OnboardingDialog = ({
               },
             }}
           />
-
-          <Divider />
-
-          <Box>
-            <Typography variant="subtitle2" sx={{ mb: 1 }}>
-              Select Peers to Invite
-            </Typography>
-            {loadingPeers ? (
-              <Box sx={{ display: "flex", justifyContent: "center", py: 2 }}>
-                <CircularProgress size={24} />
+          {prefixValid && (
+            <Typography
+              sx={{
+                fontFamily: "var(--font-mono)",
+                fontSize: 12,
+                color: "text.secondary",
+                mt: 1,
+              }}
+            >
+              Party id&nbsp;→&nbsp;
+              <Box component="span" sx={{ color: "text.primary" }}>
+                {partyIdPrefix.trim()}
               </Box>
-            ) : selectablePeers.length === 0 ? (
-              <Typography variant="body2" color="text.secondary">
-                No peers configured. Add peers in the Network Configuration
-                first.
-              </Typography>
-            ) : (
-              <FormGroup>
-                {selectablePeers.map((peer) => (
-                  <FormControlLabel
-                    key={peer.participant_id}
-                    control={
-                      <Checkbox
-                        checked={selectedPeerIds.has(peer.participant_id)}
-                        onChange={() => togglePeer(peer.participant_id)}
-                        disabled={loading || status?.status === "inprogress"}
-                      />
-                    }
-                    label={
-                      <Box>
-                        <Typography variant="body2">
-                          {peer.name || peer.participant_id}
-                        </Typography>
-                        <Typography variant="caption" color="text.secondary">
-                          {peer.address}:{peer.port}
-                        </Typography>
-                      </Box>
-                    }
-                  />
-                ))}
-              </FormGroup>
+              ::
+              <Box component="span" sx={{ color: "text.disabled" }}>
+                &lt;namespace&gt;
+              </Box>
+            </Typography>
+          )}
+        </Box>
+
+        <Box
+          sx={{ height: "1px", bgcolor: "divider", mx: "-24px", flexShrink: 0 }}
+        />
+
+        {/* Peers to invite — this section flexes to fill, the list scrolls. */}
+        <Box sx={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+          <Box
+            sx={{
+              flexShrink: 0,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 1.5,
+            }}
+          >
+            <Typography
+              sx={{
+                fontFamily: "var(--font-mono)",
+                fontSize: 11,
+                fontWeight: 500,
+                letterSpacing: "0.1em",
+                textTransform: "uppercase",
+                color: "text.secondary",
+              }}
+            >
+              Peers to invite
+            </Typography>
+            {selectablePeers.length > 0 && (
+              <Box sx={{ display: "flex", alignItems: "center", gap: 1.5 }}>
+                <Typography
+                  sx={{
+                    fontFamily: "var(--font-mono)",
+                    fontSize: 12,
+                    color: "text.secondary",
+                  }}
+                >
+                  <Box
+                    component="span"
+                    sx={{ color: "var(--accent)", fontWeight: 500 }}
+                  >
+                    {selectedPeerIds.size}
+                  </Box>{" "}
+                  of {selectablePeers.length}
+                </Typography>
+                <Button
+                  variant="text"
+                  size="small"
+                  onClick={toggleAllVisible}
+                  disabled={controlsDisabled || visiblePeers.length === 0}
+                  sx={{ minWidth: 0, p: 0, fontWeight: 500 }}
+                >
+                  {allVisibleSelected ? "Clear" : "Select all"}
+                </Button>
+              </Box>
             )}
           </Box>
 
-          {error && !meshErrors && (
-            <Alert severity="error" onClose={() => setError(null)}>
-              {error}
-            </Alert>
-          )}
-
-          {meshErrors && (
-            <Alert severity="error">
-              {unreachablePeers.length > 0 && (
-                <Box sx={{ mb: meshHoles.length > 0 ? 2 : 0 }}>
-                  <Typography variant="body2" sx={{ fontWeight: 600, mb: 1 }}>
-                    Coordinator can't reach these peers:
-                  </Typography>
-                  <Box component="ul" sx={{ pl: 2.5, m: 0 }}>
-                    {unreachablePeers.map((id) => (
-                      <Typography
-                        component="li"
-                        variant="body2"
-                        key={id}
-                        color="text.secondary"
-                      >
-                        {peerName(id)}
-                      </Typography>
-                    ))}
-                  </Box>
-                  <Typography
-                    variant="caption"
-                    color="text.secondary"
-                    sx={{ display: "block", mt: 0.5 }}
-                  >
-                    Fix the coordinator's network config for each, or check
-                    that the peer is online.
-                  </Typography>
-                </Box>
+          {loadingPeers ? (
+            <Box sx={{ display: "flex", justifyContent: "center", py: 3 }}>
+              <CircularProgress size={22} />
+            </Box>
+          ) : selectablePeers.length === 0 ? (
+            <Typography
+              sx={{ fontSize: 13, color: "text.secondary", mt: 1.5 }}
+            >
+              No peers configured. Add peers in Network Configuration first.
+            </Typography>
+          ) : (
+            <>
+              {showFilter && (
+                <TextField
+                  size="small"
+                  fullWidth
+                  value={filter}
+                  onChange={(e) => setFilter(e.target.value)}
+                  placeholder="Filter by name or address"
+                  disabled={controlsDisabled}
+                  sx={{ mt: 1.5, flexShrink: 0 }}
+                  slotProps={{
+                    input: {
+                      startAdornment: (
+                        <InputAdornment position="start">
+                          <SearchIcon fontSize="small" />
+                        </InputAdornment>
+                      ),
+                    },
+                  }}
+                />
               )}
-              {meshHoles.length > 0 && (
-                <>
-                  <Typography variant="body2" sx={{ fontWeight: 600, mb: 1 }}>
-                    Update network configs:
+              <Box
+                sx={{
+                  mt: 1.25,
+                  flex: 1,
+                  minHeight: 80,
+                  border: "1px solid",
+                  borderColor: "divider",
+                  borderRadius: "8px",
+                  bgcolor: "background.default",
+                  overflowY: "auto",
+                  p: 0.5,
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "4px",
+                }}
+              >
+                {visiblePeers.length === 0 ? (
+                  <Typography
+                    sx={{
+                      fontSize: 13,
+                      color: "text.disabled",
+                      textAlign: "center",
+                      py: 3,
+                    }}
+                  >
+                    No peers match “{filter.trim()}”.
                   </Typography>
-                  <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
-                    {meshHoles.map(({ node, missing }, i) => (
-                      <Box key={i}>
-                        <Typography variant="body2">
-                          On <strong>{peerName(node)}</strong>, add:
-                        </Typography>
-                        <Box component="ul" sx={{ pl: 2.5, m: 0 }}>
-                          {missing.map((toId, j) => (
-                            <Typography
-                              component="li"
-                              variant="body2"
-                              key={j}
-                              color="text.secondary"
-                            >
-                              {peerName(toId)}
-                            </Typography>
-                          ))}
+                ) : (
+                  visiblePeers.map((peer) => {
+                    const sel = selectedPeerIds.has(peer.participant_id);
+                    return (
+                      <Box
+                        key={peer.participant_id}
+                        role="checkbox"
+                        aria-checked={sel}
+                        tabIndex={controlsDisabled ? -1 : 0}
+                        onClick={() =>
+                          !controlsDisabled && togglePeer(peer.participant_id)
+                        }
+                        onKeyDown={(e) => {
+                          if (
+                            (e.key === "Enter" || e.key === " ") &&
+                            !controlsDisabled
+                          ) {
+                            e.preventDefault();
+                            togglePeer(peer.participant_id);
+                          }
+                        }}
+                        sx={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 1.5,
+                          p: "9px 10px",
+                          borderRadius: "6px",
+                          cursor: controlsDisabled ? "default" : "pointer",
+                          opacity: controlsDisabled ? 0.6 : 1,
+                          bgcolor: sel
+                            ? "rgba(214, 58, 15, 0.08)"
+                            : "transparent",
+                          transition: "background-color 0.12s ease-out",
+                          "&:hover": controlsDisabled
+                            ? undefined
+                            : {
+                                bgcolor: sel
+                                  ? "rgba(214, 58, 15, 0.14)"
+                                  : "action.hover",
+                              },
+                        }}
+                      >
+                        <Box
+                          sx={{
+                            flexShrink: 0,
+                            width: 18,
+                            height: 18,
+                            borderRadius: "4px",
+                            border: "1.5px solid",
+                            borderColor: sel ? "var(--accent)" : "text.secondary",
+                            bgcolor: sel ? "var(--accent)" : "transparent",
+                            color: "#fff",
+                            display: "grid",
+                            placeItems: "center",
+                            transition: "0.12s ease-out",
+                          }}
+                        >
+                          {sel && <CheckIcon sx={{ fontSize: 13 }} />}
+                        </Box>
+                        <Box sx={{ flex: 1, minWidth: 0 }}>
+                          <Typography
+                            sx={{ fontSize: 14, fontWeight: 500, lineHeight: 1.3 }}
+                          >
+                            {peer.name || peer.participant_id}
+                          </Typography>
+                          <Typography
+                            sx={{
+                              fontFamily: "var(--font-mono)",
+                              fontSize: 12,
+                              color: "text.secondary",
+                              whiteSpace: "nowrap",
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                            }}
+                          >
+                            {peer.address}:{peer.port}
+                          </Typography>
                         </Box>
                       </Box>
-                    ))}
-                  </Box>
-                </>
-              )}
-              <Typography
-                variant="caption"
-                color="text.secondary"
-                sx={{ display: "block", mt: 1 }}
-              >
-                Then retry.
-              </Typography>
-            </Alert>
-          )}
-
-          {status?.status === "inprogress" && (
-            <Alert severity="info" icon={<CircularProgress size={20} />}>
-              Onboarding workflow in progress... This may take a few minutes.
-            </Alert>
-          )}
-
-          {status?.status === "completed" && (
-            <Alert severity="success">
-              Decentralized party has been successfully created!
-            </Alert>
-          )}
-
-          {status?.status === "failed" && (
-            <Alert severity="error">
-              Onboarding workflow failed: {status.error || "Unknown error"}
-            </Alert>
+                    );
+                  })
+                )}
+              </Box>
+            </>
           )}
         </Box>
-      </DialogContent>
-      <DialogActions>
-        <Button onClick={handleClose} disabled={loading}>
+
+        {error && !meshErrors && (
+          <Alert severity="error" onClose={() => setError(null)}>
+            {error}
+          </Alert>
+        )}
+
+        {meshErrors && (
+          <Alert severity="error">
+            {unreachablePeers.length > 0 && (
+              <Box sx={{ mb: meshHoles.length > 0 ? 2 : 0 }}>
+                <Typography variant="body2" sx={{ fontWeight: 600, mb: 1 }}>
+                  Coordinator can't reach these peers:
+                </Typography>
+                <Box component="ul" sx={{ pl: 2.5, m: 0 }}>
+                  {unreachablePeers.map((id) => (
+                    <Typography
+                      component="li"
+                      variant="body2"
+                      key={id}
+                      color="text.secondary"
+                    >
+                      {peerName(id)}
+                    </Typography>
+                  ))}
+                </Box>
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{ display: "block", mt: 0.5 }}
+                >
+                  Fix the coordinator's network config for each, or check that
+                  the peer is online.
+                </Typography>
+              </Box>
+            )}
+            {meshHoles.length > 0 && (
+              <>
+                <Typography variant="body2" sx={{ fontWeight: 600, mb: 1 }}>
+                  Update network configs:
+                </Typography>
+                <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+                  {meshHoles.map(({ node, missing }, i) => (
+                    <Box key={i}>
+                      <Typography variant="body2">
+                        On <strong>{peerName(node)}</strong>, add:
+                      </Typography>
+                      <Box component="ul" sx={{ pl: 2.5, m: 0 }}>
+                        {missing.map((toId, j) => (
+                          <Typography
+                            component="li"
+                            variant="body2"
+                            key={j}
+                            color="text.secondary"
+                          >
+                            {peerName(toId)}
+                          </Typography>
+                        ))}
+                      </Box>
+                    </Box>
+                  ))}
+                </Box>
+              </>
+            )}
+            <Typography
+              variant="caption"
+              color="text.secondary"
+              sx={{ display: "block", mt: 1 }}
+            >
+              Then retry.
+            </Typography>
+          </Alert>
+        )}
+
+        {status?.status === "inprogress" && (
+          <Alert severity="info" icon={<CircularProgress size={20} />}>
+            Onboarding workflow in progress... This may take a few minutes.
+          </Alert>
+        )}
+
+        {status?.status === "completed" && (
+          <Alert severity="success">
+            Decentralized party has been successfully created!
+          </Alert>
+        )}
+
+        {status?.status === "failed" && (
+          <Alert severity="error">
+            Onboarding workflow failed: {status.error || "Unknown error"}
+          </Alert>
+        )}
+      </Box>
+
+      {/* Footer */}
+      <Box
+        sx={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "flex-end",
+          gap: 1.25,
+          p: "16px 24px",
+          borderTop: "1px solid",
+          borderColor: "divider",
+        }}
+      >
+        {isStartState && selectablePeers.length > 0 && (
+          <Typography
+            sx={{
+              mr: "auto",
+              fontFamily: "var(--font-mono)",
+              fontSize: 12,
+              color: "text.disabled",
+            }}
+          >
+            {footerNote}
+          </Typography>
+        )}
+        <Button
+          onClick={handleClose}
+          disabled={loading}
+          sx={{ color: "text.secondary" }}
+        >
           {status?.status === "completed" ||
           status?.status === "failed" ||
           status?.status === "inprogress"
@@ -474,12 +754,10 @@ export const OnboardingDialog = ({
             disabled={cancelling}
             startIcon={cancelling ? <CircularProgress size={16} /> : undefined}
           >
-            {cancelling ? "Cancelling…" : "Cancel Workflow"}
+            {cancelling ? "Cancelling…" : "Cancel workflow"}
           </Button>
         )}
-        {!status?.status ||
-        status.status === "idle" ||
-        status.status === "failed" ? (
+        {isStartState ? (
           <Button
             onClick={handleStart}
             variant="contained"
@@ -491,10 +769,10 @@ export const OnboardingDialog = ({
               selectedPeerIds.size === 0
             }
           >
-            {loading ? <CircularProgress size={20} /> : "Start Onboarding"}
+            {loading ? <CircularProgress size={20} /> : "Start onboarding"}
           </Button>
         ) : null}
-      </DialogActions>
+      </Box>
     </Dialog>
   );
 };

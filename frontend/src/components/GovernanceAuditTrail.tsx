@@ -293,7 +293,7 @@ export const GovernanceAuditTrail = ({
                 return (
                   <Fragment key={rowKey}>
                     <TableRow sx={zebraRow(idx)}>
-                      <TableCell sx={{ py: 0.5 }}>
+                      <TableCell sx={{ py: 1 }}>
                         <Tooltip title={isExpanded ? "Hide details" : "Show details"}>
                           <IconButton
                             size="small"
@@ -328,7 +328,7 @@ export const GovernanceAuditTrail = ({
                           <Typography
                             variant="body2"
                             sx={{
-                              fontFamily: "monospace",
+                              fontFamily: "var(--font-mono)",
                               fontSize: "0.8rem",
                               whiteSpace: "nowrap",
                               overflow: "hidden",
@@ -355,7 +355,7 @@ export const GovernanceAuditTrail = ({
                     <TableRow>
                       <TableCell
                         colSpan={6}
-                        sx={{ py: 0, border: 0, maxWidth: 0, ...zebraRow(idx) }}
+                        sx={{ py: 0, height: "auto", border: 0, maxWidth: 0, ...zebraRow(idx) }}
                       >
                         <Collapse in={isExpanded} timeout="auto" unmountOnExit>
                           <Box sx={{ p: 2, overflow: "hidden" }}>

@@ -16,7 +16,6 @@ import {
   useMediaQuery,
   useTheme,
 } from "@mui/material";
-import CircleIcon from "@mui/icons-material/Circle";
 import EditIcon from "@mui/icons-material/Edit";
 import DeleteIcon from "@mui/icons-material/Delete";
 import AddIcon from "@mui/icons-material/Add";
@@ -29,6 +28,7 @@ import { useSnackbar } from "../contexts";
 import { zebraRow } from "../styles";
 import { copyToClipboard } from "../clipboard";
 import { fieldHelpAdornment } from "./FieldHelp";
+import { StatusDot } from "./StatusDot";
 import type {
   NetworkConfig,
   Peer,
@@ -91,20 +91,6 @@ export const NetworkConfigAccordion = ({
 
   const getStat = (id: string): ParticipantStatus | undefined =>
     participantStatuses?.find((s) => s.id === id);
-
-  const getStatusColor = (status: ConnectionStatus | undefined): string => {
-    switch (status) {
-      case "Connected":
-        return "success.main";
-      case "CurrentNode":
-        return "primary.main";
-      case "Unreachable":
-      case "HandshakeFailed":
-        return "error.main";
-      default:
-        return "text.disabled";
-    }
-  };
 
   const getStatusTooltip = (status: ConnectionStatus | undefined): string => {
     switch (status) {
@@ -359,7 +345,7 @@ export const NetworkConfigAccordion = ({
 
   return (
     <Box>
-      <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", px: 3, py: 2 }}>
+      <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", px: "var(--content-pad)", py: 2 }}>
             <Typography variant="subtitle1">Peers:</Typography>
             <Box sx={{ display: "flex", gap: 1 }}>
               {selfEntry && (
@@ -414,12 +400,12 @@ export const NetworkConfigAccordion = ({
                     {selfEntry.address}:{selfEntry.port}
                   </TableCell>
                   <TableCell
-                    sx={{ fontFamily: "monospace", fontSize: "0.75rem", py: 1 }}
+                    sx={{ fontFamily: "var(--font-mono)", fontSize: "0.75rem", py: 1 }}
                   >
                     {truncateKey(selfEntry.public_key)}
                   </TableCell>
                   <TableCell
-                    sx={{ fontFamily: "monospace", fontSize: "0.75rem", py: 1, whiteSpace: "nowrap" }}
+                    sx={{ fontFamily: "var(--font-mono)", fontSize: "0.75rem", py: 1, whiteSpace: "nowrap" }}
                   >
                     {getStat(selfEntry.participant_id)?.version ??
                       nodeConfig?.version ??
@@ -432,15 +418,7 @@ export const NetworkConfigAccordion = ({
                 return (
                   <TableRow key={p.participant_id} sx={zebraRow(idx)}>
                     <TableCell sx={{ py: 1 }}>
-                      <Tooltip title={statusTooltip(st)} arrow>
-                        <CircleIcon
-                          sx={{
-                            fontSize: 12,
-                            color: getStatusColor(st?.status),
-                            cursor: "help",
-                          }}
-                        />
-                      </Tooltip>
+                      <StatusDot status={st?.status} title={statusTooltip(st)} />
                     </TableCell>
                     <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>
                       {p.name || truncateParticipantId(p.participant_id)}
@@ -469,12 +447,12 @@ export const NetworkConfigAccordion = ({
                       {p.address}:{p.port}
                     </TableCell>
                     <TableCell
-                      sx={{ fontFamily: "monospace", fontSize: "0.75rem", py: 1 }}
+                      sx={{ fontFamily: "var(--font-mono)", fontSize: "0.75rem", py: 1 }}
                     >
                       {truncateKey(p.public_key)}
                     </TableCell>
                     <TableCell
-                      sx={{ fontFamily: "monospace", fontSize: "0.75rem", py: 1, whiteSpace: "nowrap" }}
+                      sx={{ fontFamily: "var(--font-mono)", fontSize: "0.75rem", py: 1, whiteSpace: "nowrap" }}
                     >
                       {st?.version ?? "—"}
                     </TableCell>

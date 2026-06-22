@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { Fragment, useState, type ReactNode } from "react";
 import {
   Alert,
   Box,
@@ -6,7 +6,6 @@ import {
   Chip,
   CircularProgress,
   IconButton,
-  LinearProgress,
   Skeleton,
   Tooltip,
   Typography,
@@ -19,6 +18,13 @@ import { copyToClipboard } from "../clipboard";
 import { useSnackbar } from "../contexts";
 import { formatActionDetails, formatActionType } from "../governanceFormat";
 import { ExecuteDialog } from "./ExecuteDialog";
+import {
+  ApprovalCard,
+  ConfirmRing,
+  Pill,
+  StatusPill,
+  WorkflowPipeline,
+} from "./viz/ApprovalViz";
 import type {
   CancelConfirmationRequest,
   ConfirmActionRequest,
@@ -171,71 +177,68 @@ const InvitationCard = ({
     (invitation.dar_filenames?.length ?? 0) > 0;
 
   return (
-    <Box
-      sx={{
-        p: 2,
-        border: 1,
-        borderColor: "divider",
-        borderRadius: 2,
-        display: "flex",
-        flexDirection: "column",
-        gap: 1.25,
-      }}
-    >
-      <Box
-        sx={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "flex-start",
-          gap: 1,
-        }}
-      >
-        <Box>
-          <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
-            {invitation.invitation_type} invitation
-          </Typography>
-          <Box sx={{ display: "flex", alignItems: "center", gap: 0.25 }}>
-            <Typography variant="caption" color="text.secondary">
-              from{" "}
-              {invitation.coordinator_name ? (
-                fromLabel
-              ) : (
-                <Box component="span" sx={{ fontFamily: "monospace" }}>
-                  {fromLabel}
-                </Box>
-              )}
-            </Typography>
-            <Tooltip title="Copy sender public key">
-              <IconButton
-                size="small"
-                onClick={async () => {
-                  const ok = await copyToClipboard(invitation.coordinator_pubkey);
-                  showSnackbar(ok ? "Copied to clipboard" : "Failed to copy");
-                }}
-                sx={{ p: 0.25 }}
-              >
-                <ContentCopyIcon sx={{ fontSize: 14 }} />
-              </IconButton>
-            </Tooltip>
-          </Box>
-        </Box>
-        <Typography variant="caption" color="text.secondary">
-          {formatRelativeTime(invitation.received_at)}
-        </Typography>
-      </Box>
-
-      {showMeta && (
+    <ApprovalCard
+      glyph="✉"
+      eyebrow="Invitation"
+      accent
+      pill={<Pill label="Respond" tone="accent" />}
+      time={formatRelativeTime(invitation.received_at)}
+      title={`${invitation.invitation_type} invitation`}
+      facts={
         <Box
           sx={{
             display: "flex",
-            flexDirection: "column",
-            gap: 0.75,
-            px: 1.25,
-            py: 1,
-            bgcolor: "action.hover",
-            borderRadius: 1,
+            alignItems: "center",
+            gap: 0.5,
+            fontSize: 13,
+            color: "text.secondary",
           }}
         >
+          from
+          <Box
+            component="span"
+            sx={{
+              fontFamily: "var(--font-mono)",
+              fontSize: 12,
+              color: "text.primary",
+            }}
+          >
+            {fromLabel}
+          </Box>
+        </Box>
+      }
+      actions={
+        <>
+          <Button
+            variant="text"
+            size="small"
+            onClick={() => respond("decline")}
+            disabled={busy}
+            sx={{ color: "text.secondary" }}
+          >
+            Decline
+          </Button>
+          <Button
+            variant="contained"
+            color="primary"
+            size="small"
+            onClick={() => respond("accept")}
+            disabled={busy}
+            startIcon={busy ? <CircularProgress size={14} /> : undefined}
+          >
+            Accept
+          </Button>
+        </>
+      }
+      detail={
+        showMeta ? (
+          <Box
+            sx={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 0.75,
+            }}
+          >
           {invitation.prefix && (
             <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
               <Typography
@@ -264,7 +267,7 @@ const InvitationCard = ({
                 variant="caption"
                 onClick={() => onSelectParty(invitation.dec_party_id!)}
                 sx={{
-                  fontFamily: "monospace",
+                  fontFamily: "var(--font-mono)",
                   color: "primary.main",
                   cursor: "pointer",
                   "&:hover": { textDecoration: "underline" },
@@ -285,7 +288,7 @@ const InvitationCard = ({
               </Typography>
               <Typography
                 variant="body2"
-                sx={{ fontWeight: 600, fontFamily: "monospace" }}
+                sx={{ fontWeight: 600, fontFamily: "var(--font-mono)" }}
               >
                 {truncatePartyId(invitation.kicked_participant)}
               </Typography>
@@ -392,31 +395,10 @@ const InvitationCard = ({
               </Box>
             </Box>
           )}
-        </Box>
-      )}
-
-      <Box sx={{ display: "flex", gap: 1, justifyContent: "flex-end" }}>
-        <Button
-          variant="text"
-          color="inherit"
-          size="small"
-          onClick={() => respond("decline")}
-          disabled={busy}
-        >
-          Deny
-        </Button>
-        <Button
-          variant="outlined"
-          color="primary"
-          size="small"
-          onClick={() => respond("accept")}
-          disabled={busy}
-          startIcon={busy ? <CircularProgress size={14} /> : undefined}
-        >
-          Accept
-        </Button>
-      </Box>
-    </Box>
+          </Box>
+        ) : undefined
+      }
+    />
   );
 };
 
@@ -546,261 +528,256 @@ const ActionCard = ({
     }
   };
 
+  const details = formatActionDetails(action.action, party.threshold);
+  const sorted = [...action.confirmations].sort(
+    (a, b) => (a.created_at ?? 0) - (b.created_at ?? 0),
+  );
+  const proposerCid = sorted[0]?.contract_id;
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const needsYou = action.can_execute || !ownConfirmation;
+
   return (
-    <Box
-      sx={{
-        p: 2,
-        border: 1,
-        borderColor: "divider",
-        borderRadius: 2,
-        display: "flex",
-        flexDirection: "column",
-        gap: 1,
-      }}
-    >
-      <Box
-        sx={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "flex-start",
-          gap: 1,
-        }}
-      >
-        <Box sx={{ display: "flex", flexDirection: "column", gap: 0.25 }}>
-          <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
-            {formatActionType(action.action)}
-          </Typography>
-          <Box sx={{ display: "flex", alignItems: "baseline", gap: 0.5 }}>
-            <Typography variant="caption" color="text.secondary">
-              on
-            </Typography>
-            <Typography
+    <>
+      <ApprovalCard
+        glyph="⬡"
+        eyebrow="Governance"
+        accent={needsYou}
+        pill={
+          <Pill
+            label={
+              action.can_execute
+                ? "Ready to execute"
+                : ownConfirmation
+                  ? "Awaiting others"
+                  : "Your vote needed"
+            }
+            tone={needsYou ? "accent" : "neutral"}
+          />
+        }
+        time={
+          action.last_confirmation_at
+            ? formatRelativeTime(action.last_confirmation_at)
+            : undefined
+        }
+        title={formatActionType(action.action)}
+        facts={
+          <Box
+            sx={{
+              display: "flex",
+              alignItems: "center",
+              gap: 0.5,
+              fontSize: 13,
+              color: "text.secondary",
+            }}
+          >
+            on
+            <Box
               component="span"
-              variant="caption"
               onClick={() => onSelectParty(party.partyId)}
               sx={{
-                fontFamily: "monospace",
-                color: "primary.main",
+                fontFamily: "var(--font-mono)",
+                fontSize: 12,
+                color: "text.primary",
+                bgcolor: "action.hover",
+                borderRadius: "6px",
+                px: 0.75,
+                py: 0.25,
                 cursor: "pointer",
-                "&:hover": { textDecoration: "underline" },
+                "&:hover": { color: "primary.main" },
               }}
             >
               {truncatePartyId(party.partyId)}
-            </Typography>
-          </Box>
-        </Box>
-        {action.last_confirmation_at ? (
-          <Typography variant="caption" color="text.secondary">
-            {formatRelativeTime(action.last_confirmation_at)}
-          </Typography>
-        ) : null}
-      </Box>
-
-      {(() => {
-        const details = formatActionDetails(action.action, party.threshold);
-        if (details.length === 0) return null;
-        return (
-          <Box
-            sx={{
-              display: "flex",
-              flexDirection: "column",
-              gap: 0.75,
-              px: 1.25,
-              py: 1,
-              bgcolor: "action.hover",
-              borderRadius: 1,
-            }}
-          >
-            {details.map((d, i) => (
-              <Box
-                key={i}
-                sx={{ display: "flex", alignItems: "baseline", gap: 1 }}
-              >
-                <Typography
-                  variant="caption"
-                  color="text.secondary"
-                  sx={{ minWidth: 96 }}
-                >
-                  {d.label}
-                </Typography>
-                {d.before !== undefined ? (
-                  <Typography variant="body2">
-                    <Box
-                      component="span"
-                      sx={{ color: "text.secondary", textDecoration: "line-through" }}
-                    >
-                      {d.before}
-                    </Box>{" "}
-                    →{" "}
-                    <Box component="span" sx={{ fontWeight: 600 }}>
-                      {d.after}
-                    </Box>
-                  </Typography>
-                ) : (
-                  <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                    {d.after}
-                  </Typography>
-                )}
-              </Box>
-            ))}
-          </Box>
-        );
-      })()}
-
-      {action.confirmations.length > 0 && (() => {
-        const sorted = [...action.confirmations].sort(
-          (a, b) => (a.created_at ?? 0) - (b.created_at ?? 0),
-        );
-        const proposerCid = sorted[0]?.contract_id;
-        const nowSeconds = Math.floor(Date.now() / 1000);
-        return (
-          <Box
-            sx={{
-              display: "flex",
-              alignItems: "baseline",
-              gap: 1,
-              px: 1.25,
-              py: 1,
-              bgcolor: "action.hover",
-              borderRadius: 1,
-            }}
-          >
-            <Typography
-              variant="caption"
-              color="text.secondary"
-              sx={{ minWidth: 96 }}
-            >
-              Confirmed by
-            </Typography>
-            <Box sx={{ display: "flex", flexDirection: "column", gap: 0.25 }}>
-              {sorted.map((c) => {
-                const isOwn = c.confirming_party === party.memberPartyId;
-                const isProposer = c.contract_id === proposerCid;
-                const isExpired =
-                  (c.expires_at ?? 0) > 0 && (c.expires_at ?? 0) <= nowSeconds;
-                return (
-                  <Box
-                    key={c.contract_id}
-                    sx={{ display: "flex", alignItems: "center", gap: 0.5 }}
-                  >
-                    <Typography
-                      variant="caption"
-                      sx={{
-                        fontFamily: "monospace",
-                        color: isExpired
-                          ? "text.disabled"
-                          : isOwn
-                            ? "primary.main"
-                            : "text.primary",
-                        textDecoration: isExpired ? "line-through" : "none",
-                      }}
-                    >
-                      {truncatePartyId(c.confirming_party)}
-                      {isOwn ? " (you)" : ""}
-                    </Typography>
-                    {isProposer && (
-                      <Chip
-                        label="proposer"
-                        size="small"
-                        variant="outlined"
-                        sx={{
-                          height: 18,
-                          "& .MuiChip-label": {
-                            px: 0.75,
-                            fontSize: 10,
-                            lineHeight: 1,
-                          },
-                        }}
-                      />
-                    )}
-                    {isExpired && (
-                      <Chip
-                        label="expired"
-                        size="small"
-                        variant="outlined"
-                        color="warning"
-                        sx={{
-                          height: 18,
-                          "& .MuiChip-label": {
-                            px: 0.75,
-                            fontSize: 10,
-                            lineHeight: 1,
-                          },
-                        }}
-                      />
-                    )}
-                    {!isOwn && !isProposer && isExpired && (
-                      <Tooltip title="Expire confirmation">
-                        <span>
-                          <IconButton
-                            size="small"
-                            onClick={() => handleExpire(c.contract_id)}
-                            disabled={busy || !party.rulesContractId}
-                            sx={{ p: 0.25 }}
-                          >
-                            <TimerOffIcon sx={{ fontSize: 14 }} />
-                          </IconButton>
-                        </span>
-                      </Tooltip>
-                    )}
-                  </Box>
-                );
-              })}
             </Box>
           </Box>
-        );
-      })()}
-
-      <Box
-        sx={{
-          display: "flex",
-          gap: 1,
-          alignItems: "center",
-          justifyContent: "flex-end",
-        }}
-      >
-        <Chip
-          label={`${action.confirmation_count} / ${party.threshold} confirmed`}
-          size="small"
-          color={action.can_execute ? "success" : "default"}
-          variant={action.can_execute ? "filled" : "outlined"}
-        />
-        {ownConfirmation ? (
-          <Button
-            size="small"
-            variant="outlined"
-            color="warning"
-            onClick={handleRevoke}
-            disabled={busy}
-          >
-            Revoke
-          </Button>
-        ) : (
-          <Button
-            size="small"
-            variant="outlined"
-            onClick={handleConfirm}
-            disabled={busy || !party.rulesContractId}
-          >
-            Confirm
-          </Button>
-        )}
-        {action.can_execute && (
-          <Button
-            size="small"
-            variant="outlined"
-            color="success"
-            onClick={() => {
-              setExecuteError(null);
-              setExecuteDialogOpen(true);
-            }}
-            disabled={busy || !party.rulesContractId}
-          >
-            Execute
-          </Button>
-        )}
-      </Box>
-
+        }
+        footerLeft={
+          <ConfirmRing
+            count={action.confirmation_count}
+            threshold={party.threshold}
+            canExecute={action.can_execute}
+          />
+        }
+        actions={
+          <>
+            {ownConfirmation ? (
+              <Button
+                size="small"
+                variant="outlined"
+                color="warning"
+                onClick={handleRevoke}
+                disabled={busy}
+              >
+                Revoke
+              </Button>
+            ) : (
+              <Button
+                size="small"
+                variant="contained"
+                onClick={handleConfirm}
+                disabled={busy || !party.rulesContractId}
+              >
+                Confirm
+              </Button>
+            )}
+            {action.can_execute && (
+              <Button
+                size="small"
+                variant="contained"
+                color="success"
+                onClick={() => {
+                  setExecuteError(null);
+                  setExecuteDialogOpen(true);
+                }}
+                disabled={busy || !party.rulesContractId}
+              >
+                Execute
+              </Button>
+            )}
+          </>
+        }
+        detail={
+          details.length > 0 || action.confirmations.length > 0 ? (
+            <>
+              {details.length > 0 && (
+                <Box
+                  sx={{
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 0.5,
+                    mb: action.confirmations.length > 0 ? 2 : 0,
+                  }}
+                >
+                  {details.map((d, i) => (
+                    <Box
+                      key={i}
+                      sx={{ display: "flex", alignItems: "baseline", gap: 1 }}
+                    >
+                      <Typography
+                        variant="caption"
+                        color="text.secondary"
+                        sx={{ minWidth: 96 }}
+                      >
+                        {d.label}
+                      </Typography>
+                      {d.before !== undefined ? (
+                        <Typography variant="body2">
+                          <Box
+                            component="span"
+                            sx={{
+                              color: "text.disabled",
+                              textDecoration: "line-through",
+                            }}
+                          >
+                            {d.before}
+                          </Box>{" "}
+                          →{" "}
+                          <Box component="span" sx={{ fontWeight: 600 }}>
+                            {d.after}
+                          </Box>
+                        </Typography>
+                      ) : (
+                        <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                          {d.after}
+                        </Typography>
+                      )}
+                    </Box>
+                  ))}
+                </Box>
+              )}
+              {action.confirmations.length > 0 && (
+                <Typography
+                  sx={{
+                    fontFamily: "var(--font-mono)",
+                    fontSize: 10,
+                    letterSpacing: "0.12em",
+                    textTransform: "uppercase",
+                    color: "text.secondary",
+                    mb: 1,
+                  }}
+                >
+                  Confirmations · {action.confirmation_count} of {party.threshold}
+                </Typography>
+              )}
+              <Box sx={{ display: "flex", flexDirection: "column", gap: 0.5 }}>
+                {sorted.map((c) => {
+                  const isOwn = c.confirming_party === party.memberPartyId;
+                  const isProposer = c.contract_id === proposerCid;
+                  const isExpired =
+                    (c.expires_at ?? 0) > 0 &&
+                    (c.expires_at ?? 0) <= nowSeconds;
+                  return (
+                    <Box
+                      key={c.contract_id}
+                      sx={{ display: "flex", alignItems: "center", gap: 0.75 }}
+                    >
+                      <Typography
+                        variant="caption"
+                        sx={{
+                          fontFamily: "var(--font-mono)",
+                          color: isExpired
+                            ? "text.disabled"
+                            : isOwn
+                              ? "primary.main"
+                              : "text.primary",
+                          textDecoration: isExpired ? "line-through" : "none",
+                        }}
+                      >
+                        {truncatePartyId(c.confirming_party)}
+                        {isOwn ? " (you)" : ""}
+                      </Typography>
+                      {isProposer && (
+                        <Chip
+                          label="proposer"
+                          size="small"
+                          variant="outlined"
+                          sx={{
+                            height: 18,
+                            "& .MuiChip-label": {
+                              px: 0.75,
+                              fontSize: 10,
+                              lineHeight: 1,
+                            },
+                          }}
+                        />
+                      )}
+                      {isExpired && (
+                        <Chip
+                          label="expired"
+                          size="small"
+                          variant="outlined"
+                          color="warning"
+                          sx={{
+                            height: 18,
+                            "& .MuiChip-label": {
+                              px: 0.75,
+                              fontSize: 10,
+                              lineHeight: 1,
+                            },
+                          }}
+                        />
+                      )}
+                      {!isOwn && !isProposer && isExpired && (
+                        <Tooltip title="Expire confirmation">
+                          <span>
+                            <IconButton
+                              size="small"
+                              onClick={() => handleExpire(c.contract_id)}
+                              disabled={busy || !party.rulesContractId}
+                              sx={{ p: 0.25 }}
+                            >
+                              <TimerOffIcon sx={{ fontSize: 14 }} />
+                            </IconButton>
+                          </span>
+                        </Tooltip>
+                      )}
+                    </Box>
+                  );
+                })}
+              </Box>
+            </>
+          ) : undefined
+        }
+      />
       <ExecuteDialog
         open={executeDialogOpen}
         onClose={() => setExecuteDialogOpen(false)}
@@ -810,7 +787,7 @@ const ActionCard = ({
         error={executeError}
         onErrorDismiss={() => setExecuteError(null)}
       />
-    </Box>
+    </>
   );
 };
 
@@ -935,51 +912,128 @@ const DomainActionCard = ({
       "Proposal executed",
     );
 
+  const isTransfer =
+    !!domainAction.transfer_details || !!domainAction.accept_transfer_details;
+  const latestConfirm = domainAction.confirmations.reduce(
+    (max, c) => Math.max(max, c.created_at ?? 0),
+    0,
+  );
+  const needsYou =
+    domainAction.can_execute || !!domainAction.orphaned || !ownConfirmation;
+
   return (
-    <Box
-      sx={{
-        p: 2,
-        border: 1,
-        borderColor: "divider",
-        borderRadius: 2,
-        display: "flex",
-        flexDirection: "column",
-        gap: 1,
-      }}
-    >
-      <Box
-        sx={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "flex-start",
-          gap: 1,
-        }}
-      >
-        <Box sx={{ display: "flex", flexDirection: "column", gap: 0.25 }}>
-          <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
-            {domainAction.action_label}
-          </Typography>
-          <Box sx={{ display: "flex", alignItems: "baseline", gap: 0.5 }}>
-            <Typography variant="caption" color="text.secondary">
-              on
-            </Typography>
-            <Typography
-              component="span"
-              variant="caption"
-              onClick={() => onSelectParty(party.partyId)}
-              sx={{
-                fontFamily: "monospace",
-                color: "primary.main",
-                cursor: "pointer",
-                "&:hover": { textDecoration: "underline" },
-              }}
-            >
-              {truncatePartyId(party.partyId)}
-            </Typography>
+    <ApprovalCard
+      glyph={isTransfer ? "₿" : "⬡"}
+      eyebrow={isTransfer ? "Transfer" : "Governance"}
+      accent={needsYou}
+      pill={
+        <Pill
+          label={
+            domainAction.orphaned
+              ? "Orphaned"
+              : domainAction.can_execute
+                ? "Ready to execute"
+                : ownConfirmation
+                  ? "Awaiting others"
+                  : "Your vote needed"
+          }
+          tone={
+            domainAction.orphaned
+              ? "danger"
+              : domainAction.can_execute || !ownConfirmation
+                ? "accent"
+                : "neutral"
+          }
+        />
+      }
+      time={latestConfirm > 0 ? formatRelativeTime(latestConfirm) : undefined}
+      title={domainAction.action_label}
+      facts={
+        <Box
+          sx={{
+            display: "flex",
+            alignItems: "center",
+            gap: 0.5,
+            fontSize: 13,
+            color: "text.secondary",
+          }}
+        >
+          on
+          <Box
+            component="span"
+            onClick={() => onSelectParty(party.partyId)}
+            sx={{
+              fontFamily: "var(--font-mono)",
+              fontSize: 12,
+              color: "text.primary",
+              bgcolor: "action.hover",
+              borderRadius: "6px",
+              px: 0.75,
+              py: 0.25,
+              cursor: "pointer",
+              "&:hover": { color: "primary.main" },
+            }}
+          >
+            {truncatePartyId(party.partyId)}
           </Box>
         </Box>
-        <Chip label="proposal" size="small" variant="outlined" />
-      </Box>
+      }
+      footerLeft={
+        <ConfirmRing
+          count={domainAction.confirmation_count}
+          threshold={party.threshold}
+          canExecute={domainAction.can_execute}
+        />
+      }
+      actions={
+        domainAction.orphaned ? (
+          <Button
+            size="small"
+            variant="outlined"
+            color="warning"
+            onClick={handleDismissOrphan}
+            disabled={busy || !party.rulesContractId}
+          >
+            Dismiss
+          </Button>
+        ) : (
+          <>
+            {ownConfirmation ? (
+              <Button
+                size="small"
+                variant="outlined"
+                color="warning"
+                onClick={handleRevoke}
+                disabled={busy}
+              >
+                Revoke
+              </Button>
+            ) : (
+              <Button
+                size="small"
+                variant="contained"
+                onClick={handleConfirm}
+                disabled={busy || !party.rulesContractId}
+              >
+                Confirm
+              </Button>
+            )}
+            {domainAction.can_execute && (
+              <Button
+                size="small"
+                variant="contained"
+                color="success"
+                onClick={handleExecute}
+                disabled={busy || !party.rulesContractId}
+              >
+                Execute
+              </Button>
+            )}
+          </>
+        )
+      }
+      detail={
+        <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
 
       {domainAction.orphaned && (
         <Alert severity="warning" sx={{ py: 0.5 }}>
@@ -1208,7 +1262,7 @@ const DomainActionCard = ({
         <Typography
           variant="caption"
           color="text.secondary"
-          sx={{ fontFamily: "monospace" }}
+          sx={{ fontFamily: "var(--font-mono)" }}
         >
           {domainAction.proposal_cid.slice(0, 16)}…
         </Typography>
@@ -1265,7 +1319,7 @@ const DomainActionCard = ({
                     <Typography
                       variant="caption"
                       sx={{
-                        fontFamily: "monospace",
+                        fontFamily: "var(--font-mono)",
                         color: isExpired
                           ? "text.disabled"
                           : isOwn
@@ -1330,94 +1384,22 @@ const DomainActionCard = ({
         );
       })()}
 
-      <Box
-        sx={{
-          display: "flex",
-          gap: 1,
-          alignItems: "center",
-          justifyContent: "flex-end",
-        }}
-      >
-        <Chip
-          label={`${domainAction.confirmation_count} / ${party.threshold} confirmed`}
-          size="small"
-          color={domainAction.can_execute ? "success" : "default"}
-          variant={domainAction.can_execute ? "filled" : "outlined"}
-        />
-        {domainAction.orphaned ? (
-          <Button
-            size="small"
-            variant="outlined"
-            color="warning"
-            onClick={handleDismissOrphan}
-            disabled={busy || !party.rulesContractId}
-          >
-            Dismiss
-          </Button>
-        ) : (
-          <>
-            {ownConfirmation ? (
-              <Button
-                size="small"
-                variant="outlined"
-                color="warning"
-                onClick={handleRevoke}
-                disabled={busy}
-              >
-                Revoke
-              </Button>
-            ) : (
-              <Button
-                size="small"
-                variant="outlined"
-                onClick={handleConfirm}
-                disabled={busy || !party.rulesContractId}
-              >
-                Confirm
-              </Button>
-            )}
-            {domainAction.can_execute && (
-              <Button
-                size="small"
-                variant="outlined"
-                color="success"
-                onClick={handleExecute}
-                disabled={busy || !party.rulesContractId}
-              >
-                Execute
-              </Button>
-            )}
-          </>
-        )}
-      </Box>
-    </Box>
+        </Box>
+      }
+    />
   );
 };
-
-type FeedEntry =
-  | { kind: "invitation"; ts: number; invitation: PendingInvitation }
-  | {
-      kind: "action";
-      ts: number;
-      party: PartyActions;
-      action: GovernanceAction;
-    }
-  | {
-      kind: "domain_action";
-      ts: number;
-      party: PartyActions;
-      domainAction: DomainGovernanceAction;
-    }
-  | { kind: "workflow"; ts: number; run: WorkflowRun };
 
 const WorkflowRunCard = ({
   run,
   onAfter,
   onSelectParty,
+  compact = false,
 }: {
   run: WorkflowRun;
   onAfter: () => void;
   onSelectParty: (partyId: string) => void;
+  compact?: boolean;
 }) => {
   const [busy, setBusy] = useState(false);
   const { showSnackbar } = useSnackbar();
@@ -1507,26 +1489,6 @@ const WorkflowRunCard = ({
     }
   };
 
-  const statusLabel =
-    run.status === "inprogress"
-      ? "in progress"
-      : run.status === "completed"
-        ? "completed"
-        : run.status === "failed"
-          ? "failed"
-          : run.status === "cancelled"
-            ? "cancelled"
-            : run.status;
-
-  const statusColor: "default" | "success" | "error" | "warning" | "info" =
-    run.status === "completed"
-      ? "success"
-      : run.status === "failed"
-        ? "error"
-        : run.status === "cancelled"
-          ? "warning"
-          : "info";
-
   const fromLine = run.role === "Coordinator"
     ? "started by you"
     : run.coordinator_name
@@ -1535,115 +1497,160 @@ const WorkflowRunCard = ({
         ? `from ${run.coordinator_pubkey.slice(0, 12)}…${run.coordinator_pubkey.slice(-6)}`
         : null;
 
-
-  return (
-    <Box
-      sx={{
-        p: 2,
-        border: 1,
-        borderColor: "divider",
-        borderRadius: 2,
-        display: "flex",
-        flexDirection: "column",
-        gap: 1.25,
-      }}
-    >
+  // Terminal runs collapse to a single dense row in the Completed section.
+  if (compact) {
+    return (
       <Box
         sx={{
           display: "flex",
-          justifyContent: "space-between",
-          alignItems: "flex-start",
-          gap: 1,
+          alignItems: "center",
+          gap: 1.5,
+          p: "9px 14px",
+          border: "1px solid",
+          borderColor: "divider",
+          borderRadius: "8px",
+          bgcolor: "background.paper",
         }}
       >
-        <Box>
-          <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
-            <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
-              {run.kind} workflow
-            </Typography>
-            {run.prefix && (
-              <Chip
-                label={run.prefix}
-                size="small"
-                variant="outlined"
-                sx={{ height: 20 }}
-              />
-            )}
-          </Box>
+        <Box
+          component="span"
+          sx={{
+            color: "text.disabled",
+            fontFamily: "var(--font-mono)",
+            fontSize: 13,
+            flexShrink: 0,
+          }}
+        >
+          ◆
+        </Box>
+        <Typography sx={{ fontSize: 14, fontWeight: 500, whiteSpace: "nowrap" }}>
+          {run.kind} workflow
+        </Typography>
+        <Typography
+          sx={{
+            fontFamily: "var(--font-mono)",
+            fontSize: 12,
+            color: "text.secondary",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            minWidth: 0,
+          }}
+        >
+          {run.prefix ||
+            (run.dec_party_id ? truncatePartyId(run.dec_party_id) : fromLine || "")}
+        </Typography>
+        <Box sx={{ flex: 1, minWidth: 8 }} />
+        <StatusPill status={run.status} />
+        <Typography
+          sx={{
+            fontFamily: "var(--font-mono)",
+            fontSize: 12,
+            color: "text.secondary",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {formatRelativeTime(run.updated_at)}
+        </Typography>
+        {run.status === "failed" && run.role === "Coordinator" && (
+          <Button
+            variant="text"
+            size="small"
+            onClick={retry}
+            disabled={busy}
+            sx={{ minWidth: 0 }}
+          >
+            Retry
+          </Button>
+        )}
+        <Button
+          variant="text"
+          size="small"
+          onClick={dismiss}
+          disabled={busy}
+          sx={{ minWidth: 0, color: "text.secondary" }}
+        >
+          Dismiss
+        </Button>
+      </Box>
+    );
+  }
+
+  return (
+    <ApprovalCard
+      glyph="◆"
+      eyebrow={`Workflow · ${run.kind}`}
+      pill={<StatusPill status={run.status} />}
+      time={formatRelativeTime(run.updated_at)}
+      title={
+        run.prefix ? `${run.kind} workflow · ${run.prefix}` : `${run.kind} workflow`
+      }
+      facts={
+        <>
           {fromLine && (
-            <Typography variant="caption" color="text.secondary">
+            <Typography sx={{ fontSize: 13, color: "text.secondary" }}>
               {fromLine}
             </Typography>
           )}
-        </Box>
-        <Box
-          sx={{
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "flex-end",
-            gap: 0.5,
-          }}
-        >
-          <Chip label={statusLabel} size="small" color={statusColor} />
-          <Typography variant="caption" color="text.secondary">
-            {formatRelativeTime(run.updated_at)}
-          </Typography>
-        </Box>
-      </Box>
-
-      {(isInProgress ||
+          {isInProgress && run.step_total > 0 && (
+            <Box sx={{ mt: fromLine ? 1.25 : 0 }}>
+              <WorkflowPipeline
+                current={run.step_index}
+                total={run.step_total}
+                label={run.current_step}
+              />
+            </Box>
+          )}
+        </>
+      }
+      actions={
+        <>
+          {isInProgress && run.role === "Coordinator" && (
+            <Button
+              variant="outlined"
+              color="error"
+              size="small"
+              onClick={cancel}
+              disabled={busy}
+              startIcon={busy ? <CircularProgress size={14} /> : undefined}
+            >
+              Cancel workflow
+            </Button>
+          )}
+          {run.status === "failed" && run.role === "Coordinator" && (
+            <Button
+              variant="outlined"
+              color="primary"
+              size="small"
+              onClick={retry}
+              disabled={busy}
+              startIcon={busy ? <CircularProgress size={14} /> : undefined}
+            >
+              Retry
+            </Button>
+          )}
+          {isTerminal && (
+            <Button
+              variant="text"
+              color="inherit"
+              size="small"
+              onClick={dismiss}
+              disabled={busy}
+            >
+              Dismiss
+            </Button>
+          )}
+        </>
+      }
+      detail={
         run.error ||
         run.dec_party_id ||
         run.new_threshold != null ||
         run.kicked_participant ||
         (run.participants && run.participants.length > 0) ||
         (run.package_names && run.package_names.length > 0) ||
-        (run.dar_filenames && run.dar_filenames.length > 0)) && (
-        <Box
-          sx={{
-            display: "flex",
-            flexDirection: "column",
-            gap: 0.75,
-            px: 1.25,
-            py: 1,
-            bgcolor: "action.hover",
-            borderRadius: 1,
-          }}
-        >
-          {isInProgress && run.step_total > 0 && (
-            <Box
-              sx={{
-                display: "flex",
-                flexDirection: "column",
-                gap: 0.5,
-              }}
-            >
-              <Box
-                sx={{
-                  display: "flex",
-                  alignItems: "baseline",
-                  gap: 1,
-                  justifyContent: "space-between",
-                }}
-              >
-                <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                  {run.current_step}
-                </Typography>
-                <Typography variant="caption" color="text.secondary">
-                  {run.step_index + 1} / {run.step_total}
-                </Typography>
-              </Box>
-              <LinearProgress
-                variant="determinate"
-                value={Math.min(
-                  100,
-                  ((run.step_index + 1) / run.step_total) * 100,
-                )}
-                color="primary"
-                sx={{ height: 6, borderRadius: 3 }}
-              />
-            </Box>
-          )}
+        (run.dar_filenames && run.dar_filenames.length > 0) ? (
+          <Box sx={{ display: "flex", flexDirection: "column", gap: 0.75 }}>
           {run.dec_party_id && (
             <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
               <Typography
@@ -1658,7 +1665,7 @@ const WorkflowRunCard = ({
                 variant="caption"
                 onClick={() => onSelectParty(run.dec_party_id!)}
                 sx={{
-                  fontFamily: "monospace",
+                  fontFamily: "var(--font-mono)",
                   color: "primary.main",
                   cursor: "pointer",
                   "&:hover": { textDecoration: "underline" },
@@ -1679,7 +1686,7 @@ const WorkflowRunCard = ({
               </Typography>
               <Typography
                 variant="body2"
-                sx={{ fontWeight: 600, fontFamily: "monospace" }}
+                sx={{ fontWeight: 600, fontFamily: "var(--font-mono)" }}
               >
                 {truncatePartyId(run.kicked_participant)}
               </Typography>
@@ -1805,47 +1812,10 @@ const WorkflowRunCard = ({
               </Typography>
             </Box>
           )}
-        </Box>
-      )}
-
-      <Box sx={{ display: "flex", gap: 1, justifyContent: "flex-end" }}>
-        {isInProgress && run.role === "Coordinator" && (
-          <Button
-            variant="outlined"
-            color="error"
-            size="small"
-            onClick={cancel}
-            disabled={busy}
-            startIcon={busy ? <CircularProgress size={14} /> : undefined}
-          >
-            Cancel Workflow
-          </Button>
-        )}
-        {run.status === "failed" && run.role === "Coordinator" && (
-          <Button
-            variant="outlined"
-            color="primary"
-            size="small"
-            onClick={retry}
-            disabled={busy}
-            startIcon={busy ? <CircularProgress size={14} /> : undefined}
-          >
-            Retry
-          </Button>
-        )}
-        {isTerminal && (
-          <Button
-            variant="text"
-            color="inherit"
-            size="small"
-            onClick={dismiss}
-            disabled={busy}
-          >
-            Dismiss
-          </Button>
-        )}
-      </Box>
-    </Box>
+          </Box>
+        ) : undefined
+      }
+    />
   );
 };
 
@@ -1859,6 +1829,14 @@ export const NotificationsView = ({
   onWorkflowsChanged,
   onSelectParty,
 }: NotificationsViewProps) => {
+  const [statusFilter, setStatusFilter] = useState<
+    "all" | "you" | "prog" | "done"
+  >("all");
+  const [typeFilter, setTypeFilter] = useState<"all" | "gov" | "wf" | "inv">(
+    "all",
+  );
+  const [doneCollapsed, setDoneCollapsed] = useState(true);
+
   if (loading) {
     return (
       <Box sx={{ display: "flex", flexDirection: "column", gap: 1, p: 3 }}>
@@ -1869,43 +1847,109 @@ export const NotificationsView = ({
     );
   }
 
-  const feed: FeedEntry[] = [
-    ...pendingInvitations.map<FeedEntry>((invitation) => ({
-      kind: "invitation",
+  // ── Categorize every feed item by what it needs from the operator ──
+  type Group = "you" | "prog" | "done";
+  type Kind = "gov" | "wf" | "inv";
+  interface Entry {
+    key: string;
+    group: Group;
+    kind: Kind;
+    ts: number;
+    node: ReactNode;
+  }
+
+  const entries: Entry[] = [];
+
+  for (const invitation of pendingInvitations) {
+    entries.push({
+      key: `inv-${invitation.id}`,
+      group: "you",
+      kind: "inv",
       ts: invitation.received_at,
-      invitation,
-    })),
-    ...partyActions.flatMap<FeedEntry>((party) =>
-      party.actions.map((action) => ({
-        kind: "action",
+      node: (
+        <InvitationCard
+          invitation={invitation}
+          onAfter={onInvitationsChanged}
+          onSelectParty={onSelectParty}
+        />
+      ),
+    });
+  }
+
+  for (const party of partyActions) {
+    for (const action of party.actions) {
+      const ownConfirmed = action.confirmations.some(
+        (c) => c.confirming_party === party.memberPartyId,
+      );
+      entries.push({
+        key: `act-${party.partyId}-${action.action_hash}`,
+        // Needs you: you can execute it, or you haven't confirmed yet.
+        // In progress: you confirmed and it's waiting on the others.
+        group: action.can_execute || !ownConfirmed ? "you" : "prog",
+        kind: "gov",
         ts: action.last_confirmation_at ?? 0,
-        party,
-        action,
-      })),
-    ),
-    ...partyActions.flatMap<FeedEntry>((party) =>
-      party.domainActions.map((domainAction) => ({
-        kind: "domain_action",
-        // Domain proposals don't carry a server-side timestamp; fall back to
-        // the latest confirmation we know about, then 0 for unconfirmed
-        // proposals (they sort to the bottom of the feed).
+        node: (
+          <ActionCard
+            party={party}
+            action={action}
+            onAfter={onActionsChanged}
+            onSelectParty={onSelectParty}
+          />
+        ),
+      });
+    }
+    for (const domainAction of party.domainActions) {
+      const ownConfirmed = domainAction.confirmations.some(
+        (c) => c.confirming_party === party.memberPartyId,
+      );
+      entries.push({
+        key: `dom-${party.partyId}-${domainAction.proposal_cid}`,
+        // Orphaned proposals can only be expired — still your cleanup to do.
+        group:
+          domainAction.can_execute || domainAction.orphaned || !ownConfirmed
+            ? "you"
+            : "prog",
+        kind: "gov",
         ts: domainAction.confirmations.reduce(
           (max, c) => Math.max(max, c.created_at ?? 0),
           0,
         ),
-        party,
-        domainAction,
-      })),
-    ),
-    ...workflowRuns.map<FeedEntry>((run) => ({
-      kind: "workflow",
-      ts: run.updated_at,
-      run,
-    })),
-  ];
-  feed.sort((a, b) => b.ts - a.ts);
+        node: (
+          <DomainActionCard
+            party={party}
+            domainAction={domainAction}
+            onAfter={onActionsChanged}
+            onSelectParty={onSelectParty}
+          />
+        ),
+      });
+    }
+  }
 
-  if (feed.length === 0) {
+  for (const run of workflowRuns) {
+    const terminal =
+      run.status === "completed" ||
+      run.status === "failed" ||
+      run.status === "cancelled";
+    entries.push({
+      key: `wf-${run.instance_name}`,
+      group: terminal ? "done" : "prog",
+      kind: "wf",
+      ts: run.updated_at,
+      node: (
+        <WorkflowRunCard
+          run={run}
+          onAfter={onWorkflowsChanged}
+          onSelectParty={onSelectParty}
+          compact={terminal}
+        />
+      ),
+    });
+  }
+
+  entries.sort((a, b) => b.ts - a.ts);
+
+  if (entries.length === 0) {
     return (
       <Box sx={{ p: 4, textAlign: "center" }}>
         <Typography variant="body2" color="text.secondary">
@@ -1915,48 +1959,229 @@ export const NotificationsView = ({
     );
   }
 
+  // Each chip's count reflects the *other* active filter dimension.
+  const byKind = entries.filter(
+    (e) => typeFilter === "all" || e.kind === typeFilter,
+  );
+  const groupCount: Record<"all" | Group, number> = {
+    all: byKind.length,
+    you: byKind.filter((e) => e.group === "you").length,
+    prog: byKind.filter((e) => e.group === "prog").length,
+    done: byKind.filter((e) => e.group === "done").length,
+  };
+
+  const grouped: Record<Group, Entry[]> = { you: [], prog: [], done: [] };
+  for (const e of entries) {
+    if (statusFilter !== "all" && statusFilter !== e.group) continue;
+    if (typeFilter !== "all" && typeFilter !== e.kind) continue;
+    grouped[e.group].push(e);
+  }
+  const anyVisible =
+    grouped.you.length + grouped.prog.length + grouped.done.length > 0;
+
+  const statusChips: { key: "all" | Group; label: string }[] = [
+    { key: "all", label: "All" },
+    { key: "you", label: "Needs you" },
+    { key: "prog", label: "In progress" },
+    { key: "done", label: "Completed" },
+  ];
+  const typeChips: { key: "all" | Kind; label: string }[] = [
+    { key: "all", label: "All" },
+    { key: "gov", label: "Governance" },
+    { key: "wf", label: "Workflows" },
+    { key: "inv", label: "Invitations" },
+  ];
+  const sections: { group: Group; label: string }[] = [
+    { group: "you", label: "Needs your action" },
+    { group: "prog", label: "In progress" },
+    { group: "done", label: "Completed" },
+  ];
+
   return (
-    <Box sx={{ display: "flex", flexDirection: "column", gap: 1, p: 3 }}>
-      {feed.map((entry) => {
-        if (entry.kind === "invitation") {
-          return (
-            <InvitationCard
-              key={`inv-${entry.invitation.id}`}
-              invitation={entry.invitation}
-              onAfter={onInvitationsChanged}
-              onSelectParty={onSelectParty}
-            />
-          );
-        }
-        if (entry.kind === "workflow") {
-          return (
-            <WorkflowRunCard
-              key={`wf-${entry.run.instance_name}`}
-              run={entry.run}
-              onAfter={onWorkflowsChanged}
-              onSelectParty={onSelectParty}
-            />
-          );
-        }
-        if (entry.kind === "domain_action") {
-          return (
-            <DomainActionCard
-              key={`dom-${entry.party.partyId}-${entry.domainAction.proposal_cid}`}
-              party={entry.party}
-              domainAction={entry.domainAction}
-              onAfter={onActionsChanged}
-              onSelectParty={onSelectParty}
-            />
-          );
-        }
+    <Box sx={{ py: 3, px: "var(--content-pad)" }}>
+      <Box
+        sx={{
+          position: "sticky",
+          top: 0,
+          zIndex: 5,
+          display: "flex",
+          flexWrap: "wrap",
+          alignItems: "center",
+          gap: 1,
+          py: 1.5,
+          mb: 1,
+          bgcolor: "background.default",
+          borderBottom: "1px solid",
+          borderColor: "divider",
+        }}
+      >
+        <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1 }}>
+          {statusChips.map((c) => {
+            const active = statusFilter === c.key;
+            return (
+              <Box
+                component="button"
+                key={c.key}
+                onClick={() => setStatusFilter(c.key)}
+                sx={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 0.75,
+                  fontFamily: "inherit",
+                  fontSize: 13,
+                  fontWeight: 500,
+                  color: active ? "text.primary" : "text.secondary",
+                  bgcolor: active
+                    ? "rgba(214, 58, 15, 0.08)"
+                    : "background.paper",
+                  border: "1px solid",
+                  borderColor: active ? "var(--accent)" : "divider",
+                  borderRadius: "8px",
+                  px: 1.5,
+                  py: 0.75,
+                  cursor: "pointer",
+                  transition: "color .15s, border-color .15s, background .15s",
+                  "&:hover": { color: "text.primary" },
+                }}
+              >
+                {c.label}
+                <Box
+                  component="span"
+                  sx={{
+                    fontFamily: "var(--font-mono)",
+                    fontSize: 12,
+                    fontWeight: 600,
+                    color:
+                      c.key === "you"
+                        ? "var(--accent)"
+                        : active
+                          ? "text.primary"
+                          : "text.disabled",
+                  }}
+                >
+                  {groupCount[c.key]}
+                </Box>
+              </Box>
+            );
+          })}
+        </Box>
+        <Box sx={{ flex: 1, minWidth: 8 }} />
+        <Box sx={{ display: "flex", gap: 0.75 }}>
+          {typeChips.map((c) => {
+            const active = typeFilter === c.key;
+            return (
+              <Box
+                component="button"
+                key={c.key}
+                onClick={() => setTypeFilter(c.key)}
+                sx={{
+                  fontFamily: "var(--font-mono)",
+                  fontSize: 12,
+                  letterSpacing: "0.04em",
+                  textTransform: "uppercase",
+                  color: active ? "text.primary" : "text.disabled",
+                  bgcolor: active ? "background.paper" : "transparent",
+                  border: "1px solid",
+                  borderColor: active ? "text.disabled" : "divider",
+                  borderRadius: "6px",
+                  px: 1.1,
+                  py: 0.65,
+                  cursor: "pointer",
+                  transition: "color .15s, border-color .15s",
+                }}
+              >
+                {c.label}
+              </Box>
+            );
+          })}
+        </Box>
+      </Box>
+
+      {!anyVisible && (
+        <Typography
+          variant="body2"
+          color="text.secondary"
+          sx={{ textAlign: "center", py: 6 }}
+        >
+          Nothing matches these filters.
+        </Typography>
+      )}
+
+      {sections.map(({ group, label }) => {
+        if (statusFilter !== "all" && statusFilter !== group) return null;
+        if (grouped[group].length === 0) return null;
+        const collapsible = group === "done";
+        const collapsed =
+          collapsible && doneCollapsed && statusFilter !== "done";
         return (
-          <ActionCard
-            key={`act-${entry.party.partyId}-${entry.action.action_hash}`}
-            party={entry.party}
-            action={entry.action}
-            onAfter={onActionsChanged}
-            onSelectParty={onSelectParty}
-          />
+          <Box key={group} sx={{ mt: 3 }}>
+            <Box
+              onClick={
+                collapsible ? () => setDoneCollapsed((v) => !v) : undefined
+              }
+              sx={{
+                display: "flex",
+                alignItems: "center",
+                gap: 1.25,
+                mb: 1.5,
+                cursor: collapsible ? "pointer" : "default",
+              }}
+            >
+              {collapsible && (
+                <Box
+                  component="span"
+                  sx={{
+                    display: "flex",
+                    alignItems: "center",
+                    fontFamily: "var(--font-mono)",
+                    fontSize: 11,
+                    lineHeight: 1,
+                    color: "text.disabled",
+                  }}
+                >
+                  {collapsed ? "▸" : "▾"}
+                </Box>
+              )}
+              <Typography
+                component="h2"
+                sx={{
+                  fontFamily: "var(--font-mono)",
+                  fontSize: 11,
+                  fontWeight: 500,
+                  letterSpacing: "0.12em",
+                  textTransform: "uppercase",
+                  m: 0,
+                  lineHeight: 1,
+                  color: group === "you" ? "var(--accent)" : "text.secondary",
+                }}
+              >
+                {label}
+              </Typography>
+              <Box
+                component="span"
+                sx={{
+                  fontFamily: "var(--font-mono)",
+                  fontSize: 11,
+                  fontWeight: 600,
+                  color: "text.secondary",
+                  bgcolor: "action.hover",
+                  borderRadius: "20px",
+                  px: 1,
+                  py: 0.25,
+                }}
+              >
+                {groupCount[group]}
+              </Box>
+              <Box sx={{ flex: 1, height: "1px", bgcolor: "divider" }} />
+            </Box>
+            {!collapsed && (
+              <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+                {grouped[group].map((e) => (
+                  <Fragment key={e.key}>{e.node}</Fragment>
+                ))}
+              </Box>
+            )}
+          </Box>
         );
       })}
     </Box>

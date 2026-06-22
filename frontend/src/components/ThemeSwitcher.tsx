@@ -4,13 +4,18 @@ import DarkModeIcon from "@mui/icons-material/DarkMode";
 import SettingsBrightnessIcon from "@mui/icons-material/SettingsBrightness";
 import { useThemeMode } from "../contexts";
 
-export const ThemeSwitcher = () => {
+interface ThemeSwitcherProps {
+  orientation?: "horizontal" | "vertical";
+}
+
+export const ThemeSwitcher = ({ orientation = "horizontal" }: ThemeSwitcherProps) => {
   const { mode, setMode } = useThemeMode();
 
   return (
     <ToggleButtonGroup
       value={mode}
       exclusive
+      orientation={orientation}
       onChange={(_, newMode) => newMode && setMode(newMode)}
       size="small"
       sx={{
