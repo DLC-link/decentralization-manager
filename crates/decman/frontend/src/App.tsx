@@ -635,6 +635,7 @@ const App = () => {
           buildInfo={buildInfo}
           collapsed={sidebarCollapsed}
           onToggleCollapsed={() => setSidebarCollapsed((c) => !c)}
+          network={nodeConfig?.canton.network}
         />
       ) : (
         <Header buildInfo={buildInfo} />
