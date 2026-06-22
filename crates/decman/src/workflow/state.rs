@@ -61,17 +61,23 @@ pub struct WorkflowState<S> {
     current_step: RwLock<S>,
     /// Expected peer IDs
     expected_peers: HashSet<CantonId>,
-    /// How many expected peers must connect / complete a peer-gated step
-    /// before the workflow advances.
+    /// How many expected peers must connect before the workflow leaves the
+    /// initial `WaitingForPeers` step (the **start** gate only).
     ///
-    /// `None` means *all* expected peers are required (the original
-    /// behaviour, kept for onboarding — which defines the party's owner set,
-    /// so every invitee must take part). `Some(k)` advances as soon as `k`
-    /// peers have acted, so an operation on an existing M-of-N party proceeds
-    /// on a quorum instead of stalling on an absent owner. `k` is the number
-    /// of *peers* needed: the coordinator always participates itself, so for a
-    /// party threshold `M` this is `M - 1` (resolved and clamped by the
-    /// caller in `NoiseServer::new`).
+    /// `None` means *all* expected peers must connect first (the original
+    /// behaviour). `Some(k)` starts the workflow as soon as `k` peers have
+    /// connected, so it no longer blocks on a slow/absent owner before the
+    /// coordinator begins — `k` is the number of *peers* needed, and since the
+    /// coordinator participates itself a party threshold `M` resolves to
+    /// `M - 1` (computed and clamped by the caller in `NoiseServer::new`).
+    ///
+    /// This deliberately does **not** lower the per-step signing gate
+    /// (`peer_completed`): a peer-gated step still waits for every expected
+    /// peer. Advancing the signing step at a bare quorum means the coordinator
+    /// would call `execute_submission_and_wait_for_transaction` with only a
+    /// quorum of signatures, and Canton's finalization never completes — the
+    /// run hangs (reproduced as a 240s contracts timeout in CI). Gathering all
+    /// signatures keeps finalization identical to the require-all path.
     peer_threshold: Option<usize>,
     /// Peers that have connected (transient — not persisted, recoverable
     /// via Noise reconnect after a restart)
@@ -160,15 +166,19 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
         *self.current_step.read().await
     }
 
-    /// Number of expected peers that must connect / complete the current step
-    /// before the workflow advances. `peer_threshold` is `None` for workflows
-    /// that require every invitee (onboarding); otherwise it is the resolved,
-    /// pre-clamped quorum size. Never exceeds the expected-peer count, so a
-    /// `>=` comparison against it is equivalent to the original `== all` check
-    /// when `None`.
-    fn peers_required(&self) -> usize {
+    /// Number of expected peers that must connect before the workflow leaves
+    /// `WaitingForPeers`. `None` (and the no-peer case) require all expected
+    /// peers; otherwise the threshold is clamped into `[1, total]`. Clamping
+    /// up to 1 is load-bearing: the gate is only ever evaluated from a peer
+    /// connect event, so a `0` requirement could never be tripped and would
+    /// hang the wait — `[1, total]` keeps it reachable and never above the
+    /// peers that can actually connect.
+    fn start_peers_required(&self) -> usize {
         let total = self.expected_peers.len();
-        self.peer_threshold.map_or(total, |k| k.min(total))
+        match self.peer_threshold {
+            Some(k) if total > 0 => k.clamp(1, total),
+            _ => total,
+        }
     }
 
     pub async fn store_peer_data(&self, peer_id: CantonId, data: Vec<u8>) {
@@ -191,11 +201,11 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
     }
 
     pub async fn peer_connected(&self, peer_id: CantonId) {
-        // Guard against non-expected peers. The auto-advance gate below counts
-        // connections against `peers_required()`, so counting a peer that isn't
-        // in the expected set (stale, duplicate, or re-onboarded) could trip the
-        // gate with the wrong peers — advancing the workflow toward a quorum it
-        // didn't actually reach. Expected peers behave exactly as before.
+        // Guard against non-expected peers. The start gate below counts
+        // connections against `start_peers_required()`, so counting a peer that
+        // isn't in the expected set (stale, duplicate, or re-onboarded) could
+        // trip the gate with the wrong peers — starting the workflow before the
+        // intended quorum is present. Expected peers behave exactly as before.
         if !self.expected_peers.contains(&peer_id) {
             tracing::warn!(
                 "ignoring connect from unexpected peer {peer_id} (not in expected set for {})",
@@ -212,7 +222,7 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
         }
 
         let connected_count = connected.len();
-        let required = self.peers_required();
+        let required = self.start_peers_required();
         let total_count = self.expected_peers.len();
         tracing::info!(
             "Peer connected: {peer_id} ({connected_count}/{total_count}, need {required} to start)"
@@ -234,11 +244,11 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
     }
 
     pub async fn peer_completed(&self, peer_id: CantonId) {
-        // Guard against non-expected peers. The auto-advance gate below counts
-        // completions against `peers_required()`, so counting a peer that isn't
-        // in the expected set (stale, duplicate, or re-onboarded) could trip the
-        // gate with the wrong peers — advancing the workflow toward a quorum it
-        // didn't actually reach. Expected peers behave exactly as before.
+        // Guard against non-expected peers. The auto-advance gate below uses
+        // `expected_peers.len()` as the total, so counting a peer that isn't in
+        // the expected set (stale, duplicate, or re-onboarded) could trip the
+        // gate without all expected peers having acted — advancing the workflow
+        // with a missing signature. Expected peers behave exactly as before.
         if !self.expected_peers.contains(&peer_id) {
             tracing::warn!(
                 "ignoring step completion from unexpected peer {peer_id} (not in expected set for {})",
@@ -252,12 +262,13 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
 
         let current = self.current_step.read().await;
         let completed_count = completed.len();
-        let required = self.peers_required();
+        // The signing gate requires EVERY expected peer — see `peer_threshold`.
+        // The start-gate quorum deliberately does not apply here: executing a
+        // step with only a quorum of signatures stalls Canton finalization.
         let total_count = self.expected_peers.len();
         let step_name = format!("{current:?}");
         tracing::info!(
-            "Peer completed step {step_name}: {peer_id} \
-             ({completed_count}/{total_count}, need {required})"
+            "Peer completed step {step_name}: {peer_id} ({completed_count}/{total_count})"
         );
 
         // Persist the new completed-peers set. Failures here are logged
@@ -267,7 +278,7 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
         let completed_vec: Vec<CantonId> = completed.iter().cloned().collect();
         self.persist_step_progress(*current, completed_vec).await;
 
-        if current.requires_peers() && completed_count >= required {
+        if current.requires_peers() && completed_count == total_count {
             drop(current);
             drop(completed);
             self.advance_step().await;
@@ -612,9 +623,10 @@ mod tests {
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]
-    async fn peer_completed_advances_at_threshold(pool: SqlitePool) {
-        // Same quorum-of-one setup, but for a peer-gated step: one completion is
-        // enough to advance even though a second peer was invited.
+    async fn signing_gate_still_requires_all_peers_despite_start_threshold(pool: SqlitePool) {
+        // The start threshold must NOT lower the per-step signing gate: even
+        // with `Some(1)`, a peer-gated step waits for every expected peer so
+        // the coordinator gathers all signatures before executing.
         let state = WorkflowState::new(
             pool,
             "test-run".to_string(),
@@ -624,26 +636,29 @@ mod tests {
         );
 
         state.peer_completed(peer(1)).await;
-        assert_eq!(state.current_step().await, TestStep::Done);
-    }
-
-    #[sqlx::test(migrator = "MIGRATOR")]
-    async fn threshold_above_peer_count_clamps_to_all(pool: SqlitePool) {
-        // A threshold larger than the available peers is clamped to the peer
-        // count, so the gate behaves like the require-all path: the first
-        // completion must not advance, only the last one does.
-        let state = WorkflowState::new(
-            pool,
-            "test-run".to_string(),
-            TestStep::Sign,
-            vec![peer(1), peer(2)],
-            Some(5),
-        );
-
-        state.peer_completed(peer(1)).await;
         assert_eq!(state.current_step().await, TestStep::Sign);
 
         state.peer_completed(peer(2)).await;
         assert_eq!(state.current_step().await, TestStep::Done);
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn start_threshold_above_peer_count_clamps_to_all(pool: SqlitePool) {
+        // A start threshold larger than the available peers clamps to the peer
+        // count, so the start gate behaves like require-all: the first connect
+        // must not start the workflow, only the last one does.
+        let state = WorkflowState::new(
+            pool,
+            "test-run".to_string(),
+            TestStep::WaitPeers,
+            vec![peer(1), peer(2)],
+            Some(5),
+        );
+
+        state.peer_connected(peer(1)).await;
+        assert_eq!(state.current_step().await, TestStep::WaitPeers);
+
+        state.peer_connected(peer(2)).await;
+        assert_eq!(state.current_step().await, TestStep::Sign);
     }
 }
