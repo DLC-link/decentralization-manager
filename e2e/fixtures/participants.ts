@@ -1,5 +1,20 @@
-import { expect, type Browser, type Page } from "@playwright/test";
+import { expect, type Browser, type Page, type Locator } from "@playwright/test";
 import { getAuthConfig, fetchRopcTokens, seedAuth } from "./auth.js";
+
+// Click a workflow-start submit button (in a dialog that closes on success),
+// retrying the transient "Another workflow is already running" 409 — the
+// coordinator allows one in-flight workflow at a time and the guard releases
+// just after the prior run's card flips to completed. A persistent error (e.g.
+// a real mesh hole / bad config) keeps the dialog open and surfaces on timeout.
+export async function submitAndAwaitClose(dialog: Locator, submitName: string | RegExp) {
+  const btn = dialog.getByRole("button", { name: submitName });
+  await expect(btn).toBeEnabled({ timeout: 15_000 });
+  await expect(async () => {
+    if (await dialog.isHidden()) return;
+    await btn.click();
+    await expect(dialog).toBeHidden({ timeout: 8_000 });
+  }).toPass({ timeout: 90_000, intervals: [3000, 3000, 5000] });
+}
 
 export const PORTS = { p1: 8081, p2: 8082, p3: 8083 } as const;
 

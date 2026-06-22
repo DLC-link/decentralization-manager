@@ -1,7 +1,7 @@
 import { test, expect, type Page } from "@playwright/test";
 import {
   openParticipants, gotoTab, acceptInvitation, acceptInvitationOnAny, expectWorkflowCompleted,
-  resolvePartyId, PORTS,
+  resolvePartyId, submitAndAwaitClose, PORTS,
 } from "../fixtures/participants.js";
 import { getAuthConfig, fetchRopcTokens } from "../fixtures/auth.js";
 
@@ -99,18 +99,9 @@ test.describe.serial("governance happy path", () => {
         if (await boxes.nth(i).isChecked()) await boxes.nth(i).uncheck();
       }
     }
-    const start = dialog.getByRole("button", { name: "Start Onboarding" });
-    await expect(start).toBeEnabled({ timeout: 15_000 });
-    // On success the handler closes the dialog (OnboardingDialog.tsx:221). Back-to-back
-    // onboardings can transiently 409 ("Another workflow is already running…") because the
-    // coordinator's in-flight guard releases just after the prior run's card shows completed;
-    // re-clicking Start re-submits once the guard frees. A persistent error (e.g. a real mesh
-    // hole) keeps failing and surfaces when this times out.
-    await expect(async () => {
-      if (await dialog.isHidden()) return;
-      await start.click();
-      await expect(dialog).toBeHidden({ timeout: 8_000 });
-    }).toPass({ timeout: 90_000, intervals: [3000, 3000, 5000] });
+    // On success the handler closes the dialog (OnboardingDialog.tsx:221); retry the
+    // transient back-to-back 409 until it starts.
+    await submitAndAwaitClose(dialog, "Start Onboarding");
   }
 
   test("01 two-member party (coordinator + exactly one peer)", async () => {
@@ -166,11 +157,10 @@ test.describe.serial("governance happy path", () => {
     await parts.p1.getByRole("button", { name: "Distribute DARs" }).click();
     dialog = parts.p1.getByRole("dialog");
     await dialog.locator('input[type="file"]').setInputFiles(dars);
-    await dialog.getByRole("button", { name: "Distribute DARs" }).click();
     // Distribute, like onboarding, starts the workflow and closes the dialog
-    // (DarsDialog.tsx:231). Peers then accept; completion (DARs vetted on peers)
-    // is verified by the peer-DAR comparison in phase 04.
-    await expect(dialog).toBeHidden({ timeout: 30_000 });
+    // (DarsDialog.tsx:231) — and can transiently 409 right after onboarding, so
+    // retry. Peers then accept; completion is verified by phase 04's comparison.
+    await submitAndAwaitClose(dialog, "Distribute DARs");
     await acceptInvitation(parts.p2, /Dars/);
     await acceptInvitation(parts.p3, /Dars/);
   });
@@ -187,29 +177,47 @@ test.describe.serial("governance happy path", () => {
     });
   });
 
+  // Filter the (100+ party) list by full prefix and open that party's detail.
+  async function openParty(page: Page, prefix: string) {
+    await gotoTab(page, "Parties");
+    const filter = page.getByPlaceholder(/Filter by full prefix/i);
+    await filter.fill(prefix);
+    await filter.press("Enter");
+    await page.getByRole("row", { name: new RegExp(prefix) }).click();
+  }
+
   test("05 deploy governance core", async () => {
-    test.skip(!shared.partyId, "no party from phase 02");
+    // Falls back to env vars so this phase can be iterated standalone against an
+    // already-onboarded party (E2E_PARTY_ID + E2E_PARTY_PREFIX).
+    const partyId = shared.partyId ?? process.env.E2E_PARTY_ID;
+    const partyPrefix = shared.partyPrefix ?? process.env.E2E_PARTY_PREFIX;
+    test.skip(!partyId || !partyPrefix, "no party (run phase 02, or set E2E_PARTY_ID + E2E_PARTY_PREFIX)");
 
     // (a+b) Setup: party-config + grant-rights on all 3 nodes (API, mirrors IT).
-    await configurePartyForGovCore(shared.partyId!);
+    await configurePartyForGovCore(partyId!);
 
     // (c) Deploy Governance Core via the UI (ContractsDialog). The gov-core card
     //     is enabled because the governance-core DAR was distributed in phase 03.
-    await gotoTab(parts.p1, "Parties");
-    await parts.p1.getByRole("row", { name: new RegExp(shared.partyPrefix!) }).click();
+    await openParty(parts.p1, partyPrefix!);
     await parts.p1.getByRole("button", { name: "Deploy Contracts" }).click();
     const dialog = parts.p1.getByRole("dialog");
     await dialog.getByText("Governance Core").click();        // the gov-core card
-    await dialog.getByRole("button", { name: "Deploy Contracts" }).click();
+    // Deploy starts the Contracts workflow and closes the dialog; retry the
+    // transient back-to-back 409 until it starts.
+    await submitAndAwaitClose(dialog, "Deploy Contracts");
 
     await acceptInvitation(parts.p2, /Contracts/);
     await acceptInvitation(parts.p3, /Contracts/);
-    await expectWorkflowCompleted(parts.p1, /Contracts/, shared.partyPrefix!);
+    await expectWorkflowCompleted(parts.p1, /Contracts/, partyPrefix!);
 
     // Gov-core rules now exist → PartyDetail exposes "New Proposal" (IT's
-    // GovernanceRules-visible assertion, expressed through the UI). Needed by phase 06.
-    await gotoTab(parts.p1, "Parties");
-    await parts.p1.getByRole("row", { name: new RegExp(shared.partyPrefix!) }).click();
-    await expect(parts.p1.getByRole("button", { name: /New Proposal/i })).toBeVisible({ timeout: 60_000 });
+    // GovernanceRules-visible assertion, expressed through the UI; needed by phase 06).
+    // The detail view can lag the just-created GovernanceRules contract, so reload +
+    // re-open until it surfaces.
+    await expect(async () => {
+      await parts.p1.reload();
+      await openParty(parts.p1, partyPrefix!);
+      await expect(parts.p1.getByRole("button", { name: /New Proposal/i })).toBeVisible({ timeout: 10_000 });
+    }).toPass({ timeout: 120_000, intervals: [5000, 5000, 10_000] });
   });
 });
