@@ -1,6 +1,5 @@
 import {
   Box,
-  Chip,
   IconButton,
   Table,
   TableBody,
@@ -73,13 +72,18 @@ export const PartyList = ({
       <Table size="small">
         <TableHead>
           <TableRow>
-            <TableCell sx={{ py: 1 }}>Party ID</TableCell>
-            <TableCell sx={{ py: 1 }} align="center">Threshold</TableCell>
-            <TableCell sx={{ py: 1 }} align="center">Owners</TableCell>
-            <TableCell sx={{ py: 1 }} align="center">Participants</TableCell>
-            <TableCell sx={{ py: 1 }} align="center">Contracts</TableCell>
-            <TableCell sx={{ py: 1 }} align="center">Auth</TableCell>
+            <TableCell sx={{ py: 1 }} aria-hidden />
+            <TableCell sx={{ py: 1, width: "1%", whiteSpace: "nowrap" }}>
+              Party ID
+            </TableCell>
+            <TableCell
+              sx={{ py: 1, width: "1%", whiteSpace: "nowrap", pl: 4 }}
+              align="center"
+            >
+              Auth
+            </TableCell>
             <TableCell sx={{ py: 1, width: 56 }} align="center" />
+            <TableCell sx={{ py: 1 }} aria-hidden />
           </TableRow>
         </TableHead>
         <TableBody>
@@ -102,40 +106,25 @@ export const PartyList = ({
                   if (e.key === "Enter") onSelectParty(party.party_id);
                 }}
               >
-                <TableCell sx={{ py: 1 }}>
+                <TableCell sx={{ py: 1 }} aria-hidden />
+                <TableCell sx={{ py: 1, width: "1%", whiteSpace: "nowrap" }}>
                   <CopyableText
                     text={party.party_id}
                     truncate={{
                       start: party.party_id.indexOf("::") + 18,
                       end: 16,
                     }}
+                    expandOnWide
                     variant="body2"
                   />
                 </TableCell>
-                <TableCell sx={{ py: 1 }} align="center">
-                  {party.threshold}
-                </TableCell>
-                <TableCell sx={{ py: 1 }} align="center">
-                  {party.owners.length}
-                </TableCell>
-                <TableCell sx={{ py: 1 }} align="center">
-                  {party.participants.length}
-                </TableCell>
-                <TableCell sx={{ py: 1 }} align="center">
-                  {party.contracts ? (
-                    <Chip
-                      label={party.contracts.length}
-                      size="small"
-                      color={party.contracts.length > 0 ? "primary" : "default"}
-                    />
-                  ) : (
-                    "-"
-                  )}
-                </TableCell>
-                <TableCell sx={{ py: 1 }} align="center">
+                <TableCell
+                  sx={{ py: 1, width: "1%", whiteSpace: "nowrap", pl: 4 }}
+                  align="center"
+                >
                   <AuthStatusIcon status={auth} />
                 </TableCell>
-                <TableCell sx={{ py: 1 }} align="center">
+                <TableCell sx={{ py: 1, width: 56 }} align="center">
                   <Tooltip title={hidden ? "Unhide party" : "Hide party"}>
                     <IconButton
                       size="small"
@@ -153,6 +142,7 @@ export const PartyList = ({
                     </IconButton>
                   </Tooltip>
                 </TableCell>
+                <TableCell sx={{ py: 1 }} aria-hidden />
               </TableRow>
             );
           })}
