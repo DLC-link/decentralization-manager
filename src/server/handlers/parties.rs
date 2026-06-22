@@ -622,6 +622,38 @@ pub async fn store_parties_to_db(
     Commitable::commit(tx).await
 }
 
+/// Build the `list_party_to_participant` request used to discover this node's
+/// decentralized parties.
+///
+/// `filter_participant` is always set to this node's participant id so the query
+/// is scoped to parties hosted here. Without it the synchronizer returns every
+/// party-to-participant mapping on the whole network, which on mainnet exceeds
+/// the gRPC decode limit. We only ever care about decentralized parties this
+/// node hosts, and every party we co-own lists our participant as a host, so the
+/// scope loses nothing. An optional party-id `prefix_filter` narrows on top.
+fn build_party_to_participant_request(
+    synchronizer_id: &str,
+    prefix_filter: Option<&str>,
+    participant_id: &str,
+) -> ListPartyToParticipantRequest {
+    ListPartyToParticipantRequest {
+        base_query: Some(BaseQuery {
+            store: Some(StoreId {
+                store: Some(store_id::Store::Synchronizer(Synchronizer {
+                    kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.to_string())),
+                })),
+            }),
+            proposals: false,
+            operation: 0,
+            time_query: Some(base_query::TimeQuery::HeadState(())),
+            filter_signed_key: String::new(),
+            protocol_version: None,
+        }),
+        filter_party: prefix_filter.unwrap_or_default().to_string(),
+        filter_participant: participant_id.to_string(),
+    }
+}
+
 /// Fetch decentralized parties from Canton topology and ledger APIs
 pub async fn fetch_decentralized_parties(
     config: &NodeConfig,
@@ -681,24 +713,14 @@ pub async fn fetch_decentralized_parties(
         .await?
         .into_inner();
 
-    // Query P2P mappings with optional party prefix filter
+    // Query P2P mappings, scoped to parties hosted on this participant — see
+    // `build_party_to_participant_request` for why the participant filter matters.
     let p2p_response = topology_client
-        .list_party_to_participant(tonic::Request::new(ListPartyToParticipantRequest {
-            base_query: Some(BaseQuery {
-                store: Some(StoreId {
-                    store: Some(store_id::Store::Synchronizer(Synchronizer {
-                        kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.clone())),
-                    })),
-                }),
-                proposals: false,
-                operation: 0,
-                time_query: Some(base_query::TimeQuery::HeadState(())),
-                filter_signed_key: String::new(),
-                protocol_version: None,
-            }),
-            filter_party: prefix_filter.unwrap_or_default().to_string(),
-            filter_participant: String::new(),
-        }))
+        .list_party_to_participant(tonic::Request::new(build_party_to_participant_request(
+            &synchronizer_id,
+            prefix_filter,
+            &config.participant_id().to_string(),
+        )))
         .await?
         .into_inner();
 
@@ -1233,5 +1255,31 @@ mod tests {
             peer_error_kind_from_noise_err(&err),
             PeerErrorKind::Other
         ));
+    }
+
+    #[test]
+    fn party_to_participant_request_scopes_to_local_participant() {
+        // The core of the mainnet fix: with no prefix filter the request must
+        // still be scoped to this participant, so it doesn't scan every party
+        // on the synchronizer and overflow the gRPC decode limit.
+        let request =
+            build_party_to_participant_request("sync::physical", None, "participant::abc123");
+
+        assert_eq!(request.filter_participant, "participant::abc123");
+        assert_eq!(request.filter_party, "");
+    }
+
+    #[test]
+    fn party_to_participant_request_composes_prefix_with_participant() {
+        // A caller-supplied party prefix must narrow on top of the participant
+        // scope, not replace it.
+        let request = build_party_to_participant_request(
+            "sync::physical",
+            Some("alice"),
+            "participant::abc123",
+        );
+
+        assert_eq!(request.filter_participant, "participant::abc123");
+        assert_eq!(request.filter_party, "alice");
     }
 }
