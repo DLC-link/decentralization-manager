@@ -3248,7 +3248,7 @@ export const GovernanceSection = ({
                           variant="caption"
                           color="text.secondary"
                           sx={{
-                            fontFamily: "monospace",
+                            fontFamily: "var(--font-mono)",
                             wordBreak: "break-all",
                           }}
                         >

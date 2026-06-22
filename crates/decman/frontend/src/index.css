@@ -1,7 +1,15 @@
 :root {
-  font-family: "Space Grotesk", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-family: "Space Grotesk", system-ui, -apple-system, "Segoe UI", sans-serif;
   line-height: 1.5;
   font-weight: 400;
+
+  /* Roboto Mono carries every number, address and machine-readable string. */
+  --font-mono: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* BitSafe action accent — see the bitsafe-design skill. */
+  --accent: #d63a0f;
+  --accent-hover: #c03d10;
+  --accent-press: #a82e08;
 
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -11,11 +19,11 @@
 
 html {
   scroll-behavior: smooth;
-  background-color: #f3f3f3;
+  background-color: #faf9f8;
 }
 
 html.dark {
-  background-color: #1a1a1a;
+  background-color: #0f0e0d;
 }
 
 html, body {
