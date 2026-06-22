@@ -232,14 +232,14 @@ const getDesignTokens = (mode: "light" | "dark") => {
             // row carries a copy button / chip or just text. Cells that must
             // opt out (e.g. collapsible detail rows) set `height: "auto"`.
             height: 48,
-            // On large monitors inset the leading/trailing cell content so the
-            // table content pulls together toward a ~1300px column, while the
-            // row rules and zebra fills still run full-bleed (edge to edge).
+            // Leading/trailing cell content lines up with the rest of the UI
+            // via the shared --content-pad token; row rules and zebra fills
+            // still run full-bleed (edge to edge).
             "&:first-of-type": {
-              paddingLeft: "max(16px, calc((100vw - 1560px) / 2))",
+              paddingLeft: "var(--content-pad)",
             },
             "&:last-of-type": {
-              paddingRight: "max(16px, calc((100vw - 1560px) / 2))",
+              paddingRight: "var(--content-pad)",
             },
           },
           sizeSmall: { padding: "8px 16px", height: 48 },

@@ -119,7 +119,7 @@ const CollapsibleSection = ({
         alignItems: "center",
         cursor: "pointer",
         py: 1,
-        px: 3,
+        px: "var(--content-pad)",
         backgroundColor: expanded
           ? "transparent"
           : theme.palette.mode === "light"
@@ -285,7 +285,7 @@ export const PartyDetail = ({
           alignItems: "center",
           gap: 1,
           mb: 2,
-          px: 3,
+          px: "var(--content-pad)",
         }}
       >
         <Tooltip title="Back to parties">
@@ -306,7 +306,7 @@ export const PartyDetail = ({
           flexWrap: "wrap",
           gap: 1,
           mb: 3,
-          px: 3,
+          px: "var(--content-pad)",
           alignItems: "center",
         }}
       >
@@ -378,7 +378,7 @@ export const PartyDetail = ({
       {/* Owner Key */}
       {party.my_owner_key && (
         <Box
-          sx={{ display: "flex", alignItems: "center", gap: 1, mb: 2, px: 3 }}
+          sx={{ display: "flex", alignItems: "center", gap: 1, mb: 2, px: "var(--content-pad)" }}
         >
           <Typography variant="body2" color="text.secondary">
             <strong>My Owner Key:</strong>
@@ -403,7 +403,7 @@ export const PartyDetail = ({
           </Box>
         }
       >
-        <Box sx={{ px: 3 }}>
+        <Box sx={{ px: "var(--content-pad)" }}>
           <AuthSection
             partyId={party.party_id}
             authStatus={authStatus}

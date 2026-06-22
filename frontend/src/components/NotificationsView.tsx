@@ -1916,7 +1916,7 @@ export const NotificationsView = ({
   }
 
   return (
-    <Box sx={{ display: "flex", flexDirection: "column", gap: 1, p: 3 }}>
+    <Box sx={{ display: "flex", flexDirection: "column", gap: 1, py: 3, px: "var(--content-pad)" }}>
       {feed.map((entry) => {
         if (entry.kind === "invitation") {
           return (

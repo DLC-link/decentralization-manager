@@ -345,7 +345,7 @@ export const NetworkConfigAccordion = ({
 
   return (
     <Box>
-      <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", px: 3, py: 2 }}>
+      <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", px: "var(--content-pad)", py: 2 }}>
             <Typography variant="subtitle1">Peers:</Typography>
             <Box sx={{ display: "flex", gap: 1 }}>
               {selfEntry && (

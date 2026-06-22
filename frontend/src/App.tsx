@@ -969,7 +969,7 @@ const App = () => {
         <Box sx={{ pt: isLargeScreen ? 4 : 0 }}>
           {nodeConfig ? (
             <>
-              <Box sx={{ px: 3, py: 2 }}>
+              <Box sx={{ px: "var(--content-pad)", py: 2 }}>
                 <NodeConfigAccordion config={nodeConfig} />
               </Box>
               <Divider />

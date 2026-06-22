@@ -11,6 +11,12 @@
   --accent-hover: #c03d10;
   --accent-press: #a82e08;
 
+  /* Horizontal content inset. 24px on normal screens; on large monitors it
+     grows so content (tables AND surrounding UI) pulls together to ~1300px and
+     stays aligned, while full-bleed table rows keep their cell content lined up
+     with everything else. */
+  --content-pad: max(24px, calc((100vw - 1560px) / 2));
+
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
