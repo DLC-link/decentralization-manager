@@ -147,58 +147,6 @@ export const Sidebar = ({
         </Tooltip>
       </Box>
 
-      {/* Network indicator — which Canton network the node is connected to */}
-      {network &&
-        (collapsed ? (
-          <Tooltip title={`Network: ${network}`} placement="right" arrow>
-            <Box sx={{ display: "flex", justifyContent: "center", px: 1, pb: 0.5 }}>
-              <Box
-                sx={{
-                  width: 8,
-                  height: 8,
-                  borderRadius: "50%",
-                  bgcolor: NETWORK_COLOR[network] ?? "text.disabled",
-                }}
-              />
-            </Box>
-          </Tooltip>
-        ) : (
-          <Box sx={{ px: 3, pb: 0.5 }}>
-            <Box
-              sx={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 0.75,
-                px: 1,
-                py: 0.25,
-                borderRadius: 1,
-                border: 1,
-                borderColor: "divider",
-              }}
-            >
-              <Box
-                sx={{
-                  width: 7,
-                  height: 7,
-                  borderRadius: "50%",
-                  bgcolor: NETWORK_COLOR[network] ?? "text.disabled",
-                }}
-              />
-              <Typography
-                sx={{
-                  fontFamily: "var(--font-mono)",
-                  fontSize: "0.62rem",
-                  letterSpacing: "0.12em",
-                  textTransform: "uppercase",
-                  color: "text.secondary",
-                }}
-              >
-                {network}
-              </Typography>
-            </Box>
-          </Box>
-        ))}
-
       {/* Navigation */}
       <List sx={{ flex: 1, px: collapsed ? 1 : 1.5, pt: 2 }}>
         {navItems.map((item) => {
@@ -274,15 +222,53 @@ export const Sidebar = ({
         </Box>
       )}
 
-      {/* Build version + date — always shown when expanded */}
+      {/* Network badge + build version — expanded only, centered */}
       {!collapsed && (
         <Box
           sx={{
             px: 2,
-            pt: 1,
+            pt: 1.5,
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            gap: 0.75,
             ...(BITSAFE_BRANDING && { borderTop: `1px solid ${theme.palette.divider}` }),
           }}
         >
+          {network && (
+            <Box
+              sx={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 0.75,
+                px: 1,
+                py: 0.25,
+                borderRadius: 1,
+                border: 1,
+                borderColor: "divider",
+              }}
+            >
+              <Box
+                sx={{
+                  width: 7,
+                  height: 7,
+                  borderRadius: "50%",
+                  bgcolor: NETWORK_COLOR[network] ?? "text.disabled",
+                }}
+              />
+              <Typography
+                sx={{
+                  fontFamily: "var(--font-mono)",
+                  fontSize: "0.62rem",
+                  letterSpacing: "0.12em",
+                  textTransform: "uppercase",
+                  color: "text.secondary",
+                }}
+              >
+                {network}
+              </Typography>
+            </Box>
+          )}
           <Typography
             variant="caption"
             color="text.secondary"
@@ -293,7 +279,7 @@ export const Sidebar = ({
         </Box>
       )}
 
-      {/* Theme switcher + Logout */}
+      {/* Theme switcher + Logout — centered */}
       <Box
         sx={{
           p: collapsed ? 1 : 2,
@@ -301,7 +287,7 @@ export const Sidebar = ({
           display: "flex",
           flexDirection: collapsed ? "column" : "row",
           alignItems: "center",
-          justifyContent: collapsed ? "center" : "space-between",
+          justifyContent: "center",
           gap: 1,
         }}
       >
