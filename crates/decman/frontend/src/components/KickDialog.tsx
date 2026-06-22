@@ -179,7 +179,7 @@ export const KickDialog = ({
 
       showSnackbar("Kick workflow started — follow progress in the feed");
       onClose();
-      // Jump to the Pending Approvals feed so the user lands on the run they
+      // Jump to the Approvals feed so the user lands on the run they
       // just started (refresh + navigate). Without this the dialog closes
       // back to the party detail and the in-flight kick is easy to miss.
       onKickComplete();

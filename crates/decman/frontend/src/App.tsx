@@ -814,7 +814,7 @@ const App = () => {
                   color={activeTab === 3 ? "primary" : "error"}
                   sx={{ pr: notificationCount ? 2.5 : 0 }}
                 >
-                  Pending approvals
+                  Approvals
                 </Badge>
               }
             />
