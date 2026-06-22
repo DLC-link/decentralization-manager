@@ -1,0 +1,11 @@
+{
+  "dec_party_id": "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78",
+  "member_party_id": "ibtc-member-fra1::1220ba3790e06fa4524e56d2f223576013c73a660055439f9046b17c621c6c1d",
+  "user_id": "svc-dpm@ibtc",
+  "keycloak_url": "https://keycloak.dev.canton.ibtc.network/auth",
+  "keycloak_realm": "ibtc-catalyst-devnet",
+  "keycloak_client_id": "devnet-dec-party-mgr-1",
+  "has_client_secret": true,
+  "has_username": false,
+  "has_password": false
+}

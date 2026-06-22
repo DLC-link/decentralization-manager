@@ -1,0 +1,69 @@
+{
+  "rules_contract_id": "00c0121767cb824514a2ce225aaf9ec0c9164e38495910c6621ed5015f2830b0b6",
+  "member_party_id": "ibtc-member-fra1::1220ba3790e06fa4524e56d2f223576013c73a660055439f9046b17c621c6c1d",
+  "threshold": 1,
+  "actions": [
+    {
+      "action_hash": "122c597083bd438b7f6d72af75d025948899647711b806bdd2cd82fa69713db3",
+      "action": {
+        "type": "governance_set_timeout",
+        "new_timeout_microseconds": 43200000000
+      },
+      "confirmations": [
+        {
+          "contract_id": "002921bb0a8c3f39eeeeb70d6a4b86f119cd375170eafe64f03c3fb7b0651581f8",
+          "action": {
+            "type": "governance_set_timeout",
+            "new_timeout_microseconds": 43200000000
+          },
+          "confirming_party": "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78",
+          "created_at": 1782124323,
+          "expires_at": 1782214323
+        },
+        {
+          "contract_id": "00e1dc8e2f92856c7ae274f2bcb42ca93e2448adca244a36957c9dc3384367b5a7",
+          "action": {
+            "type": "governance_set_timeout",
+            "new_timeout_microseconds": 43200000000
+          },
+          "confirming_party": "ibtc-admin::12209688b4410a59414d40a2a541644d22ac9e85a7f9438545749f65965a495f",
+          "created_at": 1782124323,
+          "expires_at": 1782214323
+        },
+        {
+          "contract_id": "00ad62b37495b07085816d251c6169b7e8e900e6bd82fc46e76ee538aaa9e84c91",
+          "action": {
+            "type": "governance_set_timeout",
+            "new_timeout_microseconds": 43200000000
+          },
+          "confirming_party": "vault-rc7-2::1220fb3be8c3236d9258e9e1f25fc5d1a924cd368f7346a7a7ff4a82dd3eba54",
+          "created_at": 1782124323,
+          "expires_at": 1782214323
+        },
+        {
+          "contract_id": "009a6d3896b3a3ce780ca4c46eebd820c12196baa6854b1e8bc847c5a4c531fe06",
+          "action": {
+            "type": "governance_set_timeout",
+            "new_timeout_microseconds": 43200000000
+          },
+          "confirming_party": "cbtc-attestor-pool::122070884b3eb2e563698a1e51f29ea9cec1d6b9d25272be0efd76cc715b769a",
+          "created_at": 1782124323,
+          "expires_at": 1782214323
+        }
+      ],
+      "confirmation_count": 4,
+      "can_execute": true,
+      "last_confirmation_at": 1782126123
+    }
+  ],
+  "domain_actions": [
+    {
+      "proposal_cid": "00865ab0d317f36965e43d20d275b545a6773137adad19db1d61ecb8032f473e0b",
+      "action_label": "Generic vote",
+      "description": "Ratify validator set rotation",
+      "confirmations": [],
+      "confirmation_count": 2,
+      "can_execute": false
+    }
+  ]
+}

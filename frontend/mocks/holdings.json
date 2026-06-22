@@ -1,0 +1,25 @@
+{
+  "holdings": [
+    {
+      "instrument_admin": "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb",
+      "instrument_id": "CBTC",
+      "amount": "12.50000000",
+      "locked_amount": "0.50000000",
+      "preapproval_set_up": true
+    },
+    {
+      "instrument_admin": "DSO::1220dso",
+      "instrument_id": "Amulet",
+      "amount": "1840.00",
+      "locked_amount": "0.00",
+      "preapproval_set_up": true
+    },
+    {
+      "instrument_admin": "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb",
+      "instrument_id": "CBTC-YIELD",
+      "amount": "3.20000000",
+      "locked_amount": "0.00",
+      "preapproval_set_up": false
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "instruments": [
+    {
+      "contract_id": "00bc02da91c14087aeafb2f73db521f05f9e04724cf37751b2e1053689d3d5d621",
+      "instrument_admin": "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb",
+      "instrument_id": "CBTC"
+    },
+    {
+      "contract_id": "00bcb0a6fcf699f195294e07f647e1822c1f2e087e44a95c89eeade9ae2d91f29e",
+      "instrument_admin": "DSO::1220dso",
+      "instrument_id": "Amulet"
+    }
+  ]
+}

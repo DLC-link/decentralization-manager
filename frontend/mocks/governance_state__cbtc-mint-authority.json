@@ -1,0 +1,16 @@
+{
+  "state": {
+    "contract_id": "00499f115c368b166283244cde318e3455533fbbca612e14b135308d7cc29a3408",
+    "vault_manager": "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb",
+    "members": [
+      "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb",
+      "utility-registrar::12206a58a9f547e2c9e833c6e261806a51c224cd7faab962ed4fee21df39fa06",
+      "dec-treasury::1220e5eff180952bf0ea0588c3d2ab779dcebc3c3cb5c5c70904d534cccd8862",
+      "ibtc-member-fra1::1220ba3790e06fa4524e56d2f223576013c73a660055439f9046b17c621c6c1d"
+    ],
+    "threshold": 3,
+    "action_confirmation_timeout_microseconds": 86400000000,
+    "package_ref": "#governance-core-v0",
+    "out_of_date": false
+  }
+}

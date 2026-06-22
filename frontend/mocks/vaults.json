@@ -1,0 +1,18 @@
+{
+  "vaults": [
+    {
+      "contract_id": "00082ff5139ff184ee2a3e5c03bbf020a2805be5bc647c7fa1a169a520e2e094fd",
+      "vault_name": "CBTC Yield Vault",
+      "share_symbol": "yCBTC",
+      "is_paused": false,
+      "vault_manager": "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78"
+    },
+    {
+      "contract_id": "002c4a30edfb077a4493405da5005d0e7346074fca4fad45e97944e9eaf125bb40",
+      "vault_name": "Delta-Neutral BTC",
+      "share_symbol": "dnBTC",
+      "is_paused": true,
+      "vault_manager": "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78"
+    }
+  ]
+}

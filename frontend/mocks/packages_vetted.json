@@ -1,0 +1,92 @@
+[
+  {
+    "package_id": "0151eb410fe627f3178d6810b20ac306fe2fdcbfba08c4ed9c659f6b3d48926c",
+    "package_name": "bitsafe-vault",
+    "package_version": "0.0.8"
+  },
+  {
+    "package_id": "1df28d461c6f7b495eafcba6eda3d81cea52145f85cec97690a94bd0edb9ea53",
+    "package_name": "utility-registry-app",
+    "package_version": "0.0.1"
+  },
+  {
+    "package_id": "c45294b22afe1039bb3d2ebdf6fa96026322ee73f9536ee89a79d641df4b6828",
+    "package_name": "splice-amulet",
+    "package_version": "0.1.9"
+  },
+  {
+    "package_id": "6a0b972b283a55c7e107ae9faa36cfdee4d3c05447c60cefaeaf3437d98f3de2",
+    "package_name": "governance-core",
+    "package_version": "0.2.0"
+  },
+  {
+    "package_id": "2595bfe92cb953a5562cd5571146c32dd0627f7c060c05a976e31cf40e6e9b18",
+    "package_name": "governance-token-custody",
+    "package_version": "0.2.0"
+  },
+  {
+    "package_id": "0c9d570d5c3c120b4a9ba9de1b349a986a359aa08a82178b4c5a8c111ee500ca",
+    "package_name": "utility-credential",
+    "package_version": "0.0.4"
+  },
+  {
+    "package_id": "88b4bb6c9d5ac3db5813594f442192c82b096f240dde203e954cde5f710eaeff",
+    "package_name": "vault-governance",
+    "package_version": "0.0.8"
+  },
+  {
+    "package_id": "7b5034a71683d2720e30704c77050f023d868178b7b2111fba5e5c6fb376e5ae",
+    "package_name": "splice-api-featured-app",
+    "package_version": "1.0.0"
+  },
+  {
+    "package_id": "2cd83483a1661769a3a7f1a54a09ddfed2d835293a8f1b6e76dab50a1cb54b91",
+    "package_name": "splice-wallet",
+    "package_version": "0.1.9"
+  },
+  {
+    "package_id": "e8795f692a070ad4df812f507cfb1cc21066024fa3799cf76b4095e189798ebe",
+    "package_name": "cbtc-instrument",
+    "package_version": "0.3.1"
+  },
+  {
+    "package_id": "2132af55a5cec62e970fbab574180529e4b2c5551359053255fc33777a24f7da",
+    "package_name": "daml-stdlib",
+    "package_version": "2.9.4"
+  },
+  {
+    "package_id": "1f0fa98e86434456490f3550404a086d8873092da1fa8ea5058b426d6f02d40e",
+    "package_name": "daml-prim",
+    "package_version": "2.9.4"
+  },
+  {
+    "package_id": "47ba81867779b2de4cadcbf31e2023c59691a551f0cee1c5565a28a51a6f183b",
+    "package_name": "splice-amulet-name-service",
+    "package_version": "0.1.9"
+  },
+  {
+    "package_id": "0efa32b212b8eda5565f49135e8976786bd911f5d3895e900412a2cf5d7072c2",
+    "package_name": "token-standard",
+    "package_version": "1.0.0"
+  },
+  {
+    "package_id": "71e4bc624d2fcd5811ae5670faf3f2afe83a4520de32c6d7ae0fafd2f5e38c03",
+    "package_name": "attestor-pool",
+    "package_version": "0.1.2"
+  },
+  {
+    "package_id": "0d65c351b1a6637537d2045ecb21407d0d21d514e8582024b7a7346fcebd132c",
+    "package_name": "vault-processor",
+    "package_version": "0.0.8"
+  },
+  {
+    "package_id": "afb35c207709ec7726f25bd97d3f5d39651227690aa327bc856529f1e659f74a",
+    "package_name": "dec-party-core",
+    "package_version": "0.1.10"
+  },
+  {
+    "package_id": "578597487eae5e67d7f4c6e98892188e0f6339c0cdc17e91cdbc1c251759a12a",
+    "package_name": "canton-network-token",
+    "package_version": "0.4.0"
+  }
+]

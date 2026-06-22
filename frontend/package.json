@@ -9,6 +9,7 @@
   },
   "scripts": {
     "dev": "vite",
+    "dev:mock": "MOCK=true vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview"

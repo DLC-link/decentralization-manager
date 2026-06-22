@@ -1,0 +1,12 @@
+{
+  "transfer_factories": [
+    {
+      "contract_id": "00147973ff703eb065b4ca7e430e663b0d1a128b3e4c9575f3177a679f269a80cd",
+      "expected_admin": "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb"
+    },
+    {
+      "contract_id": "00eb1aed56885f79b7876ede8133ec2ab992d583f6998c1cf0ab11c36a43622173",
+      "expected_admin": "DSO::1220dso"
+    }
+  ]
+}

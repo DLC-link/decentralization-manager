@@ -1,0 +1,15 @@
+{
+  "state": {
+    "contract_id": "00c0121767cb824514a2ce225aaf9ec0c9164e38495910c6621ed5015f2830b0b6",
+    "vault_manager": "governance-core::1220b49bc40b5fc97a403d844155fd5074d3fb20e98a733ef85473b89831cce5",
+    "members": [
+      "governance-core::1220b49bc40b5fc97a403d844155fd5074d3fb20e98a733ef85473b89831cce5",
+      "vault-yield-btc::1220425311ae37972f78e3781dcd68f64665f39e3b55688ffc060f062f0d2670",
+      "ibtc-member-fra1::1220ba3790e06fa4524e56d2f223576013c73a660055439f9046b17c621c6c1d"
+    ],
+    "threshold": 1,
+    "action_confirmation_timeout_microseconds": 86400000000,
+    "package_ref": "#governance-core-v0",
+    "out_of_date": false
+  }
+}
