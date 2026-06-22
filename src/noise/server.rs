@@ -92,16 +92,18 @@ impl ActiveWorkflow {
     }
 }
 
-/// Peers that must act before a coordinator workflow advances, given the
-/// decentralized party's signing threshold `m` (the total number of signers
-/// required, *including* the coordinator) and the number of `expected_peers`
-/// (which never includes the coordinator).
+/// How many peers must connect before a coordinator workflow leaves
+/// `WaitingForPeers`, given the decentralized party's signing threshold `m`
+/// (the total number of signers required, *including* the coordinator) and the
+/// number of `expected_peers` (which never includes the coordinator).
 ///
-/// The coordinator always participates and contributes one signature itself,
-/// so `m - 1` peer signatures complete the quorum. The result is clamped to at
-/// least one peer — a coordinator-only quorum is never tripped by a peer
-/// connect/complete event, so it would hang the wait — and to at most the
-/// peers actually available.
+/// The coordinator participates itself, so `m - 1` peer connections make a
+/// quorum present and the workflow can start. The result is clamped:
+/// - `expected_peers == 0` returns `0` — there are no peers to wait for, so the
+///   start gate is satisfied immediately (the no-peer / solo case);
+/// - otherwise it is clamped to at least one peer (a `0` requirement could
+///   never be tripped by a peer connect event, so it would hang the wait) and
+///   to at most the peers actually available.
 fn peers_for_party_threshold(m: usize, expected_peers: usize) -> usize {
     if expected_peers == 0 {
         return 0;
@@ -109,9 +111,13 @@ fn peers_for_party_threshold(m: usize, expected_peers: usize) -> usize {
     m.saturating_sub(1).clamp(1, expected_peers)
 }
 
-/// Resolve the peer quorum for a coordinator run. `None` means "require every
-/// expected peer" — the original behaviour — and is also the safe, no-regression
-/// fallback whenever a party threshold can't be resolved.
+/// Resolve the **start-gate** quorum for a coordinator run: how many peers must
+/// connect before the workflow leaves `WaitingForPeers`. `None` means "require
+/// every expected peer" — the original behaviour — and is also the safe,
+/// no-regression fallback whenever a party threshold can't be resolved.
+///
+/// This only governs when the workflow *starts*; the per-step signing gate
+/// still waits for every expected peer (see `WorkflowState::peer_threshold`).
 async fn resolve_peer_threshold(
     kind: WorkflowKind,
     dec_party_id: Option<&CantonId>,
@@ -124,13 +130,11 @@ async fn resolve_peer_threshold(
     match kind {
         // Onboarding defines the party's owner set, so every invitee must take
         // part. DARs is a file distribution — the coordinator serves chunks to
-        // each peer, so finishing at a quorum would cut off a peer that's still
-        // downloading and leave it without the package; it keeps requiring all
-        // selected peers. Both therefore require the full set.
+        // each peer, so it must wait for all selected peers regardless. Both
+        // therefore require the full set even to start.
         WorkflowKind::Onboarding | WorkflowKind::Dars => None,
-        // Operate on an existing M-of-N party: only a quorum of owners is needed
-        // to authorise the topology/ledger change, so an absent owner no longer
-        // stalls the run.
+        // Operate on an existing M-of-N party: a quorum of owners is enough to
+        // begin, so a slow/absent owner no longer blocks the workflow's start.
         WorkflowKind::Kick | WorkflowKind::Contracts => {
             let party_id = dec_party_id?;
             let m = lookup_party_threshold(db, party_id).await?;
@@ -141,7 +145,9 @@ async fn resolve_peer_threshold(
 
 /// Read the decentralized party's signing threshold `M` from the local cache
 /// (`dec_parties`). Returns `None` if the party isn't cached or the stored
-/// value is unusable, in which case the caller requires every expected peer.
+/// value is unusable (missing, non-positive, or out of range), in which case
+/// the caller requires every expected peer. `M` is a meaningful M-of-N
+/// threshold only when `>= 1`, so a cached `0` is treated as invalid.
 async fn lookup_party_threshold(db: &SqlitePool, party_id: &CantonId) -> Option<usize> {
     let party_id_str = party_id.to_string();
     let parties = match SchemaRead::get_dec_parties_by_prefix(db, &party_id.prefix).await {
@@ -158,8 +164,8 @@ async fn lookup_party_threshold(db: &SqlitePool, party_id: &CantonId) -> Option<
         .find(|p| p.party_id == party_id_str)
         .map(|p| p.threshold)?;
     match usize::try_from(threshold) {
-        Ok(m) => Some(m),
-        Err(_) => {
+        Ok(m) if m >= 1 => Some(m),
+        _ => {
             tracing::warn!(
                 "Dec party {party_id_str} has invalid threshold {threshold}; requiring all peers"
             );
