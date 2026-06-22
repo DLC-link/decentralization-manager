@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { Fragment, useState, type ReactNode } from "react";
 import {
   Alert,
   Box,
@@ -1394,22 +1394,6 @@ const DomainActionCard = ({
   );
 };
 
-type FeedEntry =
-  | { kind: "invitation"; ts: number; invitation: PendingInvitation }
-  | {
-      kind: "action";
-      ts: number;
-      party: PartyActions;
-      action: GovernanceAction;
-    }
-  | {
-      kind: "domain_action";
-      ts: number;
-      party: PartyActions;
-      domainAction: DomainGovernanceAction;
-    }
-  | { kind: "workflow"; ts: number; run: WorkflowRun };
-
 const WorkflowRunCard = ({
   run,
   onAfter,
@@ -1859,6 +1843,14 @@ export const NotificationsView = ({
   onWorkflowsChanged,
   onSelectParty,
 }: NotificationsViewProps) => {
+  const [statusFilter, setStatusFilter] = useState<
+    "all" | "you" | "prog" | "done"
+  >("all");
+  const [typeFilter, setTypeFilter] = useState<"all" | "gov" | "wf" | "inv">(
+    "all",
+  );
+  const [doneCollapsed, setDoneCollapsed] = useState(true);
+
   if (loading) {
     return (
       <Box sx={{ display: "flex", flexDirection: "column", gap: 1, p: 3 }}>
@@ -1869,43 +1861,108 @@ export const NotificationsView = ({
     );
   }
 
-  const feed: FeedEntry[] = [
-    ...pendingInvitations.map<FeedEntry>((invitation) => ({
-      kind: "invitation",
+  // ── Categorize every feed item by what it needs from the operator ──
+  type Group = "you" | "prog" | "done";
+  type Kind = "gov" | "wf" | "inv";
+  interface Entry {
+    key: string;
+    group: Group;
+    kind: Kind;
+    ts: number;
+    node: ReactNode;
+  }
+
+  const entries: Entry[] = [];
+
+  for (const invitation of pendingInvitations) {
+    entries.push({
+      key: `inv-${invitation.id}`,
+      group: "you",
+      kind: "inv",
       ts: invitation.received_at,
-      invitation,
-    })),
-    ...partyActions.flatMap<FeedEntry>((party) =>
-      party.actions.map((action) => ({
-        kind: "action",
+      node: (
+        <InvitationCard
+          invitation={invitation}
+          onAfter={onInvitationsChanged}
+          onSelectParty={onSelectParty}
+        />
+      ),
+    });
+  }
+
+  for (const party of partyActions) {
+    for (const action of party.actions) {
+      const ownConfirmed = action.confirmations.some(
+        (c) => c.confirming_party === party.memberPartyId,
+      );
+      entries.push({
+        key: `act-${party.partyId}-${action.action_hash}`,
+        // Needs you: you can execute it, or you haven't confirmed yet.
+        // In progress: you confirmed and it's waiting on the others.
+        group: action.can_execute || !ownConfirmed ? "you" : "prog",
+        kind: "gov",
         ts: action.last_confirmation_at ?? 0,
-        party,
-        action,
-      })),
-    ),
-    ...partyActions.flatMap<FeedEntry>((party) =>
-      party.domainActions.map((domainAction) => ({
-        kind: "domain_action",
-        // Domain proposals don't carry a server-side timestamp; fall back to
-        // the latest confirmation we know about, then 0 for unconfirmed
-        // proposals (they sort to the bottom of the feed).
+        node: (
+          <ActionCard
+            party={party}
+            action={action}
+            onAfter={onActionsChanged}
+            onSelectParty={onSelectParty}
+          />
+        ),
+      });
+    }
+    for (const domainAction of party.domainActions) {
+      const ownConfirmed = domainAction.confirmations.some(
+        (c) => c.confirming_party === party.memberPartyId,
+      );
+      entries.push({
+        key: `dom-${party.partyId}-${domainAction.proposal_cid}`,
+        // Orphaned proposals can only be expired — still your cleanup to do.
+        group:
+          domainAction.can_execute || domainAction.orphaned || !ownConfirmed
+            ? "you"
+            : "prog",
+        kind: "gov",
         ts: domainAction.confirmations.reduce(
           (max, c) => Math.max(max, c.created_at ?? 0),
           0,
         ),
-        party,
-        domainAction,
-      })),
-    ),
-    ...workflowRuns.map<FeedEntry>((run) => ({
-      kind: "workflow",
-      ts: run.updated_at,
-      run,
-    })),
-  ];
-  feed.sort((a, b) => b.ts - a.ts);
+        node: (
+          <DomainActionCard
+            party={party}
+            domainAction={domainAction}
+            onAfter={onActionsChanged}
+            onSelectParty={onSelectParty}
+          />
+        ),
+      });
+    }
+  }
 
-  if (feed.length === 0) {
+  for (const run of workflowRuns) {
+    const terminal =
+      run.status === "completed" ||
+      run.status === "failed" ||
+      run.status === "cancelled";
+    entries.push({
+      key: `wf-${run.instance_name}`,
+      group: terminal ? "done" : "prog",
+      kind: "wf",
+      ts: run.updated_at,
+      node: (
+        <WorkflowRunCard
+          run={run}
+          onAfter={onWorkflowsChanged}
+          onSelectParty={onSelectParty}
+        />
+      ),
+    });
+  }
+
+  entries.sort((a, b) => b.ts - a.ts);
+
+  if (entries.length === 0) {
     return (
       <Box sx={{ p: 4, textAlign: "center" }}>
         <Typography variant="body2" color="text.secondary">
@@ -1915,48 +1972,225 @@ export const NotificationsView = ({
     );
   }
 
+  // Each chip's count reflects the *other* active filter dimension.
+  const byKind = entries.filter(
+    (e) => typeFilter === "all" || e.kind === typeFilter,
+  );
+  const groupCount: Record<"all" | Group, number> = {
+    all: byKind.length,
+    you: byKind.filter((e) => e.group === "you").length,
+    prog: byKind.filter((e) => e.group === "prog").length,
+    done: byKind.filter((e) => e.group === "done").length,
+  };
+
+  const grouped: Record<Group, Entry[]> = { you: [], prog: [], done: [] };
+  for (const e of entries) {
+    if (statusFilter !== "all" && statusFilter !== e.group) continue;
+    if (typeFilter !== "all" && typeFilter !== e.kind) continue;
+    grouped[e.group].push(e);
+  }
+  const anyVisible =
+    grouped.you.length + grouped.prog.length + grouped.done.length > 0;
+
+  const statusChips: { key: "all" | Group; label: string }[] = [
+    { key: "all", label: "All" },
+    { key: "you", label: "Needs you" },
+    { key: "prog", label: "In progress" },
+    { key: "done", label: "Completed" },
+  ];
+  const typeChips: { key: "all" | Kind; label: string }[] = [
+    { key: "all", label: "All" },
+    { key: "gov", label: "Governance" },
+    { key: "wf", label: "Workflows" },
+    { key: "inv", label: "Invitations" },
+  ];
+  const sections: { group: Group; label: string }[] = [
+    { group: "you", label: "Needs your action" },
+    { group: "prog", label: "In progress" },
+    { group: "done", label: "Completed" },
+  ];
+
   return (
-    <Box sx={{ display: "flex", flexDirection: "column", gap: 1, py: 3, px: "var(--content-pad)" }}>
-      {feed.map((entry) => {
-        if (entry.kind === "invitation") {
-          return (
-            <InvitationCard
-              key={`inv-${entry.invitation.id}`}
-              invitation={entry.invitation}
-              onAfter={onInvitationsChanged}
-              onSelectParty={onSelectParty}
-            />
-          );
-        }
-        if (entry.kind === "workflow") {
-          return (
-            <WorkflowRunCard
-              key={`wf-${entry.run.instance_name}`}
-              run={entry.run}
-              onAfter={onWorkflowsChanged}
-              onSelectParty={onSelectParty}
-            />
-          );
-        }
-        if (entry.kind === "domain_action") {
-          return (
-            <DomainActionCard
-              key={`dom-${entry.party.partyId}-${entry.domainAction.proposal_cid}`}
-              party={entry.party}
-              domainAction={entry.domainAction}
-              onAfter={onActionsChanged}
-              onSelectParty={onSelectParty}
-            />
-          );
-        }
+    <Box sx={{ py: 3, px: "var(--content-pad)" }}>
+      <Box
+        sx={{
+          position: "sticky",
+          top: 0,
+          zIndex: 5,
+          display: "flex",
+          flexWrap: "wrap",
+          alignItems: "center",
+          gap: 1,
+          py: 1.5,
+          mb: 1,
+          bgcolor: "background.default",
+          borderBottom: "1px solid",
+          borderColor: "divider",
+        }}
+      >
+        <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1 }}>
+          {statusChips.map((c) => {
+            const active = statusFilter === c.key;
+            return (
+              <Box
+                component="button"
+                key={c.key}
+                onClick={() => setStatusFilter(c.key)}
+                sx={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 0.75,
+                  fontFamily: "inherit",
+                  fontSize: 13,
+                  fontWeight: 500,
+                  color: active ? "text.primary" : "text.secondary",
+                  bgcolor: active
+                    ? "rgba(214, 58, 15, 0.08)"
+                    : "background.paper",
+                  border: "1px solid",
+                  borderColor: active ? "var(--accent)" : "divider",
+                  borderRadius: "8px",
+                  px: 1.5,
+                  py: 0.75,
+                  cursor: "pointer",
+                  transition: "color .15s, border-color .15s, background .15s",
+                  "&:hover": { color: "text.primary" },
+                }}
+              >
+                {c.label}
+                <Box
+                  component="span"
+                  sx={{
+                    fontFamily: "var(--font-mono)",
+                    fontSize: 12,
+                    fontWeight: 600,
+                    color:
+                      c.key === "you"
+                        ? "var(--accent)"
+                        : active
+                          ? "text.primary"
+                          : "text.disabled",
+                  }}
+                >
+                  {groupCount[c.key]}
+                </Box>
+              </Box>
+            );
+          })}
+        </Box>
+        <Box sx={{ flex: 1, minWidth: 8 }} />
+        <Box sx={{ display: "flex", gap: 0.75 }}>
+          {typeChips.map((c) => {
+            const active = typeFilter === c.key;
+            return (
+              <Box
+                component="button"
+                key={c.key}
+                onClick={() => setTypeFilter(c.key)}
+                sx={{
+                  fontFamily: "var(--font-mono)",
+                  fontSize: 12,
+                  letterSpacing: "0.04em",
+                  textTransform: "uppercase",
+                  color: active ? "text.primary" : "text.disabled",
+                  bgcolor: active ? "background.paper" : "transparent",
+                  border: "1px solid",
+                  borderColor: active ? "text.disabled" : "divider",
+                  borderRadius: "6px",
+                  px: 1.1,
+                  py: 0.65,
+                  cursor: "pointer",
+                  transition: "color .15s, border-color .15s",
+                }}
+              >
+                {c.label}
+              </Box>
+            );
+          })}
+        </Box>
+      </Box>
+
+      {!anyVisible && (
+        <Typography
+          variant="body2"
+          color="text.secondary"
+          sx={{ textAlign: "center", py: 6 }}
+        >
+          Nothing matches these filters.
+        </Typography>
+      )}
+
+      {sections.map(({ group, label }) => {
+        if (statusFilter !== "all" && statusFilter !== group) return null;
+        if (grouped[group].length === 0) return null;
+        const collapsible = group === "done";
+        const collapsed =
+          collapsible && doneCollapsed && statusFilter !== "done";
         return (
-          <ActionCard
-            key={`act-${entry.party.partyId}-${entry.action.action_hash}`}
-            party={entry.party}
-            action={entry.action}
-            onAfter={onActionsChanged}
-            onSelectParty={onSelectParty}
-          />
+          <Box key={group} sx={{ mt: 3 }}>
+            <Box
+              onClick={
+                collapsible ? () => setDoneCollapsed((v) => !v) : undefined
+              }
+              sx={{
+                display: "flex",
+                alignItems: "center",
+                gap: 1.25,
+                mb: 1.5,
+                cursor: collapsible ? "pointer" : "default",
+              }}
+            >
+              {collapsible && (
+                <Typography
+                  component="span"
+                  sx={{
+                    fontFamily: "var(--font-mono)",
+                    fontSize: 12,
+                    color: "text.disabled",
+                  }}
+                >
+                  {collapsed ? "▸" : "▾"}
+                </Typography>
+              )}
+              <Typography
+                component="h2"
+                sx={{
+                  fontFamily: "var(--font-mono)",
+                  fontSize: 11,
+                  fontWeight: 500,
+                  letterSpacing: "0.12em",
+                  textTransform: "uppercase",
+                  m: 0,
+                  color: group === "you" ? "var(--accent)" : "text.secondary",
+                }}
+              >
+                {label}
+              </Typography>
+              <Box
+                component="span"
+                sx={{
+                  fontFamily: "var(--font-mono)",
+                  fontSize: 11,
+                  fontWeight: 600,
+                  color: "text.secondary",
+                  bgcolor: "action.hover",
+                  borderRadius: "20px",
+                  px: 1,
+                  py: 0.25,
+                }}
+              >
+                {groupCount[group]}
+              </Box>
+              <Box sx={{ flex: 1, height: "1px", bgcolor: "divider" }} />
+            </Box>
+            {!collapsed && (
+              <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+                {grouped[group].map((e) => (
+                  <Fragment key={e.key}>{e.node}</Fragment>
+                ))}
+              </Box>
+            )}
+          </Box>
         );
       })}
     </Box>
