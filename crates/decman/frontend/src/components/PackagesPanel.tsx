@@ -338,10 +338,10 @@ export const PackagesPanel = ({
                   {comparisonPaging.pageItems
                     .map((pkg, idx) => (
                       <TableRow key={pkg.package_id} sx={zebraRow(idx)}>
-                        <TableCell sx={{ py: 0.75 }}>
+                        <TableCell sx={{ py: 1 }}>
                           {pkg.name || "-"}
                         </TableCell>
-                        <TableCell sx={{ py: 0.75 }}>
+                        <TableCell sx={{ py: 1 }}>
                           {pkg.version || "-"}
                         </TableCell>
                         {peerLookups.map(({ peer, lookup }) => {
@@ -358,7 +358,7 @@ export const PackagesPanel = ({
                               data-pkg={pkg.name}
                               data-status={status}
                               sx={{
-                                py: 0.75,
+                                py: 1,
                                 textAlign: "center",
                                 bgcolor: statusColor(status, idx),
                               }}

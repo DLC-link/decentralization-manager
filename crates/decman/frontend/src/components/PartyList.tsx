@@ -106,7 +106,7 @@ export const PartyList = ({
                   if (e.key === "Enter") onSelectParty(party.party_id);
                 }}
               >
-                <TableCell sx={{ py: 1.5 }}>
+                <TableCell sx={{ py: 1 }}>
                   <CopyableText
                     text={party.party_id}
                     truncate={{
@@ -116,16 +116,16 @@ export const PartyList = ({
                     variant="body2"
                   />
                 </TableCell>
-                <TableCell sx={{ py: 1.5 }} align="center">
+                <TableCell sx={{ py: 1 }} align="center">
                   {party.threshold}
                 </TableCell>
-                <TableCell sx={{ py: 1.5 }} align="center">
+                <TableCell sx={{ py: 1 }} align="center">
                   {party.owners.length}
                 </TableCell>
-                <TableCell sx={{ py: 1.5 }} align="center">
+                <TableCell sx={{ py: 1 }} align="center">
                   {party.participants.length}
                 </TableCell>
-                <TableCell sx={{ py: 1.5 }} align="center">
+                <TableCell sx={{ py: 1 }} align="center">
                   {party.contracts ? (
                     <Chip
                       label={party.contracts.length}
@@ -136,10 +136,10 @@ export const PartyList = ({
                     "-"
                   )}
                 </TableCell>
-                <TableCell sx={{ py: 1.5 }} align="center">
+                <TableCell sx={{ py: 1 }} align="center">
                   <AuthStatusIcon status={auth} />
                 </TableCell>
-                <TableCell sx={{ py: 1.5 }} align="center">
+                <TableCell sx={{ py: 1 }} align="center">
                   <Tooltip title={hidden ? "Unhide party" : "Hide party"}>
                     <IconButton
                       size="small"
