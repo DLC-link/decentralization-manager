@@ -86,5 +86,8 @@ export default defineConfig({
     // Build version: APP_VERSION from build.rs (production) → Cargo.toml
     // version (dev / mock) → "dev" only if Cargo.toml can't be read.
     __APP_VERSION__: JSON.stringify(process.env.APP_VERSION ?? cargoVersion ?? 'dev'),
+    // True only under `MOCK=true` dev — lets the app stand up a fake login
+    // session so the full authed UI (logout, etc.) is previewable offline.
+    __MOCK__: process.env.MOCK === 'true',
   },
 })
