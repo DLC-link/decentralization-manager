@@ -1,6 +1,6 @@
 [package]
 name = "dec-party-manager"
-version = "0.1.10"
+version = "1.0.0"
 edition = "2024"
 license = "Apache-2.0"
 
