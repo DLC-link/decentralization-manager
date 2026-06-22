@@ -22,7 +22,7 @@ import AddIcon from "@mui/icons-material/Add";
 import VisibilityIcon from "@mui/icons-material/Visibility";
 import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
 import { Header } from "./components/Header";
-import { Sidebar, SIDEBAR_WIDTH } from "./components/Sidebar";
+import { Sidebar, SIDEBAR_WIDTH, SIDEBAR_WIDTH_COLLAPSED } from "./components/Sidebar";
 import { PartyList } from "./components/PartyList";
 import { PartyDetail } from "./components/PartyDetail";
 import { NodeConfigAccordion } from "./components/NodeConfigAccordion";
@@ -82,6 +82,13 @@ function buildHash(tab: number, partySlug?: string | null): string {
 const App = () => {
   const muiTheme = useTheme();
   const isLargeScreen = useMediaQuery(muiTheme.breakpoints.up("lg"));
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(
+    () => localStorage.getItem("sidebar-collapsed") === "true",
+  );
+  useEffect(() => {
+    localStorage.setItem("sidebar-collapsed", String(sidebarCollapsed));
+  }, [sidebarCollapsed]);
+  const sidebarWidth = sidebarCollapsed ? SIDEBAR_WIDTH_COLLAPSED : SIDEBAR_WIDTH;
   const [activeTab, setActiveTab] = useState(INITIAL_ROUTE.tab);
   const [parties, setParties] = useState<DecentralizedParty[]>([]);
   const [nodeConfig, setNodeConfig] = useState<NodeConfig | null>(null);
@@ -563,6 +570,8 @@ const App = () => {
           partyCount={parties.length}
           packageCount={packageCount}
           notificationCount={notificationCount}
+          collapsed={sidebarCollapsed}
+          onToggleCollapsed={() => setSidebarCollapsed((c) => !c)}
         />
       ) : (
         <Header />
@@ -573,7 +582,7 @@ const App = () => {
           sx={{
             position: "fixed",
             top: 16,
-            left: `${SIDEBAR_WIDTH}px`,
+            left: `${sidebarWidth}px`,
             right: 0,
             zIndex: 1050,
             display: "flex",
@@ -582,7 +591,7 @@ const App = () => {
             transform: showSearchBar
               ? "translateY(0)"
               : "translateY(-20px)",
-            transition: "opacity 0.3s ease, transform 0.3s ease",
+            transition: "left 0.15s ease-out, opacity 0.3s ease, transform 0.3s ease",
             pointerEvents: showSearchBar ? "auto" : "none",
           }}
         >
@@ -681,7 +690,7 @@ const App = () => {
 
       <Box
         sx={{
-          ...(isLargeScreen && { ml: `${SIDEBAR_WIDTH}px` }),
+          ...(isLargeScreen && { ml: `${sidebarWidth}px`, transition: "margin-left 0.15s ease-out" }),
           ...(activeTab === 1 && {
             height: "100vh",
             overflow: "hidden",

@@ -15,7 +15,10 @@ import Inventory2Icon from "@mui/icons-material/Inventory2";
 import NotificationsIcon from "@mui/icons-material/Notifications";
 import SettingsIcon from "@mui/icons-material/Settings";
 import LogoutIcon from "@mui/icons-material/Logout";
+import ChevronLeftIcon from "@mui/icons-material/ChevronLeft";
+import ChevronRightIcon from "@mui/icons-material/ChevronRight";
 
+import BitSafeLogoB from "../assets/bitsafe-logo-b.svg";
 import BitSafeLogoDark from "../assets/bitsafe-logo-dark.svg";
 import BitSafeLogoLight from "../assets/bitsafe-logo-light.svg";
 
@@ -25,6 +28,7 @@ import { Logo } from "./Logo";
 import { ThemeSwitcher } from "./ThemeSwitcher";
 
 export const SIDEBAR_WIDTH = 260;
+export const SIDEBAR_WIDTH_COLLAPSED = 56;
 
 interface SidebarProps {
   activeTab: number;
@@ -32,6 +36,8 @@ interface SidebarProps {
   partyCount: number;
   packageCount: number;
   notificationCount: number;
+  collapsed: boolean;
+  onToggleCollapsed: () => void;
 }
 
 const navItems = [
@@ -41,17 +47,45 @@ const navItems = [
   { label: "Pending approvals", icon: <NotificationsIcon />, index: 3 },
 ];
 
+// Compile-time build metadata (injected via vite `define`). Shown at the
+// bottom of the expanded sidebar — see vite.config.ts / build.rs.
+const BUILD_INFO = (() => {
+  const version = __APP_VERSION__ === "dev" ? "dev build" : `v${__APP_VERSION__}`;
+  let when = __BUILD_DATE__;
+  try {
+    const d = new Date(__BUILD_DATE__);
+    const p = (n: number) => String(n).padStart(2, "0");
+    when = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  } catch {
+    /* fall back to the raw ISO string */
+  }
+  return `${version} · ${when}`;
+})();
+
 export const Sidebar = ({
   activeTab,
   onTabChange,
   partyCount,
   packageCount,
   notificationCount,
+  collapsed,
+  onToggleCollapsed,
 }: SidebarProps) => {
   const theme = useTheme();
   const { token, logout } = useAuth();
   const poweredByLogo =
     theme.palette.mode === "light" ? BitSafeLogoDark : BitSafeLogoLight;
+
+  const countFor = (index: number) =>
+    index === 0 ? partyCount : index === 1 ? packageCount : index === 3 ? notificationCount : 0;
+  const badgeColor = (index: number): "primary" | "secondary" | "error" =>
+    index === 3
+      ? activeTab === 3
+        ? "primary"
+        : "error"
+      : activeTab === index
+        ? "secondary"
+        : "primary";
 
   return (
     <Box
@@ -60,72 +94,99 @@ export const Sidebar = ({
         top: 0,
         left: 0,
         bottom: 0,
-        width: SIDEBAR_WIDTH,
+        width: collapsed ? SIDEBAR_WIDTH_COLLAPSED : SIDEBAR_WIDTH,
+        transition: "width 0.15s ease-out",
         display: "flex",
         flexDirection: "column",
-        borderRight: `1px solid ${theme.palette.mode === "light" ? "rgba(224, 224, 224, 0.5)" : "rgba(58, 58, 58, 0.5)"}`,
+        borderRight: `1px solid ${theme.palette.divider}`,
         backgroundColor: theme.palette.background.paper,
         zIndex: 1100,
+        overflowX: "hidden",
       }}
     >
-      {/* Logo */}
-      <Box sx={{ px: 3, pt: 3, pb: 1 }}>
-        <Logo />
+      {/* Logo + collapse toggle */}
+      <Box
+        sx={{
+          display: "flex",
+          flexDirection: collapsed ? "column" : "row",
+          alignItems: collapsed ? "center" : "flex-start",
+          justifyContent: "space-between",
+          gap: 1,
+          px: collapsed ? 1 : 3,
+          pt: 3,
+          pb: 1,
+        }}
+      >
+        {collapsed ? (
+          <img
+            src={BitSafeLogoB}
+            alt="BitSafe"
+            onClick={() => window.location.reload()}
+            style={{ height: 28, cursor: "pointer" }}
+          />
+        ) : (
+          <Logo />
+        )}
+        <Tooltip
+          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          placement="right"
+          arrow
+        >
+          <IconButton size="small" onClick={onToggleCollapsed} sx={{ mt: collapsed ? 0.5 : -0.5 }}>
+            {collapsed ? <ChevronRightIcon fontSize="small" /> : <ChevronLeftIcon fontSize="small" />}
+          </IconButton>
+        </Tooltip>
       </Box>
 
       {/* Navigation */}
-      <List sx={{ flex: 1, px: 1.5, pt: 2 }}>
-        {navItems.map((item) => (
-          <ListItemButton
-            key={item.index}
-            selected={activeTab === item.index}
-            onClick={() => onTabChange(item.index)}
-            sx={{
-              borderRadius: 1.5,
-              mb: 0.5,
-              "&.Mui-selected": {
-                backgroundColor: "primary.main",
-                color: "white",
-                "& .MuiListItemIcon-root": {
+      <List sx={{ flex: 1, px: collapsed ? 1 : 1.5, pt: 2 }}>
+        {navItems.map((item) => {
+          const count = countFor(item.index);
+          const button = (
+            <ListItemButton
+              key={item.index}
+              selected={activeTab === item.index}
+              onClick={() => onTabChange(item.index)}
+              sx={{
+                borderRadius: 1.5,
+                mb: 0.5,
+                px: collapsed ? 1 : 2,
+                justifyContent: collapsed ? "center" : "flex-start",
+                "&.Mui-selected": {
+                  backgroundColor: "primary.main",
                   color: "white",
+                  "& .MuiListItemIcon-root": { color: "white" },
+                  "&:hover": { backgroundColor: "primary.dark" },
                 },
-                "&:hover": {
-                  backgroundColor: "primary.dark",
-                },
-              },
-            }}
-          >
-            <ListItemIcon sx={{ minWidth: 40 }}>
-              {item.icon}
-            </ListItemIcon>
-            <ListItemText primary={item.label} />
-            {item.index === 0 && partyCount > 0 && (
-              <Badge
-                badgeContent={partyCount}
-                color={activeTab === 0 ? "secondary" : "primary"}
-                sx={{ mr: 1 }}
-              />
-            )}
-            {item.index === 1 && packageCount > 0 && (
-              <Badge
-                badgeContent={packageCount}
-                color={activeTab === 1 ? "secondary" : "primary"}
-                sx={{ mr: 1 }}
-              />
-            )}
-            {item.index === 3 && notificationCount > 0 && (
-              <Badge
-                badgeContent={notificationCount}
-                color={activeTab === 3 ? "secondary" : "error"}
-                sx={{ mr: 1 }}
-              />
-            )}
-          </ListItemButton>
-        ))}
+              }}
+            >
+              <ListItemIcon sx={{ minWidth: collapsed ? 0 : 40, justifyContent: "center" }}>
+                {collapsed && count > 0 ? (
+                  <Badge badgeContent={count} color={badgeColor(item.index)} overlap="circular">
+                    {item.icon}
+                  </Badge>
+                ) : (
+                  item.icon
+                )}
+              </ListItemIcon>
+              {!collapsed && <ListItemText primary={item.label} />}
+              {!collapsed && count > 0 && (
+                <Badge badgeContent={count} color={badgeColor(item.index)} sx={{ mr: 1 }} />
+              )}
+            </ListItemButton>
+          );
+          return collapsed ? (
+            <Tooltip key={item.index} title={item.label} placement="right" arrow>
+              {button}
+            </Tooltip>
+          ) : (
+            button
+          );
+        })}
       </List>
 
-      {/* Powered-by footer (only when running under a co-brand). */}
-      {!BITSAFE_BRANDING && (
+      {/* Powered-by footer (co-brand only, expanded only) */}
+      {!BITSAFE_BRANDING && !collapsed && (
         <Box
           sx={{
             px: 2,
@@ -138,36 +199,47 @@ export const Sidebar = ({
             gap: 0.5,
           }}
         >
-          <Typography
-            variant="caption"
-            color="text.secondary"
-            sx={{ lineHeight: 1 }}
-          >
+          <Typography variant="caption" color="text.secondary" sx={{ lineHeight: 1 }}>
             Powered by
           </Typography>
-          <img
-            src={poweredByLogo}
-            alt="BitSafe"
-            style={{ height: 18, opacity: 0.85 }}
-          />
+          <img src={poweredByLogo} alt="BitSafe" style={{ height: 18, opacity: 0.85 }} />
         </Box>
       )}
 
-      {/* Bottom: Theme switcher + Logout */}
+      {/* Build version + date — always shown when expanded */}
+      {!collapsed && (
+        <Box
+          sx={{
+            px: 2,
+            pt: 1,
+            ...(BITSAFE_BRANDING && { borderTop: `1px solid ${theme.palette.divider}` }),
+          }}
+        >
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            sx={{ fontFamily: "monospace", fontSize: "0.66rem", letterSpacing: "0.02em" }}
+          >
+            {BUILD_INFO}
+          </Typography>
+        </Box>
+      )}
+
+      {/* Theme switcher + Logout */}
       <Box
         sx={{
-          p: 2,
-          ...(BITSAFE_BRANDING && {
-            borderTop: `1px solid ${theme.palette.divider}`,
-          }),
+          p: collapsed ? 1 : 2,
+          pt: collapsed ? 1 : 1.5,
           display: "flex",
+          flexDirection: collapsed ? "column" : "row",
           alignItems: "center",
-          justifyContent: "space-between",
+          justifyContent: collapsed ? "center" : "space-between",
+          gap: 1,
         }}
       >
-        <ThemeSwitcher />
+        {!collapsed && <ThemeSwitcher />}
         {token && (
-          <Tooltip title="Log out" arrow>
+          <Tooltip title="Log out" placement="right" arrow>
             <IconButton size="small" onClick={logout} color="inherit">
               <LogoutIcon fontSize="small" />
             </IconButton>

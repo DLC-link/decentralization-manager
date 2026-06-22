@@ -7,6 +7,18 @@ import react from '@vitejs/plugin-react'
 
 const rootDir = dirname(fileURLToPath(import.meta.url))
 
+// The crate version (Cargo.toml lives one level up from the frontend). Used as
+// the build version when APP_VERSION isn't passed by build.rs — so `npm run dev`
+// and mock mode still show the real version rather than a placeholder.
+const cargoVersion = (() => {
+  try {
+    const toml = readFileSync(join(rootDir, '..', 'Cargo.toml'), 'utf8')
+    return toml.match(/^version\s*=\s*"([^"]+)"/m)?.[1] ?? null
+  } catch {
+    return null
+  }
+})()
+
 // Dev-only API mock. With `MOCK=true npm run dev`, the backend's REST endpoints
 // are served from JSON fixtures under ./mocks instead of a live node + Keycloak,
 // so the UI renders with realistic data offline. Only applied in `serve` mode;
@@ -71,5 +83,8 @@ export default defineConfig({
   plugins: [react(), ...(process.env.MOCK === 'true' ? [mockApi()] : [])],
   define: {
     __BUILD_DATE__: JSON.stringify(new Date().toISOString()),
+    // Build version: APP_VERSION from build.rs (production) → Cargo.toml
+    // version (dev / mock) → "dev" only if Cargo.toml can't be read.
+    __APP_VERSION__: JSON.stringify(process.env.APP_VERSION ?? cargoVersion ?? 'dev'),
   },
 })
