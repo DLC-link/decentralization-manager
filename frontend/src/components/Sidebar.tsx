@@ -55,7 +55,7 @@ const navItems = [
   { label: "Parties", icon: <GroupsIcon />, index: 0 },
   { label: "Packages", icon: <Inventory2Icon />, index: 1 },
   { label: "Configuration", icon: <SettingsIcon />, index: 2 },
-  { label: "Pending approvals", icon: <NotificationsIcon />, index: 3 },
+  { label: "Approvals", icon: <NotificationsIcon />, index: 3 },
 ];
 
 // Compile-time build metadata (injected via vite `define`). Shown at the
