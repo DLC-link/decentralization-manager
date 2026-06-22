@@ -16,7 +16,6 @@ import {
   useMediaQuery,
   useTheme,
 } from "@mui/material";
-import CircleIcon from "@mui/icons-material/Circle";
 import EditIcon from "@mui/icons-material/Edit";
 import DeleteIcon from "@mui/icons-material/Delete";
 import AddIcon from "@mui/icons-material/Add";
@@ -29,6 +28,7 @@ import { useSnackbar } from "../contexts";
 import { zebraRow } from "../styles";
 import { copyToClipboard } from "../clipboard";
 import { fieldHelpAdornment } from "./FieldHelp";
+import { StatusDot } from "./StatusDot";
 import type {
   NetworkConfig,
   Peer,
@@ -91,20 +91,6 @@ export const NetworkConfigAccordion = ({
 
   const getStat = (id: string): ParticipantStatus | undefined =>
     participantStatuses?.find((s) => s.id === id);
-
-  const getStatusColor = (status: ConnectionStatus | undefined): string => {
-    switch (status) {
-      case "Connected":
-        return "success.main";
-      case "CurrentNode":
-        return "primary.main";
-      case "Unreachable":
-      case "HandshakeFailed":
-        return "error.main";
-      default:
-        return "text.disabled";
-    }
-  };
 
   const getStatusTooltip = (status: ConnectionStatus | undefined): string => {
     switch (status) {
@@ -432,15 +418,7 @@ export const NetworkConfigAccordion = ({
                 return (
                   <TableRow key={p.participant_id} sx={zebraRow(idx)}>
                     <TableCell sx={{ py: 1 }}>
-                      <Tooltip title={statusTooltip(st)} arrow>
-                        <CircleIcon
-                          sx={{
-                            fontSize: 12,
-                            color: getStatusColor(st?.status),
-                            cursor: "help",
-                          }}
-                        />
-                      </Tooltip>
+                      <StatusDot status={st?.status} title={statusTooltip(st)} />
                     </TableCell>
                     <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>
                       {p.name || truncateParticipantId(p.participant_id)}
