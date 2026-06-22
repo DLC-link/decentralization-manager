@@ -270,4 +270,46 @@ test.describe.serial("governance happy path", () => {
       await expect(parts.p1.getByText(desc)).toHaveCount(0);
     }).toPass({ timeout: 120_000, intervals: [3000, 5000, 5000] });
   });
+
+  test("07 notification feed: dismiss a completed run", async () => {
+    await gotoTab(parts.p1, "Pending approvals");
+    await parts.p1.reload();
+    await gotoTab(parts.p1, "Pending approvals");
+    // A completed Onboarding run from phase 02 should be present and dismissable.
+    const dismiss = parts.p1.getByRole("button", { name: "Dismiss" }).first();
+    await expect(dismiss).toBeVisible({ timeout: 60_000 });
+    const before = await parts.p1.getByRole("button", { name: "Dismiss" }).count();
+    await dismiss.click();
+    await expect(async () => {
+      await parts.p1.reload();
+      await gotoTab(parts.p1, "Pending approvals");
+      const after = await parts.p1.getByRole("button", { name: "Dismiss" }).count();
+      expect(after).toBeLessThan(before);
+    }).toPass({ timeout: 30_000 });
+  });
+
+  test("08 kick participant P3", async () => {
+    const partyId = shared.partyId ?? process.env.E2E_PARTY_ID;
+    const partyPrefix = shared.partyPrefix ?? process.env.E2E_PARTY_PREFIX;
+    test.skip(!partyId || !partyPrefix, "no party (run phase 02, or set E2E_PARTY_ID + E2E_PARTY_PREFIX)");
+
+    await openParty(parts.p1, partyPrefix!);
+    // Expand Participants section, click Kick on P3's row.
+    await parts.p1.getByRole("button", { name: /Participants/i }).click();
+    const p3Row = parts.p1.getByRole("row", { name: /Participant 3|::.*3/i });
+    await p3Row.getByRole("button", { name: /Kick/i }).click();
+    const dialog = parts.p1.getByRole("dialog");
+    await expect(dialog.getByText("Kick Participant")).toBeVisible();
+    await dialog.getByLabel("New Threshold").fill("2");
+    await submitAndAwaitClose(dialog, /Kick Participant/i);
+
+    await acceptInvitation(parts.p2, /Kick/);
+    await expectWorkflowCompleted(parts.p1, /Kick/, partyPrefix!);
+    // P3 removed; threshold now 2.
+    await openParty(parts.p1, partyPrefix!);
+    await expect(parts.p1.getByText(/Threshold/i).locator("xpath=following::*[1]")).toContainText("2");
+    await test.info().attach("After kick: P3 removed, threshold = 2", {
+      body: await parts.p1.screenshot({ fullPage: true }), contentType: "image/png",
+    });
+  });
 });
