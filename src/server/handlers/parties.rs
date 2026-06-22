@@ -681,7 +681,13 @@ pub async fn fetch_decentralized_parties(
         .await?
         .into_inner();
 
-    // Query P2P mappings with optional party prefix filter
+    // Query P2P mappings, scoped to parties hosted on this participant. Without
+    // `filter_participant` this returns every party-to-participant mapping on the
+    // synchronizer (the entire network), which on mainnet exceeds the gRPC decode
+    // limit. We only ever care about decentralized parties this node hosts, and
+    // every party we co-own lists our participant as a host, so scoping here loses
+    // nothing while bounding the response to what this node manages. The optional
+    // party prefix filter still composes on top.
     let p2p_response = topology_client
         .list_party_to_participant(tonic::Request::new(ListPartyToParticipantRequest {
             base_query: Some(BaseQuery {
@@ -697,7 +703,7 @@ pub async fn fetch_decentralized_parties(
                 protocol_version: None,
             }),
             filter_party: prefix_filter.unwrap_or_default().to_string(),
-            filter_participant: String::new(),
+            filter_participant: config.participant_id().to_string(),
         }))
         .await?
         .into_inner();
