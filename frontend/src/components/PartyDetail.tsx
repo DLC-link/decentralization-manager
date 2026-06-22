@@ -465,6 +465,11 @@ export const PartyDetail = ({
                         <IconButton
                           size="small"
                           color="error"
+                          aria-label={
+                            p.participant_uid === selfParticipantId
+                              ? "Cannot kick yourself"
+                              : "Kick participant"
+                          }
                           onClick={() => handleKickClick(p.participant_uid)}
                           disabled={
                             !ADMIN_ACCESS ||

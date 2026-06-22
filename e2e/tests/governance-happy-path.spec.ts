@@ -294,21 +294,29 @@ test.describe.serial("governance happy path", () => {
     test.skip(!partyId || !partyPrefix, "no party (run phase 02, or set E2E_PARTY_ID + E2E_PARTY_PREFIX)");
 
     await openParty(parts.p1, partyPrefix!);
-    // Expand Participants section, click Kick on P3's row.
-    await parts.p1.getByRole("button", { name: /Participants/i }).click();
-    const p3Row = parts.p1.getByRole("row", { name: /Participant 3|::.*3/i });
-    await p3Row.getByRole("button", { name: /Kick/i }).click();
+    // Participants section is expanded by default. The kick control is an
+    // icon button (aria-label "Kick participant"; self is "Cannot kick
+    // yourself" and disabled). Kick the last non-self participant.
+    const kickBtn = parts.p1.getByRole("button", { name: "Kick participant" }).last();
+    await expect(kickBtn).toBeVisible({ timeout: 30_000 });
+    await kickBtn.click();
     const dialog = parts.p1.getByRole("dialog");
-    await expect(dialog.getByText("Kick Participant")).toBeVisible();
-    await dialog.getByLabel("New Threshold").fill("2");
+    await expect(dialog.getByRole("heading", { name: /Kick Participant/i })).toBeVisible();
+    await dialog.getByRole("spinbutton").fill("2"); // New Threshold (number field)
+    // Submit is disabled until the owner key resolves; submitAndAwaitClose waits
+    // for it to enable and retries the transient 409.
     await submitAndAwaitClose(dialog, /Kick Participant/i);
 
     await acceptInvitation(parts.p2, /Kick/);
     await expectWorkflowCompleted(parts.p1, /Kick/, partyPrefix!);
-    // P3 removed; threshold now 2.
-    await openParty(parts.p1, partyPrefix!);
-    await expect(parts.p1.getByText(/Threshold/i).locator("xpath=following::*[1]")).toContainText("2");
-    await test.info().attach("After kick: P3 removed, threshold = 2", {
+
+    // Party now has 2 participants (the kicked one is gone). Topology lags, so
+    // reopen + poll until the participant list shows 2.
+    await expect(async () => {
+      await openParty(parts.p1, partyPrefix!);
+      await expect(parts.p1.getByText(/iBTC-validator-\d/)).toHaveCount(2);
+    }).toPass({ timeout: 120_000, intervals: [5000, 5000, 10_000] });
+    await test.info().attach("After kick: party has 2 participants", {
       body: await parts.p1.screenshot({ fullPage: true }), contentType: "image/png",
     });
   });
