@@ -263,7 +263,7 @@ const FieldEditor = ({
             variant="body2"
             color="text.secondary"
             sx={{
-              fontFamily: "monospace",
+              fontFamily: "var(--font-mono)",
               fontSize: 14,
               overflow: "hidden",
               textOverflow: "ellipsis",
@@ -359,7 +359,7 @@ const FieldEditor = ({
                   >
                     <Typography
                       variant="caption"
-                      sx={{ flex: 1, fontFamily: "monospace" }}
+                      sx={{ flex: 1, fontFamily: "var(--font-mono)" }}
                     >
                       {party}
                     </Typography>
@@ -615,7 +615,7 @@ const FieldEditor = ({
                         >
                           <Typography
                             variant="caption"
-                            sx={{ flex: 1, fontFamily: "monospace" }}
+                            sx={{ flex: 1, fontFamily: "var(--font-mono)" }}
                           >
                             {party}
                           </Typography>
@@ -1698,7 +1698,7 @@ export const ContractsDialog = ({
                               variant="caption"
                               sx={{
                                 flex: 1,
-                                fontFamily: "monospace",
+                                fontFamily: "var(--font-mono)",
                                 overflow: "hidden",
                                 textOverflow: "ellipsis",
                               }}

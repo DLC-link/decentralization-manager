@@ -45,7 +45,7 @@ export const CopyableText = ({ text, truncate, variant = "body1" }: CopyableText
   return (
     <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
       <Tooltip title={text}>
-        <Typography variant={variant} sx={{ fontFamily: "monospace" }}>
+        <Typography variant={variant} sx={{ fontFamily: "var(--font-mono)" }}>
           {getDisplayText()}
         </Typography>
       </Tooltip>
