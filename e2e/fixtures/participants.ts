@@ -115,3 +115,101 @@ export async function resolvePartyId(port: number, prefix: string): Promise<stri
   }
   throw new Error(`party with prefix ${prefix} not found on :${port} after 90s (${last})`);
 }
+
+// --- Governance hybrid helpers ---------------------------------------------
+// A single shared frontend user (cvault-finoa-lp-1) drives all 3 nodes, so the
+// UI's "you already confirmed" logic blocks a second distinct confirmation
+// through the UI. These mirror the Rust IT's per-node /governance/* calls so
+// the propose→confirm→execute cycle can complete; the UI still drives the
+// propose and asserts the result. (Endpoint payloads mirror tests/common/governance.rs.)
+
+async function bearer(port: number): Promise<string> {
+  const cfg = await getAuthConfig(port);
+  const { access_token } = await fetchRopcTokens(cfg);
+  return access_token;
+}
+
+interface DomainAction { proposal_cid: string; can_execute?: boolean; confirmations?: { contract_id: string }[]; }
+
+async function govConfirmations(port: number, partyId: string): Promise<DomainAction[]> {
+  const tok = await bearer(port);
+  const res = await fetch(
+    `http://localhost:${port}/governance/confirmations?party_id=${encodeURIComponent(partyId)}`,
+    { headers: { authorization: `Bearer ${tok}` } },
+  );
+  if (!res.ok) throw new Error(`/governance/confirmations on :${port} → ${res.status}`);
+  return (await res.json()).domain_actions ?? [];
+}
+
+// GovernanceRules contract id for a party (from /governance/state).
+export async function govRulesContractId(port: number, partyId: string): Promise<string> {
+  const tok = await bearer(port);
+  const res = await fetch(
+    `http://localhost:${port}/governance/state?party_id=${encodeURIComponent(partyId)}`,
+    { headers: { authorization: `Bearer ${tok}` } },
+  );
+  if (!res.ok) throw new Error(`/governance/state on :${port} → ${res.status}`);
+  const cid = (await res.json())?.state?.contract_id;
+  if (!cid) throw new Error(`no GovernanceRules contract for ${partyId} on :${port}`);
+  return cid;
+}
+
+// Poll until exactly one pending domain action exists; return its proposal_cid.
+export async function waitForProposalCid(port: number, partyId: string): Promise<string> {
+  let last = "none";
+  const deadline = Date.now() + 90_000;
+  while (Date.now() < deadline) {
+    try {
+      const actions = await govConfirmations(port, partyId);
+      if (actions.length >= 1 && actions[0].proposal_cid) return actions[0].proposal_cid;
+      last = `${actions.length} actions`;
+    } catch (e) { last = String(e); }
+    await new Promise((r) => setTimeout(r, 3000));
+  }
+  throw new Error(`proposal not visible on :${port} after 90s (${last})`);
+}
+
+const THRESHOLD_ACTION = { type: "governance_set_threshold", new_threshold: 1 };
+
+// Confirm the proposal as this node's member (mirrors IT propose_confirm_execute).
+export async function govConfirm(port: number, partyId: string, rulesCid: string, proposalCid: string) {
+  const tok = await bearer(port);
+  const res = await fetch(`http://localhost:${port}/governance/confirm`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${tok}`, "content-type": "application/json" },
+    body: JSON.stringify({
+      party_id: partyId, rules_contract_id: rulesCid,
+      action: THRESHOLD_ACTION, governance_type: "core_domain", proposal_cid: proposalCid,
+    }),
+  });
+  if (!res.ok) throw new Error(`/governance/confirm on :${port} → ${res.status}: ${await res.text()}`);
+}
+
+// Poll until the proposal is executable; return its confirmation contract ids.
+export async function waitForExecutable(port: number, partyId: string, proposalCid: string): Promise<string[]> {
+  let last = "none";
+  const deadline = Date.now() + 90_000;
+  while (Date.now() < deadline) {
+    try {
+      const a = (await govConfirmations(port, partyId)).find((x) => x.proposal_cid === proposalCid && x.can_execute);
+      if (a) return (a.confirmations ?? []).map((c) => c.contract_id);
+      last = "not executable yet";
+    } catch (e) { last = String(e); }
+    await new Promise((r) => setTimeout(r, 3000));
+  }
+  throw new Error(`proposal ${proposalCid} not executable on :${port} after 90s (${last})`);
+}
+
+export async function govExecute(port: number, partyId: string, rulesCid: string, proposalCid: string, confirmationCids: string[]) {
+  const tok = await bearer(port);
+  const res = await fetch(`http://localhost:${port}/governance/execute`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${tok}`, "content-type": "application/json" },
+    body: JSON.stringify({
+      party_id: partyId, rules_contract_id: rulesCid, action: THRESHOLD_ACTION,
+      confirmation_cids: confirmationCids, disclosed_contracts: [],
+      governance_type: "core_domain", proposal_cid: proposalCid,
+    }),
+  });
+  if (!res.ok) throw new Error(`/governance/execute on :${port} → ${res.status}: ${await res.text()}`);
+}

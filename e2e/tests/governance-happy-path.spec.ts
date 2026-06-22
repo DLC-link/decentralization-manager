@@ -2,6 +2,7 @@ import { test, expect, type Page } from "@playwright/test";
 import {
   openParticipants, gotoTab, acceptInvitation, acceptInvitationOnAny, expectWorkflowCompleted,
   resolvePartyId, submitAndAwaitClose, PORTS,
+  govRulesContractId, waitForProposalCid, govConfirm, waitForExecutable, govExecute,
 } from "../fixtures/participants.js";
 import { getAuthConfig, fetchRopcTokens } from "../fixtures/auth.js";
 
@@ -178,9 +179,13 @@ test.describe.serial("governance happy path", () => {
   });
 
   // Filter the (100+ party) list by full prefix and open that party's detail.
+  // Navigate to the app root first so a PartyDetail left open by a prior phase
+  // is cleared — the "Filter by full prefix" box only exists on the list view.
   async function openParty(page: Page, prefix: string) {
+    await page.goto(new URL("/", page.url()).href);
     await gotoTab(page, "Parties");
     const filter = page.getByPlaceholder(/Filter by full prefix/i);
+    await expect(filter).toBeVisible({ timeout: 30_000 });
     await filter.fill(prefix);
     await filter.press("Enter");
     await page.getByRole("row", { name: new RegExp(prefix) }).click();
@@ -228,38 +233,41 @@ test.describe.serial("governance happy path", () => {
     const partyPrefix = shared.partyPrefix ?? process.env.E2E_PARTY_PREFIX;
     test.skip(!partyId || !partyPrefix, "no party (run phase 05, or set E2E_PARTY_ID + E2E_PARTY_PREFIX)");
 
-    // Propose on P1.
+    // --- Propose via UI (P1) ---
     await openParty(parts.p1, partyPrefix!);
     await parts.p1.getByRole("button", { name: /New Proposal/i }).click();
-    let dialog = parts.p1.getByRole("dialog");
-    await dialog.getByLabel(/Proposal Type|Action Type/i).click();
+    const dialog = parts.p1.getByRole("dialog");
+    // Proposal Type is the only Select in this dialog; getByLabel doesn't resolve
+    // a MUI Select, so target the combobox role. Options render in a portal, so
+    // select them at page level.
+    await dialog.getByRole("combobox").click();
     await parts.p1.getByRole("option", { name: /generic vote/i }).click();
     const desc = `e2e dark theme ${Date.now()}`;
-    await dialog.getByLabel(/description/i).fill(desc);
-    await parts.p1.getByRole("button", { name: /Submit (Proposal|Confirmation)/i }).click();
+    // "Vote Description" label collides with the help-icon aria-label under
+    // getByLabel, so target the textbox role.
+    await dialog.getByRole("textbox", { name: /Vote Description/i }).fill(desc);
+    await parts.p1.getByRole("button", { name: /Submit Proposal/i }).click();
 
-    // Confirm on P2.
-    await gotoTab(parts.p2, "Pending approvals");
-    await parts.p2.reload();
-    await gotoTab(parts.p2, "Pending approvals");
-    await parts.p2.getByRole("button", { name: "Confirm" }).first().click();
+    // Assert the proposal landed, via the UI feed (the vote description appears).
+    await gotoTab(parts.p1, "Pending approvals");
+    await expect(parts.p1.getByText(desc)).toBeVisible({ timeout: 90_000 });
 
-    // Execute on P3 (threshold met) — ExecuteDialog with no disclosed contracts.
+    // --- Confirm (P2) + execute (P3) via API ---
+    // All 3 nodes share one frontend user, so the UI treats the proposer's
+    // confirmation as "yours" on every node and offers no second Confirm. We
+    // reach threshold via the per-node /governance/* endpoints (as the Rust IT
+    // does), then verify the result back in the UI.
+    const rulesCid = await govRulesContractId(PORTS.p1, partyId!);
+    const proposalCid = await waitForProposalCid(PORTS.p1, partyId!);
+    await govConfirm(PORTS.p2, partyId!, rulesCid, proposalCid);
+    const confirmationCids = await waitForExecutable(PORTS.p3, partyId!, proposalCid);
+    await govExecute(PORTS.p3, partyId!, rulesCid, proposalCid, confirmationCids);
+
+    // --- Assert via UI: the action is gone from P1's feed ---
     await expect(async () => {
-      await gotoTab(parts.p3, "Pending approvals");
-      await parts.p3.reload();
-      await gotoTab(parts.p3, "Pending approvals");
-      await expect(parts.p3.getByRole("button", { name: "Execute" }).first()).toBeVisible();
-    }).toPass({ timeout: 120_000 });
-    await parts.p3.getByRole("button", { name: "Execute" }).first().click();
-    await parts.p3.getByRole("dialog").getByRole("button", { name: "Execute" }).click();
-
-    // No pending domain actions remain (action card gone on P1).
-    await expect(async () => {
-      await gotoTab(parts.p1, "Pending approvals");
       await parts.p1.reload();
       await gotoTab(parts.p1, "Pending approvals");
-      await expect(parts.p1.getByText(/generic vote/i)).toHaveCount(0);
-    }).toPass({ timeout: 120_000 });
+      await expect(parts.p1.getByText(desc)).toHaveCount(0);
+    }).toPass({ timeout: 120_000, intervals: [3000, 5000, 5000] });
   });
 });
