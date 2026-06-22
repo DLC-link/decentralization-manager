@@ -220,4 +220,46 @@ test.describe.serial("governance happy path", () => {
       await expect(parts.p1.getByRole("button", { name: /New Proposal/i })).toBeVisible({ timeout: 10_000 });
     }).toPass({ timeout: 120_000, intervals: [5000, 5000, 10_000] });
   });
+
+  test("06 generic vote (propose/confirm/execute)", async () => {
+    // Falls back to env vars so this phase can be iterated standalone against an
+    // already-deployed party (E2E_PARTY_ID + E2E_PARTY_PREFIX).
+    const partyId = shared.partyId ?? process.env.E2E_PARTY_ID;
+    const partyPrefix = shared.partyPrefix ?? process.env.E2E_PARTY_PREFIX;
+    test.skip(!partyId || !partyPrefix, "no party (run phase 05, or set E2E_PARTY_ID + E2E_PARTY_PREFIX)");
+
+    // Propose on P1.
+    await openParty(parts.p1, partyPrefix!);
+    await parts.p1.getByRole("button", { name: /New Proposal/i }).click();
+    let dialog = parts.p1.getByRole("dialog");
+    await dialog.getByLabel(/Proposal Type|Action Type/i).click();
+    await parts.p1.getByRole("option", { name: /generic vote/i }).click();
+    const desc = `e2e dark theme ${Date.now()}`;
+    await dialog.getByLabel(/description/i).fill(desc);
+    await parts.p1.getByRole("button", { name: /Submit (Proposal|Confirmation)/i }).click();
+
+    // Confirm on P2.
+    await gotoTab(parts.p2, "Pending approvals");
+    await parts.p2.reload();
+    await gotoTab(parts.p2, "Pending approvals");
+    await parts.p2.getByRole("button", { name: "Confirm" }).first().click();
+
+    // Execute on P3 (threshold met) — ExecuteDialog with no disclosed contracts.
+    await expect(async () => {
+      await gotoTab(parts.p3, "Pending approvals");
+      await parts.p3.reload();
+      await gotoTab(parts.p3, "Pending approvals");
+      await expect(parts.p3.getByRole("button", { name: "Execute" }).first()).toBeVisible();
+    }).toPass({ timeout: 120_000 });
+    await parts.p3.getByRole("button", { name: "Execute" }).first().click();
+    await parts.p3.getByRole("dialog").getByRole("button", { name: "Execute" }).click();
+
+    // No pending domain actions remain (action card gone on P1).
+    await expect(async () => {
+      await gotoTab(parts.p1, "Pending approvals");
+      await parts.p1.reload();
+      await gotoTab(parts.p1, "Pending approvals");
+      await expect(parts.p1.getByText(/generic vote/i)).toHaveCount(0);
+    }).toPass({ timeout: 120_000 });
+  });
 });
