@@ -572,6 +572,7 @@ const App = () => {
           notificationCount={notificationCount}
           collapsed={sidebarCollapsed}
           onToggleCollapsed={() => setSidebarCollapsed((c) => !c)}
+          network={nodeConfig?.canton.network}
         />
       ) : (
         <Header />

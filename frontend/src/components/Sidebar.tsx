@@ -24,6 +24,7 @@ import BitSafeLogoLight from "../assets/bitsafe-logo-light.svg";
 
 import { useAuth } from "../contexts";
 import { BITSAFE_BRANDING } from "../constants";
+import type { Network } from "../types";
 import { Logo } from "./Logo";
 import { ThemeSwitcher } from "./ThemeSwitcher";
 
@@ -38,7 +39,17 @@ interface SidebarProps {
   notificationCount: number;
   collapsed: boolean;
   onToggleCollapsed: () => void;
+  /** Canton network the node is connected to (devnet / testnet / mainnet). */
+  network?: Network;
 }
+
+// Network indicator colors — mainnet stands out (production), testnet warns,
+// devnet is informational.
+const NETWORK_COLOR: Record<Network, string> = {
+  mainnet: "success.main",
+  testnet: "warning.main",
+  devnet: "info.main",
+};
 
 const navItems = [
   { label: "Parties", icon: <GroupsIcon />, index: 0 },
@@ -70,6 +81,7 @@ export const Sidebar = ({
   notificationCount,
   collapsed,
   onToggleCollapsed,
+  network,
 }: SidebarProps) => {
   const theme = useTheme();
   const { token, logout } = useAuth();
@@ -134,6 +146,58 @@ export const Sidebar = ({
           </IconButton>
         </Tooltip>
       </Box>
+
+      {/* Network indicator — which Canton network the node is connected to */}
+      {network &&
+        (collapsed ? (
+          <Tooltip title={`Network: ${network}`} placement="right" arrow>
+            <Box sx={{ display: "flex", justifyContent: "center", px: 1, pb: 0.5 }}>
+              <Box
+                sx={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: "50%",
+                  bgcolor: NETWORK_COLOR[network] ?? "text.disabled",
+                }}
+              />
+            </Box>
+          </Tooltip>
+        ) : (
+          <Box sx={{ px: 3, pb: 0.5 }}>
+            <Box
+              sx={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 0.75,
+                px: 1,
+                py: 0.25,
+                borderRadius: 1,
+                border: 1,
+                borderColor: "divider",
+              }}
+            >
+              <Box
+                sx={{
+                  width: 7,
+                  height: 7,
+                  borderRadius: "50%",
+                  bgcolor: NETWORK_COLOR[network] ?? "text.disabled",
+                }}
+              />
+              <Typography
+                sx={{
+                  fontFamily: "var(--font-mono)",
+                  fontSize: "0.62rem",
+                  letterSpacing: "0.12em",
+                  textTransform: "uppercase",
+                  color: "text.secondary",
+                }}
+              >
+                {network}
+              </Typography>
+            </Box>
+          </Box>
+        ))}
 
       {/* Navigation */}
       <List sx={{ flex: 1, px: collapsed ? 1 : 1.5, pt: 2 }}>
