@@ -122,6 +122,11 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     phases::retry_coordinator_broadcast::run(&mut f).await?; // G3
     phases::dismiss_failed_cleans_artifacts::run(&mut f).await?; // G4
     phases::generate_keys_idempotent::run(&mut f).await?; // G7
+    // Threshold/quorum coverage (the fix for the signing-step hang + the
+    // uncancellable stuck run). Run here, after the happy-path contracts
+    // phases, so the quorum phase's never-accepted P3 invite can't interfere.
+    phases::contracts_quorum_completes::run(&mut f).await?;
+    phases::cancel_stuck_contracts::run(&mut f).await?;
     // G8 (peer 3-strikes abort) is intentionally NOT run. The
     // `peer_3_strikes_abort` phase is an unimplemented stub: exercising it
     // needs a raw-Noise-frame injection harness to feed a peer three
