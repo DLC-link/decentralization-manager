@@ -1,0 +1,319 @@
+{
+  "runs": [
+    {
+      "instance_name": "onboarding-1000",
+      "kind": "Onboarding",
+      "role": "Coordinator",
+      "status": "inprogress",
+      "current_step": "ShareKeys",
+      "step_index": 1,
+      "step_total": 5,
+      "config_json": "{}",
+      "expected_peers": [
+        "iBTC-validator-1::12203898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7d",
+        "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c",
+        "iBTC-validator-3::1220668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef343"
+      ],
+      "completed_peers": [
+        "iBTC-validator-1::12203898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7d"
+      ],
+      "dec_party_id": "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78",
+      "dismissed": false,
+      "created_at": 1782119593,
+      "updated_at": 1782126793
+    },
+    {
+      "instance_name": "kick-1001",
+      "kind": "Kick",
+      "role": "Peer",
+      "status": "inprogress",
+      "current_step": "Rotate",
+      "step_index": 2,
+      "step_total": 4,
+      "config_json": "{}",
+      "expected_peers": [
+        "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c",
+        "iBTC-validator-3::1220668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef343",
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae"
+      ],
+      "completed_peers": [
+        "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c"
+      ],
+      "dec_party_id": "ibtc-admin::12209688b4410a59414d40a2a541644d22ac9e85a7f9438545749f65965a495f",
+      "dismissed": false,
+      "created_at": 1782118993,
+      "updated_at": 1782126493,
+      "coordinator_pubkey": "02668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef3436c6e",
+      "coordinator_name": "iBTC-validator-3",
+      "kicked_participant": "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+      "previous_threshold": 5,
+      "new_threshold": 4
+    },
+    {
+      "instance_name": "contracts-1002",
+      "kind": "Contracts",
+      "role": "Coordinator",
+      "status": "inprogress",
+      "current_step": "Confirm",
+      "step_index": 3,
+      "step_total": 5,
+      "config_json": "{}",
+      "expected_peers": [
+        "iBTC-validator-3::1220668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef343",
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44"
+      ],
+      "completed_peers": [
+        "iBTC-validator-3::1220668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef343"
+      ],
+      "dec_party_id": "vault-rc7-2::1220fb3be8c3236d9258e9e1f25fc5d1a924cd368f7346a7a7ff4a82dd3eba54",
+      "dismissed": false,
+      "created_at": 1782118393,
+      "updated_at": 1782126193,
+      "package_names": [
+        "BitsafeVault.VaultRules",
+        "Utility.Registry.App"
+      ]
+    },
+    {
+      "instance_name": "dars-1003",
+      "kind": "Dars",
+      "role": "Coordinator",
+      "status": "completed",
+      "current_step": "Done",
+      "step_index": 3,
+      "step_total": 4,
+      "config_json": "{}",
+      "expected_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "completed_peers": [
+        "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9"
+      ],
+      "dec_party_id": "cbtc-attestor-pool::122070884b3eb2e563698a1e51f29ea9cec1d6b9d25272be0efd76cc715b769a",
+      "dismissed": false,
+      "created_at": 1782117793,
+      "updated_at": 1782125893,
+      "dar_filenames": [
+        "bitsafe-vault-0.0.3.dar",
+        "governance-core-0.2.3.dar"
+      ]
+    },
+    {
+      "instance_name": "onboarding-1004",
+      "kind": "Onboarding",
+      "role": "Peer",
+      "status": "completed",
+      "current_step": "Done",
+      "step_index": 4,
+      "step_total": 5,
+      "config_json": "{}",
+      "expected_peers": [
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9",
+        "dec-syd1::1220ac2594b1f585253379f7fd2d121b204088b41ae60a31698a802fef37d5b8"
+      ],
+      "completed_peers": [
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9",
+        "dec-syd1::1220ac2594b1f585253379f7fd2d121b204088b41ae60a31698a802fef37d5b8"
+      ],
+      "dec_party_id": "backend-signatory-0::12201bc2c8500d04c208285d5799eb60cf6a65e084033c9a78707a38c5a0ef60",
+      "dismissed": false,
+      "created_at": 1782117193,
+      "updated_at": 1782125593,
+      "coordinator_pubkey": "0210f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e916ed",
+      "coordinator_name": "bsafe-tok3"
+    },
+    {
+      "instance_name": "kick-1005",
+      "kind": "Kick",
+      "role": "Coordinator",
+      "status": "completed",
+      "current_step": "Done",
+      "step_index": 3,
+      "step_total": 4,
+      "config_json": "{}",
+      "expected_peers": [
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9",
+        "dec-syd1::1220ac2594b1f585253379f7fd2d121b204088b41ae60a31698a802fef37d5b8",
+        "canton-nyc::12208651f1b033067b4c5cbe09328210794e2bef13d338de4bf0aca2af277b6d"
+      ],
+      "completed_peers": [
+        "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9",
+        "dec-syd1::1220ac2594b1f585253379f7fd2d121b204088b41ae60a31698a802fef37d5b8",
+        "canton-nyc::12208651f1b033067b4c5cbe09328210794e2bef13d338de4bf0aca2af277b6d"
+      ],
+      "dec_party_id": "governance-core::1220b49bc40b5fc97a403d844155fd5074d3fb20e98a733ef85473b89831cce5",
+      "dismissed": false,
+      "created_at": 1782116593,
+      "updated_at": 1782125293,
+      "kicked_participant": "canton-nyc::12208651f1b033067b4c5cbe09328210794e2bef13d338de4bf0aca2af277b6d",
+      "previous_threshold": 5,
+      "new_threshold": 4
+    },
+    {
+      "instance_name": "contracts-1006",
+      "kind": "Contracts",
+      "role": "Coordinator",
+      "status": "failed",
+      "current_step": "Build",
+      "step_index": 1,
+      "step_total": 5,
+      "config_json": "{}",
+      "expected_peers": [
+        "dec-syd1::1220ac2594b1f585253379f7fd2d121b204088b41ae60a31698a802fef37d5b8",
+        "canton-nyc::12208651f1b033067b4c5cbe09328210794e2bef13d338de4bf0aca2af277b6d",
+        "validator-sgp::122044a2d77adbb0679fa754a1e8493afae5d1597eada7404cf7a569263574db"
+      ],
+      "completed_peers": [
+        "dec-syd1::1220ac2594b1f585253379f7fd2d121b204088b41ae60a31698a802fef37d5b8"
+      ],
+      "dec_party_id": "vault-yield-btc::1220425311ae37972f78e3781dcd68f64665f39e3b55688ffc060f062f0d2670",
+      "dismissed": false,
+      "created_at": 1782115993,
+      "updated_at": 1782124993,
+      "package_names": [
+        "BitsafeVault.VaultRules",
+        "Utility.Registry.App"
+      ],
+      "error": "peer handshake timed out after 30s"
+    },
+    {
+      "instance_name": "dars-1007",
+      "kind": "Dars",
+      "role": "Peer",
+      "status": "failed",
+      "current_step": "Done",
+      "step_index": 3,
+      "step_total": 4,
+      "config_json": "{}",
+      "expected_peers": [
+        "canton-nyc::12208651f1b033067b4c5cbe09328210794e2bef13d338de4bf0aca2af277b6d",
+        "validator-sgp::122044a2d77adbb0679fa754a1e8493afae5d1597eada7404cf7a569263574db",
+        "ibtc-fra-spare::12206b9220cb439e354deddd22af1f602a6ee3983b3a8956d0ef7dd07e958ebf"
+      ],
+      "completed_peers": [
+        "canton-nyc::12208651f1b033067b4c5cbe09328210794e2bef13d338de4bf0aca2af277b6d"
+      ],
+      "dec_party_id": "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb",
+      "dismissed": false,
+      "created_at": 1782115393,
+      "updated_at": 1782124693,
+      "coordinator_pubkey": "0244a2d77adbb0679fa754a1e8493afae5d1597eada7404cf7a569263574db475b",
+      "coordinator_name": "validator-sgp",
+      "dar_filenames": [
+        "bitsafe-vault-0.0.7.dar",
+        "governance-core-0.2.7.dar"
+      ],
+      "error": "peer handshake timed out after 30s"
+    },
+    {
+      "instance_name": "onboarding-1008",
+      "kind": "Onboarding",
+      "role": "Coordinator",
+      "status": "cancelled",
+      "current_step": "Allocating",
+      "step_index": 3,
+      "step_total": 5,
+      "config_json": "{}",
+      "expected_peers": [
+        "validator-sgp::122044a2d77adbb0679fa754a1e8493afae5d1597eada7404cf7a569263574db",
+        "ibtc-fra-spare::12206b9220cb439e354deddd22af1f602a6ee3983b3a8956d0ef7dd07e958ebf",
+        "dec-saopaulo::1220ecc57a74bf7229aaf620b544d7fb6f5b199b20b2581752bece576a50adee"
+      ],
+      "completed_peers": [
+        "validator-sgp::122044a2d77adbb0679fa754a1e8493afae5d1597eada7404cf7a569263574db"
+      ],
+      "dec_party_id": "utility-registrar::12206a58a9f547e2c9e833c6e261806a51c224cd7faab962ed4fee21df39fa06",
+      "dismissed": false,
+      "created_at": 1782114793,
+      "updated_at": 1782124393
+    },
+    {
+      "instance_name": "kick-1009",
+      "kind": "Kick",
+      "role": "Peer",
+      "status": "cancelled",
+      "current_step": "Confirm",
+      "step_index": 1,
+      "step_total": 4,
+      "config_json": "{}",
+      "expected_peers": [
+        "ibtc-fra-spare::12206b9220cb439e354deddd22af1f602a6ee3983b3a8956d0ef7dd07e958ebf",
+        "dec-saopaulo::1220ecc57a74bf7229aaf620b544d7fb6f5b199b20b2581752bece576a50adee",
+        "canton-mum::1220649a6a537db9f061d24e3c98ef1c46cbe0605015fb2ec3d52ea6215ed0ee"
+      ],
+      "completed_peers": [
+        "ibtc-fra-spare::12206b9220cb439e354deddd22af1f602a6ee3983b3a8956d0ef7dd07e958ebf"
+      ],
+      "dec_party_id": "dec-treasury::1220e5eff180952bf0ea0588c3d2ab779dcebc3c3cb5c5c70904d534cccd8862",
+      "dismissed": false,
+      "created_at": 1782114193,
+      "updated_at": 1782124093,
+      "coordinator_pubkey": "02ecc57a74bf7229aaf620b544d7fb6f5b199b20b2581752bece576a50adeea867",
+      "coordinator_name": "dec-saopaulo",
+      "kicked_participant": "canton-mum::1220649a6a537db9f061d24e3c98ef1c46cbe0605015fb2ec3d52ea6215ed0ee",
+      "previous_threshold": 5,
+      "new_threshold": 4
+    },
+    {
+      "instance_name": "contracts-1010",
+      "kind": "Contracts",
+      "role": "Coordinator",
+      "status": "idle",
+      "current_step": "Init",
+      "step_index": 0,
+      "step_total": 5,
+      "config_json": "{}",
+      "expected_peers": [
+        "dec-saopaulo::1220ecc57a74bf7229aaf620b544d7fb6f5b199b20b2581752bece576a50adee",
+        "canton-mum::1220649a6a537db9f061d24e3c98ef1c46cbe0605015fb2ec3d52ea6215ed0ee",
+        "bsafe-cape::122015a048f5c1a6ede86d6ec87272554bbbd23f4a342ac191dc644612f35d6a"
+      ],
+      "completed_peers": [
+        "dec-saopaulo::1220ecc57a74bf7229aaf620b544d7fb6f5b199b20b2581752bece576a50adee"
+      ],
+      "dec_party_id": "attestor-pool-eu::122091e27cd7ca81e72e5dd8bb97e026ff5151c1020c024ead4881ecdc7d98e9",
+      "dismissed": false,
+      "created_at": 1782113593,
+      "updated_at": 1782123793,
+      "package_names": [
+        "BitsafeVault.VaultRules",
+        "Utility.Registry.App"
+      ]
+    },
+    {
+      "instance_name": "dars-1011",
+      "kind": "Dars",
+      "role": "Peer",
+      "status": "inprogress",
+      "current_step": "Done",
+      "step_index": 3,
+      "step_total": 4,
+      "config_json": "{}",
+      "expected_peers": [
+        "canton-mum::1220649a6a537db9f061d24e3c98ef1c46cbe0605015fb2ec3d52ea6215ed0ee",
+        "bsafe-cape::122015a048f5c1a6ede86d6ec87272554bbbd23f4a342ac191dc644612f35d6a",
+        "relay-dub::12202946e81d20be83b1f31e8df7d4cc139473b6e44143a79f4d92149eb0e50a"
+      ],
+      "completed_peers": [
+        "canton-mum::1220649a6a537db9f061d24e3c98ef1c46cbe0605015fb2ec3d52ea6215ed0ee"
+      ],
+      "dec_party_id": "attestor-pool-us::12200756bbbb488bef27fa4c54b1042637f13d1e582644cf1d1b048308418608",
+      "dismissed": false,
+      "created_at": 1782112993,
+      "updated_at": 1782123493,
+      "coordinator_pubkey": "0215a048f5c1a6ede86d6ec87272554bbbd23f4a342ac191dc644612f35d6a60b2",
+      "coordinator_name": "bsafe-cape",
+      "dar_filenames": [
+        "bitsafe-vault-0.0.11.dar",
+        "governance-core-0.2.11.dar"
+      ]
+    }
+  ]
+}

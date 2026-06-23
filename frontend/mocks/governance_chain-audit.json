@@ -1,0 +1,262 @@
+{
+  "entries": [
+    {
+      "offset": 102400,
+      "timestamp": 1782081123,
+      "event_type": "ExercisedEvent",
+      "contract_id": "00e3be8f9a8a9da4890a24b89083e5e85cff8674b570f56dd5ae5b3acd7a54ffe1",
+      "template_id": "Governance.Rules:GovernanceRules",
+      "package_id": "1c8f8f2792779b51f80291e17eadc0132cc4f1cdf665ec829d1521f701a396c4",
+      "governance_type": "core_self",
+      "action_summary": "Set governance threshold 3 \u2192 4",
+      "choice": "SetThreshold",
+      "acting_parties": [
+        "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78"
+      ],
+      "update_id": "00bf5e57266129873f5aaa5e9420b347aec17454eadb399e62972853fd87ec6a89",
+      "details": {
+        "old": 3,
+        "new": 4
+      }
+    },
+    {
+      "offset": 102263,
+      "timestamp": 1782037923,
+      "event_type": "CreatedEvent",
+      "contract_id": "00837d256f26f731c28b89485251590fb308ea26ca9e71c3b3dcd04752ca76e603",
+      "template_id": "BitsafeVault.VaultRules:VaultRules",
+      "package_id": "0e9fc2c91ef3e23b2612c02f9e0655e473dbb548fae325b1dac4917e96e4778d",
+      "governance_type": "vault",
+      "action_summary": "Deploy CBTC Yield Vault",
+      "choice": "Deploy",
+      "acting_parties": [
+        "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78",
+        "ibtc-admin::12209688b4410a59414d40a2a541644d22ac9e85a7f9438545749f65965a495f"
+      ],
+      "update_id": "0045f00b8708ba7a2bcb0fbbbeb21312c028f5754c1ed77007515a64424bd63d6a",
+      "details": {
+        "vault": "CBTC Yield Vault",
+        "symbol": "yCBTC"
+      }
+    },
+    {
+      "offset": 102126,
+      "timestamp": 1781994723,
+      "event_type": "ExercisedEvent",
+      "contract_id": "00aae63b6e7a2bb2fb41ecada92e907a827518566cf9821b778d63df426f47de86",
+      "template_id": "Governance.Rules:GovernanceRules",
+      "package_id": "1c8f8f2792779b51f80291e17eadc0132cc4f1cdf665ec829d1521f701a396c4",
+      "governance_type": "core_self",
+      "action_summary": "Add member ibtc-admin",
+      "choice": "AddMember",
+      "acting_parties": [
+        "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78"
+      ],
+      "update_id": "00a857c1c32d5f1b0ae586e31f7903b2b11419035e55fa899c0229b0d3d0a38813",
+      "details": {
+        "member": "ibtc-admin"
+      }
+    },
+    {
+      "offset": 101989,
+      "timestamp": 1781951523,
+      "event_type": "ExercisedEvent",
+      "contract_id": "001c01991c8dd10bd7d34e43589a14f71fa63733a252a71d65a205306e514035a6",
+      "template_id": "BitsafeVault.VaultRules:VaultRules",
+      "package_id": "0e9fc2c91ef3e23b2612c02f9e0655e473dbb548fae325b1dac4917e96e4778d",
+      "governance_type": "vault",
+      "action_summary": "Mint 500.00 CBTC",
+      "choice": "Mint",
+      "acting_parties": [
+        "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78",
+        "governance-core::1220b49bc40b5fc97a403d844155fd5074d3fb20e98a733ef85473b89831cce5"
+      ],
+      "update_id": "00154b82c945c67ced3da8c5493d6b365c825bb947b978b5fcbcf40f037bafa869",
+      "details": {
+        "amount": "500.00",
+        "instrument": "CBTC"
+      }
+    },
+    {
+      "offset": 101852,
+      "timestamp": 1781908323,
+      "event_type": "ExercisedEvent",
+      "contract_id": "008991c33802c0dba42286c60167c2683e53685fd374310dc743e99d9ebba10896",
+      "template_id": "Governance.Rules:GovernanceRules",
+      "package_id": "1c8f8f2792779b51f80291e17eadc0132cc4f1cdf665ec829d1521f701a396c4",
+      "governance_type": "core_domain",
+      "action_summary": "Vote on DIP-039 (passed)",
+      "choice": "CastVote",
+      "acting_parties": [
+        "ibtc-admin::12209688b4410a59414d40a2a541644d22ac9e85a7f9438545749f65965a495f"
+      ],
+      "update_id": "002085e89f41aae2ea1c2c4b232c2ba3fb00e1ae5563d6e92a013055eeee21e374",
+      "details": {
+        "proposal": "DIP-039",
+        "result": "passed"
+      }
+    },
+    {
+      "offset": 101715,
+      "timestamp": 1781865123,
+      "event_type": "ArchivedEvent",
+      "contract_id": "00c202f277f6f788dc65928fa0dbedf19e3a13631194d379eafeacaa01eb16f56d",
+      "template_id": "BitsafeVault.VaultRules:VaultRules",
+      "package_id": "0e9fc2c91ef3e23b2612c02f9e0655e473dbb548fae325b1dac4917e96e4778d",
+      "governance_type": "vault",
+      "action_summary": "Pause Delta-Neutral BTC vault",
+      "choice": "Pause",
+      "acting_parties": [
+        "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78"
+      ],
+      "update_id": "00ae166746fb5d4a6784eb05d3b24b225ded019dce3df7a73f46015a036e1eefef",
+      "details": {
+        "vault": "Delta-Neutral BTC"
+      }
+    },
+    {
+      "offset": 101578,
+      "timestamp": 1781821923,
+      "event_type": "ExercisedEvent",
+      "contract_id": "0098054b35489430eac402f0d5f9b437a2e0b2fb9610f43696aea781a4f7f136a2",
+      "template_id": "Governance.Rules:GovernanceRules",
+      "package_id": "1c8f8f2792779b51f80291e17eadc0132cc4f1cdf665ec829d1521f701a396c4",
+      "governance_type": "core_self",
+      "action_summary": "Rotate action confirmation timeout \u2192 48h",
+      "choice": "SetTimeout",
+      "acting_parties": [
+        "governance-core::1220b49bc40b5fc97a403d844155fd5074d3fb20e98a733ef85473b89831cce5"
+      ],
+      "update_id": "00dec781b33111366cf74744f3b1195a46dbb72f53b99ec3985f07ad747772617a",
+      "details": {
+        "hours": 48
+      }
+    },
+    {
+      "offset": 101441,
+      "timestamp": 1781778723,
+      "event_type": "ExercisedEvent",
+      "contract_id": "00a2e50b207385f9c1ddfe9c4ba2be0e1b43e47cd86ed8d0b87f58f9d894fa3ab7",
+      "template_id": "BitsafeVault.VaultRules:VaultRules",
+      "package_id": "0e9fc2c91ef3e23b2612c02f9e0655e473dbb548fae325b1dac4917e96e4778d",
+      "governance_type": "vault",
+      "action_summary": "Burn 75.00 CBTC",
+      "choice": "Burn",
+      "acting_parties": [
+        "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb"
+      ],
+      "update_id": "006583232a681a7486a88c4fe4408ea767cedc0eb3abe830314f6fed1b56b1ee53",
+      "details": {
+        "amount": "75.00",
+        "instrument": "CBTC"
+      }
+    },
+    {
+      "offset": 101304,
+      "timestamp": 1781735523,
+      "event_type": "CreatedEvent",
+      "contract_id": "0004d06b7e2a3197d4d061a81d65c3f982cc65bc6c6feb88159b0417059c50db48",
+      "template_id": "Utility.Registry.App.V0.Service.Registrar:RegistrarService",
+      "package_id": "5a207d9fa5ec994defa2f5b7e88c34f34f0acc274aea66b6151dabbb619655d8",
+      "governance_type": "core_self",
+      "action_summary": "Provision registrar service",
+      "choice": "Provision",
+      "acting_parties": [
+        "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78",
+        "ibtc-admin::12209688b4410a59414d40a2a541644d22ac9e85a7f9438545749f65965a495f"
+      ],
+      "update_id": "0027e58defc272c063fb56e07c4996381e9f325b3d228fbccdf123ab9dc6c4ed2b",
+      "details": {}
+    },
+    {
+      "offset": 101167,
+      "timestamp": 1781692323,
+      "event_type": "ExercisedEvent",
+      "contract_id": "0079ddbec57a5691599bd2ecfc568c53b13134fbc637ba60207401d1c2bb3e9a08",
+      "template_id": "Governance.Rules:GovernanceRules",
+      "package_id": "1c8f8f2792779b51f80291e17eadc0132cc4f1cdf665ec829d1521f701a396c4",
+      "governance_type": "core_self",
+      "action_summary": "Remove member backend-signatory-0",
+      "choice": "RemoveMember",
+      "acting_parties": [
+        "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78"
+      ],
+      "update_id": "007f81a6b7ab8b2770312576b1734938086dd80ddb1a36cfa486a936ec6f8d2b56",
+      "details": {
+        "member": "backend-signatory-0"
+      }
+    },
+    {
+      "offset": 101030,
+      "timestamp": 1781649123,
+      "event_type": "ExercisedEvent",
+      "contract_id": "00feb79513d30746a487cbf96bd2cab28e4b6bbec4776ae195c0e8c015d4dff6cc",
+      "template_id": "Governance.Rules:GovernanceRules",
+      "package_id": "1c8f8f2792779b51f80291e17eadc0132cc4f1cdf665ec829d1521f701a396c4",
+      "governance_type": "core_domain",
+      "action_summary": "Transfer 250.00 CBTC to treasury",
+      "choice": "Transfer",
+      "acting_parties": [
+        "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78"
+      ],
+      "update_id": "006db02cdcab3923a49070710205333c5fb527d152fc198b45592eabe3df4b5b7d",
+      "details": {
+        "amount": "250.00",
+        "to": "dec-treasury"
+      }
+    },
+    {
+      "offset": 100893,
+      "timestamp": 1781605923,
+      "event_type": "ExercisedEvent",
+      "contract_id": "0097f5cf217fb8e40fa355ce3a6c8482feada6dfd7292008922fd04220f29b3c43",
+      "template_id": "BitsafeVault.VaultRules:VaultRules",
+      "package_id": "0e9fc2c91ef3e23b2612c02f9e0655e473dbb548fae325b1dac4917e96e4778d",
+      "governance_type": "vault",
+      "action_summary": "Update vault limits (max 10,000 CBTC)",
+      "choice": "UpdateLimits",
+      "acting_parties": [
+        "governance-core::1220b49bc40b5fc97a403d844155fd5074d3fb20e98a733ef85473b89831cce5"
+      ],
+      "update_id": "005b72c38c9c7d795acbbd43ee03004b6c34c1c343c26006d9c88e37292ba737c9",
+      "details": {
+        "max_total_deposit": "10000.00"
+      }
+    },
+    {
+      "offset": 100756,
+      "timestamp": 1781562723,
+      "event_type": "ExercisedEvent",
+      "contract_id": "00c4870be298841425662d2998b8df53efef6a84d952d9aacec714aa26cb041552",
+      "template_id": "Governance.Rules:GovernanceRules",
+      "package_id": "1c8f8f2792779b51f80291e17eadc0132cc4f1cdf665ec829d1521f701a396c4",
+      "governance_type": "core_self",
+      "action_summary": "Add member governance-core",
+      "choice": "AddMember",
+      "acting_parties": [
+        "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78"
+      ],
+      "update_id": "008a73d366dc972fa57592fdebe0eebe6341e12fcc714e9b0d7e83ffd586a342c2",
+      "details": {
+        "member": "governance-core"
+      }
+    },
+    {
+      "offset": 100619,
+      "timestamp": 1781519523,
+      "event_type": "CreatedEvent",
+      "contract_id": "0004308466d0ae0ea38035cc4df0145d4aee9169aae1c6bd33421f24153363ca6e",
+      "template_id": "Governance.Rules:GovernanceRules",
+      "package_id": "1c8f8f2792779b51f80291e17eadc0132cc4f1cdf665ec829d1521f701a396c4",
+      "governance_type": "core_self",
+      "action_summary": "Deploy governance core",
+      "choice": "Deploy",
+      "acting_parties": [
+        "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78"
+      ],
+      "update_id": "00125a532ec861ace7ace196d1b6114c15880e4b050b5bbad8f81d0983d1eea001",
+      "details": {}
+    }
+  ],
+  "total_returned": 14
+}

@@ -1,0 +1,102 @@
+{
+  "peers": [
+    {
+      "participant_id": "iBTC-validator-1::12203898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7d",
+      "name": "iBTC-validator-1",
+      "address": "validator-fra1.canton.ibtc.network",
+      "port": 6865,
+      "public_key": "023898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7df9f2"
+    },
+    {
+      "participant_id": "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c",
+      "name": "iBTC-validator-2",
+      "address": "validator-use1.canton.ibtc.network",
+      "port": 6865,
+      "public_key": "02a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c1ead"
+    },
+    {
+      "participant_id": "iBTC-validator-3::1220668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef343",
+      "name": "iBTC-validator-3",
+      "address": "node-ldn2.dec.bitsafe.finance",
+      "port": 443,
+      "public_key": "02668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef3436c6e"
+    },
+    {
+      "participant_id": "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+      "name": "cn-validator-07",
+      "address": "cn-validator-07.mainnet.canton.network",
+      "port": 5008,
+      "public_key": "0261982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae7629"
+    },
+    {
+      "participant_id": "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+      "name": "relay-zrh",
+      "address": "relay-zrh1.canton-network.io",
+      "port": 4401,
+      "public_key": "02d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44eef8"
+    },
+    {
+      "participant_id": "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9",
+      "name": "bsafe-tok3",
+      "address": "bsafe-node-tokyo-03.canton.global",
+      "port": 6865,
+      "public_key": "0210f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e916ed"
+    },
+    {
+      "participant_id": "dec-syd1::1220ac2594b1f585253379f7fd2d121b204088b41ae60a31698a802fef37d5b8",
+      "name": "dec-syd1",
+      "address": "dec-validator.syd1.bitsafe.finance",
+      "port": 8443,
+      "public_key": "02ac2594b1f585253379f7fd2d121b204088b41ae60a31698a802fef37d5b87027"
+    },
+    {
+      "participant_id": "canton-nyc::12208651f1b033067b4c5cbe09328210794e2bef13d338de4bf0aca2af277b6d",
+      "name": "canton-nyc",
+      "address": "cn-nyc-12.us-east.canton.network",
+      "port": 6865,
+      "public_key": "028651f1b033067b4c5cbe09328210794e2bef13d338de4bf0aca2af277b6de873"
+    },
+    {
+      "participant_id": "validator-sgp::122044a2d77adbb0679fa754a1e8493afae5d1597eada7404cf7a569263574db",
+      "name": "validator-sgp",
+      "address": "validator-sgp2.apac.ibtc.network",
+      "port": 5008,
+      "public_key": "0244a2d77adbb0679fa754a1e8493afae5d1597eada7404cf7a569263574db475b"
+    },
+    {
+      "participant_id": "ibtc-fra-spare::12206b9220cb439e354deddd22af1f602a6ee3983b3a8956d0ef7dd07e958ebf",
+      "name": "ibtc-fra-spare",
+      "address": "spare-fra2.canton.ibtc.network",
+      "port": 6865,
+      "public_key": "026b9220cb439e354deddd22af1f602a6ee3983b3a8956d0ef7dd07e958ebf3ff6"
+    },
+    {
+      "participant_id": "dec-saopaulo::1220ecc57a74bf7229aaf620b544d7fb6f5b199b20b2581752bece576a50adee",
+      "name": "dec-saopaulo",
+      "address": "node-gru1.sa-east.dec.bitsafe.finance",
+      "port": 443,
+      "public_key": "02ecc57a74bf7229aaf620b544d7fb6f5b199b20b2581752bece576a50adeea867"
+    },
+    {
+      "participant_id": "canton-mum::1220649a6a537db9f061d24e3c98ef1c46cbe0605015fb2ec3d52ea6215ed0ee",
+      "name": "canton-mum",
+      "address": "validator-mum1.canton-network.io",
+      "port": 6865,
+      "public_key": "02649a6a537db9f061d24e3c98ef1c46cbe0605015fb2ec3d52ea6215ed0ee0e6c"
+    },
+    {
+      "participant_id": "bsafe-cape::122015a048f5c1a6ede86d6ec87272554bbbd23f4a342ac191dc644612f35d6a",
+      "name": "bsafe-cape",
+      "address": "node-cpt1.af-south.bitsafe.finance",
+      "port": 8443,
+      "public_key": "0215a048f5c1a6ede86d6ec87272554bbbd23f4a342ac191dc644612f35d6a60b2"
+    },
+    {
+      "participant_id": "relay-dub::12202946e81d20be83b1f31e8df7d4cc139473b6e44143a79f4d92149eb0e50a",
+      "name": "relay-dub",
+      "address": "relay-dub1.eu-west.canton.network",
+      "port": 4401,
+      "public_key": "022946e81d20be83b1f31e8df7d4cc139473b6e44143a79f4d92149eb0e50abee0"
+    }
+  ]
+}

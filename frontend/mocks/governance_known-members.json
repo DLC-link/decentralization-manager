@@ -1,0 +1,28 @@
+{
+  "members": [
+    {
+      "participant_uid": "iBTC-validator-1::12203898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7d",
+      "member_party_id": "ibtc-admin::12209688b4410a59414d40a2a541644d22ac9e85a7f9438545749f65965a495f"
+    },
+    {
+      "participant_uid": "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c",
+      "member_party_id": "vault-rc7-2::1220fb3be8c3236d9258e9e1f25fc5d1a924cd368f7346a7a7ff4a82dd3eba54"
+    },
+    {
+      "participant_uid": "iBTC-validator-3::1220668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef343",
+      "member_party_id": "cbtc-attestor-pool::122070884b3eb2e563698a1e51f29ea9cec1d6b9d25272be0efd76cc715b769a"
+    },
+    {
+      "participant_uid": "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+      "member_party_id": "backend-signatory-0::12201bc2c8500d04c208285d5799eb60cf6a65e084033c9a78707a38c5a0ef60"
+    },
+    {
+      "participant_uid": "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+      "member_party_id": "governance-core::1220b49bc40b5fc97a403d844155fd5074d3fb20e98a733ef85473b89831cce5"
+    },
+    {
+      "participant_uid": "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9",
+      "member_party_id": "vault-yield-btc::1220425311ae37972f78e3781dcd68f64665f39e3b55688ffc060f062f0d2670"
+    }
+  ]
+}

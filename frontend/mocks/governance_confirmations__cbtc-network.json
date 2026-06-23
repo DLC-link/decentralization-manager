@@ -1,0 +1,215 @@
+{
+  "rules_contract_id": "00dd997b7ec53feda70dc6ed6a8b79432994028a587754824cef602facc55f9c4ddd09f2",
+  "member_party_id": "ibtc-member-fra1::1220ba3790e06fa4524e56d2f223576013c73a660055439f9046b17c621c6c1d",
+  "threshold": 2,
+  "actions": [
+    {
+      "action_hash": "4e1195df020de59e0d65a33a4279f1183e7ae4e5d980e309f8b55adff2e61c3e",
+      "action": {
+        "type": "governance_set_threshold",
+        "new_threshold": 4
+      },
+      "confirmations": [
+        {
+          "contract_id": "0066db604107764f738ec8c973c68a6facf5b51bfe88ebe7670dde0d98cbb3a081",
+          "action": {
+            "type": "governance_set_threshold",
+            "new_threshold": 4
+          },
+          "confirming_party": "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78",
+          "created_at": 1782124323,
+          "expires_at": 1782214323
+        },
+        {
+          "contract_id": "0072a5fec914d6449bca6c2b943271bbbb25ad3ae3b58c3a35c46ea9cf2852db27",
+          "action": {
+            "type": "governance_set_threshold",
+            "new_threshold": 4
+          },
+          "confirming_party": "ibtc-admin::12209688b4410a59414d40a2a541644d22ac9e85a7f9438545749f65965a495f",
+          "created_at": 1782124323,
+          "expires_at": 1782214323
+        },
+        {
+          "contract_id": "0039193b98627c3729c17d41f882e5a4873be29550fdf5ca056759c2f2a4c5a34f",
+          "action": {
+            "type": "governance_set_threshold",
+            "new_threshold": 4
+          },
+          "confirming_party": "vault-rc7-2::1220fb3be8c3236d9258e9e1f25fc5d1a924cd368f7346a7a7ff4a82dd3eba54",
+          "created_at": 1782124323,
+          "expires_at": 1782214323
+        }
+      ],
+      "confirmation_count": 3,
+      "can_execute": true,
+      "last_confirmation_at": 1782126123
+    },
+    {
+      "action_hash": "f55ff16f66f43360266b95db6f8fec01d76031054306ae4a4b380598f6cfd114",
+      "action": {
+        "type": "governance_add_member",
+        "member": "ibtc-member-fra1::1220ba3790e06fa4524e56d2f223576013c73a660055439f9046b17c621c6c1d",
+        "new_threshold": 5
+      },
+      "confirmations": [
+        {
+          "contract_id": "00585dabc53d406d65618c00322b0887b8c77c51ad99c315cd23b3952100ef80a4",
+          "action": {
+            "type": "governance_add_member",
+            "member": "ibtc-member-fra1::1220ba3790e06fa4524e56d2f223576013c73a660055439f9046b17c621c6c1d",
+            "new_threshold": 5
+          },
+          "confirming_party": "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78",
+          "created_at": 1782124323,
+          "expires_at": 1782214323
+        }
+      ],
+      "confirmation_count": 1,
+      "can_execute": false,
+      "last_confirmation_at": 1782126123
+    },
+    {
+      "action_hash": "2c3a4249d77070058649dbd822dcaf7957586fce428cfb2ca88b94741eda8b07",
+      "action": {
+        "type": "governance_remove_member",
+        "member": "backend-signatory-0::12201bc2c8500d04c208285d5799eb60cf6a65e084033c9a78707a38c5a0ef60",
+        "new_threshold": 3
+      },
+      "confirmations": [
+        {
+          "contract_id": "0028d6028a662be70617d8c83385d243be5adddc269dca73d0dda50863f4c324dc",
+          "action": {
+            "type": "governance_remove_member",
+            "member": "backend-signatory-0::12201bc2c8500d04c208285d5799eb60cf6a65e084033c9a78707a38c5a0ef60",
+            "new_threshold": 3
+          },
+          "confirming_party": "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78",
+          "created_at": 1782124323,
+          "expires_at": 1782214323
+        },
+        {
+          "contract_id": "007649cb6baf34ec9a618870ef599f80c6ced9c18f68177cc39b801821113cd8d1",
+          "action": {
+            "type": "governance_remove_member",
+            "member": "backend-signatory-0::12201bc2c8500d04c208285d5799eb60cf6a65e084033c9a78707a38c5a0ef60",
+            "new_threshold": 3
+          },
+          "confirming_party": "ibtc-admin::12209688b4410a59414d40a2a541644d22ac9e85a7f9438545749f65965a495f",
+          "created_at": 1782124323,
+          "expires_at": 1782214323
+        }
+      ],
+      "confirmation_count": 2,
+      "can_execute": false,
+      "last_confirmation_at": 1782126123
+    },
+    {
+      "action_hash": "f46dd28a5499d8efef0b8fb8ee1ec1c5a5e407c9381741d576ba8deb4f59ec3f",
+      "action": {
+        "type": "vault_pause",
+        "vault_id": "001353c2d31f0b619539c4f4056098f1ea30f4022e2ba5066f6be851c5ae6d5c0a"
+      },
+      "confirmations": [
+        {
+          "contract_id": "00882ba1a000cb357e7977040c4ca3b3bec73ef6f06fd4b88dda23994a0daaa6b1",
+          "action": {
+            "type": "vault_pause",
+            "vault_id": "001353c2d31f0b619539c4f4056098f1ea30f4022e2ba5066f6be851c5ae6d5c0a"
+          },
+          "confirming_party": "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78",
+          "created_at": 1782124323,
+          "expires_at": 1782214323
+        },
+        {
+          "contract_id": "0071e1e5a4560888eba564ca526aaa0034b3dd968c639646f2debafc697aa8d62f",
+          "action": {
+            "type": "vault_pause",
+            "vault_id": "001353c2d31f0b619539c4f4056098f1ea30f4022e2ba5066f6be851c5ae6d5c0a"
+          },
+          "confirming_party": "ibtc-admin::12209688b4410a59414d40a2a541644d22ac9e85a7f9438545749f65965a495f",
+          "created_at": 1782124323,
+          "expires_at": 1782214323
+        },
+        {
+          "contract_id": "002b2a2ba5b61a6891ff7f6ee0611e8decd644aaaa08cb7c49c604711779b4de00",
+          "action": {
+            "type": "vault_pause",
+            "vault_id": "001353c2d31f0b619539c4f4056098f1ea30f4022e2ba5066f6be851c5ae6d5c0a"
+          },
+          "confirming_party": "vault-rc7-2::1220fb3be8c3236d9258e9e1f25fc5d1a924cd368f7346a7a7ff4a82dd3eba54",
+          "created_at": 1782124323,
+          "expires_at": 1782214323
+        },
+        {
+          "contract_id": "003a94f6489e0beaa0fb5ec12e55e6f950c654a53ed33787a068b9e7d1a5133b92",
+          "action": {
+            "type": "vault_pause",
+            "vault_id": "001353c2d31f0b619539c4f4056098f1ea30f4022e2ba5066f6be851c5ae6d5c0a"
+          },
+          "confirming_party": "cbtc-attestor-pool::122070884b3eb2e563698a1e51f29ea9cec1d6b9d25272be0efd76cc715b769a",
+          "created_at": 1782124323,
+          "expires_at": 1782214323
+        }
+      ],
+      "confirmation_count": 4,
+      "can_execute": true,
+      "last_confirmation_at": 1782126123
+    },
+    {
+      "action_hash": "4539e4b4889079c2a00afeae0bfc1439840ef2379a1fb81c8ba27361ad476d6b",
+      "action": {
+        "type": "governance_set_timeout",
+        "new_timeout_microseconds": 172800000000
+      },
+      "confirmations": [
+        {
+          "contract_id": "0000e7827648dd257c57cdaa12b88b02e31c61e36f741a41f3ef3ee6fd5fdccd4b",
+          "action": {
+            "type": "governance_set_timeout",
+            "new_timeout_microseconds": 172800000000
+          },
+          "confirming_party": "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78",
+          "created_at": 1782124323,
+          "expires_at": 1782214323
+        }
+      ],
+      "confirmation_count": 1,
+      "can_execute": false,
+      "last_confirmation_at": 1782126123
+    }
+  ],
+  "domain_actions": [
+    {
+      "proposal_cid": "000ad52e338662c923b15fd45a73c6e97336efccf28a7aef9449443cc6dd7415fb",
+      "action_label": "Transfer",
+      "description": "Transfer 250.00 CBTC to treasury",
+      "confirmations": [],
+      "confirmation_count": 2,
+      "can_execute": false,
+      "transfer_details": {
+        "receiver": "dec-treasury::1220e5eff180952bf0ea0588c3d2ab779dcebc3c3cb5c5c70904d534cccd8862",
+        "amount": "250.00",
+        "instrument_admin": "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb",
+        "instrument_id": "CBTC"
+      }
+    },
+    {
+      "proposal_cid": "008b53639f152c8fc6ef30802fde462ba0be9cf085f7580dc69efd72e002abbb35",
+      "action_label": "Generic vote",
+      "description": "Approve devnet parameter change DIP-042",
+      "confirmations": [],
+      "confirmation_count": 5,
+      "can_execute": true
+    },
+    {
+      "proposal_cid": "00e788103ee15318fcd2af9b73b4ebbb33a903b020de7b307d71f5fed0f433e548",
+      "action_label": "Accept transfer",
+      "description": "Accept 12.5 CBTC (orphaned)",
+      "confirmations": [],
+      "confirmation_count": 3,
+      "can_execute": false,
+      "orphaned": true
+    }
+  ]
+}

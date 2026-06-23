@@ -1,0 +1,66 @@
+{
+  "invitations": [
+    {
+      "id": "inv-2000",
+      "invitation_type": "Onboarding",
+      "coordinator_pubkey": "0261982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae7629",
+      "coordinator_name": "cn-validator-07",
+      "received_at": 1782124993,
+      "dec_party_id": "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78",
+      "prefix": "cbtc-network",
+      "participants": [
+        "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c",
+        "iBTC-validator-3::1220668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef343"
+      ]
+    },
+    {
+      "id": "inv-2001",
+      "invitation_type": "Kick",
+      "coordinator_pubkey": "02d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44eef8",
+      "coordinator_name": "relay-zrh",
+      "received_at": 1782124093,
+      "dec_party_id": "ibtc-admin::12209688b4410a59414d40a2a541644d22ac9e85a7f9438545749f65965a495f",
+      "kicked_participant": "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+      "new_threshold": 3,
+      "previous_threshold": 4
+    },
+    {
+      "id": "inv-2002",
+      "invitation_type": "Contracts",
+      "coordinator_pubkey": "0210f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e916ed",
+      "coordinator_name": "bsafe-tok3",
+      "received_at": 1782123193,
+      "dec_party_id": "vault-rc7-2::1220fb3be8c3236d9258e9e1f25fc5d1a924cd368f7346a7a7ff4a82dd3eba54",
+      "participants": [
+        "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c"
+      ],
+      "package_names": [
+        "BitsafeVault.VaultRules"
+      ]
+    },
+    {
+      "id": "inv-2003",
+      "invitation_type": "Dars",
+      "coordinator_pubkey": "02ac2594b1f585253379f7fd2d121b204088b41ae60a31698a802fef37d5b87027",
+      "coordinator_name": "dec-syd1",
+      "received_at": 1782122293,
+      "dec_party_id": "cbtc-attestor-pool::122070884b3eb2e563698a1e51f29ea9cec1d6b9d25272be0efd76cc715b769a",
+      "dar_filenames": [
+        "bitsafe-vault-0.0.8.dar",
+        "utility-registry-0.0.1.dar"
+      ]
+    },
+    {
+      "id": "inv-2004",
+      "invitation_type": "Onboarding",
+      "coordinator_pubkey": "028651f1b033067b4c5cbe09328210794e2bef13d338de4bf0aca2af277b6de873",
+      "coordinator_name": "canton-nyc",
+      "received_at": 1782121393,
+      "dec_party_id": "backend-signatory-0::12201bc2c8500d04c208285d5799eb60cf6a65e084033c9a78707a38c5a0ef60",
+      "prefix": "vault-yield-btc",
+      "participants": [
+        "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44"
+      ]
+    }
+  ]
+}

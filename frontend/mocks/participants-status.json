@@ -1,0 +1,85 @@
+{
+  "statuses": [
+    {
+      "id": "iBTC-validator-1::12203898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7d",
+      "status": "CurrentNode",
+      "latency_ms": 0,
+      "version": "0.1.8"
+    },
+    {
+      "id": "iBTC-validator-2::1220a9fbb47c141cebb1e684509b41b6bbbdb83ccbc9d4c5e9f9c494dde7809c",
+      "status": "Connected",
+      "latency_ms": 101,
+      "version": "0.1.9"
+    },
+    {
+      "id": "iBTC-validator-3::1220668444ed3298beeb339a493dfeeab69af45f4d0a908a6f6c5aad373ef343",
+      "status": "Connected",
+      "latency_ms": 167,
+      "version": "0.1.10"
+    },
+    {
+      "id": "cn-validator-07::122061982afe660e1fa308b183d8dc9dae445b34f79dc5dbe22200b9541e7bae",
+      "status": "Unreachable"
+    },
+    {
+      "id": "relay-zrh::1220d118f9988a6c2904bdf779676da4587663c4efd2c179be8a447225fa7c44",
+      "status": "Connected",
+      "latency_ms": 137,
+      "version": "0.1.10"
+    },
+    {
+      "id": "bsafe-tok3::122010f3a78eb9d8c742c6f6154a857194706de145f2548bb5c65dd9e0b2a3e9",
+      "status": "HandshakeFailed"
+    },
+    {
+      "id": "dec-syd1::1220ac2594b1f585253379f7fd2d121b204088b41ae60a31698a802fef37d5b8",
+      "status": "Connected",
+      "latency_ms": 66,
+      "version": "0.1.9",
+      "workflow": {
+        "kind": "Onboarding",
+        "role": "Peer",
+        "step": "AwaitingKeys",
+        "step_index": 2,
+        "step_total": 5
+      }
+    },
+    {
+      "id": "canton-nyc::12208651f1b033067b4c5cbe09328210794e2bef13d338de4bf0aca2af277b6d",
+      "status": "Connected",
+      "latency_ms": 44,
+      "version": "0.2.0-rc1"
+    },
+    {
+      "id": "validator-sgp::122044a2d77adbb0679fa754a1e8493afae5d1597eada7404cf7a569263574db",
+      "status": "Unreachable"
+    },
+    {
+      "id": "ibtc-fra-spare::12206b9220cb439e354deddd22af1f602a6ee3983b3a8956d0ef7dd07e958ebf",
+      "status": "Connected",
+      "latency_ms": 74,
+      "version": "0.1.8"
+    },
+    {
+      "id": "dec-saopaulo::1220ecc57a74bf7229aaf620b544d7fb6f5b199b20b2581752bece576a50adee",
+      "status": "HandshakeFailed"
+    },
+    {
+      "id": "canton-mum::1220649a6a537db9f061d24e3c98ef1c46cbe0605015fb2ec3d52ea6215ed0ee",
+      "status": "Connected",
+      "latency_ms": 111,
+      "version": "0.1.8"
+    },
+    {
+      "id": "bsafe-cape::122015a048f5c1a6ede86d6ec87272554bbbd23f4a342ac191dc644612f35d6a",
+      "status": "Unreachable"
+    },
+    {
+      "id": "relay-dub::12202946e81d20be83b1f31e8df7d4cc139473b6e44143a79f4d92149eb0e50a",
+      "status": "Connected",
+      "latency_ms": 31,
+      "version": "0.1.9"
+    }
+  ]
+}

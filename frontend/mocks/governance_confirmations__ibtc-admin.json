@@ -1,0 +1,98 @@
+{
+  "rules_contract_id": "00dd09f2cdbb46809199ef6972e896984c16cad8750a6057089800c09246cfdd35",
+  "member_party_id": "ibtc-member-fra1::1220ba3790e06fa4524e56d2f223576013c73a660055439f9046b17c621c6c1d",
+  "threshold": 1,
+  "actions": [
+    {
+      "action_hash": "c02c0b965e023abee808f2b548d8d5193a8b5229be6f3121a6f16e2d41a449b3",
+      "action": {
+        "type": "governance_add_member",
+        "member": "vault-yield-btc::1220425311ae37972f78e3781dcd68f64665f39e3b55688ffc060f062f0d2670",
+        "new_threshold": 4
+      },
+      "confirmations": [
+        {
+          "contract_id": "006141c7551141fc116abdfd041ce2dc06fc989908289728a66690274e1c252d5f",
+          "action": {
+            "type": "governance_add_member",
+            "member": "vault-yield-btc::1220425311ae37972f78e3781dcd68f64665f39e3b55688ffc060f062f0d2670",
+            "new_threshold": 4
+          },
+          "confirming_party": "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78",
+          "created_at": 1782124323,
+          "expires_at": 1782214323
+        },
+        {
+          "contract_id": "002dac1d7e654634908a142097ed6ec4289205fc4bc6b626838cd98919d5b02d7b",
+          "action": {
+            "type": "governance_add_member",
+            "member": "vault-yield-btc::1220425311ae37972f78e3781dcd68f64665f39e3b55688ffc060f062f0d2670",
+            "new_threshold": 4
+          },
+          "confirming_party": "ibtc-admin::12209688b4410a59414d40a2a541644d22ac9e85a7f9438545749f65965a495f",
+          "created_at": 1782124323,
+          "expires_at": 1782214323
+        }
+      ],
+      "confirmation_count": 2,
+      "can_execute": false,
+      "last_confirmation_at": 1782126123
+    },
+    {
+      "action_hash": "7dc96f776c8423e57a2785489a3f9c43fb6e756876d6ad9a9cac4aa4e72ec193",
+      "action": {
+        "type": "governance_set_threshold",
+        "new_threshold": 3
+      },
+      "confirmations": [
+        {
+          "contract_id": "0046bf36a4a1175aa4204c4153f466aa9ba5e9a0ab3f42731776098d60e6286196",
+          "action": {
+            "type": "governance_set_threshold",
+            "new_threshold": 3
+          },
+          "confirming_party": "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78",
+          "created_at": 1782124323,
+          "expires_at": 1782214323
+        },
+        {
+          "contract_id": "004284b4d76380ac83366f0dadf4c5baf633f0755d077e7d8b3c4aff467ead7e96",
+          "action": {
+            "type": "governance_set_threshold",
+            "new_threshold": 3
+          },
+          "confirming_party": "ibtc-admin::12209688b4410a59414d40a2a541644d22ac9e85a7f9438545749f65965a495f",
+          "created_at": 1782124323,
+          "expires_at": 1782214323
+        },
+        {
+          "contract_id": "00d7d60ad9a45ea528d3e630a581f95cbf0fa21c9e050524b55a042a6697a109a9",
+          "action": {
+            "type": "governance_set_threshold",
+            "new_threshold": 3
+          },
+          "confirming_party": "vault-rc7-2::1220fb3be8c3236d9258e9e1f25fc5d1a924cd368f7346a7a7ff4a82dd3eba54",
+          "created_at": 1782124323,
+          "expires_at": 1782214323
+        }
+      ],
+      "confirmation_count": 3,
+      "can_execute": true,
+      "last_confirmation_at": 1782126123
+    }
+  ],
+  "domain_actions": [
+    {
+      "proposal_cid": "005c88e7a226e11ad1204cb8d30cd5d6ff6cba69bc32da73134928e17c90c54086",
+      "action_label": "Create user service request",
+      "description": "Onboard utility user",
+      "confirmations": [],
+      "confirmation_count": 1,
+      "can_execute": false,
+      "service_request_details": {
+        "operator": "ibtc-admin::12209688b4410a59414d40a2a541644d22ac9e85a7f9438545749f65965a495f",
+        "user": "ibtc-member-fra1::1220ba3790e06fa4524e56d2f223576013c73a660055439f9046b17c621c6c1d"
+      }
+    }
+  ]
+}

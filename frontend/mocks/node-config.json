@@ -1,0 +1,19 @@
+{
+  "node": {
+    "participant_id": "iBTC-validator-1::12203898ee6f3d5445918e4a30cf77e39067404651d81ed136a9fc28e7198a7d",
+    "listen_address": "0.0.0.0",
+    "public_address": "validator-fra1.canton.ibtc.network:6865",
+    "port": 6865
+  },
+  "network_config": "devnet",
+  "canton": {
+    "admin_api_host": "canton-admin.fra1.ibtc.network",
+    "admin_api_port": 5012,
+    "ledger_api_host": "canton-ledger.fra1.ibtc.network",
+    "ledger_api_port": 5011,
+    "synchronizer": "global-domain::1220a91d",
+    "network": "devnet"
+  },
+  "test_mode": false,
+  "version": "0.1.10"
+}

@@ -1,0 +1,50 @@
+{
+  "results": [
+    {
+      "party_id": "cbtc-network::12203364ffc4edbc860ce1ac2ef99126465acde05db98d90c46c5d87617a2d78",
+      "success": true
+    },
+    {
+      "party_id": "ibtc-admin::12209688b4410a59414d40a2a541644d22ac9e85a7f9438545749f65965a495f",
+      "success": true
+    },
+    {
+      "party_id": "vault-rc7-2::1220fb3be8c3236d9258e9e1f25fc5d1a924cd368f7346a7a7ff4a82dd3eba54",
+      "success": true
+    },
+    {
+      "party_id": "cbtc-attestor-pool::122070884b3eb2e563698a1e51f29ea9cec1d6b9d25272be0efd76cc715b769a",
+      "success": false,
+      "error": "token exchange failed (401 from Keycloak)"
+    },
+    {
+      "party_id": "backend-signatory-0::12201bc2c8500d04c208285d5799eb60cf6a65e084033c9a78707a38c5a0ef60",
+      "success": true
+    },
+    {
+      "party_id": "governance-core::1220b49bc40b5fc97a403d844155fd5074d3fb20e98a733ef85473b89831cce5",
+      "success": true
+    },
+    {
+      "party_id": "vault-yield-btc::1220425311ae37972f78e3781dcd68f64665f39e3b55688ffc060f062f0d2670",
+      "success": false
+    },
+    {
+      "party_id": "cbtc-mint-authority::122070e179114b2665df455d0065885d77f1822021a9580470670727f0d030cb",
+      "success": true
+    },
+    {
+      "party_id": "utility-registrar::12206a58a9f547e2c9e833c6e261806a51c224cd7faab962ed4fee21df39fa06",
+      "success": false,
+      "error": "token exchange failed (401 from Keycloak)"
+    },
+    {
+      "party_id": "dec-treasury::1220e5eff180952bf0ea0588c3d2ab779dcebc3c3cb5c5c70904d534cccd8862",
+      "success": true
+    },
+    {
+      "party_id": "attestor-pool-eu::122091e27cd7ca81e72e5dd8bb97e026ff5151c1020c024ead4881ecdc7d98e9",
+      "success": true
+    }
+  ]
+}
