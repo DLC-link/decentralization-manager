@@ -4,8 +4,8 @@ use uuid::Uuid;
 
 use canton_proto_rs::com::{
     daml::ledger::api::v2::{
-        CumulativeFilter, EventFormat, Filters, GetActiveContractsRequest, GetLedgerEndRequest,
-        Signature, WildcardFilter, cumulative_filter,
+        CumulativeFilter, EventFormat, Filters, GetEventsByContractIdRequest, Signature,
+        Transaction, WildcardFilter, cumulative_filter, event,
         interactive::{
             ExecuteSubmissionAndWaitForTransactionRequest, PartySignatures,
             PrepareSubmissionResponse, SinglePartySignatures,
@@ -123,6 +123,10 @@ pub async fn execute_submissions(
     let token_opt = Some(token.to_string());
     let mut submission_client = utils::create_submission_client(config, token_opt.clone()).await?;
 
+    // Contract ids of everything we create, harvested from each submission's
+    // committed transaction response so we can confirm them by id afterwards.
+    let mut all_created_contract_ids: Vec<String> = Vec::new();
+
     for (idx, prepared_response) in prepared_submissions.iter().enumerate() {
         tracing::info!("Executing submission {index}...", index = idx + 1);
 
@@ -183,30 +187,53 @@ pub async fn execute_submissions(
             transaction_format: None,
         };
 
-        submission_client
+        let response = submission_client
             .execute_submission_and_wait_for_transaction(tonic::Request::new(execute_request))
-            .await?;
+            .await?
+            .into_inner();
 
-        tracing::info!("Submission {index} executed successfully", index = idx + 1);
+        // The RPC blocks until the transaction is committed, and its response
+        // carries the created events — i.e. the exact contracts this submission
+        // produced. Harvest their ids so we can confirm them by id later rather
+        // than scanning the whole ACS.
+        let created = created_contract_ids(&response.transaction);
+        tracing::info!(
+            "Submission {index} executed successfully, created {count} contract(s)",
+            index = idx + 1,
+            count = created.len(),
+        );
+        all_created_contract_ids.extend(created);
     }
 
-    // Step 5: Wait for contracts to appear in ACS
-    tracing::info!("Waiting for contracts to appear in ledger...");
-    let mut state_client = utils::create_state_client(config, token_opt).await?;
+    // Step 5: Confirm the created contracts are visible.
+    //
+    // `execute_submission_and_wait_for_transaction` already blocks until each
+    // transaction is committed, so the contracts exist by this point. We still
+    // confirm them, but by looking each one up by id via
+    // `EventQueryService.GetEventsByContractId` — a cheap point query — instead
+    // of streaming the party's entire active-contract set (which can be millions
+    // of contracts and is `O(ledger state)`, not `O(contracts we created)`).
+    if all_created_contract_ids.is_empty() {
+        // No created events came back (e.g. the submitting party isn't hosted on
+        // this node, so an ACS_DELTA transaction is filtered to empty). The RPC
+        // success above is itself the commit guarantee, so don't fail here.
+        tracing::warn!(
+            "Execute responses returned no created events to confirm; \
+             relying on execute_submission_and_wait_for_transaction success"
+        );
+    } else {
+        tracing::info!(
+            "Confirming {count} created contract(s) by id...",
+            count = all_created_contract_ids.len()
+        );
 
-    let max_attempts = topology_retry_max_attempts();
-    let retry_delay = tokio::time::Duration::from_secs(topology_retry_delay_secs());
+        let mut event_query_client = utils::create_event_query_client(config, token_opt).await?;
 
-    for attempt in 1..=max_attempts {
-        // Get current ledger end
-        let ledger_end = state_client
-            .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
-            .await?
-            .into_inner()
-            .offset;
+        let max_attempts = topology_retry_max_attempts();
+        let retry_delay = tokio::time::Duration::from_secs(topology_retry_delay_secs());
 
-        // Query ACS for the decentralized party
-        // Filter by the specific party rather than "any party" to avoid permission issues
+        // `GetEventsByContractId` filters by party visibility; the decentralized
+        // party is a stakeholder on everything it just created.
         let mut filters_by_party = std::collections::HashMap::new();
         filters_by_party.insert(
             decentralized_party.clone(),
@@ -221,51 +248,81 @@ pub async fn execute_submissions(
             },
         );
 
-        let acs_request = GetActiveContractsRequest {
-            active_at_offset: ledger_end,
-            event_format: Some(EventFormat {
-                filters_by_party,
-                filters_for_any_party: None,
-                verbose: false,
-            }),
-        };
+        for contract_id in &all_created_contract_ids {
+            let mut visible = false;
 
-        let mut stream = state_client
-            .get_active_contracts(tonic::Request::new(acs_request))
-            .await?
-            .into_inner();
+            for attempt in 1..=max_attempts {
+                let request = GetEventsByContractIdRequest {
+                    contract_id: contract_id.clone(),
+                    event_format: Some(EventFormat {
+                        filters_by_party: filters_by_party.clone(),
+                        filters_for_any_party: None,
+                        verbose: false,
+                    }),
+                };
 
-        let mut contract_count = 0;
-        while let Some(response) = stream.message().await? {
-            if response.contract_entry.is_some() {
-                contract_count += 1;
+                match event_query_client
+                    .get_events_by_contract_id(tonic::Request::new(request))
+                    .await
+                {
+                    // A populated `created` event means the contract is visible.
+                    Ok(response) => {
+                        if response.into_inner().created.is_some() {
+                            visible = true;
+                            break;
+                        }
+                        tracing::debug!(
+                            "Contract {contract_id} not yet visible (attempt {attempt}/{max_attempts})"
+                        );
+                    }
+                    // `CONTRACT_EVENTS_NOT_FOUND` while the index catches up — retry.
+                    Err(status) => {
+                        tracing::debug!(
+                            "Lookup for {contract_id} failed (attempt {attempt}/{max_attempts}): {status}"
+                        );
+                    }
+                }
+
+                if attempt < max_attempts {
+                    tokio::time::sleep(retry_delay).await;
+                }
+            }
+
+            if !visible {
+                anyhow::bail!(
+                    "Created contract {contract_id} not visible after {max_attempts} attempts"
+                );
             }
         }
 
-        tracing::debug!(
-            "Found {contract_count} contracts for party {decentralized_party} (attempt {attempt}/{max_attempts})",
+        tracing::info!(
+            "All {count} created contract(s) confirmed visible",
+            count = all_created_contract_ids.len()
         );
-
-        // We expect at least as many contracts as submissions
-        if contract_count >= num_submissions {
-            tracing::info!(
-                "All contracts successfully created! Found {contract_count} contracts after {attempt} attempt(s)"
-            );
-            break;
-        }
-
-        if attempt < max_attempts {
-            tracing::debug!("Contracts not yet visible, retrying in {retry_delay:?}...");
-            tokio::time::sleep(retry_delay).await;
-        } else {
-            anyhow::bail!(
-                "Contracts not visible in ACS after {max_attempts} attempts. Found only {contract_count} contracts, expected at least {num_submissions}"
-            );
-        }
     }
 
     tracing::info!("Submissions executed successfully");
     Ok(())
+}
+
+/// Collect the contract ids of every `CreatedEvent` in an execute-and-wait
+/// transaction response. These are the exact contracts the submission created,
+/// letting us confirm them by id rather than scanning the whole ACS. Returns an
+/// empty vec when the response carries no transaction or no created events.
+fn created_contract_ids(transaction: &Option<Transaction>) -> Vec<String> {
+    let Some(tx) = transaction else {
+        return Vec::new();
+    };
+
+    tx.events
+        .iter()
+        .filter_map(|ev| {
+            ev.event.as_ref().and_then(|inner| match inner {
+                event::Event::Created(created) => Some(created.contract_id.clone()),
+                _ => None,
+            })
+        })
+        .collect()
 }
 
 /// Decode a sequence of `varint(len)||proto` messages from a byte slice. Mirrors
