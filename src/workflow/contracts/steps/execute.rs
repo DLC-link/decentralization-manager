@@ -293,8 +293,7 @@ pub async fn execute_submissions(
                     // lag — surface the real cause instead of retrying into a
                     // misleading visibility error.
                     Err(status) => {
-                        return Err(anyhow::Error::new(status)
-                            .context(format!("Failed to confirm created contract {contract_id}")));
+                        anyhow::bail!("Failed to confirm created contract {contract_id}: {status}");
                     }
                 }
             }
