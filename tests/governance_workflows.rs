@@ -100,6 +100,14 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     phases::generic_vote::run(&mut f).await?;
     phases::notification_feed::run(&mut f).await?;
     phases::owner_key_resilience::run(&mut f).await?;
+    // Threshold/quorum coverage (signing-step hang fix + uncancellable stuck
+    // run). Runs after the happy-path contracts/governance phases (so the extra
+    // GovernanceRules deploy + workflow rows can't perturb their assertions) but
+    // BEFORE `kick`, which removes a participant: the quorum case needs the
+    // intact 3-member party (2 peers — one accepts, one stays absent). Both
+    // phases clean up after themselves.
+    phases::contracts_quorum_completes::run(&mut f).await?;
+    phases::cancel_stuck_contracts::run(&mut f).await?;
     phases::kick::run(&mut f).await?;
 
     // ----------------------------------------------------------------------
@@ -122,11 +130,6 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     phases::retry_coordinator_broadcast::run(&mut f).await?; // G3
     phases::dismiss_failed_cleans_artifacts::run(&mut f).await?; // G4
     phases::generate_keys_idempotent::run(&mut f).await?; // G7
-    // Threshold/quorum coverage (the fix for the signing-step hang + the
-    // uncancellable stuck run). Run here, after the happy-path contracts
-    // phases, so the quorum phase's never-accepted P3 invite can't interfere.
-    phases::contracts_quorum_completes::run(&mut f).await?;
-    phases::cancel_stuck_contracts::run(&mut f).await?;
     // G8 (peer 3-strikes abort) is intentionally NOT run. The
     // `peer_3_strikes_abort` phase is an unimplemented stub: exercising it
     // needs a raw-Noise-frame injection harness to feed a peer three
