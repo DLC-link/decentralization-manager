@@ -22,3 +22,7 @@ E2E_ASSUME_STACK_UP=1 npm test
 ```
 
 Opt-in only: not part of default CI (needs devnet creds + tunnels + a built `release-ci` binary).
+
+## Known coverage gaps (vs. the Rust IT)
+- **`generic_vote` confirm/execute go through the API, not the UI.** All three nodes log in as the same Keycloak user (`cvault-finoa-lp-1`), so the UI treats the proposer's confirmation as "yours" on every node and never offers the peer `Confirm`/`Execute` dialogs. The suite proposes via the UI and reaches threshold via the per-node `/governance/*` endpoints (as the Rust IT does). Covering the `Confirm`/`Execute` UI dialogs would require distinct, per-node frontend users; the Rust IT covers that path.
+- **Phases kept in the Rust IT, not ported here:** `utility_onboarding` (mint/burn needs manually-supplied disclosed-contract blobs the UI can't auto-resolve), `token_custody` (same disclosed-contract dependency), and `owner_key_resilience` (asserts internal invariants not surfaced in the UI).

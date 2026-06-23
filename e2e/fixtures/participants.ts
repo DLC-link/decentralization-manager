@@ -23,7 +23,7 @@ async function openAuthed(browser: Browser, port: number): Promise<Page> {
   const context = await browser.newContext();
   if (cfg.auth_required) {
     const tokens = await fetchRopcTokens(cfg);
-    await seedAuth(context, tokens, cfg);
+    await seedAuth(context, tokens);
   }
   const page = await context.newPage();
   await page.goto(`http://localhost:${port}/`);
@@ -79,7 +79,7 @@ export async function acceptInvitationOnAny(pages: Page[], type: RegExp): Promis
 // feed card containing BOTH so a stale completed run from an earlier prefix
 // can't satisfy it, and the feed's own /workflows polling flips it to completed
 // without a reload.
-export async function expectWorkflowCompleted(page: Page, _kind: RegExp, prefix: string) {
+export async function expectWorkflowCompleted(page: Page, prefix: string) {
   await gotoTab(page, "Pending approvals");
   const card = page.locator("div").filter({ hasText: prefix }).filter({ hasText: /completed/i });
   await expect(card.first()).toBeVisible({ timeout: 240_000 });
@@ -154,19 +154,22 @@ export async function govRulesContractId(port: number, partyId: string): Promise
   return cid;
 }
 
-// Poll until exactly one pending domain action exists; return its proposal_cid.
+// Poll until EXACTLY one pending domain action exists; return its proposal_cid.
+// Requiring exactly one (matching the Rust IT's `domain_actions.len() == 1`
+// wait in tests/common/governance.rs) means a lingering/extra proposal fails
+// loudly here instead of silently confirming/executing the wrong CID.
 export async function waitForProposalCid(port: number, partyId: string): Promise<string> {
   let last = "none";
   const deadline = Date.now() + 90_000;
   while (Date.now() < deadline) {
     try {
       const actions = await govConfirmations(port, partyId);
-      if (actions.length >= 1 && actions[0].proposal_cid) return actions[0].proposal_cid;
+      if (actions.length === 1 && actions[0].proposal_cid) return actions[0].proposal_cid;
       last = `${actions.length} actions`;
     } catch (e) { last = String(e); }
     await new Promise((r) => setTimeout(r, 3000));
   }
-  throw new Error(`proposal not visible on :${port} after 90s (${last})`);
+  throw new Error(`expected exactly one pending proposal on :${port}; after 90s saw ${last}`);
 }
 
 const THRESHOLD_ACTION = { type: "governance_set_threshold", new_threshold: 1 };

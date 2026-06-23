@@ -49,7 +49,6 @@ export async function fetchRopcTokens(cfg: AuthConfig) {
 export async function seedAuth(
   context: BrowserContext,
   tokens: { access_token: string; refresh_token: string; id_token?: string },
-  _cfg: AuthConfig,
 ) {
   // Runs before any page script on every page in the context.
   await context.addInitScript((t) => {

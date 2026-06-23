@@ -6,7 +6,7 @@ test("logs in headlessly as cvault-finoa-lp-1 on P1", async ({ browser }) => {
   test.skip(!cfg.auth_required, "auth not required on this backend");
   const tokens = await fetchRopcTokens(cfg);
   const context = await browser.newContext();
-  await seedAuth(context, tokens, cfg);
+  await seedAuth(context, tokens);
   const page = await context.newPage();
   await page.goto("http://localhost:8081/");
   // Auth success signal: the Sidebar nav renders only when authenticated

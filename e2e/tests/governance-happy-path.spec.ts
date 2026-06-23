@@ -112,8 +112,8 @@ test.describe.serial("governance happy path", () => {
     // Success = this run's Onboarding workflow card shows completed on the
     // coordinator and the one invited peer (prefix-scoped, so a stale completed
     // card can't satisfy it; immediate, unlike the lagging Parties list).
-    await expectWorkflowCompleted(parts.p1, /Onboarding/, prefix);
-    await expectWorkflowCompleted(peer, /Onboarding/, prefix);
+    await expectWorkflowCompleted(parts.p1, prefix);
+    await expectWorkflowCompleted(peer, prefix);
     await test.info().attach(`Two-member onboarding completed: ${prefix}`, {
       body: await parts.p1.screenshot({ fullPage: true }), contentType: "image/png",
     });
@@ -125,9 +125,9 @@ test.describe.serial("governance happy path", () => {
     await startOnboarding(parts.p1, prefix); // full mesh: all peers stay checked
     await acceptInvitation(parts.p2, /Onboarding/);
     await acceptInvitation(parts.p3, /Onboarding/);
-    await expectWorkflowCompleted(parts.p1, /Onboarding/, prefix);
-    await expectWorkflowCompleted(parts.p2, /Onboarding/, prefix);
-    await expectWorkflowCompleted(parts.p3, /Onboarding/, prefix);
+    await expectWorkflowCompleted(parts.p1, prefix);
+    await expectWorkflowCompleted(parts.p2, prefix);
+    await expectWorkflowCompleted(parts.p3, prefix);
     // Capture the full party id for downstream phases (prefix-scoped refresh —
     // the UI Parties list lags without a forced refresh).
     shared.partyId = await resolvePartyId(PORTS.p1, prefix);
@@ -213,7 +213,7 @@ test.describe.serial("governance happy path", () => {
 
     await acceptInvitation(parts.p2, /Contracts/);
     await acceptInvitation(parts.p3, /Contracts/);
-    await expectWorkflowCompleted(parts.p1, /Contracts/, partyPrefix!);
+    await expectWorkflowCompleted(parts.p1, partyPrefix!);
 
     // Gov-core rules now exist → PartyDetail exposes "New Proposal" (IT's
     // GovernanceRules-visible assertion, expressed through the UI; needed by phase 06).
@@ -226,7 +226,13 @@ test.describe.serial("governance happy path", () => {
     }).toPass({ timeout: 120_000, intervals: [5000, 5000, 10_000] });
   });
 
-  test("06 generic vote (propose/confirm/execute)", async () => {
+  // Hybrid by necessity: only the *propose* step runs through the UI. A single
+  // shared frontend user drives all 3 nodes, so the UI treats the proposer's
+  // confirmation as "yours" on every node and never offers the peer Confirm /
+  // Execute dialogs — those are reached via the per-node /governance/* API
+  // (as the Rust IT does). The Confirm/Execute UI dialogs are a known coverage
+  // gap (see e2e/README.md); covering them needs distinct per-node users.
+  test("06 generic vote — propose (UI) + reach threshold (API)", async () => {
     // Falls back to env vars so this phase can be iterated standalone against an
     // already-deployed party (E2E_PARTY_ID + E2E_PARTY_PREFIX).
     const partyId = shared.partyId ?? process.env.E2E_PARTY_ID;
@@ -308,7 +314,7 @@ test.describe.serial("governance happy path", () => {
     await submitAndAwaitClose(dialog, /Kick Participant/i);
 
     await acceptInvitation(parts.p2, /Kick/);
-    await expectWorkflowCompleted(parts.p1, /Kick/, partyPrefix!);
+    await expectWorkflowCompleted(parts.p1, partyPrefix!);
 
     // Party now has 2 participants (the kicked one is gone). Topology lags, so
     // reopen + poll until the participant list shows 2.
