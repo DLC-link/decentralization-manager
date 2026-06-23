@@ -15,11 +15,28 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PID_FILE="${E2E_PID_FILE:-$SCRIPT_DIR/.e2e-pids}"
 
+# Run from the repo root regardless of caller cwd. global-setup.ts invokes this
+# via execFileSync without a cwd, so under Playwright the cwd is e2e/, where the
+# `cargo build` below would fail to find Cargo.toml. run.sh likewise assumes a
+# repo-root cwd for its sourced helpers.
+cd "$SCRIPT_DIR/.."
+
 teardown() {
     if [[ -f "$PID_FILE" ]]; then
+        # Mirror common.sh:stop_nodes — SIGTERM, then SIGKILL anything still
+        # alive — so a process that ignores/slow-handles SIGTERM (or a reused
+        # PID) can't leak and fail the next run's port checks.
+        local _pids=()
         while read -r pid; do
-            [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
+            [[ -n "$pid" ]] && _pids+=("$pid")
         done < "$PID_FILE"
+        for pid in "${_pids[@]+"${_pids[@]}"}"; do
+            kill -0 "$pid" 2>/dev/null && kill "$pid" 2>/dev/null || true
+        done
+        sleep 2
+        for pid in "${_pids[@]+"${_pids[@]}"}"; do
+            kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
+        done
         rm -f "$PID_FILE"
     fi
     # Kill kubectl port-forward grandchildren that were reparented to init when
