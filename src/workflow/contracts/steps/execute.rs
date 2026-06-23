@@ -222,10 +222,8 @@ pub async fn execute_submissions(
              relying on execute_submission_and_wait_for_transaction success"
         );
     } else {
-        tracing::info!(
-            "Confirming {count} created contract(s) by id...",
-            count = all_created_contract_ids.len()
-        );
+        let total = all_created_contract_ids.len();
+        tracing::info!("Confirming {total} created contract(s) by id...");
 
         let mut event_query_client = utils::create_event_query_client(config, token_opt).await?;
 
@@ -248,10 +246,16 @@ pub async fn execute_submissions(
             },
         );
 
-        for contract_id in &all_created_contract_ids {
-            let mut visible = false;
+        // Confirm in rounds: each round looks up every still-pending contract
+        // once, then sleeps a single time before the next round. This bounds the
+        // total wait to `max_attempts * retry_delay` regardless of how many
+        // contracts we created, rather than paying that budget per contract.
+        let mut pending = all_created_contract_ids;
 
-            for attempt in 1..=max_attempts {
+        for attempt in 1..=max_attempts {
+            let mut still_pending = Vec::new();
+
+            for contract_id in pending {
                 let request = GetEventsByContractIdRequest {
                     contract_id: contract_id.clone(),
                     event_format: Some(EventFormat {
@@ -265,40 +269,54 @@ pub async fn execute_submissions(
                     .get_events_by_contract_id(tonic::Request::new(request))
                     .await
                 {
-                    // A populated `created` event means the contract is visible.
                     Ok(response) => {
-                        if response.into_inner().created.is_some() {
-                            visible = true;
-                            break;
+                        if response.into_inner().created.is_none() {
+                            // The RPC succeeded, so the index served the query — a
+                            // missing `created` event is not index lag and won't
+                            // change on retry. Fail fast with the real reason.
+                            anyhow::bail!(
+                                "Created contract {contract_id} returned no create event \
+                                 (not visible to {decentralized_party} or already archived)"
+                            );
                         }
+                        // Visible — drop it from the pending set.
+                    }
+                    // `CONTRACT_EVENTS_NOT_FOUND` surfaces as NOT_FOUND while the
+                    // index catches up — the one genuinely transient case; retry it.
+                    Err(status) if status.code() == tonic::Code::NotFound => {
                         tracing::debug!(
                             "Contract {contract_id} not yet visible (attempt {attempt}/{max_attempts})"
                         );
+                        still_pending.push(contract_id);
                     }
-                    // `CONTRACT_EVENTS_NOT_FOUND` while the index catches up — retry.
+                    // Anything else (auth, permission, transport, …) is not index
+                    // lag — surface the real cause instead of retrying into a
+                    // misleading visibility error.
                     Err(status) => {
-                        tracing::debug!(
-                            "Lookup for {contract_id} failed (attempt {attempt}/{max_attempts}): {status}"
-                        );
+                        return Err(anyhow::Error::new(status)
+                            .context(format!("Failed to confirm created contract {contract_id}")));
                     }
-                }
-
-                if attempt < max_attempts {
-                    tokio::time::sleep(retry_delay).await;
                 }
             }
 
-            if !visible {
-                anyhow::bail!(
-                    "Created contract {contract_id} not visible after {max_attempts} attempts"
-                );
+            pending = still_pending;
+            if pending.is_empty() {
+                break;
+            }
+
+            if attempt < max_attempts {
+                tokio::time::sleep(retry_delay).await;
             }
         }
 
-        tracing::info!(
-            "All {count} created contract(s) confirmed visible",
-            count = all_created_contract_ids.len()
-        );
+        if !pending.is_empty() {
+            anyhow::bail!(
+                "Created contract(s) not visible after {max_attempts} attempts: {ids}",
+                ids = pending.join(", ")
+            );
+        }
+
+        tracing::info!("All {total} created contract(s) confirmed visible");
     }
 
     tracing::info!("Submissions executed successfully");
