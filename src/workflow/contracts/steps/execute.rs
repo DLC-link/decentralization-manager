@@ -310,9 +310,24 @@ pub async fn execute_submissions(
         }
 
         if !pending.is_empty() {
+            // Keep the error bounded: a large lagging batch shouldn't dump
+            // thousands of ids into the message — show counts plus a small sample.
+            let sample = pending
+                .iter()
+                .take(10)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            let more = pending.len().saturating_sub(10);
+            let suffix = if more > 0 {
+                format!(", … (+{more} more)")
+            } else {
+                String::new()
+            };
             anyhow::bail!(
-                "Created contract(s) not visible after {max_attempts} attempts: {ids}",
-                ids = pending.join(", ")
+                "{missing} of {total} created contract(s) not visible after \
+                 {max_attempts} attempts: {sample}{suffix}",
+                missing = pending.len()
             );
         }
 
@@ -362,4 +377,49 @@ fn read_all_messages_from_bytes<M: prost::Message + Default>(data: &[u8]) -> Res
         messages.push(M::decode(message_bytes)?);
     }
     Ok(messages)
+}
+
+#[cfg(test)]
+mod tests {
+    use canton_proto_rs::com::daml::ledger::api::v2::{
+        ArchivedEvent, CreatedEvent, Event, Transaction, event,
+    };
+
+    use super::created_contract_ids;
+
+    fn created(contract_id: &str) -> Event {
+        Event {
+            event: Some(event::Event::Created(CreatedEvent {
+                contract_id: contract_id.to_string(),
+                ..Default::default()
+            })),
+        }
+    }
+
+    #[test]
+    fn none_transaction_yields_no_ids() {
+        assert!(created_contract_ids(&None).is_empty());
+    }
+
+    #[test]
+    fn collects_only_created_event_ids_in_order() {
+        let tx = Transaction {
+            events: vec![
+                created("cid-1"),
+                // a non-created event must be ignored
+                Event {
+                    event: Some(event::Event::Archived(ArchivedEvent::default())),
+                },
+                created("cid-2"),
+                // an empty envelope must be ignored
+                Event { event: None },
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            created_contract_ids(&Some(tx)),
+            vec!["cid-1".to_string(), "cid-2".to_string()]
+        );
+    }
 }
