@@ -40,10 +40,54 @@ async fn open_rw(path: &Path) -> anyhow::Result<SqlitePool> {
     let opts = SqliteConnectOptions::new()
         .filename(path)
         .read_only(false)
-        .create_if_missing(false);
+        .create_if_missing(false)
+        // Tolerate brief contention if the owning process happens to write
+        // (`inject_inprogress_coordinator_run` runs against a live node).
+        .busy_timeout(std::time::Duration::from_secs(10));
     SqlitePool::connect_with(opts)
         .await
         .with_context(|| format!("opening sqlite (rw) at {}", path.display()))
+}
+
+/// Chaos/test-only: insert a synthetic `inprogress` coordinator `workflow_runs`
+/// row directly, reproducing the divergence a restart / failed startup-recovery
+/// leaves behind — the persisted row says InProgress (so `GET /workflows` and
+/// the UI list it) while the in-memory `<Kind>WorkflowState` is Idle (the app
+/// never started this run). That is exactly the state in which the per-kind
+/// cancel must fall back to the persisted row instead of reporting "no workflow
+/// in progress". The row is intentionally minimal (no peers, no dec party, `{}`
+/// config) — cancel doesn't parse the config and treats the invitee broadcast
+/// as best-effort. Safe against a live node because the test runs it when no
+/// workflow is active, so the app isn't writing `workflow_runs`.
+pub async fn inject_inprogress_coordinator_run(
+    db_path: &Path,
+    kind: &str,
+    instance_name: &str,
+    current_step: &str,
+) -> anyhow::Result<()> {
+    let pool = open_rw(db_path).await?;
+    let result = sqlx::query(
+        "INSERT INTO workflow_runs (
+            instance_name, kind, role, status, current_step, step_index, step_total,
+            config_json, coordinator_pubkey, expected_peers_json, completed_peers_json,
+            dec_party_id, error, dismissed, created_at, updated_at
+         ) VALUES (?1, ?2, 'Coordinator', 'inprogress', ?3, 2, 5,
+                   '{}', NULL, '[]', '[]', NULL, NULL, 0,
+                   strftime('%s','now'), strftime('%s','now'))",
+    )
+    .bind(instance_name)
+    .bind(kind)
+    .bind(current_step)
+    .execute(&pool)
+    .await
+    .context("inject_inprogress_coordinator_run")?;
+    pool.close().await;
+    anyhow::ensure!(
+        result.rows_affected() == 1,
+        "expected to insert exactly 1 inprogress row for {instance_name}, affected {}",
+        result.rows_affected()
+    );
+    Ok(())
 }
 
 /// Chaos-only failure injection: flip a `workflow_runs` row to `failed`,
