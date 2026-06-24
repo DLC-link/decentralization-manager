@@ -403,9 +403,18 @@ const App = () => {
       if (ms != null) setSelfLatencyMs(ms);
     };
 
-    const poll = () => {
-      fetchStatuses();
-      measureSelfLatency();
+    // In-flight guard: if a cycle (the status probe in particular) runs longer
+    // than the 2s interval, skip the tick instead of stacking concurrent
+    // requests.
+    let inFlight = false;
+    const poll = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        await Promise.all([fetchStatuses(), measureSelfLatency()]);
+      } finally {
+        inFlight = false;
+      }
     };
 
     poll();
