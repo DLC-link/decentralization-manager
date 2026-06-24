@@ -853,18 +853,33 @@ fn confirmation_cids(confirmations: &[GovConfirmation]) -> Vec<String> {
         .collect()
 }
 
-/// Build a [`PeerEntry`] from the add-peer form (trimming fields; an empty
-/// party becomes `None`; a non-numeric port falls back to 0).
-fn peer_from_form(form: &PeerForm) -> PeerEntry {
+/// Validate the add-peer form into a [`PeerEntry`], or return the index of the
+/// first invalid field so the cursor can land on it. Required: participant id
+/// (0), address (2), a non-zero `u16` port (3) and public key (4); name (1) and
+/// party (5) are optional.
+fn validate_peer_form(form: &PeerForm) -> Result<PeerEntry, usize> {
+    if form.participant_id.trim().is_empty() {
+        return Err(0);
+    }
+    if form.address.trim().is_empty() {
+        return Err(2);
+    }
+    let port: u16 = match form.port.trim().parse() {
+        Ok(port) if port > 0 => port,
+        _ => return Err(3),
+    };
+    if form.public_key.trim().is_empty() {
+        return Err(4);
+    }
     let party = form.party.trim();
-    PeerEntry {
+    Ok(PeerEntry {
         participant_id: form.participant_id.trim().to_owned(),
         name: form.name.trim().to_owned(),
         address: form.address.trim().to_owned(),
-        port: form.port.trim().parse().unwrap_or(0),
+        port,
         public_key: form.public_key.trim().to_owned(),
         party: (!party.is_empty()).then(|| party.to_owned()),
-    }
+    })
 }
 
 /// Serialize the editor's peer list as the bare JSON array `POST /network-config`
@@ -1677,10 +1692,15 @@ impl App {
                     KeyCode::Esc => state.adding = None,
                     KeyCode::Up => form.cursor = form.cursor.saturating_sub(1),
                     KeyCode::Down | KeyCode::Tab if form.cursor < 6 => form.cursor += 1,
-                    KeyCode::Enter if form.cursor >= 6 => {
-                        state.peers.push(peer_from_form(form));
-                        state.adding = None;
-                    }
+                    KeyCode::Enter if form.cursor >= 6 => match validate_peer_form(form) {
+                        // Only add a valid peer; otherwise land the cursor on
+                        // the first invalid field rather than writing port 0.
+                        Ok(peer) => {
+                            state.peers.push(peer);
+                            state.adding = None;
+                        }
+                        Err(invalid_field) => form.cursor = invalid_field,
+                    },
                     KeyCode::Enter if form.cursor < 6 => form.cursor += 1,
                     KeyCode::Char(c) => match form.cursor {
                         0 => form.participant_id.push(c),
@@ -2777,6 +2797,35 @@ mod tests {
             Err(error) => assert!(error.contains("positive")),
             Ok(_) => panic!("expected a non-positive timeout error"),
         }
+    }
+
+    #[test]
+    fn validate_peer_form_rejects_blank_and_zero_port() {
+        let full = PeerForm {
+            participant_id: "alpha::1220".to_owned(),
+            name: "alpha".to_owned(),
+            address: "10.0.0.1".to_owned(),
+            port: "9001".to_owned(),
+            public_key: "abcd".to_owned(),
+            party: String::new(),
+            cursor: 0,
+        };
+        match validate_peer_form(&full) {
+            Ok(peer) => assert_eq!(peer.port, 9001),
+            Err(field) => panic!("expected a valid peer, got invalid field {field}"),
+        }
+
+        // Blank port → cursor should land on the port field (index 3).
+        let mut blank_port = full;
+        blank_port.port = String::new();
+        assert!(matches!(validate_peer_form(&blank_port), Err(3)));
+
+        // Missing participant id → field 0.
+        let mut no_id = PeerForm::blank();
+        no_id.address = "10.0.0.1".to_owned();
+        no_id.port = "9001".to_owned();
+        no_id.public_key = "abcd".to_owned();
+        assert!(matches!(validate_peer_form(&no_id), Err(0)));
     }
 
     #[test]
