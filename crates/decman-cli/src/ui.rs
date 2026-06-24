@@ -14,7 +14,7 @@ use common::types::{
 };
 
 use crate::api::{
-    AuthStatusKind, ChainAuditEntry, FeedItem, GovState, Holding, PartyAuthStatus, PeerView,
+    AuthStatusKind, ChainAuditEntry, FeedItem, Holding, PartyAuthStatus, PeerView,
     audit_action, invitation_name, party_name, run_name,
 };
 use crate::app::{
@@ -353,12 +353,6 @@ fn holdings_count(data: Option<&DetailData>) -> usize {
         .map_or(1, |holdings| holdings.len().max(1))
 }
 
-/// The on-ledger governance state for the open party, if loaded.
-fn gov_state_of(data: Option<&DetailData>) -> Option<&GovState> {
-    data.and_then(|d| d.gov_state.as_ref().ok())
-        .and_then(Option::as_ref)
-}
-
 /// Height of the summary box, accounting for the optional owner-key and
 /// governance-state lines.
 fn summary_height(party: &DecentralizedParty, data: Option<&DetailData>) -> u16 {
@@ -366,11 +360,16 @@ fn summary_height(party: &DecentralizedParty, data: Option<&DetailData>) -> u16 
     if party.my_owner_key.is_some() {
         lines += 1;
     }
-    if let Some(state) = gov_state_of(data) {
-        lines += 1;
-        if state.out_of_date {
+    match data.map(|d| &d.gov_state) {
+        Some(Ok(Some(state))) => {
             lines += 1;
+            if state.out_of_date {
+                lines += 1;
+            }
         }
+        // Reserve a line to surface a governance-state load error.
+        Some(Err(_)) => lines += 1,
+        _ => {}
     }
     lines + 2
 }
@@ -422,24 +421,35 @@ fn draw_summary_box(
             Span::styled(key.clone(), Style::default().fg(logo::ORANGE)),
         ]));
     }
-    if let Some(state) = gov_state_of(data) {
-        let timeout = state
-            .action_confirmation_timeout_microseconds
-            .map_or_else(|| "—".to_owned(), format_micros_human);
-        lines.push(Line::from(vec![
-            label("Governance"),
-            Span::raw(format!(
-                "  threshold {threshold} of {members} members · timeout {timeout}",
-                threshold = state.threshold,
-                members = state.members.len(),
-            )),
-        ]));
-        if state.out_of_date {
-            lines.push(Line::styled(
-                "⚠ governance-core out of date — migrate this party",
-                Style::default().fg(Color::Yellow),
-            ));
+    match data.map(|d| &d.gov_state) {
+        Some(Ok(Some(state))) => {
+            let timeout = state
+                .action_confirmation_timeout_microseconds
+                .map_or_else(|| "—".to_owned(), format_micros_human);
+            lines.push(Line::from(vec![
+                label("Governance"),
+                Span::raw(format!(
+                    "  threshold {threshold} of {members} members · timeout {timeout}",
+                    threshold = state.threshold,
+                    members = state.members.len(),
+                )),
+            ]));
+            if state.out_of_date {
+                lines.push(Line::styled(
+                    "⚠ governance-core out of date — migrate this party",
+                    Style::default().fg(Color::Yellow),
+                ));
+            }
         }
+        // Surface a load error on its own line, like holdings / audit do.
+        Some(Err(error)) => lines.push(Line::from(vec![
+            label("Governance"),
+            Span::styled(
+                format!("  {}", truncate(error, 60)),
+                Style::default().fg(Color::Red),
+            ),
+        ])),
+        _ => {}
     }
     let block = popup_block(&format!("Party · {}", party_name(party)));
     frame.render_widget(Paragraph::new(lines).block(block), area);
@@ -1621,11 +1631,17 @@ fn auth_popup(frame: &mut Frame, area: Rect, parties: &[PartyAuthStatus], select
             selected_offset = u16::try_from(lines.len()).unwrap_or(0);
         }
         let marker = if index == selected { "▶ " } else { "  " };
-        lines.push(Line::from(Span::styled(
-            format!("{marker}{}", id_prefix(&party.dec_party_id)),
+        // Only the selected party's header is highlighted, like the other lists.
+        let header_style = if index == selected {
             Style::default()
                 .fg(logo::ORANGE)
-                .add_modifier(Modifier::BOLD),
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{marker}{}", id_prefix(&party.dec_party_id)),
+            header_style,
         )));
         if let Some(member) = &party.member_party_id {
             lines.push(Line::from(vec![
@@ -2401,6 +2417,8 @@ mod tests {
 
     #[test]
     fn party_detail_renders_fields() {
+        use crate::api::GovState;
+
         let party_id = canton_id("cbtc-network");
         let participant_id = CantonId::parse(&format!("participant-1::{NS2}")).unwrap();
         let party = DecentralizedParty {

@@ -933,9 +933,10 @@ fn build_deploy_context(
         }
     }
 
-    // Default threshold ≈ a 2/3 majority, at least 2 (matches the web frontend).
+    // Default threshold ≈ a 2/3 majority, at least 2, but never above the
+    // resolved member count so the initial form is always within the valid range.
     let count = i64::try_from(member_parties.len()).unwrap_or(0);
-    let threshold = ((count * 2 + 2) / 3).max(2);
+    let threshold = ((count * 2 + 2) / 3).max(2).min(count.max(1));
 
     Ok(DeployForm {
         party_id: party_id.to_owned(),
