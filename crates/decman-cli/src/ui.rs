@@ -18,7 +18,7 @@ use crate::api::{
     audit_action, invitation_name, party_name, run_name,
 };
 use crate::app::{
-    App, ComposerKind, ComposerPick, DeployForm, DetailData, GovItem, GovView, KickForm,
+    App, ComposerKind, ComposerPick, DeployForm, DetailData, GovItem, GovView, GrantForm, KickForm,
     OnboardForm, Overlay, PeerChoice, Status, Tab, TabView,
 };
 use crate::composer::{Composer, FieldKind};
@@ -1069,7 +1069,8 @@ fn footer_hint(active: Tab, overlay: &Overlay, can_logout: bool) -> String {
             " ↑/↓ field · space toggle peer · enter start · esc cancel".to_owned()
         }
         Overlay::Kick(_) => " ↑/↓ pick · ←/→ threshold · enter kick · esc cancel".to_owned(),
-        Overlay::Auth { .. } => " ↑/↓ scroll · t test auth · esc close".to_owned(),
+        Overlay::Auth { .. } => " ↑/↓ select · t test · g grant rights · esc close".to_owned(),
+        Overlay::GrantRights(_) => " ↑/↓ field · type · enter next/grant · esc cancel".to_owned(),
         Overlay::Governance(_) => {
             " ↑/↓ · c confirm · e exec · r revoke · x expire · n new · p propose · esc".to_owned()
         }
@@ -1164,7 +1165,8 @@ fn draw_overlay(frame: &mut Frame, area: Rect, overlay: &Overlay, spinner: &str)
         Overlay::Kick(form) => kick_popup(frame, area, form),
         Overlay::FeedDetail { item, scroll } => feed_detail_popup(frame, area, item, *scroll),
         Overlay::ChainAudit { entries, scroll } => chain_audit_popup(frame, area, entries, *scroll),
-        Overlay::Auth { parties, scroll } => auth_popup(frame, area, parties, *scroll),
+        Overlay::Auth { parties, selected } => auth_popup(frame, area, parties, *selected),
+        Overlay::GrantRights(form) => grant_popup(frame, area, form),
         Overlay::Governance(view) => governance_popup(frame, area, view),
         Overlay::ComposerPick(pick) => composer_pick_popup(frame, area, pick),
         Overlay::Composer(composer) => composer_popup(frame, area, composer),
@@ -1496,15 +1498,21 @@ fn right_chip(label: &str, held: bool) -> Span<'static> {
 }
 
 /// The authentication-status popup: each party's IdP status and ledger rights.
-fn auth_popup(frame: &mut Frame, area: Rect, parties: &[PartyAuthStatus], scroll: u16) {
+fn auth_popup(frame: &mut Frame, area: Rect, parties: &[PartyAuthStatus], selected: usize) {
     let mut lines: Vec<Line> = Vec::new();
     if parties.is_empty() {
         lines.push(dim_line("(no parties configured)"));
     }
     let label = |text: &'static str| Span::styled(text, Style::default().fg(Color::DarkGray));
-    for party in parties {
+    // Line index where the selected party's block starts, for scroll-to-view.
+    let mut selected_offset = 0u16;
+    for (index, party) in parties.iter().enumerate() {
+        if index == selected {
+            selected_offset = u16::try_from(lines.len()).unwrap_or(0);
+        }
+        let marker = if index == selected { "▶ " } else { "  " };
         lines.push(Line::from(Span::styled(
-            id_prefix(&party.dec_party_id).to_owned(),
+            format!("{marker}{}", id_prefix(&party.dec_party_id)),
             Style::default()
                 .fg(logo::ORANGE)
                 .add_modifier(Modifier::BOLD),
@@ -1544,10 +1552,63 @@ fn auth_popup(frame: &mut Frame, area: Rect, parties: &[PartyAuthStatus], scroll
 
     let width = 76.min(area.width.saturating_sub(4));
     let height = ((lines.len() as u16).saturating_add(2)).clamp(6, area.height.saturating_sub(4));
+    let visible = height.saturating_sub(2);
+    // Scroll so the selected party's block stays in view.
+    let scroll = selected_offset.saturating_sub(visible.saturating_sub(1));
     let rect = centered_rect(width, height, area);
     let paragraph = Paragraph::new(lines)
         .scroll((scroll, 0))
         .block(popup_block("Authentication"));
+    frame.render_widget(Clear, rect);
+    frame.render_widget(paragraph, rect);
+}
+
+/// The grant-rights form popup: admin client id + secret for one party.
+fn grant_popup(frame: &mut Frame, area: Rect, form: &GrantForm) {
+    let edit_line = |label: &str, value: &str, focused: bool, mask: bool| {
+        let value_style = if focused {
+            Style::default()
+                .fg(logo::ORANGE)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        let base = if mask {
+            "•".repeat(value.chars().count())
+        } else {
+            value.to_owned()
+        };
+        let shown = if focused {
+            format!("{base}▏")
+        } else if value.is_empty() {
+            "(empty)".to_owned()
+        } else {
+            base
+        };
+        Line::from(vec![detail_label(label), Span::styled(shown, value_style)])
+    };
+
+    let mut lines = vec![
+        detail_kv("Party", form.party_name.clone()),
+        Line::default(),
+        edit_line("Admin client id", &form.client_id, form.cursor == 0, false),
+        edit_line("Admin secret", &form.client_secret, form.cursor == 1, true),
+        Line::default(),
+    ];
+    let submit_style = if form.cursor >= 2 {
+        Style::default()
+            .fg(Color::Black)
+            .bg(logo::ORANGE)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    lines.push(Line::from(Span::styled(" Grant rights ", submit_style)));
+
+    let width = 64.min(area.width.saturating_sub(4));
+    let height = ((lines.len() as u16).saturating_add(2)).clamp(6, area.height.saturating_sub(4));
+    let rect = centered_rect(width, height, area);
+    let paragraph = Paragraph::new(lines).block(popup_block("Grant rights"));
     frame.render_widget(Clear, rect);
     frame.render_widget(paragraph, rect);
 }
@@ -2478,7 +2539,7 @@ mod tests {
                     dec_party_read_as: true,
                 }),
             }],
-            scroll: 0,
+            selected: 0,
         };
         let rendered = render(|frame, area| draw_overlay(frame, area, &overlay, "⠋"));
         assert!(rendered.contains("Authentication"));
@@ -2487,6 +2548,24 @@ mod tests {
         assert!(rendered.contains("user-1"));
         assert!(rendered.contains("authenticated"));
         assert!(rendered.contains("actAs"));
+    }
+
+    #[test]
+    fn grant_popup_masks_secret() {
+        let form = GrantForm {
+            dec_party_id: "cbtc-network::1220".to_owned(),
+            party_name: "cbtc-network".to_owned(),
+            client_id: "validator-admin".to_owned(),
+            client_secret: "supersecret".to_owned(),
+            cursor: 0,
+        };
+        let overlay = Overlay::GrantRights(Box::new(form));
+        let rendered = render(|frame, area| draw_overlay(frame, area, &overlay, "⠋"));
+        assert!(rendered.contains("Grant rights"));
+        assert!(rendered.contains("validator-admin"));
+        // The secret is masked, never shown verbatim.
+        assert!(!rendered.contains("supersecret"));
+        assert!(rendered.contains('•'));
     }
 
     #[test]

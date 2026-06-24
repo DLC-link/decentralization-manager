@@ -830,6 +830,28 @@ impl DecmanClient {
         self.post("/auth/test", None)
     }
 
+    /// Grant actAs/readAs rights on a party's member and dec parties, using an
+    /// admin (ParticipantAdmin) client. The secret is not stored server-side.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if login or the request fails, or the API rejects it.
+    pub fn grant_rights(
+        &mut self,
+        dec_party_id: &str,
+        admin_client_id: &str,
+        admin_client_secret: &str,
+    ) -> Result<()> {
+        self.post(
+            "/auth/grant-rights",
+            Some(json!({
+                "dec_party_id": dec_party_id,
+                "admin_client_id": admin_client_id,
+                "admin_client_secret": admin_client_secret,
+            })),
+        )
+    }
+
     /// Fetch the on-ledger governance state for a party (threshold, members,
     /// action timeout). `None` when the party has no governance rules contract.
     ///

@@ -119,6 +119,11 @@ pub enum Request {
     ChainAudit(String),
     AuthStatus,
     TestAuth,
+    GrantRights {
+        dec_party_id: String,
+        client_id: String,
+        client_secret: String,
+    },
     Governance {
         party_id: String,
         party_name: String,
@@ -299,6 +304,17 @@ pub struct GovActionRequest {
     rules_contract_id: String,
 }
 
+/// The grant-rights form: an admin client id + secret used to grant act/read
+/// rights for one party. The secret is sent once and not stored.
+pub struct GrantForm {
+    pub dec_party_id: String,
+    pub party_name: String,
+    pub client_id: String,
+    pub client_secret: String,
+    /// 0 = client id, 1 = secret, 2 = submit row.
+    pub cursor: usize,
+}
+
 /// A modal overlay drawn above the main UI.
 pub enum Overlay {
     None,
@@ -341,8 +357,10 @@ pub enum Overlay {
     /// Per-party authentication status and rights.
     Auth {
         parties: Vec<PartyAuthStatus>,
-        scroll: u16,
+        selected: usize,
     },
+    /// The grant-rights form for a selected party.
+    GrantRights(Box<GrantForm>),
     /// The governance approvals list for a party (confirm / execute / revoke).
     Governance(Box<GovView>),
     /// The action / proposal type picker.
@@ -598,6 +616,16 @@ fn handle_request(client: &mut DecmanClient, request: Request) -> Update {
         Request::TestAuth => Update::AuthStatus(
             client
                 .test_auth()
+                .and_then(|()| client.fetch_auth_status())
+                .map_err(err),
+        ),
+        Request::GrantRights {
+            dec_party_id,
+            client_id,
+            client_secret,
+        } => Update::AuthStatus(
+            client
+                .grant_rights(&dec_party_id, &client_id, &client_secret)
                 .and_then(|()| client.fetch_auth_status())
                 .map_err(err),
         ),
@@ -1229,9 +1257,15 @@ impl App {
                     }
                 }
                 Update::AuthStatus(result) => {
-                    if matches!(self.overlay, Overlay::Busy(_) | Overlay::Auth { .. }) {
+                    if matches!(
+                        self.overlay,
+                        Overlay::Busy(_) | Overlay::Auth { .. } | Overlay::GrantRights(_)
+                    ) {
                         self.overlay = match result {
-                            Ok(parties) => Overlay::Auth { parties, scroll: 0 },
+                            Ok(parties) => Overlay::Auth {
+                                parties,
+                                selected: 0,
+                            },
                             Err(error) => Overlay::Message(error),
                         };
                     }
@@ -1352,6 +1386,8 @@ impl App {
             OpenComposer,
             SubmitComposer,
             SubmitDeploy,
+            OpenGrant,
+            SubmitGrant,
         }
 
         let mut act = Act::None;
@@ -1420,11 +1456,44 @@ impl App {
                 }
                 _ => {}
             },
-            Overlay::Auth { scroll, .. } => match key.code {
+            Overlay::Auth { parties, selected } => match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => act = Act::Close,
                 KeyCode::Char('t') => act = Act::TestAuth,
-                KeyCode::Up | KeyCode::Char('k') => *scroll = scroll.saturating_sub(1),
-                KeyCode::Down | KeyCode::Char('j') => *scroll = scroll.saturating_add(1),
+                KeyCode::Char('g') => act = Act::OpenGrant,
+                KeyCode::Up | KeyCode::Char('k') => *selected = selected.saturating_sub(1),
+                KeyCode::Down | KeyCode::Char('j') if *selected + 1 < parties.len() => {
+                    *selected += 1;
+                }
+                _ => {}
+            },
+            Overlay::GrantRights(form) => match key.code {
+                KeyCode::Esc => act = Act::Close,
+                KeyCode::Up => form.cursor = form.cursor.saturating_sub(1),
+                KeyCode::Down | KeyCode::Tab => {
+                    if form.cursor < 2 {
+                        form.cursor += 1;
+                    }
+                }
+                KeyCode::Enter if form.cursor >= 2 => act = Act::SubmitGrant,
+                KeyCode::Enter => {
+                    if form.cursor < 2 {
+                        form.cursor += 1;
+                    }
+                }
+                KeyCode::Char(c) => match form.cursor {
+                    0 => form.client_id.push(c),
+                    1 => form.client_secret.push(c),
+                    _ => {}
+                },
+                KeyCode::Backspace => match form.cursor {
+                    0 => {
+                        form.client_id.pop();
+                    }
+                    1 => {
+                        form.client_secret.pop();
+                    }
+                    _ => {}
+                },
                 _ => {}
             },
             Overlay::Governance(view) => match key.code {
@@ -1517,6 +1586,8 @@ impl App {
             Act::OpenComposer => self.open_composer(),
             Act::SubmitComposer => self.submit_composer(),
             Act::SubmitDeploy => self.submit_deploy(),
+            Act::OpenGrant => self.open_grant(),
+            Act::SubmitGrant => self.submit_grant(),
         }
     }
 
@@ -1844,6 +1915,58 @@ impl App {
     fn run_auth_test(&mut self) {
         let _ = self.requests.send(Request::TestAuth);
         self.overlay = Overlay::Busy("Testing authentication…".to_owned());
+    }
+
+    /// Open the grant-rights form for the party selected in the auth overlay.
+    fn open_grant(&mut self) {
+        let form = {
+            let Overlay::Auth { parties, selected } = &self.overlay else {
+                return;
+            };
+            parties.get(*selected).map(|party| GrantForm {
+                dec_party_id: party.dec_party_id.clone(),
+                party_name: party
+                    .dec_party_id
+                    .split("::")
+                    .next()
+                    .unwrap_or(&party.dec_party_id)
+                    .to_owned(),
+                client_id: String::new(),
+                client_secret: String::new(),
+                cursor: 0,
+            })
+        };
+        if let Some(form) = form {
+            self.overlay = Overlay::GrantRights(Box::new(form));
+        }
+    }
+
+    /// Submit the grant-rights form, then refresh the auth overlay.
+    fn submit_grant(&mut self) {
+        let request = {
+            let Overlay::GrantRights(form) = &self.overlay else {
+                return;
+            };
+            if form.client_id.trim().is_empty() || form.client_secret.is_empty() {
+                None
+            } else {
+                Some(Request::GrantRights {
+                    dec_party_id: form.dec_party_id.clone(),
+                    client_id: form.client_id.trim().to_owned(),
+                    client_secret: form.client_secret.clone(),
+                })
+            }
+        };
+        match request {
+            Some(request) => {
+                let _ = self.requests.send(request);
+                self.overlay = Overlay::Busy("Granting rights…".to_owned());
+            }
+            None => {
+                self.overlay =
+                    Overlay::Message("Admin client id and secret are required.".to_owned());
+            }
+        }
     }
 
     /// Open the governance approvals list for the party in the detail view.
