@@ -44,10 +44,14 @@ process in [SECURITY.md](SECURITY.md).
 
 ### Repository layout
 
-- `src/` — Rust application (HTTP server, Noise P2P, Canton gRPC, workflows).
-- `frontend/` — React + Vite UI (embedded into the binary at build time).
+- `crates/decman/` — Rust server crate (HTTP server, Noise P2P, Canton gRPC,
+  workflows); binary `dec-party-manager`.
+  - `crates/decman/src/` — server source.
+  - `crates/decman/frontend/` — React + Vite UI (embedded into the binary at build time).
+  - `crates/decman/migrations/` — SQLx database migrations.
+- `crates/common/` — shared wire DTOs + Canton-ID helpers (used by `decman` and `decman-cli`).
+- `crates/decman-cli/` — terminal UI client.
 - `daml/` — Daml governance packages and tests.
-- `migrations/` — SQLx database migrations.
 - `integration-tests/` — end-to-end test harness and scripts.
 - `docs/` — architecture, integration, and use-case documentation.
 
@@ -89,7 +93,7 @@ All Rust changes must pass CI before review:
 - `cargo test`
 - No compiler warnings.
 
-Key conventions (see [`CLAUDE.md`](../CLAUDE.md) for the full set):
+Key conventions:
 
 - **Imports:** `mod` declarations first, then `use` groups ordered std →
   third-party → local, separated by blank lines; merge multiple imports from the

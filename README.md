@@ -68,13 +68,13 @@ DECPM_CANTON_ADMIN_PORT=5002 \
 DECPM_CANTON_LEDGER_HOST=localhost \
 DECPM_CANTON_LEDGER_PORT=5001 \
 DECPM_NOISE_PORT=9001 \
-cargo run -- serve
+cargo run -p decman -- serve
 
 # Or with a .env file in the data directory
-cargo run -- -d ./development/participant-1 serve
+cargo run -p decman -- -d ./development/participant-1 serve
 
 # Or with release build
-cargo build --release
+cargo build --release -p decman
 DECPM_PORT=8081 ./target/release/dec-party-manager -d ./development/participant-1 serve
 ```
 
@@ -337,6 +337,18 @@ The table below is a curated subset. A complete, interactive API reference is av
 
 ## Development
 
+This repository is a Cargo workspace with three crates under `crates/`:
+
+- **`decman`** — the server (HTTP API, Noise P2P, Canton gRPC, workflows) and
+  the embedded React frontend. Its binary is `dec-party-manager`.
+- **`common`** — shared wire DTOs and the Canton-ID helpers, consumed by both
+  `decman` and `decman-cli`. Kept dependency-light; OpenAPI (`utoipa`) schema
+  derives are behind its `openapi` feature.
+- **`decman-cli`** — a terminal UI client for the server.
+
+Workspace-wide `cargo` commands build all three; pass `-p decman` to act on
+just the server (e.g. `cargo run -p decman -- serve`).
+
 ### Building
 
 ```bash
@@ -586,7 +598,7 @@ human-readable error.
   see more than ~10 of these per run, consider bumping the const
   further or filing as a Canton-side performance regression.
 
-[step-retry]: https://github.com/DLC-link/dec-party-manager/blob/main/src/consts.rs
+[step-retry]: https://github.com/DLC-link/dec-party-manager/blob/main/crates/decman/src/consts.rs
 
 [i148]: https://github.com/DLC-link/dec-party-manager/issues/148
 [cprev6]: https://github.com/DLC-link/dec-party-manager/pull/142#discussion_r3241693561

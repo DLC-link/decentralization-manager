@@ -18,7 +18,7 @@ A custom template is fully supported by DecMan when:
 4. It can be confirmed via `POST /governance/confirm` with `governance_type: "core_domain"` (no DecMan code change needed — confirmation works on the `ContractId GovernableAction` produced by step 3).
 5. It can be executed via `POST /governance/execute` with `governance_type: "core_domain"`, producing a `GovernanceExecutionResult` audit record.
 
-Anything beyond that — for example a bespoke proposal type wired into `POST /governance/propose` — requires a server-side change in `src/server/action_serializer.rs` and is out of scope for a "custom" template.
+Anything beyond that — for example a bespoke proposal type wired into `POST /governance/propose` — requires a server-side change in `crates/decman/src/server/action_serializer.rs` and is out of scope for a "custom" template.
 
 > **One `GovernanceRules` handles every custom action.** You do **not** deploy a new `GovernanceRules` per new template. A single instance bound to a `governanceParty` matches *any* `ContractId GovernableAction` whose view's `governanceParty` field equals its own — regardless of the underlying template's package, module, or entity name. Custom templates extend an existing governance domain at zero infrastructure cost; the engine is universal.
 
@@ -200,7 +200,7 @@ curl http://localhost:8080/packages/compare-peers   # admin-only — catches mis
 
 ### 3. Register the package id for the party (optional)
 
-`PUT /party-config` accepts a `packages` map that DecMan threads through governance endpoints. The keys are hard-coded in `src/config.rs::PackageConfig`:
+`PUT /party-config` accepts a `packages` map that DecMan threads through governance endpoints. The keys are hard-coded in `crates/decman/src/config.rs::PackageConfig`:
 
 ```
 governance_action, governance_core, governance_token_custody,
@@ -263,7 +263,7 @@ There are two supported paths, depending on whether the proposal's fields fit De
 
 ### Path A — `POST /contracts` (no code change)
 
-Use this when every field on your template maps to one of the variants of [`FieldDefinition`](../src/workflow/contracts/config.rs). The full list:
+Use this when every field on your template maps to one of the variants of [`FieldDefinition`](../crates/decman/src/workflow/contracts/config.rs). The full list:
 
 | `type` | JSON shape | DAML target type |
 |---|---|---|
@@ -282,7 +282,7 @@ Use this when every field on your template maps to one of the variants of [`Fiel
 | `record` | `{ "type": "record", "fields": [...] }` | nested record |
 | `governance_threshold` | `{ "type": "governance_threshold" }` (calculated majority) or `{ "type": "governance_threshold", "value": N }` (explicit) | `Int` |
 
-The serializer is defined at [`src/workflow/contracts/steps/prepare.rs:212`](../src/workflow/contracts/steps/prepare.rs). Field order in the JSON must match the field order in the DAML template.
+The serializer is defined at [`crates/decman/src/workflow/contracts/steps/prepare.rs:212`](../crates/decman/src/workflow/contracts/steps/prepare.rs). Field order in the JSON must match the field order in the DAML template.
 
 Example body for the `PauseProposal` template above (instantiated as a proposal — note that proposals are usually created by a single party, so a dedicated multi-party `/contracts` workflow is overkill; this path is mainly for the *infrastructure* contracts a custom package ships with — `GovernanceRules`-style admin templates, configuration contracts, etc.):
 
@@ -377,7 +377,7 @@ curl -X POST http://localhost:8080/governance/execute \
 
 If your `executeImpl` exercises a choice on a contract that the governance party can't see by default (typically choice-context entries from an external registry — Canton Coin transfer rules are the canonical case), populate `disclosed_contracts` with the relevant blobs. The standard transfer / accept-transfer proposal paths fetch these from the network registry automatically; bespoke executions need to pass them explicitly.
 
-The wire shape — defined as `DisclosedContractInput` in [`src/server/types.rs`](../src/server/types.rs) — is just `contract_id` plus the base64-encoded `created_event_blob` under the key `blob`. The template id is recovered from the blob server-side; you do not pass it:
+The wire shape — defined as `DisclosedContractInput` in [`crates/decman/src/server/types.rs`](../crates/decman/src/server/types.rs) — is just `contract_id` plus the base64-encoded `created_event_blob` under the key `blob`. The template id is recovered from the blob server-side; you do not pass it:
 
 ```json
 "disclosed_contracts": [
@@ -480,7 +480,7 @@ daml build --all && daml test --all
 
 ### Rust / integration tests
 
-If you only added a DAML package and no DecMan code, no Rust tests are required. If you also extended `FieldDefinition` or `ProposalType` (server-side change — beyond this guide's scope), follow the project test conventions in [`CLAUDE.md`](../CLAUDE.md): `cargo fmt && cargo clippy --all-targets --all-features -- -D warnings && cargo test`.
+If you only added a DAML package and no DecMan code, no Rust tests are required. If you also extended `FieldDefinition` or `ProposalType` (server-side change — beyond this guide's scope), follow the project test conventions in [`CONTRIBUTING.md`](CONTRIBUTING.md): `cargo fmt && cargo clippy --all-targets --all-features -- -D warnings && cargo test`.
 
 ## Versioning and upgrades
 
