@@ -42,7 +42,7 @@ teardown() {
     # Kill kubectl port-forward grandchildren that were reparented to init when
     # the retry-loop subshells above were killed. Mirrors stop_canton_tunnels in
     # devnet.env.sh (see #142 for why bare `kill` on the loop PID is not enough).
-    # KUBE_CONTEXT_DEVNET default must match devnet.env.sh line 188.
+    # KUBE_CONTEXT_DEVNET default must match the one in devnet.env.sh.
     local _ctx="${KUBE_CONTEXT_DEVNET:-ieu-devnet}"
     pkill -f "kubectl --context=$_ctx port-forward svc/participant-ibtc-devnet" 2>/dev/null || true
 }
@@ -54,13 +54,13 @@ fi
 
 # ---------------------------------------------------------------------------
 # Build the binary first (devnet uses no --features flag; test-mode is
-# localnet-only). Mirrors run.sh lines 151-157 exactly, omitting the
-# FEATURES_FLAG block since bring-up is devnet-only.
+# localnet-only). Mirrors run.sh's `cargo build --profile release-ci`, omitting
+# the FEATURES_FLAG block since bring-up is devnet-only.
 # ---------------------------------------------------------------------------
 cargo build --profile release-ci
 
 # ---------------------------------------------------------------------------
-# Source devnet.env.sh — it sources common.sh itself (line 13 of devnet.env.sh),
+# Source devnet.env.sh — it sources common.sh itself,
 # validates Keycloak credentials, exports all per-participant port variables
 # (P{1,2,3}_HTTP, P{1,2,3}_NOISE, P{1,2,3}_CANTON_*), exports BINARY and
 # DEV_DIR, and defines start_canton_tunnels / stop_canton_tunnels,
@@ -85,8 +85,8 @@ PIDS=()
 # intentionally leave the stack running for Playwright) and only cleans up on
 # a failed/early exit. The explicit --teardown path is unaffected.
 #
-# stop_nodes is defined in common.sh (line 219); stop_canton_tunnels is defined
-# in devnet.env.sh (line 253). Both are sourced transitively above.
+# stop_nodes is defined in common.sh; stop_canton_tunnels is defined
+# in devnet.env.sh. Both are sourced transitively above.
 # ---------------------------------------------------------------------------
 _BRING_UP_COMPLETE=0
 _bring_up_failure_cleanup() {
@@ -99,7 +99,7 @@ _bring_up_failure_cleanup() {
 trap _bring_up_failure_cleanup EXIT
 
 # ---------------------------------------------------------------------------
-# Mirror run.sh's bring-up sequence (lines 160-170):
+# Mirror run.sh's bring-up sequence:
 #   download_localnet  → no-op on devnet
 #   start_localnet     → opens kubectl port-forwards to Canton participants
 #   setup_directories  → mkdirs $DEV_DIR/participant-{1,2,3}

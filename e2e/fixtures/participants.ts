@@ -53,36 +53,47 @@ export async function gotoTab(page: Page, tab: string) {
 // run status), so we navigate to the tab ONCE and let Playwright's auto-waiting
 // ride the app's polling — reloading would reset to the Parties tab and wipe the
 // just-fetched feed before it populates.
+// Find the invitation card for THIS workflow type (data-testid="invitation-card",
+// scoped by its "<type> invitation" heading) and click Accept WITHIN it — never
+// the first Accept on the page, which could belong to a different/lingering card.
+function invitationCard(page: Page, type: RegExp): Locator {
+  const label = new RegExp(`${type.source} invitation`, "i");
+  return page.getByTestId("invitation-card").filter({ hasText: label });
+}
+
 export async function acceptInvitation(page: Page, type: RegExp) {
   await gotoTab(page, "Pending approvals");
-  const label = new RegExp(`${type.source} invitation`, "i");
-  await expect(page.getByText(label).first()).toBeVisible({ timeout: 90_000 });
-  await page.getByRole("button", { name: "Accept" }).first().click();
+  const card = invitationCard(page, type);
+  await expect(card.first()).toBeVisible({ timeout: 90_000 });
+  await card.first().getByRole("button", { name: "Accept" }).click();
 }
 
 export async function acceptInvitationOnAny(pages: Page[], type: RegExp): Promise<Page> {
-  const label = new RegExp(`${type.source} invitation`, "i");
   for (const p of pages) await gotoTab(p, "Pending approvals");
   let target: Page | undefined;
   await expect(async () => {
     for (const p of pages) {
-      if (await p.getByText(label).count()) { target = p; return; }
+      if (await invitationCard(p, type).count()) { target = p; return; }
     }
     throw new Error("invitation not yet visible on any peer");
   }).toPass({ timeout: 90_000, intervals: [2000, 2000, 3000] });
-  await target!.getByRole("button", { name: "Accept" }).first().click();
+  await invitationCard(target!, type).first().getByRole("button", { name: "Accept" }).click();
   return target!;
 }
 
-// Assert the workflow for THIS run completed, scoped by its prefix. The
-// WorkflowRunCard shows a prefix chip + a "completed" status chip; we match a
-// feed card containing BOTH so a stale completed run from an earlier prefix
-// can't satisfy it, and the feed's own /workflows polling flips it to completed
-// without a reload.
-export async function expectWorkflowCompleted(page: Page, prefix: string) {
+// Assert the workflow for THIS run completed. Matches the single WorkflowRunCard
+// ELEMENT (data-testid="workflow-run-card") whose data-status is "completed" and
+// whose data-prefix is this run's prefix — or, for runs that aren't prefix-tagged
+// (Dars), whose data-kind matches. Selecting the card element (not an ancestor
+// div) avoids the false-positive where a sibling completed card under a common
+// ancestor satisfied a loose text filter. The feed's /workflows polling flips
+// data-status to "completed" without a reload.
+export async function expectWorkflowCompleted(page: Page, prefix: string, kind?: string) {
   await gotoTab(page, "Pending approvals");
-  const card = page.locator("div").filter({ hasText: prefix }).filter({ hasText: /completed/i });
-  await expect(card.first()).toBeVisible({ timeout: 240_000 });
+  const selector = kind
+    ? `[data-testid="workflow-run-card"][data-kind="${kind}"][data-status="completed"]`
+    : `[data-testid="workflow-run-card"][data-prefix="${prefix}"][data-status="completed"]`;
+  await expect(page.locator(selector).first()).toBeVisible({ timeout: 240_000 });
 }
 
 // Resolve the full party id (<prefix>::1220…) for a freshly-onboarded party.
@@ -91,12 +102,14 @@ export async function expectWorkflowCompleted(page: Page, prefix: string) {
 // downstream phases.
 export async function resolvePartyId(port: number, prefix: string): Promise<string> {
   const cfg = await getAuthConfig(port);
+  // One token for the whole poll (ROPC tokens last minutes) — avoids ~30
+  // password-grant requests at Keycloak over a 90s poll.
+  const { access_token } = await fetchRopcTokens(cfg);
   const deadline = Date.now() + 90_000;
   let last = "no response";
   // A freshly-onboarded party can lag the topology view briefly even with
   // refresh=true, so poll until it surfaces.
   while (Date.now() < deadline) {
-    const { access_token } = await fetchRopcTokens(cfg);
     const res = await fetch(
       `http://localhost:${port}/decentralized-parties?prefix=${encodeURIComponent(prefix)}&refresh=true`,
       { headers: { authorization: `Bearer ${access_token}` } },
@@ -131,8 +144,8 @@ async function bearer(port: number): Promise<string> {
 
 interface DomainAction { proposal_cid: string; can_execute?: boolean; confirmations?: { contract_id: string }[]; }
 
-async function govConfirmations(port: number, partyId: string): Promise<DomainAction[]> {
-  const tok = await bearer(port);
+async function govConfirmations(port: number, partyId: string, token?: string): Promise<DomainAction[]> {
+  const tok = token ?? await bearer(port);
   const res = await fetch(
     `http://localhost:${port}/governance/confirmations?party_id=${encodeURIComponent(partyId)}`,
     { headers: { authorization: `Bearer ${tok}` } },
@@ -159,11 +172,12 @@ export async function govRulesContractId(port: number, partyId: string): Promise
 // wait in tests/common/governance.rs) means a lingering/extra proposal fails
 // loudly here instead of silently confirming/executing the wrong CID.
 export async function waitForProposalCid(port: number, partyId: string): Promise<string> {
+  const tok = await bearer(port); // one token for the whole poll
   let last = "none";
   const deadline = Date.now() + 90_000;
   while (Date.now() < deadline) {
     try {
-      const actions = await govConfirmations(port, partyId);
+      const actions = await govConfirmations(port, partyId, tok);
       if (actions.length === 1 && actions[0].proposal_cid) return actions[0].proposal_cid;
       last = `${actions.length} actions`;
     } catch (e) { last = String(e); }
@@ -172,6 +186,11 @@ export async function waitForProposalCid(port: number, partyId: string): Promise
   throw new Error(`expected exactly one pending proposal on :${port}; after 90s saw ${last}`);
 }
 
+// `action` is required by the /governance/{confirm,execute} request schema but
+// is IGNORED on the core_domain path — the backend derives the Daml choice arg
+// from proposal_cid (+ confirmer/executor + confirmation_cids), so this is a
+// placeholder, not "confirm a set-threshold". Mirrors the Rust IT, which
+// hardcodes the same action in confirm/execute (tests/common/governance.rs).
 const THRESHOLD_ACTION = { type: "governance_set_threshold", new_threshold: 1 };
 
 // Confirm the proposal as this node's member (mirrors IT propose_confirm_execute).
@@ -190,11 +209,12 @@ export async function govConfirm(port: number, partyId: string, rulesCid: string
 
 // Poll until the proposal is executable; return its confirmation contract ids.
 export async function waitForExecutable(port: number, partyId: string, proposalCid: string): Promise<string[]> {
+  const tok = await bearer(port); // one token for the whole poll
   let last = "none";
   const deadline = Date.now() + 90_000;
   while (Date.now() < deadline) {
     try {
-      const a = (await govConfirmations(port, partyId)).find((x) => x.proposal_cid === proposalCid && x.can_execute);
+      const a = (await govConfirmations(port, partyId, tok)).find((x) => x.proposal_cid === proposalCid && x.can_execute);
       if (a) return (a.confirmations ?? []).map((c) => c.contract_id);
       last = "not executable yet";
     } catch (e) { last = String(e); }

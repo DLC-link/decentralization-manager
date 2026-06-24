@@ -48,7 +48,11 @@ async function configurePartyForGovCore(partyId: string) {
         packages: PACKAGES,
       }),
     });
-    if (!cfgRes.ok) throw new Error(`PUT /party-config on :${port} → ${cfgRes.status}: ${await cfgRes.text()}`);
+    // Cap the echoed body: these requests carry keycloak_client_secret. The
+    // server returns controlled error messages (never the posted body), but
+    // capping is cheap defense-in-depth so a future change can't leak a secret
+    // into the (local, gitignored) Playwright report.
+    if (!cfgRes.ok) throw new Error(`PUT /party-config on :${port} → ${cfgRes.status}: ${(await cfgRes.text()).slice(0, 500)}`);
   }
   // grant-rights must run AFTER all party-configs are persisted (IT comment).
   for (const { port, n } of nodes) {
@@ -63,7 +67,7 @@ async function configurePartyForGovCore(partyId: string) {
         admin_client_secret: env(`P${n}_PARTICIPANT_ADMIN_KEYCLOAK_CLIENT_SECRET`),
       }),
     });
-    if (!grRes.ok) throw new Error(`POST /auth/grant-rights on :${port} → ${grRes.status}: ${await grRes.text()}`);
+    if (!grRes.ok) throw new Error(`POST /auth/grant-rights on :${port} → ${grRes.status}: ${(await grRes.text()).slice(0, 500)}`);
   }
 }
 
@@ -160,19 +164,40 @@ test.describe.serial("governance happy path", () => {
     await dialog.locator('input[type="file"]').setInputFiles(dars);
     // Distribute, like onboarding, starts the workflow and closes the dialog
     // (DarsDialog.tsx:231) — and can transiently 409 right after onboarding, so
-    // retry. Peers then accept; completion is verified by phase 04's comparison.
+    // retry. Peers then accept.
     await submitAndAwaitClose(dialog, "Distribute DARs");
     await acceptInvitation(parts.p2, /Dars/);
     await acceptInvitation(parts.p3, /Dars/);
+    // Assert THIS distribution completed on the coordinator (Dars runs aren't
+    // prefix-tagged, so match the kind) — mirrors the Rust IT's "Dars completed"
+    // rather than leaning on phase 04 (peers may already hold the packages).
+    await expectWorkflowCompleted(parts.p1, shared.partyPrefix ?? "", "Dars");
   });
 
   test("04 check peer DARs", async () => {
     await gotoTab(parts.p1, "Packages");
     await parts.p1.getByRole("button", { name: "Check Peer DARs" }).click();
-    // Comparison table renders peer columns; matches show a success (CheckCircle) icon.
-    // Assert the governance-core package row shows matches for both peers (no error/"-").
-    await expect(parts.p1.getByText(/governance-core/i).first()).toBeVisible({ timeout: 60_000 });
-    await expect(parts.p1.getByText(/^-$/)).toHaveCount(0); // no "unreachable" cells
+    // Comparison table renders one peer-status cell per package per peer
+    // (data-testid="peer-dar-status", data-pkg, data-status), populated async
+    // after /packages/compare-peers returns. Poll (NOT a one-shot count) until
+    // governance-core has matched on both peers — that both proves the table
+    // loaded and is a positive assertion, unlike the old "no dash present" check
+    // which passed on an empty table. governance-core-v1 registers several
+    // sub-packages all containing "governance-core", so >= 2 means both peer
+    // columns matched.
+    await expect
+      .poll(
+        async () =>
+          parts.p1
+            .locator('[data-testid="peer-dar-status"][data-pkg*="governance-core"][data-status="match"]')
+            .count(),
+        { timeout: 60_000, intervals: [1000, 2000, 3000] },
+      )
+      .toBeGreaterThanOrEqual(2);
+    // Table is populated now: no peer is unreachable for any package.
+    await expect(
+      parts.p1.locator('[data-testid="peer-dar-status"][data-status="unreachable"]'),
+    ).toHaveCount(0);
     await test.info().attach("Peer DAR comparison (P1 sees P2 + P3)", {
       body: await parts.p1.screenshot({ fullPage: true }), contentType: "image/png",
     });
@@ -213,7 +238,9 @@ test.describe.serial("governance happy path", () => {
 
     await acceptInvitation(parts.p2, /Contracts/);
     await acceptInvitation(parts.p3, /Contracts/);
-    await expectWorkflowCompleted(parts.p1, partyPrefix!);
+    // One Contracts run in the chain → match by kind (always populated),
+    // sidestepping whether Contracts runs carry run.prefix.
+    await expectWorkflowCompleted(parts.p1, partyPrefix!, "Contracts");
 
     // Gov-core rules now exist → PartyDetail exposes "New Proposal" (IT's
     // GovernanceRules-visible assertion, expressed through the UI; needed by phase 06).
@@ -314,13 +341,17 @@ test.describe.serial("governance happy path", () => {
     await submitAndAwaitClose(dialog, /Kick Participant/i);
 
     await acceptInvitation(parts.p2, /Kick/);
-    await expectWorkflowCompleted(parts.p1, partyPrefix!);
+    // One Kick run in the chain → match by kind (always populated).
+    await expectWorkflowCompleted(parts.p1, partyPrefix!, "Kick");
 
-    // Party now has 2 participants (the kicked one is gone). Topology lags, so
-    // reopen + poll until the participant list shows 2.
+    // Party now has 2 participants and the namespace threshold is the new value
+    // (2). Topology lags, so reopen + poll. Assert the participant-row count and
+    // the threshold field (data-testid) rather than a devnet-specific display
+    // name — env-agnostic, and verifies the threshold change the kick applied.
     await expect(async () => {
       await openParty(parts.p1, partyPrefix!);
-      await expect(parts.p1.getByText(/iBTC-validator-\d/)).toHaveCount(2);
+      await expect(parts.p1.getByTestId("participant-row")).toHaveCount(2);
+      await expect(parts.p1.getByTestId("party-threshold")).toHaveText("2");
     }).toPass({ timeout: 120_000, intervals: [5000, 5000, 10_000] });
     await test.info().attach("After kick: party has 2 participants", {
       body: await parts.p1.screenshot({ fullPage: true }), contentType: "image/png",
