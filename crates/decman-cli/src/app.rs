@@ -17,7 +17,7 @@ use common::types::{
 use crate::api::{
     AuthSettings, ChainAuditEntry, DecmanClient, DomainGovAction, ExecuteParams, FeedItem,
     GovAction, GovConfirmation, GovState, GovernanceConfirmations, Holding, KnownMember,
-    PartyAuthStatus, PeerView, party_name,
+    PartyAuthStatus, PeerEntry, PeerView, party_name,
 };
 use crate::composer::{
     self, Composer, ComposerContext, ComposerSubmit, FieldKind, SelectOption, TypeOption,
@@ -136,6 +136,8 @@ pub enum Request {
         party_name: String,
     },
     DeploySubmit(Box<Value>),
+    NetworkPeers,
+    SaveNetwork(Box<Value>),
 }
 
 /// A result delivered by a background worker.
@@ -152,6 +154,7 @@ pub enum Update {
     Governance(Result<Box<GovView>, String>),
     OperatorInfo(String),
     DeployContext(Result<Box<DeployForm>, String>),
+    NetworkPeers(Result<Vec<PeerEntry>, String>),
 }
 
 /// A DAR file picked from disk for upload / distribution.
@@ -304,6 +307,40 @@ pub struct GovActionRequest {
     rules_contract_id: String,
 }
 
+/// The add-peer sub-form of the network-config editor.
+pub struct PeerForm {
+    pub participant_id: String,
+    pub name: String,
+    pub address: String,
+    pub port: String,
+    pub public_key: String,
+    pub party: String,
+    /// 0..=5 select a field; 6 is the submit row.
+    pub cursor: usize,
+}
+
+impl PeerForm {
+    fn blank() -> Self {
+        Self {
+            participant_id: String::new(),
+            name: String::new(),
+            address: String::new(),
+            port: String::new(),
+            public_key: String::new(),
+            party: String::new(),
+            cursor: 0,
+        }
+    }
+}
+
+/// State of the network-config editor: the editable peer list, plus an
+/// optional in-progress add-peer form.
+pub struct NetworkEditState {
+    pub peers: Vec<PeerEntry>,
+    pub selected: usize,
+    pub adding: Option<PeerForm>,
+}
+
 /// The grant-rights form: an admin client id + secret used to grant act/read
 /// rights for one party. The secret is sent once and not stored.
 pub struct GrantForm {
@@ -369,6 +406,8 @@ pub enum Overlay {
     Composer(Box<Composer>),
     /// The governance-core contract deployment form.
     Deploy(Box<DeployForm>),
+    /// The network-config (peer list) editor.
+    NetworkEdit(Box<NetworkEditState>),
 }
 
 /// The selectable top-level views.
@@ -671,6 +710,13 @@ fn handle_request(client: &mut DecmanClient, request: Request) -> Update {
                 .map(|()| "Contracts workflow started".to_owned())
                 .map_err(err),
         ),
+        Request::NetworkPeers => Update::NetworkPeers(client.fetch_network_peers().map_err(err)),
+        Request::SaveNetwork(body) => Update::Action(
+            client
+                .save_network_peers(*body)
+                .map(|()| "Network configuration saved".to_owned())
+                .map_err(err),
+        ),
         Request::Onboard { prefix, peer_ids } => Update::Action(
             client
                 .start_onboarding(&prefix, &peer_ids)
@@ -798,6 +844,40 @@ fn confirmation_cids(confirmations: &[GovConfirmation]) -> Vec<String> {
         .iter()
         .map(|confirmation| confirmation.contract_id.clone())
         .collect()
+}
+
+/// Build a [`PeerEntry`] from the add-peer form (trimming fields; an empty
+/// party becomes `None`; a non-numeric port falls back to 0).
+fn peer_from_form(form: &PeerForm) -> PeerEntry {
+    let party = form.party.trim();
+    PeerEntry {
+        participant_id: form.participant_id.trim().to_owned(),
+        name: form.name.trim().to_owned(),
+        address: form.address.trim().to_owned(),
+        port: form.port.trim().parse().unwrap_or(0),
+        public_key: form.public_key.trim().to_owned(),
+        party: (!party.is_empty()).then(|| party.to_owned()),
+    }
+}
+
+/// Serialize the editor's peer list as the bare JSON array `POST /network-config`
+/// expects.
+fn peers_to_json(peers: &[PeerEntry]) -> Value {
+    Value::Array(
+        peers
+            .iter()
+            .map(|peer| {
+                json!({
+                    "participant_id": peer.participant_id,
+                    "name": peer.name,
+                    "address": peer.address,
+                    "port": peer.port,
+                    "public_key": peer.public_key,
+                    "party": peer.party,
+                })
+            })
+            .collect(),
+    )
 }
 
 /// The placeholder action sent with on-chain (`core_domain`) confirm/execute —
@@ -1287,6 +1367,18 @@ impl App {
                         };
                     }
                 }
+                Update::NetworkPeers(result) => {
+                    if matches!(self.overlay, Overlay::Busy(_)) {
+                        self.overlay = match result {
+                            Ok(peers) => Overlay::NetworkEdit(Box::new(NetworkEditState {
+                                peers,
+                                selected: 0,
+                                adding: None,
+                            })),
+                            Err(error) => Overlay::Message(error),
+                        };
+                    }
+                }
                 // Ignore late detail results after the view was closed.
                 Update::Detail(data) if self.detail.is_some() => {
                     self.detail_data = Some(data);
@@ -1348,6 +1440,8 @@ impl App {
             (KeyCode::Enter, _) if self.active_tab == Tab::Parties => self.open_party_detail(),
             // Start onboarding a new decentralized party.
             (KeyCode::Char('n'), _) if self.active_tab == Tab::Parties => self.open_onboard(),
+            // Edit the network peer configuration.
+            (KeyCode::Char('e'), _) if self.active_tab == Tab::Peers => self.open_network_edit(),
             // Workflows actions.
             (KeyCode::Char('a'), _) if self.active_tab == Tab::Workflows => {
                 self.invitation_action(true);
@@ -1388,6 +1482,7 @@ impl App {
             SubmitDeploy,
             OpenGrant,
             SubmitGrant,
+            SaveNetwork,
         }
 
         let mut act = Act::None;
@@ -1562,6 +1657,71 @@ impl App {
                 },
                 _ => {}
             },
+            Overlay::NetworkEdit(state) => match &mut state.adding {
+                Some(form) => match key.code {
+                    KeyCode::Esc => state.adding = None,
+                    KeyCode::Up => form.cursor = form.cursor.saturating_sub(1),
+                    KeyCode::Down | KeyCode::Tab if form.cursor < 6 => form.cursor += 1,
+                    KeyCode::Enter if form.cursor >= 6 => {
+                        state.peers.push(peer_from_form(form));
+                        state.adding = None;
+                    }
+                    KeyCode::Enter if form.cursor < 6 => form.cursor += 1,
+                    KeyCode::Char(c) => match form.cursor {
+                        0 => form.participant_id.push(c),
+                        1 => form.name.push(c),
+                        2 => form.address.push(c),
+                        3 => {
+                            if c.is_ascii_digit() {
+                                form.port.push(c);
+                            }
+                        }
+                        4 => form.public_key.push(c),
+                        5 => form.party.push(c),
+                        _ => {}
+                    },
+                    KeyCode::Backspace => match form.cursor {
+                        0 => {
+                            form.participant_id.pop();
+                        }
+                        1 => {
+                            form.name.pop();
+                        }
+                        2 => {
+                            form.address.pop();
+                        }
+                        3 => {
+                            form.port.pop();
+                        }
+                        4 => {
+                            form.public_key.pop();
+                        }
+                        5 => {
+                            form.party.pop();
+                        }
+                        _ => {}
+                    },
+                    _ => {}
+                },
+                None => match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => act = Act::Close,
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        state.selected = state.selected.saturating_sub(1);
+                    }
+                    KeyCode::Down | KeyCode::Char('j')
+                        if state.selected + 1 < state.peers.len() =>
+                    {
+                        state.selected += 1;
+                    }
+                    KeyCode::Char('a') => state.adding = Some(PeerForm::blank()),
+                    KeyCode::Char('d') if state.selected < state.peers.len() => {
+                        state.peers.remove(state.selected);
+                        state.selected = state.selected.min(state.peers.len().saturating_sub(1));
+                    }
+                    KeyCode::Char('s') => act = Act::SaveNetwork,
+                    _ => {}
+                },
+            },
             Overlay::Message(_) | Overlay::Busy(_) => {
                 if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q')) {
                     act = Act::Close;
@@ -1588,6 +1748,7 @@ impl App {
             Act::SubmitDeploy => self.submit_deploy(),
             Act::OpenGrant => self.open_grant(),
             Act::SubmitGrant => self.submit_grant(),
+            Act::SaveNetwork => self.save_network(),
         }
     }
 
@@ -1903,6 +2064,24 @@ impl App {
             }
             Err(error) => self.overlay = Overlay::Message(error),
         }
+    }
+
+    /// Fetch the peer configuration and open the network-config editor.
+    fn open_network_edit(&mut self) {
+        let _ = self.requests.send(Request::NetworkPeers);
+        self.overlay = Overlay::Busy("Loading network configuration…".to_owned());
+    }
+
+    /// Save the edited peer list back to the node.
+    fn save_network(&mut self) {
+        let body = {
+            let Overlay::NetworkEdit(state) = &self.overlay else {
+                return;
+            };
+            peers_to_json(&state.peers)
+        };
+        let _ = self.requests.send(Request::SaveNetwork(Box::new(body)));
+        self.overlay = Overlay::Busy("Saving network configuration…".to_owned());
     }
 
     /// Fetch and show the per-party authentication status overlay.

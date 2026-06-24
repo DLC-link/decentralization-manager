@@ -345,6 +345,31 @@ struct OperatorInfoResponse {
     party_id: String,
 }
 
+/// A fully-detailed configured peer, for the network-config editor (the
+/// merged [`PeerView`] drops `public_key` / `party`, which editing needs).
+#[derive(Clone, Debug, Deserialize)]
+pub struct PeerEntry {
+    #[serde(default)]
+    pub participant_id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub address: String,
+    #[serde(default)]
+    pub port: u16,
+    #[serde(default)]
+    pub public_key: String,
+    #[serde(default)]
+    pub party: Option<String>,
+}
+
+/// `/network-config` response with the full peer fields.
+#[derive(Debug, Deserialize)]
+struct NetworkPeersResponse {
+    #[serde(default)]
+    peers: Vec<PeerEntry>,
+}
+
 /// Configured package ids for a party, from `/packages` (only the fields the
 /// CLI needs for contract deployment).
 #[derive(Clone, Debug, Deserialize)]
@@ -962,6 +987,27 @@ impl DecmanClient {
     pub fn fetch_operator_info(&mut self) -> Result<String> {
         let response: OperatorInfoResponse = self.get_json("/operator-info")?;
         Ok(response.party_id)
+    }
+
+    /// Fetch the configured peers with their full fields (for editing).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if login or the request fails, the API returns a
+    /// non-success status, or the response cannot be parsed.
+    pub fn fetch_network_peers(&mut self) -> Result<Vec<PeerEntry>> {
+        let response: NetworkPeersResponse = self.get_json("/network-config")?;
+        Ok(response.peers)
+    }
+
+    /// Replace the configured peer list. `peers` must be a JSON array of peer
+    /// objects (the endpoint takes a bare array, not an envelope).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if login or the request fails, or the API rejects it.
+    pub fn save_network_peers(&mut self, peers: Value) -> Result<()> {
+        self.post("/network-config", Some(peers))
     }
 
     /// Fetch the configured package ids for a party.

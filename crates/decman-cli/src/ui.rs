@@ -19,7 +19,7 @@ use crate::api::{
 };
 use crate::app::{
     App, ComposerKind, ComposerPick, DeployForm, DetailData, GovItem, GovView, GrantForm, KickForm,
-    OnboardForm, Overlay, PeerChoice, Status, Tab, TabView,
+    NetworkEditState, OnboardForm, Overlay, PeerChoice, PeerForm, Status, Tab, TabView,
 };
 use crate::composer::{Composer, FieldKind};
 use crate::config::Profile;
@@ -1081,12 +1081,18 @@ fn footer_hint(active: Tab, overlay: &Overlay, can_logout: bool) -> String {
         Overlay::Deploy(_) => {
             " ↑/↓ field · type number · enter next/deploy · esc cancel".to_owned()
         }
+        Overlay::NetworkEdit(state) => if state.adding.is_some() {
+            " ↑/↓ field · type · enter next/add · esc back"
+        } else {
+            " ↑/↓ select · a add · d remove · s save · esc cancel"
+        }
+        .to_owned(),
         Overlay::Message(_) => " enter / esc to close".to_owned(),
         Overlay::Busy(_) => " working… · esc to dismiss".to_owned(),
         Overlay::None => {
             let base = match active {
                 Tab::Parties => " ↑↓ nav · enter view · n onboard · r refresh",
-                Tab::Peers => " ↑↓ nav · tab switch",
+                Tab::Peers => " ↑↓ nav · e edit · tab switch",
                 Tab::Dars => " c check · u upload · d distribute",
                 Tab::Workflows => {
                     " a accept · x deny · c cancel · t retry · enter detail · d dismiss"
@@ -1171,7 +1177,109 @@ fn draw_overlay(frame: &mut Frame, area: Rect, overlay: &Overlay, spinner: &str)
         Overlay::ComposerPick(pick) => composer_pick_popup(frame, area, pick),
         Overlay::Composer(composer) => composer_popup(frame, area, composer),
         Overlay::Deploy(form) => deploy_popup(frame, area, form),
+        Overlay::NetworkEdit(state) => network_edit_popup(frame, area, state),
     }
+}
+
+/// The network-config editor popup: the peer list, or the add-peer sub-form.
+fn network_edit_popup(frame: &mut Frame, area: Rect, state: &NetworkEditState) {
+    match &state.adding {
+        Some(form) => peer_form_popup(frame, area, form),
+        None => peer_list_popup(frame, area, state),
+    }
+}
+
+/// The peer list view of the network editor.
+fn peer_list_popup(frame: &mut Frame, area: Rect, state: &NetworkEditState) {
+    let mut lines: Vec<Line> = Vec::new();
+    if state.peers.is_empty() {
+        lines.push(dim_line("(no peers — press a to add)"));
+    }
+    for (index, peer) in state.peers.iter().enumerate() {
+        let selected = index == state.selected;
+        let marker = if selected { "▶ " } else { "  " };
+        let style = if selected {
+            Style::default()
+                .fg(logo::ORANGE)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{marker}{}", id_prefix(&peer.participant_id)),
+                style,
+            ),
+            Span::styled(
+                format!("  {}:{}", peer.address, peer.port),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+    }
+
+    let width = 72.min(area.width.saturating_sub(4));
+    let height = ((lines.len() as u16).saturating_add(2)).clamp(6, area.height.saturating_sub(4));
+    let visible = height.saturating_sub(2);
+    let selected = u16::try_from(state.selected).unwrap_or(0);
+    let scroll = selected.saturating_sub(visible.saturating_sub(1));
+    let rect = centered_rect(width, height, area);
+    let paragraph = Paragraph::new(lines)
+        .scroll((scroll, 0))
+        .block(popup_block("Network peers"));
+    frame.render_widget(Clear, rect);
+    frame.render_widget(paragraph, rect);
+}
+
+/// The add-peer sub-form of the network editor.
+fn peer_form_popup(frame: &mut Frame, area: Rect, form: &PeerForm) {
+    let edit_line = |label: &str, value: &str, focused: bool| {
+        let value_style = if focused {
+            Style::default()
+                .fg(logo::ORANGE)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        let shown = if focused {
+            format!("{value}▏")
+        } else if value.is_empty() {
+            "(empty)".to_owned()
+        } else {
+            value.to_owned()
+        };
+        Line::from(vec![detail_label(label), Span::styled(shown, value_style)])
+    };
+
+    let fields = [
+        ("Participant id", form.participant_id.as_str()),
+        ("Name", form.name.as_str()),
+        ("Address", form.address.as_str()),
+        ("Port", form.port.as_str()),
+        ("Public key", form.public_key.as_str()),
+        ("Party (optional)", form.party.as_str()),
+    ];
+    let mut lines: Vec<Line> = fields
+        .iter()
+        .enumerate()
+        .map(|(index, (label, value))| edit_line(label, value, form.cursor == index))
+        .collect();
+    lines.push(Line::default());
+    let submit_style = if form.cursor >= fields.len() {
+        Style::default()
+            .fg(Color::Black)
+            .bg(logo::ORANGE)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    lines.push(Line::from(Span::styled(" Add peer ", submit_style)));
+
+    let width = 72.min(area.width.saturating_sub(4));
+    let height = ((lines.len() as u16).saturating_add(2)).clamp(6, area.height.saturating_sub(4));
+    let rect = centered_rect(width, height, area);
+    let paragraph = Paragraph::new(lines).block(popup_block("Add peer"));
+    frame.render_widget(Clear, rect);
+    frame.render_widget(paragraph, rect);
 }
 
 /// The governance-core contract deployment popup: resolved context plus the two
@@ -2698,6 +2806,51 @@ mod tests {
         assert!(rendered.contains("member-a"));
         assert!(rendered.contains("Threshold"));
         assert!(rendered.contains("Deploy"));
+    }
+
+    #[test]
+    fn network_edit_popup_lists_peers() {
+        use crate::api::PeerEntry;
+
+        let state = NetworkEditState {
+            peers: vec![PeerEntry {
+                participant_id: "alpha::1220".to_owned(),
+                name: "alpha".to_owned(),
+                address: "10.0.0.1".to_owned(),
+                port: 9001,
+                public_key: "abcd".to_owned(),
+                party: None,
+            }],
+            selected: 0,
+            adding: None,
+        };
+        let overlay = Overlay::NetworkEdit(Box::new(state));
+        let rendered = render(|frame, area| draw_overlay(frame, area, &overlay, "⠋"));
+        assert!(rendered.contains("Network peers"));
+        assert!(rendered.contains("alpha"));
+        assert!(rendered.contains("10.0.0.1:9001"));
+    }
+
+    #[test]
+    fn network_edit_add_form_renders_fields() {
+        let state = NetworkEditState {
+            peers: Vec::new(),
+            selected: 0,
+            adding: Some(PeerForm {
+                participant_id: String::new(),
+                name: String::new(),
+                address: String::new(),
+                port: String::new(),
+                public_key: String::new(),
+                party: String::new(),
+                cursor: 0,
+            }),
+        };
+        let overlay = Overlay::NetworkEdit(Box::new(state));
+        let rendered = render(|frame, area| draw_overlay(frame, area, &overlay, "⠋"));
+        assert!(rendered.contains("Add peer"));
+        assert!(rendered.contains("Participant id"));
+        assert!(rendered.contains("Public key"));
     }
 
     #[test]
