@@ -420,6 +420,7 @@ export const NetworkConfigAccordion = ({
                       <Tooltip title="Round-trip from this browser to your node" arrow>
                         <Typography
                           component="span"
+                          tabIndex={0}
                           sx={{
                             ml: 1,
                             color: "text.secondary",
