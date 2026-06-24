@@ -51,12 +51,15 @@ const StatCard = ({
   label,
   value,
   helpText,
+  testId,
 }: {
   label: string;
   value: number | string;
   /// Optional plain-English explanation rendered as a tooltip on hover
   /// of the pill's label. No inline icon — keeps the chip compact.
   helpText?: string;
+  /// Optional data-testid placed on the value node for e2e selectors.
+  testId?: string;
 }) => {
   const labelNode = (
     <Typography
@@ -83,7 +86,7 @@ const StatCard = ({
       })}
     >
       {helpText ? <TextHelp text={helpText}>{labelNode}</TextHelp> : labelNode}
-      <Typography variant="body2" sx={{ fontWeight: 700 }}>
+      <Typography variant="body2" sx={{ fontWeight: 700 }} data-testid={testId}>
         {value}
       </Typography>
     </Box>
@@ -319,6 +322,7 @@ export const PartyDetail = ({
           label="Threshold"
           value={party.threshold}
           helpText="Number of decentralized-namespace owners that must sign topology changes for this party (separate from the governance threshold below)."
+          testId="party-threshold"
         />
         {governanceState && (
           <>
@@ -436,7 +440,7 @@ export const PartyDetail = ({
             </TableHead>
             <TableBody>
               {party.participants.map((p, idx) => (
-                <TableRow key={p.participant_uid} sx={zebraRow(idx)}>
+                <TableRow key={p.participant_uid} sx={zebraRow(idx)} data-testid="participant-row">
                   <TableCell sx={{ py: 1 }}>
                     <CopyableText
                       text={p.participant_uid}

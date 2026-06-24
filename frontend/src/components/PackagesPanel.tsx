@@ -342,6 +342,9 @@ export const PackagesPanel = ({
                           return (
                             <TableCell
                               key={peer.participant_id}
+                              data-testid="peer-dar-status"
+                              data-pkg={pkg.name}
+                              data-status={status}
                               sx={{
                                 py: 0.75,
                                 textAlign: "center",
