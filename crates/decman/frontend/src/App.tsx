@@ -399,8 +399,10 @@ const App = () => {
     };
 
     const measureSelfLatency = async () => {
+      // Clear on failure so the row drops a stale number during an outage,
+      // matching how an unreachable peer shows no latency.
       const ms = await pingLatency(`${API_BASE}/healthz`);
-      if (ms != null) setSelfLatencyMs(ms);
+      setSelfLatencyMs(ms ?? undefined);
     };
 
     // In-flight guard: if a cycle (the status probe in particular) runs longer
