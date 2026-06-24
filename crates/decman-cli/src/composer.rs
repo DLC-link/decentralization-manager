@@ -216,14 +216,30 @@ fn select(
 }
 
 fn rows(key: &'static str, label: &'static str, columns: Vec<&'static str>) -> ComposerField {
-    let help = "one per line";
     field(
         key,
         label,
         FieldKind::Rows(columns),
         String::new(),
         true,
-        help,
+        "one per line",
+    )
+}
+
+/// A rows field whose JSON key the API requires: blank input serializes as `[]`
+/// (an absent key would fail server-side deserialization).
+fn rows_required(
+    key: &'static str,
+    label: &'static str,
+    columns: Vec<&'static str>,
+) -> ComposerField {
+    field(
+        key,
+        label,
+        FieldKind::Rows(columns),
+        String::new(),
+        false,
+        "one per line",
     )
 }
 
@@ -234,6 +250,18 @@ fn list_opt(key: &'static str, label: &'static str) -> ComposerField {
         FieldKind::List,
         String::new(),
         true,
+        "one per line",
+    )
+}
+
+/// A list field whose JSON key the API requires: blank input serializes as `[]`.
+fn list_required(key: &'static str, label: &'static str) -> ComposerField {
+    field(
+        key,
+        label,
+        FieldKind::List,
+        String::new(),
+        false,
         "one per line",
     )
 }
@@ -313,7 +341,7 @@ pub fn fields_for_action(action_type: &str, ctx: &ComposerContext) -> Vec<Compos
         ],
         "vault_update_far_beneficiaries" => vec![
             text("vault_id", "Vault contract id"),
-            rows(
+            rows_required(
                 "new_beneficiaries",
                 "Beneficiaries (party,weight)",
                 vec!["beneficiary", "weight"],
@@ -349,7 +377,7 @@ pub fn fields_for_action(action_type: &str, ctx: &ComposerContext) -> Vec<Compos
             text("vault_processor_rules_cid", "Processor rules cid"),
             text("vault_backend_signatory", "Backend signatory"),
             text("allocation_factory_cid", "Burn/mint factory cid"),
-            list_opt("initial_supported_vaults", "Initial supported vault cids"),
+            list_required("initial_supported_vaults", "Initial supported vault cids"),
         ],
         "utility_create_provider_request" | "utility_create_user_request" => {
             vec![text_value(
@@ -375,7 +403,7 @@ pub fn fields_for_action(action_type: &str, ctx: &ComposerContext) -> Vec<Compos
             text("holder", "Holder party"),
             text("id", "Credential id"),
             text("description", "Description"),
-            rows(
+            rows_required(
                 "claims",
                 "Claims (subject,property,value)",
                 vec!["subject", "property", "value"],
@@ -497,7 +525,7 @@ pub fn fields_for_proposal(proposal_type: &str, ctx: &ComposerContext) -> Vec<Co
             text("holder", "Holder party"),
             text("id", "Credential id"),
             text("description", "Description"),
-            rows(
+            rows_required(
                 "claims",
                 "Claims (subject,property,value)",
                 vec!["subject", "property", "value"],
@@ -519,6 +547,15 @@ pub fn build_payload(composer: &Composer) -> Result<Value, String> {
         "type".to_owned(),
         Value::String(composer.action_type.to_owned()),
     );
+    // A nested-object key (e.g. `limits`, `instrument_id`) is always emitted
+    // when the form declares any child for it, even if all children are blank —
+    // the matching server fields are required, so an absent key fails to parse.
+    for field in &composer.fields {
+        if let Some((parent, _)) = field.key.split_once('.') {
+            root.entry(parent.to_owned())
+                .or_insert_with(|| Value::Object(Map::new()));
+        }
+    }
     for field in &composer.fields {
         if let Some(value) = field_value(field)? {
             insert_path(&mut root, field.key, value);
@@ -677,8 +714,22 @@ mod tests {
         let payload = built("transfer", fields);
         assert_eq!(payload["instrument_id"]["admin"], "adm::1220");
         assert_eq!(payload["instrument_id"]["id"], "CBTC");
-        // The empty optional nested field is omitted entirely.
-        assert!(payload.get("limits").is_none());
+        // A declared nested-object parent is always present (required server
+        // field), but its blank optional child is omitted within it.
+        assert_eq!(payload["limits"], serde_json::json!({}));
+        assert!(payload["limits"].get("max_total_deposit").is_none());
+    }
+
+    #[test]
+    fn build_payload_required_array_is_empty_not_absent() {
+        // A required Vec field with blank input must serialize as `[]`, never absent.
+        let field = rows_required("new_beneficiaries", "Beneficiaries", vec!["beneficiary"]);
+        let payload = built("vault_update_far_beneficiaries", vec![field]);
+        assert_eq!(payload["new_beneficiaries"], serde_json::json!([]));
+
+        let field = list_required("initial_supported_vaults", "Vaults");
+        let payload = built("processor_deployment_request", vec![field]);
+        assert_eq!(payload["initial_supported_vaults"], serde_json::json!([]));
     }
 
     #[test]
