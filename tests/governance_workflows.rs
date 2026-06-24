@@ -100,6 +100,14 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     phases::generic_vote::run(&mut f).await?;
     phases::notification_feed::run(&mut f).await?;
     phases::owner_key_resilience::run(&mut f).await?;
+    // Threshold/quorum coverage (signing-step hang fix + uncancellable stuck
+    // run). Runs after the happy-path contracts/governance phases (so the extra
+    // GovernanceRules deploy + workflow rows can't perturb their assertions) but
+    // BEFORE `kick`, which removes a participant: the quorum case needs the
+    // intact 3-member party (2 peers — one accepts, one stays absent). Both
+    // phases clean up after themselves.
+    phases::contracts_quorum_completes::run(&mut f).await?;
+    phases::cancel_stuck_contracts::run(&mut f).await?;
     phases::kick::run(&mut f).await?;
 
     // ----------------------------------------------------------------------

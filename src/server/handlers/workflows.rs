@@ -1887,30 +1887,55 @@ async fn cancel_workflow_state(
     label: &str,
     kind: WorkflowKind,
 ) -> HttpResponse {
-    {
-        let status = state.status.read().await;
-        if *status != WorkflowProgress::InProgress {
-            return HttpResponse::Conflict().json(ErrorResponse {
-                error: format!("No {label} workflow in progress"),
-            });
-        }
+    let in_memory_in_progress = *state.status.read().await == WorkflowProgress::InProgress;
+
+    // The persisted coordinator row is the source of truth. After a restart the
+    // in-memory `state` can be Idle while the DB row is still InProgress (startup
+    // recovery may not have restored the in-memory status/abort_handle), and the
+    // operator must still be able to cancel the run the UI shows. So we cancel
+    // whenever EITHER the in-memory state or a persisted coordinator row says a
+    // run is in progress.
+    let persisted = data
+        .db
+        .get_active_workflow_run(kind, WorkflowRole::Coordinator)
+        .await
+        .ok()
+        .flatten();
+
+    if !in_memory_in_progress && persisted.is_none() {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!("No {label} workflow in progress"),
+        });
     }
 
-    // Take the abort handle FIRST. If it's None we're racing with a start path that
-    // hasn't finished setting itself up yet; refuse the cancel rather than mark the
-    // workflow Cancelled while the spawned task is still alive. Start paths always
-    // populate abort_handle before they let any await reach this point.
-    let Some(handle) = state.abort_handle.lock().await.take() else {
+    // Abort the live coordinator task if we hold its handle. When the in-memory
+    // state reports InProgress but the handle is missing, we're racing a start
+    // path that hasn't finished initializing — refuse rather than cancel a
+    // half-spawned run. When the in-memory state is NOT InProgress (a run
+    // recovered after restart, or one whose task already exited) there's no
+    // handle to take, and that's expected — proceed to cancel the persisted row.
+    let handle = state.abort_handle.lock().await.take();
+    if in_memory_in_progress && handle.is_none() {
         tracing::warn!(
             "{label} cancel arrived before the workflow finished initializing — refusing"
         );
         return HttpResponse::Conflict().json(ErrorResponse {
             error: format!("{label} workflow is still initializing — try again in a moment"),
         });
-    };
-    handle.abort();
+    }
+    if let Some(handle) = handle {
+        handle.abort();
+    }
 
-    let invitees = state.invited_peers.read().await.clone();
+    // Best-effort cancel-invite to the peers this run invited. Prefer the
+    // in-memory invitee list; fall back to the persisted row's expected_peers
+    // (the in-memory list is empty after a restart).
+    let mut invitees = state.invited_peers.read().await.clone();
+    if invitees.is_empty()
+        && let Some(run) = persisted.as_ref()
+    {
+        invitees = run.expected_peers.clone();
+    }
     if !invitees.is_empty()
         && let Err(e) = send_cancel_invites(&data.config, &data.db, &invitees).await
     {
@@ -1926,11 +1951,8 @@ async fn cancel_workflow_state(
         *error = None;
     }
 
-    // Mirror the cancel into the persisted workflow_runs row so the feed picks it up.
-    if let Ok(Some(run)) = data
-        .db
-        .get_active_workflow_run(kind, WorkflowRole::Coordinator)
-        .await
+    // Flip the persisted coordinator row to Cancelled so the feed reflects it.
+    if let Some(run) = persisted
         && let Err(e) = mark_run_status(
             &data.db,
             &run.instance_name,

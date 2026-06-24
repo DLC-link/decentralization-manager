@@ -61,6 +61,25 @@ pub struct WorkflowState<S> {
     current_step: RwLock<S>,
     /// Expected peer IDs
     expected_peers: HashSet<CantonId>,
+    /// The workflow's peer quorum: the minimum number of expected peers that
+    /// must take part before a peer-gated step advances.
+    ///
+    /// `None` means *all* expected peers are required (the original behaviour,
+    /// used by Onboarding — which defines the party's owner set — and DARs —
+    /// which must reach every selected node). `Some(k)` is a quorum of `k`
+    /// peers: since the coordinator participates itself, a party threshold `M`
+    /// resolves to `M - 1` peers (computed and clamped by the caller in
+    /// `NoiseServer::new`).
+    ///
+    /// Both gates use it:
+    /// * **start** (`peer_connected` / `WaitingForPeers`): begin once `k` peers
+    ///   connect, so a slow/absent owner doesn't block the start.
+    /// * **signing** (`peer_completed` / `requires_peers`): advance once every
+    ///   *connected* peer has completed AND at least `k` have. So the happy
+    ///   path (all invited peers present) still gathers every signature — Canton
+    ///   finalization is identical to require-all — an absent (never-connected)
+    ///   peer is skipped, and we never execute below the M-of-N quorum.
+    peer_threshold: Option<usize>,
     /// Peers that have connected (transient — not persisted, recoverable
     /// via Noise reconnect after a restart)
     connected_peers: RwLock<HashSet<CantonId>>,
@@ -82,12 +101,14 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
         instance_name: String,
         initial_step: S,
         expected_peers: Vec<CantonId>,
+        peer_threshold: Option<usize>,
     ) -> Arc<Self> {
         Arc::new(Self {
             db,
             instance_name,
             current_step: RwLock::new(initial_step),
             expected_peers: expected_peers.into_iter().collect(),
+            peer_threshold,
             connected_peers: RwLock::new(HashSet::new()),
             completed_peers: RwLock::new(HashSet::new()),
             peer_data: RwLock::new(HashMap::new()),
@@ -105,12 +126,14 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
         current_step: S,
         expected_peers: Vec<CantonId>,
         completed_peers: Vec<CantonId>,
+        peer_threshold: Option<usize>,
     ) -> Arc<Self> {
         Arc::new(Self {
             db,
             instance_name,
             current_step: RwLock::new(current_step),
             expected_peers: expected_peers.into_iter().collect(),
+            peer_threshold,
             connected_peers: RwLock::new(HashSet::new()),
             completed_peers: RwLock::new(completed_peers.into_iter().collect()),
             peer_data: RwLock::new(HashMap::new()),
@@ -144,6 +167,42 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
         *self.current_step.read().await
     }
 
+    /// The workflow's peer quorum: the minimum number of expected peers that
+    /// must act before a peer-gated step advances. `None` (and the no-peer
+    /// case) require all expected peers; otherwise the threshold is clamped
+    /// into `[1, total]`. Clamping up to 1 is load-bearing: the gates are only
+    /// ever evaluated from a peer event, so a `0` requirement could never be
+    /// tripped and would hang the wait — `[1, total]` keeps it reachable and
+    /// never above the peers that can actually act.
+    fn peers_quorum(&self) -> usize {
+        let total = self.expected_peers.len();
+        match self.peer_threshold {
+            Some(k) if total > 0 => k.clamp(1, total),
+            _ => total,
+        }
+    }
+
+    /// Whether a peer-gated step may advance, given how many peers have
+    /// completed it. Both conditions must hold:
+    ///
+    /// 1. `completed_count >= peers_quorum()` — never advance (and so never
+    ///    execute) below the M-of-N quorum.
+    /// 2. `completed_count >= connected_peers.len()` — every peer that
+    ///    connected to this run has also completed. Connected peers are the
+    ///    ones that will actually send a signature, so waiting for all of them
+    ///    makes the happy path advance with EVERY present peer's signature
+    ///    (matching the require-all path). Since `completed ⊆ connected`, this
+    ///    is reached as soon as the last connected peer acts.
+    ///
+    /// An invited peer that never connects is not in `connected_peers`, so it
+    /// cannot hold the gate open once the present quorum has signed. For the
+    /// require-all case (`peers_quorum() == total`), condition (1) already
+    /// forces every expected peer and (2) is redundant.
+    async fn signing_gate_satisfied(&self, completed_count: usize) -> bool {
+        let connected_count = self.connected_peers.read().await.len();
+        completed_count >= self.peers_quorum() && completed_count >= connected_count
+    }
+
     pub async fn store_peer_data(&self, peer_id: CantonId, data: Vec<u8>) {
         let mut peer_data = self.peer_data.write().await;
         peer_data.insert(peer_id, data);
@@ -164,11 +223,11 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
     }
 
     pub async fn peer_connected(&self, peer_id: CantonId) {
-        // Guard against non-expected peers. The auto-advance gate below uses
-        // `expected_peers.len()` as the total, so counting a peer that isn't in
-        // the expected set (stale, duplicate, or re-onboarded) could trip the
-        // gate without all expected peers having acted — advancing the workflow
-        // with a missing signature. Expected peers behave exactly as before.
+        // Guard against non-expected peers. The start gate below counts
+        // connections against `start_peers_required()`, so counting a peer that
+        // isn't in the expected set (stale, duplicate, or re-onboarded) could
+        // trip the gate with the wrong peers — starting the workflow before the
+        // intended quorum is present. Expected peers behave exactly as before.
         if !self.expected_peers.contains(&peer_id) {
             tracing::warn!(
                 "ignoring connect from unexpected peer {peer_id} (not in expected set for {})",
@@ -185,10 +244,13 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
         }
 
         let connected_count = connected.len();
+        let required = self.peers_quorum();
         let total_count = self.expected_peers.len();
-        tracing::info!("Peer connected: {peer_id} ({connected_count}/{total_count})");
+        tracing::info!(
+            "Peer connected: {peer_id} ({connected_count}/{total_count}, need {required} to start)"
+        );
 
-        if connected_count == total_count {
+        if connected_count >= required {
             let current = self.current_step.read().await;
             if current.is_waiting_for_peers() {
                 drop(current);
@@ -204,11 +266,11 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
     }
 
     pub async fn peer_completed(&self, peer_id: CantonId) {
-        // Guard against non-expected peers. The auto-advance gate below uses
-        // `expected_peers.len()` as the total, so counting a peer that isn't in
-        // the expected set (stale, duplicate, or re-onboarded) could trip the
-        // gate without all expected peers having acted — advancing the workflow
-        // with a missing signature. Expected peers behave exactly as before.
+        // Guard against non-expected peers. The signing gate below counts
+        // completions against the peer quorum and the connected set, so counting
+        // a peer that isn't in the expected set (stale, duplicate, or
+        // re-onboarded) could trip the gate with the wrong peers — advancing the
+        // workflow with a missing signature. Expected peers behave as before.
         if !self.expected_peers.contains(&peer_id) {
             tracing::warn!(
                 "ignoring step completion from unexpected peer {peer_id} (not in expected set for {})",
@@ -235,7 +297,10 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
         let completed_vec: Vec<CantonId> = completed.iter().cloned().collect();
         self.persist_step_progress(*current, completed_vec).await;
 
-        if current.requires_peers() && completed_count == total_count {
+        // Advance once every connected peer has completed and the quorum is met
+        // — see `peer_threshold` / `signing_gate_satisfied`. An absent peer that
+        // never connected does not hold this open.
+        if current.requires_peers() && self.signing_gate_satisfied(completed_count).await {
             drop(current);
             drop(completed);
             self.advance_step().await;
@@ -426,6 +491,7 @@ mod tests {
             "test-run".to_string(),
             TestStep::Sign,
             vec![peer(1), peer(2)],
+            None,
         );
 
         state.peer_completed(peer(1)).await;
@@ -442,6 +508,7 @@ mod tests {
             "test-run".to_string(),
             TestStep::WaitPeers,
             vec![peer(1)],
+            None,
         );
 
         // WaitPeers does not require peers, so a completion must not advance it.
@@ -456,6 +523,7 @@ mod tests {
             "test-run".to_string(),
             TestStep::WaitPeers,
             vec![peer(1), peer(2)],
+            None,
         );
 
         state.peer_connected(peer(1)).await;
@@ -471,7 +539,13 @@ mod tests {
 
     #[sqlx::test(migrator = "MIGRATOR")]
     async fn peer_connected_does_not_advance_when_not_waiting(pool: SqlitePool) {
-        let state = WorkflowState::new(pool, "test-run".to_string(), TestStep::Sign, vec![peer(1)]);
+        let state = WorkflowState::new(
+            pool,
+            "test-run".to_string(),
+            TestStep::Sign,
+            vec![peer(1)],
+            None,
+        );
 
         // Sign is not a waiting step, so a connect must not advance it.
         state.peer_connected(peer(1)).await;
@@ -485,6 +559,7 @@ mod tests {
             "test-run".to_string(),
             TestStep::Sign,
             vec![peer(1), peer(2)],
+            None,
         );
 
         state.peer_completed(peer(1)).await;
@@ -507,6 +582,7 @@ mod tests {
             "test-run".to_string(),
             TestStep::WaitPeers,
             vec![peer(1), peer(2)],
+            None,
         );
 
         state.peer_connected(peer(1)).await;
@@ -529,6 +605,7 @@ mod tests {
             TestStep::Sign,
             vec![peer(1), peer(2)],
             vec![peer(1)],
+            None,
         );
 
         state.peer_completed(peer(2)).await;
@@ -537,10 +614,120 @@ mod tests {
 
     #[sqlx::test(migrator = "MIGRATOR")]
     async fn advance_step_at_terminal_is_noop(pool: SqlitePool) {
-        let state = WorkflowState::new(pool, "test-run".to_string(), TestStep::Done, vec![peer(1)]);
+        let state = WorkflowState::new(
+            pool,
+            "test-run".to_string(),
+            TestStep::Done,
+            vec![peer(1)],
+            None,
+        );
 
         // Done has no successor, so advancing is a no-op.
         state.advance_step().await;
         assert_eq!(state.current_step().await, TestStep::Done);
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn peer_connected_advances_at_threshold(pool: SqlitePool) {
+        // Two peers expected but only one needed (e.g. a 2-of-3 party where the
+        // coordinator provides the other signature): the waiting step must
+        // advance on the first connect, without the second peer.
+        let state = WorkflowState::new(
+            pool,
+            "test-run".to_string(),
+            TestStep::WaitPeers,
+            vec![peer(1), peer(2)],
+            Some(1),
+        );
+
+        state.peer_connected(peer(1)).await;
+        assert_eq!(state.current_step().await, TestStep::Sign);
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn signing_gate_waits_for_all_connected_peers(pool: SqlitePool) {
+        // Happy path: when both invited peers are present (connected), the
+        // signing gate waits for BOTH to sign even though the quorum is 1 — so
+        // the coordinator gathers every present peer's signature before
+        // executing (matching the require-all path / green main).
+        let state = WorkflowState::new(
+            pool,
+            "test-run".to_string(),
+            TestStep::Sign,
+            vec![peer(1), peer(2)],
+            Some(1),
+        );
+
+        // Sign is not a waiting step, so connecting just records participation.
+        state.peer_connected(peer(1)).await;
+        state.peer_connected(peer(2)).await;
+
+        state.peer_completed(peer(1)).await;
+        assert_eq!(state.current_step().await, TestStep::Sign);
+
+        state.peer_completed(peer(2)).await;
+        assert_eq!(state.current_step().await, TestStep::Done);
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn signing_gate_skips_absent_peer_at_quorum(pool: SqlitePool) {
+        // The fix for the production hang: with a quorum of 1 and peer(2)
+        // absent (never connected), the signing step advances once the present
+        // quorum (peer(1)) has signed, instead of looping forever.
+        let state = WorkflowState::new(
+            pool,
+            "test-run".to_string(),
+            TestStep::Sign,
+            vec![peer(1), peer(2)],
+            Some(1),
+        );
+
+        // Only peer(1) connects; peer(2) never accepts/connects.
+        state.peer_connected(peer(1)).await;
+
+        state.peer_completed(peer(1)).await;
+        assert_eq!(state.current_step().await, TestStep::Done);
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn require_all_signing_gate_unchanged_with_connections(pool: SqlitePool) {
+        // `None` (Onboarding/DARs) still requires every expected peer even when
+        // all are connected: the quorum floor equals the total.
+        let state = WorkflowState::new(
+            pool,
+            "test-run".to_string(),
+            TestStep::Sign,
+            vec![peer(1), peer(2)],
+            None,
+        );
+
+        state.peer_connected(peer(1)).await;
+        state.peer_connected(peer(2)).await;
+
+        state.peer_completed(peer(1)).await;
+        assert_eq!(state.current_step().await, TestStep::Sign);
+
+        state.peer_completed(peer(2)).await;
+        assert_eq!(state.current_step().await, TestStep::Done);
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn start_threshold_above_peer_count_clamps_to_all(pool: SqlitePool) {
+        // A start threshold larger than the available peers clamps to the peer
+        // count, so the start gate behaves like require-all: the first connect
+        // must not start the workflow, only the last one does.
+        let state = WorkflowState::new(
+            pool,
+            "test-run".to_string(),
+            TestStep::WaitPeers,
+            vec![peer(1), peer(2)],
+            Some(5),
+        );
+
+        state.peer_connected(peer(1)).await;
+        assert_eq!(state.current_step().await, TestStep::WaitPeers);
+
+        state.peer_connected(peer(2)).await;
+        assert_eq!(state.current_step().await, TestStep::Sign);
     }
 }

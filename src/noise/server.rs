@@ -92,6 +92,88 @@ impl ActiveWorkflow {
     }
 }
 
+/// How many peers must connect before a coordinator workflow leaves
+/// `WaitingForPeers`, given the decentralized party's signing threshold `m`
+/// (the total number of signers required, *including* the coordinator) and the
+/// number of `expected_peers` (which never includes the coordinator).
+///
+/// The coordinator participates itself, so `m - 1` peer connections make a
+/// quorum present and the workflow can start. The result is clamped:
+/// - `expected_peers == 0` returns `0` — there are no peers to wait for, so the
+///   start gate is satisfied immediately (the no-peer / solo case);
+/// - otherwise it is clamped to at least one peer (a `0` requirement could
+///   never be tripped by a peer connect event, so it would hang the wait) and
+///   to at most the peers actually available.
+fn peers_for_party_threshold(m: usize, expected_peers: usize) -> usize {
+    if expected_peers == 0 {
+        return 0;
+    }
+    m.saturating_sub(1).clamp(1, expected_peers)
+}
+
+/// Resolve the **start-gate** quorum for a coordinator run: how many peers must
+/// connect before the workflow leaves `WaitingForPeers`. `None` means "require
+/// every expected peer" — the original behaviour — and is also the safe,
+/// no-regression fallback whenever a party threshold can't be resolved.
+///
+/// This only governs when the workflow *starts*; the per-step signing gate
+/// still waits for every expected peer (see `WorkflowState::peer_threshold`).
+async fn resolve_peer_threshold(
+    kind: WorkflowKind,
+    dec_party_id: Option<&CantonId>,
+    db: &SqlitePool,
+    expected_peers: usize,
+) -> Option<usize> {
+    if expected_peers == 0 {
+        return None;
+    }
+    match kind {
+        // Onboarding defines the party's owner set, so every invitee must take
+        // part. DARs is a file distribution — the coordinator serves chunks to
+        // each peer, so it must wait for all selected peers regardless. Both
+        // therefore require the full set even to start.
+        WorkflowKind::Onboarding | WorkflowKind::Dars => None,
+        // Operate on an existing M-of-N party: a quorum of owners is enough to
+        // begin, so a slow/absent owner no longer blocks the workflow's start.
+        WorkflowKind::Kick | WorkflowKind::Contracts => {
+            let party_id = dec_party_id?;
+            let m = lookup_party_threshold(db, party_id).await?;
+            Some(peers_for_party_threshold(m, expected_peers))
+        }
+    }
+}
+
+/// Read the decentralized party's signing threshold `M` from the local cache
+/// (`dec_parties`). Returns `None` if the party isn't cached or the stored
+/// value is unusable (missing, non-positive, or out of range), in which case
+/// the caller requires every expected peer. `M` is a meaningful M-of-N
+/// threshold only when `>= 1`, so a cached `0` is treated as invalid.
+async fn lookup_party_threshold(db: &SqlitePool, party_id: &CantonId) -> Option<usize> {
+    let party_id_str = party_id.to_string();
+    let parties = match SchemaRead::get_dec_parties_by_prefix(db, &party_id.prefix).await {
+        Ok(parties) => parties,
+        Err(e) => {
+            tracing::warn!(
+                "Could not read dec party threshold for {party_id_str}: {e}; requiring all peers"
+            );
+            return None;
+        }
+    };
+    let threshold = parties
+        .into_iter()
+        .find(|p| p.party_id == party_id_str)
+        .map(|p| p.threshold)?;
+    match usize::try_from(threshold) {
+        Ok(m) if m >= 1 => Some(m),
+        _ => {
+            tracing::warn!(
+                "Dec party {party_id_str} has invalid threshold {threshold}; requiring all peers"
+            );
+            None
+        }
+    }
+}
+
 impl<S: WorkflowStep + 'static> NoiseServer<S> {
     /// Create a new Noise server
     ///
@@ -185,6 +267,20 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
             .cloned()
             .collect();
 
+        // How many peers must connect / complete a peer-gated step before the
+        // workflow advances. Onboarding keeps requiring every invitee (it
+        // defines the party's owner set); the post-onboarding workflows operate
+        // on an existing M-of-N party, so a quorum is enough and an absent owner
+        // no longer stalls them. `None` => require all (also the safe fallback
+        // when a party threshold can't be resolved).
+        let peer_threshold = resolve_peer_threshold(
+            S::kind(),
+            persisted.as_ref().and_then(|run| run.dec_party_id.as_ref()),
+            &db,
+            expected_peers.len(),
+        )
+        .await;
+
         // Resume-aware construction: if an InProgress workflow_runs row already
         // exists for `instance_name` (we restarted mid-flight), re-hydrate the
         // state machine from its persisted `current_step` + already-completed
@@ -207,6 +303,7 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                             step,
                             expected_peers,
                             run.completed_peers,
+                            peer_threshold,
                         )
                     }
                     None => {
@@ -216,11 +313,23 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                             run.current_step,
                             kind = std::any::type_name::<S>()
                         );
-                        WorkflowState::new(db, instance_name, initial_step, expected_peers)
+                        WorkflowState::new(
+                            db,
+                            instance_name,
+                            initial_step,
+                            expected_peers,
+                            peer_threshold,
+                        )
                     }
                 }
             }
-            _ => WorkflowState::new(db, instance_name, initial_step, expected_peers),
+            _ => WorkflowState::new(
+                db,
+                instance_name,
+                initial_step,
+                expected_peers,
+                peer_threshold,
+            ),
         };
 
         Ok(Self {
@@ -570,5 +679,28 @@ mod tests {
             WorkflowKind::Onboarding,
             "acme-creation"
         ));
+    }
+
+    #[test]
+    fn party_threshold_subtracts_the_coordinators_own_signature() {
+        // 2-of-3 party (coordinator + 2 peers): coordinator signs itself, so a
+        // single peer signature completes the quorum.
+        assert_eq!(peers_for_party_threshold(2, 2), 1);
+        // 3-of-4 party (coordinator + 3 peers): need two more peers.
+        assert_eq!(peers_for_party_threshold(3, 3), 2);
+        // 3-of-5 / unanimous 4-of-4 etc. still resolve to M-1 peers.
+        assert_eq!(peers_for_party_threshold(4, 4), 3);
+    }
+
+    #[test]
+    fn party_threshold_is_clamped_into_range() {
+        // M = 1 (coordinator alone suffices) would resolve to 0 peers, which a
+        // peer event could never trip — clamp up to 1 so the wait can complete.
+        assert_eq!(peers_for_party_threshold(1, 3), 1);
+        // A threshold larger than the peers available is clamped down to all of
+        // them, reproducing the original require-all behaviour.
+        assert_eq!(peers_for_party_threshold(9, 2), 2);
+        // No peers at all => nothing to wait for.
+        assert_eq!(peers_for_party_threshold(5, 0), 0);
     }
 }
