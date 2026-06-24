@@ -2493,10 +2493,11 @@ mod tests {
         assert!(rendered.contains("success"));
         // The JSON is not shown inline — it opens as a modal (see below).
         assert!(!rendered.contains("new_threshold"));
-        // The on-ledger governance state renders in the summary box.
+        // The on-ledger governance state renders in the summary box (a
+        // 86_400_000_000µs timeout renders as "1d").
         assert!(rendered.contains("Governance"));
         assert!(rendered.contains("threshold 2 of 3 members"));
-        assert!(rendered.contains("24h"));
+        assert!(rendered.contains("1d"));
     }
 
     #[test]
