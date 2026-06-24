@@ -1,8 +1,86 @@
-[package]
-name = "dec-party-manager"
-version = "1.0.2"
-edition = "2024"
-license = "Apache-2.0"
+[workspace]
+members = ["crates/common", "crates/decman", "crates/decman-cli"]
+resolver = "2"
+
+# Shared dependency versions. Member crates reference these with
+# `<dep> = { workspace = true }` (adding crate-specific features or `optional`
+# on top), so a version lives in exactly one place. Keep alphabetical: the
+# crates.io block first, then a blank line and the git/path deps.
+[workspace.dependencies]
+actix-cors = { version = "0.7" }
+actix-web = { version = "4" }
+aes-gcm = { version = "0.10" }
+anyhow = { version = "1.0.98" }
+base64 = { version = "0.22" }
+bytes = { version = "1.11.1" }
+chrono = { version = "0.4", default-features = false, features = [
+    "clock",
+    "std",
+] }
+clap = { version = "4.5.43", features = ["derive", "env"] }
+colored = { version = "3.1.1" }
+dotenvy = { version = "0.15" }
+ed25519-dalek = { version = "2.1", features = ["zeroize"] }
+futures = { version = "0.3" }
+hex = { version = "0.4" }
+http = { version = "0.2" }
+hyper = { version = "0.14", features = ["full"] }
+hyper-noise = { version = "0.0.2" }
+jsonwebtoken = { version = "10.4", features = ["aws_lc_rs"] }
+mime_guess = { version = "2.0" }
+prost = { version = "0.14.1" }
+prost-types = { version = "0.14.1" }
+rand = { version = "0.10" }
+ratatui = { version = "0.29.0" }
+# `reqwest` is intentionally NOT a workspace dependency: the server (`decman`)
+# is on 0.13 while the CLI (`decman-cli`) is on 0.12 (semver-incompatible), and
+# 0.13 reorganized features / the blocking API. Each crate pins its own until
+# the CLI is migrated to 0.13 in a dedicated change.
+rfd = { version = "0.15.2" }
+rust-embed = { version = "8.5" }
+secp256k1 = { version = "0.29.1", features = ["rand-std"] }
+serde = { version = "1.0", features = ["derive"] }
+serde-big-array = { version = "0.5.1" }
+serde_json = { version = "1.0" }
+sha2 = { version = "0.11" }
+sqlx = { version = "0.8", default-features = false, features = [
+    "macros",
+    "migrate",
+    "runtime-tokio-rustls",
+    "sqlite",
+] }
+static_assertions = { version = "1.1" }
+tempfile = { version = "3.14" }
+thiserror = { version = "2.0" }
+tokio = { version = "1.48.0", features = [
+    "fs",
+    "macros",
+    "net",
+    "process",
+    "rt-multi-thread",
+    "signal",
+    "sync",
+] }
+tokio-noise = { version = "0.0.4" }
+tokio-stream = { version = "0.1" }
+toml = { version = "0.8.19" }
+tonic = { version = "0.14.2" }
+tonic-prost = { version = "0.14.2" }
+tracing = { version = "0.1" }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+utoipa = { version = "5" }
+utoipa-actix-web = { version = "0.1" }
+utoipa-swagger-ui = { version = "9", features = ["actix-web"] }
+uuid = { version = "1.11", features = ["v4"] }
+wiremock = { version = "0.6" }
+x509-parser = { version = "0.18" }
+zeroize = { version = "1.8", features = ["derive"] }
+
+canton-common = { package = "common", git = "ssh://git@github.com/DLC-link/canton-lib", branch = "main" }
+canton-proto-rs = { git = "ssh://git@github.com/DLC-link/canton-lib", branch = "main" }
+canton-registry = { package = "registry", git = "ssh://git@github.com/DLC-link/canton-lib", branch = "main" }
+common = { path = "crates/common" }
+keycloak = { git = "ssh://git@github.com/DLC-link/canton-lib", branch = "main" }
 
 [profile.release]
 opt-level = 3
@@ -19,85 +97,6 @@ inherits = "release"
 codegen-units = 16
 lto = false
 strip = "none"
-
-[features]
-# Compile-time gate for the permissive `MockValidator` (admin-by-default,
-# accepts any token) and `MockAuthRegistry`. Enabled automatically under
-# `cargo test`. Production builds must NOT enable this: leaving it off
-# means the mock types are not compiled in at all, so the binary cannot
-# select mock auth at runtime.
-test-mode = []
-
-[dependencies]
-actix-cors = { version = "0.7" }
-actix-web = { version = "4" }
-aes-gcm = { version = "0.10" }
-anyhow = { version = "1.0.98" }
-base64 = { version = "0.22" }
-bytes = { version = "1.11.1" }
-chrono = { version = "0.4", default-features = false, features = [
-    "clock",
-    "std",
-] }
-clap = { version = "4.5.43", features = ["derive", "env", "string"] }
-colored = { version = "3.1.1" }
-dotenvy = { version = "0.15" }
-ed25519-dalek = { version = "2.1", features = ["zeroize"] }
-futures = { version = "0.3" }
-hex = { version = "0.4" }
-http = { version = "0.2" }
-hyper = { version = "0.14", features = ["full"] }
-hyper-noise = { version = "0.0.2" }
-jsonwebtoken = { version = "10.4", features = ["aws_lc_rs"] }
-mime_guess = { version = "2.0" }
-prost = { version = "0.14.1" }
-prost-types = { version = "0.14.1" }
-rand = { version = "0.10" }
-reqwest = { version = "0.13", features = ["form", "json"] }
-rust-embed = { version = "8.5" }
-secp256k1 = { version = "0.29.1", features = ["rand-std"] }
-serde = { version = "1.0", features = ["derive"] }
-serde-big-array = { version = "0.5.1" }
-serde_json = { version = "1.0" }
-sha2 = { version = "0.11" }
-sqlx = { version = "0.8", default-features = false, features = [
-    "macros",
-    "migrate",
-    "runtime-tokio-rustls",
-    "sqlite",
-] }
-thiserror = { version = "2.0" }
-tokio = { version = "1.48.0", features = [
-    "fs",
-    "macros",
-    "net",
-    "process",
-    "rt-multi-thread",
-    "signal",
-    "sync",
-] }
-tokio-noise = { version = "0.0.4" }
-tokio-stream = { version = "0.1" }
-tonic = { version = "0.14.2" }
-tonic-prost = { version = "0.14.2" }
-tracing = { version = "0.1" }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-utoipa = { version = "5", features = ["actix_extras"] }
-utoipa-actix-web = { version = "0.1" }
-utoipa-swagger-ui = { version = "9", features = ["actix-web"] }
-uuid = { version = "1.11", features = ["v4"] }
-x509-parser = { version = "0.18" }
-zeroize = { version = "1.8", features = ["derive"] }
-
-canton-common = { package = "common", git = "ssh://git@github.com/DLC-link/canton-lib", branch = "main" }
-canton-proto-rs = { git = "ssh://git@github.com/DLC-link/canton-lib", branch = "main" }
-canton-registry = { package = "registry", git = "ssh://git@github.com/DLC-link/canton-lib", branch = "main" }
-keycloak = { git = "ssh://git@github.com/DLC-link/canton-lib", branch = "main" }
-
-[dev-dependencies]
-static_assertions = { version = "1.1" }
-tempfile = { version = "3.14" }
-wiremock = { version = "0.6" }
 
 [patch.crates-io]
 # Fork of tokio-noise 0.0.4 (also replaces hyper-noise's transitive dep).

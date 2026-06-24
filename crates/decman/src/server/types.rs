@@ -1,9 +1,6 @@
-use std::{
-    collections::HashMap,
-    sync::{
-        Arc, RwLock as StdRwLock,
-        atomic::{AtomicBool, Ordering},
-    },
+use std::sync::{
+    Arc, RwLock as StdRwLock,
+    atomic::{AtomicBool, Ordering},
 };
 
 use canton_common::decimal::DamlDecimal;
@@ -11,13 +8,41 @@ use canton_proto_rs::com::digitalasset::canton::protocol::v30::enums::Participan
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
+// Wire DTOs that the `decman-cli` client also needs now live in the shared
+// `common` crate. They are re-exported here so existing `crate::server::types::X`
+// (and the glob `pub use types::*` in `server/mod.rs`) keep resolving unchanged.
+pub use common::types::{
+    AuditLogEntry, AuthConfigResponse, ConnectionStatus, ContractInfo, DecentralizedParty,
+    InvitationType, PackageInfo, ParticipantInfo, ParticipantStatus, ParticipantsStatusResponse,
+    PartyMetadata, PeerErrorKind, PeerPackageComparison, PeerPackageResult, PendingInvitation,
+    Permission, VettedPackageInfo, WorkflowInfo, WorkflowKind, WorkflowProgress, WorkflowRole,
+    WorkflowRun,
+};
+
 use crate::{
     canton_id::CantonId,
     config::PackageConfig,
     noise::server::ActiveWorkflow,
-    server::health::WorkflowInfo,
     workflow::contracts::{ContractDefinition, DarFile},
 };
+
+/// Map a Canton proto `ParticipantPermission` discriminant to the wire
+/// [`Permission`] DTO.
+///
+/// This conversion lives in the backend (not in `common` alongside the enum)
+/// because it depends on the proto-generated `ParticipantPermission`, which is
+/// a server-only dependency; the `Permission` enum itself is shared with the
+/// `decman-cli` client and so must stay free of proto deps. Replaces the former
+/// `impl From<i32> for Permission`, which the orphan rule no longer permits now
+/// that `Permission` is a foreign type.
+pub fn permission_from_proto(value: i32) -> Permission {
+    match value {
+        x if x == ParticipantPermission::Submission as i32 => Permission::Submission,
+        x if x == ParticipantPermission::Confirmation as i32 => Permission::Confirmation,
+        x if x == ParticipantPermission::Observation as i32 => Permission::Observation,
+        _ => Permission::Unknown,
+    }
+}
 
 /// Trait for workflow status types that can be used with HttpWorkflowState
 pub trait WorkflowStatus: Default + Copy + Send + Sync {}
@@ -107,138 +132,6 @@ impl Drop for ActiveWorkflowGuard {
     }
 }
 
-/// Participant permission level
-#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
-#[serde(rename_all = "lowercase")]
-pub enum Permission {
-    Submission,
-    Confirmation,
-    Observation,
-    Unknown,
-}
-
-impl From<i32> for Permission {
-    fn from(value: i32) -> Self {
-        match value {
-            x if x == ParticipantPermission::Submission as i32 => Permission::Submission,
-            x if x == ParticipantPermission::Confirmation as i32 => Permission::Confirmation,
-            x if x == ParticipantPermission::Observation as i32 => Permission::Observation,
-            _ => Permission::Unknown,
-        }
-    }
-}
-
-/// Participant in a decentralized party
-#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
-pub struct ParticipantInfo {
-    pub participant_uid: CantonId,
-    pub permission: Permission,
-    /// Namespace key fingerprint for this participant (if they are an owner)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner_key: Option<String>,
-}
-
-/// Contract information surfaced in the dec_party detail view.
-///
-/// `template_id` is the short `Module.Path:Entity` form (NOT the fully
-/// qualified package_id-prefixed form). `package_name` is the human-readable
-/// Daml package name (from verbose ACS); `package_version` is joined in from
-/// the participant Admin API's PackageService. `created_at` is the ISO 8601
-/// timestamp Canton stamps on the create event.
-#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
-pub struct ContractInfo {
-    pub contract_id: String,
-    pub template_id: String,
-    pub package_id: String,
-    #[serde(default)]
-    pub package_name: String,
-    #[serde(default)]
-    pub package_version: String,
-    #[serde(default)]
-    pub created_at: String,
-}
-
-/// Vetted package information
-#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
-pub struct VettedPackageInfo {
-    pub package_id: String,
-    pub package_name: String,
-    pub package_version: String,
-}
-
-/// Package info for peer comparison
-#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
-pub struct PackageInfo {
-    pub package_id: String,
-    pub name: String,
-    pub version: String,
-}
-
-/// Reason a peer was reported `reachable: false` in `PeerPackageResult`.
-///
-/// Mirrors `NoiseError` variants at a coarser granularity that's stable on
-/// the wire — added so the UI / future tooling can distinguish failure
-/// modes without having to scan logs. Layered transport-side: TCP connect
-/// (timeout/failed), then post-connect request budget (`RequestTimeout`),
-/// then mid-stream IO/HTTP (`Transport`); then handshake/decode/status.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, utoipa::ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum PeerErrorKind {
-    TcpConnectTimeout,
-    TcpConnectFailed,
-    RequestTimeout,
-    Transport,
-    HandshakeFailed,
-    BadStatus,
-    DecodeFailed,
-    InvalidPublicKey,
-    Other,
-}
-
-/// Result of querying packages from a single peer.
-///
-/// `error_kind` is `None` when `reachable: true`. Always `Some(_)` when
-/// `reachable: false`. (Decode failures on `reachable: true` responses are
-/// not yet surfaced — see Future work item 5 in the spec.)
-#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
-pub struct PeerPackageResult {
-    pub participant_id: String,
-    pub name: String,
-    pub reachable: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error_kind: Option<PeerErrorKind>,
-    #[serde(default)]
-    pub packages: Vec<PackageInfo>,
-}
-
-/// Response from the peer DAR comparison endpoint
-#[derive(Serialize, utoipa::ToSchema)]
-pub struct PeerPackageComparison {
-    pub local_packages: Vec<PackageInfo>,
-    pub peers: Vec<PeerPackageResult>,
-}
-
-/// Party metadata from Ledger API
-#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
-pub struct PartyMetadata {
-    pub annotations: HashMap<String, String>,
-}
-
-/// Decentralized party information
-#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
-pub struct DecentralizedParty {
-    pub party_id: CantonId,
-    pub threshold: i32,
-    pub owners: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub my_owner_key: Option<String>,
-    pub participants: Vec<ParticipantInfo>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub contracts: Vec<ContractInfo>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub local_metadata: Option<PartyMetadata>,
-}
-
 /// Where the response data came from
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
@@ -259,46 +152,6 @@ pub struct DecentralizedPartiesResponse {
     /// Whether a background refresh from Canton is currently in progress
     #[serde(default)]
     pub refreshing: bool,
-}
-
-/// Connection status for a participant
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq, utoipa::ToSchema)]
-#[serde(rename_all = "PascalCase")]
-pub enum ConnectionStatus {
-    /// Current node (always reachable)
-    CurrentNode,
-    /// Successfully connected via Noise protocol
-    Connected,
-    /// Failed to establish TCP connection (peer not reachable)
-    Unreachable,
-    /// Noise handshake/decryption failed (likely wrong public key configured)
-    HandshakeFailed,
-}
-
-/// Status of a single participant
-#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
-pub struct ParticipantStatus {
-    pub id: String,
-    pub status: ConnectionStatus,
-    /// Round-trip latency of the health probe, in milliseconds. `None` when the
-    /// peer is the current node or was unreachable.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub latency_ms: Option<u64>,
-    /// The workflow this peer is currently participating in, if any and if it
-    /// reported one (peers on older code report `None`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub workflow: Option<WorkflowInfo>,
-    /// dec-party-manager version: this node's own version for the current
-    /// node, or the version a peer reported in its health response. `None` for
-    /// unreachable peers and peers on older code that don't report one.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub version: Option<String>,
-}
-
-/// Response for the participants status endpoint
-#[derive(Serialize, utoipa::ToSchema)]
-pub struct ParticipantsStatusResponse {
-    pub statuses: Vec<ParticipantStatus>,
 }
 
 /// Request to kick a participant from a decentralized party.
@@ -385,18 +238,9 @@ pub struct DarsRequest {
     pub peer_ids: Vec<CantonId>,
 }
 
-/// Progress status of a workflow (kick, onboarding, etc.)
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
-#[serde(rename_all = "lowercase")]
-pub enum WorkflowProgress {
-    #[default]
-    Idle,
-    InProgress,
-    Completed,
-    Failed,
-    Cancelled,
-}
-
+// `WorkflowProgress` is now defined in `common::types` and re-exported above.
+// `WorkflowStatus` is a backend-local trait, so this impl on the (now foreign)
+// `WorkflowProgress` is permitted by the orphan rule.
 impl WorkflowStatus for WorkflowProgress {}
 
 /// Type aliases for backwards compatibility
@@ -414,153 +258,6 @@ pub struct WorkflowResponse {
 pub type KickResponse = WorkflowResponse;
 pub type OnboardingResponse = WorkflowResponse;
 
-/// Which workflow this run belongs to. Mirrors InvitationType, but lives on
-/// every persisted run (coordinator + peer) regardless of how it started.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
-#[serde(rename_all = "PascalCase")]
-pub enum WorkflowKind {
-    Onboarding,
-    Kick,
-    Contracts,
-    Dars,
-}
-
-impl WorkflowKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Onboarding => "Onboarding",
-            Self::Kick => "Kick",
-            Self::Contracts => "Contracts",
-            Self::Dars => "Dars",
-        }
-    }
-}
-
-impl std::fmt::Display for WorkflowKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl std::str::FromStr for WorkflowKind {
-    type Err = anyhow::Error;
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        match s {
-            "Onboarding" => Ok(Self::Onboarding),
-            "Kick" => Ok(Self::Kick),
-            "Contracts" => Ok(Self::Contracts),
-            "Dars" => Ok(Self::Dars),
-            other => Err(anyhow::anyhow!("unknown workflow kind: {other}")),
-        }
-    }
-}
-
-impl From<InvitationType> for WorkflowKind {
-    fn from(t: InvitationType) -> Self {
-        match t {
-            InvitationType::Onboarding => Self::Onboarding,
-            InvitationType::Kick => Self::Kick,
-            InvitationType::Contracts => Self::Contracts,
-            InvitationType::Dars => Self::Dars,
-        }
-    }
-}
-
-/// Whether this node is driving the workflow (Coordinator) or signing /
-/// participating because it accepted an invite (Peer).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
-#[serde(rename_all = "PascalCase")]
-pub enum WorkflowRole {
-    Coordinator,
-    Peer,
-}
-
-impl WorkflowRole {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Coordinator => "Coordinator",
-            Self::Peer => "Peer",
-        }
-    }
-}
-
-impl std::fmt::Display for WorkflowRole {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl std::str::FromStr for WorkflowRole {
-    type Err = anyhow::Error;
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        match s {
-            "Coordinator" => Ok(Self::Coordinator),
-            "Peer" => Ok(Self::Peer),
-            other => Err(anyhow::anyhow!("unknown workflow role: {other}")),
-        }
-    }
-}
-
-/// A single persisted workflow run — control-plane state for either the
-/// coordinator side or an peer side. The matching artefacts live in
-/// `workflow_artifacts` and are looked up by `instance_name`.
-#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
-pub struct WorkflowRun {
-    pub instance_name: String,
-    pub kind: WorkflowKind,
-    pub role: WorkflowRole,
-    pub status: WorkflowProgress,
-    pub current_step: String,
-    pub step_index: i64,
-    pub step_total: i64,
-    /// JSON-encoded copy of the original *Config struct that started the
-    /// workflow — the resume path round-trips it back through serde.
-    pub config_json: String,
-    /// Hex pubkey of the coordinator. None for coordinator-side rows.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub coordinator_pubkey: Option<String>,
-    /// Resolved coordinator name from the peers table (server-side join,
-    /// like get_invitations does for PendingInvitation).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub coordinator_name: Option<String>,
-    pub expected_peers: Vec<CantonId>,
-    pub completed_peers: Vec<CantonId>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub dec_party_id: Option<CantonId>,
-    /// Dec party prefix associated with this run (e.g. "UAT"). Populated by
-    /// the API layer from `config_json` so the frontend can display a chip
-    /// without parsing JSON blobs itself. Not persisted as a column.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prefix: Option<String>,
-    /// Participants involved in this run (same source as `prefix`). Empty
-    /// when missing from the config payload.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub participants: Vec<CantonId>,
-    /// Kick runs only: the threshold before and after the kick, lifted from
-    /// `config_json` so the run card can show "old → new". `None` for every
-    /// other workflow kind.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub previous_threshold: Option<i32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub new_threshold: Option<i32>,
-    /// Kick runs only: the participant being kicked.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kicked_participant: Option<CantonId>,
-    /// Contracts runs only: package/contract names being deployed. Lifted from
-    /// `config_json` by the API layer (not a DB column), same as `prefix`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub package_names: Vec<String>,
-    /// Dars runs only: DAR filenames being distributed. Lifted from
-    /// `config_json` by the API layer (not a DB column).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub dar_filenames: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    pub dismissed: bool,
-    pub created_at: i64,
-    pub updated_at: i64,
-}
-
 /// Response wrapper for `GET /workflows`.
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct WorkflowRunsResponse {
@@ -572,48 +269,6 @@ pub struct WorkflowRunsResponse {
 pub struct KeyStatusResponse {
     pub has_keys: bool,
     pub public_key: Option<String>,
-}
-
-/// Type of workflow invitation
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
-#[serde(rename_all = "PascalCase")]
-pub enum InvitationType {
-    Onboarding,
-    Kick,
-    Contracts,
-    Dars,
-}
-
-impl InvitationType {
-    /// Stable string label used for DB storage. Matches the PascalCase serde repr.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Onboarding => "Onboarding",
-            Self::Kick => "Kick",
-            Self::Contracts => "Contracts",
-            Self::Dars => "Dars",
-        }
-    }
-}
-
-impl std::fmt::Display for InvitationType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl std::str::FromStr for InvitationType {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        match s {
-            "Onboarding" => Ok(Self::Onboarding),
-            "Kick" => Ok(Self::Kick),
-            "Contracts" => Ok(Self::Contracts),
-            "Dars" => Ok(Self::Dars),
-            other => Err(anyhow::anyhow!("unknown invitation type: {other}")),
-        }
-    }
 }
 
 /// Payload sent inside an `InviteOnboarding` Noise message.
@@ -686,46 +341,6 @@ pub struct ContractsInvitePayload {
     #[serde(default)]
     pub package_names: Vec<String>,
     /// The coordinator's run instance name (see `OnboardingInvitePayload`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workflow_instance: Option<String>,
-}
-
-/// A pending invitation from a coordinator
-#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
-pub struct PendingInvitation {
-    pub id: String,
-    pub invitation_type: InvitationType,
-    pub coordinator_pubkey: String,
-    pub coordinator_name: Option<String>,
-    pub received_at: i64,
-    /// Onboarding-only: party ID prefix the coordinator chose.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub prefix: Option<String>,
-    /// Onboarding-only: full participant list the coordinator selected.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub participants: Vec<CantonId>,
-    /// Dars-only: filenames the coordinator is distributing.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub dar_filenames: Vec<String>,
-    /// Kick-only: the participant being removed from the party.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kicked_participant: Option<CantonId>,
-    /// Kick-only: threshold after the kick.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub new_threshold: Option<i32>,
-    /// Kick-only: threshold before the kick.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub previous_threshold: Option<i32>,
-    /// Kick-only: dec party the kick targets. Lets the peer card render the
-    /// same "Dec party" row the coordinator shows.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dec_party_id: Option<CantonId>,
-    /// Contracts-only: human-readable package/contract names being deployed,
-    /// so the peer card shows the same "Packages" row the coordinator shows.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub package_names: Vec<String>,
-    /// The coordinator's run instance name from the invite payload. Echoed
-    /// back on decline so the coordinator only fails the matching run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_instance: Option<String>,
 }
@@ -1951,25 +1566,6 @@ pub struct PartyConfigResponse {
     pub packages: PackageConfig,
 }
 
-/// Frontend authentication configuration response
-#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
-pub struct AuthConfigResponse {
-    /// Whether auth is required (false in test mode or when no provider is configured)
-    pub auth_required: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub keycloak_host: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub keycloak_realm: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub keycloak_client_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub auth0_domain: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub auth0_client_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub auth0_audience: Option<String>,
-}
-
 /// Generic error response
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct ErrorResponse {
@@ -2014,23 +1610,6 @@ pub struct AuditLogQuery {
 
 fn default_audit_limit() -> i64 {
     50
-}
-
-/// A single governance audit log entry
-#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
-pub struct AuditLogEntry {
-    pub id: i64,
-    pub timestamp: i64,
-    pub event_type: String,
-    pub party_id: CantonId,
-    pub member_party_id: CantonId,
-    pub governance_type: String,
-    pub action_summary: String,
-    pub details: serde_json::Value,
-    pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error_message: Option<String>,
-    pub created_at: i64,
 }
 
 /// Response for the governance audit endpoint

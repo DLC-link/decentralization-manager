@@ -1,0 +1,25 @@
+# decman-cli profiles. Copy to `config.toml` and edit.
+#
+# Each [[profiles]] is a login you can pick from the startup menu. When a
+# config.toml with at least one profile exists, decman-cli shows the login menu
+# and ignores .env. With no config.toml, it falls back to .env.
+
+[[profiles]]
+name = "Localnet"
+network = "localnet"
+api_url = "http://localhost:8081"
+username = "alice"
+password = "change-me"
+
+[[profiles]]
+name = "Devnet"
+network = "devnet"
+api_url = "https://decman.devnet.example"
+username = "bob"
+password = "change-me"
+# Optional OAuth overrides (auto-discovered from /auth-config if omitted):
+# oauth_token_url = "https://keycloak.example/realms/r/protocol/openid-connect/token"
+# oauth_client_id = "decman-cli"
+# oauth_client_secret = ""
+# oauth_audience = ""
+# oauth_scope = ""

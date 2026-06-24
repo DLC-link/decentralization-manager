@@ -69,8 +69,9 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     chaos::post_onboarding(f, &prefix).await?;
 
     chaos::say("G9", "starting parallel DARs distribute");
+    // DAR fixtures live at the workspace-root `releases/` (crate is at crates/decman).
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let dars_dir = Path::new(manifest_dir).join("releases/v0/rc3");
+    let dars_dir = Path::new(manifest_dir).join("../../releases/v0/rc3");
     let dar_path = dars_dir.join("governance-core-v0-rc3-0.1.0.dar");
     let dar_b64 = B64.encode(
         tokio::fs::read(&dar_path)

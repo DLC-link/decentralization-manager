@@ -71,5 +71,5 @@ runs:
     - name: Cache npm
       uses: actions/cache@v5
       with:
-        path: frontend/node_modules
-        key: npm-${{ hashFiles('frontend/package-lock.json') }}
+        path: crates/decman/frontend/node_modules
+        key: npm-${{ hashFiles('crates/decman/frontend/package-lock.json') }}

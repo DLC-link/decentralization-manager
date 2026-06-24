@@ -149,7 +149,9 @@ if [ "$TARGET" = "localnet" ]; then
 fi
 
 log_phase "Building release-ci binary (target=$TARGET)"
-cargo build --profile release-ci ${FEATURES_FLAG[@]+"${FEATURES_FLAG[@]}"}
+# `-p decman` selects the server crate: the root is now a virtual workspace
+# (so a bare `--features` is rejected), and this skips compiling the decman-cli TUI.
+cargo build --profile release-ci -p decman ${FEATURES_FLAG[@]+"${FEATURES_FLAG[@]}"}
 
 if [ ! -f "$BINARY" ]; then
     echo "ERROR: Binary not found at $BINARY"
@@ -200,7 +202,7 @@ fi
 # $FEATURES_FLAG must match the value used in `cargo build` above to avoid
 # cargo rebuilding the binary under a different feature unification and
 # overwriting the artifact. See the build comment block for full details.
-cargo test --profile release-ci ${FEATURES_FLAG[@]+"${FEATURES_FLAG[@]}"} --test governance_workflows -- --ignored --nocapture
+cargo test --profile release-ci -p decman ${FEATURES_FLAG[@]+"${FEATURES_FLAG[@]}"} --test governance_workflows -- --ignored --nocapture
 
 echo ""
 echo "=========================================="

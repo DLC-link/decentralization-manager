@@ -35,7 +35,11 @@ jobs:
       - uses: ./.github/actions/setup-build-env
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          extra-packages: jq bc curl
+          # libwayland-dev: the `decman-cli` crate's rfd file-dialog backend
+          # (ashpd) pulls in wayland-sys, whose build script needs the Wayland
+          # client headers via pkg-config. This job builds the whole workspace
+          # (--all-targets --all-features), decman-cli included.
+          extra-packages: jq bc curl libwayland-dev
       # rust-cache trims target/ to only artifacts referenced by the
       # current Cargo.lock (drops orphaned rlibs, build script junk) and
       # auto-hashes rustc -V, RUSTFLAGS, CARGO_* env vars, and the
