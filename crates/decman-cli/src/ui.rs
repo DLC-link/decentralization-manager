@@ -376,9 +376,11 @@ fn summary_height(party: &DecentralizedParty, data: Option<&DetailData>) -> u16 
 }
 
 /// Format a microsecond duration as a compact human string (e.g. `24h`, `30m`).
+/// Days are only used for 2+ whole days, so a one-day timeout reads as `24h`
+/// (matching the web app's rel-time labels).
 fn format_micros_human(micros: i64) -> String {
     let secs = micros / 1_000_000;
-    if secs >= 86_400 && secs % 86_400 == 0 {
+    if secs >= 172_800 && secs % 86_400 == 0 {
         format!("{}d", secs / 86_400)
     } else if secs >= 3_600 && secs % 3_600 == 0 {
         format!("{}h", secs / 3_600)
@@ -2494,10 +2496,18 @@ mod tests {
         // The JSON is not shown inline — it opens as a modal (see below).
         assert!(!rendered.contains("new_threshold"));
         // The on-ledger governance state renders in the summary box (a
-        // 86_400_000_000µs timeout renders as "1d").
+        // 86_400_000_000µs timeout renders as "24h", not "1d").
         assert!(rendered.contains("Governance"));
         assert!(rendered.contains("threshold 2 of 3 members"));
-        assert!(rendered.contains("1d"));
+        assert!(rendered.contains("24h"));
+    }
+
+    #[test]
+    fn format_micros_human_uses_hours_for_one_day_and_days_for_two() {
+        assert_eq!(format_micros_human(86_400_000_000), "24h");
+        assert_eq!(format_micros_human(172_800_000_000), "2d");
+        assert_eq!(format_micros_human(3_600_000_000), "1h");
+        assert_eq!(format_micros_human(1_800_000_000), "30m");
     }
 
     #[test]
