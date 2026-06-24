@@ -14,12 +14,13 @@ use common::types::{
 };
 
 use crate::api::{
-    AuthStatusKind, ChainAuditEntry, FeedItem, Holding, PartyAuthStatus, PeerView,
-    audit_action, invitation_name, party_name, run_name,
+    AuthStatusKind, ChainAuditEntry, FeedItem, Holding, PartyAuthStatus, PeerView, audit_action,
+    invitation_name, party_name, run_name,
 };
 use crate::app::{
-    App, ComposerKind, ComposerPick, DeployForm, DetailData, GovItem, GovView, GrantForm, KickForm,
-    NetworkEditState, OnboardForm, Overlay, PeerChoice, PeerForm, Status, Tab, TabView,
+    App, ComposerKind, ComposerPick, DeployForm, DetailData, GovItem, GovView, GrantForm, IdpMode,
+    KickForm, NetworkEditState, OnboardForm, Overlay, PartyConfigForm, PcRow, PeerChoice, PeerForm,
+    Status, Tab, TabView,
 };
 use crate::composer::{Composer, FieldKind};
 use crate::config::Profile;
@@ -1081,8 +1082,11 @@ fn footer_hint(active: Tab, overlay: &Overlay, can_logout: bool) -> String {
             " ↑/↓ field · space toggle peer · enter start · esc cancel".to_owned()
         }
         Overlay::Kick(_) => " ↑/↓ pick · ←/→ threshold · enter kick · esc cancel".to_owned(),
-        Overlay::Auth { .. } => " ↑/↓ select · t test · g grant rights · esc close".to_owned(),
+        Overlay::Auth { .. } => " ↑/↓ select · t test · g grant · e config · esc close".to_owned(),
         Overlay::GrantRights(_) => " ↑/↓ field · type · enter next/grant · esc cancel".to_owned(),
+        Overlay::PartyConfig(_) => {
+            " ↑/↓ field · ←/→ provider · type · enter next/run · esc cancel".to_owned()
+        }
         Overlay::Governance(_) => {
             " ↑/↓ · c confirm · e exec · r revoke · x expire · n new · p propose · esc".to_owned()
         }
@@ -1190,7 +1194,124 @@ fn draw_overlay(frame: &mut Frame, area: Rect, overlay: &Overlay, spinner: &str)
         Overlay::Composer(composer) => composer_popup(frame, area, composer),
         Overlay::Deploy(form) => deploy_popup(frame, area, form),
         Overlay::NetworkEdit(state) => network_edit_popup(frame, area, state),
+        Overlay::PartyConfig(form) => party_config_popup(frame, area, form),
     }
+}
+
+/// A `label  value` form row; the focused row is highlighted with a cursor.
+fn pc_line(label: &str, value: String, focused: bool) -> Line<'static> {
+    let style = if focused {
+        Style::default()
+            .fg(logo::ORANGE)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    let shown = if focused {
+        format!("{value}▏")
+    } else if value.is_empty() {
+        "(empty)".to_owned()
+    } else {
+        value
+    };
+    Line::from(vec![detail_label(label), Span::styled(shown, style)])
+}
+
+/// A masked secret row. Blank with a stored secret shows a keep hint.
+fn pc_secret_line(label: &str, value: &str, has_secret: bool, focused: bool) -> Line<'static> {
+    let style = if focused {
+        Style::default()
+            .fg(logo::ORANGE)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    let masked = "•".repeat(value.chars().count());
+    let shown = if focused {
+        format!("{masked}▏")
+    } else if value.is_empty() {
+        if has_secret {
+            "(set — blank keeps it)".to_owned()
+        } else {
+            "(none)".to_owned()
+        }
+    } else {
+        masked
+    };
+    Line::from(vec![detail_label(label), Span::styled(shown, style)])
+}
+
+/// An action button row (Discover / Save).
+fn pc_button(label: &str, focused: bool) -> Line<'static> {
+    let style = if focused {
+        Style::default()
+            .fg(Color::Black)
+            .bg(logo::ORANGE)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    Line::from(Span::styled(format!(" {label} "), style))
+}
+
+/// The per-party IdP configuration editor popup (Keycloak / Auth0).
+fn party_config_popup(frame: &mut Frame, area: Rect, form: &PartyConfigForm) {
+    let rows = form.rows();
+    let mut lines: Vec<Line> = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let focused = index == form.cursor;
+            match row {
+                PcRow::Mode => {
+                    let provider = match form.mode {
+                        IdpMode::Keycloak => "Keycloak",
+                        IdpMode::Auth0 => "Auth0",
+                    };
+                    pc_line("Provider", format!("‹ {provider} ›"), focused)
+                }
+                PcRow::MemberParty => {
+                    pc_line("Member party", form.member_party_id.clone(), focused)
+                }
+                PcRow::UserId => pc_line("User id", form.user_id.clone(), focused),
+                PcRow::KcUrl => pc_line("Keycloak URL", form.kc_url.clone(), focused),
+                PcRow::KcRealm => pc_line("Realm", form.kc_realm.clone(), focused),
+                PcRow::KcClientId => pc_line("Client id", form.kc_client_id.clone(), focused),
+                PcRow::KcSecret => pc_secret_line(
+                    "Client secret",
+                    &form.kc_secret,
+                    form.kc_has_secret,
+                    focused,
+                ),
+                PcRow::Auth0Domain => pc_line("Auth0 domain", form.auth0_domain.clone(), focused),
+                PcRow::Auth0Audience => pc_line("Audience", form.auth0_audience.clone(), focused),
+                PcRow::Auth0ClientId => pc_line("Client id", form.auth0_client_id.clone(), focused),
+                PcRow::Auth0Secret => pc_secret_line(
+                    "Client secret",
+                    &form.auth0_secret,
+                    form.auth0_has_secret,
+                    focused,
+                ),
+                PcRow::Discover => pc_button("Discover member party", focused),
+                PcRow::Submit => pc_button("Save", focused),
+            }
+        })
+        .collect();
+    if !form.status.is_empty() {
+        lines.push(Line::default());
+        lines.push(Line::styled(
+            form.status.clone(),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+
+    let width = 76.min(area.width.saturating_sub(4));
+    let height = ((lines.len() as u16).saturating_add(2)).clamp(6, area.height.saturating_sub(4));
+    let rect = centered_rect(width, height, area);
+    let title = format!("Party config · {}", form.party_name);
+    let paragraph = Paragraph::new(lines).block(popup_block(&title));
+    frame.render_widget(Clear, rect);
+    frame.render_widget(paragraph, rect);
 }
 
 /// The network-config editor popup: the peer list, or the add-peer sub-form.
@@ -2880,6 +3001,39 @@ mod tests {
         assert!(rendered.contains("Add peer"));
         assert!(rendered.contains("Participant id"));
         assert!(rendered.contains("Public key"));
+    }
+
+    #[test]
+    fn party_config_popup_renders_keycloak_fields_and_secret_hint() {
+        let form = PartyConfigForm {
+            dec_party_id: "cbtc-network::1220".to_owned(),
+            party_name: "cbtc-network".to_owned(),
+            mode: IdpMode::Keycloak,
+            member_party_id: "member::1220".to_owned(),
+            user_id: "user-1".to_owned(),
+            kc_url: "https://kc".to_owned(),
+            kc_realm: "realm".to_owned(),
+            kc_client_id: "client".to_owned(),
+            kc_secret: String::new(),
+            kc_has_secret: true,
+            auth0_domain: String::new(),
+            auth0_audience: String::new(),
+            auth0_client_id: String::new(),
+            auth0_secret: String::new(),
+            auth0_has_secret: false,
+            // Focus the member-party row so the secret line renders unfocused.
+            cursor: 1,
+            status: String::new(),
+        };
+        let overlay = Overlay::PartyConfig(Box::new(form));
+        let rendered = render(|frame, area| draw_overlay(frame, area, &overlay, "⠋"));
+        assert!(rendered.contains("Party config"));
+        assert!(rendered.contains("Keycloak"));
+        assert!(rendered.contains("Member party"));
+        assert!(rendered.contains("Client id"));
+        // A stored secret with a blank field shows the keep hint, never a value.
+        assert!(rendered.contains("blank keeps it"));
+        assert!(rendered.contains("Save"));
     }
 
     #[test]

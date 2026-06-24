@@ -15,9 +15,9 @@ use common::types::{
 };
 
 use crate::api::{
-    AuthSettings, ChainAuditEntry, DecmanClient, DomainGovAction, ExecuteParams, FeedItem,
-    GovAction, GovConfirmation, GovState, GovernanceConfirmations, Holding, KnownMember,
-    PartyAuthStatus, PeerEntry, PeerView, party_name,
+    AuthSettings, ChainAuditEntry, DecmanClient, DiscoverResult, DomainGovAction, ExecuteParams,
+    FeedItem, GovAction, GovConfirmation, GovState, GovernanceConfirmations, Holding, KnownMember,
+    PartyAuthStatus, PartyConfigView, PeerEntry, PeerView, party_name,
 };
 use crate::composer::{
     self, Composer, ComposerContext, ComposerSubmit, FieldKind, SelectOption, TypeOption,
@@ -138,6 +138,9 @@ pub enum Request {
     DeploySubmit(Box<Value>),
     NetworkPeers,
     SaveNetwork(Box<Value>),
+    PartyConfig(String),
+    SavePartyConfig(Box<Value>),
+    Discover(Box<Value>),
 }
 
 /// A result delivered by a background worker.
@@ -155,6 +158,8 @@ pub enum Update {
     OperatorInfo(String),
     DeployContext(Result<Box<DeployForm>, String>),
     NetworkPeers(Result<Vec<PeerEntry>, String>),
+    PartyConfig(Result<Box<PartyConfigForm>, String>),
+    Discovered(Result<DiscoverResult, String>),
 }
 
 /// A DAR file picked from disk for upload / distribution.
@@ -341,6 +346,79 @@ pub struct NetworkEditState {
     pub adding: Option<PeerForm>,
 }
 
+/// Which IdP the party-config form is editing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum IdpMode {
+    Keycloak,
+    Auth0,
+}
+
+/// One row in the party-config form (a field, the provider toggle, or an action).
+#[derive(Clone, Copy)]
+pub enum PcRow {
+    Mode,
+    MemberParty,
+    UserId,
+    KcUrl,
+    KcRealm,
+    KcClientId,
+    KcSecret,
+    Auth0Domain,
+    Auth0Audience,
+    Auth0ClientId,
+    Auth0Secret,
+    Discover,
+    Submit,
+}
+
+/// The per-party IdP configuration editor (Keycloak or Auth0).
+pub struct PartyConfigForm {
+    pub dec_party_id: String,
+    pub party_name: String,
+    pub mode: IdpMode,
+    pub member_party_id: String,
+    pub user_id: String,
+    pub kc_url: String,
+    pub kc_realm: String,
+    pub kc_client_id: String,
+    /// Empty leaves the stored secret unchanged when one is set.
+    pub kc_secret: String,
+    pub kc_has_secret: bool,
+    pub auth0_domain: String,
+    pub auth0_audience: String,
+    pub auth0_client_id: String,
+    pub auth0_secret: String,
+    pub auth0_has_secret: bool,
+    pub cursor: usize,
+    /// Transient status line (discover result / error), shown in the form.
+    pub status: String,
+}
+
+impl PartyConfigForm {
+    /// The rows shown for the current provider mode, in display order.
+    pub fn rows(&self) -> Vec<PcRow> {
+        let mut rows = vec![PcRow::Mode, PcRow::MemberParty, PcRow::UserId];
+        match self.mode {
+            IdpMode::Keycloak => {
+                rows.extend([
+                    PcRow::KcUrl,
+                    PcRow::KcRealm,
+                    PcRow::KcClientId,
+                    PcRow::KcSecret,
+                ]);
+            }
+            IdpMode::Auth0 => rows.extend([
+                PcRow::Auth0Domain,
+                PcRow::Auth0Audience,
+                PcRow::Auth0ClientId,
+                PcRow::Auth0Secret,
+            ]),
+        }
+        rows.extend([PcRow::Discover, PcRow::Submit]);
+        rows
+    }
+}
+
 /// The grant-rights form: an admin client id + secret used to grant act/read
 /// rights for one party. The secret is sent once and not stored.
 pub struct GrantForm {
@@ -408,6 +486,8 @@ pub enum Overlay {
     Deploy(Box<DeployForm>),
     /// The network-config (peer list) editor.
     NetworkEdit(Box<NetworkEditState>),
+    /// The per-party IdP configuration editor.
+    PartyConfig(Box<PartyConfigForm>),
 }
 
 /// The selectable top-level views.
@@ -717,6 +797,20 @@ fn handle_request(client: &mut DecmanClient, request: Request) -> Update {
                 .map(|()| "Network configuration saved".to_owned())
                 .map_err(err),
         ),
+        Request::PartyConfig(dec_party_id) => Update::PartyConfig(
+            build_party_config_form(client, &dec_party_id)
+                .map(Box::new)
+                .map_err(err),
+        ),
+        Request::SavePartyConfig(body) => Update::Action(
+            client
+                .save_party_config(*body)
+                .map(|()| "Party configuration saved".to_owned())
+                .map_err(err),
+        ),
+        Request::Discover(body) => {
+            Update::Discovered(client.discover_member_party(*body).map_err(err))
+        }
         Request::Onboard { prefix, peer_ids } => Update::Action(
             client
                 .start_onboarding(&prefix, &peer_ids)
@@ -900,6 +994,120 @@ fn peers_to_json(peers: &[PeerEntry]) -> Value {
             })
             .collect(),
     )
+}
+
+/// Fetch a party's IdP configuration and build the editor form, defaulting to
+/// the Auth0 tab when an Auth0 domain is already configured.
+fn build_party_config_form(
+    client: &mut DecmanClient,
+    dec_party_id: &str,
+) -> Result<PartyConfigForm> {
+    let config = client.fetch_party_config(dec_party_id)?;
+    let PartyConfigView {
+        member_party_id,
+        user_id,
+        keycloak_url,
+        keycloak_realm,
+        keycloak_client_id,
+        has_client_secret,
+        auth0_domain,
+        auth0_audience,
+        auth0_client_id,
+        has_auth0_client_secret,
+    } = config;
+    let mode = if auth0_domain.as_deref().is_some_and(|d| !d.is_empty()) {
+        IdpMode::Auth0
+    } else {
+        IdpMode::Keycloak
+    };
+    Ok(PartyConfigForm {
+        dec_party_id: dec_party_id.to_owned(),
+        party_name: dec_party_id
+            .split("::")
+            .next()
+            .unwrap_or(dec_party_id)
+            .to_owned(),
+        mode,
+        member_party_id: member_party_id.unwrap_or_default(),
+        user_id: user_id.unwrap_or_default(),
+        kc_url: keycloak_url,
+        kc_realm: keycloak_realm,
+        kc_client_id: keycloak_client_id,
+        kc_secret: String::new(),
+        kc_has_secret: has_client_secret,
+        auth0_domain: auth0_domain.unwrap_or_default(),
+        auth0_audience: auth0_audience.unwrap_or_default(),
+        auth0_client_id: auth0_client_id.unwrap_or_default(),
+        auth0_secret: String::new(),
+        auth0_has_secret: has_auth0_client_secret,
+        cursor: 0,
+        status: String::new(),
+    })
+}
+
+/// Build the `PUT /party-config` body from the form. A blank secret is omitted
+/// (keep existing); the inactive provider's secret is never sent.
+fn party_config_body(form: &PartyConfigForm) -> Value {
+    let mut body = json!({
+        "dec_party_id": form.dec_party_id,
+        "member_party_id": form.member_party_id.trim(),
+        "user_id": form.user_id.trim(),
+    });
+    match form.mode {
+        IdpMode::Keycloak => {
+            body["keycloak_url"] = json!(form.kc_url.trim());
+            body["keycloak_realm"] = json!(form.kc_realm.trim());
+            body["keycloak_client_id"] = json!(form.kc_client_id.trim());
+            if !form.kc_secret.is_empty() {
+                body["keycloak_client_secret"] = json!(form.kc_secret);
+            }
+        }
+        IdpMode::Auth0 => {
+            body["auth0_domain"] = json!(form.auth0_domain.trim());
+            body["auth0_audience"] = json!(form.auth0_audience.trim());
+            body["auth0_client_id"] = json!(form.auth0_client_id.trim());
+            if !form.auth0_secret.is_empty() {
+                body["auth0_client_secret"] = json!(form.auth0_secret);
+            }
+        }
+    }
+    body
+}
+
+/// Build the discover-member-party body from the form's active provider fields.
+fn discover_body(form: &PartyConfigForm) -> Value {
+    match form.mode {
+        IdpMode::Keycloak => json!({
+            "keycloak_url": form.kc_url.trim(),
+            "keycloak_realm": form.kc_realm.trim(),
+            "keycloak_client_id": form.kc_client_id.trim(),
+            "keycloak_client_secret": form.kc_secret,
+        }),
+        IdpMode::Auth0 => json!({
+            "auth0_domain": form.auth0_domain.trim(),
+            "auth0_audience": form.auth0_audience.trim(),
+            "auth0_client_id": form.auth0_client_id.trim(),
+            "auth0_client_secret": form.auth0_secret,
+        }),
+    }
+}
+
+/// The editable string for a party-config form row, or `None` for the
+/// provider toggle and the action rows.
+fn pc_field_mut(form: &mut PartyConfigForm, row: Option<PcRow>) -> Option<&mut String> {
+    match row? {
+        PcRow::MemberParty => Some(&mut form.member_party_id),
+        PcRow::UserId => Some(&mut form.user_id),
+        PcRow::KcUrl => Some(&mut form.kc_url),
+        PcRow::KcRealm => Some(&mut form.kc_realm),
+        PcRow::KcClientId => Some(&mut form.kc_client_id),
+        PcRow::KcSecret => Some(&mut form.kc_secret),
+        PcRow::Auth0Domain => Some(&mut form.auth0_domain),
+        PcRow::Auth0Audience => Some(&mut form.auth0_audience),
+        PcRow::Auth0ClientId => Some(&mut form.auth0_client_id),
+        PcRow::Auth0Secret => Some(&mut form.auth0_secret),
+        PcRow::Mode | PcRow::Discover | PcRow::Submit => None,
+    }
 }
 
 /// The placeholder action sent with on-chain (`core_domain`) confirm/execute —
@@ -1410,6 +1618,35 @@ impl App {
                         };
                     }
                 }
+                Update::PartyConfig(result) => {
+                    if matches!(self.overlay, Overlay::Busy(_)) {
+                        self.overlay = match result {
+                            Ok(form) => Overlay::PartyConfig(form),
+                            Err(error) => Overlay::Message(error),
+                        };
+                    }
+                }
+                Update::Discovered(result) => {
+                    if let Overlay::PartyConfig(form) = &mut self.overlay {
+                        match result {
+                            Ok(discovered) => {
+                                form.user_id = discovered.user_id;
+                                match discovered.primary_party {
+                                    Some(party) => {
+                                        form.member_party_id = party;
+                                        form.status = "Discovered member party.".to_owned();
+                                    }
+                                    None => {
+                                        form.status =
+                                            "Authenticated, but no primary party assigned."
+                                                .to_owned();
+                                    }
+                                }
+                            }
+                            Err(error) => form.status = format!("Discover failed: {error}"),
+                        }
+                    }
+                }
                 // Ignore late detail results after the view was closed.
                 Update::Detail(data) if self.detail.is_some() => {
                     self.detail_data = Some(data);
@@ -1514,6 +1751,9 @@ impl App {
             OpenGrant,
             SubmitGrant,
             SaveNetwork,
+            OpenPartyConfig,
+            SubmitPartyConfig,
+            Discover,
         }
 
         let mut act = Act::None;
@@ -1586,6 +1826,7 @@ impl App {
                 KeyCode::Esc | KeyCode::Char('q') => act = Act::Close,
                 KeyCode::Char('t') => act = Act::TestAuth,
                 KeyCode::Char('g') => act = Act::OpenGrant,
+                KeyCode::Char('e') => act = Act::OpenPartyConfig,
                 KeyCode::Up | KeyCode::Char('k') => *selected = selected.saturating_sub(1),
                 KeyCode::Down | KeyCode::Char('j') if *selected + 1 < parties.len() => {
                     *selected += 1;
@@ -1758,6 +1999,46 @@ impl App {
                     _ => {}
                 },
             },
+            Overlay::PartyConfig(form) => {
+                let rows = form.rows();
+                let row = rows.get(form.cursor).copied();
+                match key.code {
+                    KeyCode::Esc => act = Act::Close,
+                    KeyCode::Up => form.cursor = form.cursor.saturating_sub(1),
+                    KeyCode::Down | KeyCode::Tab if form.cursor + 1 < rows.len() => {
+                        form.cursor += 1;
+                    }
+                    KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
+                        if matches!(row, Some(PcRow::Mode)) =>
+                    {
+                        form.mode = match form.mode {
+                            IdpMode::Keycloak => IdpMode::Auth0,
+                            IdpMode::Auth0 => IdpMode::Keycloak,
+                        };
+                        form.cursor = 0;
+                    }
+                    KeyCode::Enter => match row {
+                        Some(PcRow::Discover) => act = Act::Discover,
+                        Some(PcRow::Submit) => act = Act::SubmitPartyConfig,
+                        _ => {
+                            if form.cursor + 1 < rows.len() {
+                                form.cursor += 1;
+                            }
+                        }
+                    },
+                    KeyCode::Char(c) => {
+                        if let Some(field) = pc_field_mut(form, row) {
+                            field.push(c);
+                        }
+                    }
+                    KeyCode::Backspace => {
+                        if let Some(field) = pc_field_mut(form, row) {
+                            field.pop();
+                        }
+                    }
+                    _ => {}
+                }
+            }
             Overlay::Message(_) | Overlay::Busy(_) => {
                 if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q')) {
                     act = Act::Close;
@@ -1785,6 +2066,9 @@ impl App {
             Act::OpenGrant => self.open_grant(),
             Act::SubmitGrant => self.submit_grant(),
             Act::SaveNetwork => self.save_network(),
+            Act::OpenPartyConfig => self.open_party_config(),
+            Act::SubmitPartyConfig => self.submit_party_config(),
+            Act::Discover => self.run_discover(),
         }
     }
 
@@ -2130,6 +2414,49 @@ impl App {
     fn run_auth_test(&mut self) {
         let _ = self.requests.send(Request::TestAuth);
         self.overlay = Overlay::Busy("Testing authentication…".to_owned());
+    }
+
+    /// Open the IdP-config editor for the party selected in the auth overlay.
+    fn open_party_config(&mut self) {
+        let dec_party_id = {
+            let Overlay::Auth { parties, selected } = &self.overlay else {
+                return;
+            };
+            match parties.get(*selected) {
+                Some(party) => party.dec_party_id.clone(),
+                None => return,
+            }
+        };
+        let _ = self.requests.send(Request::PartyConfig(dec_party_id));
+        self.overlay = Overlay::Busy("Loading party configuration…".to_owned());
+    }
+
+    /// Validate and save the party-config form.
+    fn submit_party_config(&mut self) {
+        let body = {
+            let Overlay::PartyConfig(form) = &self.overlay else {
+                return;
+            };
+            if form.member_party_id.trim().is_empty() || form.user_id.trim().is_empty() {
+                self.overlay =
+                    Overlay::Message("Member party id and user id are required.".to_owned());
+                return;
+            }
+            party_config_body(form)
+        };
+        let _ = self.requests.send(Request::SavePartyConfig(Box::new(body)));
+        self.overlay = Overlay::Busy("Saving party configuration…".to_owned());
+    }
+
+    /// Discover the member party from the form's current IdP credentials. The
+    /// form stays open (with a status line) so the result patches into it.
+    fn run_discover(&mut self) {
+        let Overlay::PartyConfig(form) = &mut self.overlay else {
+            return;
+        };
+        let body = discover_body(form);
+        form.status = "Discovering member party…".to_owned();
+        let _ = self.requests.send(Request::Discover(Box::new(body)));
     }
 
     /// Open the grant-rights form for the party selected in the auth overlay.
@@ -2835,6 +3162,56 @@ mod tests {
         no_id.port = "9001".to_owned();
         no_id.public_key = "abcd".to_owned();
         assert!(matches!(validate_peer_form(&no_id), Err(0)));
+    }
+
+    fn party_config_form() -> PartyConfigForm {
+        PartyConfigForm {
+            dec_party_id: "dec::1220".to_owned(),
+            party_name: "dec".to_owned(),
+            mode: IdpMode::Keycloak,
+            member_party_id: "member::1220".to_owned(),
+            user_id: "user-1".to_owned(),
+            kc_url: "https://kc".to_owned(),
+            kc_realm: "realm".to_owned(),
+            kc_client_id: "client".to_owned(),
+            kc_secret: String::new(),
+            kc_has_secret: true,
+            auth0_domain: String::new(),
+            auth0_audience: String::new(),
+            auth0_client_id: String::new(),
+            auth0_secret: String::new(),
+            auth0_has_secret: false,
+            cursor: 0,
+            status: String::new(),
+        }
+    }
+
+    #[test]
+    fn party_config_body_keycloak_omits_blank_secret() {
+        let body = party_config_body(&party_config_form());
+        assert_eq!(body["member_party_id"], "member::1220");
+        assert_eq!(body["keycloak_url"], "https://kc");
+        assert_eq!(body["keycloak_client_id"], "client");
+        // A blank secret is omitted (the server keeps the existing one).
+        assert!(body.get("keycloak_client_secret").is_none());
+        // Auth0 fields are not sent while in Keycloak mode.
+        assert!(body.get("auth0_domain").is_none());
+    }
+
+    #[test]
+    fn party_config_body_sends_typed_secret_and_auth0_fields() {
+        let mut form = party_config_form();
+        form.kc_secret = "s3cr3t".to_owned();
+        assert_eq!(party_config_body(&form)["keycloak_client_secret"], "s3cr3t");
+
+        let mut auth0 = party_config_form();
+        auth0.mode = IdpMode::Auth0;
+        auth0.auth0_domain = "tenant.auth0.com".to_owned();
+        auth0.auth0_client_id = "a0client".to_owned();
+        let body = party_config_body(&auth0);
+        assert_eq!(body["auth0_domain"], "tenant.auth0.com");
+        assert_eq!(body["auth0_client_id"], "a0client");
+        assert!(body.get("keycloak_client_secret").is_none());
     }
 
     #[test]

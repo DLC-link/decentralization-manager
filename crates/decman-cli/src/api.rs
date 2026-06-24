@@ -345,6 +345,41 @@ struct OperatorInfoResponse {
     party_id: String,
 }
 
+/// Per-party IdP configuration, from `GET /party-config/{id}` (secrets are
+/// returned only as `has_*` flags).
+#[derive(Clone, Debug, Deserialize)]
+pub struct PartyConfigView {
+    #[serde(default)]
+    pub member_party_id: Option<String>,
+    #[serde(default)]
+    pub user_id: Option<String>,
+    #[serde(default)]
+    pub keycloak_url: String,
+    #[serde(default)]
+    pub keycloak_realm: String,
+    #[serde(default)]
+    pub keycloak_client_id: String,
+    #[serde(default)]
+    pub has_client_secret: bool,
+    #[serde(default)]
+    pub auth0_domain: Option<String>,
+    #[serde(default)]
+    pub auth0_audience: Option<String>,
+    #[serde(default)]
+    pub auth0_client_id: Option<String>,
+    #[serde(default)]
+    pub has_auth0_client_secret: bool,
+}
+
+/// Result of `POST /party-config/discover-member-party`.
+#[derive(Clone, Debug, Deserialize)]
+pub struct DiscoverResult {
+    #[serde(default)]
+    pub user_id: String,
+    #[serde(default)]
+    pub primary_party: Option<String>,
+}
+
 /// A fully-detailed configured peer, for the network-config editor (the
 /// merged [`PeerView`] drops `public_key` / `party`, which editing needs).
 #[derive(Clone, Debug, Deserialize)]
@@ -989,6 +1024,45 @@ impl DecmanClient {
         Ok(response.party_id)
     }
 
+    /// Fetch the per-party IdP configuration for a dec party.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if login or the request fails, the API returns a
+    /// non-success status, or the response cannot be parsed.
+    pub fn fetch_party_config(&mut self, dec_party_id: &str) -> Result<PartyConfigView> {
+        // `::` is path-safe and actix decodes the segment, so no encoding needed.
+        self.get_json(&format!("/party-config/{dec_party_id}"))
+    }
+
+    /// Save the per-party IdP configuration. `body` is the full
+    /// `PartyConfigRequest` (an absent secret keeps the existing one).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if login or the request fails, or the API rejects it.
+    pub fn save_party_config(&mut self, body: Value) -> Result<()> {
+        self.put("/party-config", body)
+    }
+
+    /// Discover the member party for the given IdP credentials.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if login or the request fails, the API returns a
+    /// non-success status, or the response cannot be parsed.
+    pub fn discover_member_party(&mut self, body: Value) -> Result<DiscoverResult> {
+        let response = self.post_raw("/party-config/discover-member-party", Some(&body))?;
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().unwrap_or_default();
+            bail!("discover-member-party failed ({status}): {text}");
+        }
+        response
+            .json()
+            .context("failed to parse discover-member-party response")
+    }
+
     /// Fetch the configured peers with their full fields (for editing).
     ///
     /// # Errors
@@ -1329,6 +1403,39 @@ impl DecmanClient {
         }
         if let Some(body) = body {
             request = request.json(body);
+        }
+        request
+            .send()
+            .with_context(|| format!("request to {url} failed"))
+    }
+
+    /// PUT `path` with a JSON body, authenticating on first use and retrying
+    /// once on `401`, then failing on any non-success status.
+    fn put(&mut self, path: &str, body: Value) -> Result<()> {
+        if !self.authenticated {
+            self.authenticate()?;
+        }
+        let mut response = self.send_put(path, &body)?;
+        if response.status() == StatusCode::UNAUTHORIZED {
+            self.authenticated = false;
+            self.token = None;
+            self.authenticate()?;
+            response = self.send_put(path, &body)?;
+        }
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().unwrap_or_default();
+            bail!("decman API {path} returned {status}: {text}");
+        }
+        Ok(())
+    }
+
+    /// Send a `PUT {base_url}{path}` with a JSON body and the bearer token.
+    fn send_put(&self, path: &str, body: &Value) -> Result<Response> {
+        let url = format!("{base}{path}", base = self.base_url);
+        let mut request = self.http.put(&url).json(body);
+        if let Some(token) = &self.token {
+            request = request.bearer_auth(token);
         }
         request
             .send()
