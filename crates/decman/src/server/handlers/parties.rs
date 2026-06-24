@@ -41,7 +41,7 @@ use crate::{
             ConnectionStatus, ContractInfo, DecentralizedPartiesResponse, DecentralizedParty,
             ErrorResponse, PackageInfo, ParticipantInfo, ParticipantStatus,
             ParticipantsStatusResponse, PeerErrorKind, PeerPackageComparison, PeerPackageResult,
-            Permission, ResponseSource, VettedPackageInfo,
+            Permission, ResponseSource, VettedPackageInfo, permission_from_proto,
         },
     },
     utils,
@@ -817,7 +817,7 @@ pub async fn fetch_decentralized_parties(
                         };
                         Some(ParticipantInfo {
                             participant_uid,
-                            permission: Permission::from(p.permission),
+                            permission: permission_from_proto(p.permission),
                             owner_key,
                         })
                     })

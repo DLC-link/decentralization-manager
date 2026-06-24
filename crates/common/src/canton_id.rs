@@ -149,6 +149,7 @@ impl fmt::Display for CantonId {
     }
 }
 
+#[cfg(feature = "openapi")]
 impl utoipa::PartialSchema for CantonId {
     fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
         utoipa::openapi::ObjectBuilder::new()
@@ -161,6 +162,7 @@ impl utoipa::PartialSchema for CantonId {
     }
 }
 
+#[cfg(feature = "openapi")]
 impl utoipa::ToSchema for CantonId {}
 
 impl std::str::FromStr for CantonId {

@@ -1,0 +1,82 @@
+[package]
+name = "decman"
+version = "1.0.2"
+edition = "2024"
+license = "Apache-2.0"
+
+# The published binary keeps its historical name: deployments, the Dockerfile
+# ENTRYPOINT, and the k8s manifests all invoke `dec-party-manager serve`.
+[[bin]]
+name = "dec-party-manager"
+path = "src/main.rs"
+
+# The library keeps the `dec_party_manager` crate name so the binary, the
+# integration tests under `tests/`, and downstream `use dec_party_manager::*`
+# imports are unaffected by the package rename to `decman`.
+[lib]
+name = "dec_party_manager"
+path = "src/lib.rs"
+
+[features]
+# Compile-time gate for the permissive `MockValidator` (admin-by-default,
+# accepts any token) and `MockAuthRegistry`. Enabled automatically under
+# `cargo test`. Production builds must NOT enable this: leaving it off
+# means the mock types are not compiled in at all, so the binary cannot
+# select mock auth at runtime.
+test-mode = []
+
+[dependencies]
+actix-cors = { workspace = true }
+actix-web = { workspace = true }
+aes-gcm = { workspace = true }
+anyhow = { workspace = true }
+base64 = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true, features = ["string"] }
+colored = { workspace = true }
+dotenvy = { workspace = true }
+ed25519-dalek = { workspace = true }
+futures = { workspace = true }
+hex = { workspace = true }
+http = { workspace = true }
+hyper = { workspace = true }
+hyper-noise = { workspace = true }
+jsonwebtoken = { workspace = true }
+mime_guess = { workspace = true }
+prost = { workspace = true }
+prost-types = { workspace = true }
+rand = { workspace = true }
+reqwest = { version = "0.13", features = ["form", "json"] }
+rust-embed = { workspace = true }
+secp256k1 = { workspace = true }
+serde = { workspace = true }
+serde-big-array = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-noise = { workspace = true }
+tokio-stream = { workspace = true }
+tonic = { workspace = true }
+tonic-prost = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+utoipa = { workspace = true, features = ["actix_extras"] }
+utoipa-actix-web = { workspace = true }
+utoipa-swagger-ui = { workspace = true }
+uuid = { workspace = true }
+x509-parser = { workspace = true }
+zeroize = { workspace = true }
+
+canton-common = { workspace = true }
+canton-proto-rs = { workspace = true }
+canton-registry = { workspace = true }
+common = { workspace = true, features = ["openapi"] }
+keycloak = { workspace = true }
+
+[dev-dependencies]
+static_assertions = { workspace = true }
+tempfile = { workspace = true }
+wiremock = { workspace = true }

@@ -4,18 +4,13 @@ use sqlx::SqlitePool;
 use crate::{
     db::schema::SchemaRead,
     noise::{Message, MessageType},
-    server::{ConnectionStatus, WorkflowKind, WorkflowRole},
+    server::{ConnectionStatus, WorkflowKind},
 };
 
-/// The workflow a node is currently participating in, if any.
-#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
-pub struct WorkflowInfo {
-    pub kind: WorkflowKind,
-    pub role: WorkflowRole,
-    pub step: String,
-    pub step_index: i64,
-    pub step_total: i64,
-}
+// `WorkflowInfo` now lives in the shared `common` crate (consumed by both this
+// server and the `decman-cli` client). Re-exported here so the existing
+// `crate::server::health::WorkflowInfo` path keeps working.
+pub use common::types::WorkflowInfo;
 
 /// Health report a node returns in response to a `Health` Noise message.
 ///
@@ -106,7 +101,7 @@ pub fn busy_payload(kind: WorkflowKind) -> Vec<u8> {
 mod tests {
     use anyhow::Context;
 
-    use crate::{db::MIGRATOR, error::Result};
+    use crate::{db::MIGRATOR, error::Result, server::WorkflowRole};
 
     use super::*;
 

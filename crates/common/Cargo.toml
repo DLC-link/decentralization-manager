@@ -1,0 +1,19 @@
+[package]
+name = "common"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[features]
+# Derives `utoipa::ToSchema` on the wire DTOs and Canton ID, for the backend's
+# OpenAPI spec. Off by default so dependency-light clients (e.g. the `decman-cli`
+# TUI) don't pull in `utoipa`.
+openapi = ["dep:utoipa"]
+
+[dependencies]
+anyhow = { workspace = true }
+hex = { workspace = true }
+serde = { workspace = true }
+serde-big-array = { workspace = true }
+serde_json = { workspace = true }
+utoipa = { workspace = true, optional = true }
