@@ -26,3 +26,34 @@ export async function authenticatedFetch(
   }
   return response;
 }
+
+/**
+ * Measure round-trip latency to a backend endpoint by timing GET requests.
+ * Pings `samples` times and returns the smallest result in ms — the minimum
+ * is the least distorted by client-side jitter (GC, render work), the same
+ * reason `ping` reports min/avg/max. Returns null if any request fails.
+ *
+ * Point this at a no-auth, no-I/O endpoint (`/healthz`) so the number reflects
+ * transport + handler overhead rather than backend work. `cache: "no-store"`
+ * stops the browser from serving a cached 200 (which would always read ~0 ms).
+ */
+export async function pingLatency(
+  path: string,
+  samples = 3,
+): Promise<number | null> {
+  let best: number | null = null;
+  for (let i = 0; i < samples; i++) {
+    const start = performance.now();
+    try {
+      const res = await fetch(path, { cache: "no-store" });
+      if (!res.ok) return null;
+      // Drain the body so timing covers the full response, not just headers.
+      await res.arrayBuffer();
+    } catch {
+      return null;
+    }
+    const elapsed = performance.now() - start;
+    if (best === null || elapsed < best) best = elapsed;
+  }
+  return best === null ? null : Math.round(best);
+}

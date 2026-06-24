@@ -1584,6 +1584,14 @@ pub struct SuccessResponse {
     pub success: bool,
 }
 
+/// Liveness response for the `/healthz` ping endpoint. The body is
+/// intentionally tiny — the frontend uses it to time its own round-trip to
+/// this node, so the handler does no work beyond returning this.
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct HealthResponse {
+    pub status: String,
+}
+
 /// Response for workflow status check endpoints
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct WorkflowStatusResponse {

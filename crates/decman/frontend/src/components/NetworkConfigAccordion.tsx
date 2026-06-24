@@ -43,6 +43,8 @@ interface NetworkConfigAccordionProps {
   nodeConfig?: NodeConfig;
   keyStatus?: KeyStatusResponse;
   participantStatuses?: ParticipantStatus[];
+  /** Our own round-trip latency to the backend (ms), shown on the "you" row. */
+  selfLatencyMs?: number;
   onSave?: (peers: Peer[]) => Promise<void>;
 }
 
@@ -59,6 +61,7 @@ export const NetworkConfigAccordion = ({
   nodeConfig,
   keyStatus,
   participantStatuses,
+  selfLatencyMs,
   onSave,
 }: NetworkConfigAccordionProps) => {
   const [editing, setEditing] = useState(false);
@@ -406,9 +409,28 @@ export const NetworkConfigAccordion = ({
                     </Tooltip>
                   </TableCell>
                   <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>
-                    <Typography variant="body2" color="text.secondary">
+                    <Typography
+                      variant="body2"
+                      color="text.secondary"
+                      component="span"
+                    >
                       {selfPeer?.name || truncateParticipantId(selfEntry.participant_id)} (You)
                     </Typography>
+                    {selfLatencyMs != null && (
+                      <Tooltip title="Round-trip from this browser to your node" arrow>
+                        <Typography
+                          component="span"
+                          sx={{
+                            ml: 1,
+                            color: "text.secondary",
+                            fontSize: "0.7rem",
+                            cursor: "help",
+                          }}
+                        >
+                          {selfLatencyMs} ms
+                        </Typography>
+                      </Tooltip>
+                    )}
                   </TableCell>
                   <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>
                     {selfEntry.address}:{selfEntry.port}

@@ -10,7 +10,7 @@ use crate::{
     server::{
         AppState,
         middleware::require_admin,
-        types::{ErrorResponse, SuccessResponse},
+        types::{ErrorResponse, HealthResponse, SuccessResponse},
     },
 };
 
@@ -93,6 +93,24 @@ pub async fn get_node_config(data: web::Data<AppState>) -> impl Responder {
         config: &data.config,
         test_mode: data.test_mode,
         version: env!("CARGO_PKG_VERSION"),
+    })
+}
+
+/// Liveness probe. Returns `200 {"status":"ok"}` and does no I/O, so the
+/// frontend can ping it to measure its own round-trip latency to this node
+/// (filling the "you" row of the peers table, where peer latency comes from
+/// Noise health probes). Public — no auth — so the timing reflects transport
+/// plus handler overhead only, and so it doubles as a container liveness probe.
+#[utoipa::path(
+    tag = "Configuration",
+    responses(
+        (status = 200, description = "Service is alive", body = HealthResponse)
+    )
+)]
+#[get("/healthz")]
+pub async fn healthz() -> impl Responder {
+    HttpResponse::Ok().json(HealthResponse {
+        status: "ok".to_string(),
     })
 }
 
