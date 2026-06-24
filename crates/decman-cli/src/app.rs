@@ -1075,20 +1075,32 @@ fn party_config_body(form: &PartyConfigForm) -> Value {
 }
 
 /// Build the discover-member-party body from the form's active provider fields.
+/// A blank secret is omitted entirely (the server models it as `Option`, so an
+/// empty string would deserialize to `Some("")` and break authentication).
 fn discover_body(form: &PartyConfigForm) -> Value {
     match form.mode {
-        IdpMode::Keycloak => json!({
-            "keycloak_url": form.kc_url.trim(),
-            "keycloak_realm": form.kc_realm.trim(),
-            "keycloak_client_id": form.kc_client_id.trim(),
-            "keycloak_client_secret": form.kc_secret,
-        }),
-        IdpMode::Auth0 => json!({
-            "auth0_domain": form.auth0_domain.trim(),
-            "auth0_audience": form.auth0_audience.trim(),
-            "auth0_client_id": form.auth0_client_id.trim(),
-            "auth0_client_secret": form.auth0_secret,
-        }),
+        IdpMode::Keycloak => {
+            let mut body = json!({
+                "keycloak_url": form.kc_url.trim(),
+                "keycloak_realm": form.kc_realm.trim(),
+                "keycloak_client_id": form.kc_client_id.trim(),
+            });
+            if !form.kc_secret.is_empty() {
+                body["keycloak_client_secret"] = json!(form.kc_secret);
+            }
+            body
+        }
+        IdpMode::Auth0 => {
+            let mut body = json!({
+                "auth0_domain": form.auth0_domain.trim(),
+                "auth0_audience": form.auth0_audience.trim(),
+                "auth0_client_id": form.auth0_client_id.trim(),
+            });
+            if !form.auth0_secret.is_empty() {
+                body["auth0_client_secret"] = json!(form.auth0_secret);
+            }
+            body
+        }
     }
 }
 

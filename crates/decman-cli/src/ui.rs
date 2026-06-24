@@ -1104,7 +1104,7 @@ fn footer_hint(active: Tab, overlay: &Overlay, can_logout: bool) -> String {
         }
         .to_owned(),
         Overlay::Message(_) => " enter / esc to close".to_owned(),
-        Overlay::Busy(_) => " working… · esc to dismiss".to_owned(),
+        Overlay::Busy(_) => " working… · enter/esc to dismiss".to_owned(),
         Overlay::None => {
             let base = match active {
                 Tab::Parties => " ↑↓ nav · enter view · n onboard · r refresh",
