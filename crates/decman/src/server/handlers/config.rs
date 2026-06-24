@@ -1,4 +1,8 @@
-use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
+use actix_web::{
+    HttpRequest, HttpResponse, Responder,
+    http::header::{CacheControl, CacheDirective},
+    get, post, web,
+};
 use serde::Serialize;
 
 use sqlx::SqlitePool;
@@ -109,9 +113,15 @@ pub async fn get_node_config(data: web::Data<AppState>) -> impl Responder {
 )]
 #[get("/healthz")]
 pub async fn healthz() -> impl Responder {
-    HttpResponse::Ok().json(HealthResponse {
-        status: "ok".to_string(),
-    })
+    // `no-store` so an intermediary cache/proxy can't serve a cached 200 and
+    // skew the latency the frontend measures (and a liveness probe shouldn't
+    // be cacheable anyway). The frontend also sends `no-store`; this is the
+    // server-side half.
+    HttpResponse::Ok()
+        .insert_header(CacheControl(vec![CacheDirective::NoStore]))
+        .json(HealthResponse {
+            status: "ok".to_string(),
+        })
 }
 
 async fn save_peers_to_db(db: &SqlitePool, peers: &[Peer]) -> Result {
