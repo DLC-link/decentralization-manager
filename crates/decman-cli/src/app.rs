@@ -2434,18 +2434,26 @@ impl App {
         let Some(party) = self.detail.as_ref() else {
             return;
         };
-        let self_id = self
+        // Require this node's identity to be resolved before listing candidates,
+        // otherwise self could not be excluded and might be kicked by mistake.
+        let Some(self_id) = self
             .peers
             .iter()
             .find(|peer| peer.is_self)
-            .map(|peer| peer.participant_id.clone());
+            .map(|peer| peer.participant_id.clone())
+        else {
+            self.overlay = Overlay::Message(
+                "Still resolving this node's identity — try again in a moment.".to_owned(),
+            );
+            return;
+        };
         let candidates: Vec<KickCandidate> = party
             .participants
             .iter()
             .filter(|participant| participant.owner_key.is_some())
             .filter_map(|participant| {
                 let id = participant.participant_uid.to_string();
-                if self_id.as_deref() == Some(id.as_str()) {
+                if id == self_id {
                     return None;
                 }
                 Some(KickCandidate {
