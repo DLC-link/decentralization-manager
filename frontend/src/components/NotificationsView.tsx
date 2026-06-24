@@ -172,6 +172,8 @@ const InvitationCard = ({
 
   return (
     <Box
+      data-testid="invitation-card"
+      data-kind={invitation.invitation_type}
       sx={{
         p: 2,
         border: 1,
@@ -1538,6 +1540,10 @@ const WorkflowRunCard = ({
 
   return (
     <Box
+      data-testid="workflow-run-card"
+      data-kind={run.kind}
+      data-prefix={run.prefix ?? ""}
+      data-status={run.status}
       sx={{
         p: 2,
         border: 1,
