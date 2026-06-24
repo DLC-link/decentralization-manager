@@ -68,7 +68,9 @@ check_prerequisites
 check_dpm_ports_free
 
 log_phase "Building release-ci binary (with test-mode feature)"
-cargo build --profile release-ci --features test-mode
+# `-p decman`: the root is a virtual workspace (bare `--features` is rejected)
+# and this avoids compiling the decman-cli TUI.
+cargo build --profile release-ci -p decman --features test-mode
 if [ ! -f "$BINARY" ]; then
     echo "ERROR: Binary not found at $BINARY"
     exit 1

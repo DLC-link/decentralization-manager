@@ -55,7 +55,7 @@ jobs:
           ECR_REPOSITORY: canton-decparty-manager
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          echo "VITE_ADMIN_ACCESS=true" > frontend/.env
+          echo "VITE_ADMIN_ACCESS=true" > crates/decman/frontend/.env
           docker build --ssh default \
             -t $ECR_PUBLIC_REGISTRY/$REGISTRY_ALIAS/$ECR_REPOSITORY:v$VERSION \
             -t $ECR_PUBLIC_REGISTRY/$REGISTRY_ALIAS/$ECR_REPOSITORY:latest .
@@ -69,7 +69,7 @@ jobs:
           ECR_REPOSITORY: canton-decparty-manager
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          echo "VITE_ADMIN_ACCESS=false" > frontend/.env
+          echo "VITE_ADMIN_ACCESS=false" > crates/decman/frontend/.env
           docker build --ssh default \
             -t $ECR_PUBLIC_REGISTRY/$REGISTRY_ALIAS/$ECR_REPOSITORY:v$VERSION-demo \
             -t $ECR_PUBLIC_REGISTRY/$REGISTRY_ALIAS/$ECR_REPOSITORY:demo .

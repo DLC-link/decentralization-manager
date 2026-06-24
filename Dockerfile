@@ -10,17 +10,29 @@ RUN mkdir -p /root/.ssh && ssh-keyscan github.com >> /root/.ssh/known_hosts
 
 ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
 
-COPY frontend/package.json frontend/package-lock.json ./frontend/
-RUN cd frontend && npm ci
+# Frontend deps layer, cached unless package*.json change. The frontend now
+# lives under the backend crate (crates/decman/frontend).
+COPY crates/decman/frontend/package.json crates/decman/frontend/package-lock.json ./crates/decman/frontend/
+RUN cd crates/decman/frontend && npm ci
 
-COPY Cargo.toml Cargo.lock build.rs ./
-COPY migrations ./migrations
-COPY src ./src
-COPY frontend/src ./frontend/src
-COPY frontend/public ./frontend/public
-COPY frontend/index.html frontend/vite.config.ts frontend/tsconfig*.json frontend/eslint.config.js frontend/.env ./frontend/
+# Workspace manifest + the sibling crates the backend depends on / the
+# workspace must resolve. `common` and `decman-cli` are copied wholesale (small,
+# no node_modules); the backend crate is copied selectively so the host's
+# frontend/node_modules is never pulled in.
+COPY Cargo.toml Cargo.lock ./
+COPY crates/common ./crates/common
+COPY crates/decman-cli ./crates/decman-cli
+COPY crates/decman/Cargo.toml crates/decman/build.rs ./crates/decman/
+COPY crates/decman/migrations ./crates/decman/migrations
+COPY crates/decman/src ./crates/decman/src
+COPY crates/decman/frontend/src ./crates/decman/frontend/src
+COPY crates/decman/frontend/public ./crates/decman/frontend/public
+COPY crates/decman/frontend/index.html crates/decman/frontend/vite.config.ts crates/decman/frontend/tsconfig*.json crates/decman/frontend/eslint.config.js crates/decman/frontend/.env ./crates/decman/frontend/
 
-RUN --mount=type=ssh cargo build --release
+# Build only the backend (its bin is `dec-party-manager`). `-p decman` avoids
+# compiling the `decman-cli` TUI, whose Linux file-dialog backend would pull in
+# extra system libraries the server image doesn't need.
+RUN --mount=type=ssh cargo build --release -p decman
 
 FROM busybox:latest AS runtime
 
