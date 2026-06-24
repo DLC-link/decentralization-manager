@@ -769,6 +769,11 @@ fn build_gov_view(
         rules_contract_id,
         member_party_id,
     } = client.fetch_governance(party_id)?;
+    // Confirm/execute/propose all need a real rules contract id; bail early with
+    // a clear message rather than sending empty ids that fail obscurely later.
+    let rules_contract_id = rules_contract_id
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("no governance rules contract found for this party"))?;
     let items = actions
         .into_iter()
         .map(GovItem::OffChain)
@@ -778,7 +783,9 @@ fn build_gov_view(
         party_name: party_name.to_owned(),
         party_id: party_id.to_owned(),
         governance_type: governance_type.to_owned(),
-        rules_contract_id: rules_contract_id.unwrap_or_default(),
+        rules_contract_id,
+        // Empty is tolerated: it only weakens "revoke", which already handles
+        // not finding this node's own confirmation gracefully.
         member_party_id: member_party_id.unwrap_or_default(),
         threshold,
         items,
@@ -931,6 +938,14 @@ fn build_deploy_context(
 /// Build the `POST /contracts` body for a governance-core deployment, or a
 /// human error describing why it cannot be submitted.
 fn build_contracts_request(form: &DeployForm) -> Result<Value, String> {
+    if form.package_id.is_empty() {
+        return Err(
+            "Unknown governance-core package — vet the governance-core DAR first.".to_owned(),
+        );
+    }
+    if form.member_parties.is_empty() {
+        return Err("No governance members resolved — peers may be unreachable.".to_owned());
+    }
     let threshold: i64 = form
         .threshold
         .trim()
@@ -941,13 +956,13 @@ fn build_contracts_request(form: &DeployForm) -> Result<Value, String> {
         .trim()
         .parse()
         .map_err(|_| "Timeout must be a whole number".to_owned())?;
-    if form.package_id.is_empty() {
-        return Err(
-            "Unknown governance-core package — vet the governance-core DAR first.".to_owned(),
-        );
+    // Validate ranges client-side so the error is immediate, not a chain failure.
+    let member_count = i64::try_from(form.member_parties.len()).unwrap_or(i64::MAX);
+    if !(1..=member_count).contains(&threshold) {
+        return Err(format!("Threshold must be between 1 and {member_count}."));
     }
-    if form.member_parties.is_empty() {
-        return Err("No governance members resolved — peers may be unreachable.".to_owned());
+    if timeout <= 0 {
+        return Err("Timeout must be a positive number of microseconds.".to_owned());
     }
     Ok(json!({
         "decentralized_party_id": form.party_id,
@@ -2743,6 +2758,24 @@ mod tests {
         match build_contracts_request(&form) {
             Err(error) => assert!(error.contains("governance-core")),
             Ok(_) => panic!("expected a missing-package error"),
+        }
+    }
+
+    #[test]
+    fn build_contracts_request_rejects_out_of_range_threshold() {
+        // Two members, so a threshold of 3 is out of the 1..=2 range.
+        let mut form = deploy_form();
+        form.threshold = "3".to_owned();
+        match build_contracts_request(&form) {
+            Err(error) => assert!(error.contains("between 1 and 2")),
+            Ok(_) => panic!("expected an out-of-range threshold error"),
+        }
+
+        let mut form = deploy_form();
+        form.timeout_micros = "0".to_owned();
+        match build_contracts_request(&form) {
+            Err(error) => assert!(error.contains("positive")),
+            Ok(_) => panic!("expected a non-positive timeout error"),
         }
     }
 
