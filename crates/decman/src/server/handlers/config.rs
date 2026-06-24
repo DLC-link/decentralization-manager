@@ -14,7 +14,7 @@ use crate::{
     server::{
         AppState,
         middleware::require_admin,
-        types::{ErrorResponse, HealthResponse, SuccessResponse},
+        types::{ErrorResponse, LivenessResponse, SuccessResponse},
     },
 };
 
@@ -108,7 +108,7 @@ pub async fn get_node_config(data: web::Data<AppState>) -> impl Responder {
 #[utoipa::path(
     tag = "Configuration",
     responses(
-        (status = 200, description = "Service is alive", body = HealthResponse)
+        (status = 200, description = "Service is alive", body = LivenessResponse)
     )
 )]
 #[get("/healthz")]
@@ -119,7 +119,7 @@ pub async fn healthz() -> impl Responder {
     // server-side half.
     HttpResponse::Ok()
         .insert_header(CacheControl(vec![CacheDirective::NoStore]))
-        .json(HealthResponse {
+        .json(LivenessResponse {
             status: "ok".to_string(),
         })
 }
