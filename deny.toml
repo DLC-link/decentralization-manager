@@ -1,0 +1,15 @@
+# cargo-deny configuration.
+#
+# Scoped to advisories for now: the CI `cargo-deny` job runs
+# `cargo-deny check advisories`. Bans, licenses, and sources need policy
+# decisions before they're worth enabling.
+
+[advisories]
+ignore = [
+  # `paste` is unmaintained (RUSTSEC-2024-0436). It is a trivial compile-time
+  # token-pasting proc-macro with no runtime or security surface, pulled in
+  # transitively only by `ratatui` (the `decman-cli` TUI). There is no
+  # maintained drop-in until ratatui moves off it, so ignore the advisory
+  # rather than block CI.
+  "RUSTSEC-2024-0436",
+]
