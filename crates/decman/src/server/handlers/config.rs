@@ -1,7 +1,7 @@
 use actix_web::{
-    HttpRequest, HttpResponse, Responder,
+    HttpRequest, HttpResponse, Responder, get,
     http::header::{CacheControl, CacheDirective},
-    get, post, web,
+    post, web,
 };
 use serde::Serialize;
 
