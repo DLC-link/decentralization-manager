@@ -7,11 +7,21 @@ use base64::prelude::*;
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::widgets::TableState;
-use serde_json::Value;
+use serde_json::{Value, json};
 
-use common::types::{AuditLogEntry, DecentralizedParty, PeerPackageComparison, VettedPackageInfo};
+use common::types::{
+    AuditLogEntry, DecentralizedParty, PeerPackageComparison, VettedPackageInfo, WorkflowKind,
+    WorkflowProgress, WorkflowRole,
+};
 
-use crate::api::{AuthSettings, DecmanClient, FeedItem, Holding, PeerView, party_name};
+use crate::api::{
+    AuthSettings, ChainAuditEntry, DecmanClient, DomainGovAction, ExecuteParams, FeedItem,
+    GovAction, GovConfirmation, GovState, GovernanceConfirmations, Holding, KnownMember,
+    PartyAuthStatus, PeerView, party_name,
+};
+use crate::composer::{
+    self, Composer, ComposerContext, ComposerSubmit, FieldKind, SelectOption, TypeOption,
+};
 use crate::config::Profile;
 use crate::ui;
 
@@ -20,6 +30,7 @@ use crate::ui;
 pub struct DetailData {
     pub holdings: Result<Vec<Holding>, String>,
     pub audit: Result<Vec<AuditLogEntry>, String>,
+    pub gov_state: Result<Option<GovState>, String>,
 }
 
 /// How the main app exited: quit the program, or log out back to the menu.
@@ -93,6 +104,33 @@ pub enum Request {
         peer_ids: Vec<String>,
     },
     Detail(String),
+    Onboard {
+        prefix: String,
+        peer_ids: Vec<String>,
+    },
+    Kick {
+        party_id: String,
+        participant_id: String,
+        new_threshold: i32,
+        previous_threshold: i32,
+    },
+    CancelWorkflow(WorkflowKind),
+    RetryWorkflow(String),
+    ChainAudit(String),
+    AuthStatus,
+    TestAuth,
+    Governance {
+        party_id: String,
+        party_name: String,
+        governance_type: String,
+    },
+    GovAction(Box<GovActionRequest>),
+    OperatorInfo,
+    DeployContext {
+        party_id: String,
+        party_name: String,
+    },
+    DeploySubmit(Box<Value>),
 }
 
 /// A result delivered by a background worker.
@@ -104,6 +142,11 @@ pub enum Update {
     Compare(Result<PeerPackageComparison, String>),
     Action(Result<String, String>),
     Detail(DetailData),
+    ChainAudit(Result<Vec<ChainAuditEntry>, String>),
+    AuthStatus(Result<Vec<PartyAuthStatus>, String>),
+    Governance(Result<Box<GovView>, String>),
+    OperatorInfo(String),
+    DeployContext(Result<Box<DeployForm>, String>),
 }
 
 /// A DAR file picked from disk for upload / distribution.
@@ -117,6 +160,143 @@ pub struct PeerChoice {
     pub id: String,
     pub name: String,
     pub checked: bool,
+}
+
+/// The onboarding (create-party) form: a party-id prefix plus a tickable list
+/// of peers to invite. `cursor` 0 selects the prefix field; `1..=peers.len()`
+/// select a peer row.
+pub struct OnboardForm {
+    pub prefix: String,
+    pub peers: Vec<PeerChoice>,
+    pub cursor: usize,
+}
+
+impl OnboardForm {
+    /// Whether the prefix field (cursor 0) is focused.
+    fn on_prefix(&self) -> bool {
+        self.cursor == 0
+    }
+
+    /// The peer row index under the cursor, if a peer row is focused.
+    fn peer_index(&self) -> Option<usize> {
+        self.cursor.checked_sub(1)
+    }
+}
+
+/// A participant that may be kicked from a party (an owner of the party).
+pub struct KickCandidate {
+    pub participant_id: String,
+    pub label: String,
+}
+
+/// The kick-participant form: pick an owner to remove and set the new
+/// signing threshold for the remaining owners.
+pub struct KickForm {
+    pub party_id: String,
+    pub party_name: String,
+    pub previous_threshold: i32,
+    pub candidates: Vec<KickCandidate>,
+    pub selected: usize,
+    pub new_threshold: i32,
+    /// Highest threshold allowed after the kick (remaining owner count).
+    pub max_threshold: i32,
+}
+
+/// One pending governance item shown in the approvals overlay: an off-chain
+/// action or an on-chain (core-domain) proposal.
+pub enum GovItem {
+    OffChain(GovAction),
+    Domain(DomainGovAction),
+}
+
+/// State of the governance-approvals overlay for one party.
+pub struct GovView {
+    pub party_name: String,
+    pub party_id: String,
+    /// The party's governance type (`core_self` or `vault`), used for off-chain
+    /// actions and to refresh the overlay after a mutation.
+    pub governance_type: String,
+    pub rules_contract_id: String,
+    pub member_party_id: String,
+    pub threshold: i32,
+    pub items: Vec<GovItem>,
+    pub selected: usize,
+}
+
+/// A governance mutation to perform against a pending action.
+enum GovOp {
+    Confirm {
+        action: Value,
+        governance_type: String,
+        proposal_cid: Option<String>,
+    },
+    Execute {
+        action: Value,
+        confirmation_cids: Vec<String>,
+        governance_type: String,
+        proposal_cid: Option<String>,
+    },
+    Cancel {
+        confirmation_cid: String,
+        governance_type: String,
+    },
+    Expire {
+        confirmation_cid: String,
+        governance_type: String,
+    },
+    /// Propose a new on-chain action (`POST /governance/propose`).
+    Propose { proposal: Value },
+}
+
+/// Which composer the type picker is choosing for.
+#[derive(Clone, Copy)]
+pub enum ComposerKind {
+    /// A brand-new off-chain governance action (submitted via confirm).
+    Action,
+    /// A new on-chain governance proposal.
+    Proposal,
+}
+
+/// The action / proposal type picker, before a specific form is opened.
+pub struct ComposerPick {
+    pub kind: ComposerKind,
+    pub party_id: String,
+    pub party_name: String,
+    pub governance_type: String,
+    pub rules_contract_id: String,
+    pub default_threshold: i64,
+    pub options: Vec<TypeOption>,
+    pub selected: usize,
+}
+
+/// The governance-core contract deployment form. The member set, participant
+/// ids and package id are resolved from the server; the operator only edits the
+/// initial governance threshold and the proposal timeout (the contract's field
+/// structure is fixed, mirroring the web frontend's locked gov-core preset).
+pub struct DeployForm {
+    pub party_id: String,
+    pub party_name: String,
+    /// The `governance_core` package id (empty if the DAR is not vetted).
+    pub package_id: String,
+    pub operator_party: String,
+    /// Participant uids, aligned with `member_parties`.
+    pub participant_ids: Vec<String>,
+    /// Member party ids (the governance member set).
+    pub member_parties: Vec<String>,
+    pub threshold: String,
+    pub timeout_micros: String,
+    /// 0 = threshold, 1 = timeout, 2 = submit row.
+    pub cursor: usize,
+}
+
+/// A governance mutation plus the context needed to refresh the overlay after.
+pub struct GovActionRequest {
+    op: GovOp,
+    party_id: String,
+    party_name: String,
+    /// Party-level governance type, used to refresh the overlay after the op.
+    governance_type: String,
+    rules_contract_id: String,
 }
 
 /// A modal overlay drawn above the main UI.
@@ -142,6 +322,35 @@ pub enum Overlay {
         value: Value,
         scroll: u16,
     },
+    /// The onboarding (create-party) form.
+    Onboard(OnboardForm),
+    /// The kick-participant form.
+    Kick(KickForm),
+    /// A scrollable detail view of a feed item (workflow run or invitation).
+    /// Boxed: a feed item (with its workflow run) is large relative to the
+    /// other overlay variants.
+    FeedDetail {
+        item: Box<FeedItem>,
+        scroll: u16,
+    },
+    /// The on-chain governance audit trail for the open party.
+    ChainAudit {
+        entries: Vec<ChainAuditEntry>,
+        scroll: u16,
+    },
+    /// Per-party authentication status and rights.
+    Auth {
+        parties: Vec<PartyAuthStatus>,
+        scroll: u16,
+    },
+    /// The governance approvals list for a party (confirm / execute / revoke).
+    Governance(Box<GovView>),
+    /// The action / proposal type picker.
+    ComposerPick(Box<ComposerPick>),
+    /// A composer form for a chosen action / proposal variant.
+    Composer(Box<Composer>),
+    /// The governance-core contract deployment form.
+    Deploy(Box<DeployForm>),
 }
 
 /// The selectable top-level views.
@@ -247,6 +456,28 @@ fn filter_dars<'a>(dars: &'a [VettedPackageInfo], query: &str) -> Vec<&'a Vetted
         .collect()
 }
 
+/// Validate a decentralized-party id prefix, mirroring the web frontend's
+/// onboarding rules: starts with a letter, only `[A-Za-z0-9_-]`, ≤180 chars.
+fn validate_prefix(prefix: &str) -> Result<(), String> {
+    match prefix.chars().next() {
+        None => return Err("Party id prefix is required.".to_owned()),
+        Some(c) if !c.is_ascii_alphabetic() => {
+            return Err("Party id prefix must start with a letter.".to_owned());
+        }
+        Some(_) => {}
+    }
+    if prefix.chars().count() > 180 {
+        return Err("Party id prefix must be 180 characters or fewer.".to_owned());
+    }
+    if !prefix
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err("Party id prefix may only contain letters, digits, '-' and '_'.".to_owned());
+    }
+    Ok(())
+}
+
 /// Keep a table's selection in range after its data changes.
 fn clamp_selection(table: &mut TableState, len: usize) {
     let selected = match table.selected() {
@@ -279,8 +510,15 @@ pub fn spawn_workers(
             }
         };
         loop {
-            let result = client.fetch_peers().map_err(|error| format!("{error:#}"));
-            if peer_tx.send(Update::Peers(result)).is_err() {
+            // Re-probe peers and refresh the workflows feed on the same cadence
+            // the web frontend uses, so live progress and incoming invitations
+            // appear without the operator pressing refresh.
+            let peers = client.fetch_peers().map_err(|error| format!("{error:#}"));
+            if peer_tx.send(Update::Peers(peers)).is_err() {
+                break;
+            }
+            let feed = client.fetch_feed().map_err(|error| format!("{error:#}"));
+            if peer_tx.send(Update::Feed(feed)).is_err() {
                 break;
             }
             thread::sleep(peer_interval);
@@ -351,8 +589,392 @@ fn handle_request(client: &mut DecmanClient, request: Request) -> Update {
         Request::Detail(party_id) => Update::Detail(DetailData {
             holdings: client.fetch_holdings(&party_id).map_err(err),
             audit: client.fetch_audit(&party_id).map_err(err),
+            gov_state: client.fetch_governance_state(&party_id).map_err(err),
         }),
+        Request::ChainAudit(party_id) => {
+            Update::ChainAudit(client.fetch_chain_audit(&party_id).map_err(err))
+        }
+        Request::AuthStatus => Update::AuthStatus(client.fetch_auth_status().map_err(err)),
+        Request::TestAuth => Update::AuthStatus(
+            client
+                .test_auth()
+                .and_then(|()| client.fetch_auth_status())
+                .map_err(err),
+        ),
+        Request::Governance {
+            party_id,
+            party_name,
+            governance_type,
+        } => Update::Governance(
+            build_gov_view(client, &party_id, &party_name, &governance_type)
+                .map(Box::new)
+                .map_err(err),
+        ),
+        Request::GovAction(request) => {
+            let GovActionRequest {
+                op,
+                party_id,
+                party_name,
+                governance_type,
+                rules_contract_id,
+            } = *request;
+            let result = perform_gov_op(client, &party_id, &rules_contract_id, &op)
+                .and_then(|()| build_gov_view(client, &party_id, &party_name, &governance_type))
+                .map(Box::new)
+                .map_err(err);
+            Update::Governance(result)
+        }
+        Request::OperatorInfo => match client.fetch_operator_info() {
+            Ok(party_id) => Update::OperatorInfo(party_id),
+            // Operator info is best-effort prefill; swallow errors silently.
+            Err(_) => Update::OperatorInfo(String::new()),
+        },
+        Request::DeployContext {
+            party_id,
+            party_name,
+        } => Update::DeployContext(
+            build_deploy_context(client, &party_id, &party_name)
+                .map(Box::new)
+                .map_err(err),
+        ),
+        Request::DeploySubmit(body) => Update::Action(
+            client
+                .deploy_contracts(*body)
+                .map(|()| "Contracts workflow started".to_owned())
+                .map_err(err),
+        ),
+        Request::Onboard { prefix, peer_ids } => Update::Action(
+            client
+                .start_onboarding(&prefix, &peer_ids)
+                .map(|()| format!("Onboarding started for {prefix}"))
+                .map_err(err),
+        ),
+        Request::Kick {
+            party_id,
+            participant_id,
+            new_threshold,
+            previous_threshold,
+        } => Update::Action(
+            client
+                .kick_participant(
+                    &party_id,
+                    &participant_id,
+                    new_threshold,
+                    previous_threshold,
+                )
+                .map(|()| "Kick started".to_owned())
+                .map_err(err),
+        ),
+        Request::CancelWorkflow(kind) => Update::Action(
+            client
+                .cancel_workflow(kind)
+                .map(|()| "Workflow cancelled".to_owned())
+                .map_err(err),
+        ),
+        Request::RetryWorkflow(name) => Update::Action(
+            client
+                .retry_workflow(&name)
+                .map(|()| "Workflow retry started".to_owned())
+                .map_err(err),
+        ),
     }
+}
+
+/// Fetch the pending governance confirmations for a party and assemble the
+/// approvals view (off-chain actions first, then on-chain proposals).
+fn build_gov_view(
+    client: &mut DecmanClient,
+    party_id: &str,
+    party_name: &str,
+    governance_type: &str,
+) -> Result<GovView> {
+    let GovernanceConfirmations {
+        actions,
+        domain_actions,
+        threshold,
+        rules_contract_id,
+        member_party_id,
+    } = client.fetch_governance(party_id)?;
+    let items = actions
+        .into_iter()
+        .map(GovItem::OffChain)
+        .chain(domain_actions.into_iter().map(GovItem::Domain))
+        .collect();
+    Ok(GovView {
+        party_name: party_name.to_owned(),
+        party_id: party_id.to_owned(),
+        governance_type: governance_type.to_owned(),
+        rules_contract_id: rules_contract_id.unwrap_or_default(),
+        member_party_id: member_party_id.unwrap_or_default(),
+        threshold,
+        items,
+        selected: 0,
+    })
+}
+
+/// Perform one governance mutation against the API.
+fn perform_gov_op(
+    client: &mut DecmanClient,
+    party_id: &str,
+    rules_contract_id: &str,
+    op: &GovOp,
+) -> Result<()> {
+    match op {
+        GovOp::Confirm {
+            action,
+            governance_type,
+            proposal_cid,
+        } => client.confirm_action(
+            party_id,
+            rules_contract_id,
+            action,
+            governance_type,
+            proposal_cid.as_deref(),
+        ),
+        GovOp::Execute {
+            action,
+            confirmation_cids,
+            governance_type,
+            proposal_cid,
+        } => client.execute_action(
+            party_id,
+            rules_contract_id,
+            &ExecuteParams {
+                action: action.clone(),
+                confirmation_cids: confirmation_cids.clone(),
+                governance_type: governance_type.clone(),
+                proposal_cid: proposal_cid.clone(),
+                disclosed: Vec::new(),
+            },
+        ),
+        GovOp::Cancel {
+            confirmation_cid,
+            governance_type,
+        } => client.cancel_confirmation(party_id, confirmation_cid, governance_type),
+        GovOp::Expire {
+            confirmation_cid,
+            governance_type,
+        } => client.expire_confirmation(
+            party_id,
+            rules_contract_id,
+            confirmation_cid,
+            governance_type,
+        ),
+        GovOp::Propose { proposal } => client.propose_action(party_id, rules_contract_id, proposal),
+    }
+}
+
+/// The contract ids of a set of confirmations, for the execute call.
+fn confirmation_cids(confirmations: &[GovConfirmation]) -> Vec<String> {
+    confirmations
+        .iter()
+        .map(|confirmation| confirmation.contract_id.clone())
+        .collect()
+}
+
+/// The placeholder action sent with on-chain (`core_domain`) confirm/execute —
+/// the server builds the real choice from `proposal_cid` and ignores this.
+fn placeholder_action() -> Value {
+    json!({ "type": "governance_set_threshold", "new_threshold": 0 })
+}
+
+/// Resolve the package id, members and operator needed to deploy governance
+/// core for a party, and build the deployment form with sensible defaults.
+fn build_deploy_context(
+    client: &mut DecmanClient,
+    party_id: &str,
+    party_name: &str,
+) -> Result<DeployForm> {
+    let packages = client.fetch_packages(party_id)?;
+    let known = client.fetch_known_members(party_id)?;
+    // Operator party is best-effort prefill — a deploy can still be sent without.
+    let operator_party = client.fetch_operator_info().unwrap_or_default();
+
+    let mut participant_ids = Vec::new();
+    let mut member_parties = Vec::new();
+    for KnownMember {
+        participant_uid,
+        member_party_id,
+    } in known
+    {
+        if let Some(party) = member_party_id.filter(|party| !party.is_empty()) {
+            participant_ids.push(participant_uid);
+            member_parties.push(party);
+        }
+    }
+
+    // Default threshold ≈ a 2/3 majority, at least 2 (matches the web frontend).
+    let count = i64::try_from(member_parties.len()).unwrap_or(0);
+    let threshold = ((count * 2 + 2) / 3).max(2);
+
+    Ok(DeployForm {
+        party_id: party_id.to_owned(),
+        party_name: party_name.to_owned(),
+        package_id: packages.governance_core.unwrap_or_default(),
+        operator_party,
+        participant_ids,
+        member_parties,
+        threshold: threshold.to_string(),
+        timeout_micros: "86400000000".to_owned(),
+        cursor: 0,
+    })
+}
+
+/// Build the `POST /contracts` body for a governance-core deployment, or a
+/// human error describing why it cannot be submitted.
+fn build_contracts_request(form: &DeployForm) -> Result<Value, String> {
+    let threshold: i64 = form
+        .threshold
+        .trim()
+        .parse()
+        .map_err(|_| "Threshold must be a whole number".to_owned())?;
+    let timeout: i64 = form
+        .timeout_micros
+        .trim()
+        .parse()
+        .map_err(|_| "Timeout must be a whole number".to_owned())?;
+    if form.package_id.is_empty() {
+        return Err(
+            "Unknown governance-core package — vet the governance-core DAR first.".to_owned(),
+        );
+    }
+    if form.member_parties.is_empty() {
+        return Err("No governance members resolved — peers may be unreachable.".to_owned());
+    }
+    Ok(json!({
+        "decentralized_party_id": form.party_id,
+        "participant_ids": form.participant_ids,
+        "participant_parties": form.member_parties,
+        "operator_party": form.operator_party,
+        "contracts": [{
+            "id": "create-governance-rules",
+            "name": "GovernanceRules",
+            "package_id": form.package_id,
+            "module_name": "Governance.Rules",
+            "entity_name": "GovernanceRules",
+            "fields": [
+                { "type": "decentralized_party" },
+                { "type": "party_set", "parties": form.member_parties },
+                { "type": "governance_threshold", "value": threshold },
+                { "type": "rel_time", "microseconds": timeout },
+                { "type": "optional", "inner": { "type": "party_set", "parties": [] } }
+            ]
+        }]
+    }))
+}
+
+/// The governance type for a party's rules contract, or `None` when the party
+/// has no governance rules contract. Mirrors the web frontend's classification.
+fn party_governance_type(party: &DecentralizedParty) -> Option<&'static str> {
+    party.contracts.iter().find_map(|contract| {
+        let template = contract.template_id.as_str();
+        if template == "Governance.Rules:GovernanceRules" {
+            Some("core_self")
+        } else if template.contains("VaultGovernanceRules") || template.contains("VaultGovernance")
+        {
+            Some("vault")
+        } else {
+            None
+        }
+    })
+}
+
+/// Current unix time in seconds (0 if the clock is before the epoch).
+fn now_secs() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i64::try_from(d.as_secs()).ok())
+        .unwrap_or(0)
+}
+
+/// The select option value one step forward / back from `current`.
+fn next_select_value(options: &[SelectOption], current: &str, forward: bool) -> String {
+    if options.is_empty() {
+        return current.to_owned();
+    }
+    let index = options
+        .iter()
+        .position(|option| option.value == current)
+        .unwrap_or(0);
+    let len = options.len();
+    let next = if forward {
+        (index + 1) % len
+    } else {
+        (index + len - 1) % len
+    };
+    options[next].value.to_owned()
+}
+
+/// Handle a key in the composer form. Returns `true` when the form was
+/// submitted (Enter on the virtual submit row).
+fn composer_key(composer: &mut Composer, key: KeyEvent) -> bool {
+    let field_count = composer.fields.len();
+    let multiline = composer
+        .fields
+        .get(composer.cursor)
+        .is_some_and(|field| matches!(field.kind, FieldKind::List | FieldKind::Rows(_)));
+
+    match key.code {
+        KeyCode::Up => {
+            composer.cursor = composer.cursor.saturating_sub(1);
+            return false;
+        }
+        KeyCode::Down | KeyCode::Tab => {
+            if composer.cursor < field_count {
+                composer.cursor += 1;
+            }
+            return false;
+        }
+        KeyCode::Enter if composer.cursor >= field_count => return true,
+        // Enter advances to the next field, except in a multi-line field where
+        // it inserts a newline (handled below).
+        KeyCode::Enter if !multiline => {
+            if composer.cursor < field_count {
+                composer.cursor += 1;
+            }
+            return false;
+        }
+        _ => {}
+    }
+
+    if let Some(field) = composer.fields.get_mut(composer.cursor) {
+        match &field.kind {
+            FieldKind::Bool => {
+                if matches!(
+                    key.code,
+                    KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
+                ) {
+                    field.value = if field.value == "true" {
+                        "false".to_owned()
+                    } else {
+                        "true".to_owned()
+                    };
+                }
+            }
+            FieldKind::Select(options) => match key.code {
+                KeyCode::Left => field.value = next_select_value(options, &field.value, false),
+                KeyCode::Right | KeyCode::Char(' ') => {
+                    field.value = next_select_value(options, &field.value, true);
+                }
+                _ => {}
+            },
+            FieldKind::Text | FieldKind::Int | FieldKind::List | FieldKind::Rows(_) => {
+                match key.code {
+                    KeyCode::Char(c) => field.value.push(c),
+                    KeyCode::Backspace => {
+                        field.value.pop();
+                    }
+                    // Only reached for multi-line fields (single-line Enter is
+                    // handled above as field navigation).
+                    KeyCode::Enter => field.value.push('\n'),
+                    _ => {}
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Application state for the decman-cli terminal UI.
@@ -384,6 +1006,8 @@ pub struct App {
     audit_table: TableState,
     tick: usize,
     can_logout: bool,
+    /// The operator party id, prefetched for composer prefill (empty if unknown).
+    operator_party: String,
     should_quit: bool,
     should_logout: bool,
 }
@@ -418,6 +1042,7 @@ impl App {
             audit_table: TableState::default(),
             tick: 0,
             can_logout,
+            operator_party: String::new(),
             should_quit: false,
             should_logout: false,
         }
@@ -511,6 +1136,8 @@ impl App {
         let _ = self.requests.send(Request::Parties);
         let _ = self.requests.send(Request::Dars);
         let _ = self.requests.send(Request::Feed);
+        // Prefetch the operator party for composer prefill.
+        let _ = self.requests.send(Request::OperatorInfo);
 
         while !self.should_quit && !self.should_logout {
             self.tick = self.tick.wrapping_add(1);
@@ -554,7 +1181,12 @@ impl App {
                     clamp_selection(&mut self.feed_table, self.feed.len());
                     self.feed_status = Status::Loaded;
                 }
-                Update::Feed(Err(error)) => self.feed_status = Status::Error(error),
+                // Keep the last feed on a transient poll error; only surface it
+                // when there is nothing to show (mirrors the peer-poll behavior).
+                Update::Feed(Err(error)) if self.feed.is_empty() => {
+                    self.feed_status = Status::Error(error);
+                }
+                Update::Feed(Err(_)) => {}
                 Update::Peers(Ok(peers)) => {
                     self.peers = peers;
                     clamp_selection(&mut self.peers_table, self.peers.len());
@@ -586,6 +1218,39 @@ impl App {
                 Update::Action(Err(error)) => {
                     if matches!(self.overlay, Overlay::Busy(_)) {
                         self.overlay = Overlay::Message(format!("Failed: {error}"));
+                    }
+                }
+                Update::ChainAudit(result) => {
+                    if matches!(self.overlay, Overlay::Busy(_)) {
+                        self.overlay = match result {
+                            Ok(entries) => Overlay::ChainAudit { entries, scroll: 0 },
+                            Err(error) => Overlay::Message(error),
+                        };
+                    }
+                }
+                Update::AuthStatus(result) => {
+                    if matches!(self.overlay, Overlay::Busy(_) | Overlay::Auth { .. }) {
+                        self.overlay = match result {
+                            Ok(parties) => Overlay::Auth { parties, scroll: 0 },
+                            Err(error) => Overlay::Message(error),
+                        };
+                    }
+                }
+                Update::Governance(result) => {
+                    if matches!(self.overlay, Overlay::Busy(_) | Overlay::Governance(_)) {
+                        self.overlay = match result {
+                            Ok(view) => Overlay::Governance(view),
+                            Err(error) => Overlay::Message(error),
+                        };
+                    }
+                }
+                Update::OperatorInfo(party_id) => self.operator_party = party_id,
+                Update::DeployContext(result) => {
+                    if matches!(self.overlay, Overlay::Busy(_)) {
+                        self.overlay = match result {
+                            Ok(form) => Overlay::Deploy(form),
+                            Err(error) => Overlay::Message(error),
+                        };
                     }
                 }
                 // Ignore late detail results after the view was closed.
@@ -635,6 +1300,8 @@ impl App {
             (KeyCode::Esc, _) => self.should_quit = true,
             (KeyCode::Char('/'), _) if self.active_tab.searchable() => self.searching = true,
             (KeyCode::Char('r'), _) => self.refresh_active(),
+            // View authentication status for all parties (any tab).
+            (KeyCode::Char('A'), _) => self.open_auth(),
             (KeyCode::Tab | KeyCode::Right, _) => self.switch_to(self.active_tab.next()),
             (KeyCode::BackTab | KeyCode::Left, _) => self.switch_to(self.active_tab.previous()),
             (KeyCode::Char('1'), _) => self.switch_to(Tab::Parties),
@@ -645,6 +1312,8 @@ impl App {
             (KeyCode::Up | KeyCode::Char('k'), _) => self.select_previous(),
             // Open the party detail view.
             (KeyCode::Enter, _) if self.active_tab == Tab::Parties => self.open_party_detail(),
+            // Start onboarding a new decentralized party.
+            (KeyCode::Char('n'), _) if self.active_tab == Tab::Parties => self.open_onboard(),
             // Workflows actions.
             (KeyCode::Char('a'), _) if self.active_tab == Tab::Workflows => {
                 self.invitation_action(true);
@@ -653,6 +1322,9 @@ impl App {
                 self.invitation_action(false);
             }
             (KeyCode::Char('d'), _) if self.active_tab == Tab::Workflows => self.dismiss_run(),
+            (KeyCode::Char('c'), _) if self.active_tab == Tab::Workflows => self.cancel_run(),
+            (KeyCode::Char('t'), _) if self.active_tab == Tab::Workflows => self.retry_run(),
+            (KeyCode::Enter, _) if self.active_tab == Tab::Workflows => self.open_feed_detail(),
             // Dars actions.
             (KeyCode::Char('c'), _) if self.active_tab == Tab::Dars => self.start_compare(),
             (KeyCode::Char('u'), _) if self.active_tab == Tab::Dars => self.start_upload(),
@@ -668,6 +1340,18 @@ impl App {
             None,
             Close,
             Distribute,
+            Onboard,
+            Kick,
+            TestAuth,
+            GovConfirm,
+            GovExecute,
+            GovRevoke,
+            GovExpire,
+            ComposeAction,
+            ComposeProposal,
+            OpenComposer,
+            SubmitComposer,
+            SubmitDeploy,
         }
 
         let mut act = Act::None;
@@ -688,10 +1372,125 @@ impl App {
                 KeyCode::Enter => act = Act::Distribute,
                 _ => {}
             },
-            Overlay::Compare { scroll, .. } | Overlay::Json { scroll, .. } => match key.code {
+            Overlay::Compare { scroll, .. }
+            | Overlay::Json { scroll, .. }
+            | Overlay::FeedDetail { scroll, .. }
+            | Overlay::ChainAudit { scroll, .. } => match key.code {
                 KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => act = Act::Close,
                 KeyCode::Up | KeyCode::Char('k') => *scroll = scroll.saturating_sub(1),
                 KeyCode::Down | KeyCode::Char('j') => *scroll = scroll.saturating_add(1),
+                _ => {}
+            },
+            Overlay::Onboard(form) => match key.code {
+                KeyCode::Esc => act = Act::Close,
+                KeyCode::Enter => act = Act::Onboard,
+                KeyCode::Up => form.cursor = form.cursor.saturating_sub(1),
+                KeyCode::Down | KeyCode::Tab => {
+                    if form.cursor < form.peers.len() {
+                        form.cursor += 1;
+                    }
+                }
+                KeyCode::Char(' ') if !form.on_prefix() => {
+                    if let Some(peer) = form.peer_index().and_then(|i| form.peers.get_mut(i)) {
+                        peer.checked = !peer.checked;
+                    }
+                }
+                KeyCode::Backspace if form.on_prefix() => {
+                    form.prefix.pop();
+                }
+                KeyCode::Char(c) if form.on_prefix() => form.prefix.push(c),
+                _ => {}
+            },
+            Overlay::Kick(form) => match key.code {
+                KeyCode::Esc => act = Act::Close,
+                KeyCode::Enter => act = Act::Kick,
+                KeyCode::Up | KeyCode::Char('k') => {
+                    form.selected = form.selected.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if form.selected + 1 < form.candidates.len() {
+                        form.selected += 1;
+                    }
+                }
+                KeyCode::Left | KeyCode::Char('-') => {
+                    form.new_threshold = (form.new_threshold - 1).max(1);
+                }
+                KeyCode::Right | KeyCode::Char('+') => {
+                    form.new_threshold = (form.new_threshold + 1).min(form.max_threshold);
+                }
+                _ => {}
+            },
+            Overlay::Auth { scroll, .. } => match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => act = Act::Close,
+                KeyCode::Char('t') => act = Act::TestAuth,
+                KeyCode::Up | KeyCode::Char('k') => *scroll = scroll.saturating_sub(1),
+                KeyCode::Down | KeyCode::Char('j') => *scroll = scroll.saturating_add(1),
+                _ => {}
+            },
+            Overlay::Governance(view) => match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => act = Act::Close,
+                KeyCode::Up | KeyCode::Char('k') => {
+                    view.selected = view.selected.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if view.selected + 1 < view.items.len() {
+                        view.selected += 1;
+                    }
+                }
+                KeyCode::Char('c') => act = Act::GovConfirm,
+                KeyCode::Char('e') => act = Act::GovExecute,
+                KeyCode::Char('r') => act = Act::GovRevoke,
+                KeyCode::Char('x') => act = Act::GovExpire,
+                KeyCode::Char('n') => act = Act::ComposeAction,
+                KeyCode::Char('p') => act = Act::ComposeProposal,
+                _ => {}
+            },
+            Overlay::ComposerPick(pick) => match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => act = Act::Close,
+                KeyCode::Up => pick.selected = pick.selected.saturating_sub(1),
+                KeyCode::Down => {
+                    if pick.selected + 1 < pick.options.len() {
+                        pick.selected += 1;
+                    }
+                }
+                KeyCode::Enter => act = Act::OpenComposer,
+                _ => {}
+            },
+            Overlay::Composer(composer) => {
+                if key.code == KeyCode::Esc {
+                    act = Act::Close;
+                } else if composer_key(composer, key) {
+                    act = Act::SubmitComposer;
+                }
+            }
+            Overlay::Deploy(form) => match key.code {
+                KeyCode::Esc => act = Act::Close,
+                KeyCode::Up => form.cursor = form.cursor.saturating_sub(1),
+                KeyCode::Down | KeyCode::Tab => {
+                    if form.cursor < 2 {
+                        form.cursor += 1;
+                    }
+                }
+                KeyCode::Enter if form.cursor >= 2 => act = Act::SubmitDeploy,
+                KeyCode::Enter => {
+                    if form.cursor < 2 {
+                        form.cursor += 1;
+                    }
+                }
+                KeyCode::Char(c) if c.is_ascii_digit() => match form.cursor {
+                    0 => form.threshold.push(c),
+                    1 => form.timeout_micros.push(c),
+                    _ => {}
+                },
+                KeyCode::Backspace => match form.cursor {
+                    0 => {
+                        form.threshold.pop();
+                    }
+                    1 => {
+                        form.timeout_micros.pop();
+                    }
+                    _ => {}
+                },
                 _ => {}
             },
             Overlay::Message(_) | Overlay::Busy(_) => {
@@ -706,6 +1505,18 @@ impl App {
             Act::None => {}
             Act::Close => self.overlay = Overlay::None,
             Act::Distribute => self.confirm_distribute(),
+            Act::Onboard => self.confirm_onboard(),
+            Act::Kick => self.confirm_kick(),
+            Act::TestAuth => self.run_auth_test(),
+            Act::GovConfirm => self.gov_confirm(),
+            Act::GovExecute => self.gov_execute(),
+            Act::GovRevoke => self.gov_revoke(),
+            Act::GovExpire => self.gov_expire(),
+            Act::ComposeAction => self.open_composer_pick(ComposerKind::Action),
+            Act::ComposeProposal => self.open_composer_pick(ComposerKind::Proposal),
+            Act::OpenComposer => self.open_composer(),
+            Act::SubmitComposer => self.submit_composer(),
+            Act::SubmitDeploy => self.submit_deploy(),
         }
     }
 
@@ -769,6 +1580,14 @@ impl App {
             }
             // Open the selected audit entry's JSON in a modal.
             KeyCode::Enter | KeyCode::Char(' ') => self.open_audit_json(),
+            // Kick a participant from this party.
+            KeyCode::Char('K') => self.open_kick(),
+            // View the on-chain governance audit trail.
+            KeyCode::Char('c') => self.open_chain_audit(),
+            // Open the governance approvals list (confirm / execute / revoke).
+            KeyCode::Char('g') => self.open_governance(),
+            // Deploy governance-core contracts for this party.
+            KeyCode::Char('D') => self.open_deploy(),
             _ => {}
         }
     }
@@ -829,6 +1648,515 @@ impl App {
         };
         let _ = self.requests.send(Request::Dismiss(name));
         self.overlay = Overlay::Busy("Dismissing workflow…".to_owned());
+    }
+
+    /// Cancel the selected workflow run (only valid for an in-progress run this
+    /// node coordinates).
+    fn cancel_run(&mut self) {
+        let kind = match self.selected_feed_item() {
+            Some(FeedItem::Run(run))
+                if run.status == WorkflowProgress::InProgress
+                    && run.role == WorkflowRole::Coordinator =>
+            {
+                run.kind
+            }
+            Some(FeedItem::Run(_)) => {
+                self.overlay = Overlay::Message(
+                    "Only in-progress workflows you coordinate can be cancelled.".to_owned(),
+                );
+                return;
+            }
+            _ => return,
+        };
+        let _ = self.requests.send(Request::CancelWorkflow(kind));
+        self.overlay = Overlay::Busy("Cancelling workflow…".to_owned());
+    }
+
+    /// Retry the selected workflow run (only valid for a failed run this node
+    /// coordinates).
+    fn retry_run(&mut self) {
+        let name = match self.selected_feed_item() {
+            Some(FeedItem::Run(run))
+                if run.status == WorkflowProgress::Failed
+                    && run.role == WorkflowRole::Coordinator =>
+            {
+                run.instance_name.clone()
+            }
+            Some(FeedItem::Run(_)) => {
+                self.overlay = Overlay::Message(
+                    "Only failed workflows you coordinate can be retried.".to_owned(),
+                );
+                return;
+            }
+            _ => return,
+        };
+        let _ = self.requests.send(Request::RetryWorkflow(name));
+        self.overlay = Overlay::Busy("Retrying workflow…".to_owned());
+    }
+
+    /// Open the action / proposal type picker from the governance overlay.
+    fn open_composer_pick(&mut self, kind: ComposerKind) {
+        let pick = {
+            let Overlay::Governance(view) = &self.overlay else {
+                return;
+            };
+            if matches!(kind, ComposerKind::Proposal) && view.governance_type != "core_self" {
+                None
+            } else {
+                let options = match kind {
+                    ComposerKind::Action => composer::action_types(&view.governance_type),
+                    ComposerKind::Proposal => composer::proposal_types(),
+                };
+                Some(ComposerPick {
+                    kind,
+                    party_id: view.party_id.clone(),
+                    party_name: view.party_name.clone(),
+                    governance_type: view.governance_type.clone(),
+                    rules_contract_id: view.rules_contract_id.clone(),
+                    default_threshold: i64::from(view.threshold),
+                    options,
+                    selected: 0,
+                })
+            }
+        };
+        self.overlay = match pick {
+            Some(pick) => Overlay::ComposerPick(Box::new(pick)),
+            None => Overlay::Message(
+                "Proposals are only available on core-self governance parties.".to_owned(),
+            ),
+        };
+    }
+
+    /// Open the composer form for the type selected in the picker.
+    fn open_composer(&mut self) {
+        let composer = {
+            let Overlay::ComposerPick(pick) = &self.overlay else {
+                return;
+            };
+            let Some(option) = pick.options.get(pick.selected) else {
+                return;
+            };
+            let ctx = ComposerContext {
+                party_id: pick.party_id.clone(),
+                operator_party: self.operator_party.clone(),
+                default_threshold: pick.default_threshold,
+            };
+            let (fields, submit) = match pick.kind {
+                ComposerKind::Action => (
+                    composer::fields_for_action(option.key, &ctx),
+                    ComposerSubmit::Confirm,
+                ),
+                ComposerKind::Proposal => (
+                    composer::fields_for_proposal(option.key, &ctx),
+                    ComposerSubmit::Propose,
+                ),
+            };
+            Composer {
+                title: option.label.to_owned(),
+                action_type: option.key,
+                submit,
+                party_id: pick.party_id.clone(),
+                party_name: pick.party_name.clone(),
+                governance_type: pick.governance_type.clone(),
+                rules_contract_id: pick.rules_contract_id.clone(),
+                fields,
+                cursor: 0,
+            }
+        };
+        self.overlay = Overlay::Composer(Box::new(composer));
+    }
+
+    /// Validate the composer form and submit it (confirm or propose).
+    fn submit_composer(&mut self) {
+        let outcome = {
+            let Overlay::Composer(composer) = &self.overlay else {
+                return;
+            };
+            composer::build_payload(composer).map(|payload| {
+                let op = match composer.submit {
+                    ComposerSubmit::Confirm => GovOp::Confirm {
+                        action: payload,
+                        governance_type: composer.governance_type.clone(),
+                        proposal_cid: None,
+                    },
+                    ComposerSubmit::Propose => GovOp::Propose { proposal: payload },
+                };
+                GovActionRequest {
+                    op,
+                    party_id: composer.party_id.clone(),
+                    party_name: composer.party_name.clone(),
+                    governance_type: composer.governance_type.clone(),
+                    rules_contract_id: composer.rules_contract_id.clone(),
+                }
+            })
+        };
+        match outcome {
+            Ok(request) => {
+                let _ = self.requests.send(Request::GovAction(Box::new(request)));
+                self.overlay = Overlay::Busy("Submitting…".to_owned());
+            }
+            Err(error) => self.overlay = Overlay::Message(error),
+        }
+    }
+
+    /// Start a governance-core contract deployment for the party in detail view.
+    fn open_deploy(&mut self) {
+        let Some(party) = self.detail.as_ref() else {
+            return;
+        };
+        if party_governance_type(party).is_some() {
+            self.overlay = Overlay::Message(
+                "This party already has governance contracts deployed.".to_owned(),
+            );
+            return;
+        }
+        let _ = self.requests.send(Request::DeployContext {
+            party_id: party.party_id.to_string(),
+            party_name: party_name(party).to_owned(),
+        });
+        self.overlay = Overlay::Busy("Preparing contract deployment…".to_owned());
+    }
+
+    /// Validate the deploy form and start the contracts workflow.
+    fn submit_deploy(&mut self) {
+        let outcome = {
+            let Overlay::Deploy(form) = &self.overlay else {
+                return;
+            };
+            build_contracts_request(form)
+        };
+        match outcome {
+            Ok(body) => {
+                let _ = self.requests.send(Request::DeploySubmit(Box::new(body)));
+                self.overlay = Overlay::Busy("Deploying contracts…".to_owned());
+            }
+            Err(error) => self.overlay = Overlay::Message(error),
+        }
+    }
+
+    /// Fetch and show the per-party authentication status overlay.
+    fn open_auth(&mut self) {
+        let _ = self.requests.send(Request::AuthStatus);
+        self.overlay = Overlay::Busy("Loading authentication status…".to_owned());
+    }
+
+    /// Re-test authentication for all parties, then refresh the auth overlay.
+    fn run_auth_test(&mut self) {
+        let _ = self.requests.send(Request::TestAuth);
+        self.overlay = Overlay::Busy("Testing authentication…".to_owned());
+    }
+
+    /// Open the governance approvals list for the party in the detail view.
+    fn open_governance(&mut self) {
+        let Some(party) = self.detail.as_ref() else {
+            return;
+        };
+        let Some(governance_type) = party_governance_type(party) else {
+            self.overlay =
+                Overlay::Message("This party has no governance rules contract.".to_owned());
+            return;
+        };
+        let _ = self.requests.send(Request::Governance {
+            party_id: party.party_id.to_string(),
+            party_name: party_name(party).to_owned(),
+            governance_type: governance_type.to_owned(),
+        });
+        self.overlay = Overlay::Busy("Loading governance approvals…".to_owned());
+    }
+
+    /// Build a governance-action request for the selected item, applying `op`.
+    fn gov_request(view: &GovView, op: GovOp) -> GovActionRequest {
+        GovActionRequest {
+            op,
+            party_id: view.party_id.clone(),
+            party_name: view.party_name.clone(),
+            governance_type: view.governance_type.clone(),
+            rules_contract_id: view.rules_contract_id.clone(),
+        }
+    }
+
+    /// Add this node's confirmation to the selected governance action.
+    fn gov_confirm(&mut self) {
+        let request = {
+            let Overlay::Governance(view) = &self.overlay else {
+                return;
+            };
+            let Some(item) = view.items.get(view.selected) else {
+                return;
+            };
+            let op = match item {
+                GovItem::OffChain(action) => GovOp::Confirm {
+                    action: action.action.clone(),
+                    governance_type: view.governance_type.clone(),
+                    proposal_cid: None,
+                },
+                GovItem::Domain(domain) => GovOp::Confirm {
+                    action: placeholder_action(),
+                    governance_type: "core_domain".to_owned(),
+                    proposal_cid: Some(domain.proposal_cid.clone()),
+                },
+            };
+            Self::gov_request(view, op)
+        };
+        let _ = self.requests.send(Request::GovAction(Box::new(request)));
+        self.overlay = Overlay::Busy("Confirming action…".to_owned());
+    }
+
+    /// Execute the selected governance action once its threshold is met.
+    fn gov_execute(&mut self) {
+        let (can_execute, request) = {
+            let Overlay::Governance(view) = &self.overlay else {
+                return;
+            };
+            let Some(item) = view.items.get(view.selected) else {
+                return;
+            };
+            let (can_execute, op) = match item {
+                GovItem::OffChain(action) => (
+                    action.can_execute,
+                    GovOp::Execute {
+                        action: action.action.clone(),
+                        confirmation_cids: confirmation_cids(&action.confirmations),
+                        governance_type: view.governance_type.clone(),
+                        proposal_cid: None,
+                    },
+                ),
+                GovItem::Domain(domain) => (
+                    domain.can_execute,
+                    GovOp::Execute {
+                        action: placeholder_action(),
+                        confirmation_cids: confirmation_cids(&domain.confirmations),
+                        governance_type: "core_domain".to_owned(),
+                        proposal_cid: Some(domain.proposal_cid.clone()),
+                    },
+                ),
+            };
+            (can_execute, Self::gov_request(view, op))
+        };
+        if !can_execute {
+            self.overlay =
+                Overlay::Message("Not enough confirmations to execute this action yet.".to_owned());
+            return;
+        }
+        let _ = self.requests.send(Request::GovAction(Box::new(request)));
+        self.overlay = Overlay::Busy("Executing action…".to_owned());
+    }
+
+    /// Revoke this node's own confirmation on the selected governance action.
+    fn gov_revoke(&mut self) {
+        let request = {
+            let Overlay::Governance(view) = &self.overlay else {
+                return;
+            };
+            let Some(item) = view.items.get(view.selected) else {
+                return;
+            };
+            let (confirmations, governance_type) = match item {
+                GovItem::OffChain(action) => (&action.confirmations, view.governance_type.clone()),
+                GovItem::Domain(domain) => (&domain.confirmations, "core_domain".to_owned()),
+            };
+            confirmations
+                .iter()
+                .find(|confirmation| confirmation.confirming_party == view.member_party_id)
+                .map(|mine| {
+                    Self::gov_request(
+                        view,
+                        GovOp::Cancel {
+                            confirmation_cid: mine.contract_id.clone(),
+                            governance_type,
+                        },
+                    )
+                })
+        };
+        match request {
+            Some(request) => {
+                let _ = self.requests.send(Request::GovAction(Box::new(request)));
+                self.overlay = Overlay::Busy("Revoking confirmation…".to_owned());
+            }
+            None => {
+                self.overlay = Overlay::Message("You have no confirmation to revoke.".to_owned());
+            }
+        }
+    }
+
+    /// Expire the first stale confirmation on the selected governance action.
+    fn gov_expire(&mut self) {
+        let now = now_secs();
+        let request = {
+            let Overlay::Governance(view) = &self.overlay else {
+                return;
+            };
+            let Some(item) = view.items.get(view.selected) else {
+                return;
+            };
+            let (confirmations, governance_type) = match item {
+                GovItem::OffChain(action) => (&action.confirmations, view.governance_type.clone()),
+                GovItem::Domain(domain) => (&domain.confirmations, "core_domain".to_owned()),
+            };
+            confirmations
+                .iter()
+                .find(|confirmation| confirmation.expires_at > 0 && confirmation.expires_at <= now)
+                .map(|stale| {
+                    Self::gov_request(
+                        view,
+                        GovOp::Expire {
+                            confirmation_cid: stale.contract_id.clone(),
+                            governance_type,
+                        },
+                    )
+                })
+        };
+        match request {
+            Some(request) => {
+                let _ = self.requests.send(Request::GovAction(Box::new(request)));
+                self.overlay = Overlay::Busy("Expiring confirmation…".to_owned());
+            }
+            None => {
+                self.overlay =
+                    Overlay::Message("No expired confirmations on this action.".to_owned());
+            }
+        }
+    }
+
+    /// Fetch and show the on-chain governance audit trail for the open party.
+    fn open_chain_audit(&mut self) {
+        if let Some(party) = self.detail.as_ref() {
+            let _ = self
+                .requests
+                .send(Request::ChainAudit(party.party_id.to_string()));
+            self.overlay = Overlay::Busy("Loading on-chain audit…".to_owned());
+        }
+    }
+
+    /// Open a scrollable detail view for the selected feed item.
+    fn open_feed_detail(&mut self) {
+        if let Some(item) = self.selected_feed_item() {
+            self.overlay = Overlay::FeedDetail {
+                item: Box::new(item.clone()),
+                scroll: 0,
+            };
+        }
+    }
+
+    /// Open the onboarding form, seeded with all configured peers (self
+    /// excluded), each ticked by default — matching the web frontend.
+    fn open_onboard(&mut self) {
+        let peers: Vec<PeerChoice> = self
+            .peers
+            .iter()
+            .filter(|peer| !peer.is_self)
+            .map(|peer| PeerChoice {
+                id: peer.participant_id.clone(),
+                name: peer.name.clone(),
+                checked: true,
+            })
+            .collect();
+        if peers.is_empty() {
+            self.overlay = Overlay::Message(
+                "No peers available to onboard with. Configure peers first.".to_owned(),
+            );
+            return;
+        }
+        self.overlay = Overlay::Onboard(OnboardForm {
+            prefix: String::new(),
+            peers,
+            cursor: 0,
+        });
+    }
+
+    /// Validate the onboarding form and send the start request.
+    fn confirm_onboard(&mut self) {
+        let Overlay::Onboard(form) = &self.overlay else {
+            return;
+        };
+        let prefix = form.prefix.trim().to_owned();
+        if let Err(message) = validate_prefix(&prefix) {
+            self.overlay = Overlay::Message(message);
+            return;
+        }
+        let peer_ids: Vec<String> = form
+            .peers
+            .iter()
+            .filter(|peer| peer.checked)
+            .map(|peer| peer.id.clone())
+            .collect();
+        if peer_ids.is_empty() {
+            self.overlay = Overlay::Message("Select at least one peer to onboard.".to_owned());
+            return;
+        }
+        let _ = self.requests.send(Request::Onboard {
+            prefix: prefix.clone(),
+            peer_ids,
+        });
+        self.overlay = Overlay::Busy(format!("Starting onboarding for {prefix}…"));
+    }
+
+    /// Open the kick form for the party in the detail view, listing the owner
+    /// participants that can be removed (self excluded).
+    fn open_kick(&mut self) {
+        let Some(party) = self.detail.as_ref() else {
+            return;
+        };
+        let self_id = self
+            .peers
+            .iter()
+            .find(|peer| peer.is_self)
+            .map(|peer| peer.participant_id.clone());
+        let candidates: Vec<KickCandidate> = party
+            .participants
+            .iter()
+            .filter(|participant| participant.owner_key.is_some())
+            .filter_map(|participant| {
+                let id = participant.participant_uid.to_string();
+                if self_id.as_deref() == Some(id.as_str()) {
+                    return None;
+                }
+                Some(KickCandidate {
+                    participant_id: id,
+                    label: participant.participant_uid.prefix.clone(),
+                })
+            })
+            .collect();
+        if candidates.is_empty() {
+            self.overlay = Overlay::Message("No owner participants available to kick.".to_owned());
+            return;
+        }
+        let owners = i32::try_from(party.owners.len()).unwrap_or(i32::MAX);
+        let remaining = (owners - 1).max(0);
+        if remaining < 1 {
+            self.overlay =
+                Overlay::Message("Cannot kick: the party would be left with no owners.".to_owned());
+            return;
+        }
+        let suggested = (((remaining + 1) / 2).max(1)).min(remaining);
+        self.overlay = Overlay::Kick(KickForm {
+            party_id: party.party_id.to_string(),
+            party_name: party_name(party).to_owned(),
+            previous_threshold: party.threshold,
+            candidates,
+            selected: 0,
+            new_threshold: suggested,
+            max_threshold: remaining,
+        });
+    }
+
+    /// Send the kick request for the selected candidate in the kick form.
+    fn confirm_kick(&mut self) {
+        let Overlay::Kick(form) = &self.overlay else {
+            return;
+        };
+        let Some(candidate) = form.candidates.get(form.selected) else {
+            return;
+        };
+        let request = Request::Kick {
+            party_id: form.party_id.clone(),
+            participant_id: candidate.participant_id.clone(),
+            new_threshold: form.new_threshold,
+            previous_threshold: form.previous_threshold,
+        };
+        let label = candidate.label.clone();
+        let _ = self.requests.send(request);
+        self.overlay = Overlay::Busy(format!("Kicking {label}…"));
     }
 
     /// Kick off the package checker.
@@ -1061,6 +2389,59 @@ mod tests {
         // A substring of the namespace hex matches against the full party id.
         assert_eq!(filter_parties(&parties, "c4010d").len(), 1);
         assert_eq!(filter_parties(&parties, "nomatch").len(), 0);
+    }
+
+    #[test]
+    fn validate_prefix_accepts_valid_and_rejects_invalid() {
+        assert!(validate_prefix("vault-rc5").is_ok());
+        assert!(validate_prefix("a_b-9").is_ok());
+        assert!(validate_prefix("").is_err()); // empty
+        assert!(validate_prefix("9abc").is_err()); // must start with a letter
+        assert!(validate_prefix("ab cd").is_err()); // space
+        assert!(validate_prefix("ab.cd").is_err()); // illegal char
+        assert!(validate_prefix(&"a".repeat(181)).is_err()); // too long
+        assert!(validate_prefix(&"a".repeat(180)).is_ok()); // at the limit
+    }
+
+    fn deploy_form() -> DeployForm {
+        DeployForm {
+            party_id: "dec::1220".to_owned(),
+            party_name: "cbtc-network".to_owned(),
+            package_id: "#governance-core-v1".to_owned(),
+            operator_party: "op::1220".to_owned(),
+            participant_ids: vec!["p1::1220".to_owned(), "p2::1220".to_owned()],
+            member_parties: vec!["m1::1220".to_owned(), "m2::1220".to_owned()],
+            threshold: "2".to_owned(),
+            timeout_micros: "86400000000".to_owned(),
+            cursor: 0,
+        }
+    }
+
+    #[test]
+    fn build_contracts_request_assembles_gov_core() {
+        let body = match build_contracts_request(&deploy_form()) {
+            Ok(body) => body,
+            Err(error) => panic!("build failed: {error}"),
+        };
+        assert_eq!(body["decentralized_party_id"], "dec::1220");
+        assert_eq!(body["participant_ids"][0], "p1::1220");
+        assert_eq!(body["participant_parties"][1], "m2::1220");
+        let contract = &body["contracts"][0];
+        assert_eq!(contract["entity_name"], "GovernanceRules");
+        assert_eq!(contract["fields"][1]["type"], "party_set");
+        assert_eq!(contract["fields"][2]["type"], "governance_threshold");
+        assert_eq!(contract["fields"][2]["value"], 2);
+        assert_eq!(contract["fields"][3]["microseconds"], 86_400_000_000_i64);
+    }
+
+    #[test]
+    fn build_contracts_request_rejects_missing_package() {
+        let mut form = deploy_form();
+        form.package_id = String::new();
+        match build_contracts_request(&form) {
+            Err(error) => assert!(error.contains("governance-core")),
+            Ok(_) => panic!("expected a missing-package error"),
+        }
     }
 
     #[test]
