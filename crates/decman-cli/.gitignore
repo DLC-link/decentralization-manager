@@ -1,4 +1,4 @@
 /target
 .env
 config.toml
-.decliman-session
+.decman-cli-session

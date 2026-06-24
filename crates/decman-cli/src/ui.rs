@@ -1477,7 +1477,10 @@ mod tests {
         };
 
         let mut audit_state = TableState::default().with_selected(Some(0));
-        let mut terminal = Terminal::new(TestBackend::new(96, 26)).unwrap();
+        // Wide enough for a participant row to show the full Canton id (a
+        // ~83-char `prefix::namespace`) AND the trailing `[permission]` tag,
+        // which the boxes lay out full-width (vertical layout).
+        let mut terminal = Terminal::new(TestBackend::new(120, 26)).unwrap();
         terminal
             .draw(|frame| {
                 draw_party_detail(frame, frame.area(), &party, Some(&data), &mut audit_state)
@@ -1492,8 +1495,8 @@ mod tests {
             .collect();
 
         // Each section renders in its own framed box, with its data. The party
-        // id and participant uid render as their prefixes (truncated to fit the
-        // 96-column test buffer, so assert on the visible prefix segment).
+        // id and participant uid render as the full Canton id; assert on the
+        // visible prefix segment.
         assert!(rendered.contains("cbtc-network::"));
         assert!(rendered.contains("Participants"));
         assert!(rendered.contains("participant-1::"));
