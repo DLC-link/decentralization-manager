@@ -4,8 +4,7 @@ use uuid::Uuid;
 
 use canton_proto_rs::com::{
     daml::ledger::api::v2::{
-        CumulativeFilter, EventFormat, Filters, GetActiveContractsRequest, GetLedgerEndRequest,
-        Signature, WildcardFilter, cumulative_filter,
+        Signature, Transaction, event,
         interactive::{
             ExecuteSubmissionAndWaitForTransactionRequest, PartySignatures,
             PrepareSubmissionResponse, SinglePartySignatures,
@@ -16,7 +15,6 @@ use canton_proto_rs::com::{
 
 use crate::{
     config::NodeConfig,
-    consts::{topology_retry_delay_secs, topology_retry_max_attempts},
     error::Result,
     utils,
     workflow::{
@@ -120,8 +118,12 @@ pub async fn execute_submissions(
     );
 
     // Step 4: Execute each submission
-    let token_opt = Some(token.to_string());
-    let mut submission_client = utils::create_submission_client(config, token_opt.clone()).await?;
+    let mut submission_client =
+        utils::create_submission_client(config, Some(token.to_string())).await?;
+
+    // Contract ids of everything we create, harvested from each submission's
+    // committed transaction response, purely so we can log how many we made.
+    let mut all_created_contract_ids: Vec<String> = Vec::new();
 
     for (idx, prepared_response) in prepared_submissions.iter().enumerate() {
         tracing::info!("Executing submission {index}...", index = idx + 1);
@@ -183,89 +185,58 @@ pub async fn execute_submissions(
             transaction_format: None,
         };
 
-        submission_client
+        let response = submission_client
             .execute_submission_and_wait_for_transaction(tonic::Request::new(execute_request))
-            .await?;
-
-        tracing::info!("Submission {index} executed successfully", index = idx + 1);
-    }
-
-    // Step 5: Wait for contracts to appear in ACS
-    tracing::info!("Waiting for contracts to appear in ledger...");
-    let mut state_client = utils::create_state_client(config, token_opt).await?;
-
-    let max_attempts = topology_retry_max_attempts();
-    let retry_delay = tokio::time::Duration::from_secs(topology_retry_delay_secs());
-
-    for attempt in 1..=max_attempts {
-        // Get current ledger end
-        let ledger_end = state_client
-            .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
-            .await?
-            .into_inner()
-            .offset;
-
-        // Query ACS for the decentralized party
-        // Filter by the specific party rather than "any party" to avoid permission issues
-        let mut filters_by_party = std::collections::HashMap::new();
-        filters_by_party.insert(
-            decentralized_party.clone(),
-            Filters {
-                cumulative: vec![CumulativeFilter {
-                    identifier_filter: Some(cumulative_filter::IdentifierFilter::WildcardFilter(
-                        WildcardFilter {
-                            include_created_event_blob: false,
-                        },
-                    )),
-                }],
-            },
-        );
-
-        let acs_request = GetActiveContractsRequest {
-            active_at_offset: ledger_end,
-            event_format: Some(EventFormat {
-                filters_by_party,
-                filters_for_any_party: None,
-                verbose: false,
-            }),
-        };
-
-        let mut stream = state_client
-            .get_active_contracts(tonic::Request::new(acs_request))
             .await?
             .into_inner();
 
-        let mut contract_count = 0;
-        while let Some(response) = stream.message().await? {
-            if response.contract_entry.is_some() {
-                contract_count += 1;
-            }
-        }
-
-        tracing::debug!(
-            "Found {contract_count} contracts for party {decentralized_party} (attempt {attempt}/{max_attempts})",
+        // The RPC blocks until the transaction is committed, and its response
+        // carries the created events — i.e. the exact contracts this submission
+        // produced. Harvest their ids just to report how many we created.
+        let created = created_contract_ids(&response.transaction);
+        tracing::info!(
+            "Submission {index} executed successfully, created {count} contract(s)",
+            index = idx + 1,
+            count = created.len(),
         );
-
-        // We expect at least as many contracts as submissions
-        if contract_count >= num_submissions {
-            tracing::info!(
-                "All contracts successfully created! Found {contract_count} contracts after {attempt} attempt(s)"
-            );
-            break;
-        }
-
-        if attempt < max_attempts {
-            tracing::debug!("Contracts not yet visible, retrying in {retry_delay:?}...");
-            tokio::time::sleep(retry_delay).await;
-        } else {
-            anyhow::bail!(
-                "Contracts not visible in ACS after {max_attempts} attempts. Found only {contract_count} contracts, expected at least {num_submissions}"
-            );
-        }
+        all_created_contract_ids.extend(created);
     }
 
-    tracing::info!("Submissions executed successfully");
+    // No post-submission confirmation is needed.
+    // `execute_submission_and_wait_for_transaction` is the *and-wait* variant: it
+    // blocks until each transaction is sequenced and committed, so a successful
+    // return is itself the commit guarantee. There is nothing to re-confirm, and
+    // nothing downstream reads the ACS — the workflow advances straight to
+    // `Complete`. The default ACS_DELTA transaction shape also means the responses
+    // above already carried the created contracts, so we just log the count. An
+    // empty set means the submitting party isn't hosted on this node (the
+    // ACS_DELTA is filtered out), which is expected rather than an error.
+    tracing::info!(
+        "Submissions executed successfully; committed {count} created contract(s)",
+        count = all_created_contract_ids.len(),
+    );
+
     Ok(())
+}
+
+/// Collect the contract ids of every `CreatedEvent` in an execute-and-wait
+/// transaction response. These are the exact contracts the submission created,
+/// reported only to log how many were made. Returns an empty vec when the
+/// response carries no transaction or no created events.
+fn created_contract_ids(transaction: &Option<Transaction>) -> Vec<String> {
+    let Some(tx) = transaction else {
+        return Vec::new();
+    };
+
+    tx.events
+        .iter()
+        .filter_map(|ev| {
+            ev.event.as_ref().and_then(|inner| match inner {
+                event::Event::Created(created) => Some(created.contract_id.clone()),
+                _ => None,
+            })
+        })
+        .collect()
 }
 
 /// Decode a sequence of `varint(len)||proto` messages from a byte slice. Mirrors
@@ -287,4 +258,49 @@ fn read_all_messages_from_bytes<M: prost::Message + Default>(data: &[u8]) -> Res
         messages.push(M::decode(message_bytes)?);
     }
     Ok(messages)
+}
+
+#[cfg(test)]
+mod tests {
+    use canton_proto_rs::com::daml::ledger::api::v2::{
+        ArchivedEvent, CreatedEvent, Event, Transaction, event,
+    };
+
+    use super::created_contract_ids;
+
+    fn created(contract_id: &str) -> Event {
+        Event {
+            event: Some(event::Event::Created(CreatedEvent {
+                contract_id: contract_id.to_string(),
+                ..Default::default()
+            })),
+        }
+    }
+
+    #[test]
+    fn none_transaction_yields_no_ids() {
+        assert!(created_contract_ids(&None).is_empty());
+    }
+
+    #[test]
+    fn collects_only_created_event_ids_in_order() {
+        let tx = Transaction {
+            events: vec![
+                created("cid-1"),
+                // a non-created event must be ignored
+                Event {
+                    event: Some(event::Event::Archived(ArchivedEvent::default())),
+                },
+                created("cid-2"),
+                // an empty envelope must be ignored
+                Event { event: None },
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            created_contract_ids(&Some(tx)),
+            vec!["cid-1".to_string(), "cid-2".to_string()]
+        );
+    }
 }
