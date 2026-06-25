@@ -74,10 +74,15 @@ pub async fn save_network_config(
 }
 
 /// Node configuration response (includes runtime flags)
+///
+/// `config` is owned (not borrowed) so the type can derive `ts_rs::TS` for the
+/// frontend type generator — `TS` needs an owned, `'static` type. The handler
+/// clones the node config once per request, which is cheap relative to the I/O.
 #[derive(Serialize)]
-struct NodeConfigResponse<'a> {
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
+pub struct NodeConfigResponse {
     #[serde(flatten)]
-    config: &'a NodeConfig,
+    config: NodeConfig,
     test_mode: bool,
     /// dec-party-manager binary version, so the Config tab can show which
     /// build this node is running.
@@ -94,7 +99,7 @@ struct NodeConfigResponse<'a> {
 #[get("/node-config")]
 pub async fn get_node_config(data: web::Data<AppState>) -> impl Responder {
     HttpResponse::Ok().json(NodeConfigResponse {
-        config: &data.config,
+        config: data.config.clone(),
         test_mode: data.test_mode,
         version: env!("CARGO_PKG_VERSION"),
     })

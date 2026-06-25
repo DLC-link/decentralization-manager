@@ -427,7 +427,7 @@ export const GovernanceSection = ({
       );
       if (!res.ok) return;
       const body: GovernanceStateResponse = await res.json();
-      setGovernanceState(body.state);
+      setGovernanceState(body.state ?? null);
     } catch {
       /* fall back to hardcoded defaults */
     }
@@ -1464,6 +1464,7 @@ export const GovernanceSection = ({
             provider_service_cid: proposalProviderServiceCid,
             operator: proposalOperator,
             instrument_id_text: proposalInstrumentIdText,
+            additional_identifiers: [],
             create_transfer_rule: proposalCreateTransferRule,
             create_allocation_factory: proposalCreateAllocationFactory,
           };
@@ -1499,7 +1500,7 @@ export const GovernanceSection = ({
           proposal = {
             type: "set_provider_app_reward_beneficiaries",
             instrument_configuration_cid: proposalInstrumentConfigurationCid,
-            provider_app_reward_beneficiaries: beneficiaries,
+            provider_app_reward_beneficiaries: beneficiaries ?? undefined,
           };
           break;
         }
@@ -1509,7 +1510,7 @@ export const GovernanceSection = ({
             registrar_service_cid: proposalRegistrarServiceCid,
             enable_result_contracts:
               proposalEnableResultContracts === "clear"
-                ? null
+                ? undefined
                 : proposalEnableResultContracts === "true",
           };
           break;

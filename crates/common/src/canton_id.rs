@@ -92,6 +92,21 @@ impl<'de> serde::Deserialize<'de> for CantonId {
     }
 }
 
+// `CantonId` serializes as a plain `prefix::namespace` string, so its generated
+// TypeScript form is `string`. (A manual impl rather than `#[derive(TS)]`, which
+// would emit a struct from the fields.)
+#[cfg(feature = "typegen")]
+impl ts_rs::TS for CantonId {
+    type WithoutGenerics = Self;
+    type OptionInnerType = Self;
+    fn name(_: &ts_rs::Config) -> String {
+        "string".to_owned()
+    }
+    fn inline(cfg: &ts_rs::Config) -> String {
+        <Self as ts_rs::TS>::name(cfg)
+    }
+}
+
 impl CantonId {
     /// Create a new Canton ID from prefix and namespace
     pub fn new(prefix: String, namespace: Namespace) -> Self {

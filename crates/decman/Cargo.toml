@@ -17,6 +17,14 @@ path = "src/main.rs"
 name = "dec_party_manager"
 path = "src/lib.rs"
 
+# Frontend TypeScript generator. `required-features = ["typegen"]` so normal
+# builds (and `cargo build` without features) skip it — it only compiles when
+# the ts-rs derives are enabled.
+[[bin]]
+name = "gen-types"
+path = "src/bin/gen_types.rs"
+required-features = ["typegen"]
+
 [features]
 # Compile-time gate for the permissive `MockValidator` (admin-by-default,
 # accepts any token) and `MockAuthRegistry`. Enabled automatically under
@@ -24,6 +32,10 @@ path = "src/lib.rs"
 # means the mock types are not compiled in at all, so the binary cannot
 # select mock auth at runtime.
 test-mode = []
+# Derives `ts_rs::TS` on the server-only wire DTOs (governance/decimal cluster,
+# node config) and pulls in `common/typegen`, so the `gen-types` binary can emit
+# the frontend's TypeScript. Off by default; only the generation build enables it.
+typegen = ["dep:ts-rs", "common/typegen"]
 
 [dependencies]
 actix-cors = { workspace = true }
@@ -63,6 +75,7 @@ tonic = { workspace = true }
 tonic-prost = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+ts-rs = { workspace = true, optional = true }
 utoipa = { workspace = true, features = ["actix_extras"] }
 utoipa-actix-web = { workspace = true }
 utoipa-swagger-ui = { workspace = true }

@@ -12,6 +12,10 @@ dist
 dist-ssr
 *.local
 
+# Generated from the Rust wire DTOs by ts-rs; not committed.
+# Produced by `just gen-types` (and a pre-build step in CI / Docker / release).
+src/types.generated.ts
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

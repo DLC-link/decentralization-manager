@@ -69,6 +69,12 @@ jobs:
           key: grcov-bin-0.10.7
       - name: Install rustup components
         run: rustup component add rustfmt clippy llvm-tools-preview
+      # The frontend's TS wire types are generated from the Rust DTOs (ts-rs).
+      # Generate them before any build that runs build.rs (which builds the
+      # frontend and needs this file). DECMAN_SKIP_FRONTEND so this generation
+      # build doesn't itself try to build the frontend.
+      - name: Generate frontend TypeScript bindings
+        run: DECMAN_SKIP_FRONTEND=1 cargo run -p decman --all-features --bin gen-types
       - name: cargo fmt
         run: cargo fmt -- --check
       # Build the test binaries first (rlibs + sidecar rmeta) so both
@@ -119,6 +125,10 @@ jobs:
         with:
           path: .localnet/
           key: localnet-0.5.17
+      # Generate the frontend TS bindings before the integration build (which
+      # builds the decman binary → build.rs → frontend, needing this file).
+      - name: Generate frontend TypeScript bindings
+        run: DECMAN_SKIP_FRONTEND=1 cargo run -p decman --features typegen --bin gen-types
       - name: Run integration tests
         run: ./integration-tests/run.sh
 

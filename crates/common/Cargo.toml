@@ -9,6 +9,10 @@ license = "Apache-2.0"
 # OpenAPI spec. Off by default so dependency-light clients (e.g. the `decman-cli`
 # TUI) don't pull in `utoipa`.
 openapi = ["dep:utoipa"]
+# Derives `ts_rs::TS` on the wire DTOs so the frontend's TypeScript can be
+# generated from them. Off by default (only the type-generation build enables
+# it), so the dependency-light clients don't pull in `ts-rs`.
+typegen = ["dep:ts-rs"]
 
 [dependencies]
 anyhow = { workspace = true }
@@ -16,4 +20,5 @@ hex = { workspace = true }
 serde = { workspace = true }
 serde-big-array = { workspace = true }
 serde_json = { workspace = true }
+ts-rs = { workspace = true, optional = true }
 utoipa = { workspace = true, optional = true }

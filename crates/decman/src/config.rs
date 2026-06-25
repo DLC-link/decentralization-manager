@@ -9,6 +9,8 @@ use crate::{
 
 /// Network configuration - list of peers in the network
 #[derive(Clone, Debug, Default, Serialize, utoipa::ToSchema)]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typegen", ts(optional_fields))]
 pub struct NetworkConfig {
     /// List of peers in the network
     pub peers: Vec<Peer>,
@@ -16,6 +18,8 @@ pub struct NetworkConfig {
 
 /// A peer in the network
 #[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typegen", ts(optional_fields))]
 pub struct Peer {
     /// Canton participant UID (e.g., "participant1::1220...")
     pub participant_id: CantonId,
@@ -51,6 +55,8 @@ impl NetworkConfig {
 /// 1. Client credentials (M2M): Set `client_id` and `client_secret`
 /// 2. Password flow: Set `client_id`, `username`, and `password`
 #[derive(Clone, Debug, Default, Deserialize, Serialize, utoipa::ToSchema)]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typegen", ts(optional_fields))]
 pub struct KeycloakConfig {
     /// Keycloak server URL (e.g., "https://keycloak.example.com"). This is the
     /// URL the browser logs in against and is what appears as the token `iss`,
@@ -77,14 +83,22 @@ pub struct KeycloakConfig {
     pub realm: String,
     /// OAuth2 client ID
     pub client_id: String,
-    /// Client secret for M2M (client_credentials) flow
-    #[serde(default)]
+    /// Client secret for M2M (client_credentials) flow.
+    ///
+    /// `skip_serializing`: a secret that must never reach the browser via
+    /// `GET /node-config`. The frontend never reads it; keeping it off the wire
+    /// also keeps it out of the generated TypeScript type.
+    #[serde(default, skip_serializing)]
     pub client_secret: Option<String>,
     /// Username for password flow
     #[serde(default)]
     pub username: Option<String>,
-    /// Password for password flow
-    #[serde(default)]
+    /// Password for password flow.
+    ///
+    /// `skip_serializing`: a secret that must never reach the browser via
+    /// `GET /node-config`. The frontend never reads it; keeping it off the wire
+    /// also keeps it out of the generated TypeScript type.
+    #[serde(default, skip_serializing)]
     pub password: Option<String>,
 }
 
@@ -93,6 +107,8 @@ pub struct KeycloakConfig {
 /// Mutually exclusive with [`KeycloakConfig`] at the top level — each node
 /// operator picks one or the other via environment variables at deploy time.
 #[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typegen", ts(optional_fields))]
 pub struct Auth0Config {
     /// Auth0 tenant domain (e.g., "tenant.us.auth0.com")
     pub domain: String,
@@ -121,19 +137,10 @@ pub struct Auth0M2MConfig {
     pub client_secret: String,
 }
 
-/// Package identifiers for Daml contracts (configurable per party)
-#[derive(Clone, Debug, Default, Deserialize, Serialize, utoipa::ToSchema)]
-pub struct PackageConfig {
-    pub governance_action: Option<String>,
-    pub governance_core: Option<String>,
-    pub governance_token_custody: Option<String>,
-    pub governance_utility_credential: Option<String>,
-    pub governance_utility_onboarding: Option<String>,
-    pub utility_credential: Option<String>,
-    pub utility_registry: Option<String>,
-    pub vault: Option<String>,
-    pub vault_governance: Option<String>,
-}
+/// Package identifiers for Daml contracts (configurable per party). Defined in
+/// the shared `common::api` crate (the frontend's TypeScript is generated from
+/// it); re-exported so `crate::config::PackageConfig` resolves unchanged.
+pub use common::api::PackageConfig;
 
 /// Credentials for a specific decentralized party
 #[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
@@ -157,6 +164,8 @@ pub struct PartyCredentials {
 
 /// Timeout configuration
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typegen", ts(optional_fields))]
 pub struct Timeouts {
     pub handshake_timeout_secs: u64,
     pub message_timeout_secs: u64,
@@ -179,6 +188,8 @@ impl Default for Timeouts {
 /// (`send_noise_message_with_retry`). Defaults match the spec working
 /// hypothesis: 5s × 2 attempts, 250ms backoff between attempts.
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typegen", ts(optional_fields))]
 pub struct NoiseRetryConfig {
     /// Per-attempt timeout in seconds (applied independently to TCP connect
     /// and to the Noise/HTTP request budget).
@@ -211,6 +222,8 @@ impl NoiseRetryConfig {
 
 /// Individual node configuration
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typegen", ts(optional_fields))]
 pub struct NodeConfig {
     pub node: NodeInfo,
     pub canton: CantonConfig,
@@ -242,8 +255,12 @@ impl Default for NodeConfig {
 
 /// Node-specific information
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typegen", ts(optional_fields))]
 pub struct NodeInfo {
-    /// Canton participant ID for this node (e.g., "participant1::1220...")
+    /// Canton participant ID for this node (e.g., "participant1::1220...").
+    /// Always resolved before serving, so it is non-null on the wire.
+    #[cfg_attr(feature = "typegen", ts(type = "string"))]
     pub participant_id: Option<CantonId>,
     /// Address to listen on for Noise protocol connections
     pub listen_address: String,
@@ -284,6 +301,8 @@ pub struct KeycloakDefaults {
 
 /// Canton Network environment
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, utoipa::ToSchema, clap::ValueEnum)]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typegen", ts(optional_fields))]
 #[serde(rename_all = "lowercase")]
 pub enum Network {
     Devnet,
@@ -363,6 +382,8 @@ pub fn default_package_config() -> PackageConfig {
 
 /// Canton participant configuration
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typegen", ts(optional_fields))]
 pub struct CantonConfig {
     pub admin_api_host: String,
     pub admin_api_port: u16,

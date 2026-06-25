@@ -29,6 +29,13 @@ COPY crates/decman/frontend/src ./crates/decman/frontend/src
 COPY crates/decman/frontend/public ./crates/decman/frontend/public
 COPY crates/decman/frontend/index.html crates/decman/frontend/vite.config.ts crates/decman/frontend/tsconfig*.json crates/decman/frontend/eslint.config.js crates/decman/frontend/.env ./crates/decman/frontend/
 
+# Generate the frontend's TypeScript wire types from the Rust DTOs (ts-rs),
+# which `build.rs` needs before it builds the frontend. DECMAN_SKIP_FRONTEND so
+# this generation build doesn't itself try to build the frontend (chicken-and-egg).
+# Same --release profile so the dependency compiles are shared with the build below.
+RUN --mount=type=ssh DECMAN_SKIP_FRONTEND=1 \
+    cargo run --release -p decman --features typegen --bin gen-types
+
 # Build only the backend (its bin is `dec-party-manager`). `-p decman` avoids
 # compiling the `decman-cli` TUI, whose Linux file-dialog backend would pull in
 # extra system libraries the server image doesn't need.

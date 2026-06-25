@@ -68,6 +68,7 @@ use crate::{
     workflow::{self, WorkflowType},
 };
 
+pub use handlers::NodeConfigResponse;
 pub use types::*;
 
 /// TTL for cached chunked ListPackages payloads (per peer).

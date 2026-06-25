@@ -259,6 +259,10 @@ export const PartyConfigDialog = ({
       dec_party_id: partyId,
       member_party_id: memberPartyId,
       user_id: userId,
+      keycloak_url: "",
+      keycloak_realm: "",
+      keycloak_client_id: "",
+      packages: {},
     };
 
     if (provider === "auth0") {
