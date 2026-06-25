@@ -8,7 +8,9 @@ mod party_config;
 mod workflows;
 
 pub use auth::{get_auth_config, get_auth_status, grant_rights, test_auth};
-pub use config::{NodeConfigResponse, get_network_config, get_node_config, healthz, save_network_config};
+pub use config::{
+    NodeConfigResponse, get_network_config, get_node_config, healthz, save_network_config,
+};
 pub use governance::{
     cancel_confirmation, confirm_action, execute_action, expire_confirmation,
     get_burn_requests_handler, get_credential_offers_handler, get_governance, get_governance_audit,

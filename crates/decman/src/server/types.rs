@@ -41,6 +41,20 @@ pub use common::types::{
 
 use crate::{canton_id::CantonId, noise::server::ActiveWorkflow};
 
+/// Liveness response for the `/healthz` ping endpoint. The body is
+/// intentionally tiny: the frontend uses it to time its own round-trip to
+/// this node, so the handler does no work beyond returning this. Named
+/// `Liveness*` to avoid clashing with [`super::health::HealthResponse`], the
+/// Noise health-probe payload.
+///
+/// Not generated into the frontend types: the frontend pings `/healthz` only to
+/// time the round-trip and never reads the body — the latency is measured
+/// client-side (`pingLatency`), not carried by this response.
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct LivenessResponse {
+    pub status: String,
+}
+
 /// Map a Canton proto `ParticipantPermission` discriminant to the wire
 /// [`Permission`] DTO.
 ///
