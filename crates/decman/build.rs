@@ -10,6 +10,16 @@ fn main() {
     // Rust side locally. CI and release builds leave it unset.
     println!("cargo:rerun-if-env-changed=DECMAN_SKIP_FRONTEND");
     if std::env::var_os("DECMAN_SKIP_FRONTEND").is_some() {
+        // rust-embed (`#[folder = "frontend/dist"]` in server/assets.rs) needs the
+        // folder to exist at compile time, even when we skip the actual build.
+        // Ensure a placeholder so the crate still compiles — e.g. for the
+        // `gen-types` binary, which never serves assets. A real build overwrites it.
+        let dist = Path::new("frontend/dist");
+        std::fs::create_dir_all(dist).ok();
+        let index = dist.join("index.html");
+        if !index.exists() {
+            std::fs::write(index, "<!doctype html>\n").ok();
+        }
         return;
     }
     build_frontend();
