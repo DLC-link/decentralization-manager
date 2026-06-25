@@ -1,6 +1,6 @@
 //! HTTP wire DTOs for the `decman` server's REST API, shared with the
 //! `decman-cli` client and used to generate the frontend's TypeScript types
-//! (see `decman/build.rs`, which runs typeshare over this module).
+//! (see the `gen-types` binary, which derives them from this module via ts-rs).
 //!
 //! Like [`crate::types`], these are pure data-transfer types: no server-only
 //! dependencies. The OpenAPI (`utoipa`) derives are gated behind the `openapi`
@@ -642,9 +642,9 @@ pub struct GovernanceState {
     pub vault_manager: CantonId,
     pub members: Vec<CantonId>,
     pub threshold: i64,
-    // `default` so typeshare emits this as an optional TS property: when
-    // `serialized_as` overrides the type, typeshare relies on `serde(default)`
-    // (not the `Option<_>`) to mark the field optional.
+    // Optional on the wire: older governance rules contracts predate this field.
+    // `skip_serializing_if` omits it when None and `default` accepts it missing;
+    // ts-rs renders it as an optional TS property via the type's `optional_fields`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action_confirmation_timeout_microseconds: Option<i64>,
     /// The package-name ref the active rules contract actually lives under,
