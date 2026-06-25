@@ -68,7 +68,7 @@ tonic = { version = "0.14.2" }
 tonic-prost = { version = "0.14.2" }
 tracing = { version = "0.1" }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-ts-rs = { version = "12", features = ["format", "no-serde-warnings"] }
+ts-rs = { version = "12", features = ["no-serde-warnings"] }
 utoipa = { version = "5" }
 utoipa-actix-web = { version = "0.1" }
 utoipa-swagger-ui = { version = "9", features = ["actix-web"] }

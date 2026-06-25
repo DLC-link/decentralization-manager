@@ -14,8 +14,7 @@ use crate::canton_id::CantonId;
 /// Participant permission level
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 #[serde(rename_all = "lowercase")]
 pub enum Permission {
     Submission,
@@ -45,8 +44,7 @@ impl std::fmt::Display for Permission {
 /// Participant in a decentralized party
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct ParticipantInfo {
     pub participant_uid: CantonId,
     pub permission: Permission,
@@ -64,8 +62,7 @@ pub struct ParticipantInfo {
 /// timestamp Canton stamps on the create event.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct ContractInfo {
     pub contract_id: String,
     pub template_id: String,
@@ -81,8 +78,7 @@ pub struct ContractInfo {
 /// Vetted package information
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct VettedPackageInfo {
     pub package_id: String,
     pub package_name: String,
@@ -92,8 +88,7 @@ pub struct VettedPackageInfo {
 /// Package info for peer comparison
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct PackageInfo {
     pub package_id: String,
     pub name: String,
@@ -109,8 +104,7 @@ pub struct PackageInfo {
 /// then mid-stream IO/HTTP (`Transport`); then handshake/decode/status.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 #[serde(rename_all = "snake_case")]
 pub enum PeerErrorKind {
     TcpConnectTimeout,
@@ -131,8 +125,7 @@ pub enum PeerErrorKind {
 /// not yet surfaced — see Future work item 5 in the spec.)
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct PeerPackageResult {
     pub participant_id: String,
     pub name: String,
@@ -146,8 +139,7 @@ pub struct PeerPackageResult {
 /// Response from the peer DAR comparison endpoint
 #[derive(Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct PeerPackageComparison {
     pub local_packages: Vec<PackageInfo>,
     pub peers: Vec<PeerPackageResult>,
@@ -156,8 +148,7 @@ pub struct PeerPackageComparison {
 /// Party metadata from Ledger API
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct PartyMetadata {
     pub annotations: HashMap<String, String>,
 }
@@ -165,8 +156,7 @@ pub struct PartyMetadata {
 /// Decentralized party information
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct DecentralizedParty {
     pub party_id: CantonId,
     pub threshold: i32,
@@ -183,8 +173,7 @@ pub struct DecentralizedParty {
 /// Connection status for a participant
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 #[serde(rename_all = "PascalCase")]
 pub enum ConnectionStatus {
     /// Current node (always reachable)
@@ -200,8 +189,7 @@ pub enum ConnectionStatus {
 /// Status of a single participant
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct ParticipantStatus {
     pub id: String,
     pub status: ConnectionStatus,
@@ -223,8 +211,7 @@ pub struct ParticipantStatus {
 /// Response for the participants status endpoint
 #[derive(Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct ParticipantsStatusResponse {
     pub statuses: Vec<ParticipantStatus>,
 }
@@ -232,8 +219,7 @@ pub struct ParticipantsStatusResponse {
 /// Progress status of a workflow (kick, onboarding, etc.)
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 #[serde(rename_all = "lowercase")]
 pub enum WorkflowProgress {
     #[default]
@@ -267,8 +253,7 @@ impl std::fmt::Display for WorkflowProgress {
 /// every persisted run (coordinator + peer) regardless of how it started.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 #[serde(rename_all = "PascalCase")]
 pub enum WorkflowKind {
     Onboarding,
@@ -322,8 +307,7 @@ impl From<InvitationType> for WorkflowKind {
 /// participating because it accepted an invite (Peer).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 #[serde(rename_all = "PascalCase")]
 pub enum WorkflowRole {
     Coordinator,
@@ -361,8 +345,7 @@ impl std::str::FromStr for WorkflowRole {
 /// `workflow_artifacts` and are looked up by `instance_name`.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct WorkflowRun {
     pub instance_name: String,
     pub kind: WorkflowKind,
@@ -422,8 +405,7 @@ pub struct WorkflowRun {
 /// Type of workflow invitation
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 #[serde(rename_all = "PascalCase")]
 pub enum InvitationType {
     Onboarding,
@@ -467,8 +449,7 @@ impl std::str::FromStr for InvitationType {
 /// A pending invitation from a coordinator
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct PendingInvitation {
     pub id: String,
     pub invitation_type: InvitationType,
@@ -511,8 +492,7 @@ pub struct PendingInvitation {
 /// Frontend authentication configuration response
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 #[serde(default)]
 pub struct AuthConfigResponse {
     /// Whether auth is required (false in test mode or when no provider is configured)
@@ -534,8 +514,7 @@ pub struct AuthConfigResponse {
 /// A single governance audit log entry
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct AuditLogEntry {
     pub id: i64,
     pub timestamp: i64,
@@ -555,8 +534,7 @@ pub struct AuditLogEntry {
 /// The workflow a node is currently participating in, if any.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct WorkflowInfo {
     pub kind: WorkflowKind,
     pub role: WorkflowRole,

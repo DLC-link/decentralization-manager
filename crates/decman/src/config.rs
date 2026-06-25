@@ -9,8 +9,7 @@ use crate::{
 
 /// Network configuration - list of peers in the network
 #[derive(Clone, Debug, Default, Serialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct NetworkConfig {
     /// List of peers in the network
     pub peers: Vec<Peer>,
@@ -18,8 +17,7 @@ pub struct NetworkConfig {
 
 /// A peer in the network
 #[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct Peer {
     /// Canton participant UID (e.g., "participant1::1220...")
     pub participant_id: CantonId,
@@ -55,8 +53,7 @@ impl NetworkConfig {
 /// 1. Client credentials (M2M): Set `client_id` and `client_secret`
 /// 2. Password flow: Set `client_id`, `username`, and `password`
 #[derive(Clone, Debug, Default, Deserialize, Serialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct KeycloakConfig {
     /// Keycloak server URL (e.g., "https://keycloak.example.com"). This is the
     /// URL the browser logs in against and is what appears as the token `iss`,
@@ -107,8 +104,7 @@ pub struct KeycloakConfig {
 /// Mutually exclusive with [`KeycloakConfig`] at the top level — each node
 /// operator picks one or the other via environment variables at deploy time.
 #[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct Auth0Config {
     /// Auth0 tenant domain (e.g., "tenant.us.auth0.com")
     pub domain: String,
@@ -164,8 +160,7 @@ pub struct PartyCredentials {
 
 /// Timeout configuration
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct Timeouts {
     pub handshake_timeout_secs: u64,
     pub message_timeout_secs: u64,
@@ -188,8 +183,7 @@ impl Default for Timeouts {
 /// (`send_noise_message_with_retry`). Defaults match the spec working
 /// hypothesis: 5s × 2 attempts, 250ms backoff between attempts.
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct NoiseRetryConfig {
     /// Per-attempt timeout in seconds (applied independently to TCP connect
     /// and to the Noise/HTTP request budget).
@@ -222,8 +216,7 @@ impl NoiseRetryConfig {
 
 /// Individual node configuration
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct NodeConfig {
     pub node: NodeInfo,
     pub canton: CantonConfig,
@@ -255,8 +248,7 @@ impl Default for NodeConfig {
 
 /// Node-specific information
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct NodeInfo {
     /// Canton participant ID for this node (e.g., "participant1::1220...").
     /// Always resolved before serving, so it is non-null on the wire.
@@ -301,8 +293,7 @@ pub struct KeycloakDefaults {
 
 /// Canton Network environment
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, utoipa::ToSchema, clap::ValueEnum)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 #[serde(rename_all = "lowercase")]
 pub enum Network {
     Devnet,
@@ -382,8 +373,7 @@ pub fn default_package_config() -> PackageConfig {
 
 /// Canton participant configuration
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct CantonConfig {
     pub admin_api_host: String,
     pub admin_api_port: u16,

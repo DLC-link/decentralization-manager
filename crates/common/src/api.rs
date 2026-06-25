@@ -28,8 +28,7 @@ use crate::{
 /// Package identifiers for Daml contracts (configurable per party)
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct PackageConfig {
     pub governance_action: Option<String>,
     pub governance_core: Option<String>,
@@ -49,8 +48,7 @@ pub struct PackageConfig {
 /// A DAR file to upload
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct DarFile {
     /// Filename (used as description when uploading)
     pub filename: String,
@@ -61,8 +59,7 @@ pub struct DarFile {
 /// Definition of a Daml contract to create on the ledger
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct ContractDefinition {
     /// Unique identifier for this contract (used as command ID)
     pub id: String,
@@ -82,8 +79,7 @@ pub struct ContractDefinition {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "openapi", schema(no_recursion))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum FieldDefinition {
     /// The decentralized party ID
@@ -124,8 +120,7 @@ pub enum FieldDefinition {
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "lowercase")]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub enum ResponseSource {
     /// Fresh data from Canton gRPC
     #[default]
@@ -137,8 +132,7 @@ pub enum ResponseSource {
 /// Response for the decentralized parties endpoint
 #[derive(Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct DecentralizedPartiesResponse {
     pub parties: Vec<DecentralizedParty>,
     #[serde(default)]
@@ -155,8 +149,7 @@ pub struct DecentralizedPartiesResponse {
 #[derive(Clone, Debug, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct KickRequest {
     pub decentralized_party_id: CantonId,
     pub participant_id: CantonId,
@@ -172,8 +165,7 @@ pub struct KickRequest {
 /// Request to create a new decentralized party
 #[derive(Clone, Debug, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct OnboardingRequest {
     /// Party ID prefix for the decentralized party (e.g., "xyz-network")
     pub party_id_prefix: String,
@@ -190,8 +182,7 @@ pub struct OnboardingRequest {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub enum MissingEdgeKind {
     UnreachableFromCoordinator,
     MeshHole,
@@ -202,8 +193,7 @@ pub enum MissingEdgeKind {
 /// `to` at all (`UnreachableFromCoordinator`, `from` is the coordinator).
 #[derive(Clone, Debug, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct MissingPeerEdge {
     pub from: String,
     pub to: String,
@@ -214,8 +204,7 @@ pub struct MissingPeerEdge {
 /// fully meshed. The workflow is not started.
 #[derive(Clone, Debug, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct OnboardingMeshErrorResponse {
     pub error: String,
     pub missing_edges: Vec<MissingPeerEdge>,
@@ -224,8 +213,7 @@ pub struct OnboardingMeshErrorResponse {
 /// Request to deploy contracts for a decentralized party
 #[derive(Clone, Debug, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct ContractsRequest {
     /// Decentralized party ID to deploy contracts for
     pub decentralized_party_id: CantonId,
@@ -243,8 +231,7 @@ pub struct ContractsRequest {
 /// Request to upload DARs across all participants
 #[derive(Clone, Debug, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct DarsRequest {
     /// DAR files to upload (base64-encoded)
     pub dar_files: Vec<DarFile>,
@@ -256,8 +243,7 @@ pub struct DarsRequest {
 /// Response for workflow initiation (kick, onboarding, etc.)
 #[derive(Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct WorkflowResponse {
     pub status: WorkflowProgress,
     pub message: String,
@@ -266,8 +252,7 @@ pub struct WorkflowResponse {
 /// Response wrapper for `GET /workflows`.
 #[derive(Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct WorkflowRunsResponse {
     pub runs: Vec<WorkflowRun>,
 }
@@ -275,8 +260,7 @@ pub struct WorkflowRunsResponse {
 /// Response for key status check
 #[derive(Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct KeyStatusResponse {
     pub has_keys: bool,
     pub public_key: Option<String>,
@@ -285,8 +269,7 @@ pub struct KeyStatusResponse {
 /// Payload sent inside an `InviteOnboarding` Noise message.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct OnboardingInvitePayload {
     pub prefix: String,
     pub participants: Vec<CantonId>,
@@ -302,8 +285,7 @@ pub struct OnboardingInvitePayload {
 /// coordinator can fail its matching in-progress run with a clear error.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct DeclineInvitationPayload {
     pub kind: WorkflowKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -318,8 +300,7 @@ pub struct DeclineInvitationPayload {
 /// Payload sent inside an `InviteDars` Noise message.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct DarsInvitePayload {
     pub dar_filenames: Vec<String>,
     /// The member set (selected peers) this distribution targets, so the peer
@@ -336,8 +317,7 @@ pub struct DarsInvitePayload {
 /// proposals arrive later in the workflow.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct KickInvitePayload {
     pub dec_party_id: CantonId,
     pub kicked_participant: CantonId,
@@ -357,8 +337,7 @@ pub struct KickInvitePayload {
 /// package/contract names being deployed before the proposals arrive.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct ContractsInvitePayload {
     pub dec_party_id: CantonId,
     #[serde(default)]
@@ -374,8 +353,7 @@ pub struct ContractsInvitePayload {
 /// Response for pending invitations endpoint
 #[derive(Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct PendingInvitationsResponse {
     pub invitations: Vec<PendingInvitation>,
 }
@@ -383,8 +361,7 @@ pub struct PendingInvitationsResponse {
 /// Request to accept or decline an invitation
 #[derive(Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct InvitationActionRequest {
     pub id: String,
 }
@@ -396,8 +373,7 @@ pub struct InvitationActionRequest {
 /// Authentication status for a party
 #[derive(Clone, Debug, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 #[serde(tag = "status", rename_all = "lowercase")]
 pub enum AuthStatus {
     Authenticated,
@@ -409,8 +385,7 @@ pub enum AuthStatus {
 /// User rights validation result
 #[derive(Clone, Debug, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct RightsStatus {
     /// Whether user can actAs the member party
     pub member_party_act_as: bool,
@@ -435,8 +410,7 @@ impl RightsStatus {
 /// Authentication status for a single party
 #[derive(Clone, Debug, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct PartyAuthStatus {
     pub dec_party_id: CantonId,
     pub member_party_id: CantonId,
@@ -457,8 +431,7 @@ pub struct PartyAuthStatus {
 /// Response for the auth status endpoint
 #[derive(Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct AuthStatusResponse {
     pub parties: Vec<PartyAuthStatus>,
 }
@@ -466,8 +439,7 @@ pub struct AuthStatusResponse {
 /// Result of an authentication test
 #[derive(Clone, Debug, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct AuthTestResult {
     pub party_id: CantonId,
     pub success: bool,
@@ -478,8 +450,7 @@ pub struct AuthTestResult {
 /// Response for the auth test endpoint
 #[derive(Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct AuthTestResponse {
     pub results: Vec<AuthTestResult>,
 }
@@ -488,8 +459,7 @@ pub struct AuthTestResponse {
 /// member_party_id = peer not configured / unreachable.
 #[derive(Clone, Debug, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct KnownMember {
     pub participant_uid: CantonId,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -499,8 +469,7 @@ pub struct KnownMember {
 /// Response for `GET /governance/known-members`.
 #[derive(Clone, Debug, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct KnownMembersResponse {
     pub members: Vec<KnownMember>,
 }
@@ -511,8 +480,7 @@ pub struct KnownMembersResponse {
 /// user's primary party from Canton's UserManagementService.
 #[derive(Clone, Debug, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct DiscoverMemberPartyRequest {
     #[serde(default)]
     pub keycloak_url: String,
@@ -540,8 +508,7 @@ pub struct DiscoverMemberPartyRequest {
 /// is `None` when Canton's user has no primary party assigned.
 #[derive(Clone, Debug, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct DiscoverMemberPartyResponse {
     pub user_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -553,8 +520,7 @@ pub struct DiscoverMemberPartyResponse {
 /// Request to grant the configured user the rights they need to act on a dec party
 #[derive(Clone, Debug, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct GrantRightsRequest {
     /// Decentralized party whose coordinator user should receive rights
     pub dec_party_id: CantonId,
@@ -570,8 +536,7 @@ pub struct GrantRightsRequest {
 /// Response for the grant-rights endpoint
 #[derive(Clone, Debug, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct GrantRightsResponse {
     /// Refreshed rights status after the grant call
     pub rights: RightsStatus,
@@ -584,8 +549,7 @@ pub struct GrantRightsResponse {
 /// Instrument identifier (admin + id)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct InstrumentId {
     pub admin: String,
     pub id: String,
@@ -594,8 +558,7 @@ pub struct InstrumentId {
 /// Credential claim (subject, property, value)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct Claim {
     pub subject: String,
     pub property: String,
@@ -606,8 +569,7 @@ pub struct Claim {
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub enum GovernanceType {
     /// VaultGovernanceRules (closed-enum inline actions)
     #[default]
@@ -621,8 +583,7 @@ pub enum GovernanceType {
 /// Instrument allowance for token preapproval
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct InstrumentAllowance {
     pub id: String,
 }
@@ -633,8 +594,7 @@ pub struct InstrumentAllowance {
 /// `instrument_id_text` UUID.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct InstrumentIdentifier {
     pub source: CantonId,
     pub id: String,
@@ -644,8 +604,7 @@ pub struct InstrumentIdentifier {
 /// A disclosed contract to include in the ledger submission
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct DisclosedContractInput {
     pub contract_id: String,
     pub blob: String, // base64-encoded created_event_blob
@@ -654,8 +613,7 @@ pub struct DisclosedContractInput {
 /// Request to expire a stale confirmation
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct ExpireConfirmationRequest {
     pub party_id: CantonId,
     pub rules_contract_id: String,
@@ -667,8 +625,7 @@ pub struct ExpireConfirmationRequest {
 /// Request to cancel (revoke) own confirmation
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct CancelConfirmationRequest {
     pub party_id: CantonId,
     pub confirmation_cid: String,
@@ -679,8 +636,7 @@ pub struct CancelConfirmationRequest {
 /// State of a VaultGovernanceRules contract
 #[derive(Clone, Debug, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct GovernanceState {
     pub contract_id: String,
     pub vault_manager: CantonId,
@@ -705,8 +661,7 @@ pub struct GovernanceState {
 /// Response for the governance state endpoint
 #[derive(Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct GovernanceStateResponse {
     pub state: Option<GovernanceState>,
 }
@@ -714,8 +669,7 @@ pub struct GovernanceStateResponse {
 /// Information about a deployed Vault contract
 #[derive(Clone, Debug, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct VaultInfo {
     pub contract_id: String,
     pub vault_name: String,
@@ -727,8 +681,7 @@ pub struct VaultInfo {
 /// Response for the vaults endpoint
 #[derive(Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct VaultsResponse {
     pub vaults: Vec<VaultInfo>,
 }
@@ -736,8 +689,7 @@ pub struct VaultsResponse {
 /// Information about a ProviderService contract
 #[derive(Clone, Debug, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct ProviderServiceInfo {
     pub contract_id: String,
     pub operator: CantonId,
@@ -747,8 +699,7 @@ pub struct ProviderServiceInfo {
 /// Response for the provider services endpoint
 #[derive(Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct ProviderServicesResponse {
     pub services: Vec<ProviderServiceInfo>,
 }
@@ -756,8 +707,7 @@ pub struct ProviderServicesResponse {
 /// Information about a UserService contract
 #[derive(Clone, Debug, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct UserServiceInfo {
     pub contract_id: String,
     pub operator: CantonId,
@@ -767,8 +717,7 @@ pub struct UserServiceInfo {
 /// Response for the user services endpoint
 #[derive(Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct UserServicesResponse {
     pub services: Vec<UserServiceInfo>,
 }
@@ -780,8 +729,7 @@ pub struct UserServicesResponse {
 /// proposals.
 #[derive(Clone, Debug, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct InstrumentInfo {
     pub contract_id: String,
     pub instrument_admin: CantonId,
@@ -791,8 +739,7 @@ pub struct InstrumentInfo {
 /// Response for the instruments endpoint
 #[derive(Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct InstrumentsResponse {
     pub instruments: Vec<InstrumentInfo>,
 }
@@ -803,8 +750,7 @@ pub struct InstrumentsResponse {
 /// CID and expected-admin fields on the Transfer Proposal form.
 #[derive(Clone, Debug, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct TransferFactoryInfo {
     pub contract_id: String,
     pub expected_admin: CantonId,
@@ -813,8 +759,7 @@ pub struct TransferFactoryInfo {
 /// Response for the transfer-factories endpoint.
 #[derive(Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct TransferFactoriesResponse {
     pub transfer_factories: Vec<TransferFactoryInfo>,
 }
@@ -825,8 +770,7 @@ pub struct TransferFactoriesResponse {
 /// by hand.
 #[derive(Clone, Debug, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct CredentialOfferInfo {
     pub contract_id: String,
     pub operator: CantonId,
@@ -844,8 +788,7 @@ pub struct CredentialOfferInfo {
 /// Response for the credential offers endpoint
 #[derive(Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct CredentialOffersResponse {
     pub credential_offers: Vec<CredentialOfferInfo>,
 }
@@ -853,8 +796,7 @@ pub struct CredentialOffersResponse {
 /// Information about a RegistrarService contract
 #[derive(Clone, Debug, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct RegistrarServiceInfo {
     pub contract_id: String,
     pub operator: CantonId,
@@ -864,8 +806,7 @@ pub struct RegistrarServiceInfo {
 /// Response for the registrar services endpoint
 #[derive(Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct RegistrarServicesResponse {
     pub services: Vec<RegistrarServiceInfo>,
 }
@@ -873,8 +814,7 @@ pub struct RegistrarServicesResponse {
 /// A contract ID with its blob
 #[derive(Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct ContractWithBlob {
     pub contract_id: String,
     pub blob: String,
@@ -883,8 +823,7 @@ pub struct ContractWithBlob {
 /// DSO network info (amulet rules + DSO party)
 #[derive(Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct NetworkInfo {
     pub dso_party_id: CantonId,
     pub amulet_rules_cid: String,
@@ -894,8 +833,7 @@ pub struct NetworkInfo {
 /// DA Utility operator info (operator party id)
 #[derive(Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct OperatorInfo {
     pub party_id: CantonId,
 }
@@ -906,8 +844,7 @@ pub struct OperatorInfo {
 /// (the on-chain choice would fail when executed).
 #[derive(Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct TransferPreapprovalsResponse {
     /// `Splice.Wallet.TransferPreapproval:TransferPreapproval` — Canton Coin
     pub cc: usize,
@@ -918,8 +855,7 @@ pub struct TransferPreapprovalsResponse {
 /// Response for the generic contract query endpoint
 #[derive(Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct ContractQueryResponse {
     pub contracts: Vec<ContractWithBlob>,
 }
@@ -934,8 +870,7 @@ pub struct ContractQueryResponse {
 /// provider gates the frontend.
 #[derive(Clone, Debug, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct PartyConfigRequest {
     /// The decentralized party ID
     pub dec_party_id: CantonId,
@@ -982,8 +917,7 @@ pub struct PartyConfigRequest {
 /// Response with party configuration (secrets masked)
 #[derive(Clone, Debug, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct PartyConfigResponse {
     /// The decentralized party ID
     pub dec_party_id: CantonId,
@@ -1027,8 +961,7 @@ pub struct PartyConfigResponse {
 /// Generic error response
 #[derive(Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct ErrorResponse {
     pub error: String,
 }
@@ -1036,8 +969,7 @@ pub struct ErrorResponse {
 /// Generic success response
 #[derive(Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct MessageResponse {
     pub message: String,
 }
@@ -1045,8 +977,7 @@ pub struct MessageResponse {
 /// Generic success boolean response
 #[derive(Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct SuccessResponse {
     pub success: bool,
 }
@@ -1054,8 +985,7 @@ pub struct SuccessResponse {
 /// Response for workflow status check endpoints
 #[derive(Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct WorkflowStatusResponse {
     pub status: WorkflowProgress,
     // Omit when absent so the wire matches the generated `error?: string`
@@ -1068,8 +998,7 @@ pub struct WorkflowStatusResponse {
 /// Response for the governance audit endpoint
 #[derive(Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct AuditLogResponse {
     pub entries: Vec<AuditLogEntry>,
     pub total_returned: usize,
@@ -1078,8 +1007,7 @@ pub struct AuditLogResponse {
 /// A single on-chain governance audit entry
 #[derive(Clone, Debug, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct ChainAuditEntry {
     /// Ledger offset (used for sort/pagination)
     pub offset: i64,
@@ -1108,8 +1036,7 @@ pub struct ChainAuditEntry {
 /// Response for the on-chain governance audit endpoint
 #[derive(Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct ChainAuditResponse {
     pub entries: Vec<ChainAuditEntry>,
     pub total_returned: usize,

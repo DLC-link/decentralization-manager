@@ -166,8 +166,7 @@ pub type OnboardingResponse = WorkflowResponse;
 
 /// Vault limits configuration (all fields are optional in DAML)
 #[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct VaultLimits {
     #[schema(value_type = Option<String>)]
     #[cfg_attr(feature = "typegen", ts(type = "string"))]
@@ -185,8 +184,7 @@ pub struct VaultLimits {
 
 /// Featured App Right beneficiary
 #[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct AppRewardBeneficiary {
     pub beneficiary: CantonId,
     #[schema(value_type = String)]
@@ -196,8 +194,7 @@ pub struct AppRewardBeneficiary {
 
 /// Featured App Right configuration
 #[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct FarConfig {
     pub featured_app_right_cid: String,
     pub beneficiaries: Vec<AppRewardBeneficiary>,
@@ -205,8 +202,7 @@ pub struct FarConfig {
 
 /// Structured action types for Vault governance
 #[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ActionType {
     // Governance (4)
@@ -402,8 +398,7 @@ fn validate_beneficiary_weights(beneficiaries: &[AppRewardBeneficiary]) -> Resul
 /// Billing parameters for a paid credential.
 /// Mirrors `Utility.Credential.App.V0.Types.BillingParams`.
 #[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct BillingParams {
     /// The daily fee for the credential in USD (corresponds to RatePerDay record).
     #[schema(value_type = String)]
@@ -424,8 +419,7 @@ pub struct BillingParams {
 
 /// Types of governance domain action proposals
 #[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ProposalType {
     /// Set up Canton Coin TransferPreapproval
@@ -610,8 +604,7 @@ impl ProposalType {
 
 /// Request to propose a governance domain action (creates proposal contract)
 #[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct ProposeActionRequest {
     pub party_id: CantonId,
     pub rules_contract_id: String,
@@ -620,8 +613,7 @@ pub struct ProposeActionRequest {
 
 /// A pending domain action proposal with its confirmations
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct DomainGovernanceAction {
     /// Contract ID of the proposal
     pub proposal_cid: String,
@@ -676,8 +668,7 @@ pub struct DomainGovernanceAction {
 /// the request onboards. Exactly one of `user` / `provider` is set, matching
 /// the proposal kind.
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct ServiceRequestDetails {
     /// Operator party — present on both request kinds.
     pub operator: CantonId,
@@ -693,8 +684,7 @@ pub struct ServiceRequestDetails {
 /// `transfer` field. Surfaced inside `DomainGovernanceAction` so the
 /// notification queue card shows the meaningful parameters of the proposal.
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct TransferProposalDetails {
     pub receiver: CantonId,
     #[schema(value_type = String)]
@@ -710,8 +700,7 @@ pub struct TransferProposalDetails {
 /// render who's transferring what to whom — the proposal contract itself
 /// only carries the `TransferInstruction` cid, not these fields.
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct AcceptTransferDetails {
     pub sender: CantonId,
     pub receiver: CantonId,
@@ -724,8 +713,7 @@ pub struct AcceptTransferDetails {
 
 /// Request to submit a confirmation for an action with structured type
 #[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct ConfirmActionRequest {
     pub party_id: CantonId,
     pub rules_contract_id: String,
@@ -739,8 +727,7 @@ pub struct ConfirmActionRequest {
 
 /// Request to execute a confirmed action with structured type
 #[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct ExecuteActionRequest {
     pub party_id: CantonId,
     pub rules_contract_id: String,
@@ -757,8 +744,7 @@ pub struct ExecuteActionRequest {
 
 /// A single governance confirmation with parsed action
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct GovernanceConfirmation {
     pub contract_id: String,
     pub action: ActionType,
@@ -774,8 +760,7 @@ pub struct GovernanceConfirmation {
 
 /// A governance action with its confirmations, grouped by action hash
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct GovernanceAction {
     /// Deterministic hash of the serialized action for grouping
     pub action_hash: String,
@@ -794,8 +779,7 @@ pub struct GovernanceAction {
 
 /// Response for governance confirmations endpoint
 #[derive(Serialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct GovernanceResponse {
     pub actions: Vec<GovernanceAction>,
     /// Pending domain action proposals (governance-core GovernableAction)
@@ -826,8 +810,7 @@ pub struct GovernanceResponse {
 /// offers waiting on an internal workflow (admin / registrar) so the dropdown
 /// can surface them as "pending: X" rather than silently hide them.
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct TransferInstructionInfo {
     pub contract_id: String,
     pub sender: CantonId,
@@ -852,8 +835,7 @@ pub struct TransferInstructionInfo {
 /// One row of `TransferInstructionStatus.pendingActions`. The Daml type is
 /// `Map Party Text`; the receiver can render "<party> — <action>" per row.
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct PendingAction {
     pub party: CantonId,
     pub action: String,
@@ -861,8 +843,7 @@ pub struct PendingAction {
 
 /// Mirrors `Splice.Api.Token.TransferInstructionV1.TransferInstructionStatus`.
 #[derive(Clone, Copy, Debug, Serialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 #[serde(rename_all = "snake_case")]
 pub enum TransferInstructionStatus {
     PendingReceiverAcceptance,
@@ -871,8 +852,7 @@ pub enum TransferInstructionStatus {
 
 /// Response for the transfer instructions endpoint.
 #[derive(Serialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct TransferInstructionsResponse {
     pub transfer_instructions: Vec<TransferInstructionInfo>,
 }
@@ -883,8 +863,7 @@ pub struct TransferInstructionsResponse {
 /// `mint`/`burn` payload's `executeBefore` field so the dropdown can disable
 /// past-deadline rows.
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct TokenRequestInfo {
     pub contract_id: String,
     pub holder: CantonId,
@@ -899,16 +878,14 @@ pub struct TokenRequestInfo {
 
 /// Response for the mint-requests endpoint.
 #[derive(Serialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct MintRequestsResponse {
     pub mint_requests: Vec<TokenRequestInfo>,
 }
 
 /// Response for the burn-requests endpoint.
 #[derive(Serialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct BurnRequestsResponse {
     pub burn_requests: Vec<TokenRequestInfo>,
 }
@@ -917,8 +894,7 @@ pub struct BurnRequestsResponse {
 /// every active `Splice.Api.Token.HoldingV1:Holding` contract that shares the
 /// same `(instrument_admin, instrument_id)` pair.
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct HoldingInfo {
     pub instrument_admin: CantonId,
     pub instrument_id: String,
@@ -943,8 +919,7 @@ pub struct HoldingInfo {
 
 /// Response for the holdings endpoint.
 #[derive(Serialize, utoipa::ToSchema)]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typegen", ts(optional_fields))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct HoldingsResponse {
     pub holdings: Vec<HoldingInfo>,
 }
