@@ -61,9 +61,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 " ↑/↓ field · type · ←/→ toggle · enter next/submit · esc cancel"
             }
             Overlay::Deploy(_) => " ↑/↓ field · type number · enter next/deploy · esc cancel",
+            Overlay::PartyConfig(_) => {
+                " ↑/↓ field · ←/→ provider · type · enter next/run · esc cancel"
+            }
             Overlay::Message(_) | Overlay::Busy(_) => " enter / esc to close",
             _ => {
-                " ↑/↓ audit · enter json · g gov · D deploy · c chain · K kick · esc back · q quit"
+                " ↑/↓ audit · enter json · a login · g gov · D deploy · c chain · K kick · esc back"
             }
         };
         frame.render_widget(
@@ -1148,6 +1151,25 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     Rect::new(x, y, width, height)
 }
 
+/// Draw a one-cell drop shadow behind a popup `rect` (offset down-right and
+/// clamped to `area`). Rendered before the popup's own `Clear`, so only the
+/// protruding bottom row and right column remain visible as the shadow.
+fn draw_shadow(frame: &mut Frame, rect: Rect, area: Rect) {
+    let x = rect.x.saturating_add(1);
+    let y = rect.y.saturating_add(1);
+    let max_x = area.x.saturating_add(area.width);
+    let max_y = area.y.saturating_add(area.height);
+    if x >= max_x || y >= max_y {
+        return;
+    }
+    let shadow = Rect::new(x, y, rect.width.min(max_x - x), rect.height.min(max_y - y));
+    frame.render_widget(Clear, shadow);
+    frame.render_widget(
+        Block::default().style(Style::default().bg(Color::Rgb(18, 18, 18))),
+        shadow,
+    );
+}
+
 /// The bordered block used by modal popups.
 fn popup_block(title: &str) -> Block<'static> {
     Block::bordered()
@@ -1310,6 +1332,7 @@ fn party_config_popup(frame: &mut Frame, area: Rect, form: &PartyConfigForm) {
     let rect = centered_rect(width, height, area);
     let title = format!("Party config · {}", form.party_name);
     let paragraph = Paragraph::new(lines).block(popup_block(&title));
+    draw_shadow(frame, rect, area);
     frame.render_widget(Clear, rect);
     frame.render_widget(paragraph, rect);
 }
@@ -1359,6 +1382,7 @@ fn peer_list_popup(frame: &mut Frame, area: Rect, state: &NetworkEditState) {
     let paragraph = Paragraph::new(lines)
         .scroll((scroll, 0))
         .block(popup_block("Network peers"));
+    draw_shadow(frame, rect, area);
     frame.render_widget(Clear, rect);
     frame.render_widget(paragraph, rect);
 }
@@ -1411,6 +1435,7 @@ fn peer_form_popup(frame: &mut Frame, area: Rect, form: &PeerForm) {
     let height = ((lines.len() as u16).saturating_add(2)).clamp(6, area.height.saturating_sub(4));
     let rect = centered_rect(width, height, area);
     let paragraph = Paragraph::new(lines).block(popup_block("Add peer"));
+    draw_shadow(frame, rect, area);
     frame.render_widget(Clear, rect);
     frame.render_widget(paragraph, rect);
 }
@@ -1476,6 +1501,7 @@ fn deploy_popup(frame: &mut Frame, area: Rect, form: &DeployForm) {
     let paragraph = Paragraph::new(lines)
         .scroll((0, 0))
         .block(popup_block(&title));
+    draw_shadow(frame, rect, area);
     frame.render_widget(Clear, rect);
     frame.render_widget(paragraph, rect);
 }
@@ -1513,6 +1539,7 @@ fn composer_pick_popup(frame: &mut Frame, area: Rect, pick: &ComposerPick) {
     let paragraph = Paragraph::new(lines)
         .scroll((scroll, 0))
         .block(popup_block(title));
+    draw_shadow(frame, rect, area);
     frame.render_widget(Clear, rect);
     frame.render_widget(paragraph, rect);
 }
@@ -1598,6 +1625,7 @@ fn composer_popup(frame: &mut Frame, area: Rect, composer: &Composer) {
     let paragraph = Paragraph::new(lines)
         .scroll((scroll, 0))
         .block(popup_block(&composer.title));
+    draw_shadow(frame, rect, area);
     frame.render_widget(Clear, rect);
     frame.render_widget(paragraph, rect);
 }
@@ -1709,6 +1737,7 @@ fn governance_popup(frame: &mut Frame, area: Rect, view: &GovView) {
     let paragraph = Paragraph::new(lines)
         .scroll((scroll, 0))
         .block(popup_block(&title));
+    draw_shadow(frame, rect, area);
     frame.render_widget(Clear, rect);
     frame.render_widget(paragraph, rect);
 }
@@ -1806,6 +1835,7 @@ fn auth_popup(frame: &mut Frame, area: Rect, parties: &[PartyAuthStatus], select
     let paragraph = Paragraph::new(lines)
         .scroll((scroll, 0))
         .block(popup_block("Authentication"));
+    draw_shadow(frame, rect, area);
     frame.render_widget(Clear, rect);
     frame.render_widget(paragraph, rect);
 }
@@ -1856,6 +1886,7 @@ fn grant_popup(frame: &mut Frame, area: Rect, form: &GrantForm) {
     let height = ((lines.len() as u16).saturating_add(2)).clamp(6, area.height.saturating_sub(4));
     let rect = centered_rect(width, height, area);
     let paragraph = Paragraph::new(lines).block(popup_block("Grant rights"));
+    draw_shadow(frame, rect, area);
     frame.render_widget(Clear, rect);
     frame.render_widget(paragraph, rect);
 }
@@ -1900,6 +1931,7 @@ fn chain_audit_popup(frame: &mut Frame, area: Rect, entries: &[ChainAuditEntry],
     let paragraph = Paragraph::new(lines)
         .scroll((scroll, 0))
         .block(popup_block("On-chain audit"));
+    draw_shadow(frame, rect, area);
     frame.render_widget(Clear, rect);
     frame.render_widget(paragraph, rect);
 }
@@ -1926,6 +1958,7 @@ fn json_popup(frame: &mut Frame, area: Rect, value: &serde_json::Value, scroll: 
     let paragraph = Paragraph::new(lines)
         .scroll((scroll, 0))
         .block(popup_block("Audit details"));
+    draw_shadow(frame, rect, area);
     frame.render_widget(Clear, rect);
     frame.render_widget(paragraph, rect);
 }
@@ -1939,6 +1972,7 @@ fn message_popup(frame: &mut Frame, area: Rect, title: &str, message: &str, colo
         .alignment(Alignment::Center)
         .wrap(Wrap { trim: true })
         .block(popup_block(title));
+    draw_shadow(frame, rect, area);
     frame.render_widget(Clear, rect);
     frame.render_widget(paragraph, rect);
 }
@@ -2005,6 +2039,7 @@ fn compare_popup(frame: &mut Frame, area: Rect, comparison: &PeerPackageComparis
     let paragraph = Paragraph::new(lines)
         .scroll((scroll, 0))
         .block(popup_block("Package check"));
+    draw_shadow(frame, rect, area);
     frame.render_widget(Clear, rect);
     frame.render_widget(paragraph, rect);
 }
@@ -2039,6 +2074,7 @@ fn peer_select_popup(
     let rect = centered_rect(width, height, area);
     let title = format!("Distribute {filename}");
     let paragraph = Paragraph::new(lines).block(popup_block(&title));
+    draw_shadow(frame, rect, area);
     frame.render_widget(Clear, rect);
     frame.render_widget(paragraph, rect);
 }
@@ -2087,6 +2123,7 @@ fn onboard_popup(frame: &mut Frame, area: Rect, form: &OnboardForm) {
     let height = ((lines.len() as u16) + 2).clamp(8, area.height.saturating_sub(4));
     let rect = centered_rect(width, height, area);
     let paragraph = Paragraph::new(lines).block(popup_block("Onboard new party"));
+    draw_shadow(frame, rect, area);
     frame.render_widget(Clear, rect);
     frame.render_widget(paragraph, rect);
 }
@@ -2140,6 +2177,7 @@ fn kick_popup(frame: &mut Frame, area: Rect, form: &KickForm) {
     let height = ((lines.len() as u16) + 2).clamp(8, area.height.saturating_sub(4));
     let rect = centered_rect(width, height, area);
     let paragraph = Paragraph::new(lines).block(popup_block("Kick participant"));
+    draw_shadow(frame, rect, area);
     frame.render_widget(Clear, rect);
     frame.render_widget(paragraph, rect);
 }
@@ -2160,6 +2198,7 @@ fn feed_detail_popup(frame: &mut Frame, area: Rect, item: &FeedItem, scroll: u16
         .scroll((scroll, 0))
         .wrap(Wrap { trim: false })
         .block(popup_block(&title));
+    draw_shadow(frame, rect, area);
     frame.render_widget(Clear, rect);
     frame.render_widget(paragraph, rect);
 }
@@ -3034,6 +3073,21 @@ mod tests {
         // A stored secret with a blank field shows the keep hint, never a value.
         assert!(rendered.contains("blank keeps it"));
         assert!(rendered.contains("Save"));
+    }
+
+    #[test]
+    fn draw_shadow_clamps_at_screen_edge_without_panicking() {
+        let Ok(mut terminal) = Terminal::new(TestBackend::new(20, 10)) else {
+            panic!("failed to build test terminal");
+        };
+        // A popup flush against the bottom-right corner: the offset shadow must
+        // clamp to the screen rather than panic on out-of-bounds.
+        let drawn = terminal.draw(|frame| {
+            let area = frame.area();
+            draw_shadow(frame, Rect::new(18, 8, 2, 2), area);
+            draw_shadow(frame, Rect::new(5, 3, 8, 4), area);
+        });
+        assert!(drawn.is_ok());
     }
 
     #[test]

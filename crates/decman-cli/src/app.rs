@@ -2152,6 +2152,8 @@ impl App {
             KeyCode::Char('g') => self.open_governance(),
             // Deploy governance-core contracts for this party.
             KeyCode::Char('D') => self.open_deploy(),
+            // Configure / log in this party's IdP credentials.
+            KeyCode::Char('a') => self.open_party_login(),
             _ => {}
         }
     }
@@ -2702,6 +2704,16 @@ impl App {
                 .requests
                 .send(Request::ChainAudit(party.party_id.to_string()));
             self.overlay = Overlay::Busy("Loading on-chain audit…".to_owned());
+        }
+    }
+
+    /// Open the IdP config / login editor for the party in the detail view.
+    fn open_party_login(&mut self) {
+        if let Some(party) = self.detail.as_ref() {
+            let _ = self
+                .requests
+                .send(Request::PartyConfig(party.party_id.to_string()));
+            self.overlay = Overlay::Busy("Loading party configuration…".to_owned());
         }
     }
 
