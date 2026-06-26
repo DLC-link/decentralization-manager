@@ -1,6 +1,18 @@
 default:
     @just --list
 
+# Regenerate the frontend TypeScript wire types from the Rust DTOs via ts-rs.
+# The output (crates/decman/frontend/src/types.generated.ts) is committed; CI
+# checks it is up to date. Run this after changing any wire DTO.
+[group('frontend')]
+gen-types:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # DECMAN_SKIP_FRONTEND so build.rs doesn't try to build the frontend (which
+    # would need this very file) while we compile the generator.
+    DECMAN_SKIP_FRONTEND=1 cargo run -q -p decman --features typegen --bin gen-types
+    echo "Generated crates/decman/frontend/src/types.generated.ts"
+
 # Forward Canton ibtc-devnet participant 1..3 Ledger/Admin ports (KUBE_NS=catalyst-canton by default).
 [group('canton')]
 port-forward:

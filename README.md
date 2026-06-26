@@ -612,7 +612,12 @@ npm run dev     # Development server with hot reload
 npm run build   # Production build (output to dist/)
 ```
 
-The frontend is embedded into the Rust binary at build time via `build.rs`.
+The frontend is embedded into the Rust binary at build time via `build.rs`, which
+runs the Vite build. The wire types in `frontend/src/types.generated.ts` are
+generated separately from the Rust DTOs (in `common` and the `decman` server) by
+the `gen-types` binary (ts-rs). That file is gitignored, so on a fresh checkout
+run `just gen-types` once before frontend-only work, otherwise the generated
+TypeScript imports won't resolve.
 
 ## Docker Image
 

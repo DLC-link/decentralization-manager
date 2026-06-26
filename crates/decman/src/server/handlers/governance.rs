@@ -52,7 +52,7 @@ use crate::{
             OperatorInfo, ProposalType, ProposeActionRequest, ProviderServicesResponse,
             RegistrarServicesResponse, TransferFactoriesResponse, TransferFactoryInfo,
             TransferInstructionsResponse, TransferPreapprovalsResponse, UserServicesResponse,
-            VaultsResponse,
+            VaultsResponse, chain_audit_entry_from_row,
         },
     },
     utils,
@@ -992,7 +992,8 @@ pub async fn get_governance_chain_audit(
             .await
         {
             Ok(rows) => {
-                let entries: Vec<ChainAuditEntry> = rows.into_iter().map(Into::into).collect();
+                let entries: Vec<ChainAuditEntry> =
+                    rows.into_iter().map(chain_audit_entry_from_row).collect();
                 let total_returned = entries.len();
                 return HttpResponse::Ok().json(ChainAuditResponse {
                     entries,

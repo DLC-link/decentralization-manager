@@ -264,7 +264,7 @@ export const PartyDetail = ({
         );
         if (!res.ok) return;
         const data: GovernanceStateResponse = await res.json();
-        if (!cancelled) setGovernanceState(data.state);
+        if (!cancelled) setGovernanceState(data.state ?? null);
       } catch {
         /* leave columns blank on failure */
       }

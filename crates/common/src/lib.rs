@@ -7,6 +7,7 @@
 //! derives are gated behind the `openapi` feature so clients don't inherit
 //! them.
 
+pub mod api;
 pub mod canton_id;
 pub mod error;
 pub mod types;
