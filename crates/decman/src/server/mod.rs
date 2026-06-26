@@ -1323,6 +1323,7 @@ pub async fn start_server(
             .app_data(onboarding_state.clone())
             .app_data(contracts_state.clone())
             .app_data(dars_state.clone())
+            .service(handlers::healthz)
             .service(handlers::get_network_config)
             .service(handlers::save_network_config)
             .service(handlers::get_node_config)

@@ -35,7 +35,7 @@ import { NotificationsView } from "./components/NotificationsView";
 import type { PartyActions } from "./components/NotificationsView";
 import { useSnackbar } from "./contexts";
 import { API_BASE, ADMIN_ACCESS } from "./constants";
-import { authenticatedFetch } from "./api";
+import { authenticatedFetch, pingLatency } from "./api";
 import { useHiddenParties } from "./useHiddenParties";
 import type {
   DecentralizedParty,
@@ -91,6 +91,11 @@ const App = () => {
   const [participantStatuses, setParticipantStatuses] = useState<
     ParticipantStatus[]
   >([]);
+  // Our own round-trip latency to the backend (ms). The peers table fills the
+  // peer rows from Noise health probes but never the "you" row; this fills it.
+  const [selfLatencyMs, setSelfLatencyMs] = useState<number | undefined>(
+    undefined,
+  );
   const [keyStatus, setKeyStatus] = useState<KeyStatusResponse | null>(null);
   const [authStatuses, setAuthStatuses] = useState<PartyAuthStatus[]>([]);
   const [packageCount, setPackageCount] = useState(0);
@@ -377,7 +382,9 @@ const App = () => {
     fetchConfigData();
   }, [activeTab, networkConfig, keyStatus]);
 
-  // Poll participant statuses every 2 seconds
+  // Poll participant statuses every 2 seconds, and on the same cadence measure
+  // our own round-trip to the backend so the "you" row of the peers table shows
+  // a latency too (peer latencies come from the status response itself).
   useEffect(() => {
     const fetchStatuses = async () => {
       try {
@@ -391,8 +398,29 @@ const App = () => {
       }
     };
 
-    fetchStatuses();
-    const interval = window.setInterval(fetchStatuses, 2000);
+    const measureSelfLatency = async () => {
+      // Clear on failure so the row drops a stale number during an outage,
+      // matching how an unreachable peer shows no latency.
+      const ms = await pingLatency(`${API_BASE}/healthz`);
+      setSelfLatencyMs(ms ?? undefined);
+    };
+
+    // In-flight guard: if a cycle (the status probe in particular) runs longer
+    // than the 2s interval, skip the tick instead of stacking concurrent
+    // requests.
+    let inFlight = false;
+    const poll = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        await Promise.all([fetchStatuses(), measureSelfLatency()]);
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    poll();
+    const interval = window.setInterval(poll, 2000);
 
     return () => clearInterval(interval);
   }, []);
@@ -970,6 +998,7 @@ const App = () => {
                   nodeConfig={nodeConfig ?? undefined}
                   keyStatus={keyStatus ?? undefined}
                   participantStatuses={participantStatuses}
+                  selfLatencyMs={selfLatencyMs}
                   onSave={savePeers}
                 />
               ) : (

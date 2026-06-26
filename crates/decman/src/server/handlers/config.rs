@@ -1,4 +1,8 @@
-use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
+use actix_web::{
+    HttpRequest, HttpResponse, Responder, get,
+    http::header::{CacheControl, CacheDirective},
+    post, web,
+};
 use serde::Serialize;
 
 use sqlx::SqlitePool;
@@ -10,7 +14,7 @@ use crate::{
     server::{
         AppState,
         middleware::require_admin,
-        types::{ErrorResponse, SuccessResponse},
+        types::{ErrorResponse, LivenessResponse, SuccessResponse},
     },
 };
 
@@ -94,6 +98,30 @@ pub async fn get_node_config(data: web::Data<AppState>) -> impl Responder {
         test_mode: data.test_mode,
         version: env!("CARGO_PKG_VERSION"),
     })
+}
+
+/// Liveness probe. Returns `200 {"status":"ok"}` and does no I/O, so the
+/// frontend can ping it to measure its own round-trip latency to this node
+/// (filling the "you" row of the peers table, where peer latency comes from
+/// Noise health probes). Public — no auth — so the timing reflects transport
+/// plus handler overhead only, and so it doubles as a container liveness probe.
+#[utoipa::path(
+    tag = "Configuration",
+    responses(
+        (status = 200, description = "Service is alive", body = LivenessResponse)
+    )
+)]
+#[get("/healthz")]
+pub async fn healthz() -> impl Responder {
+    // `no-store` so an intermediary cache/proxy can't serve a cached 200 and
+    // skew the latency the frontend measures (and a liveness probe shouldn't
+    // be cacheable anyway). The frontend also sends `no-store`; this is the
+    // server-side half.
+    HttpResponse::Ok()
+        .insert_header(CacheControl(vec![CacheDirective::NoStore]))
+        .json(LivenessResponse {
+            status: "ok".to_string(),
+        })
 }
 
 async fn save_peers_to_db(db: &SqlitePool, peers: &[Peer]) -> Result {

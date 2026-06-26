@@ -184,9 +184,12 @@ fn parse_bearer(header: &str) -> Option<&str> {
 }
 
 /// Paths that bypass auth entirely. Covers the SPA entry point, static
-/// assets, swagger (only mounted with the `test-mode` Cargo feature), and
+/// assets, swagger (only mounted with the `test-mode` Cargo feature),
 /// `/auth-config` which the login page fetches before the user has a
-/// token. The `/.well-known/`
+/// token, and `/healthz` — a no-I/O liveness probe the frontend pings to
+/// time its own round-trip to this node (kept auth-free so the measurement
+/// reflects transport overhead only, and so it works as a container probe).
+/// The `/.well-known/`
 /// prefix is also exempt — RFC 8615 reserves it for unauthenticated probes
 /// (Chrome DevTools, OIDC discovery, ACME challenges, etc.). If you ever
 /// add an app handler at `/.well-known/<something>`, it will be reachable
@@ -199,7 +202,7 @@ fn parse_bearer(header: &str) -> Option<&str> {
 fn is_always_public(path: &str) -> bool {
     matches!(
         path,
-        "" | "/" | "/index.html" | "/favicon.ico" | "/favicon.svg" | "/auth-config"
+        "" | "/" | "/index.html" | "/favicon.ico" | "/favicon.svg" | "/auth-config" | "/healthz"
     ) || path.starts_with("/assets/")
         || path.starts_with("/swagger-ui/")
         || path.starts_with("/api-docs/")
@@ -224,6 +227,11 @@ mod tests {
         assert!(is_always_public("/auth-config"));
         assert!(!is_always_public("/auth/status"));
         assert!(!is_always_public("/auth/test"));
+    }
+
+    #[test]
+    fn healthz_is_public() {
+        assert!(is_always_public("/healthz"));
     }
 
     #[test]
