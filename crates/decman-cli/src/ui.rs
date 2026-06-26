@@ -9,14 +9,20 @@ use ratatui::widgets::{
 };
 
 use common::types::{
-    ConnectionStatus, DecentralizedParty, PeerErrorKind, PeerPackageComparison, Permission,
-    VettedPackageInfo, WorkflowProgress,
+    ConnectionStatus, DecentralizedParty, PeerErrorKind, PeerPackageComparison, PendingInvitation,
+    Permission, VettedPackageInfo, WorkflowProgress, WorkflowRun,
 };
 
 use crate::api::{
-    FeedItem, Holding, PeerView, audit_action, invitation_name, party_name, run_name,
+    AuthStatusKind, ChainAuditEntry, FeedItem, Holding, PartyAuthStatus, PeerView, audit_action,
+    invitation_name, party_name, run_name,
 };
-use crate::app::{App, DetailData, Overlay, PeerChoice, Status, Tab, TabView};
+use crate::app::{
+    App, ComposerKind, ComposerPick, DeployForm, DetailData, GovItem, GovView, GrantForm, IdpMode,
+    KickForm, NetworkEditState, OnboardForm, Overlay, PartyConfigForm, PcRow, PeerChoice, PeerForm,
+    Status, Tab, TabView,
+};
+use crate::composer::{Composer, FieldKind};
 use crate::config::Profile;
 use crate::logo;
 
@@ -44,10 +50,24 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         if let Some((party, data, audit_state)) = app.detail_view() {
             draw_party_detail(frame, body, party, data, audit_state);
         }
-        let hint = if matches!(app.overlay(), Overlay::Json { .. }) {
-            " ↑/↓ scroll · esc close"
-        } else {
-            " ↑/↓ audit · enter json · esc back · q quit"
+        let hint = match app.overlay() {
+            Overlay::Json { .. } | Overlay::ChainAudit { .. } => " ↑/↓ scroll · esc close",
+            Overlay::Kick(_) => " ↑/↓ pick · ←/→ threshold · enter kick · esc cancel",
+            Overlay::Governance(_) => {
+                " ↑/↓ · c confirm · e exec · r revoke · x expire · n new · p propose · esc"
+            }
+            Overlay::ComposerPick(_) => " ↑/↓ pick · enter open · esc cancel",
+            Overlay::Composer(_) => {
+                " ↑/↓ field · type · ←/→ toggle · enter next/submit · esc cancel"
+            }
+            Overlay::Deploy(_) => " ↑/↓ field · type number · enter next/deploy · esc cancel",
+            Overlay::PartyConfig(_) => {
+                " ↑/↓ field · ←/→ provider · type · enter next/run · esc cancel"
+            }
+            Overlay::Message(_) | Overlay::Busy(_) => " enter / esc to close",
+            _ => {
+                " ↑/↓ audit · enter json · a login · g gov · D deploy · c chain · K kick · esc back"
+            }
         };
         frame.render_widget(
             Paragraph::new(hint).style(Style::default().fg(Color::DarkGray)),
@@ -309,7 +329,7 @@ fn draw_party_detail(
     audit_state: &mut TableState,
 ) {
     let [summary, participants, contracts, holdings, audit] = Layout::vertical([
-        Constraint::Length(if party.my_owner_key.is_some() { 5 } else { 4 }),
+        Constraint::Length(summary_height(party, data)),
         Constraint::Length(box_height(party.participants.len(), 5)),
         Constraint::Length(box_height(party.contracts.len(), 5)),
         // +1 content row for the holdings header line.
@@ -318,7 +338,7 @@ fn draw_party_detail(
     ])
     .areas(area);
 
-    draw_summary_box(frame, summary, party);
+    draw_summary_box(frame, summary, party, data);
     draw_participants_box(frame, participants, party);
     draw_contracts_box(frame, contracts, party);
     draw_holdings_box(frame, holdings, data);
@@ -337,8 +357,51 @@ fn holdings_count(data: Option<&DetailData>) -> usize {
         .map_or(1, |holdings| holdings.len().max(1))
 }
 
-/// The party summary box: id, threshold/owners/participants/contracts, key.
-fn draw_summary_box(frame: &mut Frame, area: Rect, party: &DecentralizedParty) {
+/// Height of the summary box, accounting for the optional owner-key and
+/// governance-state lines.
+fn summary_height(party: &DecentralizedParty, data: Option<&DetailData>) -> u16 {
+    let mut lines = 2u16;
+    if party.my_owner_key.is_some() {
+        lines += 1;
+    }
+    match data.map(|d| &d.gov_state) {
+        Some(Ok(Some(state))) => {
+            lines += 1;
+            if state.out_of_date {
+                lines += 1;
+            }
+        }
+        // Reserve a line to surface a governance-state load error.
+        Some(Err(_)) => lines += 1,
+        _ => {}
+    }
+    lines + 2
+}
+
+/// Format a microsecond duration as a compact human string (e.g. `24h`, `30m`).
+/// Days are only used for 2+ whole days, so a one-day timeout reads as `24h`
+/// (matching the web app's rel-time labels).
+fn format_micros_human(micros: i64) -> String {
+    let secs = micros / 1_000_000;
+    if secs >= 172_800 && secs % 86_400 == 0 {
+        format!("{}d", secs / 86_400)
+    } else if secs >= 3_600 && secs % 3_600 == 0 {
+        format!("{}h", secs / 3_600)
+    } else if secs >= 60 && secs % 60 == 0 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{secs}s")
+    }
+}
+
+/// The party summary box: id, threshold/owners/participants/contracts, key, and
+/// on-ledger governance state (threshold, members, action timeout) when loaded.
+fn draw_summary_box(
+    frame: &mut Frame,
+    area: Rect,
+    party: &DecentralizedParty,
+    data: Option<&DetailData>,
+) {
     let label = |text: &'static str| Span::styled(text, Style::default().fg(Color::DarkGray));
     let mut lines = vec![
         Line::from(vec![
@@ -361,6 +424,36 @@ fn draw_summary_box(frame: &mut Frame, area: Rect, party: &DecentralizedParty) {
             label("Your key  "),
             Span::styled(key.clone(), Style::default().fg(logo::ORANGE)),
         ]));
+    }
+    match data.map(|d| &d.gov_state) {
+        Some(Ok(Some(state))) => {
+            let timeout = state
+                .action_confirmation_timeout_microseconds
+                .map_or_else(|| "—".to_owned(), format_micros_human);
+            lines.push(Line::from(vec![
+                label("Governance"),
+                Span::raw(format!(
+                    "  threshold {threshold} of {members} members · timeout {timeout}",
+                    threshold = state.threshold,
+                    members = state.members.len(),
+                )),
+            ]));
+            if state.out_of_date {
+                lines.push(Line::styled(
+                    "⚠ governance-core out of date — migrate this party",
+                    Style::default().fg(Color::Yellow),
+                ));
+            }
+        }
+        // Surface a load error on its own line, like holdings / audit do.
+        Some(Err(error)) => lines.push(Line::from(vec![
+            label("Governance"),
+            Span::styled(
+                format!("  {}", truncate(error, 60)),
+                Style::default().fg(Color::Red),
+            ),
+        ])),
+        _ => {}
     }
     let block = popup_block(&format!("Party · {}", party_name(party)));
     frame.render_widget(Paragraph::new(lines).block(block), area);
@@ -985,20 +1078,49 @@ fn footer_hint(active: Tab, overlay: &Overlay, can_logout: bool) -> String {
             " ↑/↓ move · space toggle · enter distribute · esc cancel".to_owned()
         }
         Overlay::Compare { .. } => " ↑/↓ scroll · esc close".to_owned(),
-        Overlay::Json { .. } => " ↑/↓ scroll · esc close".to_owned(),
+        Overlay::Json { .. } | Overlay::FeedDetail { .. } | Overlay::ChainAudit { .. } => {
+            " ↑/↓ scroll · esc close".to_owned()
+        }
+        Overlay::Onboard(_) => {
+            " ↑/↓ field · space toggle peer · enter start · esc cancel".to_owned()
+        }
+        Overlay::Kick(_) => " ↑/↓ pick · ←/→ threshold · enter kick · esc cancel".to_owned(),
+        Overlay::Auth { .. } => " ↑/↓ select · t test · g grant · e config · esc close".to_owned(),
+        Overlay::GrantRights(_) => " ↑/↓ field · type · enter next/grant · esc cancel".to_owned(),
+        Overlay::PartyConfig(_) => {
+            " ↑/↓ field · ←/→ provider · type · enter next/run · esc cancel".to_owned()
+        }
+        Overlay::Governance(_) => {
+            " ↑/↓ · c confirm · e exec · r revoke · x expire · n new · p propose · esc".to_owned()
+        }
+        Overlay::ComposerPick(_) => " ↑/↓ pick · enter open · esc cancel".to_owned(),
+        Overlay::Composer(_) => {
+            " ↑/↓ field · type to edit · ←/→ toggle · enter next/submit · esc cancel".to_owned()
+        }
+        Overlay::Deploy(_) => {
+            " ↑/↓ field · type number · enter next/deploy · esc cancel".to_owned()
+        }
+        Overlay::NetworkEdit(state) => if state.adding.is_some() {
+            " ↑/↓ field · type · enter next/add · esc back"
+        } else {
+            " ↑/↓ select · a add · d remove · s save · esc cancel"
+        }
+        .to_owned(),
         Overlay::Message(_) => " enter / esc to close".to_owned(),
-        Overlay::Busy(_) => " working… · esc to dismiss".to_owned(),
+        Overlay::Busy(_) => " working… · enter/esc to dismiss".to_owned(),
         Overlay::None => {
             let base = match active {
-                Tab::Parties => " ↑↓ nav · enter view · r refresh",
-                Tab::Peers => " ↑↓ nav · tab switch",
+                Tab::Parties => " ↑↓ nav · enter view · n onboard · r refresh",
+                Tab::Peers => " ↑↓ nav · e edit · tab switch",
                 Tab::Dars => " c check · u upload · d distribute",
-                Tab::Workflows => " a accept · x deny · d dismiss",
+                Tab::Workflows => {
+                    " a accept · x deny · c cancel · t retry · enter detail · d dismiss"
+                }
             };
             let tail = if can_logout {
-                " · esc logout · q quit"
+                " · A auth · esc logout · q quit"
             } else {
-                " · q quit"
+                " · A auth · q quit"
             };
             format!("{base}{tail}")
         }
@@ -1027,6 +1149,25 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     let x = area.x + (area.width - width) / 2;
     let y = area.y + (area.height - height) / 2;
     Rect::new(x, y, width, height)
+}
+
+/// Draw a one-cell drop shadow behind a popup `rect` (offset down-right and
+/// clamped to `area`). Rendered before the popup's own `Clear`, so only the
+/// protruding bottom row and right column remain visible as the shadow.
+fn draw_shadow(frame: &mut Frame, rect: Rect, area: Rect) {
+    let x = rect.x.saturating_add(1);
+    let y = rect.y.saturating_add(1);
+    let max_x = area.x.saturating_add(area.width);
+    let max_y = area.y.saturating_add(area.height);
+    if x >= max_x || y >= max_y {
+        return;
+    }
+    let shadow = Rect::new(x, y, rect.width.min(max_x - x), rect.height.min(max_y - y));
+    frame.render_widget(Clear, shadow);
+    frame.render_widget(
+        Block::default().style(Style::default().bg(Color::Rgb(18, 18, 18))),
+        shadow,
+    );
 }
 
 /// The bordered block used by modal popups.
@@ -1064,6 +1205,744 @@ fn draw_overlay(frame: &mut Frame, area: Rect, overlay: &Overlay, spinner: &str)
             peer_select_popup(frame, area, &dar.filename, peers, *cursor);
         }
         Overlay::Json { value, scroll } => json_popup(frame, area, value, *scroll),
+        Overlay::Onboard(form) => onboard_popup(frame, area, form),
+        Overlay::Kick(form) => kick_popup(frame, area, form),
+        Overlay::FeedDetail { item, scroll } => feed_detail_popup(frame, area, item, *scroll),
+        Overlay::ChainAudit { entries, scroll } => chain_audit_popup(frame, area, entries, *scroll),
+        Overlay::Auth { parties, selected } => auth_popup(frame, area, parties, *selected),
+        Overlay::GrantRights(form) => grant_popup(frame, area, form),
+        Overlay::Governance(view) => governance_popup(frame, area, view),
+        Overlay::ComposerPick(pick) => composer_pick_popup(frame, area, pick),
+        Overlay::Composer(composer) => composer_popup(frame, area, composer),
+        Overlay::Deploy(form) => deploy_popup(frame, area, form),
+        Overlay::NetworkEdit(state) => network_edit_popup(frame, area, state),
+        Overlay::PartyConfig(form) => party_config_popup(frame, area, form),
+    }
+}
+
+/// A `label  value` form row; the focused row is highlighted with a cursor.
+fn pc_line(label: &str, value: String, focused: bool) -> Line<'static> {
+    let style = if focused {
+        Style::default()
+            .fg(logo::ORANGE)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    let shown = if focused {
+        format!("{value}▏")
+    } else if value.is_empty() {
+        "(empty)".to_owned()
+    } else {
+        value
+    };
+    Line::from(vec![detail_label(label), Span::styled(shown, style)])
+}
+
+/// A masked secret row. Blank with a stored secret shows a keep hint.
+fn pc_secret_line(label: &str, value: &str, has_secret: bool, focused: bool) -> Line<'static> {
+    let style = if focused {
+        Style::default()
+            .fg(logo::ORANGE)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    let masked = "•".repeat(value.chars().count());
+    let shown = if focused {
+        format!("{masked}▏")
+    } else if value.is_empty() {
+        if has_secret {
+            "(set — blank keeps it)".to_owned()
+        } else {
+            "(none)".to_owned()
+        }
+    } else {
+        masked
+    };
+    Line::from(vec![detail_label(label), Span::styled(shown, style)])
+}
+
+/// An action button row (Discover / Save).
+fn pc_button(label: &str, focused: bool) -> Line<'static> {
+    let style = if focused {
+        Style::default()
+            .fg(Color::Black)
+            .bg(logo::ORANGE)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    Line::from(Span::styled(format!(" {label} "), style))
+}
+
+/// The per-party IdP configuration editor popup (Keycloak / Auth0).
+fn party_config_popup(frame: &mut Frame, area: Rect, form: &PartyConfigForm) {
+    let rows = form.rows();
+    let mut lines: Vec<Line> = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let focused = index == form.cursor;
+            match row {
+                PcRow::Mode => {
+                    let provider = match form.mode {
+                        IdpMode::Keycloak => "Keycloak",
+                        IdpMode::Auth0 => "Auth0",
+                    };
+                    pc_line("Provider", format!("‹ {provider} ›"), focused)
+                }
+                PcRow::MemberParty => {
+                    pc_line("Member party", form.member_party_id.clone(), focused)
+                }
+                PcRow::UserId => pc_line("User id", form.user_id.clone(), focused),
+                PcRow::KcUrl => pc_line("Keycloak URL", form.kc_url.clone(), focused),
+                PcRow::KcRealm => pc_line("Realm", form.kc_realm.clone(), focused),
+                PcRow::KcClientId => pc_line("Client id", form.kc_client_id.clone(), focused),
+                PcRow::KcSecret => pc_secret_line(
+                    "Client secret",
+                    &form.kc_secret,
+                    form.kc_has_secret,
+                    focused,
+                ),
+                PcRow::Auth0Domain => pc_line("Auth0 domain", form.auth0_domain.clone(), focused),
+                PcRow::Auth0Audience => pc_line("Audience", form.auth0_audience.clone(), focused),
+                PcRow::Auth0ClientId => pc_line("Client id", form.auth0_client_id.clone(), focused),
+                PcRow::Auth0Secret => pc_secret_line(
+                    "Client secret",
+                    &form.auth0_secret,
+                    form.auth0_has_secret,
+                    focused,
+                ),
+                PcRow::Discover => pc_button("Discover member party", focused),
+                PcRow::Submit => pc_button("Save", focused),
+            }
+        })
+        .collect();
+    if !form.status.is_empty() {
+        lines.push(Line::default());
+        lines.push(Line::styled(
+            form.status.clone(),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+
+    let width = 76.min(area.width.saturating_sub(4));
+    let height = ((lines.len() as u16).saturating_add(2)).clamp(6, area.height.saturating_sub(4));
+    let rect = centered_rect(width, height, area);
+    let title = format!("Party config · {}", form.party_name);
+    let paragraph = Paragraph::new(lines).block(popup_block(&title));
+    draw_shadow(frame, rect, area);
+    frame.render_widget(Clear, rect);
+    frame.render_widget(paragraph, rect);
+}
+
+/// The network-config editor popup: the peer list, or the add-peer sub-form.
+fn network_edit_popup(frame: &mut Frame, area: Rect, state: &NetworkEditState) {
+    match &state.adding {
+        Some(form) => peer_form_popup(frame, area, form),
+        None => peer_list_popup(frame, area, state),
+    }
+}
+
+/// The peer list view of the network editor.
+fn peer_list_popup(frame: &mut Frame, area: Rect, state: &NetworkEditState) {
+    let mut lines: Vec<Line> = Vec::new();
+    if state.peers.is_empty() {
+        lines.push(dim_line("(no peers — press a to add)"));
+    }
+    for (index, peer) in state.peers.iter().enumerate() {
+        let selected = index == state.selected;
+        let marker = if selected { "▶ " } else { "  " };
+        let style = if selected {
+            Style::default()
+                .fg(logo::ORANGE)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{marker}{}", id_prefix(&peer.participant_id)),
+                style,
+            ),
+            Span::styled(
+                format!("  {}:{}", peer.address, peer.port),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+    }
+
+    let width = 72.min(area.width.saturating_sub(4));
+    let height = ((lines.len() as u16).saturating_add(2)).clamp(6, area.height.saturating_sub(4));
+    let visible = height.saturating_sub(2);
+    let selected = u16::try_from(state.selected).unwrap_or(0);
+    let scroll = selected.saturating_sub(visible.saturating_sub(1));
+    let rect = centered_rect(width, height, area);
+    let paragraph = Paragraph::new(lines)
+        .scroll((scroll, 0))
+        .block(popup_block("Network peers"));
+    draw_shadow(frame, rect, area);
+    frame.render_widget(Clear, rect);
+    frame.render_widget(paragraph, rect);
+}
+
+/// The add-peer sub-form of the network editor.
+fn peer_form_popup(frame: &mut Frame, area: Rect, form: &PeerForm) {
+    let edit_line = |label: &str, value: &str, focused: bool| {
+        let value_style = if focused {
+            Style::default()
+                .fg(logo::ORANGE)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        let shown = if focused {
+            format!("{value}▏")
+        } else if value.is_empty() {
+            "(empty)".to_owned()
+        } else {
+            value.to_owned()
+        };
+        Line::from(vec![detail_label(label), Span::styled(shown, value_style)])
+    };
+
+    let fields = [
+        ("Participant id", form.participant_id.as_str()),
+        ("Name", form.name.as_str()),
+        ("Address", form.address.as_str()),
+        ("Port", form.port.as_str()),
+        ("Public key", form.public_key.as_str()),
+        ("Party (optional)", form.party.as_str()),
+    ];
+    let mut lines: Vec<Line> = fields
+        .iter()
+        .enumerate()
+        .map(|(index, (label, value))| edit_line(label, value, form.cursor == index))
+        .collect();
+    lines.push(Line::default());
+    let submit_style = if form.cursor >= fields.len() {
+        Style::default()
+            .fg(Color::Black)
+            .bg(logo::ORANGE)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    lines.push(Line::from(Span::styled(" Add peer ", submit_style)));
+
+    let width = 72.min(area.width.saturating_sub(4));
+    let height = ((lines.len() as u16).saturating_add(2)).clamp(6, area.height.saturating_sub(4));
+    let rect = centered_rect(width, height, area);
+    let paragraph = Paragraph::new(lines).block(popup_block("Add peer"));
+    draw_shadow(frame, rect, area);
+    frame.render_widget(Clear, rect);
+    frame.render_widget(paragraph, rect);
+}
+
+/// The governance-core contract deployment popup: resolved context plus the two
+/// editable fields (threshold, timeout) and a submit row.
+fn deploy_popup(frame: &mut Frame, area: Rect, form: &DeployForm) {
+    let edit_line = |label: &str, value: &str, focused: bool| {
+        let value_style = if focused {
+            Style::default()
+                .fg(logo::ORANGE)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        let shown = if focused {
+            format!("{value}▏")
+        } else {
+            value.to_owned()
+        };
+        Line::from(vec![detail_label(label), Span::styled(shown, value_style)])
+    };
+
+    let mut lines = vec![
+        detail_kv("Contract", "GovernanceRules".to_owned()),
+        detail_kv(
+            "Package",
+            if form.package_id.is_empty() {
+                "(governance-core DAR not vetted)".to_owned()
+            } else {
+                truncate(&form.package_id, 44)
+            },
+        ),
+        detail_kv("Members", form.member_parties.len().to_string()),
+    ];
+    lines.extend(
+        form.member_parties
+            .iter()
+            .map(|member| detail_item(id_prefix(member).to_owned())),
+    );
+    lines.push(Line::default());
+    lines.push(edit_line("Threshold", &form.threshold, form.cursor == 0));
+    lines.push(edit_line(
+        "Timeout (µs)",
+        &form.timeout_micros,
+        form.cursor == 1,
+    ));
+    lines.push(Line::default());
+    let submit_style = if form.cursor >= 2 {
+        Style::default()
+            .fg(Color::Black)
+            .bg(logo::ORANGE)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    lines.push(Line::from(Span::styled(" Deploy ", submit_style)));
+
+    let width = 70.min(area.width.saturating_sub(4));
+    let height = ((lines.len() as u16).saturating_add(2)).clamp(6, area.height.saturating_sub(4));
+    let rect = centered_rect(width, height, area);
+    let title = format!("Deploy governance · {}", form.party_name);
+    let paragraph = Paragraph::new(lines)
+        .scroll((0, 0))
+        .block(popup_block(&title));
+    draw_shadow(frame, rect, area);
+    frame.render_widget(Clear, rect);
+    frame.render_widget(paragraph, rect);
+}
+
+/// The action / proposal type picker popup.
+fn composer_pick_popup(frame: &mut Frame, area: Rect, pick: &ComposerPick) {
+    let title = match pick.kind {
+        ComposerKind::Action => "New governance action",
+        ComposerKind::Proposal => "New proposal",
+    };
+    let lines: Vec<Line> = pick
+        .options
+        .iter()
+        .enumerate()
+        .map(|(index, option)| {
+            let selected = index == pick.selected;
+            let marker = if selected { "▶ " } else { "  " };
+            let style = if selected {
+                Style::default()
+                    .fg(logo::ORANGE)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            Line::from(Span::styled(format!("{marker}{}", option.label), style))
+        })
+        .collect();
+
+    let width = 56.min(area.width.saturating_sub(4));
+    let height = ((lines.len() as u16).saturating_add(2)).clamp(6, area.height.saturating_sub(4));
+    let visible = height.saturating_sub(2);
+    let selected = u16::try_from(pick.selected).unwrap_or(0);
+    let scroll = selected.saturating_sub(visible.saturating_sub(1));
+    let rect = centered_rect(width, height, area);
+    let paragraph = Paragraph::new(lines)
+        .scroll((scroll, 0))
+        .block(popup_block(title));
+    draw_shadow(frame, rect, area);
+    frame.render_widget(Clear, rect);
+    frame.render_widget(paragraph, rect);
+}
+
+/// The display string for a composer field's current value.
+fn composer_field_display(field: &crate::composer::ComposerField, focused: bool) -> String {
+    match &field.kind {
+        FieldKind::Bool => format!("‹ {} ›", field.value),
+        FieldKind::Select(options) => {
+            let label = options
+                .iter()
+                .find(|option| option.value == field.value)
+                .map_or(field.value.as_str(), |option| option.label);
+            format!("‹ {label} ›")
+        }
+        FieldKind::List | FieldKind::Rows(_) => {
+            let preview = field.value.replace('\n', " | ");
+            if focused {
+                format!("{preview}▏")
+            } else if preview.is_empty() {
+                "(empty)".to_owned()
+            } else {
+                preview
+            }
+        }
+        FieldKind::Text | FieldKind::Int => {
+            if focused {
+                format!("{}▏", field.value)
+            } else if field.value.is_empty() {
+                "(empty)".to_owned()
+            } else {
+                field.value.clone()
+            }
+        }
+    }
+}
+
+/// The composer form popup: one row per field plus a virtual submit row.
+fn composer_popup(frame: &mut Frame, area: Rect, composer: &Composer) {
+    let mut lines: Vec<Line> = Vec::new();
+    for (index, field) in composer.fields.iter().enumerate() {
+        let focused = index == composer.cursor;
+        let value_style = if focused {
+            Style::default()
+                .fg(logo::ORANGE)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        let mut spans = vec![
+            Span::styled(
+                format!("{:<24}", truncate(field.label, 24)),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(composer_field_display(field, focused), value_style),
+        ];
+        if focused && !field.help.is_empty() {
+            spans.push(Span::styled(
+                format!("   {}", field.help),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        lines.push(Line::from(spans));
+    }
+    lines.push(Line::default());
+    let submit_focused = composer.cursor >= composer.fields.len();
+    let submit_style = if submit_focused {
+        Style::default()
+            .fg(Color::Black)
+            .bg(logo::ORANGE)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    lines.push(Line::from(Span::styled(" Submit ", submit_style)));
+
+    let width = 78.min(area.width.saturating_sub(4));
+    let height = ((lines.len() as u16).saturating_add(2)).clamp(6, area.height.saturating_sub(4));
+    let visible = height.saturating_sub(2);
+    let cursor = u16::try_from(composer.cursor).unwrap_or(0);
+    let scroll = cursor.saturating_sub(visible.saturating_sub(1));
+    let rect = centered_rect(width, height, area);
+    let paragraph = Paragraph::new(lines)
+        .scroll((scroll, 0))
+        .block(popup_block(&composer.title));
+    draw_shadow(frame, rect, area);
+    frame.render_widget(Clear, rect);
+    frame.render_widget(paragraph, rect);
+}
+
+/// Title-case a snake_case identifier (e.g. `set_threshold` → `Set Threshold`).
+fn humanize(value: &str) -> String {
+    let mut out = String::new();
+    for (i, word) in value.split('_').enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        let mut chars = word.chars();
+        if let Some(first) = chars.next() {
+            out.extend(first.to_uppercase());
+            out.push_str(chars.as_str());
+        }
+    }
+    out
+}
+
+/// A short human summary of an off-chain governance action (its `type` plus a
+/// salient field).
+fn gov_action_summary(action: &serde_json::Value) -> String {
+    let field_str = |key: &str| action.get(key).and_then(serde_json::Value::as_str);
+    let field_i64 = |key: &str| action.get(key).and_then(serde_json::Value::as_i64);
+    let kind = field_str("type").unwrap_or("action");
+    let base = humanize(kind);
+    let detail = match kind {
+        "governance_set_threshold" => field_i64("new_threshold").map(|n| format!("→ {n}")),
+        "governance_add_member" | "governance_remove_member" => {
+            field_str("member").map(|m| id_prefix(m).to_owned())
+        }
+        "governance_set_timeout" => field_i64("new_timeout_microseconds").map(format_micros_human),
+        "vault_pause" | "vault_unpause" | "vault_update_limits" | "vault_update_backend" => {
+            field_str("vault_id").map(|v| truncate(v, 12))
+        }
+        _ => None,
+    };
+    match detail {
+        Some(detail) => format!("{base}  {detail}"),
+        None => base,
+    }
+}
+
+/// The governance approvals popup: a selectable list of pending actions.
+fn governance_popup(frame: &mut Frame, area: Rect, view: &GovView) {
+    let ready = || Span::styled("  ✓ ready", Style::default().fg(Color::Green));
+    let dim = || Style::default().fg(Color::DarkGray);
+
+    let mut lines: Vec<Line> = Vec::new();
+    if view.items.is_empty() {
+        lines.push(dim_line("(no pending approvals)"));
+    }
+    for (index, item) in view.items.iter().enumerate() {
+        let selected = index == view.selected;
+        let marker = if selected { "▶ " } else { "  " };
+        let style = if selected {
+            Style::default()
+                .fg(logo::ORANGE)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        let mut spans = vec![Span::styled(marker, style)];
+        match item {
+            GovItem::OffChain(action) => {
+                spans.push(Span::styled(gov_action_summary(&action.action), style));
+                spans.push(Span::styled(
+                    format!("  {}/{}", action.confirmation_count, view.threshold),
+                    dim(),
+                ));
+                if action.can_execute {
+                    spans.push(ready());
+                }
+            }
+            GovItem::Domain(domain) => {
+                spans.push(Span::styled("[chain] ", Style::default().fg(Color::Cyan)));
+                let label = match domain.description.as_deref().filter(|d| !d.is_empty()) {
+                    Some(description) => format!("{} — {description}", domain.action_label),
+                    None => domain.action_label.clone(),
+                };
+                spans.push(Span::styled(label, style));
+                spans.push(Span::styled(
+                    format!("  {}", domain.confirmation_count),
+                    dim(),
+                ));
+                if domain.can_execute {
+                    spans.push(ready());
+                }
+                if domain.orphaned {
+                    spans.push(Span::styled("  orphaned", Style::default().fg(Color::Red)));
+                }
+            }
+        }
+        lines.push(Line::from(spans));
+    }
+
+    let width = 86.min(area.width.saturating_sub(4));
+    let height = ((lines.len() as u16).saturating_add(2)).clamp(6, area.height.saturating_sub(4));
+    let visible = height.saturating_sub(2);
+    let selected = u16::try_from(view.selected).unwrap_or(0);
+    let scroll = selected.saturating_sub(visible.saturating_sub(1));
+    let rect = centered_rect(width, height, area);
+    let title = format!(
+        "Approvals · {party} · threshold {threshold}",
+        party = view.party_name,
+        threshold = view.threshold
+    );
+    let paragraph = Paragraph::new(lines)
+        .scroll((scroll, 0))
+        .block(popup_block(&title));
+    draw_shadow(frame, rect, area);
+    frame.render_widget(Clear, rect);
+    frame.render_widget(paragraph, rect);
+}
+
+/// The human-readable prefix of a Canton id (segment before `::`).
+fn id_prefix(id: &str) -> &str {
+    id.split("::").next().unwrap_or(id)
+}
+
+/// Display color and label for a per-party authentication status.
+fn auth_status_display(status: &AuthStatusKind) -> (Color, String) {
+    match status {
+        AuthStatusKind::Authenticated => (Color::Green, "authenticated".to_owned()),
+        AuthStatusKind::Mock => (logo::ORANGE, "mock".to_owned()),
+        AuthStatusKind::Failed { error } => (Color::Red, format!("failed: {error}")),
+        AuthStatusKind::Notconfigured => (Color::DarkGray, "not configured".to_owned()),
+    }
+}
+
+/// A `✓ label` / `✗ label` chip, green when the right is held, else dim.
+fn right_chip(label: &str, held: bool) -> Span<'static> {
+    let (mark, color) = if held {
+        ("✓", Color::Green)
+    } else {
+        ("✗", Color::DarkGray)
+    };
+    Span::styled(format!("{mark} {label}"), Style::default().fg(color))
+}
+
+/// The authentication-status popup: each party's IdP status and ledger rights.
+fn auth_popup(frame: &mut Frame, area: Rect, parties: &[PartyAuthStatus], selected: usize) {
+    let mut lines: Vec<Line> = Vec::new();
+    if parties.is_empty() {
+        lines.push(dim_line("(no parties configured)"));
+    }
+    let label = |text: &'static str| Span::styled(text, Style::default().fg(Color::DarkGray));
+    // Line index where the selected party's block starts, for scroll-to-view.
+    let mut selected_offset = 0u16;
+    for (index, party) in parties.iter().enumerate() {
+        if index == selected {
+            selected_offset = u16::try_from(lines.len()).unwrap_or(0);
+        }
+        let marker = if index == selected { "▶ " } else { "  " };
+        // Only the selected party's header is highlighted, like the other lists.
+        let header_style = if index == selected {
+            Style::default()
+                .fg(logo::ORANGE)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{marker}{}", id_prefix(&party.dec_party_id)),
+            header_style,
+        )));
+        if let Some(member) = &party.member_party_id {
+            lines.push(Line::from(vec![
+                label("  member  "),
+                Span::raw(id_prefix(member).to_owned()),
+            ]));
+        }
+        if let Some(user) = &party.user_id {
+            lines.push(Line::from(vec![
+                label("  user    "),
+                Span::raw(user.clone()),
+            ]));
+        }
+        let (color, status_label) = auth_status_display(&party.status);
+        lines.push(Line::from(vec![
+            label("  status  "),
+            Span::styled(status_label, Style::default().fg(color)),
+        ]));
+        if let Some(rights) = &party.rights {
+            lines.push(Line::from(vec![
+                label("  rights  "),
+                label("member "),
+                right_chip("actAs", rights.member_party_act_as),
+                Span::raw(" "),
+                right_chip("readAs", rights.member_party_read_as),
+                label("  · dec "),
+                right_chip("actAs", rights.dec_party_act_as),
+                Span::raw(" "),
+                right_chip("readAs", rights.dec_party_read_as),
+            ]));
+        }
+        lines.push(Line::default());
+    }
+
+    let width = 76.min(area.width.saturating_sub(4));
+    let height = ((lines.len() as u16).saturating_add(2)).clamp(6, area.height.saturating_sub(4));
+    let visible = height.saturating_sub(2);
+    // Scroll so the selected party's block stays in view.
+    let scroll = selected_offset.saturating_sub(visible.saturating_sub(1));
+    let rect = centered_rect(width, height, area);
+    let paragraph = Paragraph::new(lines)
+        .scroll((scroll, 0))
+        .block(popup_block("Authentication"));
+    draw_shadow(frame, rect, area);
+    frame.render_widget(Clear, rect);
+    frame.render_widget(paragraph, rect);
+}
+
+/// The grant-rights form popup: admin client id + secret for one party.
+fn grant_popup(frame: &mut Frame, area: Rect, form: &GrantForm) {
+    let edit_line = |label: &str, value: &str, focused: bool, mask: bool| {
+        let value_style = if focused {
+            Style::default()
+                .fg(logo::ORANGE)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        let base = if mask {
+            "•".repeat(value.chars().count())
+        } else {
+            value.to_owned()
+        };
+        let shown = if focused {
+            format!("{base}▏")
+        } else if value.is_empty() {
+            "(empty)".to_owned()
+        } else {
+            base
+        };
+        Line::from(vec![detail_label(label), Span::styled(shown, value_style)])
+    };
+
+    let mut lines = vec![
+        detail_kv("Party", form.party_name.clone()),
+        Line::default(),
+        edit_line("Admin client id", &form.client_id, form.cursor == 0, false),
+        edit_line("Admin secret", &form.client_secret, form.cursor == 1, true),
+        Line::default(),
+    ];
+    let submit_style = if form.cursor >= 2 {
+        Style::default()
+            .fg(Color::Black)
+            .bg(logo::ORANGE)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    lines.push(Line::from(Span::styled(" Grant rights ", submit_style)));
+
+    let width = 64.min(area.width.saturating_sub(4));
+    let height = ((lines.len() as u16).saturating_add(2)).clamp(6, area.height.saturating_sub(4));
+    let rect = centered_rect(width, height, area);
+    let paragraph = Paragraph::new(lines).block(popup_block("Grant rights"));
+    draw_shadow(frame, rect, area);
+    frame.render_widget(Clear, rect);
+    frame.render_widget(paragraph, rect);
+}
+
+/// A scrollable popup of the on-chain governance audit trail.
+fn chain_audit_popup(frame: &mut Frame, area: Rect, entries: &[ChainAuditEntry], scroll: u16) {
+    let lines: Vec<Line> = if entries.is_empty() {
+        vec![dim_line("(no on-chain audit entries)")]
+    } else {
+        entries
+            .iter()
+            .map(|entry| {
+                let summary = if entry.action_summary.is_empty() {
+                    entry
+                        .choice
+                        .clone()
+                        .unwrap_or_else(|| entry.event_type.clone())
+                } else {
+                    entry.action_summary.clone()
+                };
+                Line::from(vec![
+                    Span::styled(
+                        format!("{:<17}", format_timestamp(entry.timestamp)),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(
+                        format!("{:<9}", truncate(&entry.event_type, 9)),
+                        Style::default().fg(chain_event_color(&entry.event_type)),
+                    ),
+                    Span::styled(
+                        format!("{:<12}", truncate(&entry.governance_type, 12)),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::raw(summary),
+                ])
+            })
+            .collect()
+    };
+    let width = 84.min(area.width.saturating_sub(4));
+    let height = ((lines.len() as u16).saturating_add(2)).clamp(6, area.height.saturating_sub(4));
+    let rect = centered_rect(width, height, area);
+    let paragraph = Paragraph::new(lines)
+        .scroll((scroll, 0))
+        .block(popup_block("On-chain audit"));
+    draw_shadow(frame, rect, area);
+    frame.render_widget(Clear, rect);
+    frame.render_widget(paragraph, rect);
+}
+
+/// Color for an on-chain audit event type.
+fn chain_event_color(event_type: &str) -> Color {
+    match event_type {
+        "execute" => Color::Green,
+        "propose" | "confirm" => logo::ORANGE,
+        "cancel" | "expire" => Color::Red,
+        _ => Color::Gray,
     }
 }
 
@@ -1079,6 +1958,7 @@ fn json_popup(frame: &mut Frame, area: Rect, value: &serde_json::Value, scroll: 
     let paragraph = Paragraph::new(lines)
         .scroll((scroll, 0))
         .block(popup_block("Audit details"));
+    draw_shadow(frame, rect, area);
     frame.render_widget(Clear, rect);
     frame.render_widget(paragraph, rect);
 }
@@ -1092,6 +1972,7 @@ fn message_popup(frame: &mut Frame, area: Rect, title: &str, message: &str, colo
         .alignment(Alignment::Center)
         .wrap(Wrap { trim: true })
         .block(popup_block(title));
+    draw_shadow(frame, rect, area);
     frame.render_widget(Clear, rect);
     frame.render_widget(paragraph, rect);
 }
@@ -1158,6 +2039,7 @@ fn compare_popup(frame: &mut Frame, area: Rect, comparison: &PeerPackageComparis
     let paragraph = Paragraph::new(lines)
         .scroll((scroll, 0))
         .block(popup_block("Package check"));
+    draw_shadow(frame, rect, area);
     frame.render_widget(Clear, rect);
     frame.render_widget(paragraph, rect);
 }
@@ -1192,8 +2074,272 @@ fn peer_select_popup(
     let rect = centered_rect(width, height, area);
     let title = format!("Distribute {filename}");
     let paragraph = Paragraph::new(lines).block(popup_block(&title));
+    draw_shadow(frame, rect, area);
     frame.render_widget(Clear, rect);
     frame.render_widget(paragraph, rect);
+}
+
+/// The onboarding (create-party) form popup: a prefix field above a tickable
+/// peer list, with the focused element highlighted.
+fn onboard_popup(frame: &mut Frame, area: Rect, form: &OnboardForm) {
+    let prefix_focus = form.cursor == 0;
+    let prefix_span = if form.prefix.is_empty() && !prefix_focus {
+        Span::styled("<party id prefix>", Style::default().fg(Color::DarkGray))
+    } else {
+        let cursor = if prefix_focus { "▏" } else { "" };
+        Span::styled(
+            format!("{}{cursor}", form.prefix),
+            Style::default()
+                .fg(logo::ORANGE)
+                .add_modifier(Modifier::BOLD),
+        )
+    };
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("Prefix  ", Style::default().fg(Color::DarkGray)),
+            prefix_span,
+        ]),
+        Line::default(),
+        dim_line("Invite peers:"),
+    ];
+    for (i, peer) in form.peers.iter().enumerate() {
+        let focused = form.cursor == i + 1;
+        let marker = if focused { "▶ " } else { "  " };
+        let check = if peer.checked { "[x] " } else { "[ ] " };
+        let style = if focused {
+            Style::default()
+                .fg(logo::ORANGE)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{marker}{check}{}", peer.name),
+            style,
+        )));
+    }
+
+    let width = 64.min(area.width.saturating_sub(4));
+    let height = ((lines.len() as u16) + 2).clamp(8, area.height.saturating_sub(4));
+    let rect = centered_rect(width, height, area);
+    let paragraph = Paragraph::new(lines).block(popup_block("Onboard new party"));
+    draw_shadow(frame, rect, area);
+    frame.render_widget(Clear, rect);
+    frame.render_widget(paragraph, rect);
+}
+
+/// The kick-participant form popup: pick an owner to remove and set the new
+/// signing threshold.
+fn kick_popup(frame: &mut Frame, area: Rect, form: &KickForm) {
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("Party  ", Style::default().fg(Color::DarkGray)),
+            Span::raw(form.party_name.clone()),
+        ]),
+        Line::default(),
+        dim_line("Remove participant:"),
+    ];
+    for (i, candidate) in form.candidates.iter().enumerate() {
+        let focused = i == form.selected;
+        let marker = if focused { "▶ " } else { "  " };
+        let style = if focused {
+            Style::default()
+                .fg(logo::ORANGE)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{marker}{}", candidate.label),
+            style,
+        )));
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(vec![
+        Span::styled("New threshold  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("{} ", form.new_threshold),
+            Style::default()
+                .fg(logo::ORANGE)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(
+                "(was {prev}, max {max}) ←/→ adjust",
+                prev = form.previous_threshold,
+                max = form.max_threshold
+            ),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]));
+
+    let width = 64.min(area.width.saturating_sub(4));
+    let height = ((lines.len() as u16) + 2).clamp(8, area.height.saturating_sub(4));
+    let rect = centered_rect(width, height, area);
+    let paragraph = Paragraph::new(lines).block(popup_block("Kick participant"));
+    draw_shadow(frame, rect, area);
+    frame.render_widget(Clear, rect);
+    frame.render_widget(paragraph, rect);
+}
+
+/// A scrollable detail popup for a feed item (workflow run or invitation).
+fn feed_detail_popup(frame: &mut Frame, area: Rect, item: &FeedItem, scroll: u16) {
+    let (title, lines) = match item {
+        FeedItem::Run(run) => (format!("{} workflow", run.kind), run_detail_lines(run)),
+        FeedItem::Invitation(invitation) => (
+            format!("{} invitation", invitation.invitation_type),
+            invitation_detail_lines(invitation),
+        ),
+    };
+    let width = 84.min(area.width.saturating_sub(4));
+    let height = ((lines.len() as u16).saturating_add(2)).clamp(6, area.height.saturating_sub(4));
+    let rect = centered_rect(width, height, area);
+    let paragraph = Paragraph::new(lines)
+        .scroll((scroll, 0))
+        .wrap(Wrap { trim: false })
+        .block(popup_block(&title));
+    draw_shadow(frame, rect, area);
+    frame.render_widget(Clear, rect);
+    frame.render_widget(paragraph, rect);
+}
+
+/// A right-padded dim field label for the detail popups.
+fn detail_label(text: &str) -> Span<'static> {
+    Span::styled(format!("{text:<15}"), Style::default().fg(Color::DarkGray))
+}
+
+/// A `label  value` detail line.
+fn detail_kv(label: &str, value: String) -> Line<'static> {
+    Line::from(vec![detail_label(label), Span::raw(value)])
+}
+
+/// An indented detail value line (for list items).
+fn detail_item(value: String) -> Line<'static> {
+    Line::from(vec![
+        Span::raw("  "),
+        Span::styled(value, Style::default().fg(Color::Gray)),
+    ])
+}
+
+/// Detail lines for a workflow run.
+fn run_detail_lines(run: &WorkflowRun) -> Vec<Line<'static>> {
+    let (color, label) = workflow_status_display(run.status);
+    let mut lines = vec![
+        detail_kv("Instance", run.instance_name.clone()),
+        detail_kv("Kind", run.kind.to_string()),
+        detail_kv("Role", run.role.to_string()),
+        Line::from(vec![
+            detail_label("Status"),
+            Span::styled(label.to_owned(), Style::default().fg(color)),
+        ]),
+        detail_kv(
+            "Step",
+            format!(
+                "{step} ({index}/{total})",
+                step = if run.current_step.is_empty() {
+                    "—"
+                } else {
+                    &run.current_step
+                },
+                index = run.step_index,
+                total = run.step_total
+            ),
+        ),
+    ];
+    if let Some(prefix) = run.prefix.as_deref().filter(|p| !p.is_empty()) {
+        lines.push(detail_kv("Prefix", prefix.to_owned()));
+    }
+    if let Some(dec_party) = &run.dec_party_id {
+        lines.push(detail_kv("Dec party", dec_party.to_string()));
+    }
+    if run.previous_threshold.is_some() || run.new_threshold.is_some() {
+        lines.push(detail_kv(
+            "Threshold",
+            format!(
+                "{prev} → {next}",
+                prev = run.previous_threshold.unwrap_or(0),
+                next = run.new_threshold.unwrap_or(0)
+            ),
+        ));
+    }
+    if let Some(kicked) = &run.kicked_participant {
+        lines.push(detail_kv("Kicked", kicked.to_string()));
+    }
+    if !run.participants.is_empty() {
+        lines.push(detail_kv("Participants", String::new()));
+        lines.extend(run.participants.iter().map(|p| detail_item(p.to_string())));
+    }
+    if !run.completed_peers.is_empty() || !run.expected_peers.is_empty() {
+        lines.push(detail_kv(
+            "Peers",
+            format!(
+                "{done}/{total} done",
+                done = run.completed_peers.len(),
+                total = run.expected_peers.len()
+            ),
+        ));
+    }
+    if !run.package_names.is_empty() {
+        lines.push(detail_kv("Packages", run.package_names.join(", ")));
+    }
+    if !run.dar_filenames.is_empty() {
+        lines.push(detail_kv("DARs", run.dar_filenames.join(", ")));
+    }
+    if let Some(error) = &run.error {
+        lines.push(Line::default());
+        lines.push(Line::styled(
+            format!("Error: {error}"),
+            Style::default().fg(Color::Red),
+        ));
+    }
+    lines
+}
+
+/// Detail lines for a pending invitation.
+fn invitation_detail_lines(invitation: &PendingInvitation) -> Vec<Line<'static>> {
+    let mut lines = vec![detail_kv("Type", invitation.invitation_type.to_string())];
+    if let Some(name) = &invitation.coordinator_name {
+        lines.push(detail_kv("From", name.clone()));
+    }
+    lines.push(detail_kv(
+        "Coordinator",
+        invitation.coordinator_pubkey.clone(),
+    ));
+    if let Some(prefix) = invitation.prefix.as_deref().filter(|p| !p.is_empty()) {
+        lines.push(detail_kv("Prefix", prefix.to_owned()));
+    }
+    if let Some(dec_party) = &invitation.dec_party_id {
+        lines.push(detail_kv("Dec party", dec_party.to_string()));
+    }
+    if invitation.previous_threshold.is_some() || invitation.new_threshold.is_some() {
+        lines.push(detail_kv(
+            "Threshold",
+            format!(
+                "{prev} → {next}",
+                prev = invitation.previous_threshold.unwrap_or(0),
+                next = invitation.new_threshold.unwrap_or(0)
+            ),
+        ));
+    }
+    if let Some(kicked) = &invitation.kicked_participant {
+        lines.push(detail_kv("Kicked", kicked.to_string()));
+    }
+    if !invitation.participants.is_empty() {
+        lines.push(detail_kv("Participants", String::new()));
+        lines.extend(
+            invitation
+                .participants
+                .iter()
+                .map(|p| detail_item(p.to_string())),
+        );
+    }
+    if !invitation.package_names.is_empty() {
+        lines.push(detail_kv("Packages", invitation.package_names.join(", ")));
+    }
+    if !invitation.dar_filenames.is_empty() {
+        lines.push(detail_kv("DARs", invitation.dar_filenames.join(", ")));
+    }
+    lines
 }
 
 #[cfg(test)]
@@ -1431,6 +2577,8 @@ mod tests {
 
     #[test]
     fn party_detail_renders_fields() {
+        use crate::api::GovState;
+
         let party_id = canton_id("cbtc-network");
         let participant_id = CantonId::parse(&format!("participant-1::{NS2}")).unwrap();
         let party = DecentralizedParty {
@@ -1474,6 +2622,12 @@ mod tests {
                 error_message: None,
                 created_at: 1_750_000_000,
             }]),
+            gov_state: Ok(Some(GovState {
+                members: vec!["m1".to_owned(), "m2".to_owned(), "m3".to_owned()],
+                threshold: 2,
+                action_confirmation_timeout_microseconds: Some(86_400_000_000),
+                out_of_date: false,
+            })),
         };
 
         let mut audit_state = TableState::default().with_selected(Some(0));
@@ -1519,6 +2673,38 @@ mod tests {
         assert!(rendered.contains("success"));
         // The JSON is not shown inline — it opens as a modal (see below).
         assert!(!rendered.contains("new_threshold"));
+        // The on-ledger governance state renders in the summary box (a
+        // 86_400_000_000µs timeout renders as "24h", not "1d").
+        assert!(rendered.contains("Governance"));
+        assert!(rendered.contains("threshold 2 of 3 members"));
+        assert!(rendered.contains("24h"));
+    }
+
+    #[test]
+    fn format_micros_human_uses_hours_for_one_day_and_days_for_two() {
+        assert_eq!(format_micros_human(86_400_000_000), "24h");
+        assert_eq!(format_micros_human(172_800_000_000), "2d");
+        assert_eq!(format_micros_human(3_600_000_000), "1h");
+        assert_eq!(format_micros_human(1_800_000_000), "30m");
+    }
+
+    #[test]
+    fn chain_audit_popup_renders_entries() {
+        let overlay = Overlay::ChainAudit {
+            entries: vec![ChainAuditEntry {
+                timestamp: 1_750_000_000,
+                event_type: "execute".to_owned(),
+                governance_type: "core_domain".to_owned(),
+                action_summary: "Executed SetThreshold".to_owned(),
+                choice: Some("GovernanceRules_Execute".to_owned()),
+            }],
+            scroll: 0,
+        };
+        let rendered = render(|frame, area| draw_overlay(frame, area, &overlay, "⠋"));
+        assert!(rendered.contains("On-chain audit"));
+        assert!(rendered.contains("execute"));
+        assert!(rendered.contains("core_domain"));
+        assert!(rendered.contains("Executed SetThreshold"));
     }
 
     #[test]
@@ -1551,6 +2737,357 @@ mod tests {
         assert_eq!(color_of("3"), Some(Color::Yellow)); // number
         assert_eq!(color_of("true"), Some(Color::Magenta)); // boolean
         assert_eq!(color_of("null"), Some(Color::Magenta)); // null
+    }
+
+    #[test]
+    fn onboard_popup_renders_prefix_and_peers() {
+        let overlay = Overlay::Onboard(OnboardForm {
+            prefix: "vault".to_owned(),
+            peers: vec![PeerChoice {
+                id: "p1::1220".to_owned(),
+                name: "alpha".to_owned(),
+                checked: true,
+            }],
+            cursor: 0,
+        });
+        let rendered = render(|frame, area| draw_overlay(frame, area, &overlay, "⠋"));
+        assert!(rendered.contains("Onboard new party"));
+        assert!(rendered.contains("vault"));
+        assert!(rendered.contains("alpha"));
+        assert!(rendered.contains("[x]"));
+    }
+
+    #[test]
+    fn kick_popup_renders_candidates_and_threshold() {
+        use crate::app::KickCandidate;
+
+        let overlay = Overlay::Kick(KickForm {
+            party_id: "dec::1220".to_owned(),
+            party_name: "cbtc-network".to_owned(),
+            previous_threshold: 3,
+            candidates: vec![KickCandidate {
+                participant_id: "p::1220".to_owned(),
+                label: "peerA".to_owned(),
+            }],
+            selected: 0,
+            new_threshold: 2,
+            max_threshold: 2,
+        });
+        let rendered = render(|frame, area| draw_overlay(frame, area, &overlay, "⠋"));
+        assert!(rendered.contains("Kick participant"));
+        assert!(rendered.contains("cbtc-network"));
+        assert!(rendered.contains("peerA"));
+        assert!(rendered.contains("New threshold"));
+    }
+
+    #[test]
+    fn feed_detail_popup_renders_run_fields_and_error() {
+        let run = WorkflowRun {
+            instance_name: "onboarding-vault-abc".to_owned(),
+            kind: WorkflowKind::Onboarding,
+            role: WorkflowRole::Coordinator,
+            status: WorkflowProgress::Failed,
+            current_step: "WaitingForPeers".to_owned(),
+            step_index: 1,
+            step_total: 7,
+            config_json: String::new(),
+            coordinator_pubkey: None,
+            coordinator_name: None,
+            expected_peers: Vec::new(),
+            completed_peers: Vec::new(),
+            dec_party_id: None,
+            prefix: Some("vault".to_owned()),
+            participants: Vec::new(),
+            previous_threshold: None,
+            new_threshold: None,
+            kicked_participant: None,
+            package_names: Vec::new(),
+            dar_filenames: Vec::new(),
+            error: Some("peer unreachable".to_owned()),
+            dismissed: false,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let overlay = Overlay::FeedDetail {
+            item: Box::new(FeedItem::Run(run)),
+            scroll: 0,
+        };
+        let rendered = render(|frame, area| draw_overlay(frame, area, &overlay, "⠋"));
+        assert!(rendered.contains("Onboarding workflow"));
+        assert!(rendered.contains("Instance"));
+        assert!(rendered.contains("Failed"));
+        assert!(rendered.contains("Error:"));
+    }
+
+    #[test]
+    fn auth_popup_renders_status_and_rights() {
+        use crate::api::AuthRights;
+
+        let overlay = Overlay::Auth {
+            parties: vec![PartyAuthStatus {
+                dec_party_id: "cbtc-network::1220".to_owned(),
+                member_party_id: Some("member-a::1220".to_owned()),
+                user_id: Some("user-1".to_owned()),
+                status: AuthStatusKind::Authenticated,
+                rights: Some(AuthRights {
+                    member_party_act_as: true,
+                    member_party_read_as: true,
+                    dec_party_act_as: false,
+                    dec_party_read_as: true,
+                }),
+            }],
+            selected: 0,
+        };
+        let rendered = render(|frame, area| draw_overlay(frame, area, &overlay, "⠋"));
+        assert!(rendered.contains("Authentication"));
+        assert!(rendered.contains("cbtc-network"));
+        assert!(rendered.contains("member-a"));
+        assert!(rendered.contains("user-1"));
+        assert!(rendered.contains("authenticated"));
+        assert!(rendered.contains("actAs"));
+    }
+
+    #[test]
+    fn grant_popup_masks_secret() {
+        let form = GrantForm {
+            dec_party_id: "cbtc-network::1220".to_owned(),
+            party_name: "cbtc-network".to_owned(),
+            client_id: "validator-admin".to_owned(),
+            client_secret: "supersecret".to_owned(),
+            cursor: 0,
+        };
+        let overlay = Overlay::GrantRights(Box::new(form));
+        let rendered = render(|frame, area| draw_overlay(frame, area, &overlay, "⠋"));
+        assert!(rendered.contains("Grant rights"));
+        assert!(rendered.contains("validator-admin"));
+        // The secret is masked, never shown verbatim.
+        assert!(!rendered.contains("supersecret"));
+        assert!(rendered.contains('•'));
+    }
+
+    #[test]
+    fn gov_action_summary_humanizes_with_detail() {
+        assert_eq!(
+            gov_action_summary(
+                &serde_json::json!({ "type": "governance_set_threshold", "new_threshold": 3 })
+            ),
+            "Governance Set Threshold  → 3"
+        );
+        assert_eq!(
+            gov_action_summary(
+                &serde_json::json!({ "type": "vault_pause", "vault_id": "00abcdef0123456789" })
+            ),
+            "Vault Pause  00abcdef012…"
+        );
+        assert_eq!(
+            gov_action_summary(&serde_json::json!({ "type": "vault_deployment" })),
+            "Vault Deployment"
+        );
+    }
+
+    #[test]
+    fn governance_popup_renders_offchain_and_domain() {
+        use crate::api::{DomainGovAction, GovAction};
+
+        let view = GovView {
+            party_name: "cbtc-network".to_owned(),
+            party_id: "dec::1220".to_owned(),
+            governance_type: "vault".to_owned(),
+            rules_contract_id: "00rules".to_owned(),
+            member_party_id: "member::1220".to_owned(),
+            threshold: 2,
+            items: vec![
+                GovItem::OffChain(GovAction {
+                    action: serde_json::json!({
+                        "type": "governance_set_threshold",
+                        "new_threshold": 3,
+                    }),
+                    confirmations: Vec::new(),
+                    confirmation_count: 1,
+                    can_execute: false,
+                }),
+                GovItem::Domain(DomainGovAction {
+                    proposal_cid: "00prop".to_owned(),
+                    action_label: "SetupCcPreapproval".to_owned(),
+                    description: Some("set up preapproval".to_owned()),
+                    confirmations: Vec::new(),
+                    confirmation_count: 2,
+                    can_execute: true,
+                    orphaned: false,
+                }),
+            ],
+            selected: 0,
+        };
+        let overlay = Overlay::Governance(Box::new(view));
+        let rendered = render(|frame, area| draw_overlay(frame, area, &overlay, "⠋"));
+        assert!(rendered.contains("Approvals"));
+        assert!(rendered.contains("Governance Set Threshold"));
+        assert!(rendered.contains("1/2"));
+        assert!(rendered.contains("[chain]"));
+        assert!(rendered.contains("SetupCcPreapproval"));
+        assert!(rendered.contains("ready"));
+    }
+
+    #[test]
+    fn composer_pick_popup_lists_options() {
+        use crate::app::{ComposerKind, ComposerPick};
+
+        let pick = ComposerPick {
+            kind: ComposerKind::Action,
+            party_id: "dec::1".to_owned(),
+            party_name: "dec".to_owned(),
+            governance_type: "core_self".to_owned(),
+            rules_contract_id: "00r".to_owned(),
+            default_threshold: 2,
+            options: crate::composer::action_types("core_self"),
+            selected: 0,
+        };
+        let overlay = Overlay::ComposerPick(Box::new(pick));
+        let rendered = render(|frame, area| draw_overlay(frame, area, &overlay, "⠋"));
+        assert!(rendered.contains("New governance action"));
+        assert!(rendered.contains("Add governance member"));
+    }
+
+    #[test]
+    fn composer_popup_renders_fields_and_submit() {
+        use crate::composer::{ComposerContext, ComposerSubmit};
+
+        let ctx = ComposerContext {
+            party_id: "dec::1".to_owned(),
+            operator_party: String::new(),
+            default_threshold: 2,
+        };
+        let composer = Composer {
+            title: "Set governance threshold".to_owned(),
+            action_type: "governance_set_threshold",
+            submit: ComposerSubmit::Confirm,
+            party_id: "dec::1".to_owned(),
+            party_name: "dec".to_owned(),
+            governance_type: "core_self".to_owned(),
+            rules_contract_id: "00r".to_owned(),
+            fields: crate::composer::fields_for_action("governance_set_threshold", &ctx),
+            cursor: 0,
+        };
+        let overlay = Overlay::Composer(Box::new(composer));
+        let rendered = render(|frame, area| draw_overlay(frame, area, &overlay, "⠋"));
+        assert!(rendered.contains("Set governance threshold"));
+        assert!(rendered.contains("New threshold"));
+        assert!(rendered.contains("Submit"));
+    }
+
+    #[test]
+    fn deploy_popup_renders_context_and_fields() {
+        let form = DeployForm {
+            party_id: "dec::1220".to_owned(),
+            party_name: "cbtc-network".to_owned(),
+            package_id: "#governance-core-v1".to_owned(),
+            operator_party: "op::1220".to_owned(),
+            participant_ids: vec!["p1::1220".to_owned()],
+            member_parties: vec!["member-a::1220".to_owned()],
+            threshold: "2".to_owned(),
+            timeout_micros: "86400000000".to_owned(),
+            cursor: 0,
+        };
+        let overlay = Overlay::Deploy(Box::new(form));
+        let rendered = render(|frame, area| draw_overlay(frame, area, &overlay, "⠋"));
+        assert!(rendered.contains("Deploy governance"));
+        assert!(rendered.contains("GovernanceRules"));
+        assert!(rendered.contains("member-a"));
+        assert!(rendered.contains("Threshold"));
+        assert!(rendered.contains("Deploy"));
+    }
+
+    #[test]
+    fn network_edit_popup_lists_peers() {
+        use crate::api::PeerEntry;
+
+        let state = NetworkEditState {
+            peers: vec![PeerEntry {
+                participant_id: "alpha::1220".to_owned(),
+                name: "alpha".to_owned(),
+                address: "10.0.0.1".to_owned(),
+                port: 9001,
+                public_key: "abcd".to_owned(),
+                party: None,
+            }],
+            selected: 0,
+            adding: None,
+        };
+        let overlay = Overlay::NetworkEdit(Box::new(state));
+        let rendered = render(|frame, area| draw_overlay(frame, area, &overlay, "⠋"));
+        assert!(rendered.contains("Network peers"));
+        assert!(rendered.contains("alpha"));
+        assert!(rendered.contains("10.0.0.1:9001"));
+    }
+
+    #[test]
+    fn network_edit_add_form_renders_fields() {
+        let state = NetworkEditState {
+            peers: Vec::new(),
+            selected: 0,
+            adding: Some(PeerForm {
+                participant_id: String::new(),
+                name: String::new(),
+                address: String::new(),
+                port: String::new(),
+                public_key: String::new(),
+                party: String::new(),
+                cursor: 0,
+            }),
+        };
+        let overlay = Overlay::NetworkEdit(Box::new(state));
+        let rendered = render(|frame, area| draw_overlay(frame, area, &overlay, "⠋"));
+        assert!(rendered.contains("Add peer"));
+        assert!(rendered.contains("Participant id"));
+        assert!(rendered.contains("Public key"));
+    }
+
+    #[test]
+    fn party_config_popup_renders_keycloak_fields_and_secret_hint() {
+        let form = PartyConfigForm {
+            dec_party_id: "cbtc-network::1220".to_owned(),
+            party_name: "cbtc-network".to_owned(),
+            mode: IdpMode::Keycloak,
+            member_party_id: "member::1220".to_owned(),
+            user_id: "user-1".to_owned(),
+            kc_url: "https://kc".to_owned(),
+            kc_realm: "realm".to_owned(),
+            kc_client_id: "client".to_owned(),
+            kc_secret: String::new(),
+            kc_has_secret: true,
+            auth0_domain: String::new(),
+            auth0_audience: String::new(),
+            auth0_client_id: String::new(),
+            auth0_secret: String::new(),
+            auth0_has_secret: false,
+            // Focus the member-party row so the secret line renders unfocused.
+            cursor: 1,
+            status: String::new(),
+        };
+        let overlay = Overlay::PartyConfig(Box::new(form));
+        let rendered = render(|frame, area| draw_overlay(frame, area, &overlay, "⠋"));
+        assert!(rendered.contains("Party config"));
+        assert!(rendered.contains("Keycloak"));
+        assert!(rendered.contains("Member party"));
+        assert!(rendered.contains("Client id"));
+        // A stored secret with a blank field shows the keep hint, never a value.
+        assert!(rendered.contains("blank keeps it"));
+        assert!(rendered.contains("Save"));
+    }
+
+    #[test]
+    fn draw_shadow_clamps_at_screen_edge_without_panicking() {
+        let Ok(mut terminal) = Terminal::new(TestBackend::new(20, 10)) else {
+            panic!("failed to build test terminal");
+        };
+        // A popup flush against the bottom-right corner: the offset shadow must
+        // clamp to the screen rather than panic on out-of-bounds.
+        let drawn = terminal.draw(|frame| {
+            let area = frame.area();
+            draw_shadow(frame, Rect::new(18, 8, 2, 2), area);
+            draw_shadow(frame, Rect::new(5, 3, 8, 4), area);
+        });
+        assert!(drawn.is_ok());
     }
 
     #[test]

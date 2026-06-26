@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail};
 use common::types::{
     AuditLogEntry, AuthConfigResponse, ConnectionStatus, DecentralizedParty, ParticipantStatus,
     ParticipantsStatusResponse, PeerPackageComparison, PendingInvitation, VettedPackageInfo,
-    WorkflowInfo, WorkflowRun,
+    WorkflowInfo, WorkflowKind, WorkflowRun,
 };
 use reqwest::StatusCode;
 use reqwest::blocking::{Client, Response};
@@ -279,6 +279,312 @@ struct HoldingsResponse {
     holdings: Vec<Holding>,
 }
 
+/// A single confirmation on a pending governance action.
+#[derive(Clone, Debug, Deserialize)]
+pub struct GovConfirmation {
+    #[serde(default)]
+    pub contract_id: String,
+    #[serde(default)]
+    pub confirming_party: String,
+    #[serde(default)]
+    pub expires_at: i64,
+}
+
+/// A pending off-chain governance action (vault / core-self), grouped by hash.
+#[derive(Clone, Debug, Deserialize)]
+pub struct GovAction {
+    /// The `ActionType` payload, echoed back verbatim on confirm / execute.
+    #[serde(default)]
+    pub action: Value,
+    #[serde(default)]
+    pub confirmations: Vec<GovConfirmation>,
+    #[serde(default)]
+    pub confirmation_count: i64,
+    #[serde(default)]
+    pub can_execute: bool,
+}
+
+/// A pending on-chain (core-domain) governance proposal.
+#[derive(Clone, Debug, Deserialize)]
+pub struct DomainGovAction {
+    #[serde(default)]
+    pub proposal_cid: String,
+    #[serde(default)]
+    pub action_label: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub confirmations: Vec<GovConfirmation>,
+    #[serde(default)]
+    pub confirmation_count: i64,
+    #[serde(default)]
+    pub can_execute: bool,
+    #[serde(default)]
+    pub orphaned: bool,
+}
+
+/// `/governance/confirmations` response: pending actions awaiting signatures.
+#[derive(Clone, Debug, Deserialize)]
+pub struct GovernanceConfirmations {
+    #[serde(default)]
+    pub actions: Vec<GovAction>,
+    #[serde(default)]
+    pub domain_actions: Vec<DomainGovAction>,
+    #[serde(default)]
+    pub threshold: i32,
+    #[serde(default)]
+    pub rules_contract_id: Option<String>,
+    #[serde(default)]
+    pub member_party_id: Option<String>,
+}
+
+/// `/operator-info` response: this node's operator party id.
+#[derive(Debug, Deserialize)]
+struct OperatorInfoResponse {
+    #[serde(default)]
+    party_id: String,
+}
+
+/// Per-party IdP configuration, from `GET /party-config/{id}` (secrets are
+/// returned only as `has_*` flags).
+#[derive(Clone, Debug, Deserialize)]
+pub struct PartyConfigView {
+    #[serde(default)]
+    pub member_party_id: Option<String>,
+    #[serde(default)]
+    pub user_id: Option<String>,
+    #[serde(default)]
+    pub keycloak_url: String,
+    #[serde(default)]
+    pub keycloak_realm: String,
+    #[serde(default)]
+    pub keycloak_client_id: String,
+    #[serde(default)]
+    pub has_client_secret: bool,
+    #[serde(default)]
+    pub auth0_domain: Option<String>,
+    #[serde(default)]
+    pub auth0_audience: Option<String>,
+    #[serde(default)]
+    pub auth0_client_id: Option<String>,
+    #[serde(default)]
+    pub has_auth0_client_secret: bool,
+}
+
+/// Result of `POST /party-config/discover-member-party`.
+#[derive(Clone, Debug, Deserialize)]
+pub struct DiscoverResult {
+    #[serde(default)]
+    pub user_id: String,
+    #[serde(default)]
+    pub primary_party: Option<String>,
+}
+
+/// A fully-detailed configured peer, for the network-config editor (the
+/// merged [`PeerView`] drops `public_key` / `party`, which editing needs).
+#[derive(Clone, Debug, Deserialize)]
+pub struct PeerEntry {
+    #[serde(default)]
+    pub participant_id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub address: String,
+    #[serde(default)]
+    pub port: u16,
+    #[serde(default)]
+    pub public_key: String,
+    #[serde(default)]
+    pub party: Option<String>,
+}
+
+/// `/network-config` response with the full peer fields.
+#[derive(Debug, Deserialize)]
+struct NetworkPeersResponse {
+    #[serde(default)]
+    peers: Vec<PeerEntry>,
+}
+
+/// Configured package ids for a party, from `/packages` (only the fields the
+/// CLI needs for contract deployment).
+#[derive(Clone, Debug, Deserialize)]
+pub struct PackageConfig {
+    #[serde(default)]
+    pub governance_core: Option<String>,
+}
+
+/// A governance member discovered from peers, from `/governance/known-members`.
+#[derive(Clone, Debug, Deserialize)]
+pub struct KnownMember {
+    #[serde(default)]
+    pub participant_uid: String,
+    #[serde(default)]
+    pub member_party_id: Option<String>,
+}
+
+/// `/governance/known-members` response envelope.
+#[derive(Debug, Deserialize)]
+struct KnownMembersResponse {
+    #[serde(default)]
+    members: Vec<KnownMember>,
+}
+
+/// Arguments for [`DecmanClient::execute_action`]. `disclosed` carries any
+/// `(contract_id, base64_blob)` pairs the action needs at execution time
+/// (empty for most actions; deployment actions need their rules-contract blob).
+pub struct ExecuteParams {
+    pub action: Value,
+    pub confirmation_cids: Vec<String>,
+    pub governance_type: String,
+    pub proposal_cid: Option<String>,
+    pub disclosed: Vec<(String, String)>,
+}
+
+/// On-ledger governance state for a party, from `/governance/state`.
+#[derive(Clone, Debug, Deserialize)]
+pub struct GovState {
+    #[serde(default)]
+    pub members: Vec<String>,
+    #[serde(default)]
+    pub threshold: i32,
+    #[serde(default)]
+    pub action_confirmation_timeout_microseconds: Option<i64>,
+    #[serde(default)]
+    pub out_of_date: bool,
+}
+
+/// `/governance/state` response envelope (`state` is null when no rules
+/// contract exists for the party).
+#[derive(Debug, Deserialize)]
+struct GovStateResponse {
+    #[serde(default)]
+    state: Option<GovState>,
+}
+
+/// One on-chain governance audit entry, from `/governance/chain-audit`.
+#[derive(Clone, Debug, Deserialize)]
+pub struct ChainAuditEntry {
+    #[serde(default)]
+    pub timestamp: i64,
+    #[serde(default)]
+    pub event_type: String,
+    #[serde(default)]
+    pub governance_type: String,
+    #[serde(default)]
+    pub action_summary: String,
+    #[serde(default)]
+    pub choice: Option<String>,
+}
+
+/// `/governance/chain-audit` response envelope.
+#[derive(Debug, Deserialize)]
+struct ChainAuditResponse {
+    #[serde(default)]
+    entries: Vec<ChainAuditEntry>,
+}
+
+/// One directed missing edge from the onboarding mesh pre-flight: peer `from`
+/// does not have `to` configured (`mesh_hole`), or the coordinator could not
+/// reach `to` at all (`unreachable_from_coordinator`).
+#[derive(Debug, Deserialize)]
+struct MeshEdge {
+    #[serde(default)]
+    from: String,
+    #[serde(default)]
+    to: String,
+    #[serde(default)]
+    kind: Option<String>,
+}
+
+/// The `422` body returned when onboarding's mesh pre-flight fails.
+#[derive(Debug, Deserialize)]
+struct MeshErrorResponse {
+    #[serde(default)]
+    error: String,
+    #[serde(default)]
+    missing_edges: Vec<MeshEdge>,
+}
+
+/// Render a mesh pre-flight failure as actionable, multi-line remediation
+/// guidance, mirroring the web frontend's onboarding error panel.
+fn format_mesh_error(mesh: &MeshErrorResponse) -> String {
+    let mut out = if mesh.error.is_empty() {
+        "Peers are not fully meshed.".to_owned()
+    } else {
+        mesh.error.clone()
+    };
+    if !mesh.missing_edges.is_empty() {
+        out.push_str("\n\nMissing connections:");
+        for edge in &mesh.missing_edges {
+            let hint = match edge.kind.as_deref() {
+                Some("unreachable_from_coordinator") => {
+                    format!("coordinator can't reach {to}", to = short_id(&edge.to))
+                }
+                _ => format!(
+                    "on {from}, add {to} as a peer",
+                    from = short_id(&edge.from),
+                    to = short_id(&edge.to)
+                ),
+            };
+            out.push_str(&format!("\n • {hint}"));
+        }
+    }
+    out
+}
+
+/// The human-readable prefix of a Canton id (the segment before `::`).
+fn short_id(id: &str) -> &str {
+    id.split("::").next().unwrap_or(id)
+}
+
+/// Per-party authentication status, from `/auth/status`. Internally tagged on
+/// the wire under `status`.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(tag = "status", rename_all = "lowercase")]
+pub enum AuthStatusKind {
+    Authenticated,
+    Mock,
+    Failed {
+        #[serde(default)]
+        error: String,
+    },
+    Notconfigured,
+}
+
+/// Which ledger rights this node holds for a party's member and dec parties.
+#[derive(Clone, Debug, Deserialize)]
+pub struct AuthRights {
+    #[serde(default)]
+    pub member_party_act_as: bool,
+    #[serde(default)]
+    pub member_party_read_as: bool,
+    #[serde(default)]
+    pub dec_party_act_as: bool,
+    #[serde(default)]
+    pub dec_party_read_as: bool,
+}
+
+/// Authentication status for a single decentralized party.
+#[derive(Clone, Debug, Deserialize)]
+pub struct PartyAuthStatus {
+    #[serde(default)]
+    pub dec_party_id: String,
+    #[serde(default)]
+    pub member_party_id: Option<String>,
+    #[serde(default)]
+    pub user_id: Option<String>,
+    pub status: AuthStatusKind,
+    #[serde(default)]
+    pub rights: Option<AuthRights>,
+}
+
+/// `/auth/status` response envelope.
+#[derive(Debug, Deserialize)]
+struct AuthStatusResponse {
+    #[serde(default)]
+    parties: Vec<PartyAuthStatus>,
+}
+
 /// Resolved OAuth2 target after discovery / overrides are applied.
 struct AuthTarget {
     token_url: String,
@@ -467,6 +773,78 @@ impl DecmanClient {
         )
     }
 
+    /// Start onboarding a new decentralized party with the given prefix and
+    /// peer participant ids.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if login or the request fails, or the API rejects it.
+    /// A `422` mesh pre-flight failure is parsed into actionable remediation
+    /// hints (which peers are unreachable or missing from each other's config).
+    pub fn start_onboarding(&mut self, prefix: &str, peer_ids: &[String]) -> Result<()> {
+        let body = json!({ "party_id_prefix": prefix, "peer_ids": peer_ids });
+        let response = self.post_raw("/onboarding", Some(&body))?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        let text = response.text().unwrap_or_default();
+        if status == StatusCode::UNPROCESSABLE_ENTITY
+            && let Ok(mesh) = serde_json::from_str::<MeshErrorResponse>(&text)
+        {
+            bail!("{}", format_mesh_error(&mesh));
+        }
+        bail!("onboarding failed ({status}): {text}");
+    }
+
+    /// Kick a participant from a decentralized party, setting the new threshold.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if login or the request fails, or the API rejects it.
+    pub fn kick_participant(
+        &mut self,
+        party_id: &str,
+        participant_id: &str,
+        new_threshold: i32,
+        previous_threshold: i32,
+    ) -> Result<()> {
+        self.post(
+            "/kick",
+            Some(json!({
+                "decentralized_party_id": party_id,
+                "participant_id": participant_id,
+                "new_threshold": new_threshold,
+                "previous_threshold": previous_threshold,
+            })),
+        )
+    }
+
+    /// Cancel an in-progress workflow run (coordinator side). The cancel
+    /// endpoint is selected by the run's [`WorkflowKind`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if login or the request fails, or the API rejects it.
+    pub fn cancel_workflow(&mut self, kind: WorkflowKind) -> Result<()> {
+        let path = match kind {
+            WorkflowKind::Onboarding => "/onboarding/cancel",
+            WorkflowKind::Kick => "/kick/cancel",
+            WorkflowKind::Contracts => "/contracts/cancel",
+            WorkflowKind::Dars => "/dars/cancel",
+        };
+        self.post(path, None)
+    }
+
+    /// Retry a failed workflow run (coordinator side) by instance name.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if login or the request fails, or the API rejects it.
+    pub fn retry_workflow(&mut self, instance_name: &str) -> Result<()> {
+        self.post(&format!("/workflows/{instance_name}/retry"), None)
+    }
+
     /// Fetch the governance audit log for a party (newest entries).
     ///
     /// # Errors
@@ -489,6 +867,311 @@ impl DecmanClient {
         let response: HoldingsResponse =
             self.get_json_query("/holdings", &[("party_id", party_id)])?;
         Ok(response.holdings)
+    }
+
+    /// Fetch the per-party authentication status (rights + IdP status).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if login or the request fails, the API returns a
+    /// non-success status, or the response cannot be parsed.
+    pub fn fetch_auth_status(&mut self) -> Result<Vec<PartyAuthStatus>> {
+        let response: AuthStatusResponse = self.get_json("/auth/status")?;
+        Ok(response.parties)
+    }
+
+    /// Re-test credentials for all parties (the backend re-mints tokens and
+    /// re-checks rights). The refreshed state is read back via `auth/status`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if login or the request fails, or the API rejects it.
+    pub fn test_auth(&mut self) -> Result<()> {
+        self.post("/auth/test", None)
+    }
+
+    /// Grant actAs/readAs rights on a party's member and dec parties, using an
+    /// admin (ParticipantAdmin) client. The secret is not stored server-side.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if login or the request fails, or the API rejects it.
+    pub fn grant_rights(
+        &mut self,
+        dec_party_id: &str,
+        admin_client_id: &str,
+        admin_client_secret: &str,
+    ) -> Result<()> {
+        self.post(
+            "/auth/grant-rights",
+            Some(json!({
+                "dec_party_id": dec_party_id,
+                "admin_client_id": admin_client_id,
+                "admin_client_secret": admin_client_secret,
+            })),
+        )
+    }
+
+    /// Fetch the on-ledger governance state for a party (threshold, members,
+    /// action timeout). `None` when the party has no governance rules contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if login or the request fails, the API returns a
+    /// non-success status, or the response cannot be parsed.
+    pub fn fetch_governance_state(&mut self, party_id: &str) -> Result<Option<GovState>> {
+        let response: GovStateResponse =
+            self.get_json_query("/governance/state", &[("party_id", party_id)])?;
+        Ok(response.state)
+    }
+
+    /// Fetch the pending governance confirmations (off-chain actions and
+    /// on-chain domain proposals) for a party.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if login or the request fails, the API returns a
+    /// non-success status, or the response cannot be parsed.
+    pub fn fetch_governance(&mut self, party_id: &str) -> Result<GovernanceConfirmations> {
+        self.get_json_query("/governance/confirmations", &[("party_id", party_id)])
+    }
+
+    /// Add this node's confirmation to a governance action. `proposal_cid` is
+    /// set for on-chain (`core_domain`) proposals.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if login or the request fails, or the API rejects it.
+    pub fn confirm_action(
+        &mut self,
+        party_id: &str,
+        rules_contract_id: &str,
+        action: &Value,
+        governance_type: &str,
+        proposal_cid: Option<&str>,
+    ) -> Result<()> {
+        let mut body = json!({
+            "party_id": party_id,
+            "rules_contract_id": rules_contract_id,
+            "action": action,
+            "governance_type": governance_type,
+        });
+        if let Some(cid) = proposal_cid {
+            body["proposal_cid"] = json!(cid);
+        }
+        self.post("/governance/confirm", Some(body))
+    }
+
+    /// Execute a governance action once its threshold is met.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if login or the request fails, or the API rejects it.
+    pub fn execute_action(
+        &mut self,
+        party_id: &str,
+        rules_contract_id: &str,
+        execute: &ExecuteParams,
+    ) -> Result<()> {
+        let disclosed_json: Vec<Value> = execute
+            .disclosed
+            .iter()
+            .map(|(cid, blob)| json!({ "contract_id": cid, "blob": blob }))
+            .collect();
+        let mut body = json!({
+            "party_id": party_id,
+            "rules_contract_id": rules_contract_id,
+            "action": execute.action,
+            "confirmation_cids": execute.confirmation_cids,
+            "disclosed_contracts": disclosed_json,
+            "governance_type": execute.governance_type,
+        });
+        if let Some(cid) = &execute.proposal_cid {
+            body["proposal_cid"] = json!(cid);
+        }
+        self.post("/governance/execute", Some(body))
+    }
+
+    /// Propose a new on-chain (`core_domain`) governance action.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if login or the request fails, or the API rejects it.
+    pub fn propose_action(
+        &mut self,
+        party_id: &str,
+        rules_contract_id: &str,
+        proposal: &Value,
+    ) -> Result<()> {
+        self.post(
+            "/governance/propose",
+            Some(json!({
+                "party_id": party_id,
+                "rules_contract_id": rules_contract_id,
+                "proposal": proposal,
+            })),
+        )
+    }
+
+    /// Fetch the operator party id for this node.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if login or the request fails, the API returns a
+    /// non-success status, or the response cannot be parsed.
+    pub fn fetch_operator_info(&mut self) -> Result<String> {
+        let response: OperatorInfoResponse = self.get_json("/operator-info")?;
+        Ok(response.party_id)
+    }
+
+    /// Fetch the per-party IdP configuration for a dec party.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if login or the request fails, the API returns a
+    /// non-success status, or the response cannot be parsed.
+    pub fn fetch_party_config(&mut self, dec_party_id: &str) -> Result<PartyConfigView> {
+        // `::` is path-safe and actix decodes the segment, so no encoding needed.
+        self.get_json(&format!("/party-config/{dec_party_id}"))
+    }
+
+    /// Save the per-party IdP configuration. `body` is the full
+    /// `PartyConfigRequest` (an absent secret keeps the existing one).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if login or the request fails, or the API rejects it.
+    pub fn save_party_config(&mut self, body: Value) -> Result<()> {
+        self.put("/party-config", body)
+    }
+
+    /// Discover the member party for the given IdP credentials.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if login or the request fails, the API returns a
+    /// non-success status, or the response cannot be parsed.
+    pub fn discover_member_party(&mut self, body: Value) -> Result<DiscoverResult> {
+        let response = self.post_raw("/party-config/discover-member-party", Some(&body))?;
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().unwrap_or_default();
+            bail!("discover-member-party failed ({status}): {text}");
+        }
+        response
+            .json()
+            .context("failed to parse discover-member-party response")
+    }
+
+    /// Fetch the configured peers with their full fields (for editing).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if login or the request fails, the API returns a
+    /// non-success status, or the response cannot be parsed.
+    pub fn fetch_network_peers(&mut self) -> Result<Vec<PeerEntry>> {
+        let response: NetworkPeersResponse = self.get_json("/network-config")?;
+        Ok(response.peers)
+    }
+
+    /// Replace the configured peer list. `peers` must be a JSON array of peer
+    /// objects (the endpoint takes a bare array, not an envelope).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if login or the request fails, or the API rejects it.
+    pub fn save_network_peers(&mut self, peers: Value) -> Result<()> {
+        self.post("/network-config", Some(peers))
+    }
+
+    /// Fetch the configured package ids for a party.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if login or the request fails, the API returns a
+    /// non-success status, or the response cannot be parsed.
+    pub fn fetch_packages(&mut self, party_id: &str) -> Result<PackageConfig> {
+        self.get_json_query("/packages", &[("party_id", party_id)])
+    }
+
+    /// Fetch the governance members known for a party (participant uid → member
+    /// party id), used to prefill the member set when deploying governance core.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if login or the request fails, the API returns a
+    /// non-success status, or the response cannot be parsed.
+    pub fn fetch_known_members(&mut self, party_id: &str) -> Result<Vec<KnownMember>> {
+        let response: KnownMembersResponse =
+            self.get_json_query("/governance/known-members", &[("party_id", party_id)])?;
+        Ok(response.members)
+    }
+
+    /// Start the contracts-deployment workflow for a party.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if login or the request fails, or the API rejects it.
+    pub fn deploy_contracts(&mut self, body: Value) -> Result<()> {
+        self.post("/contracts", Some(body))
+    }
+
+    /// Revoke this node's own confirmation on a governance action.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if login or the request fails, or the API rejects it.
+    pub fn cancel_confirmation(
+        &mut self,
+        party_id: &str,
+        confirmation_cid: &str,
+        governance_type: &str,
+    ) -> Result<()> {
+        self.post(
+            "/governance/cancel",
+            Some(json!({
+                "party_id": party_id,
+                "confirmation_cid": confirmation_cid,
+                "governance_type": governance_type,
+            })),
+        )
+    }
+
+    /// Expire a stale confirmation on a governance action.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if login or the request fails, or the API rejects it.
+    pub fn expire_confirmation(
+        &mut self,
+        party_id: &str,
+        rules_contract_id: &str,
+        confirmation_cid: &str,
+        governance_type: &str,
+    ) -> Result<()> {
+        self.post(
+            "/governance/expire",
+            Some(json!({
+                "party_id": party_id,
+                "rules_contract_id": rules_contract_id,
+                "confirmation_cid": confirmation_cid,
+                "governance_type": governance_type,
+            })),
+        )
+    }
+
+    /// Fetch the on-chain governance audit trail for a party (newest first).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if login or the request fails, the API returns a
+    /// non-success status, or the response cannot be parsed.
+    pub fn fetch_chain_audit(&mut self, party_id: &str) -> Result<Vec<ChainAuditEntry>> {
+        let response: ChainAuditResponse = self.get_json_query(
+            "/governance/chain-audit",
+            &[("party_id", party_id), ("limit", "200")],
+        )?;
+        Ok(response.entries)
     }
 
     /// GET `path` as JSON (no query params).
@@ -680,21 +1363,28 @@ impl DecmanClient {
             .with_context(|| format!("request to {url} failed"))
     }
 
-    /// POST `path` with an optional JSON body, discarding the success body.
-    /// Authenticates on first use and re-authenticates once on `401`.
-    fn post(&mut self, path: &str, body: Option<Value>) -> Result<()> {
+    /// POST `path` with an optional JSON body, returning the raw response.
+    /// Authenticates on first use and re-authenticates once on `401`, so the
+    /// caller can inspect non-success statuses (e.g. a 422 with a typed body).
+    fn post_raw(&mut self, path: &str, body: Option<&Value>) -> Result<Response> {
         if !self.authenticated {
             self.authenticate()?;
         }
 
-        let mut response = self.send_post(path, body.as_ref())?;
+        let mut response = self.send_post(path, body)?;
         if response.status() == StatusCode::UNAUTHORIZED {
             self.authenticated = false;
             self.token = None;
             self.authenticate()?;
-            response = self.send_post(path, body.as_ref())?;
+            response = self.send_post(path, body)?;
         }
+        Ok(response)
+    }
 
+    /// POST `path` with an optional JSON body, discarding the success body and
+    /// failing on any non-success status.
+    fn post(&mut self, path: &str, body: Option<Value>) -> Result<()> {
+        let response = self.post_raw(path, body.as_ref())?;
         let status = response.status();
         if !status.is_success() {
             let body = response.text().unwrap_or_default();
@@ -713,6 +1403,39 @@ impl DecmanClient {
         }
         if let Some(body) = body {
             request = request.json(body);
+        }
+        request
+            .send()
+            .with_context(|| format!("request to {url} failed"))
+    }
+
+    /// PUT `path` with a JSON body, authenticating on first use and retrying
+    /// once on `401`, then failing on any non-success status.
+    fn put(&mut self, path: &str, body: Value) -> Result<()> {
+        if !self.authenticated {
+            self.authenticate()?;
+        }
+        let mut response = self.send_put(path, &body)?;
+        if response.status() == StatusCode::UNAUTHORIZED {
+            self.authenticated = false;
+            self.token = None;
+            self.authenticate()?;
+            response = self.send_put(path, &body)?;
+        }
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().unwrap_or_default();
+            bail!("decman API {path} returned {status}: {text}");
+        }
+        Ok(())
+    }
+
+    /// Send a `PUT {base_url}{path}` with a JSON body and the bearer token.
+    fn send_put(&self, path: &str, body: &Value) -> Result<Response> {
+        let url = format!("{base}{path}", base = self.base_url);
+        let mut request = self.http.put(&url).json(body);
+        if let Some(token) = &self.token {
+            request = request.bearer_auth(token);
         }
         request
             .send()
@@ -756,6 +1479,49 @@ mod tests {
     #[test]
     fn party_name_is_the_canton_id_prefix() {
         assert_eq!(party_name(&party("cbtc-network")), "cbtc-network");
+    }
+
+    #[test]
+    fn short_id_takes_the_prefix() {
+        assert_eq!(short_id("alpha::1220deadbeef"), "alpha");
+        assert_eq!(short_id("nocolon"), "nocolon");
+    }
+
+    #[test]
+    fn format_mesh_error_renders_remediation_hints() {
+        // Arrange — one coordinator-reachability gap and one peer mesh hole.
+        let mesh = MeshErrorResponse {
+            error: "Could not verify a full peer mesh.".to_owned(),
+            missing_edges: vec![
+                MeshEdge {
+                    from: "coord::1220ab".to_owned(),
+                    to: "peerB::1220cd".to_owned(),
+                    kind: Some("unreachable_from_coordinator".to_owned()),
+                },
+                MeshEdge {
+                    from: "peerA::1220ef".to_owned(),
+                    to: "peerB::1220cd".to_owned(),
+                    kind: Some("mesh_hole".to_owned()),
+                },
+            ],
+        };
+
+        // Act
+        let out = format_mesh_error(&mesh);
+
+        // Assert — the server message plus per-edge, short-id remediation.
+        assert!(out.contains("Could not verify a full peer mesh."));
+        assert!(out.contains("coordinator can't reach peerB"));
+        assert!(out.contains("on peerA, add peerB as a peer"));
+    }
+
+    #[test]
+    fn format_mesh_error_falls_back_without_an_error_message() {
+        let mesh = MeshErrorResponse {
+            error: String::new(),
+            missing_edges: Vec::new(),
+        };
+        assert_eq!(format_mesh_error(&mesh), "Peers are not fully meshed.");
     }
 
     #[test]
