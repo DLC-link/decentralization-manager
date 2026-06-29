@@ -1,3 +1,4 @@
+pub mod add_party;
 pub mod contracts;
 pub mod dars;
 pub mod kick;
@@ -32,6 +33,7 @@ use crate::{
     },
 };
 
+pub use add_party::{AddPartyConfig, AddPartyStep};
 pub use contracts::{ContractsConfig, ContractsStep};
 pub use dars::{DarsConfig, DarsStep};
 pub use kick::{KickConfig, KickStep};
@@ -45,6 +47,7 @@ pub enum WorkflowType {
     Contracts,
     Dars,
     Kick,
+    AddParty,
 }
 
 /// Result from a coordinator workflow, optionally containing the created party ID
@@ -63,6 +66,7 @@ pub async fn start_coordinator(
     kick_config: Option<KickConfig>,
     contracts_config: Option<ContractsConfig>,
     dars_config: Option<DarsConfig>,
+    add_party_config: Option<AddPartyConfig>,
     workflow_auth: Option<WorkflowAuth>,
     last_seen: LastSeen,
     instance: Arc<WorkflowInstance>,
@@ -140,6 +144,24 @@ pub async fn start_coordinator(
                 created_party_id: None,
             })
         }
+        WorkflowType::AddParty => {
+            let config = add_party_config.ok_or_else(|| {
+                anyhow::anyhow!("AddPartyConfig is required for AddParty workflow")
+            })?;
+            add_party::coordinator::start_coordinator(
+                node_config,
+                network_config,
+                config,
+                workflow_auth,
+                db,
+                last_seen,
+                instance,
+            )
+            .await?;
+            Ok(CoordinatorResult {
+                created_party_id: None,
+            })
+        }
     }
 }
 
@@ -188,6 +210,7 @@ pub async fn start_peer(
     db: SqlitePool,
     instance_name: String,
     coordinator_instance: String,
+    workflow_auth: Option<WorkflowAuth>,
 ) -> Result {
     tracing::info!(
         "Initializing Noise client to connect to coordinator {}...",
@@ -580,6 +603,273 @@ pub async fn start_peer(
                     tracing::error!("Failed to send kick signatures to coordinator: {e}");
                 }
             }
+            MessageType::GenerateAddPartyKeys => {
+                tracing::info!("Executing: Generate add-party keys");
+                let Some(add_party_config) = decode_add_party_config(&payload) else {
+                    continue;
+                };
+                if !is_new_member(&node_config, &add_party_config) {
+                    send_skip_status(&client, "GenerateAddPartyKeys").await;
+                    continue;
+                }
+
+                let ledger_token = add_party::resolve_ledger_token(
+                    &workflow_auth,
+                    &add_party_config.decentralized_party_id,
+                )
+                .await;
+                if let Err(e) = add_party::generate_keys(
+                    &node_config,
+                    &db,
+                    &instance_name,
+                    &add_party_config,
+                    ledger_token.as_deref(),
+                )
+                .await
+                {
+                    tracing::error!("Step execution failed: {e}");
+                    consecutive_step_failures += 1;
+                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                        anyhow::bail!(
+                            "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {e}"
+                        );
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    continue;
+                }
+                consecutive_step_failures = 0;
+                if let Err(e) = add_party::peer::send_keys_to_coordinator(
+                    &client,
+                    &db,
+                    &instance_name,
+                    &node_config,
+                )
+                .await
+                {
+                    tracing::error!("Failed to send add-party keys to coordinator: {e}");
+                }
+            }
+            MessageType::SignAddParty => {
+                tracing::info!("Executing: Sign add-party proposals");
+                if payload.is_empty() {
+                    tracing::error!("No add-party proposals payload received from coordinator");
+                    continue;
+                }
+
+                let items = match utils::decode_length_prefixed(&payload, 3) {
+                    Ok(items) => items,
+                    Err(e) => {
+                        tracing::error!("Failed to decode SignAddParty payload: {e}");
+                        continue;
+                    }
+                };
+                let Some(add_party_config) = decode_add_party_config(&items[0]) else {
+                    continue;
+                };
+
+                let proposal_data = utils::encode_length_prefixed(&[&items[1], &items[2]]);
+                if let Err(e) =
+                    add_party::sign_proposals(&node_config, &db, &instance_name, &proposal_data)
+                        .await
+                {
+                    tracing::error!("Step execution failed: {e}");
+                    consecutive_step_failures += 1;
+                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                        anyhow::bail!(
+                            "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {e}"
+                        );
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    continue;
+                }
+                consecutive_step_failures = 0;
+                if let Err(e) = add_party::peer::send_add_party_signatures_to_coordinator(
+                    &client,
+                    &db,
+                    &instance_name,
+                    &node_config,
+                )
+                .await
+                {
+                    tracing::error!("Failed to send add-party signatures to coordinator: {e}");
+                }
+
+                // Identity hook (new member): same point in the protocol
+                // where onboarding peers persist their identity — the party
+                // id is authoritative from the config, and the keys were
+                // written by GenerateAddPartyKeys.
+                if is_new_member(&node_config, &add_party_config)
+                    && let Err(e) = onboarding::peer::copy_self_identity_for_party(
+                        &db,
+                        &instance_name,
+                        &node_config,
+                        &add_party_config.decentralized_party_id,
+                    )
+                    .await
+                {
+                    tracing::error!(
+                        "Failed to copy self identity for {party}: {e}",
+                        party = add_party_config.decentralized_party_id
+                    );
+                }
+            }
+            MessageType::ImportAcs => {
+                tracing::info!("Executing: Import party ACS");
+                let items = match utils::decode_length_prefixed(&payload, 2) {
+                    Ok(items) => items,
+                    Err(e) => {
+                        tracing::error!("Failed to decode ImportAcs payload: {e}");
+                        continue;
+                    }
+                };
+                let Some(add_party_config) = decode_add_party_config(&items[0]) else {
+                    continue;
+                };
+                if !is_new_member(&node_config, &add_party_config) {
+                    send_skip_status(&client, "ImportAcs").await;
+                    continue;
+                }
+
+                if let Err(e) =
+                    add_party::import_party_acs(&node_config, &add_party_config, items[1].clone())
+                        .await
+                {
+                    tracing::error!("Step execution failed: {e}");
+                    consecutive_step_failures += 1;
+                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                        anyhow::bail!(
+                            "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {e}"
+                        );
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    continue;
+                }
+                consecutive_step_failures = 0;
+                if let Err(e) = client.send_status(b"ImportAcs completed".to_vec()).await {
+                    tracing::error!("Failed to send completion status: {e}");
+                }
+            }
+            MessageType::ClearOnboardingFlag => {
+                tracing::info!("Executing: Clear onboarding flag");
+                let Some(add_party_config) = decode_add_party_config(&payload) else {
+                    continue;
+                };
+                if !is_new_member(&node_config, &add_party_config) {
+                    send_skip_status(&client, "ClearOnboardingFlag").await;
+                    continue;
+                }
+
+                match add_party::clear_onboarding_flag(
+                    &node_config,
+                    &db,
+                    &instance_name,
+                    &add_party_config,
+                )
+                .await
+                {
+                    Ok(add_party::ClearOutcome::Proposed) => {
+                        // Canton requires the ONBOARDING PARTICIPANT to issue
+                        // the flag-clear transaction — author it here and ship
+                        // it to the coordinator for the threshold-signing
+                        // round (the coordinator lacks an appropriate key).
+                        match add_party::author_clear_proposal(&node_config, &add_party_config)
+                            .await
+                        {
+                            Ok(Some(proposal)) => {
+                                consecutive_step_failures = 0;
+                                if let Err(e) = client.send_add_party_clear_proposal(proposal).await
+                                {
+                                    tracing::error!(
+                                        "Failed to send clearing proposal to coordinator: {e}"
+                                    );
+                                }
+                            }
+                            Ok(None) => {
+                                // Flag dropped between the poll and the
+                                // authoring — report as cleared.
+                                consecutive_step_failures = 0;
+                                if let Err(e) = client
+                                    .send_status(b"ClearOnboardingFlag: Cleared".to_vec())
+                                    .await
+                                {
+                                    tracing::error!("Failed to send completion status: {e}");
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("Step execution failed: {e}");
+                                consecutive_step_failures += 1;
+                                if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                                    anyhow::bail!(
+                                        "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {e}"
+                                    );
+                                }
+                                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                            }
+                        }
+                    }
+                    Ok(add_party::ClearOutcome::Cleared) => {
+                        consecutive_step_failures = 0;
+                        if let Err(e) = client
+                            .send_status(b"ClearOnboardingFlag: Cleared".to_vec())
+                            .await
+                        {
+                            tracing::error!("Failed to send completion status: {e}");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Step execution failed: {e}");
+                        consecutive_step_failures += 1;
+                        if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                            anyhow::bail!(
+                                "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {e}"
+                            );
+                        }
+                        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    }
+                }
+            }
+            MessageType::SignClearOnboarding => {
+                tracing::info!("Executing: Sign onboarding-flag clearing proposal");
+                let items = match utils::decode_length_prefixed(&payload, 2) {
+                    Ok(items) => items,
+                    Err(e) => {
+                        tracing::error!("Failed to decode SignClearOnboarding payload: {e}");
+                        continue;
+                    }
+                };
+                if items[1].is_empty() {
+                    // Skip marker: the flag already cleared without a
+                    // signing round (e.g. a single-owner-threshold party).
+                    send_skip_status(&client, "SignClearOnboarding").await;
+                    continue;
+                }
+
+                if let Err(e) =
+                    add_party::sign_clear_proposal(&node_config, &db, &instance_name, &items[1])
+                        .await
+                {
+                    tracing::error!("Step execution failed: {e}");
+                    consecutive_step_failures += 1;
+                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                        anyhow::bail!(
+                            "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {e}"
+                        );
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    continue;
+                }
+                consecutive_step_failures = 0;
+                if let Err(e) = add_party::peer::send_clear_signature_to_coordinator(
+                    &client,
+                    &db,
+                    &instance_name,
+                    &node_config,
+                )
+                .await
+                {
+                    tracing::error!("Failed to send clearing signature to coordinator: {e}");
+                }
+            }
             _ => {
                 tracing::warn!("Unexpected message type: {command:?}");
             }
@@ -588,6 +878,36 @@ pub async fn start_peer(
 
     tracing::info!("Peer shutting down");
     Ok(())
+}
+
+/// Decode an `AddPartyConfig` from a command payload. Errors are logged and
+/// collapse to `None` so the peer loop's `continue` keeps polling (the
+/// coordinator re-serves the command until the peer completes).
+fn decode_add_party_config(payload: &[u8]) -> Option<add_party::AddPartyConfig> {
+    match serde_json::from_slice(payload) {
+        Ok(config) => Some(config),
+        Err(e) => {
+            tracing::error!("Failed to deserialize add-party config: {e}");
+            None
+        }
+    }
+}
+
+/// Whether this node is the member being added by the run.
+fn is_new_member(node_config: &NodeConfig, config: &add_party::AddPartyConfig) -> bool {
+    node_config.participant_id() == &config.new_participant_id
+}
+
+/// Reply with the add-party skip status for a command that only the new
+/// member executes. Completes this peer for the step on the coordinator.
+async fn send_skip_status(client: &NoiseClient, step: &str) {
+    tracing::info!("{step}: not the new member — replying skip");
+    if let Err(e) = client
+        .send_status(add_party::peer::SKIP_STATUS.to_vec())
+        .await
+    {
+        tracing::error!("Failed to send skip status for {step}: {e}");
+    }
 }
 
 /// Extract the resolved decentralized party id from a SignP2p command payload.
@@ -670,6 +990,22 @@ fn peer_step_for_command(
                 _ => return None,
             };
             Some((step.step_name(), step.step_index(), DarsStep::step_total()))
+        }
+        WorkflowKind::AddParty => {
+            let step = match command {
+                MessageType::GenerateAddPartyKeys => AddPartyStep::GenerateNewMemberKeys,
+                MessageType::SignAddParty => AddPartyStep::SignProposals,
+                MessageType::ImportAcs => AddPartyStep::SyncAcs,
+                MessageType::ClearOnboardingFlag => AddPartyStep::ProposeClearOnboarding,
+                MessageType::SignClearOnboarding => AddPartyStep::SignClearOnboarding,
+                MessageType::Disconnect => AddPartyStep::Complete,
+                _ => return None,
+            };
+            Some((
+                step.step_name(),
+                step.step_index(),
+                AddPartyStep::step_total(),
+            ))
         }
     }
 }
@@ -758,6 +1094,12 @@ mod tests {
             (WorkflowKind::Contracts, MessageType::Disconnect),
             (WorkflowKind::Dars, MessageType::UploadDars),
             (WorkflowKind::Dars, MessageType::Disconnect),
+            (WorkflowKind::AddParty, MessageType::GenerateAddPartyKeys),
+            (WorkflowKind::AddParty, MessageType::SignAddParty),
+            (WorkflowKind::AddParty, MessageType::ImportAcs),
+            (WorkflowKind::AddParty, MessageType::ClearOnboardingFlag),
+            (WorkflowKind::AddParty, MessageType::SignClearOnboarding),
+            (WorkflowKind::AddParty, MessageType::Disconnect),
         ];
         for (kind, command) in mapped {
             assert!(
@@ -772,6 +1114,7 @@ mod tests {
             WorkflowKind::Kick,
             WorkflowKind::Contracts,
             WorkflowKind::Dars,
+            WorkflowKind::AddParty,
         ] {
             assert!(peer_step_for_command(kind, MessageType::Wait).is_none());
             assert!(peer_step_for_command(kind, MessageType::Ping).is_none());
@@ -782,6 +1125,8 @@ mod tests {
         assert!(peer_step_for_command(WorkflowKind::Kick, MessageType::GenerateKeys).is_none());
         assert!(peer_step_for_command(WorkflowKind::Contracts, MessageType::UploadDars).is_none());
         assert!(peer_step_for_command(WorkflowKind::Dars, MessageType::SignSubmissions).is_none());
+        assert!(peer_step_for_command(WorkflowKind::AddParty, MessageType::GenerateKeys).is_none());
+        assert!(peer_step_for_command(WorkflowKind::Kick, MessageType::SignAddParty).is_none());
     }
 
     #[test]

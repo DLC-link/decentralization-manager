@@ -72,6 +72,39 @@ pub mod artifact_kinds {
     pub const SIGNED_KICK_DNS: &str = "signed_kick_dns";
     /// Per-peer signed P2P kick proposal — same shape as `SIGNED_KICK_DNS`.
     pub const SIGNED_KICK_P2P: &str = "signed_kick_p2p";
+
+    // Add-party (workflow_artifacts during a run)
+    /// Current (pre-add) decentralized namespace definition, exported from
+    /// the topology snapshot in the ExportState step. Length-prefixed proto.
+    pub const ADD_PARTY_NAMESPACE_DEF: &str = "add_party_namespace_def";
+    /// Post-add `DecentralizedNamespaceDefinition` protobuf — used by submit
+    /// to wait for the new owner set to land in the topology.
+    pub const ADD_PARTY_NEW_NAMESPACE_DEF: &str = "add_party_new_namespace_def";
+    /// Unsigned DNS add proposal (`SignedTopologyTransaction`) produced by
+    /// the coordinator in CreateProposals. Length-prefixed proto.
+    pub const ADD_PARTY_DNS_PROPOSAL: &str = "add_party_dns_proposal";
+    /// Unsigned P2P add proposal produced alongside the DNS one.
+    pub const ADD_PARTY_P2P_PROPOSAL: &str = "add_party_p2p_proposal";
+    /// Per-peer signed DNS add proposal — single length-prefixed proto.
+    pub const SIGNED_ADD_PARTY_DNS: &str = "signed_add_party_dns";
+    /// Per-peer signed P2P add proposal — same shape.
+    pub const SIGNED_ADD_PARTY_P2P: &str = "signed_add_party_p2p";
+    /// Coordinator's ledger offset captured BEFORE the new topology is
+    /// submitted. Passed to `ExportPartyAcs` as `begin_offset_exclusive` so
+    /// Canton finds the party's activation on the new member after it.
+    /// Plaintext UTF-8 integer.
+    pub const ADD_PARTY_EXPORT_OFFSET: &str = "add_party_export_offset";
+    /// New-member-side: its own ledger offset captured during GenerateKeys
+    /// (before activation), used as `begin_offset_exclusive` for
+    /// `ClearPartyOnboardingFlag`. Plaintext UTF-8 integer, keyed by self id.
+    pub const ADD_PARTY_PRE_ACTIVATION_OFFSET: &str = "add_party_pre_activation_offset";
+    /// Unsigned onboarding-flag clearing proposal (P2P update without the
+    /// new member's Onboarding marker) created by the coordinator. Empty
+    /// payload doubles as the "flag already cleared — skip the sign round"
+    /// marker. Length-prefixed proto when non-empty.
+    pub const ADD_PARTY_CLEAR_PROPOSAL: &str = "add_party_clear_proposal";
+    /// Per-peer signed clearing proposal — single length-prefixed proto.
+    pub const SIGNED_ADD_PARTY_CLEAR: &str = "signed_add_party_clear";
 }
 
 /// Identity-table artefact kinds. These survive the originating workflow run's

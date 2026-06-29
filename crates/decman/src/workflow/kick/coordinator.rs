@@ -170,7 +170,10 @@ pub async fn start_coordinator(
 /// The output blobs are byte-identical to what each peer wrote as its
 /// own `SIGNED_KICK_DNS` / `SIGNED_KICK_P2P` artefact, so re-encoding via
 /// `read_first_message_from_bytes` round-trips cleanly.
-fn split_signed_kick_pair(combined: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
+///
+/// `pub(crate)` — the add-party workflow ships its signed DNS/P2P pair over
+/// the same wire format and reuses this splitter.
+pub(crate) fn split_signed_kick_pair(combined: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
     let mut cursor: &[u8] = combined;
 
     let dns_len = prost::encoding::decode_varint(&mut cursor)? as usize;

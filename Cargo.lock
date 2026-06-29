@@ -877,8 +877,8 @@ dependencies = [
 
 [[package]]
 name = "canton-proto-rs"
-version = "3.4.0"
-source = "git+ssh://git@github.com/DLC-link/canton-lib?branch=main#83446199920966c322c525d6a3739d2cfd2863c7"
+version = "3.5.3"
+source = "git+ssh://git@github.com/DLC-link/canton-lib?rev=e80d7c1acc012a23665dadeaf7c8761e9ea73ef7#e80d7c1acc012a23665dadeaf7c8761e9ea73ef7"
 dependencies = [
  "prost",
  "prost-types",
@@ -1076,8 +1076,8 @@ dependencies = [
 
 [[package]]
 name = "common"
-version = "0.6.0"
-source = "git+ssh://git@github.com/DLC-link/canton-lib?branch=main#83446199920966c322c525d6a3739d2cfd2863c7"
+version = "0.6.1"
+source = "git+ssh://git@github.com/DLC-link/canton-lib?rev=e80d7c1acc012a23665dadeaf7c8761e9ea73ef7#e80d7c1acc012a23665dadeaf7c8761e9ea73ef7"
 dependencies = [
  "canton-api-client",
  "rust_decimal",
@@ -1377,7 +1377,7 @@ dependencies = [
  "clap",
  "colored",
  "common 0.1.0",
- "common 0.6.0",
+ "common 0.6.1",
  "dotenvy",
  "ed25519-dalek",
  "futures",
@@ -2618,8 +2618,8 @@ dependencies = [
 
 [[package]]
 name = "keycloak"
-version = "0.6.0"
-source = "git+ssh://git@github.com/DLC-link/canton-lib?branch=main#83446199920966c322c525d6a3739d2cfd2863c7"
+version = "0.6.1"
+source = "git+ssh://git@github.com/DLC-link/canton-lib?rev=e80d7c1acc012a23665dadeaf7c8761e9ea73ef7#e80d7c1acc012a23665dadeaf7c8761e9ea73ef7"
 dependencies = [
  "base64",
  "reqwest 0.12.28",
@@ -3684,10 +3684,10 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
 name = "registry"
-version = "0.6.0"
-source = "git+ssh://git@github.com/DLC-link/canton-lib?branch=main#83446199920966c322c525d6a3739d2cfd2863c7"
+version = "0.6.1"
+source = "git+ssh://git@github.com/DLC-link/canton-lib?rev=e80d7c1acc012a23665dadeaf7c8761e9ea73ef7#e80d7c1acc012a23665dadeaf7c8761e9ea73ef7"
 dependencies = [
- "common 0.6.0",
+ "common 0.6.1",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

@@ -15,8 +15,8 @@ use crate::{
         peer_status::{LastSeen, bump},
     },
     workflow::{
-        WorkflowState, contracts::ContractsStep, dars::DarsStep, kick::KickStep,
-        onboarding::OnboardingStep, state::WorkflowStep,
+        WorkflowState, add_party::AddPartyStep, contracts::ContractsStep, dars::DarsStep,
+        kick::KickStep, onboarding::OnboardingStep, state::WorkflowStep,
     },
 };
 
@@ -74,6 +74,7 @@ pub enum ActiveWorkflow {
     Kick(Arc<NoiseServer<KickStep>>),
     Contracts(Arc<NoiseServer<ContractsStep>>),
     Dars(Arc<NoiseServer<DarsStep>>),
+    AddParty(Arc<NoiseServer<AddPartyStep>>),
 }
 
 impl ActiveWorkflow {
@@ -88,6 +89,7 @@ impl ActiveWorkflow {
             Self::Kick(s) => s.handle_command(peer_id, message).await,
             Self::Contracts(s) => s.handle_command(peer_id, message).await,
             Self::Dars(s) => s.handle_command(peer_id, message).await,
+            Self::AddParty(s) => s.handle_command(peer_id, message).await,
         }
     }
 }
@@ -273,6 +275,22 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
             }
             MessageType::KickSignatures => {
                 self.handle_peer_data(peer_id, message.payload, "kick signatures")
+                    .await
+            }
+            MessageType::AddPartyKeysUpload => {
+                self.handle_peer_data(peer_id, message.payload, "add-party keys upload")
+                    .await
+            }
+            MessageType::AddPartySignatures => {
+                self.handle_peer_data(peer_id, message.payload, "add-party signatures")
+                    .await
+            }
+            MessageType::AddPartyClearSignatures => {
+                self.handle_peer_data(peer_id, message.payload, "add-party clearing signature")
+                    .await
+            }
+            MessageType::AddPartyClearProposal => {
+                self.handle_peer_data(peer_id, message.payload, "add-party clearing proposal")
                     .await
             }
             MessageType::StatusUpdate => self.handle_status_update(peer_id, message.payload).await,
@@ -517,6 +535,11 @@ mod tests {
         assert!(command_carries_payload(MessageType::SignSubmissions));
         assert!(command_carries_payload(MessageType::SignKick));
         assert!(command_carries_payload(MessageType::GenerateKeys));
+        assert!(command_carries_payload(MessageType::GenerateAddPartyKeys));
+        assert!(command_carries_payload(MessageType::SignAddParty));
+        assert!(command_carries_payload(MessageType::ImportAcs));
+        assert!(command_carries_payload(MessageType::ClearOnboardingFlag));
+        assert!(command_carries_payload(MessageType::SignClearOnboarding));
     }
 
     fn decline(kind: WorkflowKind, workflow_instance: Option<&str>) -> DeclineInvitationPayload {

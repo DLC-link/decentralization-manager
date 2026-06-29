@@ -162,6 +162,22 @@ pub struct KickRequest {
     pub previous_threshold: i32,
 }
 
+/// Request to add a new member to an existing decentralized party.
+#[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct AddPartyRequest {
+    pub decentralized_party_id: CantonId,
+    pub new_participant_id: CantonId,
+    pub new_threshold: i32,
+    /// The party's threshold *before* the add. Display-only — surfaced on
+    /// the workflow run card as "old → new". Defaults to 0 (rendered as
+    /// just the new value) when an older client omits it.
+    #[serde(default)]
+    pub previous_threshold: i32,
+}
+
 /// Request to create a new decentralized party
 #[derive(Clone, Debug, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -329,6 +345,27 @@ pub struct KickInvitePayload {
     pub previous_threshold: i32,
     /// The surviving member set the kick targets, so the peer card renders
     /// the same participant list the coordinator shows.
+    #[serde(default)]
+    pub participants: Vec<CantonId>,
+    /// The coordinator's run instance name (see `OnboardingInvitePayload`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_instance: Option<String>,
+}
+
+/// Payload sent inside an `InviteAddParty` Noise message — gives the peer
+/// enough context to show "adding X to dec party Y, threshold a→b" before
+/// the proposals arrive. Sent both to the existing members and to the new
+/// member itself (which recognises its own id in `new_participant`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct AddPartyInvitePayload {
+    pub dec_party_id: CantonId,
+    pub new_participant: CantonId,
+    pub new_threshold: i32,
+    pub previous_threshold: i32,
+    /// The full post-add member set, so the peer card renders the same
+    /// participant list the coordinator shows.
     #[serde(default)]
     pub participants: Vec<CantonId>,
     /// The coordinator's run instance name (see `OnboardingInvitePayload`).

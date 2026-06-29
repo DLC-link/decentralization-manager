@@ -237,6 +237,57 @@ impl NoiseClient {
         .await
     }
 
+    /// Upload the new member's `keys||participant_id` payload to the
+    /// coordinator of an add-party run.
+    pub async fn upload_add_party_keys(&self, keys_data: Vec<u8>) -> Result<(), NoiseError> {
+        self.send_and_verify_ack(
+            MessageType::AddPartyKeysUpload,
+            keys_data,
+            "Uploading add-party keys to coordinator",
+        )
+        .await
+    }
+
+    /// Send the signed add-party DNS + P2P pair to the coordinator.
+    pub async fn send_add_party_signatures(
+        &self,
+        signatures_data: Vec<u8>,
+    ) -> Result<(), NoiseError> {
+        self.send_and_verify_ack(
+            MessageType::AddPartySignatures,
+            signatures_data,
+            "Sending add-party signatures to coordinator",
+        )
+        .await
+    }
+
+    /// Send the clearing proposal AUTHORED by this (new-member) node to the
+    /// coordinator, which runs the threshold-signing round on it.
+    pub async fn send_add_party_clear_proposal(
+        &self,
+        proposal_data: Vec<u8>,
+    ) -> Result<(), NoiseError> {
+        self.send_and_verify_ack(
+            MessageType::AddPartyClearProposal,
+            proposal_data,
+            "Sending authored clearing proposal to coordinator",
+        )
+        .await
+    }
+
+    /// Send the signed onboarding-flag clearing proposal to the coordinator.
+    pub async fn send_add_party_clear_signature(
+        &self,
+        signature_data: Vec<u8>,
+    ) -> Result<(), NoiseError> {
+        self.send_and_verify_ack(
+            MessageType::AddPartyClearSignatures,
+            signature_data,
+            "Sending add-party clearing signature to coordinator",
+        )
+        .await
+    }
+
     /// Tell the coordinator we are declining an outstanding invitation so it
     /// can fail its in-progress run with a descriptive error instead of
     /// hanging until timeout. Payload is the JSON-encoded

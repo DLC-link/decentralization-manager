@@ -165,6 +165,7 @@ const InvitationCard = ({
     !!invitation.prefix ||
     !!invitation.dec_party_id ||
     !!invitation.kicked_participant ||
+    !!invitation.new_participant ||
     invitation.new_threshold != null ||
     (invitation.participants?.length ?? 0) > 0 ||
     (invitation.package_names?.length ?? 0) > 0 ||
@@ -296,6 +297,35 @@ const InvitationCard = ({
                   size="small"
                   onClick={async () => {
                     const ok = await copyToClipboard(invitation.kicked_participant!);
+                    showSnackbar(ok ? "Copied to clipboard" : "Failed to copy");
+                  }}
+                  sx={{ p: 0.25 }}
+                >
+                  <ContentCopyIcon sx={{ fontSize: 14 }} />
+                </IconButton>
+              </Tooltip>
+            </Box>
+          )}
+          {invitation.new_participant && (
+            <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ minWidth: 96 }}
+              >
+                Adding
+              </Typography>
+              <Typography
+                variant="body2"
+                sx={{ fontWeight: 600, fontFamily: "monospace" }}
+              >
+                {truncatePartyId(invitation.new_participant)}
+              </Typography>
+              <Tooltip title="Copy added participant id">
+                <IconButton
+                  size="small"
+                  onClick={async () => {
+                    const ok = await copyToClipboard(invitation.new_participant!);
                     showSnackbar(ok ? "Copied to clipboard" : "Failed to copy");
                   }}
                   sx={{ p: 0.25 }}
@@ -1592,6 +1622,7 @@ const WorkflowRunCard = ({
         run.dec_party_id ||
         run.new_threshold != null ||
         run.kicked_participant ||
+        run.added_participant ||
         (run.participants && run.participants.length > 0) ||
         (run.package_names && run.package_names.length > 0) ||
         (run.dar_filenames && run.dar_filenames.length > 0)) && (
@@ -1684,6 +1715,35 @@ const WorkflowRunCard = ({
                   size="small"
                   onClick={async () => {
                     const ok = await copyToClipboard(run.kicked_participant!);
+                    showSnackbar(ok ? "Copied to clipboard" : "Failed to copy");
+                  }}
+                  sx={{ p: 0.25 }}
+                >
+                  <ContentCopyIcon sx={{ fontSize: 14 }} />
+                </IconButton>
+              </Tooltip>
+            </Box>
+          )}
+          {run.added_participant && (
+            <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ minWidth: 96 }}
+              >
+                Adding
+              </Typography>
+              <Typography
+                variant="body2"
+                sx={{ fontWeight: 600, fontFamily: "monospace" }}
+              >
+                {truncatePartyId(run.added_participant)}
+              </Typography>
+              <Tooltip title="Copy added participant id">
+                <IconButton
+                  size="small"
+                  onClick={async () => {
+                    const ok = await copyToClipboard(run.added_participant!);
                     showSnackbar(ok ? "Copied to clipboard" : "Failed to copy");
                   }}
                   sx={{ p: 0.25 }}

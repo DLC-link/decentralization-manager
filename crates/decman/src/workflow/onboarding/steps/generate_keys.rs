@@ -122,7 +122,10 @@ pub async fn generate_keys(
 /// This is what makes onboarding's GenerateKeys step idempotent across
 /// retries — without it, every retry mints a new fingerprint and breaks the
 /// topology delegation chain.
-async fn get_or_create_signing_key(
+///
+/// `pub(crate)` so the add-party workflow's new-member key generation reuses
+/// the exact same idempotent path instead of duplicating it.
+pub(crate) async fn get_or_create_signing_key(
     vault_client: &mut VaultServiceClient<tonic::transport::Channel>,
     name: &str,
     usage: SigningKeyUsage,
@@ -169,7 +172,10 @@ async fn get_or_create_signing_key(
 /// `utils::write_messages_to_file(&[ns, daml], path)` produced, so the
 /// coordinator's `read_all_messages_from_file` (now `read_all_messages` over
 /// bytes) reads them back identically.
-fn encode_keys_payload(namespace_key: &SigningPublicKey, daml_key: &SigningPublicKey) -> Vec<u8> {
+pub(crate) fn encode_keys_payload(
+    namespace_key: &SigningPublicKey,
+    daml_key: &SigningPublicKey,
+) -> Vec<u8> {
     let mut buffer = BytesMut::new();
     for key in [namespace_key, daml_key] {
         let encoded = key.encode_to_vec();
@@ -180,7 +186,10 @@ fn encode_keys_payload(namespace_key: &SigningPublicKey, daml_key: &SigningPubli
 }
 
 /// Propose namespace delegation for the generated namespace key
-async fn propose_namespace_delegation(
+///
+/// `pub(crate)` so the add-party workflow's new-member key generation reuses
+/// the same delegation path (see `get_or_create_signing_key`).
+pub(crate) async fn propose_namespace_delegation(
     config: &NodeConfig,
     namespace_key: &SigningPublicKey,
     namespace_fingerprint: &str,

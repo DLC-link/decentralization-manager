@@ -16,7 +16,9 @@ use crate::{
             WorkflowRole, WorkflowRun,
         },
     },
-    workflow::{ContractsStep, DarsStep, KickStep, OnboardingStep, state::WorkflowStep},
+    workflow::{
+        AddPartyStep, ContractsStep, DarsStep, KickStep, OnboardingStep, state::WorkflowStep,
+    },
 };
 
 async fn delete_persisted_invitation(data: &web::Data<AppState>, id: &str) {
@@ -60,6 +62,7 @@ fn step_total_for(kind: WorkflowKind) -> i64 {
         WorkflowKind::Kick => KickStep::step_total(),
         WorkflowKind::Contracts => ContractsStep::step_total(),
         WorkflowKind::Dars => DarsStep::step_total(),
+        WorkflowKind::AddParty => AddPartyStep::step_total(),
     }
 }
 
@@ -115,6 +118,7 @@ async fn insert_peer_run(
             "participants": invitation.participants,
             "dar_filenames": invitation.dar_filenames,
             "participant_id": invitation.kicked_participant,
+            "new_participant_id": invitation.new_participant,
             "new_threshold": invitation.new_threshold,
             "previous_threshold": invitation.previous_threshold,
             "package_names": invitation.package_names,
@@ -136,6 +140,7 @@ async fn insert_peer_run(
         previous_threshold: None,
         new_threshold: None,
         kicked_participant: None,
+        added_participant: None,
         package_names: Vec::new(),
         dar_filenames: Vec::new(),
         error: None,

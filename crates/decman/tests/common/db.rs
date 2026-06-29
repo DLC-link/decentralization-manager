@@ -257,6 +257,31 @@ pub async fn count_artifacts(db_path: &Path, instance_name: &str) -> anyhow::Res
     Ok(n)
 }
 
+/// Whether the node's dec-party membership CACHE lists `participant_uid` as
+/// a member of `dec_party_id`. Start handlers (kick, add-party) consult this
+/// cache — not live Canton — so phases asserting on their member guards must
+/// gate on the cache itself: `refresh=true` responses are served from the
+/// fresh fetch while the cache write happens in a spawned task, so the
+/// response converging does NOT mean the cache has.
+pub async fn dec_party_cache_has_participant(
+    db_path: &Path,
+    dec_party_id: &str,
+    participant_uid: &str,
+) -> anyhow::Result<bool> {
+    let pool = open(db_path).await?;
+    let n: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM dec_party_participant \
+         WHERE dec_party_id = ?1 AND participant_uid = ?2",
+    )
+    .bind(dec_party_id)
+    .bind(participant_uid)
+    .fetch_one(&pool)
+    .await
+    .context("dec_party_cache_has_participant")?;
+    pool.close().await;
+    Ok(n > 0)
+}
+
 pub async fn count_dec_party_identity(db_path: &Path, dec_party_id: &str) -> anyhow::Result<i64> {
     let pool = open(db_path).await?;
     let n: i64 =

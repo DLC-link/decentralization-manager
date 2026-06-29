@@ -41,3 +41,4 @@ export type KickStatusResponse = WorkflowStatusResponse;
 export type OnboardingStatusResponse = WorkflowStatusResponse;
 export type ContractsStatusResponse = WorkflowStatusResponse;
 export type DarsStatusResponse = WorkflowStatusResponse;
+export type AddPartyStatusResponse = WorkflowStatusResponse;
