@@ -113,6 +113,65 @@ where
     Commitable::commit(tx).await
 }
 
+/// Register a freshly-built coordinator run in the shared registry and persist
+/// its `workflow_runs` row — the register-or-409 / persist-or-unregister
+/// contract every `start_*` handler needs, kept in one place so a change to it
+/// can't drift between the four handlers.
+///
+/// The registry insert is the dedup gate: a duplicate `instance_name` is
+/// rejected here BEFORE we persist, so a racing same-instance request can't
+/// upsert (and clobber) the in-flight run's row. If the persist then fails the
+/// registry entry is removed, so a run that never started can't leak and block
+/// future starts. On either failure returns the 409 `HttpResponse` the handler
+/// should return; on success the run is both registered and persisted.
+async fn register_and_persist<S, C>(
+    data: &web::Data<AppState>,
+    instance: &Arc<WorkflowInstance>,
+    initial_step: S,
+    config: &C,
+    invitees: &[CantonId],
+    dec_party_id: Option<CantonId>,
+) -> std::result::Result<(), HttpResponse>
+where
+    S: WorkflowStep,
+    C: serde::Serialize,
+{
+    let kind = instance.kind;
+    let instance_name = &instance.instance_name;
+    let label = match kind {
+        WorkflowKind::Onboarding => "onboarding",
+        WorkflowKind::Kick => "kick",
+        WorkflowKind::Contracts => "contracts",
+        WorkflowKind::Dars => "DARs",
+    };
+
+    if !data.workflows.insert(instance.clone()) {
+        return Err(HttpResponse::Conflict().json(ErrorResponse {
+            error: format!("A workflow with instance {instance_name} is already running"),
+        }));
+    }
+
+    if let Err(e) = insert_coordinator_run(
+        &data.db,
+        instance_name,
+        kind,
+        initial_step,
+        config,
+        invitees,
+        dec_party_id,
+    )
+    .await
+    {
+        data.workflows.remove(instance_name);
+        tracing::warn!("Failed to persist {label} workflow run: {e:#}");
+        return Err(HttpResponse::Conflict().json(ErrorResponse {
+            error: format!("Failed to start {label} workflow: {e}"),
+        }));
+    }
+
+    Ok(())
+}
+
 /// Flip the persisted run's status to Completed. Errors are logged and
 /// swallowed — the spawned task can't usefully react to a DB error here.
 async fn mark_run_completed(db: &SqlitePool, instance_name: &str) {
@@ -371,24 +430,11 @@ pub async fn start_kick(
         });
     }
 
-    // Register in the registry FIRST — atomic dedup. A racing request for the
-    // same instance_name must be rejected here, BEFORE we persist, so it can't
-    // upsert (and clobber) the in-flight run's workflow_runs row.
-    if !data.workflows.insert(instance.clone()) {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format!(
-                "A workflow with instance {} is already running",
-                instance.instance_name
-            ),
-        });
-    }
-
-    // Persist the workflow_runs row. On failure, unregister so we don't leak a
-    // stale registry entry for a run that never started.
-    if let Err(e) = insert_coordinator_run(
-        &data.db,
-        &instance_name,
-        WorkflowKind::Kick,
+    // Register + persist atomically w.r.t. duplicates (registry insert dedups
+    // before the upsert; a persist failure unregisters so nothing leaks).
+    if let Err(resp) = register_and_persist(
+        &data,
+        &instance,
         KickStep::WaitingForPeers,
         &kick_config,
         &invitees,
@@ -396,11 +442,7 @@ pub async fn start_kick(
     )
     .await
     {
-        data.workflows.remove(&instance_name);
-        tracing::warn!("Failed to persist kick workflow run: {e:#}");
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format!("Failed to start kick workflow: {e}"),
-        });
+        return resp;
     }
 
     let invitees_for_invites = invitees.clone();
@@ -511,6 +553,27 @@ pub async fn get_kick_status(data: web::Data<AppState>) -> impl Responder {
     HttpResponse::Ok().json(kind_status(&data, WorkflowKind::Kick).await)
 }
 
+/// Pick the coordinator run of `kind` that the legacy per-kind `/{kind}/status`
+/// and `/{kind}/cancel` endpoints act on. `snapshot()` is HashMap-ordered, so we
+/// sort by `instance_name` and take the lowest — a stable choice so repeated
+/// polls and cancels don't flip between concurrent same-kind runs from call to
+/// call. Callers that mean a specific run use the per-instance endpoints. Shared
+/// by `kind_status` and `cancel_workflow_state` so both always pick the same
+/// instance.
+fn pick_coordinator_run(
+    data: &web::Data<AppState>,
+    kind: WorkflowKind,
+) -> Option<Arc<WorkflowInstance>> {
+    let mut runs: Vec<_> = data
+        .workflows
+        .snapshot()
+        .into_iter()
+        .filter(|i| i.kind == kind && i.role == WorkflowRole::Coordinator)
+        .collect();
+    runs.sort_by(|a, b| a.instance_name.cmp(&b.instance_name));
+    runs.into_iter().next()
+}
+
 /// Summarize the status of a coordinator run of `kind` for the legacy
 /// per-kind `/{kind}/status` endpoints.
 ///
@@ -524,16 +587,7 @@ pub async fn get_kick_status(data: web::Data<AppState>) -> impl Responder {
 /// runs of one kind these endpoints are necessarily coarse — callers wanting
 /// per-instance detail should use `GET /workflows`.
 async fn kind_status(data: &web::Data<AppState>, kind: WorkflowKind) -> WorkflowStatusResponse {
-    // Pick deterministically (lowest instance_name) so repeated polls don't flip
-    // between concurrent same-kind runs — `snapshot()` is HashMap-ordered.
-    let mut live: Vec<_> = data
-        .workflows
-        .snapshot()
-        .into_iter()
-        .filter(|i| i.kind == kind && i.role == WorkflowRole::Coordinator)
-        .collect();
-    live.sort_by(|a, b| a.instance_name.cmp(&b.instance_name));
-    if let Some(inst) = live.first() {
+    if let Some(inst) = pick_coordinator_run(data, kind) {
         return WorkflowStatusResponse {
             status: *inst.http.status.read().await,
             error: inst.http.error.read().await.clone(),
@@ -794,24 +848,12 @@ pub async fn start_onboarding(
         });
     }
 
-    // Register FIRST — atomic dedup before persist. Onboarding's instance_name
-    // is deterministic (`{prefix}-creation`), so a racing same-prefix request
-    // is realistic; rejecting here (before the upsert) stops it clobbering the
-    // in-flight run's persisted row.
-    if !data.workflows.insert(instance.clone()) {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format!(
-                "A workflow with instance {} is already running",
-                instance.instance_name
-            ),
-        });
-    }
-
-    // Persist; unregister on failure so a never-started run can't leak.
-    if let Err(e) = insert_coordinator_run(
-        &data.db,
-        &instance_name,
-        WorkflowKind::Onboarding,
+    // Onboarding's instance_name is deterministic (`{prefix}-creation`), so a
+    // racing same-prefix request is realistic — register_and_persist's registry
+    // insert rejects it before the upsert can clobber the in-flight run's row.
+    if let Err(resp) = register_and_persist(
+        &data,
+        &instance,
         OnboardingStep::WaitingForPeers,
         &onboarding_config,
         &peer_ids,
@@ -819,11 +861,7 @@ pub async fn start_onboarding(
     )
     .await
     {
-        data.workflows.remove(&instance_name);
-        tracing::warn!("Failed to persist onboarding workflow run: {e:#}");
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format!("Failed to start onboarding workflow: {e}"),
-        });
+        return resp;
     }
 
     let config = data.config.clone();
@@ -990,12 +1028,15 @@ pub async fn get_onboarding_status(data: web::Data<AppState>) -> impl Responder 
 
 /// Interpret a peer's reply to a workflow invite.
 ///
-/// A `Busy` reply means the peer raced into another workflow between our
-/// pre-flight health check and this invite. Treat it as a hard error so the
-/// coordinator aborts fast — the spawning task marks the run Failed with a clear
-/// reason — instead of waiting on a peer that will never join. Any other
-/// non-`Ack` reply, or an unparseable one, is logged but tolerated (an older
-/// peer may not Ack).
+/// Current peers accept invites unconditionally (workflows are multi-instance
+/// now — see the invite arm in `server::mod`), so a current peer always replies
+/// `Ack`, and a pre-`Ack` build is refused by the version gate before it can
+/// reach an invite. The `Busy` arm is therefore a defensive safety net no
+/// current-version peer triggers: were a peer ever to report `Busy`, treating it
+/// as a hard error makes the coordinator fail fast (the spawning task marks the
+/// run Failed with a clear reason) instead of waiting on a peer that will never
+/// join. Any other non-`Ack` reply, or an unparseable one, is logged but
+/// tolerated.
 fn interpret_invite_reply(peer_id: &CantonId, kind: &str, response: &[u8]) -> Result {
     match Message::from_bytes(response) {
         Ok(msg) if msg.msg_type == MessageType::Ack => {
@@ -1338,22 +1379,11 @@ pub async fn start_contracts(
         });
     }
 
-    // Register FIRST — atomic dedup before persist (a racing same-instance
-    // request can't upsert/clobber the in-flight run's row).
-    if !data.workflows.insert(instance.clone()) {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format!(
-                "A workflow with instance {} is already running",
-                instance.instance_name
-            ),
-        });
-    }
-
-    // Persist; unregister on failure so a never-started run can't leak.
-    if let Err(e) = insert_coordinator_run(
-        &data.db,
-        &instance_name_for_run,
-        WorkflowKind::Contracts,
+    // Register + persist atomically w.r.t. duplicates (registry insert dedups
+    // before the upsert; a persist failure unregisters so nothing leaks).
+    if let Err(resp) = register_and_persist(
+        &data,
+        &instance,
         ContractsStep::WaitingForPeers,
         &contracts_config,
         &contracts_invitees,
@@ -1361,11 +1391,7 @@ pub async fn start_contracts(
     )
     .await
     {
-        data.workflows.remove(&instance_name_for_run);
-        tracing::warn!("Failed to persist contracts workflow run: {e:#}");
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format!("Failed to start contracts workflow: {e}"),
-        });
+        return resp;
     }
 
     let config = data.config.clone();
@@ -1605,21 +1631,11 @@ pub async fn start_dars(
         });
     }
 
-    // Register FIRST — atomic dedup before persist (no clobber on a race).
-    if !data.workflows.insert(instance.clone()) {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format!(
-                "A workflow with instance {} is already running",
-                instance.instance_name
-            ),
-        });
-    }
-
-    // Persist; unregister on failure so a never-started run can't leak.
-    if let Err(e) = insert_coordinator_run(
-        &data.db,
-        &instance_name,
-        WorkflowKind::Dars,
+    // Register + persist atomically w.r.t. duplicates (registry insert dedups
+    // before the upsert; a persist failure unregisters so nothing leaks).
+    if let Err(resp) = register_and_persist(
+        &data,
+        &instance,
         DarsStep::WaitingForPeers,
         &dars_config,
         &body.peer_ids,
@@ -1627,11 +1643,7 @@ pub async fn start_dars(
     )
     .await
     {
-        data.workflows.remove(&instance_name);
-        tracing::warn!("Failed to persist dars workflow run: {e:#}");
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format!("Failed to start DARs workflow: {e}"),
-        });
+        return resp;
     }
 
     let config = data.config.clone();
@@ -1837,24 +1849,17 @@ async fn send_dars_invites(
     Ok(())
 }
 
-/// Shared cancel logic for the legacy per-kind endpoints. Picks the
-/// coordinator run of `kind` deterministically (lowest instance_name) —
-/// `snapshot()` is HashMap-ordered, so with concurrent same-kind runs an
-/// arbitrary pick would cancel a different instance each call. Callers that
-/// know which run they mean should use `POST /workflows/{instance}/cancel`.
+/// Shared cancel logic for the legacy per-kind endpoints. Picks the coordinator
+/// run of `kind` via [`pick_coordinator_run`] (deterministic lowest
+/// instance_name), so `/{kind}/status` and `/{kind}/cancel` always act on the
+/// same instance. Callers that know which run they mean should use
+/// `POST /workflows/{instance}/cancel`.
 async fn cancel_workflow_state(
     data: &web::Data<AppState>,
     label: &str,
     kind: WorkflowKind,
 ) -> HttpResponse {
-    let mut candidates: Vec<_> = data
-        .workflows
-        .snapshot()
-        .into_iter()
-        .filter(|i| i.kind == kind && i.role == WorkflowRole::Coordinator)
-        .collect();
-    candidates.sort_by(|a, b| a.instance_name.cmp(&b.instance_name));
-    let Some(instance) = candidates.into_iter().next() else {
+    let Some(instance) = pick_coordinator_run(data, kind) else {
         return HttpResponse::Conflict().json(ErrorResponse {
             error: format!("No {label} workflow in progress"),
         });
@@ -2683,7 +2688,9 @@ mod tests {
         let ack = Message::new_empty(MessageType::Ack).to_bytes();
         assert!(interpret_invite_reply(&peer, "onboarding", &ack).is_ok());
 
-        // Busy aborts so the coordinator fails fast instead of waiting forever.
+        // Busy is a defensive net no current-version peer triggers (peers Ack
+        // unconditionally and pre-Ack builds are version-gated out); were it ever
+        // sent, it still aborts so the coordinator fails fast instead of waiting.
         let busy = Message::new(MessageType::Busy, b"Onboarding".to_vec()).to_bytes();
         assert!(interpret_invite_reply(&peer, "onboarding", &busy).is_err());
 
