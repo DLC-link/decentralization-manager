@@ -377,18 +377,20 @@ struct GetAddPartyStatusRequest {
 1. ✅ Generate keys for new member
 2. ✅ Create namespace delegation
 3. ✅ Update DecentralizedNamespaceDefinition
-4. ✅ Update PartyToParticipant
+4. ✅ Update PartyToParticipant (with the Onboarding marker)
 5. ✅ Collect threshold signatures
 6. ✅ Submit topology transactions
+7. ✅ Export the coordinator's ACS (`ExportPartyAcs`) and import it on the new
+   member (`ImportPartyAcs`) — Canton 3.4+ offline party replication
+8. ✅ Clear the Onboarding marker (`ClearPartyOnboardingFlag`) once the import
+   has landed, activating the party on the new member
 
-#### Missing Steps (For Parties with Contracts)
-7. ❌ Check if party has existing contracts
-8. ❌ If yes, perform ACS export from coordinator
-9. ❌ Transfer ACS snapshot to new member
-10. ❌ New member: enable repair mode (requires restart)
-11. ❌ New member: disconnect from synchronizers
-12. ❌ New member: import ACS
-13. ❌ New member: reconnect to synchronizers
+> **No repair mode / restart / synchronizer disconnect.** Offline party
+> replication plus the Onboarding marker keeps the party suspended on the new
+> member until the ACS import completes, so the legacy repair-mode approach
+> (enable repair mode + restart, disconnect/reconnect synchronizers) is **not**
+> used. An earlier draft of this section listed those steps as "missing"; the
+> offline-replication flow above superseded them.
 
 ### Recommended Approach
 
