@@ -96,22 +96,49 @@ pub async fn get_auth_status(data: web::Data<AppState>) -> impl Responder {
 
     // Handle test mode - return mock status
     if let Some(WorkflowAuth::Mock(ref mock_registry)) = *auth {
-        let manager = mock_registry.get_by_str("").await;
-        // In test mode we don't have a real dec_party / member_party pair,
-        // so we surface the mock's member_party_id for both. Real auth flows
-        // overwrite this with the configured creds below.
-        let mock_member = manager.member_party_id().clone();
-        party_statuses.push(PartyAuthStatus {
-            dec_party_id: mock_member.clone(),
-            member_party_id: mock_member,
-            user_id: manager.user_id().to_string(),
-            keycloak_url: None,
-            keycloak_realm: None,
-            auth0_domain: None,
-            auth0_audience: None,
-            status: AuthStatus::Mock,
-            rights: None,
-        });
+        let party_creds_list = data.party_credentials.read().await;
+        if party_creds_list.is_empty() {
+            // No party configured yet: surface the mock registry's member party
+            // as a placeholder so the UI has something to show.
+            let manager = mock_registry.get_by_str("").await;
+            let mock_member = manager.member_party_id().clone();
+            party_statuses.push(PartyAuthStatus {
+                dec_party_id: mock_member.clone(),
+                member_party_id: mock_member,
+                user_id: manager.user_id().to_string(),
+                keycloak_url: None,
+                keycloak_realm: None,
+                auth0_domain: None,
+                auth0_audience: None,
+                status: AuthStatus::Mock,
+                rights: None,
+            });
+        } else {
+            // Test mode mints a token for any configured party, so report each
+            // configured party as Mock-authenticated with the full canned rights
+            // (matching the mock `grant_rights` path). Lets the UI recognise the
+            // real dec party — the hardcoded placeholder above never matched it,
+            // so auth-gated actions (member-party discovery, contract deploy)
+            // stayed blocked even after `/party-config` succeeded.
+            for creds in party_creds_list.iter() {
+                party_statuses.push(PartyAuthStatus {
+                    dec_party_id: creds.dec_party_id.clone(),
+                    member_party_id: creds.member_party_id.clone(),
+                    user_id: creds.user_id.clone(),
+                    keycloak_url: None,
+                    keycloak_realm: None,
+                    auth0_domain: None,
+                    auth0_audience: None,
+                    status: AuthStatus::Mock,
+                    rights: Some(RightsStatus {
+                        member_party_act_as: true,
+                        member_party_read_as: true,
+                        dec_party_act_as: true,
+                        dec_party_read_as: true,
+                    }),
+                });
+            }
+        }
         return HttpResponse::Ok().json(AuthStatusResponse {
             parties: party_statuses,
         });
