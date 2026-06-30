@@ -146,6 +146,7 @@ where
         WorkflowKind::Kick => "kick",
         WorkflowKind::Contracts => "contracts",
         WorkflowKind::Dars => "DARs",
+        WorkflowKind::AddParty => "add-party",
     };
 
     if !data.workflows.insert(instance.clone()) {
