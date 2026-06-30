@@ -156,6 +156,27 @@ pub async fn workflow_run_status(
     Ok(s)
 }
 
+/// Status of the (single) peer-side run that belongs to the given coordinator
+/// run, matched via the `coordinator_instance` column persisted at accept
+/// time. Returns `None` while the peer hasn't accepted (no row yet).
+pub async fn peer_run_status_by_coordinator_instance(
+    db_path: &Path,
+    coordinator_instance: &str,
+) -> anyhow::Result<Option<String>> {
+    let pool = open(db_path).await?;
+    let s: Option<String> = sqlx::query_scalar(
+        "SELECT status FROM workflow_runs \
+         WHERE role = 'Peer' AND coordinator_instance = ?1 \
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(coordinator_instance)
+    .fetch_optional(&pool)
+    .await
+    .context("peer_run_status_by_coordinator_instance")?;
+    pool.close().await;
+    Ok(s)
+}
+
 pub async fn workflow_run_dismissed(
     db_path: &Path,
     instance_name: &str,

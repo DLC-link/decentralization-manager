@@ -381,6 +381,45 @@ Most variables have a default that's only useful for local development (loopback
 
 ¹ Required only for the chosen provider. Set the `DECPM_KEYCLOAK_*` trio **or** the `DECPM_AUTH0_*` trio, not both.
 
+## Note: keeping the existing Noise keypair
+
+If you would rather not regenerate your Noise keypair (so peers don't have to update their entry for you), you can preserve the keypair file from your old PVC. The keypair is stored as a file in the data directory (not in the SQLite database), so it survives a clean redeploy as long as you keep the same PVC mounted at `/app`.
+
+The peer list and party credentials do **not** carry over: those live in the SQLite database, which the new format introduces. The first time the new application starts on the preserved PVC it will create a fresh database alongside the existing keypair file. You will still need to re-establish peers (Step 5) and re-enter party credentials (Step 6) — the only thing you save is the round-trip with peers having to update their entry for you.
+
+## Upgrading an existing mesh to concurrent workflows
+
+The concurrent multi-instance workflow release changes the **Noise wire
+format**: every frame now starts with a protocol-version byte and carries an
+instance-routing field. Frames from older builds are rejected with an explicit
+"protocol version mismatch" error (and old builds cannot parse new frames). A mixed-version mesh
+does not degrade gracefully — every cross-node call (heartbeats, invites,
+workflow commands) fails until all nodes run the same side of the change.
+
+**Upgrade lockstep, not rolling:**
+
+1. Ensure no workflow is in flight on any node (finish or cancel + dismiss
+   everything in the feed).
+2. Stop **all** dec-party-manager processes in the mesh.
+3. Upgrade every node to the new image/binary.
+4. Start them all again. SQLite migrations `000013` (drops the
+   one-InProgress-run-per-kind index) and `000014` (adds
+   `coordinator_instance` to `workflow_runs`) apply automatically on boot.
+
+Peer-side rows created before the upgrade have no `coordinator_instance`;
+their resumed command streams route via a single-active-run fallback, which
+cannot be disambiguated if the coordinator is already running several
+workflows — another reason to upgrade with nothing in flight.
+
+Both directions of the incompatibility are guarded at runtime: a 0.1.9+
+coordinator refuses to start a workflow (409, naming the peers) unless every
+invitee positively reports >= 0.1.9, and a 0.1.9+ node denies requests from
+older builds with an explicit version-mismatch error in its logs.
+
+Downgrading requires reversing migration `000014` and `000013`; note the
+`000013` down-migration fails while concurrent InProgress rows exist (finish
+or dismiss them first).
+
 ## Troubleshooting
 
 - **Pod is `CrashLoopBackOff`**: `kubectl logs` will usually show a missing required env var. Compare against the configuration reference above.

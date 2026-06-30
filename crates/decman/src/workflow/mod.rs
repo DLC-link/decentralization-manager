@@ -6,6 +6,8 @@ pub mod state;
 pub mod storage;
 pub mod topology;
 
+use std::sync::Arc;
+
 use anyhow::Context;
 use canton_proto_rs::com::digitalasset::canton::{
     protocol::v30::{SignedTopologyTransaction, TopologyTransaction, topology_mapping},
@@ -22,7 +24,7 @@ use crate::{
     db::schema::{Commitable, SchemaRead, SchemaWrite},
     error::Result,
     noise::{MessageType, NoiseError, client::NoiseClient, server::ActiveWorkflow},
-    server::{ActiveWorkflowGuard, ActiveWorkflowSlot, WorkflowKind, peer_status::LastSeen},
+    server::{WorkflowInstance, WorkflowKind, peer_status::LastSeen},
     utils,
     workflow::{
         state::WorkflowStep,
@@ -63,7 +65,7 @@ pub async fn start_coordinator(
     dars_config: Option<DarsConfig>,
     workflow_auth: Option<WorkflowAuth>,
     last_seen: LastSeen,
-    active_workflow: ActiveWorkflowSlot,
+    instance: Arc<WorkflowInstance>,
 ) -> Result<CoordinatorResult> {
     tracing::info!("Loading peers from database...");
     let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
@@ -81,7 +83,7 @@ pub async fn start_coordinator(
                 config,
                 db,
                 last_seen,
-                active_workflow,
+                instance,
             )
             .await?;
             Ok(CoordinatorResult {
@@ -99,7 +101,7 @@ pub async fn start_coordinator(
                 workflow_auth,
                 db,
                 last_seen,
-                active_workflow,
+                instance,
             )
             .await?;
             Ok(CoordinatorResult {
@@ -115,7 +117,7 @@ pub async fn start_coordinator(
                 config,
                 db,
                 last_seen,
-                active_workflow,
+                instance,
             )
             .await?;
             Ok(CoordinatorResult {
@@ -131,7 +133,7 @@ pub async fn start_coordinator(
                 config,
                 db,
                 last_seen,
-                active_workflow,
+                instance,
             )
             .await?;
             Ok(CoordinatorResult {
@@ -141,17 +143,19 @@ pub async fn start_coordinator(
     }
 }
 
-/// Register the coordinator's workflow so the always-on Noise listener can route
-/// peer command messages to it, then drive the workflow loop to completion. No
-/// port is bound here — the single always-on listener already owns port 9000.
-/// The [`ActiveWorkflowGuard`] clears the slot on return (success, error, or
-/// panic), so a finished or failed workflow stops receiving routed commands.
+/// Register the coordinator's Noise handle on its [`WorkflowInstance`] so the
+/// always-on listener can route this run's peer command messages to it, then
+/// drive the workflow loop to completion. No port is bound here — the single
+/// always-on listener already owns port 9000. The instance's registry entry is
+/// removed by the caller's [`WorkflowGuard`](crate::server::WorkflowGuard) on
+/// return (success, error, or panic), so a finished or failed workflow stops
+/// receiving routed commands.
 pub async fn run_workflow_with_handler(
     active: ActiveWorkflow,
-    slot: ActiveWorkflowSlot,
+    instance: Arc<WorkflowInstance>,
     workflow_handle: tokio::task::JoinHandle<Result>,
 ) -> Result {
-    let _guard = ActiveWorkflowGuard::register(slot, active);
+    instance.set_active(active);
     match workflow_handle.await {
         Ok(Ok(())) => {
             tracing::info!("Workflow completed successfully, shutting down");
@@ -183,13 +187,14 @@ pub async fn start_peer(
     coordinator: Peer,
     db: SqlitePool,
     instance_name: String,
+    coordinator_instance: String,
 ) -> Result {
     tracing::info!(
         "Initializing Noise client to connect to coordinator {}...",
         coordinator.participant_id
     );
 
-    let client = NoiseClient::new(node_config.clone(), coordinator).await?;
+    let client = NoiseClient::new(node_config.clone(), coordinator, coordinator_instance).await?;
 
     tracing::info!("Noise client initialized, entering command polling loop");
 

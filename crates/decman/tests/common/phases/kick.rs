@@ -65,6 +65,32 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 Ok(())
             })
         })
+        .when(
+            "second /kick for the SAME party — expect 409 (same-party guard)",
+            |f, _| {
+                Box::pin(async move {
+                    // The first kick's row is persisted InProgress before its 202
+                    // returns, so the same-party guard must reject a second
+                    // topology-mutating workflow on this party deterministically.
+                    let party_id = f.party_id()?.to_string();
+                    let req = json!({
+                        "decentralized_party_id": party_id,
+                        "participant_id": f.p3.participant_id.clone(),
+                        "new_threshold": 2_i64,
+                    });
+                    let (status, body) = f.post_expect_status(f.p1.http, "/kick", &req).await?;
+                    anyhow::ensure!(
+                        status.as_u16() == 409,
+                        "expected 409 from the same-party guard, got {status}: {body}"
+                    );
+                    anyhow::ensure!(
+                        body.contains("already has a"),
+                        "409 body should name the conflicting in-flight workflow: {body}"
+                    );
+                    Ok(())
+                })
+            },
+        )
         .then(
             "Kick invitation visible on P2",
             Duration::from_secs(60),

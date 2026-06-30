@@ -471,7 +471,11 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
     async fn broadcast_cancel_to_others(&self, declining_peer: &CantonId) {
         let identity = self.node_config.participant_id().to_string();
         let identity_bytes = identity.as_bytes();
-        let message = Message::new_empty(MessageType::CancelInvite);
+        // Stamp this run's instance so peers cancel only THIS run's
+        // invite/peer-run — a sibling concurrent run from the same
+        // coordinator must survive the teardown.
+        let message = Message::new_empty(MessageType::CancelInvite)
+            .with_instance(self.workflow_state.instance_name());
 
         for peer in &self.peers {
             if &peer.participant_id == declining_peer {

@@ -573,8 +573,44 @@ pub fn decode_length_prefixed(data: &[u8], expected_count: usize) -> Result<Vec<
     Ok(items)
 }
 
+/// Whether dotted-numeric version `v` is at least `min` (component-wise
+/// numeric compare, missing components treated as 0). Returns `false` for
+/// anything that doesn't parse as dotted numerics — for version gating,
+/// "can't parse" must mean "can't verify", never "assume compatible".
+pub fn version_at_least(v: &str, min: &str) -> bool {
+    fn parse(s: &str) -> Option<Vec<u64>> {
+        s.trim().split('.').map(|c| c.parse::<u64>().ok()).collect()
+    }
+    let (Some(v), Some(min)) = (parse(v), parse(min)) else {
+        return false;
+    };
+    let len = v.len().max(min.len());
+    for i in 0..len {
+        let a = v.get(i).copied().unwrap_or(0);
+        let b = min.get(i).copied().unwrap_or(0);
+        if a != b {
+            return a > b;
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn version_at_least_compares_numerically() {
+        assert!(version_at_least("0.1.9", "0.1.9"));
+        assert!(version_at_least("0.1.10", "0.1.9"));
+        assert!(version_at_least("0.2.0", "0.1.9"));
+        assert!(version_at_least("1.0", "0.1.9"));
+        assert!(!version_at_least("0.1.8", "0.1.9"));
+        assert!(!version_at_least("0.1", "0.1.9"));
+        // Unparseable must never pass the gate.
+        assert!(!version_at_least("", "0.1.9"));
+        assert!(!version_at_least("0.1.9-rc1", "0.1.9"));
+        assert!(!version_at_least("abc", "0.1.9"));
+    }
+
     use super::*;
 
     use prost_types::Timestamp;

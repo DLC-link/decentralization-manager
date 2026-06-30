@@ -554,7 +554,7 @@ async fn test_keycloak_auth(
 mod tests {
     use std::{
         collections::{HashMap, HashSet},
-        sync::{Arc, atomic::AtomicBool},
+        sync::Arc,
     };
 
     use actix_web::{
@@ -565,7 +565,7 @@ mod tests {
     };
     use serde_json::{Value, json};
     use sqlx::SqlitePool;
-    use tokio::sync::{Mutex, Notify, RwLock};
+    use tokio::sync::{Mutex, RwLock};
 
     use super::grant_rights;
     use crate::{
@@ -589,12 +589,8 @@ mod tests {
             config: NodeConfig::default(),
             peer_status: Arc::new(RwLock::new(HashMap::new())),
             last_seen: Arc::new(RwLock::new(HashMap::new())),
-            onboarding_trigger: Arc::new(Notify::new()),
-            kick_trigger: Arc::new(Notify::new()),
-            contracts_trigger: Arc::new(Notify::new()),
-            dars_trigger: Arc::new(Notify::new()),
-            coordinator_pubkey: Arc::new(RwLock::new(None)),
-            peer_run_instance: Arc::new(RwLock::new(None)),
+            peer_job_sender: tokio::sync::mpsc::unbounded_channel().0,
+            workflows: crate::server::WorkflowRegistry::new(),
             pending_invitations: Arc::new(RwLock::new(Vec::new())),
             auth: Arc::new(RwLock::new(Some(WorkflowAuth::Mock(Arc::new(
                 MockAuthRegistry::new(party_credentials.clone()),
@@ -605,8 +601,6 @@ mod tests {
             admin_role: admin_role.map(str::to_string),
             party_credentials,
             bootstrap_mu: Arc::new(Mutex::new(())),
-            workflow_in_flight: Arc::new(AtomicBool::new(false)),
-            active_workflow: Arc::new(std::sync::RwLock::new(None)),
             test_mode: true,
             refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
             http_client: reqwest::Client::new(),

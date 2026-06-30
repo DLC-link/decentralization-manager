@@ -360,6 +360,13 @@ pub struct WorkflowRun {
     /// Hex pubkey of the coordinator. None for coordinator-side rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coordinator_pubkey: Option<String>,
+    /// The coordinator's own run `instance_name` this peer-side row belongs to
+    /// (the invite's `workflow_instance`). Lets instance-scoped CancelInvite /
+    /// RetryWorkflow target exactly one of several concurrent runs from the
+    /// same coordinator, and gives peer resume its routing key. None for
+    /// coordinator-side rows and for rows that predate instance routing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coordinator_instance: Option<String>,
     /// Resolved coordinator name from the peers table (server-side join,
     /// like get_invitations does for PendingInvitation).
     #[serde(default, skip_serializing_if = "Option::is_none")]

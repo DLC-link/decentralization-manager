@@ -1,5 +1,10 @@
 //! G9: Restart while two concurrent workflow kinds are in flight resumes both.
 //!
+//! Under the registry model this is the multi-run recovery test: the restart
+//! leaves TWO InProgress coordinator rows and `recover_in_progress_workflows`
+//! must resume them BOTH concurrently (the old single-slot model resumed only
+//! the newest and failed the rest).
+//!
 //! Start an Onboarding then immediately a DARs distribution so both are
 //! InProgress simultaneously. Defer accept on both kinds. Hard-kill P1,
 //! restart, accept on both kinds, and assert both reach Completed by polling
@@ -9,7 +14,7 @@ use std::{path::Path, time::Duration};
 
 use anyhow::Context;
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
-use serde_json::{Value, json};
+use serde_json::json;
 
 use crate::common::{
     Fixture, chaos, db, invitations::post_accept_invitation, processes,
@@ -82,7 +87,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         "dar_files": [{"filename": "governance-core-v0-rc3-0.1.0.dar", "data": dar_b64}],
         "peer_ids": [&f.p2.participant_id, &f.p3.participant_id],
     });
-    let _: Value = f.post_json(f.p1.http, "/dars/distribute", &req).await?;
+    let dars_instance = chaos::start_workflow_on(f, f.p1.http, "/dars/distribute", &req).await?;
 
     // Wait for two distinct InProgress coordinator rows + invites of both
     // kinds delivered to both peers (resume path doesn't re-send invites).
@@ -137,7 +142,12 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 .await?
                 .as_deref(),
             Some("completed")
-        ) && db::count_completed_runs(&p1_db, "Dars", "Coordinator").await? >= 1)
+        ) && matches!(
+            db::workflow_run_status(&p1_db, &dars_instance, "Coordinator")
+                .await?
+                .as_deref(),
+            Some("completed")
+        ))
     })
     .await?;
 

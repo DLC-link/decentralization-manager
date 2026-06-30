@@ -15,6 +15,7 @@ use super::parties::{
 use crate::{
     canton_id::{CantonId, validate_party_id_prefix},
     config::{NetworkConfig, NodeConfig},
+    consts::MIN_PEER_VERSION,
     db::schema::{Commitable, SchemaRead, SchemaWrite},
     error::Result,
     noise::{
@@ -28,113 +29,25 @@ use crate::{
         respawn_coordinator,
         types::{
             ContractsInvitePayload, ContractsRequest, DarsInvitePayload, DarsRequest,
-            ErrorResponse, HttpWorkflowState, KickInvitePayload, KickRequest, KickResponse,
-            KickStatus, MessageResponse, MissingEdgeKind, MissingPeerEdge, OnboardingInvitePayload,
+            ErrorResponse, KickInvitePayload, KickRequest, KickResponse, KickStatus,
+            MessageResponse, MissingEdgeKind, MissingPeerEdge, OnboardingInvitePayload,
             OnboardingMeshErrorResponse, OnboardingRequest, OnboardingResponse, OnboardingStatus,
-            SuccessResponse, WorkflowInFlightGuard, WorkflowKind, WorkflowProgress,
+            SuccessResponse, WorkflowGuard, WorkflowInstance, WorkflowKind, WorkflowProgress,
             WorkflowResponse, WorkflowRole, WorkflowRun, WorkflowRunsResponse,
             WorkflowStatusResponse,
         },
     },
+    utils,
     workflow::{self, ContractsStep, DarsStep, KickStep, OnboardingStep, state::WorkflowStep},
 };
-
-// ============================================================================
-// Pre-flight busy check
-// ============================================================================
-
-/// Format the operator-facing 409 message naming each busy peer and the
-/// workflow it is currently participating in.
-fn format_busy_peers(busy: &[(String, WorkflowKind)]) -> String {
-    busy.iter()
-        .map(|(id, kind)| {
-            let article = if matches!(kind, WorkflowKind::Onboarding) {
-                "an"
-            } else {
-                "a"
-            };
-            format!(
-                "Peer {id} is participating in {article} {kind} workflow, please try again later."
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-/// Probe every invited peer's `Health` in parallel and return those already in a
-/// workflow. Unreachable peers are NOT treated as busy — the workflow proceeds;
-/// a genuinely dead peer never advances the run and the operator can cancel.
-/// Peers on older code report no workflow and so aren't blocked (graceful
-/// rollout — the peer-side invite gate still protects correctness).
-async fn preflight_busy_peers(
-    config: &NodeConfig,
-    db: &SqlitePool,
-    invitees: &[CantonId],
-) -> Vec<(String, WorkflowKind)> {
-    let Ok(peers) = db.get_all_peers().await else {
-        return Vec::new();
-    };
-    let Ok(keypair) = NoiseKeypair::from_file(&config.key_file_path()).await else {
-        return Vec::new();
-    };
-    let identity = config.participant_id().to_string();
-    let invitee_set: HashSet<String> = invitees.iter().map(CantonId::to_string).collect();
-
-    let mut probes = Vec::new();
-    for peer in peers
-        .into_iter()
-        .filter(|p| invitee_set.contains(&p.participant_id.to_string()))
-    {
-        let Ok(pubkey) = parse_public_key(&peer.public_key) else {
-            continue;
-        };
-        let psk = keypair.derive_psk(&pubkey);
-        let id = peer.participant_id.to_string();
-        let address = peer.address.clone();
-        let port = peer.port;
-        let identity = identity.clone();
-        let retry = config.noise_retry.clone();
-        probes.push(tokio::spawn(async move {
-            match send_noise_message_with_retry(
-                &address,
-                port,
-                &psk,
-                identity.as_bytes(),
-                &Message::new_empty(MessageType::Health),
-                &retry,
-            )
-            .await
-            {
-                Ok(response) => classify_health_reply(&response).1.map(|w| (id, w.kind)),
-                Err(_) => None,
-            }
-        }));
-    }
-
-    let mut busy = Vec::new();
-    for probe in probes {
-        if let Ok(Some(hit)) = probe.await {
-            busy.push(hit);
-        }
-    }
-    busy
-}
 
 // ============================================================================
 // Workflow State Types
 // ============================================================================
 
-/// State for tracking kick workflow
-pub type KickWorkflowState = HttpWorkflowState<KickStatus>;
-
-/// State for tracking onboarding workflow
-pub type OnboardingWorkflowState = HttpWorkflowState<OnboardingStatus>;
-
-/// State for tracking contracts workflow
-pub type ContractsWorkflowState = HttpWorkflowState<WorkflowProgress>;
-
-/// State for tracking DARs distribution workflow
-pub type DarsWorkflowState = HttpWorkflowState<WorkflowProgress>;
+// Per-kind workflow state is now tracked per-instance in
+// `AppState.workflows` (`WorkflowRegistry`) rather than via singleton
+// `HttpWorkflowState<S>` aliases.
 
 // ============================================================================
 // Workflow run persistence helpers
@@ -148,8 +61,10 @@ fn now_secs() -> i64 {
 }
 
 /// Insert the coordinator-side `workflow_runs` row for a freshly-started run.
-/// The partial unique index enforces "one InProgress run per (kind, role)" so a
-/// duplicate insert here surfaces as the right error to bubble back as 409.
+/// Duplicate-instance protection lives in the registry insert that precedes
+/// this call (migration 000013 dropped the one-InProgress-per-(kind, role)
+/// unique index — concurrent same-kind runs are allowed); a failure here is a
+/// genuine persistence error and bubbles back as 409.
 async fn insert_coordinator_run<S, C>(
     db: &SqlitePool,
     instance_name: &str,
@@ -175,6 +90,7 @@ where
         config_json: serde_json::to_string(config)
             .map_err(|e| anyhow::anyhow!("encode workflow config: {e}"))?,
         coordinator_pubkey: None,
+        coordinator_instance: None,
         coordinator_name: None,
         expected_peers: invitees.to_vec(),
         completed_peers: Vec::new(),
@@ -195,6 +111,65 @@ where
     let mut tx = db.begin_transaction().await?;
     tx.upsert_workflow_run(&run).await?;
     Commitable::commit(tx).await
+}
+
+/// Register a freshly-built coordinator run in the shared registry and persist
+/// its `workflow_runs` row — the register-or-409 / persist-or-unregister
+/// contract every `start_*` handler needs, kept in one place so a change to it
+/// can't drift between the four handlers.
+///
+/// The registry insert is the dedup gate: a duplicate `instance_name` is
+/// rejected here BEFORE we persist, so a racing same-instance request can't
+/// upsert (and clobber) the in-flight run's row. If the persist then fails the
+/// registry entry is removed, so a run that never started can't leak and block
+/// future starts. On either failure returns the 409 `HttpResponse` the handler
+/// should return; on success the run is both registered and persisted.
+async fn register_and_persist<S, C>(
+    data: &web::Data<AppState>,
+    instance: &Arc<WorkflowInstance>,
+    initial_step: S,
+    config: &C,
+    invitees: &[CantonId],
+    dec_party_id: Option<CantonId>,
+) -> std::result::Result<(), HttpResponse>
+where
+    S: WorkflowStep,
+    C: serde::Serialize,
+{
+    let kind = instance.kind;
+    let instance_name = &instance.instance_name;
+    let label = match kind {
+        WorkflowKind::Onboarding => "onboarding",
+        WorkflowKind::Kick => "kick",
+        WorkflowKind::Contracts => "contracts",
+        WorkflowKind::Dars => "DARs",
+    };
+
+    if !data.workflows.insert(instance.clone()) {
+        return Err(HttpResponse::Conflict().json(ErrorResponse {
+            error: format!("A workflow with instance {instance_name} is already running"),
+        }));
+    }
+
+    if let Err(e) = insert_coordinator_run(
+        &data.db,
+        instance_name,
+        kind,
+        initial_step,
+        config,
+        invitees,
+        dec_party_id,
+    )
+    .await
+    {
+        data.workflows.remove(instance_name);
+        tracing::warn!("Failed to persist {label} workflow run: {e:#}");
+        return Err(HttpResponse::Conflict().json(ErrorResponse {
+            error: format!("Failed to start {label} workflow: {e}"),
+        }));
+    }
+
+    Ok(())
 }
 
 /// Flip the persisted run's status to Completed. Errors are logged and
@@ -250,29 +225,11 @@ async fn mark_run_status(
 pub async fn start_kick(
     http_req: HttpRequest,
     data: web::Data<AppState>,
-    kick_state: web::Data<Arc<KickWorkflowState>>,
     body: web::Json<KickRequest>,
 ) -> impl Responder {
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
     }
-
-    // Cross-workflow mutex: at most one of kick / onboarding / contracts /
-    // dars in flight at a time. The atomic compare-and-swap closes the
-    // start-handler TOCTOU and prevents two workflows from sharing a
-    // `ListenerPauseGuard`. The guard moves into the spawned task below and
-    // drops when the task ends (success, failure, abort, or panic), so the
-    // gate cannot leak.
-    let workflow_guard = match WorkflowInFlightGuard::try_acquire(data.workflow_in_flight.clone()) {
-        Some(g) => g,
-        None => {
-            return HttpResponse::Conflict().json(ErrorResponse {
-                error: "Another workflow is already running; \
-                        wait for it to complete or cancel it first"
-                    .to_string(),
-            });
-        }
-    };
 
     tracing::info!(
         "Kick request received: party={}, participant_to_kick={}, threshold={}",
@@ -319,16 +276,6 @@ pub async fn start_kick(
             });
         }
     };
-
-    // Check if a kick is already in progress
-    {
-        let status = kick_state.status.read().await;
-        if *status == KickStatus::InProgress {
-            return HttpResponse::Conflict().json(ErrorResponse {
-                error: "A kick workflow is already in progress".to_string(),
-            });
-        }
-    }
 
     // Load peers once: we use the count to bound `new_threshold` per the
     // audit finding, then filter into `invitees`. A DB error here is fatal
@@ -439,6 +386,17 @@ pub async fn start_kick(
     // can carry the same identifier the coordinator task will use.
     let timestamp = now_secs();
     let instance_name = format!("{}-kick-{timestamp}", decentralized_party_id.prefix);
+
+    // Register this run in the shared registry. A duplicate `instance_name`
+    // (extremely unlikely given the timestamp) is the only rejection — multiple
+    // distinct kick runs may now proceed concurrently.
+    let instance = WorkflowInstance::new(
+        instance_name.clone(),
+        WorkflowKind::Kick,
+        WorkflowRole::Coordinator,
+    );
+    let kick_state = &instance.http;
+
     let kick_config = workflow::KickConfig::new(
         decentralized_party_id.clone(),
         participant_id.clone(),
@@ -448,23 +406,35 @@ pub async fn start_kick(
         instance_name.clone(),
     );
 
-    // Refuse BEFORE persisting our run row if any selected peer is already in a
-    // workflow — otherwise a busy-peer rejection leaves a phantom InProgress row.
-    let busy = preflight_busy_peers(&data.config, &data.db, &invitees).await;
-    if !busy.is_empty() {
+    // Refuse a second workflow targeting the SAME decentralized party — the
+    // party's topology mutations must not interleave (two kicks, or a kick
+    // racing a contracts deployment, conflict at the Canton layer with
+    // confusing step failures).
+    if let Some((run, kind)) =
+        find_inprogress_run_for_party(&data.db, &decentralized_party_id).await
+    {
         return HttpResponse::Conflict().json(ErrorResponse {
-            error: format_busy_peers(&busy),
+            error: format!(
+                "Party {decentralized_party_id} already has a {kind} workflow in flight \
+                 (run {run}); wait for it to finish or cancel it first"
+            ),
         });
     }
 
-    // Insert the workflow_runs row BEFORE flipping in-memory status. If the
-    // insert fails (e.g. partial-unique-index says another kick is already in
-    // flight), bubble that out as a 409 — same semantics as the existing
-    // in-memory check just upgraded to durable storage.
-    if let Err(e) = insert_coordinator_run(
-        &data.db,
-        &instance_name,
-        WorkflowKind::Kick,
+    // Refuse to invite any peer that can't speak the concurrent-workflows wire
+    // format — NO invites are sent if even one invitee fails the version gate.
+    let incompatible = preflight_incompatible_peers(&data.config, &data.db, &invitees).await;
+    if !incompatible.is_empty() {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format_incompatible_peers(&incompatible),
+        });
+    }
+
+    // Register + persist atomically w.r.t. duplicates (registry insert dedups
+    // before the upsert; a persist failure unregisters so nothing leaks).
+    if let Err(resp) = register_and_persist(
+        &data,
+        &instance,
         KickStep::WaitingForPeers,
         &kick_config,
         &invitees,
@@ -472,10 +442,7 @@ pub async fn start_kick(
     )
     .await
     {
-        tracing::warn!("Failed to persist kick workflow run: {e:#}");
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format!("Failed to start kick workflow: {e}"),
-        });
+        return resp;
     }
 
     let invitees_for_invites = invitees.clone();
@@ -484,8 +451,9 @@ pub async fn start_kick(
     // Spawn the kick workflow in the background
     let config = data.config.clone();
     let db = data.db.clone();
-    let kick_state_clone = kick_state.get_ref().clone();
-    let active_workflow = data.active_workflow.clone();
+    let kick_state_clone = instance.http.clone();
+    let instance_for_coord = instance.clone();
+    let workflows = data.workflows.clone();
     let last_seen = data.last_seen.clone();
     let instance_for_task = instance_name.clone();
 
@@ -497,7 +465,8 @@ pub async fn start_kick(
     let mut error_guard = kick_state.error.write().await;
 
     let join_handle = tokio::spawn(async move {
-        let _workflow_guard = workflow_guard; // dropped at end → releases cross-workflow gate
+        // Removes this run from the registry on return (success/failure/abort).
+        let _workflow_guard = WorkflowGuard::new(workflows, instance_for_task.clone());
 
         // Send kick invites to the surviving party members before starting workflow
         let invite_result =
@@ -528,7 +497,7 @@ pub async fn start_kick(
             None, // No dars config
             None, // No auth registry for kick
             last_seen,
-            active_workflow,
+            instance_for_coord,
         )
         .await;
 
@@ -568,6 +537,7 @@ pub async fn start_kick(
     HttpResponse::Accepted().json(KickResponse {
         status: KickStatus::InProgress,
         message: "Kick workflow started".to_string(),
+        instance_name,
     })
 }
 
@@ -579,14 +549,67 @@ pub async fn start_kick(
     )
 )]
 #[get("/kick/status")]
-pub async fn get_kick_status(kick_state: web::Data<Arc<KickWorkflowState>>) -> impl Responder {
-    let status = kick_state.status.read().await;
-    let error = kick_state.error.read().await;
+pub async fn get_kick_status(data: web::Data<AppState>) -> impl Responder {
+    HttpResponse::Ok().json(kind_status(&data, WorkflowKind::Kick).await)
+}
 
-    HttpResponse::Ok().json(WorkflowStatusResponse {
-        status: *status,
-        error: error.clone(),
-    })
+/// Pick the coordinator run of `kind` that the legacy per-kind `/{kind}/status`
+/// and `/{kind}/cancel` endpoints act on. `snapshot()` is HashMap-ordered, so we
+/// sort by `instance_name` and take the lowest — a stable choice so repeated
+/// polls and cancels don't flip between concurrent same-kind runs from call to
+/// call. Callers that mean a specific run use the per-instance endpoints. Shared
+/// by `kind_status` and `cancel_workflow_state` so both always pick the same
+/// instance.
+fn pick_coordinator_run(
+    data: &web::Data<AppState>,
+    kind: WorkflowKind,
+) -> Option<Arc<WorkflowInstance>> {
+    let mut runs: Vec<_> = data
+        .workflows
+        .snapshot()
+        .into_iter()
+        .filter(|i| i.kind == kind && i.role == WorkflowRole::Coordinator)
+        .collect();
+    runs.sort_by(|a, b| a.instance_name.cmp(&b.instance_name));
+    runs.into_iter().next()
+}
+
+/// Summarize the status of a coordinator run of `kind` for the legacy
+/// per-kind `/{kind}/status` endpoints.
+///
+/// While a run is live it is in the registry, so report its in-memory status.
+/// But the registry entry is removed the moment a run reaches a terminal
+/// status (its `WorkflowGuard` drops), so once finished there is nothing in the
+/// registry — fall back to the **latest persisted `workflow_runs` row** of this
+/// kind, which carries the terminal Completed/Failed/Cancelled status (and is
+/// the same source the `/workflows` feed uses). Without this fallback a poller
+/// watching `/{kind}/status` would never observe completion. With concurrent
+/// runs of one kind these endpoints are necessarily coarse — callers wanting
+/// per-instance detail should use `GET /workflows`.
+async fn kind_status(data: &web::Data<AppState>, kind: WorkflowKind) -> WorkflowStatusResponse {
+    if let Some(inst) = pick_coordinator_run(data, kind) {
+        return WorkflowStatusResponse {
+            status: *inst.http.status.read().await,
+            error: inst.http.error.read().await.clone(),
+        };
+    }
+    // No live run registered — report the latest persisted coordinator run of
+    // this kind (terminal status survives in the DB after deregistration).
+    if let Ok(runs) = SchemaRead::get_visible_workflow_runs(&data.db).await
+        && let Some(run) = runs
+            .into_iter()
+            .filter(|r| r.kind == kind && r.role == WorkflowRole::Coordinator)
+            .max_by_key(|r| r.created_at)
+    {
+        return WorkflowStatusResponse {
+            status: run.status,
+            error: run.error,
+        };
+    }
+    WorkflowStatusResponse {
+        status: WorkflowProgress::default(),
+        error: None,
+    }
 }
 
 /// Send kick invites to all peers using Noise protocol (excluding the peer being kicked)
@@ -719,7 +742,6 @@ async fn send_kick_invites(
 pub async fn start_onboarding(
     http_req: HttpRequest,
     data: web::Data<AppState>,
-    onboarding_state: web::Data<Arc<OnboardingWorkflowState>>,
     body: web::Json<OnboardingRequest>,
 ) -> impl Responder {
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
@@ -732,28 +754,6 @@ pub async fn start_onboarding(
     // deserialization error ~90s later. Fail fast with a clear 400 instead.
     if let Err(msg) = validate_party_id_prefix(&body.party_id_prefix) {
         return HttpResponse::BadRequest().json(ErrorResponse { error: msg });
-    }
-
-    // Cross-workflow mutex (see `start_kick` for rationale).
-    let workflow_guard = match WorkflowInFlightGuard::try_acquire(data.workflow_in_flight.clone()) {
-        Some(g) => g,
-        None => {
-            return HttpResponse::Conflict().json(ErrorResponse {
-                error: "Another workflow is already running; \
-                        wait for it to complete or cancel it first"
-                    .to_string(),
-            });
-        }
-    };
-    // Belt-and-suspenders: keep the per-workflow status check so /onboarding/status
-    // gives a precise reason when polled mid-start.
-    {
-        let status = onboarding_state.status.read().await;
-        if *status == OnboardingStatus::InProgress {
-            return HttpResponse::Conflict().json(ErrorResponse {
-                error: "An onboarding workflow is already in progress".to_string(),
-            });
-        }
     }
 
     // Pre-flight: every selected peer must have every other selected peer in
@@ -809,6 +809,12 @@ pub async fn start_onboarding(
     let party_id_prefix = body.party_id_prefix.clone();
     let peer_ids = body.peer_ids.clone();
     let instance_name = format!("{party_id_prefix}-creation");
+    let instance = WorkflowInstance::new(
+        instance_name.clone(),
+        WorkflowKind::Onboarding,
+        WorkflowRole::Coordinator,
+    );
+    let onboarding_state = &instance.http;
     let onboarding_config =
         workflow::OnboardingConfig::new(party_id_prefix.clone(), instance_name.clone());
 
@@ -833,21 +839,21 @@ pub async fn start_onboarding(
         }
     }
 
-    // Refuse BEFORE persisting our run row if any selected peer is already in a
-    // workflow. Doing this after the insert leaves a phantom InProgress row when
-    // a peer is busy: no invites are sent, and the in-memory state is never set,
-    // so the row can't even be cancelled.
-    let busy = preflight_busy_peers(&data.config, &data.db, &peer_ids).await;
-    if !busy.is_empty() {
+    // Refuse to invite any peer that can't speak the concurrent-workflows wire
+    // format — NO invites are sent if even one invitee fails the version gate.
+    let incompatible = preflight_incompatible_peers(&data.config, &data.db, &peer_ids).await;
+    if !incompatible.is_empty() {
         return HttpResponse::Conflict().json(ErrorResponse {
-            error: format_busy_peers(&busy),
+            error: format_incompatible_peers(&incompatible),
         });
     }
 
-    if let Err(e) = insert_coordinator_run(
-        &data.db,
-        &instance_name,
-        WorkflowKind::Onboarding,
+    // Onboarding's instance_name is deterministic (`{prefix}-creation`), so a
+    // racing same-prefix request is realistic — register_and_persist's registry
+    // insert rejects it before the upsert can clobber the in-flight run's row.
+    if let Err(resp) = register_and_persist(
+        &data,
+        &instance,
         OnboardingStep::WaitingForPeers,
         &onboarding_config,
         &peer_ids,
@@ -855,16 +861,14 @@ pub async fn start_onboarding(
     )
     .await
     {
-        tracing::warn!("Failed to persist onboarding workflow run: {e:#}");
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format!("Failed to start onboarding workflow: {e}"),
-        });
+        return resp;
     }
 
     let config = data.config.clone();
     let db = data.db.clone();
-    let onboarding_state_clone = onboarding_state.get_ref().clone();
-    let active_workflow = data.active_workflow.clone();
+    let onboarding_state_clone = instance.http.clone();
+    let instance_for_coord = instance.clone();
+    let workflows = data.workflows.clone();
     *onboarding_state.invited_peers.write().await = peer_ids.clone();
     let party_credentials = data.party_credentials.clone();
     let auth_lock = data.auth.clone();
@@ -880,7 +884,7 @@ pub async fn start_onboarding(
     let mut error_guard = onboarding_state.error.write().await;
 
     let join_handle = tokio::spawn(async move {
-        let _workflow_guard = workflow_guard; // releases cross-workflow gate on drop
+        let _workflow_guard = WorkflowGuard::new(workflows, instance_for_task.clone());
 
         // Send invites to selected peers before starting coordinator workflow
         let invite_result = send_onboarding_invites(
@@ -917,7 +921,7 @@ pub async fn start_onboarding(
             None, // No dars config
             None, // No auth registry for onboarding
             last_seen,
-            active_workflow,
+            instance_for_coord,
         )
         .await;
 
@@ -1006,6 +1010,7 @@ pub async fn start_onboarding(
     HttpResponse::Accepted().json(OnboardingResponse {
         status: OnboardingStatus::InProgress,
         message: "Onboarding workflow started".to_string(),
+        instance_name,
     })
 }
 
@@ -1017,26 +1022,21 @@ pub async fn start_onboarding(
     )
 )]
 #[get("/onboarding/status")]
-pub async fn get_onboarding_status(
-    onboarding_state: web::Data<Arc<OnboardingWorkflowState>>,
-) -> impl Responder {
-    let status = onboarding_state.status.read().await;
-    let error = onboarding_state.error.read().await;
-
-    HttpResponse::Ok().json(WorkflowStatusResponse {
-        status: *status,
-        error: error.clone(),
-    })
+pub async fn get_onboarding_status(data: web::Data<AppState>) -> impl Responder {
+    HttpResponse::Ok().json(kind_status(&data, WorkflowKind::Onboarding).await)
 }
 
 /// Interpret a peer's reply to a workflow invite.
 ///
-/// A `Busy` reply means the peer raced into another workflow between our
-/// pre-flight health check and this invite. Treat it as a hard error so the
-/// coordinator aborts fast — the spawning task marks the run Failed with a clear
-/// reason — instead of waiting on a peer that will never join. Any other
-/// non-`Ack` reply, or an unparseable one, is logged but tolerated (an older
-/// peer may not Ack).
+/// Current peers accept invites unconditionally (workflows are multi-instance
+/// now — see the invite arm in `server::mod`), so a current peer always replies
+/// `Ack`, and a pre-`Ack` build is refused by the version gate before it can
+/// reach an invite. The `Busy` arm is therefore a defensive safety net no
+/// current-version peer triggers: were a peer ever to report `Busy`, treating it
+/// as a hard error makes the coordinator fail fast (the spawning task marks the
+/// run Failed with a clear reason) instead of waiting on a peer that will never
+/// join. Any other non-`Ack` reply, or an unparseable one, is logged but
+/// tolerated.
 fn interpret_invite_reply(peer_id: &CantonId, kind: &str, response: &[u8]) -> Result {
     match Message::from_bytes(response) {
         Ok(msg) if msg.msg_type == MessageType::Ack => {
@@ -1308,33 +1308,10 @@ async fn verify_peer_mesh(
 pub async fn start_contracts(
     http_req: HttpRequest,
     data: web::Data<AppState>,
-    contracts_state: web::Data<Arc<ContractsWorkflowState>>,
     body: web::Json<ContractsRequest>,
 ) -> impl Responder {
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
-    }
-
-    // Cross-workflow mutex (see `start_kick` for rationale).
-    let workflow_guard = match WorkflowInFlightGuard::try_acquire(data.workflow_in_flight.clone()) {
-        Some(g) => g,
-        None => {
-            return HttpResponse::Conflict().json(ErrorResponse {
-                error: "Another workflow is already running; \
-                        wait for it to complete or cancel it first"
-                    .to_string(),
-            });
-        }
-    };
-    // Belt-and-suspenders: keep the per-workflow status check so /contracts/status
-    // gives a precise reason when polled mid-start.
-    {
-        let status = contracts_state.status.read().await;
-        if *status == WorkflowProgress::InProgress {
-            return HttpResponse::Conflict().json(ErrorResponse {
-                error: "A contracts workflow is already in progress".to_string(),
-            });
-        }
     }
 
     // Create contracts config from request
@@ -1372,18 +1349,41 @@ pub async fn start_contracts(
     };
 
     let instance_name_for_run = contracts_config.instance_name.clone();
-    // Refuse BEFORE persisting our run row if any selected peer is already in a
-    // workflow — otherwise a busy-peer rejection leaves a phantom InProgress row.
-    let busy = preflight_busy_peers(&data.config, &data.db, &contracts_invitees).await;
-    if !busy.is_empty() {
+    let instance = WorkflowInstance::new(
+        instance_name_for_run.clone(),
+        WorkflowKind::Contracts,
+        WorkflowRole::Coordinator,
+    );
+    let contracts_state = &instance.http;
+    // Refuse a second workflow targeting the SAME decentralized party (see
+    // `find_inprogress_run_for_party`).
+    if let Some((run, kind)) =
+        find_inprogress_run_for_party(&data.db, &body.decentralized_party_id).await
+    {
         return HttpResponse::Conflict().json(ErrorResponse {
-            error: format_busy_peers(&busy),
+            error: format!(
+                "Party {} already has a {kind} workflow in flight (run {run}); wait for it \
+                 to finish or cancel it first",
+                body.decentralized_party_id
+            ),
         });
     }
-    if let Err(e) = insert_coordinator_run(
-        &data.db,
-        &instance_name_for_run,
-        WorkflowKind::Contracts,
+
+    // Refuse to invite any peer that can't speak the concurrent-workflows wire
+    // format — NO invites are sent if even one invitee fails the version gate.
+    let incompatible =
+        preflight_incompatible_peers(&data.config, &data.db, &contracts_invitees).await;
+    if !incompatible.is_empty() {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format_incompatible_peers(&incompatible),
+        });
+    }
+
+    // Register + persist atomically w.r.t. duplicates (registry insert dedups
+    // before the upsert; a persist failure unregisters so nothing leaks).
+    if let Err(resp) = register_and_persist(
+        &data,
+        &instance,
         ContractsStep::WaitingForPeers,
         &contracts_config,
         &contracts_invitees,
@@ -1391,18 +1391,16 @@ pub async fn start_contracts(
     )
     .await
     {
-        tracing::warn!("Failed to persist contracts workflow run: {e:#}");
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format!("Failed to start contracts workflow: {e}"),
-        });
+        return resp;
     }
 
     let config = data.config.clone();
     let db = data.db.clone();
     let workflow_auth = data.auth.read().await.clone();
     let auth_lock = data.auth.clone();
-    let contracts_state_clone = contracts_state.get_ref().clone();
-    let active_workflow = data.active_workflow.clone();
+    let contracts_state_clone = instance.http.clone();
+    let instance_for_coord = instance.clone();
+    let workflows = data.workflows.clone();
     let party_credentials = data.party_credentials.clone();
     let last_seen = data.last_seen.clone();
     let contracts_invitees_for_invites = contracts_invitees.clone();
@@ -1418,7 +1416,7 @@ pub async fn start_contracts(
     let mut error_guard = contracts_state.error.write().await;
 
     let join_handle = tokio::spawn(async move {
-        let _workflow_guard = workflow_guard; // releases cross-workflow gate on drop
+        let _workflow_guard = WorkflowGuard::new(workflows, instance_for_task.clone());
 
         // Send invites to this party's members before starting coordinator workflow
         let invite_result = send_contracts_invites(
@@ -1454,7 +1452,7 @@ pub async fn start_contracts(
             None, // No dars config
             workflow_auth,
             last_seen,
-            active_workflow,
+            instance_for_coord,
         )
         .await;
 
@@ -1521,6 +1519,7 @@ pub async fn start_contracts(
     HttpResponse::Accepted().json(WorkflowResponse {
         status: WorkflowProgress::InProgress,
         message: "Contracts workflow started".to_string(),
+        instance_name: instance_name_for_run,
     })
 }
 
@@ -1532,16 +1531,8 @@ pub async fn start_contracts(
     )
 )]
 #[get("/contracts/status")]
-pub async fn get_contracts_status(
-    contracts_state: web::Data<Arc<ContractsWorkflowState>>,
-) -> impl Responder {
-    let status = contracts_state.status.read().await;
-    let error = contracts_state.error.read().await;
-
-    HttpResponse::Ok().json(WorkflowStatusResponse {
-        status: *status,
-        error: error.clone(),
-    })
+pub async fn get_contracts_status(data: web::Data<AppState>) -> impl Responder {
+    HttpResponse::Ok().json(kind_status(&data, WorkflowKind::Contracts).await)
 }
 
 // ============================================================================
@@ -1605,7 +1596,6 @@ pub async fn upload_dars_local(
 pub async fn start_dars(
     http_req: HttpRequest,
     data: web::Data<AppState>,
-    dars_state: web::Data<Arc<DarsWorkflowState>>,
     body: web::Json<DarsRequest>,
 ) -> impl Responder {
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
@@ -1617,49 +1607,35 @@ pub async fn start_dars(
         });
     }
 
-    // Cross-workflow mutex (see `start_kick` for rationale).
-    let workflow_guard = match WorkflowInFlightGuard::try_acquire(data.workflow_in_flight.clone()) {
-        Some(g) => g,
-        None => {
-            return HttpResponse::Conflict().json(ErrorResponse {
-                error: "Another workflow is already running; \
-                        wait for it to complete or cancel it first"
-                    .to_string(),
-            });
-        }
-    };
-    // Belt-and-suspenders: keep the per-workflow status check so /dars/status
-    // gives a precise reason when polled mid-start.
-    {
-        let status = dars_state.status.read().await;
-        if *status == WorkflowProgress::InProgress {
-            return HttpResponse::Conflict().json(ErrorResponse {
-                error: "A DARs distribution workflow is already in progress".to_string(),
-            });
-        }
-    }
-
     // Create DARs config from request
     let timestamp = now_secs();
     let instance_name = format!("dars-distribute-{timestamp}");
+    let instance = WorkflowInstance::new(
+        instance_name.clone(),
+        WorkflowKind::Dars,
+        WorkflowRole::Coordinator,
+    );
+    let dars_state = &instance.http;
     let dars_config = workflow::DarsConfig {
         dar_files: body.dar_files.clone(),
         instance_name: instance_name.clone(),
         peer_ids: body.peer_ids.clone(),
     };
 
-    // Refuse BEFORE persisting our run row if any selected peer is already in a
-    // workflow — otherwise a busy-peer rejection leaves a phantom InProgress row.
-    let busy = preflight_busy_peers(&data.config, &data.db, &body.peer_ids).await;
-    if !busy.is_empty() {
+    // Refuse to invite any peer that can't speak the concurrent-workflows wire
+    // format — NO invites are sent if even one invitee fails the version gate.
+    let incompatible = preflight_incompatible_peers(&data.config, &data.db, &body.peer_ids).await;
+    if !incompatible.is_empty() {
         return HttpResponse::Conflict().json(ErrorResponse {
-            error: format_busy_peers(&busy),
+            error: format_incompatible_peers(&incompatible),
         });
     }
-    if let Err(e) = insert_coordinator_run(
-        &data.db,
-        &instance_name,
-        WorkflowKind::Dars,
+
+    // Register + persist atomically w.r.t. duplicates (registry insert dedups
+    // before the upsert; a persist failure unregisters so nothing leaks).
+    if let Err(resp) = register_and_persist(
+        &data,
+        &instance,
         DarsStep::WaitingForPeers,
         &dars_config,
         &body.peer_ids,
@@ -1667,16 +1643,14 @@ pub async fn start_dars(
     )
     .await
     {
-        tracing::warn!("Failed to persist dars workflow run: {e:#}");
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format!("Failed to start DARs workflow: {e}"),
-        });
+        return resp;
     }
 
     let config = data.config.clone();
     let db = data.db.clone();
-    let dars_state_clone = dars_state.get_ref().clone();
-    let active_workflow = data.active_workflow.clone();
+    let dars_state_clone = instance.http.clone();
+    let instance_for_coord = instance.clone();
+    let workflows = data.workflows.clone();
     let last_seen = data.last_seen.clone();
     let peer_ids = body.peer_ids.clone();
     *dars_state.invited_peers.write().await = peer_ids.clone();
@@ -1700,7 +1674,7 @@ pub async fn start_dars(
     let mut error_guard = dars_state.error.write().await;
 
     let join_handle = tokio::spawn(async move {
-        let _workflow_guard = workflow_guard; // releases cross-workflow gate on drop
+        let _workflow_guard = WorkflowGuard::new(workflows, instance_for_task.clone());
 
         // Send invites to selected peers before starting coordinator workflow
         let dar_filenames: Vec<String> = dars_config
@@ -1744,7 +1718,7 @@ pub async fn start_dars(
             Some(dars_config),
             None, // No auth
             last_seen,
-            active_workflow,
+            instance_for_coord,
         )
         .await;
 
@@ -1782,6 +1756,7 @@ pub async fn start_dars(
     HttpResponse::Accepted().json(WorkflowResponse {
         status: WorkflowProgress::InProgress,
         message: "DARs distribution workflow started".to_string(),
+        instance_name,
     })
 }
 
@@ -1793,14 +1768,8 @@ pub async fn start_dars(
     )
 )]
 #[get("/dars/distribute/status")]
-pub async fn get_dars_status(dars_state: web::Data<Arc<DarsWorkflowState>>) -> impl Responder {
-    let status = dars_state.status.read().await;
-    let error = dars_state.error.read().await;
-
-    HttpResponse::Ok().json(WorkflowStatusResponse {
-        status: *status,
-        error: error.clone(),
-    })
+pub async fn get_dars_status(data: web::Data<AppState>) -> impl Responder {
+    HttpResponse::Ok().json(kind_status(&data, WorkflowKind::Dars).await)
 }
 
 /// Send DARs invites to selected peers using Noise protocol
@@ -1880,13 +1849,33 @@ async fn send_dars_invites(
     Ok(())
 }
 
-/// Shared cancel logic. All four workflow types use HttpWorkflowState<WorkflowProgress>.
+/// Shared cancel logic for the legacy per-kind endpoints. Picks the coordinator
+/// run of `kind` via [`pick_coordinator_run`] (deterministic lowest
+/// instance_name), so `/{kind}/status` and `/{kind}/cancel` always act on the
+/// same instance. Callers that know which run they mean should use
+/// `POST /workflows/{instance}/cancel`.
 async fn cancel_workflow_state(
-    state: &Arc<HttpWorkflowState<WorkflowProgress>>,
     data: &web::Data<AppState>,
     label: &str,
     kind: WorkflowKind,
 ) -> HttpResponse {
+    let Some(instance) = pick_coordinator_run(data, kind) else {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!("No {label} workflow in progress"),
+        });
+    };
+    cancel_instance(data, &instance, label).await
+}
+
+/// Cancel exactly one registered coordinator run: abort its task, notify its
+/// invitees with an instance-stamped CancelInvite (sibling runs on the peers
+/// survive), and mirror Cancelled onto the persisted row.
+async fn cancel_instance(
+    data: &web::Data<AppState>,
+    instance: &Arc<WorkflowInstance>,
+    label: &str,
+) -> HttpResponse {
+    let state = &instance.http;
     {
         let status = state.status.read().await;
         if *status != WorkflowProgress::InProgress {
@@ -1908,11 +1897,49 @@ async fn cancel_workflow_state(
             error: format!("{label} workflow is still initializing — try again in a moment"),
         });
     };
+
+    // Persist Cancelled BEFORE aborting. Recovery resumes every InProgress
+    // coordinator row on restart, so if we aborted first and this status write
+    // then failed transiently, the row would stay InProgress and
+    // respawn_coordinator would re-launch — re-sending invites, re-submitting
+    // topology — for a run the operator explicitly cancelled. So on a write
+    // failure we DON'T abort: restore the handle so the run stays cancellable and
+    // live, and surface 500 so the operator retries against consistent state.
+    // Once the row is durably Cancelled, a crash before the abort is safe —
+    // recovery only resumes InProgress rows.
+    if let Err(e) = mark_run_status(
+        &data.db,
+        &instance.instance_name,
+        WorkflowProgress::Cancelled,
+        None,
+    )
+    .await
+    {
+        tracing::error!(
+            "Failed to persist cancel for {}: {e:#}; leaving the run InProgress and \
+             active rather than aborting a run we can't durably mark cancelled",
+            instance.instance_name
+        );
+        *state.abort_handle.lock().await = Some(handle);
+        return HttpResponse::InternalServerError().json(ErrorResponse {
+            error: format!(
+                "Failed to cancel {label} workflow (database error); the run is still \
+                 active — try again"
+            ),
+        });
+    }
+
+    // Durably Cancelled — now stop the task and notify invitees.
+    // NOTE: an abort landing in the narrow window between the workflow task's
+    // Ok(result) and its mark_completed write can leave the row Cancelled for a
+    // run that de-facto finished — rare and benign (the work itself is already
+    // committed on-ledger; only the feed status differs).
     handle.abort();
 
     let invitees = state.invited_peers.read().await.clone();
     if !invitees.is_empty()
-        && let Err(e) = send_cancel_invites(&data.config, &data.db, &invitees).await
+        && let Err(e) =
+            send_cancel_invites(&data.config, &data.db, &invitees, &instance.instance_name).await
     {
         tracing::warn!("send_cancel_invites failed during {label} cancel: {e}");
     }
@@ -1926,26 +1953,7 @@ async fn cancel_workflow_state(
         *error = None;
     }
 
-    // Mirror the cancel into the persisted workflow_runs row so the feed picks it up.
-    if let Ok(Some(run)) = data
-        .db
-        .get_active_workflow_run(kind, WorkflowRole::Coordinator)
-        .await
-        && let Err(e) = mark_run_status(
-            &data.db,
-            &run.instance_name,
-            WorkflowProgress::Cancelled,
-            None,
-        )
-        .await
-    {
-        tracing::warn!(
-            "Failed to flip workflow_runs row {} to cancelled: {e:#}",
-            run.instance_name
-        );
-    }
-
-    tracing::info!("{label} workflow cancelled");
+    tracing::info!("{label} workflow {} cancelled", instance.instance_name);
     HttpResponse::Ok().json(MessageResponse {
         message: format!("{label} workflow cancelled"),
     })
@@ -1959,21 +1967,11 @@ async fn cancel_workflow_state(
     )
 )]
 #[post("/onboarding/cancel")]
-pub async fn cancel_onboarding(
-    http_req: HttpRequest,
-    data: web::Data<AppState>,
-    state: web::Data<Arc<OnboardingWorkflowState>>,
-) -> impl Responder {
+pub async fn cancel_onboarding(http_req: HttpRequest, data: web::Data<AppState>) -> impl Responder {
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
     }
-    cancel_workflow_state(
-        state.get_ref(),
-        &data,
-        "Onboarding",
-        WorkflowKind::Onboarding,
-    )
-    .await
+    cancel_workflow_state(&data, "Onboarding", WorkflowKind::Onboarding).await
 }
 
 #[utoipa::path(
@@ -1984,15 +1982,11 @@ pub async fn cancel_onboarding(
     )
 )]
 #[post("/kick/cancel")]
-pub async fn cancel_kick(
-    http_req: HttpRequest,
-    data: web::Data<AppState>,
-    state: web::Data<Arc<KickWorkflowState>>,
-) -> impl Responder {
+pub async fn cancel_kick(http_req: HttpRequest, data: web::Data<AppState>) -> impl Responder {
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
     }
-    cancel_workflow_state(state.get_ref(), &data, "Kick", WorkflowKind::Kick).await
+    cancel_workflow_state(&data, "Kick", WorkflowKind::Kick).await
 }
 
 #[utoipa::path(
@@ -2003,15 +1997,11 @@ pub async fn cancel_kick(
     )
 )]
 #[post("/contracts/cancel")]
-pub async fn cancel_contracts(
-    http_req: HttpRequest,
-    data: web::Data<AppState>,
-    state: web::Data<Arc<ContractsWorkflowState>>,
-) -> impl Responder {
+pub async fn cancel_contracts(http_req: HttpRequest, data: web::Data<AppState>) -> impl Responder {
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
     }
-    cancel_workflow_state(state.get_ref(), &data, "Contracts", WorkflowKind::Contracts).await
+    cancel_workflow_state(&data, "Contracts", WorkflowKind::Contracts).await
 }
 
 #[utoipa::path(
@@ -2022,15 +2012,46 @@ pub async fn cancel_contracts(
     )
 )]
 #[post("/dars/cancel")]
-pub async fn cancel_dars(
+pub async fn cancel_dars(http_req: HttpRequest, data: web::Data<AppState>) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
+    cancel_workflow_state(&data, "DARs", WorkflowKind::Dars).await
+}
+
+/// Cancel one specific in-flight coordinator run by its `instance_name`. With
+/// concurrent runs of the same kind, this is the only unambiguous cancel — the
+/// legacy per-kind `/{kind}/cancel` endpoints pick a run deterministically but
+/// cannot target a chosen card.
+#[utoipa::path(
+    tag = "Workflows",
+    responses(
+        (status = 200, description = "Workflow cancelled", body = MessageResponse),
+        (status = 409, description = "No in-flight run with this instance_name", body = ErrorResponse)
+    )
+)]
+#[post("/workflows/{instance_name}/cancel")]
+pub async fn cancel_workflow_instance(
     http_req: HttpRequest,
     data: web::Data<AppState>,
-    state: web::Data<Arc<DarsWorkflowState>>,
+    path: web::Path<String>,
 ) -> impl Responder {
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
     }
-    cancel_workflow_state(state.get_ref(), &data, "DARs", WorkflowKind::Dars).await
+    let instance_name = path.into_inner();
+    let Some(instance) = data.workflows.get(&instance_name) else {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!("No in-flight workflow run named {instance_name}"),
+        });
+    };
+    if instance.role != WorkflowRole::Coordinator {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!("Run {instance_name} is not coordinated by this node"),
+        });
+    }
+    let label = instance.kind.as_str();
+    cancel_instance(&data, &instance, label).await
 }
 
 // ============================================================================
@@ -2269,10 +2290,6 @@ pub async fn dismiss_workflow(
 pub async fn retry_workflow(
     http_req: HttpRequest,
     data: web::Data<AppState>,
-    kick_state: web::Data<Arc<KickWorkflowState>>,
-    onboarding_state: web::Data<Arc<OnboardingWorkflowState>>,
-    contracts_state: web::Data<Arc<ContractsWorkflowState>>,
-    dars_state: web::Data<Arc<DarsWorkflowState>>,
     path: web::Path<String>,
 ) -> impl Responder {
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
@@ -2311,10 +2328,9 @@ pub async fn retry_workflow(
         });
     }
 
-    // Flip the row back to InProgress so the partial unique index reserves
-    // (kind, role) again before we spawn the resumed task. If a fresh run of
-    // the same kind+role has been started since this one failed, that index
-    // will reject this update and we surface a 409.
+    // Flip the row back to InProgress before re-spawning the task. Concurrent
+    // same-kind runs are allowed now (no unique index); the registry insert in
+    // respawn_coordinator still rejects a same-instance duplicate.
     let mut tx = match data.db.begin_transaction().await {
         Ok(t) => t,
         Err(e) => {
@@ -2357,18 +2373,21 @@ pub async fn retry_workflow(
     // Tell every previously-invited peer to flip their Failed row back to
     // InProgress and re-spin start_peer. Best-effort — peers that are
     // unreachable now will stay Failed; operator can dismiss + re-accept.
-    if let Err(e) = send_retry_workflow(&data.config, &data.db, &run.expected_peers).await {
+    if let Err(e) = send_retry_workflow(
+        &data.config,
+        &data.db,
+        &run.expected_peers,
+        &run.instance_name,
+    )
+    .await
+    {
         tracing::warn!("Failed to broadcast RetryWorkflow: {e:#}");
     }
     respawn_coordinator(
         data.db.clone(),
         data.config.clone(),
         &run,
-        kick_state,
-        onboarding_state,
-        contracts_state,
-        dars_state,
-        data.active_workflow.clone(),
+        data.workflows.clone(),
         data.auth.clone(),
         data.last_seen.clone(),
     )
@@ -2385,6 +2404,108 @@ pub async fn retry_workflow(
 /// Look for an existing decentralized party whose human-readable prefix
 /// equals `prefix`. Returns the matching `party_id` if found — used by the
 /// onboarding pre-flight to refuse duplicate-prefix runs.
+/// Probe every invitee's `Health` and return those that cannot POSITIVELY be
+/// verified to run dec-party-manager >= [`MIN_PEER_VERSION`]. 0.1.9's Noise
+/// wire format is breaking — an older peer cannot parse our frames at all, so
+/// inviting it would strand the run. An old build answers the probe with a
+/// 503 (it can't decode the request), so any failure to obtain a parseable
+/// version report blocks the start: for this gate, unverifiable means
+/// incompatible, never "assume OK".
+async fn preflight_incompatible_peers(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    invitees: &[CantonId],
+) -> Vec<(String, String)> {
+    let Ok(peers) = db.get_all_peers().await else {
+        return Vec::new();
+    };
+    let Ok(keypair) = NoiseKeypair::from_file(&config.key_file_path()).await else {
+        return Vec::new();
+    };
+    let identity = config.participant_id().to_string();
+    let invitee_set: HashSet<String> = invitees.iter().map(CantonId::to_string).collect();
+
+    let mut probes = Vec::new();
+    for peer in peers
+        .into_iter()
+        .filter(|p| invitee_set.contains(&p.participant_id.to_string()))
+    {
+        let Ok(pubkey) = parse_public_key(&peer.public_key) else {
+            continue;
+        };
+        let psk = keypair.derive_psk(&pubkey);
+        let id = peer.participant_id.to_string();
+        let address = peer.address.clone();
+        let port = peer.port;
+        let identity = identity.clone();
+        let retry = config.noise_retry.clone();
+        probes.push(tokio::spawn(async move {
+            match send_noise_message_with_retry(
+                &address,
+                port,
+                &psk,
+                identity.as_bytes(),
+                &Message::new_empty(MessageType::Health),
+                &retry,
+            )
+            .await
+            {
+                Ok(response) => match classify_health_reply(&response).2 {
+                    Some(v) if utils::version_at_least(&v, MIN_PEER_VERSION) => None,
+                    Some(v) => Some((id, format!("running version {v}"))),
+                    None => Some((
+                        id,
+                        "reachable but reported no version (pre-0.1.9 build)".to_string(),
+                    )),
+                },
+                Err(e) => Some((id, format!("could not verify version: {e}"))),
+            }
+        }));
+    }
+
+    let mut incompatible = Vec::new();
+    for probe in probes {
+        if let Ok(Some(hit)) = probe.await {
+            incompatible.push(hit);
+        }
+    }
+    incompatible
+}
+
+/// Operator-facing 409 message naming each peer that blocks the start and why.
+fn format_incompatible_peers(incompatible: &[(String, String)]) -> String {
+    let list = incompatible
+        .iter()
+        .map(|(id, reason)| format!("{id} ({reason})"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!(
+        "Cannot start the workflow: every invited peer must run dec-party-manager \
+         >= {MIN_PEER_VERSION} (concurrent workflows changed the Noise wire format, \
+         older builds cannot participate). Blocking peer(s): {list}. Upgrade or \
+         deselect them and retry."
+    )
+}
+
+/// Any in-progress run on this node (either role) already targeting the given
+/// decentralized party. The old global one-at-a-time gate incidentally
+/// prevented two workflows from mutating the same party's topology
+/// concurrently (e.g. two kicks, or a kick racing a contracts deployment);
+/// with concurrent workflows that protection must be explicit. Local-node
+/// guard only — two DIFFERENT nodes coordinating conflicting workflows on the
+/// same party is a distributed conflict Canton itself surfaces.
+async fn find_inprogress_run_for_party(
+    db: &SqlitePool,
+    party: &CantonId,
+) -> Option<(String, WorkflowKind)> {
+    SchemaRead::get_in_progress_workflow_runs(db)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .find(|r| r.dec_party_id.as_ref() == Some(party))
+        .map(|r| (r.instance_name, r.kind))
+}
+
 async fn find_party_with_prefix(db: &SqlitePool, prefix: &str) -> Result<Option<String>> {
     use crate::db::schema::SchemaRead;
 
@@ -2392,16 +2513,20 @@ async fn find_party_with_prefix(db: &SqlitePool, prefix: &str) -> Result<Option<
     Ok(parties.into_iter().next().map(|p| p.party_id))
 }
 
+/// `instance` is the cancelled run's `instance_name`, stamped onto the message
+/// so peers cancel only that run's invite/peer-run — not every run they hold
+/// from this coordinator (which may have other concurrent runs in flight).
 async fn send_cancel_invites(
     config: &NodeConfig,
     db: &SqlitePool,
     peer_ids: &[CantonId],
+    instance: &str,
 ) -> Result {
     broadcast_simple_message(
         config,
         db,
         peer_ids,
-        Message::new_empty(MessageType::CancelInvite),
+        Message::new_empty(MessageType::CancelInvite).with_instance(instance),
         "CancelInvite",
     )
     .await
@@ -2409,17 +2534,19 @@ async fn send_cancel_invites(
 
 /// Best-effort: notify previously-invited peers that the coordinator is
 /// retrying the workflow so they flip their Failed row back to InProgress
-/// and re-spin `start_peer`.
+/// and re-spin `start_peer`. `instance` scopes the retry to this run's peer
+/// rows (see `send_cancel_invites`).
 async fn send_retry_workflow(
     config: &NodeConfig,
     db: &SqlitePool,
     peer_ids: &[CantonId],
+    instance: &str,
 ) -> Result {
     broadcast_simple_message(
         config,
         db,
         peer_ids,
-        Message::new_empty(MessageType::RetryWorkflow),
+        Message::new_empty(MessageType::RetryWorkflow).with_instance(instance),
         "RetryWorkflow",
     )
     .await
@@ -2570,17 +2697,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn busy_message_names_each_peer_and_kind() {
-        let busy = vec![
-            ("participant2".to_string(), WorkflowKind::Onboarding),
-            ("participant3".to_string(), WorkflowKind::Kick),
-        ];
-        let msg = format_busy_peers(&busy);
-        assert!(msg.contains("participant2 is participating in an Onboarding workflow"));
-        assert!(msg.contains("participant3 is participating in a Kick workflow"));
-    }
-
-    #[test]
     fn invite_reply_aborts_on_busy_only() -> anyhow::Result<()> {
         let peer = CantonId::parse(
             "participant::12200ad4539c269a7b13af6806fb2ee326e7c0d7233fa6144004c416502a2c73fb0b",
@@ -2590,7 +2706,9 @@ mod tests {
         let ack = Message::new_empty(MessageType::Ack).to_bytes();
         assert!(interpret_invite_reply(&peer, "onboarding", &ack).is_ok());
 
-        // Busy aborts so the coordinator fails fast instead of waiting forever.
+        // Busy is a defensive net no current-version peer triggers (peers Ack
+        // unconditionally and pre-Ack builds are version-gated out); were it ever
+        // sent, it still aborts so the coordinator fails fast instead of waiting.
         let busy = Message::new(MessageType::Busy, b"Onboarding".to_vec()).to_bytes();
         assert!(interpret_invite_reply(&peer, "onboarding", &busy).is_err());
 
@@ -2617,6 +2735,7 @@ mod tests {
             step_total: 5,
             config_json: config_json.to_string(),
             coordinator_pubkey: None,
+            coordinator_instance: None,
             coordinator_name: None,
             expected_peers,
             completed_peers: Vec::new(),

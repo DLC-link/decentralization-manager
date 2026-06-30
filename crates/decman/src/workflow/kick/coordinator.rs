@@ -7,7 +7,7 @@ use crate::{
     config::{NetworkConfig, NodeConfig},
     error::Result,
     noise::server::{ActiveWorkflow, NoiseServer},
-    server::{ActiveWorkflowSlot, peer_status::LastSeen},
+    server::{WorkflowInstance, peer_status::LastSeen},
     utils,
     workflow::storage::{WorkflowStorage, artifact_kinds},
 };
@@ -23,7 +23,7 @@ pub async fn start_coordinator(
     kick_config: KickConfig,
     db: sqlx::SqlitePool,
     last_seen: LastSeen,
-    active_workflow: ActiveWorkflowSlot,
+    instance: Arc<WorkflowInstance>,
 ) -> Result {
     tracing::info!("Initializing Noise server...");
 
@@ -159,7 +159,7 @@ pub async fn start_coordinator(
 
     crate::workflow::run_workflow_with_handler(
         ActiveWorkflow::Kick(server),
-        active_workflow,
+        instance,
         coordinator_workflow,
     )
     .await

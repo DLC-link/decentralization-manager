@@ -854,9 +854,9 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         let row = WorkflowRunRow::from_domain(run)?;
 
         // ON CONFLICT(instance_name) so re-saving the same run (resume,
-        // step advance, etc.) replaces in place. Conflicts on the partial
-        // unique index `idx_workflow_runs_inprogress_per_kind` propagate as
-        // an error — that's what enforces "one InProgress run per (kind, role)".
+        // step advance, etc.) replaces in place. Migration 000013 dropped the
+        // partial unique index that once forbade two InProgress runs per
+        // (kind, role) — concurrency is governed by the in-memory registry.
         sqlx::query(
             r"
             INSERT INTO workflow_runs (
@@ -869,6 +869,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                 step_total,
                 config_json,
                 coordinator_pubkey,
+                coordinator_instance,
                 expected_peers_json,
                 completed_peers_json,
                 dec_party_id,
@@ -876,7 +877,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                 dismissed,
                 created_at,
                 updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(instance_name) DO UPDATE SET
                 kind                     = excluded.kind,
                 role                     = excluded.role,
@@ -886,6 +887,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                 step_total               = excluded.step_total,
                 config_json              = excluded.config_json,
                 coordinator_pubkey       = excluded.coordinator_pubkey,
+                coordinator_instance     = excluded.coordinator_instance,
                 expected_peers_json  = excluded.expected_peers_json,
                 completed_peers_json = excluded.completed_peers_json,
                 dec_party_id             = excluded.dec_party_id,
@@ -903,6 +905,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         .bind(row.step_total)
         .bind(&row.config_json)
         .bind(&row.coordinator_pubkey)
+        .bind(&row.coordinator_instance)
         .bind(&row.expected_peers_json)
         .bind(&row.completed_peers_json)
         .bind(&row.dec_party_id)
@@ -1970,6 +1973,7 @@ mod tests {
             step_total: 7,
             config_json: r#"{"foo":"bar"}"#.to_string(),
             coordinator_pubkey: Some("aaaa".to_string()),
+            coordinator_instance: None,
             coordinator_name: None,
             expected_peers: vec![
                 CantonId::parse(&format!("a::{TEST_NS}")).unwrap(),
@@ -1989,6 +1993,28 @@ mod tests {
             created_at: 1000,
             updated_at: 1000,
         }
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_workflow_run_coordinator_instance_roundtrip(pool: SqlitePool) -> Result {
+        // Migration 000014: a peer row's `coordinator_instance` (the
+        // coordinator run it belongs to) must survive a persist/load
+        // round-trip — instance-scoped CancelInvite/RetryWorkflow and
+        // peer-resume routing key off it.
+        let mut run = test_run("peer-onboarding-abc-1", "Onboarding", "Peer");
+        run.coordinator_instance = Some("test32-creation".to_string());
+
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_workflow_run(&run).await?;
+        Commitable::commit(tx).await?;
+
+        let loaded = pool.get_workflow_run(&run.instance_name).await?.unwrap();
+        assert_eq!(
+            loaded.coordinator_instance.as_deref(),
+            Some("test32-creation")
+        );
+
+        Ok(())
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]
@@ -2091,41 +2117,36 @@ mod tests {
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]
-    async fn test_workflow_runs_unique_inprogress_per_kind(pool: SqlitePool) -> Result {
-        let mut a = test_run("alpha", "Onboarding", "Coordinator");
-        let mut b = test_run("beta", "Onboarding", "Coordinator");
+    async fn test_workflow_runs_concurrent_inprogress_same_kind(pool: SqlitePool) -> Result {
+        // Migration 000013 dropped the partial unique index that previously
+        // forbade two InProgress runs of the same (kind, role). The DB now
+        // accepts them; runtime concurrency is governed by the in-memory
+        // `WorkflowRegistry`, each run addressed by its own `instance_name`.
+        let a = test_run("alpha", "Onboarding", "Coordinator");
+        let b = test_run("beta", "Onboarding", "Coordinator");
 
         let mut tx = pool.begin_transaction().await?;
         tx.upsert_workflow_run(&a).await?;
         Commitable::commit(tx).await?;
 
-        // A second InProgress run of the same (kind, role) must fail — and
-        // specifically with a UNIQUE constraint violation, not merely any
-        // error. A malformed row or a JSON-encode failure would also be
-        // `is_err()` and would let a dropped partial index slip through.
-        let mut tx = pool.begin_transaction().await?;
-        let Err(err) = tx.upsert_workflow_run(&b).await else {
-            panic!("expected a UNIQUE constraint violation, got Ok");
-        };
-        let full = format!("{err:#}");
-        assert!(
-            full.contains("UNIQUE constraint"),
-            "expected a UNIQUE constraint violation, got: {full}"
-        );
-        // tx is poisoned — drop it
-        drop(tx);
-
-        // Once A is terminal, B can start.
-        let mut tx = pool.begin_transaction().await?;
-        tx.set_workflow_run_status(&a.instance_name, WorkflowProgress::Completed, None, 2000)
-            .await?;
-        Commitable::commit(tx).await?;
-
-        a.status = WorkflowProgress::Completed;
-        b.status = WorkflowProgress::InProgress;
+        // A second InProgress run of the same (kind, role) must now succeed.
         let mut tx = pool.begin_transaction().await?;
         tx.upsert_workflow_run(&b).await?;
         Commitable::commit(tx).await?;
+
+        let visible = pool.get_visible_workflow_runs().await?;
+        let inprogress = visible
+            .iter()
+            .filter(|r| {
+                r.kind == WorkflowKind::Onboarding
+                    && r.role == WorkflowRole::Coordinator
+                    && r.status == WorkflowProgress::InProgress
+            })
+            .count();
+        assert_eq!(
+            inprogress, 2,
+            "both concurrent InProgress onboarding coordinator runs must persist"
+        );
 
         Ok(())
     }

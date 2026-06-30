@@ -247,6 +247,10 @@ pub struct DarsRequest {
 pub struct WorkflowResponse {
     pub status: WorkflowProgress,
     pub message: String,
+    /// The freshly started run's `instance_name`, so callers can address it
+    /// directly — with concurrent runs of the same kind, the legacy per-kind
+    /// status/cancel endpoints are no longer unambiguous.
+    pub instance_name: String,
 }
 
 /// Response wrapper for `GET /workflows`.
