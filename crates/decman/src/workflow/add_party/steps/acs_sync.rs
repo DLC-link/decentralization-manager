@@ -93,15 +93,8 @@ pub async fn export_party_acs(
 
         match collect_export_stream(&mut client, request).await {
             Ok(snapshot) => {
-                if snapshot.len() > MAX_CHUNKED_TOTAL_SIZE {
-                    anyhow::bail!(
-                        "Exported ACS snapshot is {len} bytes, over the \
-                         {MAX_CHUNKED_TOTAL_SIZE}-byte chunked-transfer cap — the new \
-                         member cannot receive it over Noise. Raise MAX_CHUNKED_TOTAL_SIZE \
-                         (with a memory-bound review) to replicate a party this large.",
-                        len = snapshot.len(),
-                    );
-                }
+                // Size cap is enforced mid-stream in `collect_export_stream`, so a
+                // returned snapshot is always within the chunked-transfer limit.
                 tracing::info!("Exported ACS snapshot: {len} bytes", len = snapshot.len());
                 return Ok(snapshot);
             }
@@ -133,6 +126,17 @@ async fn collect_export_stream(
     let mut snapshot = Vec::new();
     while let Some(response) = stream.message().await? {
         snapshot.extend_from_slice(&response.chunk);
+        // Enforce the chunked-transfer cap while streaming so an oversized party
+        // can't accumulate unbounded memory (and OOM) before the export finishes
+        // — abort as soon as the running total crosses the cap.
+        if snapshot.len() > MAX_CHUNKED_TOTAL_SIZE {
+            return Err(tonic::Status::out_of_range(format!(
+                "Exported ACS snapshot exceeds the {MAX_CHUNKED_TOTAL_SIZE}-byte \
+                 chunked-transfer cap — the new member cannot receive it over Noise. \
+                 Raise MAX_CHUNKED_TOTAL_SIZE (with a memory-bound review) to replicate \
+                 a party this large."
+            )));
+        }
     }
     Ok(snapshot)
 }
