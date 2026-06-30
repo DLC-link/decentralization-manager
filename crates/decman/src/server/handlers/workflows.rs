@@ -1889,10 +1889,6 @@ async fn cancel_instance(
     // hasn't finished setting itself up yet; refuse the cancel rather than mark the
     // workflow Cancelled while the spawned task is still alive. Start paths always
     // populate abort_handle before they let any await reach this point.
-    // NOTE: an abort landing in the narrow window between the workflow task's
-    // Ok(result) and its mark_completed write can leave the row Cancelled for
-    // a run that de-facto finished — rare and benign (the work itself is
-    // already committed on-ledger; only the feed status differs).
     let Some(handle) = state.abort_handle.lock().await.take() else {
         tracing::warn!(
             "{label} cancel arrived before the workflow finished initializing — refusing"
@@ -1901,6 +1897,43 @@ async fn cancel_instance(
             error: format!("{label} workflow is still initializing — try again in a moment"),
         });
     };
+
+    // Persist Cancelled BEFORE aborting. Recovery resumes every InProgress
+    // coordinator row on restart, so if we aborted first and this status write
+    // then failed transiently, the row would stay InProgress and
+    // respawn_coordinator would re-launch — re-sending invites, re-submitting
+    // topology — for a run the operator explicitly cancelled. So on a write
+    // failure we DON'T abort: restore the handle so the run stays cancellable and
+    // live, and surface 500 so the operator retries against consistent state.
+    // Once the row is durably Cancelled, a crash before the abort is safe —
+    // recovery only resumes InProgress rows.
+    if let Err(e) = mark_run_status(
+        &data.db,
+        &instance.instance_name,
+        WorkflowProgress::Cancelled,
+        None,
+    )
+    .await
+    {
+        tracing::error!(
+            "Failed to persist cancel for {}: {e:#}; leaving the run InProgress and \
+             active rather than aborting a run we can't durably mark cancelled",
+            instance.instance_name
+        );
+        *state.abort_handle.lock().await = Some(handle);
+        return HttpResponse::InternalServerError().json(ErrorResponse {
+            error: format!(
+                "Failed to cancel {label} workflow (database error); the run is still \
+                 active — try again"
+            ),
+        });
+    }
+
+    // Durably Cancelled — now stop the task and notify invitees.
+    // NOTE: an abort landing in the narrow window between the workflow task's
+    // Ok(result) and its mark_completed write can leave the row Cancelled for a
+    // run that de-facto finished — rare and benign (the work itself is already
+    // committed on-ledger; only the feed status differs).
     handle.abort();
 
     let invitees = state.invited_peers.read().await.clone();
@@ -1918,21 +1951,6 @@ async fn cancel_instance(
     {
         let mut error = state.error.write().await;
         *error = None;
-    }
-
-    // Mirror the cancel into the persisted workflow_runs row so the feed picks it up.
-    if let Err(e) = mark_run_status(
-        &data.db,
-        &instance.instance_name,
-        WorkflowProgress::Cancelled,
-        None,
-    )
-    .await
-    {
-        tracing::warn!(
-            "Failed to flip workflow_runs row {} to cancelled: {e:#}",
-            instance.instance_name
-        );
     }
 
     tracing::info!("{label} workflow {} cancelled", instance.instance_name);
