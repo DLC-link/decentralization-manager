@@ -1303,23 +1303,30 @@ async fn handle_incoming_connection(
                     return Ok::<_, hyper::Error>(Response::new(Body::empty()));
                 }
 
-                // Deny anything we can't parse EXPLICITLY — most importantly
-                // frames from pre-0.1.9 builds, whose wire format predates the
-                // version byte. An old coordinator inviting this node lands
-                // here: warn with the sender's identity so the operator can
-                // see who needs upgrading, and answer 503 so the old sender's
-                // call fails fast instead of silently vanishing.
-                if let Err(e) = Message::from_bytes(&body_bytes) {
-                    tracing::warn!(
-                        "Denied Noise request from {sender}: {e}",
-                        sender = peer_id_str.as_deref().unwrap_or("<unidentified peer>")
-                    );
-                    let mut resp = Response::new(Body::empty());
-                    *resp.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
-                    return Ok(resp);
-                }
+                // Parse the frame exactly once: this is the always-on listener
+                // hot path (5s heartbeats per peer + all workflow/chunk traffic),
+                // so re-decoding would needlessly re-allocate the payload Vec and
+                // the instance String on every request. Deny anything we can't
+                // parse EXPLICITLY — most importantly frames from pre-0.1.9
+                // builds, whose wire format predates the version byte. An old
+                // coordinator inviting this node lands in the Err arm: warn with
+                // the sender's identity so the operator can see who needs
+                // upgrading, and answer 503 so the old sender's call fails fast
+                // instead of silently vanishing.
+                let msg = match Message::from_bytes(&body_bytes) {
+                    Ok(msg) => msg,
+                    Err(e) => {
+                        tracing::warn!(
+                            "Denied Noise request from {sender}: {e}",
+                            sender = peer_id_str.as_deref().unwrap_or("<unidentified peer>")
+                        );
+                        let mut resp = Response::new(Body::empty());
+                        *resp.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
+                        return Ok(resp);
+                    }
+                };
 
-                if let Ok(msg) = Message::from_bytes(&body_bytes) {
+                {
                     tracing::debug!("Received message type {:?}", msg.msg_type);
 
                     match msg.msg_type {
