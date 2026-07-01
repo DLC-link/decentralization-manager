@@ -163,7 +163,7 @@ pub async fn submit_proposals(
 }
 
 /// Drop duplicate signatures, keeping the first per signing fingerprint.
-fn dedupe_signatures(transaction: &mut SignedTopologyTransaction) {
+pub(crate) fn dedupe_signatures(transaction: &mut SignedTopologyTransaction) {
     let mut seen = HashSet::new();
     transaction
         .signatures

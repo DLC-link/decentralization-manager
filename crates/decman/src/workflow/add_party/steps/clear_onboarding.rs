@@ -318,10 +318,7 @@ pub async fn submit_clear_proposal(
         transaction.signatures.extend(coordinator_signed.signatures);
     }
 
-    let mut seen = std::collections::HashSet::new();
-    transaction
-        .signatures
-        .retain(|sig| seen.insert(sig.signed_by.clone()));
+    super::proposals::submit::dedupe_signatures(&mut transaction);
 
     let mut topology_write_client =
         TopologyManagerWriteServiceClient::connect(config.admin_api_url()).await?;
