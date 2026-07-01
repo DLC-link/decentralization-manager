@@ -260,6 +260,7 @@ pub enum WorkflowKind {
     Kick,
     Contracts,
     Dars,
+    AddParty,
 }
 
 impl WorkflowKind {
@@ -269,6 +270,7 @@ impl WorkflowKind {
             Self::Kick => "Kick",
             Self::Contracts => "Contracts",
             Self::Dars => "Dars",
+            Self::AddParty => "AddParty",
         }
     }
 }
@@ -287,6 +289,7 @@ impl std::str::FromStr for WorkflowKind {
             "Kick" => Ok(Self::Kick),
             "Contracts" => Ok(Self::Contracts),
             "Dars" => Ok(Self::Dars),
+            "AddParty" => Ok(Self::AddParty),
             other => Err(anyhow::anyhow!("unknown workflow kind: {other}")),
         }
     }
@@ -299,6 +302,7 @@ impl From<InvitationType> for WorkflowKind {
             InvitationType::Kick => Self::Kick,
             InvitationType::Contracts => Self::Contracts,
             InvitationType::Dars => Self::Dars,
+            InvitationType::AddParty => Self::AddParty,
         }
     }
 }
@@ -394,6 +398,10 @@ pub struct WorkflowRun {
     /// Kick runs only: the participant being kicked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kicked_participant: Option<CantonId>,
+    /// AddParty runs only: the participant being added. Lifted from
+    /// `config_json` by the API layer (not a DB column), same as `prefix`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub added_participant: Option<CantonId>,
     /// Contracts runs only: package/contract names being deployed. Lifted from
     /// `config_json` by the API layer (not a DB column), same as `prefix`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -419,6 +427,7 @@ pub enum InvitationType {
     Kick,
     Contracts,
     Dars,
+    AddParty,
 }
 
 impl InvitationType {
@@ -429,6 +438,7 @@ impl InvitationType {
             Self::Kick => "Kick",
             Self::Contracts => "Contracts",
             Self::Dars => "Dars",
+            Self::AddParty => "AddParty",
         }
     }
 }
@@ -448,6 +458,7 @@ impl std::str::FromStr for InvitationType {
             "Kick" => Ok(Self::Kick),
             "Contracts" => Ok(Self::Contracts),
             "Dars" => Ok(Self::Dars),
+            "AddParty" => Ok(Self::AddParty),
             other => Err(anyhow::anyhow!("unknown invitation type: {other}")),
         }
     }
@@ -486,6 +497,9 @@ pub struct PendingInvitation {
     /// same "Dec party" row the coordinator shows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dec_party_id: Option<CantonId>,
+    /// AddParty-only: the participant being added to the party.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_participant: Option<CantonId>,
     /// Contracts-only: human-readable package/contract names being deployed,
     /// so the peer card shows the same "Packages" row the coordinator shows.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

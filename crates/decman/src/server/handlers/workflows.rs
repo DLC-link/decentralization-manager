@@ -28,17 +28,19 @@ use crate::{
         middleware::require_admin,
         respawn_coordinator,
         types::{
-            ContractsInvitePayload, ContractsRequest, DarsInvitePayload, DarsRequest,
-            ErrorResponse, KickInvitePayload, KickRequest, KickResponse, KickStatus,
-            MessageResponse, MissingEdgeKind, MissingPeerEdge, OnboardingInvitePayload,
-            OnboardingMeshErrorResponse, OnboardingRequest, OnboardingResponse, OnboardingStatus,
-            SuccessResponse, WorkflowGuard, WorkflowInstance, WorkflowKind, WorkflowProgress,
-            WorkflowResponse, WorkflowRole, WorkflowRun, WorkflowRunsResponse,
-            WorkflowStatusResponse,
+            AddPartyInvitePayload, AddPartyRequest, ContractsInvitePayload, ContractsRequest,
+            DarsInvitePayload, DarsRequest, ErrorResponse, KickInvitePayload, KickRequest,
+            KickResponse, KickStatus, MessageResponse, MissingEdgeKind, MissingPeerEdge,
+            OnboardingInvitePayload, OnboardingMeshErrorResponse, OnboardingRequest,
+            OnboardingResponse, OnboardingStatus, SuccessResponse, WorkflowGuard, WorkflowInstance,
+            WorkflowKind, WorkflowProgress, WorkflowResponse, WorkflowRole, WorkflowRun,
+            WorkflowRunsResponse, WorkflowStatusResponse,
         },
     },
     utils,
-    workflow::{self, ContractsStep, DarsStep, KickStep, OnboardingStep, state::WorkflowStep},
+    workflow::{
+        self, AddPartyStep, ContractsStep, DarsStep, KickStep, OnboardingStep, state::WorkflowStep,
+    },
 };
 
 // ============================================================================
@@ -100,6 +102,7 @@ where
         previous_threshold: None,
         new_threshold: None,
         kicked_participant: None,
+        added_participant: None,
         package_names: Vec::new(),
         dar_filenames: Vec::new(),
         error: None,
@@ -143,6 +146,7 @@ where
         WorkflowKind::Kick => "kick",
         WorkflowKind::Contracts => "contracts",
         WorkflowKind::Dars => "DARs",
+        WorkflowKind::AddParty => "add-party",
     };
 
     if !data.workflows.insert(instance.clone()) {
@@ -495,6 +499,7 @@ pub async fn start_kick(
             Some(kick_config),
             None, // No contracts config
             None, // No dars config
+            None, // No add-party config
             None, // No auth registry for kick
             last_seen,
             instance_for_coord,
@@ -723,6 +728,405 @@ async fn send_kick_invites(
 }
 
 // ============================================================================
+// Add-Party Workflow
+// ============================================================================
+
+/// Start an add-party workflow to add a new member to a decentralized party
+#[utoipa::path(
+    tag = "Workflows",
+    request_body = AddPartyRequest,
+    responses(
+        (status = 202, description = "Add-party workflow started", body = WorkflowResponse),
+        (status = 400, description = "Bad request", body = ErrorResponse),
+        (status = 409, description = "Workflow already in progress for this party, or the participant is already a member", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+#[post("/add-party")]
+pub async fn start_add_party(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    body: web::Json<AddPartyRequest>,
+) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
+
+    tracing::info!(
+        "Add-party request received: party={}, new_participant={}, threshold={}",
+        body.decentralized_party_id,
+        body.new_participant_id,
+        body.new_threshold
+    );
+
+    let decentralized_party_id = body.decentralized_party_id.clone();
+    let new_participant_id = body.new_participant_id.clone();
+
+    if new_participant_id == *data.config.participant_id() {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: "Cannot add yourself as the new participant".to_string(),
+        });
+    }
+
+    let peers = match data.db.get_all_peers().await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!("Failed to load peers for add-party: {e}");
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: "Failed to load peers".to_string(),
+            });
+        }
+    };
+
+    // The new member must be a configured, known peer — invites travel over
+    // Noise, so a participant this node can't reach can't join.
+    if !peers.iter().any(|p| p.participant_id == new_participant_id) {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: format!(
+                "Participant {new_participant_id} is not a configured peer of this node"
+            ),
+        });
+    }
+
+    // Scope the existing-member set to the party's cached membership (same
+    // rationale as start_kick — the party can be a strict subset of the
+    // configured mesh).
+    let party_member_ids: HashSet<CantonId> = match data
+        .db
+        .get_dec_party_participants(&decentralized_party_id)
+        .await
+    {
+        Ok(rows) => rows
+            .iter()
+            .filter_map(|r| CantonId::parse(&r.participant_uid).ok())
+            .collect(),
+        Err(e) => {
+            tracing::error!("Failed to load dec party participants for add-party: {e}");
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: "Failed to load decentralized party members".to_string(),
+            });
+        }
+    };
+    if party_member_ids.is_empty() {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!(
+                "No cached membership for {decentralized_party_id}. Try refreshing \
+                 /decentralized-parties first."
+            ),
+        });
+    }
+    if party_member_ids.contains(&new_participant_id) {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!(
+                "Participant {new_participant_id} is already a member of \
+                 {decentralized_party_id}"
+            ),
+        });
+    }
+    if !party_member_ids.contains(data.config.participant_id()) {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: format!(
+                "This node is not a member of {decentralized_party_id}; only an existing \
+                 member can coordinate adding one"
+            ),
+        });
+    }
+
+    // Bound the new threshold by the post-add member count. The deeper
+    // validation against the live DNS owner set happens in ExportState.
+    let post_add_member_count = party_member_ids.len() as i32 + 1;
+    if body.new_threshold < 1 || body.new_threshold > post_add_member_count {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: format!(
+                "new_threshold must be between 1 and {post_add_member_count} \
+                 (party member count {n}, plus the new member); got {got}",
+                n = party_member_ids.len(),
+                got = body.new_threshold,
+            ),
+        });
+    }
+
+    // Invitees: every existing member except self, plus the new member.
+    let mut invitees: Vec<CantonId> = peers
+        .into_iter()
+        .map(|p| p.participant_id)
+        .filter(|p| party_member_ids.contains(p) && p != data.config.participant_id())
+        .collect();
+    invitees.push(new_participant_id.clone());
+
+    let timestamp = now_secs();
+    let instance_name = format!("{}-add-party-{timestamp}", decentralized_party_id.prefix);
+
+    let instance = WorkflowInstance::new(
+        instance_name.clone(),
+        WorkflowKind::AddParty,
+        WorkflowRole::Coordinator,
+    );
+    let add_party_state = &instance.http;
+
+    let add_party_config = workflow::AddPartyConfig::new(
+        decentralized_party_id.clone(),
+        new_participant_id.clone(),
+        body.new_threshold,
+        body.previous_threshold,
+        instance_name.clone(),
+    );
+
+    // Refuse a second workflow targeting the SAME decentralized party (see
+    // start_kick for the rationale — topology mutations must not interleave).
+    if let Some((run, kind)) =
+        find_inprogress_run_for_party(&data.db, &decentralized_party_id).await
+    {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!(
+                "Party {decentralized_party_id} already has a {kind} workflow in flight \
+                 (run {run}); wait for it to finish or cancel it first"
+            ),
+        });
+    }
+
+    // Refuse to invite any peer that can't speak the concurrent-workflows wire
+    // format — NO invites are sent if even one invitee fails the version gate.
+    let incompatible = preflight_incompatible_peers(&data.config, &data.db, &invitees).await;
+    if !incompatible.is_empty() {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format_incompatible_peers(&incompatible),
+        });
+    }
+
+    if !data.workflows.insert(instance.clone()) {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!(
+                "A workflow with instance {} is already running",
+                instance.instance_name
+            ),
+        });
+    }
+
+    if let Err(e) = insert_coordinator_run(
+        &data.db,
+        &instance_name,
+        WorkflowKind::AddParty,
+        AddPartyStep::WaitingForPeers,
+        &add_party_config,
+        &invitees,
+        Some(decentralized_party_id.clone()),
+    )
+    .await
+    {
+        data.workflows.remove(&instance_name);
+        tracing::warn!("Failed to persist add-party workflow run: {e:#}");
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!("Failed to start add-party workflow: {e}"),
+        });
+    }
+
+    let invitees_for_invites = invitees.clone();
+    *add_party_state.invited_peers.write().await = invitees;
+
+    let config = data.config.clone();
+    let db = data.db.clone();
+    let add_party_state_clone = instance.http.clone();
+    let instance_for_coord = instance.clone();
+    let workflows = data.workflows.clone();
+    let last_seen = data.last_seen.clone();
+    let instance_for_task = instance_name.clone();
+    // Ledger token source for the begin-offset capture (see
+    // `current_ledger_offset`); the workflow proceeds without it.
+    let workflow_auth = data.auth.read().await.clone();
+
+    // abort_handle/status/error are flipped under simultaneously-held locks —
+    // see start_dars for the cancel-race rationale.
+    let mut abort_guard = add_party_state.abort_handle.lock().await;
+    let mut status_guard = add_party_state.status.write().await;
+    let mut error_guard = add_party_state.error.write().await;
+
+    let join_handle = tokio::spawn(async move {
+        let _workflow_guard = WorkflowGuard::new(workflows, instance_for_task.clone());
+
+        let invite_result =
+            send_add_party_invites(&config, &db, &add_party_config, &invitees_for_invites).await;
+        if let Err(e) = invite_result {
+            tracing::error!("Failed to send add-party invites: {e}");
+            let msg = format!("Failed to send invites: {e}");
+            {
+                let mut status = add_party_state_clone.status.write().await;
+                let mut error = add_party_state_clone.error.write().await;
+                *status = WorkflowProgress::Failed;
+                *error = Some(msg.clone());
+            }
+            mark_run_failed(&db, &instance_for_task, &msg).await;
+            return;
+        }
+
+        // Give peers time to start their peer workflows
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        let result = workflow::start_coordinator(
+            config,
+            db.clone(),
+            workflow::WorkflowType::AddParty,
+            None, // No onboarding config
+            None, // No kick config
+            None, // No contracts config
+            None, // No dars config
+            Some(add_party_config),
+            workflow_auth,
+            last_seen,
+            instance_for_coord,
+        )
+        .await;
+
+        match result {
+            Ok(_) => {
+                {
+                    let mut status = add_party_state_clone.status.write().await;
+                    *status = WorkflowProgress::Completed;
+                }
+                tracing::info!("Add-party workflow completed successfully");
+                mark_run_completed(&db, &instance_for_task).await;
+            }
+            Err(e) => {
+                let msg = format!("{e}");
+                {
+                    let mut status = add_party_state_clone.status.write().await;
+                    let mut error = add_party_state_clone.error.write().await;
+                    *status = WorkflowProgress::Failed;
+                    *error = Some(msg.clone());
+                }
+                tracing::error!("Add-party workflow failed: {e}");
+                mark_run_failed(&db, &instance_for_task, &msg).await;
+            }
+        }
+    });
+    *abort_guard = Some(join_handle.abort_handle());
+    *status_guard = WorkflowProgress::InProgress;
+    *error_guard = None;
+    drop(error_guard);
+    drop(status_guard);
+    drop(abort_guard);
+
+    HttpResponse::Accepted().json(WorkflowResponse {
+        status: WorkflowProgress::InProgress,
+        message: "Add-party workflow started".to_string(),
+        instance_name,
+    })
+}
+
+/// Get the current status of the add-party workflow
+#[utoipa::path(
+    tag = "Workflows",
+    responses(
+        (status = 200, description = "Add-party workflow status", body = WorkflowStatusResponse)
+    )
+)]
+#[get("/add-party/status")]
+pub async fn get_add_party_status(data: web::Data<AppState>) -> impl Responder {
+    HttpResponse::Ok().json(kind_status(&data, WorkflowKind::AddParty).await)
+}
+
+#[utoipa::path(
+    tag = "Workflows",
+    responses(
+        (status = 200, description = "Workflow cancelled", body = MessageResponse),
+        (status = 409, description = "No workflow in progress", body = ErrorResponse)
+    )
+)]
+#[post("/add-party/cancel")]
+pub async fn cancel_add_party(http_req: HttpRequest, data: web::Data<AppState>) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
+    cancel_workflow_state(&data, "Add-party", WorkflowKind::AddParty).await
+}
+
+/// Send add-party invites over Noise to the existing members and the new
+/// member (`invitees` carries both).
+async fn send_add_party_invites(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    add_party_config: &workflow::AddPartyConfig,
+    invitees: &[CantonId],
+) -> Result {
+    let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
+    let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
+
+    let current_participant_id = config.participant_id();
+    let invitee_set: HashSet<&CantonId> = invitees.iter().collect();
+    // The card shows the full post-add member set: invitees + this node.
+    let mut participants = invitees.to_vec();
+    participants.push(current_participant_id.clone());
+    let payload = AddPartyInvitePayload {
+        dec_party_id: add_party_config.decentralized_party_id.clone(),
+        new_participant: add_party_config.new_participant_id.clone(),
+        new_threshold: add_party_config.new_threshold,
+        previous_threshold: add_party_config.previous_threshold,
+        participants,
+        workflow_instance: Some(add_party_config.instance_name.clone()),
+    };
+    let payload_bytes = serde_json::to_vec(&payload).context("encode AddPartyInvitePayload")?;
+    let invite_message = Message::new(MessageType::InviteAddParty, payload_bytes);
+
+    for peer in &network_config.peers {
+        if !invitee_set.contains(&peer.participant_id)
+            || peer.participant_id == *current_participant_id
+        {
+            continue;
+        }
+
+        if peer.public_key.is_empty() {
+            tracing::warn!(
+                "Skipping add-party invite to {} - no public key configured",
+                peer.participant_id
+            );
+            continue;
+        }
+        let peer_pub_key = match parse_public_key(&peer.public_key) {
+            Ok(pk) => pk,
+            Err(e) => {
+                tracing::warn!(
+                    "Skipping add-party invite to {} - invalid public key: {e}",
+                    peer.participant_id
+                );
+                continue;
+            }
+        };
+
+        let psk = keypair.derive_psk(&peer_pub_key);
+        let identity = config.participant_id().to_string();
+
+        tracing::info!(
+            "Sending add-party invite to {} at {}:{}",
+            peer.participant_id,
+            peer.address,
+            peer.port
+        );
+
+        match send_noise_message(
+            &peer.address,
+            peer.port,
+            &psk,
+            identity.as_bytes(),
+            &invite_message,
+        )
+        .await
+        {
+            Ok(response) => {
+                interpret_invite_reply(&peer.participant_id, "add-party", &response)?;
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Failed to send add-party invite to {}: {e}",
+                    peer.participant_id
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// ============================================================================
 // Onboarding Workflow
 // ============================================================================
 
@@ -919,6 +1323,7 @@ pub async fn start_onboarding(
             None, // No kick config
             None, // No contracts config
             None, // No dars config
+            None, // No add-party config
             None, // No auth registry for onboarding
             last_seen,
             instance_for_coord,
@@ -1450,6 +1855,7 @@ pub async fn start_contracts(
             None, // No kick config
             Some(contracts_config.clone()),
             None, // No dars config
+            None, // No add-party config
             workflow_auth,
             last_seen,
             instance_for_coord,
@@ -1716,6 +2122,7 @@ pub async fn start_dars(
             None, // No kick config
             None, // No contracts config
             Some(dars_config),
+            None, // No add-party config
             None, // No auth
             last_seen,
             instance_for_coord,
@@ -2131,13 +2538,20 @@ fn enrich_from_config_json(run: &mut WorkflowRun) {
         party_id_prefix: Option<String>,
         #[serde(default)]
         participants: Vec<CantonId>,
-        // Kick configs only.
+        // Kick + AddParty configs only.
         #[serde(default)]
         new_threshold: Option<i32>,
         #[serde(default)]
         previous_threshold: Option<i32>,
+        // Kick configs only.
         #[serde(default)]
         participant_id: Option<CantonId>,
+        // AddParty configs only.
+        #[serde(default)]
+        new_participant_id: Option<CantonId>,
+        // AddParty + Kick configs: derive a display prefix from the party id.
+        #[serde(default)]
+        decentralized_party_id: Option<CantonId>,
         // Contracts: `package_names` is the peer's flat list (from the invite);
         // `contracts[].name` is the coordinator's `ContractsConfig`.
         #[serde(default)]
@@ -2152,7 +2566,10 @@ fn enrich_from_config_json(run: &mut WorkflowRun) {
         dar_files: Vec<DarFileShape>,
     }
     if let Ok(shape) = serde_json::from_str::<ConfigShape>(&run.config_json) {
-        let prefix = shape.prefix.or(shape.party_id_prefix);
+        let prefix = shape
+            .prefix
+            .or(shape.party_id_prefix)
+            .or_else(|| shape.decentralized_party_id.map(|p| p.prefix));
         if let Some(p) = prefix
             && !p.is_empty()
         {
@@ -2166,6 +2583,7 @@ fn enrich_from_config_json(run: &mut WorkflowRun) {
         // sent one (it defaults to 0); 0 means "unknown", render as new-only.
         run.previous_threshold = shape.previous_threshold.filter(|t| *t > 0);
         run.kicked_participant = shape.participant_id;
+        run.added_participant = shape.new_participant_id;
         // Package names: peer's flat list wins; otherwise derive from the
         // coordinator's contract definitions. Both converge to the same set.
         if !shape.package_names.is_empty() {
@@ -2745,6 +3163,7 @@ mod tests {
             previous_threshold: None,
             new_threshold: None,
             kicked_participant: None,
+            added_participant: None,
             package_names: Vec::new(),
             dar_filenames: Vec::new(),
             error: None,

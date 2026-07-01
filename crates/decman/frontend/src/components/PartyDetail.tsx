@@ -22,12 +22,14 @@ import {
 } from "@mui/material";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import EditIcon from "@mui/icons-material/Edit";
+import PersonAddIcon from "@mui/icons-material/PersonAdd";
 import PersonRemoveIcon from "@mui/icons-material/PersonRemove";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import { CopyableText } from "./CopyableText";
 import { TextHelp } from "./FieldHelp";
+import { AddPartyDialog } from "./AddPartyDialog";
 import { KickDialog } from "./KickDialog";
 import { ContractsDialog } from "./ContractsDialog";
 import { PartyConfigDialog } from "./PartyConfigDialog";
@@ -183,6 +185,7 @@ export const PartyDetail = ({
   network,
 }: PartyDetailProps) => {
   const [kickDialogOpen, setKickDialogOpen] = useState(false);
+  const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [contractsDialogOpen, setContractsDialogOpen] = useState(false);
   const [configDialogOpen, setConfigDialogOpen] = useState(false);
   const [selectedParticipant, setSelectedParticipant] = useState("");
@@ -424,7 +427,29 @@ export const PartyDetail = ({
         onToggle={() => setParticipantsExpanded(!participantsExpanded)}
         helpText="Canton participants hosting this party. One participant per row, with its permission level."
         badge={
-          <Chip label={party.participants.length} size="small" sx={{ ml: 1 }} />
+          <>
+            <Chip
+              label={party.participants.length}
+              size="small"
+              sx={{ ml: 1 }}
+            />
+            <Tooltip title="Add member">
+              <span>
+                <IconButton
+                  size="small"
+                  sx={{ ml: 0.5 }}
+                  onClick={(e) => {
+                    // Don't toggle the collapsible section.
+                    e.stopPropagation();
+                    setAddDialogOpen(true);
+                  }}
+                  disabled={!ADMIN_ACCESS}
+                >
+                  <PersonAddIcon fontSize="small" />
+                </IconButton>
+              </span>
+            </Tooltip>
+          </>
         }
       >
         <Box sx={{ overflowX: "auto" }}>
@@ -687,6 +712,19 @@ export const PartyDetail = ({
             (p) => p.participant_uid === selectedParticipant,
           )?.owner_key
         }
+        currentThreshold={party.threshold}
+        currentOwnerCount={party.owners.length}
+      />
+
+      <AddPartyDialog
+        open={addDialogOpen}
+        onClose={() => setAddDialogOpen(false)}
+        onAddComplete={() => {
+          onRefresh();
+          onNavigateToNotifications();
+        }}
+        partyId={party.party_id}
+        participantUids={party.participants.map((p) => p.participant_uid)}
         currentThreshold={party.threshold}
         currentOwnerCount={party.owners.length}
       />

@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+pub mod add_party;
+pub mod add_party_edge_cases;
 pub mod cancel_cascades;
 pub mod check_peer_dars;
 pub mod concurrent_cross_workflows;

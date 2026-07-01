@@ -16,7 +16,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 SCRIPT_DIR="${SCRIPT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 
 # Localnet
-LOCALNET_VERSION="0.5.17"
+LOCALNET_VERSION="0.6.7"
 LOCALNET_BUNDLE_URL="https://github.com/digital-asset/decentralized-canton-sync/releases/download/v${LOCALNET_VERSION}/${LOCALNET_VERSION}_splice-node.tar.gz"
 LOCALNET_CACHE_DIR="$SCRIPT_DIR/.localnet"
 LOCALNET_COMPOSE_DIR="$LOCALNET_CACHE_DIR/splice-node/docker-compose/localnet"

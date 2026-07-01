@@ -59,6 +59,22 @@ pub enum MessageType {
     ListPeers = 0x000D,
     RequestMemberParty = 0x000E,
     Health = 0x000F,
+    // Add-party commands live above the invite block (0x0010-0x001F) because
+    // the low command range 0x0001-0x000F is exhausted.
+    /// Command: the new member generates its namespace + DAML keys. Other
+    /// peers reply with a skip status.
+    GenerateAddPartyKeys = 0x0020,
+    /// Command: every peer signs the add-party DNS + P2P proposals.
+    SignAddParty = 0x0021,
+    /// Command: the new member imports the party's ACS snapshot. Other peers
+    /// reply with a skip status.
+    ImportAcs = 0x0022,
+    /// Command: the new member drives `ClearPartyOnboardingFlag` past
+    /// Canton's safe time. Other peers reply with a skip status.
+    ClearOnboardingFlag = 0x0023,
+    /// Command: every peer signs the onboarding-flag clearing proposal
+    /// (no-op when the payload carries the empty skip marker).
+    SignClearOnboarding = 0x0024,
 
     // Invites (0x0010 - 0x001F)
     InviteOnboarding = 0x0010,
@@ -75,6 +91,9 @@ pub enum MessageType {
     /// in-progress run can be marked Failed instead of hanging until
     /// timeout. Payload is a JSON `DeclineInvitationPayload`.
     DeclineInvitation = 0x0016,
+    /// Invite to participate in adding a new member to a decentralized
+    /// party. Payload is a JSON `AddPartyInvitePayload`.
+    InviteAddParty = 0x0017,
 
     // Responses (0x0100 - 0x01FF)
     Ack = 0x0101,
@@ -95,6 +114,17 @@ pub enum MessageType {
     P2pSignatures = 0x0203,
     SubmissionSignatures = 0x0204,
     KickSignatures = 0x0205,
+    /// New member → coordinator: `keys||participant_id` payload.
+    AddPartyKeysUpload = 0x0206,
+    /// Peer → coordinator: signed add-party DNS + P2P pair.
+    AddPartySignatures = 0x0207,
+    /// Peer → coordinator: signed onboarding-flag clearing proposal.
+    AddPartyClearSignatures = 0x0208,
+    /// New member → coordinator: the clearing proposal it AUTHORED. Canton
+    /// requires the onboarding participant itself to issue the flag-clear
+    /// transaction, so the new member authors it and the coordinator only
+    /// runs the signing round on it.
+    AddPartyClearProposal = 0x0209,
 
     // Chunked Transfer (0x0300 - 0x03FF)
     /// Command with chunked payload - payload contains: [command_type (2 bytes)] [total_size (4 bytes)] [chunk_count (4 bytes)]
@@ -158,6 +188,12 @@ impl TryFrom<u16> for MessageType {
             0x0014 => Ok(Self::CancelInvite),
             0x0015 => Ok(Self::RetryWorkflow),
             0x0016 => Ok(Self::DeclineInvitation),
+            0x0017 => Ok(Self::InviteAddParty),
+            0x0020 => Ok(Self::GenerateAddPartyKeys),
+            0x0021 => Ok(Self::SignAddParty),
+            0x0022 => Ok(Self::ImportAcs),
+            0x0023 => Ok(Self::ClearOnboardingFlag),
+            0x0024 => Ok(Self::SignClearOnboarding),
             0x0101 => Ok(Self::Ack),
             0x0102 => Ok(Self::Data),
             0x0103 => Ok(Self::Error),
@@ -174,6 +210,10 @@ impl TryFrom<u16> for MessageType {
             0x0203 => Ok(Self::P2pSignatures),
             0x0204 => Ok(Self::SubmissionSignatures),
             0x0205 => Ok(Self::KickSignatures),
+            0x0206 => Ok(Self::AddPartyKeysUpload),
+            0x0207 => Ok(Self::AddPartySignatures),
+            0x0208 => Ok(Self::AddPartyClearSignatures),
+            0x0209 => Ok(Self::AddPartyClearProposal),
             0x0300 => Ok(Self::ChunkedCommand),
             0x0301 => Ok(Self::GetChunk),
             0x0302 => Ok(Self::Chunk),
@@ -1015,6 +1055,25 @@ mod tests {
         assert_eq!(MessageType::Ack.to_u16(), 0x0101);
         assert_eq!(MessageType::try_from(0x0101)?, MessageType::Ack);
         assert!(MessageType::try_from(0xFFFF).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn add_party_message_types_round_trip() -> Result {
+        for mt in [
+            MessageType::GenerateAddPartyKeys,
+            MessageType::SignAddParty,
+            MessageType::ImportAcs,
+            MessageType::ClearOnboardingFlag,
+            MessageType::SignClearOnboarding,
+            MessageType::InviteAddParty,
+            MessageType::AddPartyKeysUpload,
+            MessageType::AddPartySignatures,
+            MessageType::AddPartyClearSignatures,
+            MessageType::AddPartyClearProposal,
+        ] {
+            assert_eq!(MessageType::try_from(mt.to_u16())?, mt);
+        }
         Ok(())
     }
 

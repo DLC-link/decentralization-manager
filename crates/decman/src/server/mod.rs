@@ -166,6 +166,7 @@ enum InvitationMeta {
     Dars(DarsInvitePayload),
     Kick(KickInvitePayload),
     Contracts(ContractsInvitePayload),
+    AddParty(AddPartyInvitePayload),
 }
 
 /// On boot, re-spawn any InProgress workflow runs that were interrupted by the
@@ -254,6 +255,7 @@ pub(crate) async fn respawn_coordinator(
     let mut kick_config = None;
     let mut contracts_config = None;
     let mut dars_config = None;
+    let mut add_party_config = None;
     let parsed = match kind {
         WorkflowKind::Onboarding => {
             serde_json::from_str::<workflow::OnboardingConfig>(&run.config_json)
@@ -267,6 +269,10 @@ pub(crate) async fn respawn_coordinator(
         }
         WorkflowKind::Dars => serde_json::from_str::<workflow::DarsConfig>(&run.config_json)
             .map(|c| dars_config = Some(c)),
+        WorkflowKind::AddParty => {
+            serde_json::from_str::<workflow::AddPartyConfig>(&run.config_json)
+                .map(|c| add_party_config = Some(c))
+        }
     };
     if let Err(e) = parsed {
         tracing::warn!("respawn_coordinator: bad {kind:?} config_json for {instance_name}: {e}");
@@ -293,6 +299,7 @@ pub(crate) async fn respawn_coordinator(
         kick_config,
         contracts_config,
         dars_config,
+        add_party_config,
         auth_snapshot,
         last_seen,
     );
@@ -314,6 +321,7 @@ fn spawn_coordinator_run(
     kick_config: Option<workflow::KickConfig>,
     contracts_config: Option<workflow::ContractsConfig>,
     dars_config: Option<workflow::DarsConfig>,
+    add_party_config: Option<workflow::AddPartyConfig>,
     auth: Option<WorkflowAuth>,
     last_seen: LastSeen,
 ) -> tokio::task::JoinHandle<()> {
@@ -322,6 +330,7 @@ fn spawn_coordinator_run(
         WorkflowKind::Kick => WorkflowType::Kick,
         WorkflowKind::Contracts => WorkflowType::Contracts,
         WorkflowKind::Dars => WorkflowType::Dars,
+        WorkflowKind::AddParty => WorkflowType::AddParty,
     };
     tokio::spawn(async move {
         let instance_name = instance.instance_name.clone();
@@ -336,6 +345,7 @@ fn spawn_coordinator_run(
             kick_config,
             contracts_config,
             dars_config,
+            add_party_config,
             auth,
             last_seen,
             instance.clone(),
@@ -445,6 +455,7 @@ impl WorkflowTriggers {
         let mut participants = Vec::new();
         let mut dar_filenames = Vec::new();
         let mut kicked_participant = None;
+        let mut new_participant = None;
         let mut new_threshold = None;
         let mut previous_threshold = None;
         let mut dec_party_id = None;
@@ -476,6 +487,14 @@ impl WorkflowTriggers {
                 package_names = p.package_names;
                 workflow_instance = p.workflow_instance;
             }
+            InvitationMeta::AddParty(p) => {
+                new_participant = Some(p.new_participant);
+                new_threshold = Some(p.new_threshold);
+                previous_threshold = Some(p.previous_threshold);
+                dec_party_id = Some(p.dec_party_id);
+                participants = p.participants;
+                workflow_instance = p.workflow_instance;
+            }
         }
         // Key the id on the coordinator's run instance when available so a
         // NEW run's invite never silently morphs an older card in place — an
@@ -502,6 +521,7 @@ impl WorkflowTriggers {
             participants,
             dar_filenames,
             kicked_participant,
+            new_participant,
             new_threshold,
             previous_threshold,
             dec_party_id,
@@ -884,7 +904,7 @@ pub async fn start_server(
         last_seen: last_seen.clone(),
         peer_job_sender: peer_job_sender.clone(),
         pending_invitations: pending_invitations.clone(),
-        auth,
+        auth: auth.clone(),
         token_validator,
         admin_role,
         party_credentials: party_credentials.clone(),
@@ -941,8 +961,15 @@ pub async fn start_server(
     // node can be a peer in many concurrent workflows at once.
     let peer_listener_config = config.clone();
     let peer_listener_db = db.clone();
+    let peer_listener_auth = auth.clone();
     tokio::spawn(async move {
-        run_peer_listener(peer_listener_config, peer_listener_db, peer_job_receiver).await;
+        run_peer_listener(
+            peer_listener_config,
+            peer_listener_db,
+            peer_listener_auth,
+            peer_job_receiver,
+        )
+        .await;
     });
 
     // Background task: sync decentralized parties from Canton on startup
@@ -1032,6 +1059,9 @@ pub async fn start_server(
             .service(handlers::start_kick)
             .service(handlers::get_kick_status)
             .service(handlers::cancel_kick)
+            .service(handlers::start_add_party)
+            .service(handlers::get_add_party_status)
+            .service(handlers::cancel_add_party)
             .service(handlers::start_onboarding)
             .service(handlers::get_onboarding_status)
             .service(handlers::cancel_onboarding)
@@ -1646,6 +1676,10 @@ async fn handle_incoming_connection(
                         | MessageType::P2pSignatures
                         | MessageType::SubmissionSignatures
                         | MessageType::KickSignatures
+                        | MessageType::AddPartyKeysUpload
+                        | MessageType::AddPartySignatures
+                        | MessageType::AddPartyClearSignatures
+                        | MessageType::AddPartyClearProposal
                         | MessageType::StatusUpdate
                         | MessageType::DeclineInvitation => {
                             // Route workflow-command traffic to the coordinator
@@ -1687,7 +1721,8 @@ async fn handle_incoming_connection(
                         MessageType::InviteOnboarding
                         | MessageType::InviteKick
                         | MessageType::InviteContracts
-                        | MessageType::InviteDars => {
+                        | MessageType::InviteDars
+                        | MessageType::InviteAddParty => {
                             // Invites are accepted unconditionally: workflows are
                             // multi-instance now, so a node already coordinating or
                             // participating in runs can take part in more
@@ -1700,6 +1735,7 @@ async fn handle_incoming_connection(
                                 MessageType::InviteKick => InvitationType::Kick,
                                 MessageType::InviteContracts => InvitationType::Contracts,
                                 MessageType::InviteDars => InvitationType::Dars,
+                                MessageType::InviteAddParty => InvitationType::AddParty,
                                 _ => unreachable!(),
                             };
                             tracing::info!(
@@ -1756,6 +1792,19 @@ async fn handle_incoming_connection(
                                             Err(e) => {
                                                 tracing::warn!(
                                                     "Contracts invite payload was unparseable: {e}"
+                                                );
+                                                InvitationMeta::None
+                                            }
+                                        }
+                                    }
+                                    InvitationType::AddParty => {
+                                        match serde_json::from_slice::<AddPartyInvitePayload>(
+                                            &msg.payload,
+                                        ) {
+                                            Ok(p) => InvitationMeta::AddParty(p),
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    "Add-party invite payload was unparseable: {e}"
                                                 );
                                                 InvitationMeta::None
                                             }
@@ -1983,11 +2032,13 @@ async fn finalize_peer_run(
 async fn run_peer_listener(
     config: NodeConfig,
     db: SqlitePool,
+    auth: Arc<RwLock<Option<WorkflowAuth>>>,
     mut peer_jobs: mpsc::UnboundedReceiver<PeerJob>,
 ) {
     while let Some(job) = peer_jobs.recv().await {
         let config = config.clone();
         let db = db.clone();
+        let auth = auth.clone();
         tokio::spawn(async move {
             tracing::info!(
                 "Starting {:?} peer workflow {} (coordinator run {:?})",
@@ -2021,12 +2072,14 @@ async fn run_peer_listener(
                 }
             };
 
+            let auth_snapshot = auth.read().await.clone();
             let result = workflow::start_peer(
                 config,
                 coordinator,
                 db.clone(),
                 job.instance_name.clone(),
                 job.coordinator_instance.clone(),
+                auth_snapshot,
             )
             .await;
 

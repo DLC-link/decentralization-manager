@@ -191,6 +191,7 @@ pub struct PendingInvitationRow {
     pub participants: Option<String>,
     pub dar_filenames: Option<String>,
     pub kicked_participant: Option<String>,
+    pub new_participant: Option<String>,
     pub new_threshold: Option<i64>,
     pub previous_threshold: Option<i64>,
     pub dec_party_id: Option<String>,
@@ -237,6 +238,7 @@ impl PendingInvitationRow {
             participants: encode_list(&inv.participants, "pending invitation participants")?,
             dar_filenames: encode_list(&inv.dar_filenames, "pending invitation dar_filenames")?,
             kicked_participant: inv.kicked_participant.as_ref().map(|p| p.to_string()),
+            new_participant: inv.new_participant.as_ref().map(|p| p.to_string()),
             new_threshold: inv.new_threshold.map(i64::from),
             previous_threshold: inv.previous_threshold.map(i64::from),
             dec_party_id: inv.dec_party_id.as_ref().map(|p| p.to_string()),
@@ -262,6 +264,11 @@ impl PendingInvitationRow {
             .map(|s| CantonId::parse(&s))
             .transpose()
             .with_context(|| format!("invalid kicked_participant for id {}", self.id))?;
+        let new_participant = self
+            .new_participant
+            .map(|s| CantonId::parse(&s))
+            .transpose()
+            .with_context(|| format!("invalid new_participant for id {}", self.id))?;
         let dec_party_id = self
             .dec_party_id
             .map(|s| CantonId::parse(&s))
@@ -277,6 +284,7 @@ impl PendingInvitationRow {
             participants,
             dar_filenames,
             kicked_participant,
+            new_participant,
             new_threshold: self.new_threshold.map(|v| v as i32),
             previous_threshold: self.previous_threshold.map(|v| v as i32),
             dec_party_id,
@@ -422,6 +430,7 @@ impl WorkflowRunRow {
             previous_threshold: None,
             new_threshold: None,
             kicked_participant: None,
+            added_participant: None,
             package_names: Vec::new(),
             dar_filenames: Vec::new(),
             error: self.error,
@@ -452,6 +461,7 @@ mod tests {
             participants: None,
             dar_filenames: None,
             kicked_participant: None,
+            new_participant: None,
             new_threshold: None,
             previous_threshold: None,
             dec_party_id: None,

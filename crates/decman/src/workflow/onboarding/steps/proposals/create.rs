@@ -326,7 +326,10 @@ pub async fn create_proposals(
 
 /// Decode a payload produced by `generate_keys::encode_keys_payload` —
 /// two consecutive `varint(len)||SigningPublicKey` messages.
-fn decode_keys_payload(payload: &[u8]) -> Result<Vec<SigningPublicKey>> {
+///
+/// `pub(crate)` so the add-party workflow decodes the new member's key
+/// upload with the exact inverse of the encoder it shares with onboarding.
+pub(crate) fn decode_keys_payload(payload: &[u8]) -> Result<Vec<SigningPublicKey>> {
     let mut cursor: &[u8] = payload;
     let mut keys = Vec::with_capacity(2);
     while !cursor.is_empty() {

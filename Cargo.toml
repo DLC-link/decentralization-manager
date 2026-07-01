@@ -77,11 +77,11 @@ wiremock = { version = "0.6" }
 x509-parser = { version = "0.18" }
 zeroize = { version = "1.8", features = ["derive"] }
 
-canton-common = { package = "common", git = "ssh://git@github.com/DLC-link/canton-lib", branch = "main" }
-canton-proto-rs = { git = "ssh://git@github.com/DLC-link/canton-lib", branch = "main" }
-canton-registry = { package = "registry", git = "ssh://git@github.com/DLC-link/canton-lib", branch = "main" }
+canton-common = { package = "common", git = "ssh://git@github.com/DLC-link/canton-lib", rev = "e80d7c1acc012a23665dadeaf7c8761e9ea73ef7" }
+canton-proto-rs = { git = "ssh://git@github.com/DLC-link/canton-lib", rev = "e80d7c1acc012a23665dadeaf7c8761e9ea73ef7" }
+canton-registry = { package = "registry", git = "ssh://git@github.com/DLC-link/canton-lib", rev = "e80d7c1acc012a23665dadeaf7c8761e9ea73ef7" }
 common = { path = "crates/common" }
-keycloak = { git = "ssh://git@github.com/DLC-link/canton-lib", branch = "main" }
+keycloak = { git = "ssh://git@github.com/DLC-link/canton-lib", rev = "e80d7c1acc012a23665dadeaf7c8761e9ea73ef7" }
 
 [profile.release]
 opt-level = 3

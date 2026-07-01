@@ -786,12 +786,13 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                 participants,
                 dar_filenames,
                 kicked_participant,
+                new_participant,
                 new_threshold,
                 previous_threshold,
                 dec_party_id,
                 package_names,
                 workflow_instance
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ",
         )
         .bind(&row.id)
@@ -802,6 +803,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         .bind(&row.participants)
         .bind(&row.dar_filenames)
         .bind(&row.kicked_participant)
+        .bind(&row.new_participant)
         .bind(row.new_threshold)
         .bind(row.previous_threshold)
         .bind(&row.dec_party_id)
@@ -1816,6 +1818,7 @@ mod tests {
             ],
             dar_filenames: Vec::new(),
             kicked_participant: None,
+            new_participant: None,
             new_threshold: None,
             previous_threshold: None,
             dec_party_id: None,
@@ -1832,6 +1835,7 @@ mod tests {
             participants: Vec::new(),
             dar_filenames: Vec::new(),
             kicked_participant: Some(CantonId::parse(&format!("kicked::{TEST_NS}")).unwrap()),
+            new_participant: None,
             new_threshold: Some(2),
             previous_threshold: Some(3),
             dec_party_id: Some(CantonId::parse(&format!("dec::{TEST_NS}")).unwrap()),
@@ -1854,6 +1858,7 @@ mod tests {
             participants: Vec::new(),
             dar_filenames: vec!["app.dar".to_string(), "lib.dar".to_string()],
             kicked_participant: None,
+            new_participant: None,
             new_threshold: None,
             previous_threshold: None,
             dec_party_id: None,
@@ -1913,6 +1918,7 @@ mod tests {
             ],
             dar_filenames: Vec::new(),
             kicked_participant: None,
+            new_participant: None,
             new_threshold: None,
             previous_threshold: None,
             dec_party_id: Some(CantonId::parse(&format!("dec::{TEST_NS}")).unwrap()),
@@ -1986,6 +1992,7 @@ mod tests {
             previous_threshold: None,
             new_threshold: None,
             kicked_participant: None,
+            added_participant: None,
             package_names: Vec::new(),
             dar_filenames: Vec::new(),
             error: None,
@@ -2485,6 +2492,7 @@ mod tests {
             participants: Vec::new(),
             dar_filenames: Vec::new(),
             kicked_participant: None,
+            new_participant: None,
             new_threshold: None,
             previous_threshold: None,
             dec_party_id: None,
@@ -2501,6 +2509,7 @@ mod tests {
             participants: Vec::new(),
             dar_filenames: vec!["app.dar".to_string()],
             kicked_participant: None,
+            new_participant: None,
             new_threshold: None,
             previous_threshold: None,
             dec_party_id: None,

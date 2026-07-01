@@ -101,6 +101,14 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     phases::notification_feed::run(&mut f).await?;
     phases::owner_key_resilience::run(&mut f).await?;
     phases::kick::run(&mut f).await?;
+    // Add-party edge cases must run while P3 is still OUT of the party
+    // (validation 400s/409s, decline cascade, cancel cascade) — both
+    // teardown paths leave P3 un-added for the happy-path phase below.
+    phases::add_party_edge_cases::run(&mut f).await?;
+    // Re-add the member kick just removed: full add flow (P3 key generation,
+    // threshold signatures, topology growth, ACS sync, onboarding-flag
+    // clearing) + the already-member and same-party 409 guards.
+    phases::add_party::run(&mut f).await?;
 
     // ----------------------------------------------------------------------
     // Negative-path / chaos tests. They mutate workflow_runs (cancel/dismiss)

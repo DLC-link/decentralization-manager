@@ -10,7 +10,7 @@
 use std::time::Duration;
 
 use canton_proto_rs::com::digitalasset::canton::topology::admin::v30::{
-    SignTransactionsRequest, SignTransactionsResponse,
+    AuthorizeRequest, AuthorizeResponse, SignTransactionsRequest, SignTransactionsResponse,
     topology_manager_write_service_client::TopologyManagerWriteServiceClient,
 };
 
@@ -69,6 +69,57 @@ pub async fn sign_transactions_with_topology_retry(
                 if attempt >= max_attempts {
                     anyhow::bail!(
                         "{label}: sign_transactions still returning \
+                         TOPOLOGY_NO_APPROPRIATE_SIGNING_KEY_IN_STORE after \
+                         {max_attempts} attempts: {status}",
+                    );
+                }
+                tracing::warn!(
+                    "{label}: TOPOLOGY_NO_APPROPRIATE_SIGNING_KEY_IN_STORE \
+                     on attempt {attempt}/{max_attempts}, retrying in {retry_delay:?}",
+                );
+                tokio::time::sleep(retry_delay).await;
+            }
+            Err(status) => return Err(status.into()),
+        }
+    }
+}
+
+/// `authorize` twin of [`sign_transactions_with_topology_retry`]: proposal
+/// creation hits the same `TOPOLOGY_NO_APPROPRIATE_SIGNING_KEY_IN_STORE`
+/// transient while the local topology store reconciles — observed live on
+/// the add-party flag-clearing proposal, which is authorized right after the
+/// heaviest topology churn in the codebase (owner-set growth + activation +
+/// ACS import on the counterparty).
+pub async fn authorize_with_topology_retry(
+    config: &NodeConfig,
+    request: AuthorizeRequest,
+    label: &str,
+) -> Result<AuthorizeResponse> {
+    let mut topology_client =
+        TopologyManagerWriteServiceClient::connect(config.admin_api_url()).await?;
+
+    let max_attempts = topology_retry_max_attempts();
+    let retry_delay = Duration::from_secs(topology_retry_delay_secs());
+
+    let mut attempt = 0usize;
+    loop {
+        attempt += 1;
+        match topology_client
+            .authorize(tonic::Request::new(request.clone()))
+            .await
+        {
+            Ok(response) => {
+                if attempt > 1 {
+                    tracing::info!(
+                        "{label}: authorize succeeded on attempt {attempt}/{max_attempts}",
+                    );
+                }
+                return Ok(response.into_inner());
+            }
+            Err(status) if is_topology_signing_key_not_ready(&status) => {
+                if attempt >= max_attempts {
+                    anyhow::bail!(
+                        "{label}: authorize still returning \
                          TOPOLOGY_NO_APPROPRIATE_SIGNING_KEY_IN_STORE after \
                          {max_attempts} attempts: {status}",
                     );

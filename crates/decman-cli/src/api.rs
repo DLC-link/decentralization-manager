@@ -832,6 +832,7 @@ impl DecmanClient {
             WorkflowKind::Kick => "/kick/cancel",
             WorkflowKind::Contracts => "/contracts/cancel",
             WorkflowKind::Dars => "/dars/cancel",
+            WorkflowKind::AddParty => "/add-party/cancel",
         };
         self.post(path, None)
     }
