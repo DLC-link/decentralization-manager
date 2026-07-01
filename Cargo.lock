@@ -1404,7 +1404,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
- "tokio-noise",
+ "tokio-noise 0.0.4",
  "tokio-stream",
  "tonic",
  "tonic-prost",
@@ -2213,14 +2213,14 @@ dependencies = [
 
 [[package]]
 name = "hyper-noise"
-version = "0.0.2"
+version = "0.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3182ba21c365eb40cc8d0f4c52a72775e00be23dca824a967b52b692a271a98d"
+checksum = "d559beceeeec56ccc0f7bd2f3ca30d3903ceb6bc07a76634c769058ea578bf2a"
 dependencies = [
  "hyper 0.14.32",
  "log",
  "tokio",
- "tokio-noise",
+ "tokio-noise 0.0.5",
 ]
 
 [[package]]
@@ -4959,6 +4959,17 @@ dependencies = [
 name = "tokio-noise"
 version = "0.0.4"
 source = "git+https://github.com/DLC-link/tokio-noise?rev=5a941dbe07b322dcc068b1a96c5cb11379f21652#5a941dbe07b322dcc068b1a96c5cb11379f21652"
+dependencies = [
+ "log",
+ "snow",
+ "tokio",
+]
+
+[[package]]
+name = "tokio-noise"
+version = "0.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d8a83b874e553ca5c1a0f9340ee67ccb131813d9fe9c074d9a28e6322cf7ff9"
 dependencies = [
  "log",
  "snow",
