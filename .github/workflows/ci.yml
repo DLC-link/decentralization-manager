@@ -31,7 +31,7 @@ jobs:
       RUSTFLAGS: "-C instrument-coverage -D warnings"
       CARGO_INCREMENTAL: "0"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-build-env
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -63,7 +63,7 @@ jobs:
       # cache key in lockstep.
       - name: Cache grcov binary
         id: cache-grcov
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: /usr/local/cargo/bin/grcov
           key: grcov-bin-0.10.7
@@ -103,7 +103,7 @@ jobs:
     runs-on: ubuntu-latest # TEMP stopgap: ubuntu-8-core larger runners unavailable — revert once restored
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-build-env
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -121,7 +121,7 @@ jobs:
           key: release-ci
           cache-on-failure: "true"
       - name: Cache localnet bundle
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: .localnet/
           key: localnet-0.6.7
@@ -135,7 +135,7 @@ jobs:
           DPM_IT_LOG_DIR: ${{ github.workspace }}/it-node-logs
       - name: Upload node logs
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: it-node-logs
           path: it-node-logs/
@@ -148,7 +148,7 @@ jobs:
       checks: write
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -157,7 +157,7 @@ jobs:
     name: Cargo Deny
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       # Authenticate the private `common` git dependency over HTTPS using the
       # workflow GITHUB_TOKEN instead of a bot SSH deploy key. cargo-deny runs
       # on the host (not the action's Docker container) so this git credential
@@ -185,14 +185,14 @@ jobs:
       run:
         working-directory: daml
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       # ~/.dpm holds the dpm CLI and the installed SDK toolchain. Cache
       # both so the install steps below short-circuit on a hit. Key on the
       # SDK version so a bump invalidates the cache automatically; keep
       # the install-script-driven steps so a cache miss still self-heals.
       - name: Cache dpm + DAML SDK
         id: cache-dpm
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ~/.dpm
           key: dpm-3.4.11
