@@ -24,8 +24,8 @@ result = "1220" + hex(hash)   // Multihash SHA-256 prefix
 Key properties:
 - The hash is **immutable** -- it is computed once from the initial set of owners and never changes
 - Owners are sorted lexicographically before hashing for determinism
-- The threshold (minimum signers required) is `ceil(n/2)` by default; for even `n` this is a bare majority
-- Adding or removing members updates the `DecentralizedNamespaceDefinition` mapping but does not change the namespace hash itself
+- The threshold (minimum signers required) defaults to `ceil(n/2)` (a bare majority for even `n`), is configurable when the party is created, and can be changed later via the change-threshold workflow
+- Adding or removing members, or changing the threshold, updates the `DecentralizedNamespaceDefinition` mapping but does not change the namespace hash itself
 
 ### PartyToParticipant (P2P)
 
@@ -37,11 +37,11 @@ The PartyToParticipant topology mapping connects a decentralized party to its ho
 
 ### Threshold Model
 
-The system uses a majority threshold for both topology changes and governance actions:
+The system defaults to a majority threshold for both topology changes and governance actions:
 
 | Operation | Threshold |
 |-----------|-----------|
-| Topology changes (DNS/P2P) | `ceil(n/2)` of namespace owners must sign (bare majority for even `n`) |
+| Topology changes (DNS/P2P) | `ceil(n/2)` of namespace owners must sign by default (bare majority for even `n`); set at creation and adjustable via the change-threshold workflow |
 | Governance actions | Configurable per `GovernanceRules` or `VaultGovernanceRules` contract |
 
 ### Key Types

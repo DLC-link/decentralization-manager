@@ -253,8 +253,12 @@ curl http://localhost:8081/party-config/decparty::1220abc...
 
 1. Configure all participant nodes with each other's connection details via the `/network-config` API
 2. Start all participant servers
-3. On the coordinator's UI, click **Create Party** and enter a party ID prefix
-4. The coordinator invites peers and orchestrates:
+3. On the coordinator's UI, click **Create Party**, enter a party ID prefix, and
+   select the peers to invite
+4. Optionally adjust the **Threshold** — how many of the party's owners must sign
+   topology changes. It defaults to a majority (`ceil(owners / 2)`, shown and
+   editable in the dialog)
+5. The coordinator invites peers and orchestrates:
    - Cryptographic key generation (namespace + DAML signing keys)
    - Topology proposal creation (DNS and P2P mappings)
    - Multi-party signing
@@ -281,6 +285,23 @@ curl http://localhost:8081/party-config/decparty::1220abc...
    - Multi-party signing by remaining members
    - Proposal submission
 
+### Adding a Participant (Add Party)
+
+1. From a party card, click **Add member** and choose the participant to add
+2. The coordinator orchestrates:
+   - Key generation on the new member
+   - Updated topology proposals (added owner + P2P mapping) signed by all members
+   - ACS replication to the new member and clearing of its onboarding flag
+
+### Changing the Threshold (Change Threshold)
+
+1. From a party card, click **Change Threshold** and enter the new value
+2. The coordinator orchestrates:
+   - Export current namespace state
+   - Re-issue the DNS and P2P mappings with the new threshold (same members)
+   - Multi-party signing by a quorum of the current owners
+   - Proposal submission
+
 ## API Endpoints
 
 The table below is a curated subset. A complete, interactive API reference is available via the **Swagger UI at `/swagger-ui/`** (OpenAPI document at `/api-docs/openapi.json`) — but note these endpoints are only mounted in development/test builds (`--features test-mode`); the shipped release image does not expose them.
@@ -305,12 +326,18 @@ The table below is a curated subset. A complete, interactive API reference is av
 | `/contracts/status` | GET | Returns contracts progress |
 | `/kick` | POST | Starts kick workflow |
 | `/kick/status` | GET | Returns kick progress |
+| `/add-party` | POST | Starts add-party workflow |
+| `/add-party/status` | GET | Returns add-party progress |
+| `/change-threshold` | POST | Starts change-threshold workflow |
+| `/change-threshold/status` | GET | Returns change-threshold progress |
 | `/workflows` | GET | Lists workflow instances and their lifecycle state |
 | `/workflows/{instance_name}/dismiss` | POST | Dismisses a workflow instance |
 | `/workflows/{instance_name}/retry` | POST | Retries a failed workflow instance |
 | `/onboarding/cancel` | POST | Cancels the onboarding workflow |
 | `/contracts/cancel` | POST | Cancels the contracts workflow |
 | `/kick/cancel` | POST | Cancels the kick workflow |
+| `/add-party/cancel` | POST | Cancels the add-party workflow |
+| `/change-threshold/cancel` | POST | Cancels the change-threshold workflow |
 | `/dars/cancel` | POST | Cancels the DARs distribution workflow |
 | `/invitations` | GET | Returns pending workflow invitations |
 | `/invitations/accept` | POST | Accepts a pending invitation |

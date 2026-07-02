@@ -105,6 +105,18 @@ pub fn read_first_message_from_bytes<M: Message + Default>(data: &[u8]) -> Resul
     Ok(message)
 }
 
+/// Encode a single protobuf message as `varint(len)||proto` — the same
+/// length-prefixed framing [`write_message_to_file`] writes to disk and
+/// [`read_first_message_from_bytes`] reads back. Workflows share this to build
+/// artefact / on-wire bytes without re-implementing the framing.
+pub fn encode_length_prefixed_message<M: Message>(message: &M) -> Vec<u8> {
+    let encoded = message.encode_to_vec();
+    let mut buffer = BytesMut::new();
+    prost::encoding::encode_varint(encoded.len() as u64, &mut buffer);
+    buffer.put_slice(&encoded);
+    buffer.to_vec()
+}
+
 /// Write multiple protobuf messages to a file
 ///
 /// Each message is prefixed with a varint indicating its length, matching Canton's format.

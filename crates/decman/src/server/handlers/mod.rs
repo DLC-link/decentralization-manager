@@ -30,8 +30,9 @@ pub use parties::{
 };
 pub use party_config::{discover_member_party, get_party_config, save_party_config};
 pub use workflows::{
-    cancel_add_party, cancel_contracts, cancel_dars, cancel_kick, cancel_onboarding,
-    cancel_workflow_instance, dismiss_workflow, get_add_party_status, get_contracts_status,
-    get_dars_status, get_kick_status, get_onboarding_status, list_workflows, retry_workflow,
-    start_add_party, start_contracts, start_dars, start_kick, start_onboarding, upload_dars_local,
+    cancel_add_party, cancel_change_threshold, cancel_contracts, cancel_dars, cancel_kick,
+    cancel_onboarding, cancel_workflow_instance, dismiss_workflow, get_add_party_status,
+    get_change_threshold_status, get_contracts_status, get_dars_status, get_kick_status,
+    get_onboarding_status, list_workflows, retry_workflow, start_add_party, start_change_threshold,
+    start_contracts, start_dars, start_kick, start_onboarding, upload_dars_local,
 };

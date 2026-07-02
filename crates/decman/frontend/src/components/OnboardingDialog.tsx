@@ -66,7 +66,23 @@ export const OnboardingDialog = ({
     new Set(),
   );
   const [loadingPeers, setLoadingPeers] = useState(false);
+  // Initial signing threshold. Defaults (visibly) to the same majority
+  // algorithm the server would use — `ceil(owners / 2)` — recomputed as the
+  // selected-peer set changes, until the operator edits the field.
+  const [threshold, setThreshold] = useState(1);
+  const [thresholdTouched, setThresholdTouched] = useState(false);
   const { showSnackbar } = useSnackbar();
+
+  // Owners = the selected peers plus this node (always an owner of a party it
+  // creates). The default threshold is the majority of that owner count.
+  const ownerCount = selectedPeerIds.size + 1;
+  const defaultThreshold = Math.max(1, Math.ceil(ownerCount / 2));
+
+  // Keep the field on the computed default until the operator touches it, so
+  // it always shows a sensible value as peers are checked/unchecked.
+  useEffect(() => {
+    if (!thresholdTouched) setThreshold(defaultThreshold);
+  }, [defaultThreshold, thresholdTouched]);
 
   // Fetch peers when dialog opens
   useEffect(() => {
@@ -114,6 +130,7 @@ export const OnboardingDialog = ({
       setLoading(false);
       setPartyIdPrefix("");
       setSelectedPeerIds(new Set());
+      setThresholdTouched(false);
     }
   }, [open]);
 
@@ -188,6 +205,11 @@ export const OnboardingDialog = ({
       return;
     }
 
+    if (threshold < 1 || threshold > ownerCount) {
+      setError(`Threshold must be between 1 and ${ownerCount}`);
+      return;
+    }
+
     setLoading(true);
     setError(null);
     setMeshErrors(null);
@@ -199,6 +221,7 @@ export const OnboardingDialog = ({
         body: JSON.stringify({
           party_id_prefix: partyIdPrefix.trim(),
           peer_ids: Array.from(selectedPeerIds),
+          threshold,
         }),
       });
 
@@ -366,6 +389,39 @@ export const OnboardingDialog = ({
             )}
           </Box>
 
+          <TextField
+            label="Threshold"
+            type="number"
+            value={threshold}
+            onChange={(e) => {
+              setThresholdTouched(true);
+              setThreshold(Math.max(1, parseInt(e.target.value) || 1));
+            }}
+            fullWidth
+            disabled={loading || status?.status === "inprogress"}
+            error={threshold < 1 || threshold > ownerCount}
+            slotProps={{
+              htmlInput: { min: 1, max: ownerCount },
+              input: {
+                endAdornment: fieldHelpAdornment(
+                  "The decentralized-namespace threshold: how many of the party's owners must sign topology changes (it's also set as the party-to-participant confirmation threshold). Owners are you plus the peers you invite. Defaults to a majority; edit to override. Separate from the governance threshold.",
+                  "Help for Threshold",
+                ),
+              },
+            }}
+            helperText={
+              threshold > ownerCount
+                ? `Must be at most ${ownerCount} (you + ${selectedPeerIds.size} peer${
+                    selectedPeerIds.size === 1 ? "" : "s"
+                  })`
+                : `Of ${ownerCount} owner${ownerCount === 1 ? "" : "s"} (you + ${
+                    selectedPeerIds.size
+                  } peer${
+                    selectedPeerIds.size === 1 ? "" : "s"
+                  }). Default: majority (${defaultThreshold}).`
+            }
+          />
+
           {error && !meshErrors && (
             <Alert severity="error" onClose={() => setError(null)}>
               {error}
@@ -488,7 +544,9 @@ export const OnboardingDialog = ({
               loading ||
               !partyIdPrefix.trim() ||
               !!partyPrefixError(partyIdPrefix.trim()) ||
-              selectedPeerIds.size === 0
+              selectedPeerIds.size === 0 ||
+              threshold < 1 ||
+              threshold > ownerCount
             }
           >
             {loading ? <CircularProgress size={20} /> : "Start Onboarding"}

@@ -16,9 +16,10 @@ use tokio::sync::RwLock;
 pub use common::api::{
     AddPartyInvitePayload, AddPartyRequest, AuditLogResponse, AuthStatus, AuthStatusResponse,
     AuthTestResponse, AuthTestResult, CancelConfirmationRequest, ChainAuditEntry,
-    ChainAuditResponse, Claim, ContractQueryResponse, ContractWithBlob, ContractsInvitePayload,
-    ContractsRequest, CredentialOfferInfo, CredentialOffersResponse, DarsInvitePayload,
-    DarsRequest, DecentralizedPartiesResponse, DeclineInvitationPayload, DisclosedContractInput,
+    ChainAuditResponse, ChangeThresholdInvitePayload, ChangeThresholdRequest, Claim,
+    ContractQueryResponse, ContractWithBlob, ContractsInvitePayload, ContractsRequest,
+    CredentialOfferInfo, CredentialOffersResponse, DarsInvitePayload, DarsRequest,
+    DecentralizedPartiesResponse, DeclineInvitationPayload, DisclosedContractInput,
     DiscoverMemberPartyRequest, DiscoverMemberPartyResponse, ErrorResponse,
     ExpireConfirmationRequest, GovernanceState, GovernanceStateResponse, GovernanceType,
     GrantRightsRequest, GrantRightsResponse, InstrumentAllowance, InstrumentId,

@@ -261,6 +261,7 @@ pub enum WorkflowKind {
     Contracts,
     Dars,
     AddParty,
+    ChangeThreshold,
 }
 
 impl WorkflowKind {
@@ -271,6 +272,7 @@ impl WorkflowKind {
             Self::Contracts => "Contracts",
             Self::Dars => "Dars",
             Self::AddParty => "AddParty",
+            Self::ChangeThreshold => "ChangeThreshold",
         }
     }
 }
@@ -290,6 +292,7 @@ impl std::str::FromStr for WorkflowKind {
             "Contracts" => Ok(Self::Contracts),
             "Dars" => Ok(Self::Dars),
             "AddParty" => Ok(Self::AddParty),
+            "ChangeThreshold" => Ok(Self::ChangeThreshold),
             other => Err(anyhow::anyhow!("unknown workflow kind: {other}")),
         }
     }
@@ -303,6 +306,7 @@ impl From<InvitationType> for WorkflowKind {
             InvitationType::Contracts => Self::Contracts,
             InvitationType::Dars => Self::Dars,
             InvitationType::AddParty => Self::AddParty,
+            InvitationType::ChangeThreshold => Self::ChangeThreshold,
         }
     }
 }
@@ -428,6 +432,7 @@ pub enum InvitationType {
     Contracts,
     Dars,
     AddParty,
+    ChangeThreshold,
 }
 
 impl InvitationType {
@@ -439,6 +444,7 @@ impl InvitationType {
             Self::Contracts => "Contracts",
             Self::Dars => "Dars",
             Self::AddParty => "AddParty",
+            Self::ChangeThreshold => "ChangeThreshold",
         }
     }
 }
@@ -459,6 +465,7 @@ impl std::str::FromStr for InvitationType {
             "Contracts" => Ok(Self::Contracts),
             "Dars" => Ok(Self::Dars),
             "AddParty" => Ok(Self::AddParty),
+            "ChangeThreshold" => Ok(Self::ChangeThreshold),
             other => Err(anyhow::anyhow!("unknown invitation type: {other}")),
         }
     }

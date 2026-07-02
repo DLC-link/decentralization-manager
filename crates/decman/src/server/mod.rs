@@ -167,6 +167,7 @@ enum InvitationMeta {
     Kick(KickInvitePayload),
     Contracts(ContractsInvitePayload),
     AddParty(AddPartyInvitePayload),
+    ChangeThreshold(ChangeThresholdInvitePayload),
 }
 
 /// On boot, re-spawn any InProgress workflow runs that were interrupted by the
@@ -256,6 +257,7 @@ pub(crate) async fn respawn_coordinator(
     let mut contracts_config = None;
     let mut dars_config = None;
     let mut add_party_config = None;
+    let mut change_threshold_config = None;
     let parsed = match kind {
         WorkflowKind::Onboarding => {
             serde_json::from_str::<workflow::OnboardingConfig>(&run.config_json)
@@ -272,6 +274,10 @@ pub(crate) async fn respawn_coordinator(
         WorkflowKind::AddParty => {
             serde_json::from_str::<workflow::AddPartyConfig>(&run.config_json)
                 .map(|c| add_party_config = Some(c))
+        }
+        WorkflowKind::ChangeThreshold => {
+            serde_json::from_str::<workflow::ChangeThresholdConfig>(&run.config_json)
+                .map(|c| change_threshold_config = Some(c))
         }
     };
     if let Err(e) = parsed {
@@ -300,6 +306,7 @@ pub(crate) async fn respawn_coordinator(
         contracts_config,
         dars_config,
         add_party_config,
+        change_threshold_config,
         auth_snapshot,
         last_seen,
     );
@@ -322,6 +329,7 @@ fn spawn_coordinator_run(
     contracts_config: Option<workflow::ContractsConfig>,
     dars_config: Option<workflow::DarsConfig>,
     add_party_config: Option<workflow::AddPartyConfig>,
+    change_threshold_config: Option<workflow::ChangeThresholdConfig>,
     auth: Option<WorkflowAuth>,
     last_seen: LastSeen,
 ) -> tokio::task::JoinHandle<()> {
@@ -331,6 +339,7 @@ fn spawn_coordinator_run(
         WorkflowKind::Contracts => WorkflowType::Contracts,
         WorkflowKind::Dars => WorkflowType::Dars,
         WorkflowKind::AddParty => WorkflowType::AddParty,
+        WorkflowKind::ChangeThreshold => WorkflowType::ChangeThreshold,
     };
     tokio::spawn(async move {
         let instance_name = instance.instance_name.clone();
@@ -346,6 +355,7 @@ fn spawn_coordinator_run(
             contracts_config,
             dars_config,
             add_party_config,
+            change_threshold_config,
             auth,
             last_seen,
             instance.clone(),
@@ -466,6 +476,7 @@ impl WorkflowTriggers {
             InvitationMeta::Onboarding(p) => {
                 prefix = Some(p.prefix);
                 participants = p.participants;
+                new_threshold = p.threshold;
                 workflow_instance = p.workflow_instance;
             }
             InvitationMeta::Dars(p) => {
@@ -489,6 +500,13 @@ impl WorkflowTriggers {
             }
             InvitationMeta::AddParty(p) => {
                 new_participant = Some(p.new_participant);
+                new_threshold = Some(p.new_threshold);
+                previous_threshold = Some(p.previous_threshold);
+                dec_party_id = Some(p.dec_party_id);
+                participants = p.participants;
+                workflow_instance = p.workflow_instance;
+            }
+            InvitationMeta::ChangeThreshold(p) => {
                 new_threshold = Some(p.new_threshold);
                 previous_threshold = Some(p.previous_threshold);
                 dec_party_id = Some(p.dec_party_id);
@@ -1062,6 +1080,9 @@ pub async fn start_server(
             .service(handlers::start_add_party)
             .service(handlers::get_add_party_status)
             .service(handlers::cancel_add_party)
+            .service(handlers::start_change_threshold)
+            .service(handlers::get_change_threshold_status)
+            .service(handlers::cancel_change_threshold)
             .service(handlers::start_onboarding)
             .service(handlers::get_onboarding_status)
             .service(handlers::cancel_onboarding)
@@ -1680,6 +1701,7 @@ async fn handle_incoming_connection(
                         | MessageType::AddPartySignatures
                         | MessageType::AddPartyClearSignatures
                         | MessageType::AddPartyClearProposal
+                        | MessageType::ChangeThresholdSignatures
                         | MessageType::StatusUpdate
                         | MessageType::DeclineInvitation => {
                             // Route workflow-command traffic to the coordinator
@@ -1722,7 +1744,8 @@ async fn handle_incoming_connection(
                         | MessageType::InviteKick
                         | MessageType::InviteContracts
                         | MessageType::InviteDars
-                        | MessageType::InviteAddParty => {
+                        | MessageType::InviteAddParty
+                        | MessageType::InviteChangeThreshold => {
                             // Invites are accepted unconditionally: workflows are
                             // multi-instance now, so a node already coordinating or
                             // participating in runs can take part in more
@@ -1736,6 +1759,9 @@ async fn handle_incoming_connection(
                                 MessageType::InviteContracts => InvitationType::Contracts,
                                 MessageType::InviteDars => InvitationType::Dars,
                                 MessageType::InviteAddParty => InvitationType::AddParty,
+                                MessageType::InviteChangeThreshold => {
+                                    InvitationType::ChangeThreshold
+                                }
                                 _ => unreachable!(),
                             };
                             tracing::info!(
@@ -1805,6 +1831,19 @@ async fn handle_incoming_connection(
                                             Err(e) => {
                                                 tracing::warn!(
                                                     "Add-party invite payload was unparseable: {e}"
+                                                );
+                                                InvitationMeta::None
+                                            }
+                                        }
+                                    }
+                                    InvitationType::ChangeThreshold => {
+                                        match serde_json::from_slice::<ChangeThresholdInvitePayload>(
+                                            &msg.payload,
+                                        ) {
+                                            Ok(p) => InvitationMeta::ChangeThreshold(p),
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    "Change-threshold invite payload was unparseable: {e}"
                                                 );
                                                 InvitationMeta::None
                                             }

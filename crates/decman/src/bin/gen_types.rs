@@ -59,6 +59,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         CancelConfirmationRequest,
         ChainAuditEntry,
         ChainAuditResponse,
+        ChangeThresholdInvitePayload,
+        ChangeThresholdRequest,
         Claim,
         ConnectionStatus,
         ContractDefinition,
