@@ -107,6 +107,8 @@ docker compose up
 
 This starts three participant instances on ports 8081, 8082, and 8083.
 
+The compose stack uses bridge networking and reaches Canton through `host.docker.internal`, so it runs the same on Docker Desktop, OrbStack, and Linux. Each participant expects its Canton Ledger/Admin APIs reachable on the host (the standard layout forwards them to `localhost:5001/5002`, `5011/5012`, `5021/5022` — e.g. via `just port-forward`). See the header of [`development/docker-compose.yml`](development/docker-compose.yml) for the full prerequisites.
+
 ## Configuration
 
 All node configuration is done via environment variables (prefixed `DECPM_*`) or CLI arguments. The `--dir` (`-d`) flag points to a directory for persistent data. If a `.env` file exists in that directory, it is loaded automatically before parsing CLI arguments.
@@ -151,6 +153,10 @@ The database file path can be overridden with the `--db` CLI flag.
 | `DECPM_AUTH0_DOMAIN` | Auth0 tenant domain for frontend auth (mutually exclusive with `DECPM_KEYCLOAK_*`) | _(none)_ |
 | `DECPM_AUTH0_CLIENT_ID` | Auth0 SPA client ID for frontend auth | _(none)_ |
 | `DECPM_AUTH0_AUDIENCE` | Auth0 API audience the SPA's access tokens target | _(none)_ |
+| `DECPM_INSECURE` | Run without an IdP: accept any inbound token and present an unsafe HS256 token to Canton (CLI flag `--insecure`). **Never use in production.** See [Insecure mode](#insecure-mode-local-development-without-an-idp) | `false` |
+| `DECPM_CANTON_HMAC_SECRET` | HS256 secret decman signs the unsafe Canton token with, in insecure mode. Must match Canton's unsafe auth-service secret | `unsafe` |
+| `DECPM_CANTON_HMAC_AUDIENCE` | `aud` claim for the unsafe Canton token, in insecure mode. Must match Canton's `target-audience` | `https://canton.network.global` |
+| `DECPM_CANTON_HMAC_SUBJECT` | `sub` claim / ledger user for the unsafe Canton token, in insecure mode | `ledger-api-user` |
 | `DECPM_TIMEOUT_HANDSHAKE` | Noise handshake timeout in seconds | `30` |
 | `DECPM_TIMEOUT_MESSAGE` | Noise message timeout in seconds | `120` |
 | `DECPM_TIMEOUT_RETRY_ATTEMPTS` | Connection retry attempts | `3` |
@@ -160,6 +166,24 @@ The database file path can be overridden with the `--db` CLI flag.
 | `DECPM_NOISE_RETRY_BACKOFF_MS` | Backoff between attempts of the bounded peer-Noise retry wrapper, in milliseconds | `250` |
 
 All environment variables can also be passed as CLI arguments (e.g., `--canton-admin-host`).
+
+### Insecure mode (local development without an IdP)
+
+For local development against a Canton configured with **unsafe (shared-secret) auth**, you can run without setting up Keycloak or Auth0 at all. Start the node with `--insecure` (or `DECPM_INSECURE=true`) and it will:
+
+- accept **any** inbound token, so the admin UI needs no login, and
+- mint an unsafe **HS256** token for Canton instead of fetching one from an IdP.
+
+> [!WARNING]
+> Insecure mode disables authentication entirely. It is for local development only — **never enable `--insecure` / `DECPM_INSECURE` in a shared or production deployment.** The node logs a warning at startup whenever it is on.
+
+The token is signed and stamped from the `DECPM_CANTON_HMAC_*` variables above; point Canton's unsafe auth service at the same secret and audience so it accepts the token. With the defaults (`unsafe` / `https://canton.network.global`), `--insecure` alone is enough:
+
+```bash
+dec-party-manager -d ./development/participant-1 serve --insecure
+```
+
+This replaces the older `--features test-mode` build — no special build is required; the flag is honored by the standard release binary.
 
 ### Example `.env` File
 
@@ -283,7 +307,7 @@ curl http://localhost:8081/party-config/decparty::1220abc...
 
 ## API Endpoints
 
-The table below is a curated subset. A complete, interactive API reference is available via the **Swagger UI at `/swagger-ui/`** (OpenAPI document at `/api-docs/openapi.json`) — but note these endpoints are only mounted in development/test builds (`--features test-mode`); the shipped release image does not expose them.
+The table below is a curated subset. A complete, interactive API reference is available via the **Swagger UI at `/swagger-ui/`** (OpenAPI document at `/api-docs/openapi.json`) — but note this is only mounted when the node runs in [insecure mode](#insecure-mode-local-development-without-an-idp) (`--insecure`); a normal (secure) deployment does not expose it.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
@@ -525,7 +549,7 @@ instances, same `wait_for_server` and `configure_peers` flow), except:
 - Canton gRPC admin (5002/5012/5022) and ledger (5001/5011/5021) ports are
   tunneled to localhost via `kubectl port-forward` (managed by
   `devnet.env.sh`'s `start_canton_tunnels`).
-- DPM auth uses real Keycloak (the `JwtValidator`), not the test-mode
+- DPM auth uses real Keycloak (the `JwtValidator`), not the insecure-mode
   `MockValidator` localnet uses. The test runner mints its own bearer token
   via password grant; per-party workflows use M2M `client_credentials`.
 - Member parties (`P{N}_MEMBER_PARTY_ID`) are pre-provisioned, not allocated
