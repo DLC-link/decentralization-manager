@@ -1,63 +1,60 @@
 services:
   participant-1:
     platform: linux/amd64
-    build:
-      context: ..
-      dockerfile: Dockerfile
-      ssh:
-        - default
+    image: public.ecr.aws/dlc-link/canton-decparty-manager:1.0.1
     volumes:
       - ./remote/participant-1/data:/app/data
-    network_mode: host
     ports:
       - "8081:8081"
-      - "9001:9001"
     env_file:
       - ./remote/participant-1/.env
     environment:
       DECPM_DIR: /app
       DECPM_HOST: 0.0.0.0
       DECPM_PORT: "8081"
+      DECPM_CANTON_ADMIN_HOST: host.docker.internal
+      DECPM_CANTON_LEDGER_HOST: host.docker.internal
+      DECPM_PUBLIC_ADDRESS: participant-1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     entrypoint: ["dec-party-manager", "serve"]
 
   participant-2:
     platform: linux/amd64
-    build:
-      context: ..
-      dockerfile: Dockerfile
-      ssh:
-        - default
+    image: public.ecr.aws/dlc-link/canton-decparty-manager:1.0.1
     volumes:
       - ./remote/participant-2/data:/app/data
-    network_mode: host
     ports:
       - "8082:8082"
-      - "9002:9002"
     env_file:
       - ./remote/participant-2/.env
     environment:
       DECPM_DIR: /app
       DECPM_HOST: 0.0.0.0
       DECPM_PORT: "8082"
+      DECPM_CANTON_ADMIN_HOST: host.docker.internal
+      DECPM_CANTON_LEDGER_HOST: host.docker.internal
+      DECPM_PUBLIC_ADDRESS: participant-2
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     entrypoint: ["dec-party-manager", "serve"]
 
   participant-3:
     platform: linux/amd64
-    build:
-      context: ..
-      dockerfile: Dockerfile
-      ssh:
-        - default
+    image: public.ecr.aws/dlc-link/canton-decparty-manager:1.0.1
     volumes:
       - ./remote/participant-3/data:/app/data
-    network_mode: host
     ports:
       - "8083:8083"
-      - "9003:9003"
     env_file:
       - ./remote/participant-3/.env
     environment:
       DECPM_DIR: /app
       DECPM_HOST: 0.0.0.0
       DECPM_PORT: "8083"
+      DECPM_CANTON_ADMIN_HOST: host.docker.internal
+      DECPM_CANTON_LEDGER_HOST: host.docker.internal
+      DECPM_PUBLIC_ADDRESS: participant-3
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     entrypoint: ["dec-party-manager", "serve"]
