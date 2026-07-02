@@ -1,7 +1,43 @@
+# Local 3-node dec-party-manager dev stack.
+#
+# Builds the image from source (../Dockerfile). The build fetches private
+# DLC-link dependencies (canton-lib) over SSH via `--mount=type=ssh`, so you
+# need an ssh-agent running with a key that can read github.com/DLC-link/*:
+#   eval "$(ssh-agent -s)" && ssh-add ~/.ssh/<your-key>
+# NOTE: this build is currently broken with a GitHub SSH auth error — see
+# https://github.com/DLC-link/dec-party-manager/issues/221. Until it is fixed
+# you can run a prebuilt image instead by replacing each `build:` block with
+# `image: public.ecr.aws/dlc-link/canton-decparty-manager:<tag>`.
+#
+# Uses bridge networking (the Compose default) so it runs the same on Docker
+# Desktop for Mac, OrbStack, and Linux. Do NOT switch these to
+# `network_mode: host`: on Docker Desktop for Mac a host-networked container
+# runs inside Docker Desktop's Linux VM, so the published UI ports are dropped
+# and localhost:808x serves nothing.
+#
+# Prerequisites:
+#   1. Copy each remote/participant-N/.env.example to .env and fill it in.
+#   2. Run `just port-forward` on the host so the Canton Ledger/Admin APIs are
+#      reachable at localhost:5001/5002 (p1), 5011/5012 (p2), 5021/5022 (p3).
+#      The containers reach those forwards via host.docker.internal (below).
+#
+# Per-service overrides vs the .env files:
+#   - DECPM_CANTON_*_HOST -> host.docker.internal: in bridge networking a
+#     container's localhost is itself, so the .env's `localhost` can't reach the
+#     host's port-forwards. host.docker.internal points at the host. (The port
+#     numbers still come from each .env.)
+#   - DECPM_PUBLIC_ADDRESS -> the compose service name: the address a node
+#     advertises so its peers can dial its Noise listener over the shared
+#     bridge network.
+
 services:
   participant-1:
     platform: linux/amd64
-    image: public.ecr.aws/dlc-link/canton-decparty-manager:1.0.1
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      ssh:
+        - default
     volumes:
       - ./remote/participant-1/data:/app/data
     ports:
@@ -21,7 +57,11 @@ services:
 
   participant-2:
     platform: linux/amd64
-    image: public.ecr.aws/dlc-link/canton-decparty-manager:1.0.1
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      ssh:
+        - default
     volumes:
       - ./remote/participant-2/data:/app/data
     ports:
@@ -41,7 +81,11 @@ services:
 
   participant-3:
     platform: linux/amd64
-    image: public.ecr.aws/dlc-link/canton-decparty-manager:1.0.1
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      ssh:
+        - default
     volumes:
       - ./remote/participant-3/data:/app/data
     ports:
