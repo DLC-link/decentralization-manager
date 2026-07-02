@@ -82,6 +82,10 @@ async fn main() -> Result {
             noise_retry_max_attempts,
             noise_retry_backoff_ms,
             db_encryption_key,
+            insecure,
+            canton_hmac_secret,
+            canton_hmac_audience,
+            canton_hmac_subject,
             ..
         } => {
             if let Some(key) = db_encryption_key {
@@ -176,6 +180,17 @@ async fn main() -> Result {
             }
             if let Some(v) = noise_retry_backoff_ms {
                 config.noise_retry.backoff_ms = *v;
+            }
+
+            config.insecure = *insecure;
+            if let Some(v) = canton_hmac_secret {
+                config.insecure_auth.secret = v.clone();
+            }
+            if let Some(v) = canton_hmac_audience {
+                config.insecure_auth.audience = v.clone();
+            }
+            if let Some(v) = canton_hmac_subject {
+                config.insecure_auth.subject = v.clone();
             }
         }
     }

@@ -17,9 +17,7 @@ use tokio::sync::RwLock;
 
 pub use mock::{MockAuthRegistry, MockTokenManager};
 pub use validator::{Principal, TokenValidator, ValidationError};
-#[cfg(any(test, feature = "test-mode"))]
-pub use validators::MockValidator;
-pub use validators::{JwtValidator, OidcIntrospectionValidator};
+pub use validators::{JwtValidator, MockValidator, OidcIntrospectionValidator};
 
 use crate::{
     canton_id::CantonId,
