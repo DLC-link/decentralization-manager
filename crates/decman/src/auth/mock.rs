@@ -1,20 +1,88 @@
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
+use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+use serde::Serialize;
 use tokio::sync::RwLock;
 
-use crate::{canton_id::CantonId, config::PartyCredentials};
+use crate::{
+    canton_id::CantonId,
+    config::{InsecureAuthConfig, PartyCredentials},
+};
 
-/// Static mock token for test mode (from legacy config)
+/// Static mock token. Kept as the fallback if runtime minting ever fails, and
+/// as the reference the inbound `MockValidator` recognises. Equivalent to the
+/// default-configured runtime token (HS256, secret `unsafe`, aud
+/// `https://canton.network.global`, sub `ledger-api-user`).
 pub const MOCK_TOKEN: &str = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJodHRwczovL2NhbnRvbi5uZXR3b3JrLmdsb2JhbCIsImlhdCI6MTc2Mzc0ODcwMiwic3ViIjoibGVkZ2VyLWFwaS11c2VyIn0.vpkfH4SoM9AZqbE38W4hrvl3xxy69jYs4u8gveskw9k";
 
-/// Static mock user ID for test mode (from legacy config)
+/// Default subject/user id, used by the inbound `MockValidator` and as the
+/// fallback if minting fails.
 pub const MOCK_USER_ID: &str = "ledger-api-user";
 
-/// Default placeholder member party ID for test mode
+/// Default placeholder member party ID for insecure mode
 const MOCK_MEMBER_PARTY_ID: &str =
     "mock-member::1220aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01";
 
-/// Mock token manager for test mode
+/// Claims for the unsafe HS256 Canton token: audience, subject, and issued-at,
+/// with no expiry (Canton's unsafe auth does not require one).
+#[derive(Serialize)]
+struct UnsafeClaims<'a> {
+    aud: &'a str,
+    sub: &'a str,
+    iat: u64,
+}
+
+/// Mint an HS256 Canton token from the given secret/audience/subject.
+///
+/// # Errors
+///
+/// Returns a `jsonwebtoken` error if token encoding fails.
+fn mint_unsafe_token(
+    secret: &str,
+    audience: &str,
+    subject: &str,
+) -> Result<String, jsonwebtoken::errors::Error> {
+    let iat = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let claims = UnsafeClaims {
+        aud: audience,
+        sub: subject,
+        iat,
+    };
+    encode(
+        &Header::new(Algorithm::HS256),
+        &claims,
+        &EncodingKey::from_secret(secret.as_bytes()),
+    )
+}
+
+/// Mint the unsafe token and resolve its subject, from the configured
+/// secret/audience/subject. Falls back to the static [`MOCK_TOKEN`] if encoding
+/// fails. Never logs the secret.
+fn mint_credentials(cfg: &InsecureAuthConfig) -> (String, String) {
+    match mint_unsafe_token(&cfg.secret, &cfg.audience, &cfg.subject) {
+        Ok(token) => {
+            tracing::info!(
+                "Minted unsafe Canton HMAC token (aud={}, sub={})",
+                cfg.audience,
+                cfg.subject
+            );
+            (token, cfg.subject.clone())
+        }
+        Err(e) => {
+            tracing::error!("Failed to mint unsafe Canton HMAC token: {e}; using static fallback");
+            (MOCK_TOKEN.to_string(), MOCK_USER_ID.to_string())
+        }
+    }
+}
+
+/// Mock token manager for insecure mode. Holds a token minted once by the
+/// [`MockAuthRegistry`].
 pub struct MockTokenManager {
     user_id: String,
     token: String,
@@ -22,20 +90,12 @@ pub struct MockTokenManager {
 }
 
 impl MockTokenManager {
-    /// Create a new MockTokenManager with a specific member party ID
-    pub fn with_member_party_id(member_party_id: CantonId) -> Self {
+    fn new(token: String, user_id: String, member_party_id: CantonId) -> Self {
         Self {
-            user_id: MOCK_USER_ID.to_string(),
-            token: MOCK_TOKEN.to_string(),
+            user_id,
+            token,
             member_party_id,
         }
-    }
-
-    /// Create a new MockTokenManager with the default placeholder member party ID
-    pub fn new() -> Self {
-        let member_party_id =
-            CantonId::parse(MOCK_MEMBER_PARTY_ID).expect("hardcoded mock member party ID");
-        Self::with_member_party_id(member_party_id)
     }
 
     /// Get the user ID
@@ -54,45 +114,63 @@ impl MockTokenManager {
     }
 }
 
-impl Default for MockTokenManager {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Mock registry for test mode — looks up member_party_id from party credentials,
-/// falling back to a default placeholder when no credentials are configured.
+/// Mock registry for insecure mode — mints the unsafe token once, then hands
+/// out managers that carry each party's configured member_party_id (falling
+/// back to a placeholder when no credentials are configured).
 pub struct MockAuthRegistry {
     party_credentials: Arc<RwLock<Vec<PartyCredentials>>>,
-    fallback: Arc<MockTokenManager>,
+    token: String,
+    user_id: String,
+    fallback_member: CantonId,
 }
 
 impl MockAuthRegistry {
-    /// Create a new MockAuthRegistry backed by the live party credentials
+    /// Create a registry using the default unsafe token settings.
     pub fn new(party_credentials: Arc<RwLock<Vec<PartyCredentials>>>) -> Self {
-        tracing::info!("Initializing mock authentication (test mode)");
+        Self::with_config(party_credentials, &InsecureAuthConfig::default())
+    }
+
+    /// Create a registry minting the unsafe token from `cfg`.
+    pub fn with_config(
+        party_credentials: Arc<RwLock<Vec<PartyCredentials>>>,
+        cfg: &InsecureAuthConfig,
+    ) -> Self {
+        tracing::info!("Initializing mock authentication (insecure mode)");
+        let (token, user_id) = mint_credentials(cfg);
+        let fallback_member =
+            CantonId::parse(MOCK_MEMBER_PARTY_ID).expect("hardcoded mock member party ID");
         Self {
             party_credentials,
-            fallback: Arc::new(MockTokenManager::new()),
+            token,
+            user_id,
+            fallback_member,
         }
+    }
+
+    fn manager_for(&self, member_party_id: CantonId) -> Arc<MockTokenManager> {
+        Arc::new(MockTokenManager::new(
+            self.token.clone(),
+            self.user_id.clone(),
+            member_party_id,
+        ))
     }
 
     /// Get mock token manager for a party, using its configured member_party_id
     pub async fn get(&self, party_id: &CantonId) -> Arc<MockTokenManager> {
         let creds = self.party_credentials.read().await;
-        match creds.iter().find(|p| p.dec_party_id == *party_id) {
-            Some(c) => Arc::new(MockTokenManager::with_member_party_id(
-                c.member_party_id.clone(),
-            )),
-            None => self.fallback.clone(),
-        }
+        let member = creds
+            .iter()
+            .find(|p| p.dec_party_id == *party_id)
+            .map(|c| c.member_party_id.clone())
+            .unwrap_or_else(|| self.fallback_member.clone());
+        self.manager_for(member)
     }
 
     /// Get mock token manager by string ID
     pub async fn get_by_str(&self, party_id: &str) -> Arc<MockTokenManager> {
         match CantonId::parse(party_id) {
             Ok(id) => self.get(&id).await,
-            Err(_) => self.fallback.clone(),
+            Err(_) => self.manager_for(self.fallback_member.clone()),
         }
     }
 }
