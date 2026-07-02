@@ -75,6 +75,9 @@ pub enum MessageType {
     /// Command: every peer signs the onboarding-flag clearing proposal
     /// (no-op when the payload carries the empty skip marker).
     SignClearOnboarding = 0x0024,
+    /// Command: every party member signs the change-threshold DNS + P2P
+    /// proposals.
+    SignChangeThreshold = 0x0025,
 
     // Invites (0x0010 - 0x001F)
     InviteOnboarding = 0x0010,
@@ -94,6 +97,9 @@ pub enum MessageType {
     /// Invite to participate in adding a new member to a decentralized
     /// party. Payload is a JSON `AddPartyInvitePayload`.
     InviteAddParty = 0x0017,
+    /// Invite to participate in changing a decentralized party's threshold.
+    /// Payload is a JSON `ChangeThresholdInvitePayload`.
+    InviteChangeThreshold = 0x0018,
 
     // Responses (0x0100 - 0x01FF)
     Ack = 0x0101,
@@ -125,6 +131,8 @@ pub enum MessageType {
     /// transaction, so the new member authors it and the coordinator only
     /// runs the signing round on it.
     AddPartyClearProposal = 0x0209,
+    /// Peer → coordinator: signed change-threshold DNS + P2P pair.
+    ChangeThresholdSignatures = 0x020A,
 
     // Chunked Transfer (0x0300 - 0x03FF)
     /// Command with chunked payload - payload contains: [command_type (2 bytes)] [total_size (4 bytes)] [chunk_count (4 bytes)]
@@ -194,6 +202,8 @@ impl TryFrom<u16> for MessageType {
             0x0022 => Ok(Self::ImportAcs),
             0x0023 => Ok(Self::ClearOnboardingFlag),
             0x0024 => Ok(Self::SignClearOnboarding),
+            0x0025 => Ok(Self::SignChangeThreshold),
+            0x0018 => Ok(Self::InviteChangeThreshold),
             0x0101 => Ok(Self::Ack),
             0x0102 => Ok(Self::Data),
             0x0103 => Ok(Self::Error),
@@ -214,6 +224,7 @@ impl TryFrom<u16> for MessageType {
             0x0207 => Ok(Self::AddPartySignatures),
             0x0208 => Ok(Self::AddPartyClearSignatures),
             0x0209 => Ok(Self::AddPartyClearProposal),
+            0x020A => Ok(Self::ChangeThresholdSignatures),
             0x0300 => Ok(Self::ChunkedCommand),
             0x0301 => Ok(Self::GetChunk),
             0x0302 => Ok(Self::Chunk),
@@ -1071,6 +1082,18 @@ mod tests {
             MessageType::AddPartySignatures,
             MessageType::AddPartyClearSignatures,
             MessageType::AddPartyClearProposal,
+        ] {
+            assert_eq!(MessageType::try_from(mt.to_u16())?, mt);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn change_threshold_message_types_round_trip() -> Result {
+        for mt in [
+            MessageType::SignChangeThreshold,
+            MessageType::InviteChangeThreshold,
+            MessageType::ChangeThresholdSignatures,
         ] {
             assert_eq!(MessageType::try_from(mt.to_u16())?, mt);
         }

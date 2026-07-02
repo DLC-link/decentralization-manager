@@ -28,18 +28,20 @@ use crate::{
         middleware::require_admin,
         respawn_coordinator,
         types::{
-            AddPartyInvitePayload, AddPartyRequest, ContractsInvitePayload, ContractsRequest,
-            DarsInvitePayload, DarsRequest, ErrorResponse, KickInvitePayload, KickRequest,
-            KickResponse, KickStatus, MessageResponse, MissingEdgeKind, MissingPeerEdge,
-            OnboardingInvitePayload, OnboardingMeshErrorResponse, OnboardingRequest,
-            OnboardingResponse, OnboardingStatus, SuccessResponse, WorkflowGuard, WorkflowInstance,
-            WorkflowKind, WorkflowProgress, WorkflowResponse, WorkflowRole, WorkflowRun,
-            WorkflowRunsResponse, WorkflowStatusResponse,
+            AddPartyInvitePayload, AddPartyRequest, ChangeThresholdInvitePayload,
+            ChangeThresholdRequest, ContractsInvitePayload, ContractsRequest, DarsInvitePayload,
+            DarsRequest, ErrorResponse, KickInvitePayload, KickRequest, KickResponse, KickStatus,
+            MessageResponse, MissingEdgeKind, MissingPeerEdge, OnboardingInvitePayload,
+            OnboardingMeshErrorResponse, OnboardingRequest, OnboardingResponse, OnboardingStatus,
+            SuccessResponse, WorkflowGuard, WorkflowInstance, WorkflowKind, WorkflowProgress,
+            WorkflowResponse, WorkflowRole, WorkflowRun, WorkflowRunsResponse,
+            WorkflowStatusResponse,
         },
     },
     utils,
     workflow::{
-        self, AddPartyStep, ContractsStep, DarsStep, KickStep, OnboardingStep, state::WorkflowStep,
+        self, AddPartyStep, ChangeThresholdStep, ContractsStep, DarsStep, KickStep, OnboardingStep,
+        state::WorkflowStep,
     },
 };
 
@@ -147,6 +149,7 @@ where
         WorkflowKind::Contracts => "contracts",
         WorkflowKind::Dars => "DARs",
         WorkflowKind::AddParty => "add-party",
+        WorkflowKind::ChangeThreshold => "change-threshold",
     };
 
     if !data.workflows.insert(instance.clone()) {
@@ -500,6 +503,7 @@ pub async fn start_kick(
             None, // No contracts config
             None, // No dars config
             None, // No add-party config
+            None, // No change-threshold config
             None, // No auth registry for kick
             last_seen,
             instance_for_coord,
@@ -971,6 +975,7 @@ pub async fn start_add_party(
             None, // No contracts config
             None, // No dars config
             Some(add_party_config),
+            None, // No change-threshold config
             workflow_auth,
             last_seen,
             instance_for_coord,
@@ -1127,6 +1132,376 @@ async fn send_add_party_invites(
 }
 
 // ============================================================================
+// Change-Threshold Workflow
+// ============================================================================
+
+/// Start a change-threshold workflow to change the signing threshold of an
+/// existing decentralized party (namespace + P2P), keeping its membership.
+#[utoipa::path(
+    tag = "Workflows",
+    request_body = ChangeThresholdRequest,
+    responses(
+        (status = 202, description = "Change-threshold workflow started", body = WorkflowResponse),
+        (status = 400, description = "Bad request", body = ErrorResponse),
+        (status = 409, description = "Workflow already in progress for this party", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+#[post("/change-threshold")]
+pub async fn start_change_threshold(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    body: web::Json<ChangeThresholdRequest>,
+) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
+
+    tracing::info!(
+        "Change-threshold request received: party={}, threshold={}->{}",
+        body.decentralized_party_id,
+        body.previous_threshold,
+        body.new_threshold
+    );
+
+    let decentralized_party_id = body.decentralized_party_id.clone();
+
+    // Scope to the party's cached membership (same rationale as start_kick /
+    // start_add_party — the party can be a strict subset of the mesh).
+    let party_member_ids: HashSet<CantonId> = match data
+        .db
+        .get_dec_party_participants(&decentralized_party_id)
+        .await
+    {
+        Ok(rows) => rows
+            .iter()
+            .filter_map(|r| CantonId::parse(&r.participant_uid).ok())
+            .collect(),
+        Err(e) => {
+            tracing::error!("Failed to load dec party participants for change-threshold: {e}");
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: "Failed to load decentralized party members".to_string(),
+            });
+        }
+    };
+
+    if party_member_ids.is_empty() {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!(
+                "No cached membership for {decentralized_party_id}. Try refreshing \
+                 /decentralized-parties first."
+            ),
+        });
+    }
+    if !party_member_ids.contains(data.config.participant_id()) {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: format!(
+                "This node is not a member of {decentralized_party_id}; only an existing \
+                 member can coordinate a threshold change"
+            ),
+        });
+    }
+    // Need at least one other member to reach a signing quorum — a solo-owner
+    // party has a fixed threshold of 1 and nothing to change.
+    if party_member_ids.len() < 2 {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: format!(
+                "Cannot change threshold: {decentralized_party_id} has only {n} member(s)",
+                n = party_member_ids.len()
+            ),
+        });
+    }
+
+    // Bound the new threshold by the member count. The deeper validation
+    // against the live DNS owner set (and the "already current" check) happens
+    // in ExportState.
+    let member_count = party_member_ids.len() as i32;
+    if body.new_threshold < 1 || body.new_threshold > member_count {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: format!(
+                "new_threshold must be between 1 and {member_count} (party member count); got {got}",
+                got = body.new_threshold,
+            ),
+        });
+    }
+
+    // Invitees: every member except self — they all sign.
+    let invitees: Vec<CantonId> = match data.db.get_all_peers().await {
+        Ok(peers) => peers
+            .into_iter()
+            .map(|p| p.participant_id)
+            .filter(|p| party_member_ids.contains(p) && p != data.config.participant_id())
+            .collect(),
+        Err(e) => {
+            tracing::error!("Failed to load peers for change-threshold: {e}");
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: "Failed to load peers".to_string(),
+            });
+        }
+    };
+
+    let timestamp = now_secs();
+    let instance_name = format!(
+        "{}-change-threshold-{timestamp}",
+        decentralized_party_id.prefix
+    );
+
+    let instance = WorkflowInstance::new(
+        instance_name.clone(),
+        WorkflowKind::ChangeThreshold,
+        WorkflowRole::Coordinator,
+    );
+    let change_state = &instance.http;
+
+    let change_config = workflow::ChangeThresholdConfig::new(
+        decentralized_party_id.clone(),
+        body.new_threshold,
+        body.previous_threshold,
+        instance_name.clone(),
+    );
+
+    // Refuse a second workflow targeting the SAME dec party (topology mutations
+    // must not interleave — see start_kick).
+    if let Some((run, kind)) =
+        find_inprogress_run_for_party(&data.db, &decentralized_party_id).await
+    {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!(
+                "Party {decentralized_party_id} already has a {kind} workflow in flight \
+                 (run {run}); wait for it to finish or cancel it first"
+            ),
+        });
+    }
+
+    // Refuse to invite any peer that can't speak the concurrent-workflows wire
+    // format — NO invites are sent if even one invitee fails the version gate.
+    let incompatible = preflight_incompatible_peers(&data.config, &data.db, &invitees).await;
+    if !incompatible.is_empty() {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format_incompatible_peers(&incompatible),
+        });
+    }
+
+    if let Err(resp) = register_and_persist(
+        &data,
+        &instance,
+        ChangeThresholdStep::WaitingForPeers,
+        &change_config,
+        &invitees,
+        Some(decentralized_party_id.clone()),
+    )
+    .await
+    {
+        return resp;
+    }
+
+    let invitees_for_invites = invitees.clone();
+    *change_state.invited_peers.write().await = invitees;
+
+    let config = data.config.clone();
+    let db = data.db.clone();
+    let change_state_clone = instance.http.clone();
+    let instance_for_coord = instance.clone();
+    let workflows = data.workflows.clone();
+    let last_seen = data.last_seen.clone();
+    let instance_for_task = instance_name.clone();
+
+    // abort_handle/status/error are flipped under simultaneously-held locks —
+    // see start_dars for the cancel-race rationale.
+    let mut abort_guard = change_state.abort_handle.lock().await;
+    let mut status_guard = change_state.status.write().await;
+    let mut error_guard = change_state.error.write().await;
+
+    let join_handle = tokio::spawn(async move {
+        let _workflow_guard = WorkflowGuard::new(workflows, instance_for_task.clone());
+
+        let invite_result =
+            send_change_threshold_invites(&config, &db, &change_config, &invitees_for_invites)
+                .await;
+        if let Err(e) = invite_result {
+            tracing::error!("Failed to send change-threshold invites: {e}");
+            let msg = format!("Failed to send invites: {e}");
+            {
+                let mut status = change_state_clone.status.write().await;
+                let mut error = change_state_clone.error.write().await;
+                *status = WorkflowProgress::Failed;
+                *error = Some(msg.clone());
+            }
+            mark_run_failed(&db, &instance_for_task, &msg).await;
+            return;
+        }
+
+        // Give peers time to start their peer workflows
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        let result = workflow::start_coordinator(
+            config,
+            db.clone(),
+            workflow::WorkflowType::ChangeThreshold,
+            None, // No onboarding config
+            None, // No kick config
+            None, // No contracts config
+            None, // No dars config
+            None, // No add-party config
+            Some(change_config),
+            None, // No auth registry for change-threshold
+            last_seen,
+            instance_for_coord,
+        )
+        .await;
+
+        match result {
+            Ok(_) => {
+                {
+                    let mut status = change_state_clone.status.write().await;
+                    *status = WorkflowProgress::Completed;
+                }
+                tracing::info!("Change-threshold workflow completed successfully");
+                mark_run_completed(&db, &instance_for_task).await;
+            }
+            Err(e) => {
+                let msg = format!("{e}");
+                {
+                    let mut status = change_state_clone.status.write().await;
+                    let mut error = change_state_clone.error.write().await;
+                    *status = WorkflowProgress::Failed;
+                    *error = Some(msg.clone());
+                }
+                tracing::error!("Change-threshold workflow failed: {e}");
+                mark_run_failed(&db, &instance_for_task, &msg).await;
+            }
+        }
+    });
+    *abort_guard = Some(join_handle.abort_handle());
+    *status_guard = WorkflowProgress::InProgress;
+    *error_guard = None;
+    drop(error_guard);
+    drop(status_guard);
+    drop(abort_guard);
+
+    HttpResponse::Accepted().json(WorkflowResponse {
+        status: WorkflowProgress::InProgress,
+        message: "Change-threshold workflow started".to_string(),
+        instance_name,
+    })
+}
+
+/// Get the current status of the change-threshold workflow
+#[utoipa::path(
+    tag = "Workflows",
+    responses(
+        (status = 200, description = "Change-threshold workflow status", body = WorkflowStatusResponse)
+    )
+)]
+#[get("/change-threshold/status")]
+pub async fn get_change_threshold_status(data: web::Data<AppState>) -> impl Responder {
+    HttpResponse::Ok().json(kind_status(&data, WorkflowKind::ChangeThreshold).await)
+}
+
+#[utoipa::path(
+    tag = "Workflows",
+    responses(
+        (status = 200, description = "Workflow cancelled", body = MessageResponse),
+        (status = 409, description = "No workflow in progress", body = ErrorResponse)
+    )
+)]
+#[post("/change-threshold/cancel")]
+pub async fn cancel_change_threshold(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
+    cancel_workflow_state(&data, "Change-threshold", WorkflowKind::ChangeThreshold).await
+}
+
+/// Send change-threshold invites over Noise to every existing member.
+async fn send_change_threshold_invites(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    change_config: &workflow::ChangeThresholdConfig,
+    invitees: &[CantonId],
+) -> Result {
+    let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
+    let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
+
+    let current_participant_id = config.participant_id();
+    let invitee_set: HashSet<&CantonId> = invitees.iter().collect();
+    // The card shows the full member set: invitees + this node.
+    let mut participants = invitees.to_vec();
+    participants.push(current_participant_id.clone());
+    let payload = ChangeThresholdInvitePayload {
+        dec_party_id: change_config.decentralized_party_id.clone(),
+        new_threshold: change_config.new_threshold,
+        previous_threshold: change_config.previous_threshold,
+        participants,
+        workflow_instance: Some(change_config.instance_name.clone()),
+    };
+    let payload_bytes =
+        serde_json::to_vec(&payload).context("encode ChangeThresholdInvitePayload")?;
+    let invite_message = Message::new(MessageType::InviteChangeThreshold, payload_bytes);
+
+    for peer in &network_config.peers {
+        if !invitee_set.contains(&peer.participant_id)
+            || peer.participant_id == *current_participant_id
+        {
+            continue;
+        }
+
+        if peer.public_key.is_empty() {
+            tracing::warn!(
+                "Skipping change-threshold invite to {} - no public key configured",
+                peer.participant_id
+            );
+            continue;
+        }
+        let peer_pub_key = match parse_public_key(&peer.public_key) {
+            Ok(pk) => pk,
+            Err(e) => {
+                tracing::warn!(
+                    "Skipping change-threshold invite to {} - invalid public key: {e}",
+                    peer.participant_id
+                );
+                continue;
+            }
+        };
+
+        let psk = keypair.derive_psk(&peer_pub_key);
+        let identity = config.participant_id().to_string();
+
+        tracing::info!(
+            "Sending change-threshold invite to {} at {}:{}",
+            peer.participant_id,
+            peer.address,
+            peer.port
+        );
+
+        match send_noise_message(
+            &peer.address,
+            peer.port,
+            &psk,
+            identity.as_bytes(),
+            &invite_message,
+        )
+        .await
+        {
+            Ok(response) => {
+                interpret_invite_reply(&peer.participant_id, "change-threshold", &response)?;
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Failed to send change-threshold invite to {}: {e}",
+                    peer.participant_id
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// ============================================================================
 // Onboarding Workflow
 // ============================================================================
 
@@ -1219,8 +1594,26 @@ pub async fn start_onboarding(
         WorkflowRole::Coordinator,
     );
     let onboarding_state = &instance.http;
-    let onboarding_config =
-        workflow::OnboardingConfig::new(party_id_prefix.clone(), instance_name.clone());
+
+    // If the operator set an explicit initial threshold, bound it by the owner
+    // count (invited peers + this coordinator). Omitted => the coordinator uses
+    // the default majority algorithm once the owner set is resolved.
+    let owner_count = peer_ids.len() as i32 + 1;
+    if let Some(t) = body.threshold
+        && !(1..=owner_count).contains(&t)
+    {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: format!(
+                "threshold must be between 1 and {owner_count} (invited peers + this node); got {t}"
+            ),
+        });
+    }
+
+    let onboarding_config = workflow::OnboardingConfig::new(
+        party_id_prefix.clone(),
+        instance_name.clone(),
+        body.threshold,
+    );
 
     // Refuse onboarding when a party with this prefix already exists. The
     // human-readable prefix is the only piece of the party id the operator
@@ -1296,6 +1689,7 @@ pub async fn start_onboarding(
             &db,
             &peer_ids,
             &party_id_prefix,
+            onboarding_config.threshold,
             &instance_for_task,
         )
         .await;
@@ -1324,6 +1718,7 @@ pub async fn start_onboarding(
             None, // No contracts config
             None, // No dars config
             None, // No add-party config
+            None, // No change-threshold config
             None, // No auth registry for onboarding
             last_seen,
             instance_for_coord,
@@ -1474,14 +1869,22 @@ async fn send_onboarding_invites(
     db: &SqlitePool,
     peer_ids: &[CantonId],
     party_id_prefix: &str,
+    threshold: Option<i32>,
     instance_name: &str,
 ) -> Result {
     let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
 
+    // Show the threshold the coordinator will actually use: the operator's
+    // choice, or the same majority default it falls back to (owners = invited
+    // peers + this coordinator).
+    let owners = peer_ids.len() + 1;
+    let effective_threshold = threshold.unwrap_or_else(|| owners.div_ceil(2).max(1) as i32);
+
     let payload = OnboardingInvitePayload {
         prefix: party_id_prefix.to_string(),
         participants: peer_ids.to_vec(),
+        threshold: Some(effective_threshold),
         workflow_instance: Some(instance_name.to_string()),
     };
     let payload_bytes = serde_json::to_vec(&payload)?;
@@ -1856,6 +2259,7 @@ pub async fn start_contracts(
             Some(contracts_config.clone()),
             None, // No dars config
             None, // No add-party config
+            None, // No change-threshold config
             workflow_auth,
             last_seen,
             instance_for_coord,
@@ -2123,6 +2527,7 @@ pub async fn start_dars(
             None, // No contracts config
             Some(dars_config),
             None, // No add-party config
+            None, // No change-threshold config
             None, // No auth
             last_seen,
             instance_for_coord,
@@ -2543,6 +2948,9 @@ fn enrich_from_config_json(run: &mut WorkflowRun) {
         new_threshold: Option<i32>,
         #[serde(default)]
         previous_threshold: Option<i32>,
+        // Onboarding config only: the initial threshold (no previous).
+        #[serde(default)]
+        threshold: Option<i32>,
         // Kick configs only.
         #[serde(default)]
         participant_id: Option<CantonId>,
@@ -2578,7 +2986,9 @@ fn enrich_from_config_json(run: &mut WorkflowRun) {
         if !shape.participants.is_empty() {
             run.participants = shape.participants;
         }
-        run.new_threshold = shape.new_threshold;
+        // Onboarding stores the initial threshold under `threshold`; kick /
+        // add-party use `new_threshold`. Either populates the card's value.
+        run.new_threshold = shape.new_threshold.or(shape.threshold);
         // Only surface a previous threshold when an older client actually
         // sent one (it defaults to 0); 0 means "unknown", render as new-only.
         run.previous_threshold = shape.previous_threshold.filter(|t| *t > 0);

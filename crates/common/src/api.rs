@@ -178,6 +178,23 @@ pub struct AddPartyRequest {
     pub previous_threshold: i32,
 }
 
+/// Request to change the signing threshold of an existing decentralized party.
+/// Re-issues the namespace + party mappings with `new_threshold`; membership is
+/// unchanged.
+#[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct ChangeThresholdRequest {
+    pub decentralized_party_id: CantonId,
+    pub new_threshold: i32,
+    /// The party's threshold *before* the change. Display-only — surfaced on
+    /// the workflow run card as "old → new". Defaults to 0 (rendered as just
+    /// the new value) when an older client omits it.
+    #[serde(default)]
+    pub previous_threshold: i32,
+}
+
 /// Request to create a new decentralized party
 #[derive(Clone, Debug, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -187,6 +204,13 @@ pub struct OnboardingRequest {
     pub party_id_prefix: String,
     /// List of peer IDs to invite to the decentralized party
     pub peer_ids: Vec<CantonId>,
+    /// Initial signing threshold for the new party (applied to both the
+    /// decentralized-namespace and party-to-participant mappings). Optional:
+    /// when omitted the coordinator falls back to the default majority
+    /// algorithm (`ceil(owner_count / 2)`, min 1). The frontend pre-fills this
+    /// with the same default so the operator can see and adjust it.
+    #[serde(default)]
+    pub threshold: Option<i32>,
 }
 
 /// Why a directed edge was reported missing. The frontend renders different
@@ -293,6 +317,11 @@ pub struct KeyStatusResponse {
 pub struct OnboardingInvitePayload {
     pub prefix: String,
     pub participants: Vec<CantonId>,
+    /// Initial signing threshold the coordinator will use, so the invitation
+    /// and run cards can show it before the proposals are built. `None` from
+    /// an older coordinator that predates the field (the card then omits it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threshold: Option<i32>,
     /// The coordinator's `workflow_runs` instance name for this run. Echoed
     /// back in `DeclineInvitationPayload` so the coordinator can tell a
     /// decline of THIS run apart from a stale invite of an earlier run.
@@ -366,6 +395,25 @@ pub struct AddPartyInvitePayload {
     pub previous_threshold: i32,
     /// The full post-add member set, so the peer card renders the same
     /// participant list the coordinator shows.
+    #[serde(default)]
+    pub participants: Vec<CantonId>,
+    /// The coordinator's run instance name (see `OnboardingInvitePayload`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_instance: Option<String>,
+}
+
+/// Payload sent inside an `InviteChangeThreshold` Noise message — gives the
+/// peer enough context to show "changing dec party Y threshold a→b" before the
+/// proposals arrive.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct ChangeThresholdInvitePayload {
+    pub dec_party_id: CantonId,
+    pub new_threshold: i32,
+    pub previous_threshold: i32,
+    /// The party's member set, so the peer card renders the same participant
+    /// list the coordinator shows.
     #[serde(default)]
     pub participants: Vec<CantonId>,
     /// The coordinator's run instance name (see `OnboardingInvitePayload`).

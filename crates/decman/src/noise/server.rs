@@ -15,8 +15,9 @@ use crate::{
         peer_status::{LastSeen, bump},
     },
     workflow::{
-        WorkflowState, add_party::AddPartyStep, contracts::ContractsStep, dars::DarsStep,
-        kick::KickStep, onboarding::OnboardingStep, state::WorkflowStep,
+        WorkflowState, add_party::AddPartyStep, change_threshold::ChangeThresholdStep,
+        contracts::ContractsStep, dars::DarsStep, kick::KickStep, onboarding::OnboardingStep,
+        state::WorkflowStep,
     },
 };
 
@@ -75,6 +76,7 @@ pub enum ActiveWorkflow {
     Contracts(Arc<NoiseServer<ContractsStep>>),
     Dars(Arc<NoiseServer<DarsStep>>),
     AddParty(Arc<NoiseServer<AddPartyStep>>),
+    ChangeThreshold(Arc<NoiseServer<ChangeThresholdStep>>),
 }
 
 impl ActiveWorkflow {
@@ -90,6 +92,7 @@ impl ActiveWorkflow {
             Self::Contracts(s) => s.handle_command(peer_id, message).await,
             Self::Dars(s) => s.handle_command(peer_id, message).await,
             Self::AddParty(s) => s.handle_command(peer_id, message).await,
+            Self::ChangeThreshold(s) => s.handle_command(peer_id, message).await,
         }
     }
 }
@@ -291,6 +294,10 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
             }
             MessageType::AddPartyClearProposal => {
                 self.handle_peer_data(peer_id, message.payload, "add-party clearing proposal")
+                    .await
+            }
+            MessageType::ChangeThresholdSignatures => {
+                self.handle_peer_data(peer_id, message.payload, "change-threshold signatures")
                     .await
             }
             MessageType::StatusUpdate => self.handle_status_update(peer_id, message.payload).await,
@@ -540,6 +547,7 @@ mod tests {
         assert!(command_carries_payload(MessageType::ImportAcs));
         assert!(command_carries_payload(MessageType::ClearOnboardingFlag));
         assert!(command_carries_payload(MessageType::SignClearOnboarding));
+        assert!(command_carries_payload(MessageType::SignChangeThreshold));
     }
 
     fn decline(kind: WorkflowKind, workflow_instance: Option<&str>) -> DeclineInvitationPayload {

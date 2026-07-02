@@ -237,6 +237,19 @@ impl NoiseClient {
         .await
     }
 
+    /// Send the signed change-threshold DNS + P2P pair to the coordinator.
+    pub async fn send_change_threshold_signatures(
+        &self,
+        signatures_data: Vec<u8>,
+    ) -> Result<(), NoiseError> {
+        self.send_and_verify_ack(
+            MessageType::ChangeThresholdSignatures,
+            signatures_data,
+            "Sending change-threshold signatures to coordinator",
+        )
+        .await
+    }
+
     /// Upload the new member's `keys||participant_id` payload to the
     /// coordinator of an add-party run.
     pub async fn upload_add_party_keys(&self, keys_data: Vec<u8>) -> Result<(), NoiseError> {

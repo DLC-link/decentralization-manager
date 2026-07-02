@@ -9,14 +9,21 @@ pub struct OnboardingConfig {
     pub party_id_prefix: String,
     /// Workflow instance name for directory organization (e.g., "xyz-network-creation")
     pub instance_name: String,
+    /// Operator-chosen initial threshold. `None` means "use the default
+    /// majority algorithm" (`ceil(owner_count / 2)`, min 1), computed by the
+    /// coordinator once the owner set is known. Defaults to `None` for configs
+    /// persisted before this field existed.
+    #[serde(default)]
+    pub threshold: Option<i32>,
     _p: PhantomData<()>,
 }
 
 impl OnboardingConfig {
-    pub fn new(party_id_prefix: String, instance_name: String) -> Self {
+    pub fn new(party_id_prefix: String, instance_name: String, threshold: Option<i32>) -> Self {
         Self {
             party_id_prefix,
             instance_name,
+            threshold,
             _p: PhantomData,
         }
     }

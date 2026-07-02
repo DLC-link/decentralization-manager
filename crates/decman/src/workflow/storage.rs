@@ -105,6 +105,26 @@ pub mod artifact_kinds {
     pub const ADD_PARTY_CLEAR_PROPOSAL: &str = "add_party_clear_proposal";
     /// Per-peer signed clearing proposal — single length-prefixed proto.
     pub const SIGNED_ADD_PARTY_CLEAR: &str = "signed_add_party_clear";
+
+    // Change-threshold (workflow_artifacts during a run)
+    /// Current decentralized namespace definition, exported in ExportState.
+    /// Length-prefixed proto.
+    pub const CHANGE_THRESHOLD_NAMESPACE_DEF: &str = "change_threshold_namespace_def";
+    /// Re-issued `DecentralizedNamespaceDefinition` (same owners, new
+    /// threshold) — used by submit to poll the topology. Length-prefixed proto.
+    pub const CHANGE_THRESHOLD_NEW_NAMESPACE_DEF: &str = "change_threshold_new_namespace_def";
+    /// Unsigned DNS threshold-change proposal (`SignedTopologyTransaction`)
+    /// produced by the coordinator in CreateProposals. Length-prefixed proto.
+    pub const CHANGE_THRESHOLD_DNS_PROPOSAL: &str = "change_threshold_dns_proposal";
+    /// Unsigned P2P threshold-change proposal produced alongside the DNS one.
+    pub const CHANGE_THRESHOLD_P2P_PROPOSAL: &str = "change_threshold_p2p_proposal";
+    /// Per-peer signed DNS threshold-change proposal — single length-prefixed
+    /// proto.
+    pub const SIGNED_CHANGE_THRESHOLD_DNS: &str = "signed_change_threshold_dns";
+    /// Per-peer signed P2P threshold-change proposal — same shape.
+    pub const SIGNED_CHANGE_THRESHOLD_P2P: &str = "signed_change_threshold_p2p";
+    /// Full party id (plaintext) — used by submit to poll the P2P mapping.
+    pub const CHANGE_THRESHOLD_PARTY_ID: &str = "change_threshold_party_id";
 }
 
 /// Identity-table artefact kinds. These survive the originating workflow run's

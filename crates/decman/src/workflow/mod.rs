@@ -1,4 +1,5 @@
 pub mod add_party;
+pub mod change_threshold;
 pub mod contracts;
 pub mod dars;
 pub mod kick;
@@ -34,6 +35,7 @@ use crate::{
 };
 
 pub use add_party::{AddPartyConfig, AddPartyStep};
+pub use change_threshold::{ChangeThresholdConfig, ChangeThresholdStep};
 pub use contracts::{ContractsConfig, ContractsStep};
 pub use dars::{DarsConfig, DarsStep};
 pub use kick::{KickConfig, KickStep};
@@ -48,6 +50,7 @@ pub enum WorkflowType {
     Dars,
     Kick,
     AddParty,
+    ChangeThreshold,
 }
 
 /// Result from a coordinator workflow, optionally containing the created party ID
@@ -67,6 +70,7 @@ pub async fn start_coordinator(
     contracts_config: Option<ContractsConfig>,
     dars_config: Option<DarsConfig>,
     add_party_config: Option<AddPartyConfig>,
+    change_threshold_config: Option<ChangeThresholdConfig>,
     workflow_auth: Option<WorkflowAuth>,
     last_seen: LastSeen,
     instance: Arc<WorkflowInstance>,
@@ -153,6 +157,23 @@ pub async fn start_coordinator(
                 network_config,
                 config,
                 workflow_auth,
+                db,
+                last_seen,
+                instance,
+            )
+            .await?;
+            Ok(CoordinatorResult {
+                created_party_id: None,
+            })
+        }
+        WorkflowType::ChangeThreshold => {
+            let config = change_threshold_config.ok_or_else(|| {
+                anyhow::anyhow!("ChangeThresholdConfig is required for ChangeThreshold workflow")
+            })?;
+            change_threshold::coordinator::start_coordinator(
+                node_config,
+                network_config,
+                config,
                 db,
                 last_seen,
                 instance,
@@ -603,6 +624,66 @@ pub async fn start_peer(
                     tracing::error!("Failed to send kick signatures to coordinator: {e}");
                 }
             }
+            MessageType::SignChangeThreshold => {
+                tracing::info!("Executing: Sign change-threshold proposals");
+                if payload.is_empty() {
+                    tracing::error!(
+                        "No change-threshold proposals payload received from coordinator"
+                    );
+                    continue;
+                }
+
+                let items = match utils::decode_length_prefixed(&payload, 3) {
+                    Ok(items) => items,
+                    Err(e) => {
+                        tracing::error!("Failed to decode SignChangeThreshold payload: {e}");
+                        continue;
+                    }
+                };
+
+                let _change_config: change_threshold::ChangeThresholdConfig =
+                    match serde_json::from_slice(&items[0]) {
+                        Ok(config) => config,
+                        Err(e) => {
+                            tracing::error!("Failed to deserialize change-threshold config: {e}");
+                            continue;
+                        }
+                    };
+
+                let proposal_data = utils::encode_length_prefixed(&[&items[1], &items[2]]);
+                if let Err(e) = change_threshold::sign_proposals(
+                    &node_config,
+                    &db,
+                    &instance_name,
+                    &proposal_data,
+                )
+                .await
+                {
+                    tracing::error!("Step execution failed: {e}");
+                    consecutive_step_failures += 1;
+                    if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+                        anyhow::bail!(
+                            "Aborting peer: {MAX_CONSECUTIVE_STEP_FAILURES} consecutive step failures: {e}"
+                        );
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    continue;
+                }
+                consecutive_step_failures = 0;
+                if let Err(e) =
+                    change_threshold::peer::send_change_threshold_signatures_to_coordinator(
+                        &client,
+                        &db,
+                        &instance_name,
+                        &node_config,
+                    )
+                    .await
+                {
+                    tracing::error!(
+                        "Failed to send change-threshold signatures to coordinator: {e}"
+                    );
+                }
+            }
             MessageType::GenerateAddPartyKeys => {
                 tracing::info!("Executing: Generate add-party keys");
                 let Some(add_party_config) = decode_add_party_config(&payload) else {
@@ -1007,6 +1088,18 @@ fn peer_step_for_command(
                 AddPartyStep::step_total(),
             ))
         }
+        WorkflowKind::ChangeThreshold => {
+            let step = match command {
+                MessageType::SignChangeThreshold => ChangeThresholdStep::SignProposals,
+                MessageType::Disconnect => ChangeThresholdStep::Complete,
+                _ => return None,
+            };
+            Some((
+                step.step_name(),
+                step.step_index(),
+                ChangeThresholdStep::step_total(),
+            ))
+        }
     }
 }
 
@@ -1100,6 +1193,11 @@ mod tests {
             (WorkflowKind::AddParty, MessageType::ClearOnboardingFlag),
             (WorkflowKind::AddParty, MessageType::SignClearOnboarding),
             (WorkflowKind::AddParty, MessageType::Disconnect),
+            (
+                WorkflowKind::ChangeThreshold,
+                MessageType::SignChangeThreshold,
+            ),
+            (WorkflowKind::ChangeThreshold, MessageType::Disconnect),
         ];
         for (kind, command) in mapped {
             assert!(
@@ -1115,6 +1213,7 @@ mod tests {
             WorkflowKind::Contracts,
             WorkflowKind::Dars,
             WorkflowKind::AddParty,
+            WorkflowKind::ChangeThreshold,
         ] {
             assert!(peer_step_for_command(kind, MessageType::Wait).is_none());
             assert!(peer_step_for_command(kind, MessageType::Ping).is_none());
@@ -1127,6 +1226,12 @@ mod tests {
         assert!(peer_step_for_command(WorkflowKind::Dars, MessageType::SignSubmissions).is_none());
         assert!(peer_step_for_command(WorkflowKind::AddParty, MessageType::GenerateKeys).is_none());
         assert!(peer_step_for_command(WorkflowKind::Kick, MessageType::SignAddParty).is_none());
+        assert!(
+            peer_step_for_command(WorkflowKind::ChangeThreshold, MessageType::SignKick).is_none()
+        );
+        assert!(
+            peer_step_for_command(WorkflowKind::Kick, MessageType::SignChangeThreshold).is_none()
+        );
     }
 
     #[test]

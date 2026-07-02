@@ -17,7 +17,8 @@ use crate::{
         },
     },
     workflow::{
-        AddPartyStep, ContractsStep, DarsStep, KickStep, OnboardingStep, state::WorkflowStep,
+        AddPartyStep, ChangeThresholdStep, ContractsStep, DarsStep, KickStep, OnboardingStep,
+        state::WorkflowStep,
     },
 };
 
@@ -63,6 +64,7 @@ fn step_total_for(kind: WorkflowKind) -> i64 {
         WorkflowKind::Contracts => ContractsStep::step_total(),
         WorkflowKind::Dars => DarsStep::step_total(),
         WorkflowKind::AddParty => AddPartyStep::step_total(),
+        WorkflowKind::ChangeThreshold => ChangeThresholdStep::step_total(),
     }
 }
 

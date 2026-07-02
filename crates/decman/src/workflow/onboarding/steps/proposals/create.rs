@@ -141,11 +141,22 @@ pub async fn create_proposals(
         );
     }
 
-    // Step 5: Calculate threshold (majority)
-    let threshold = namespaces.len().div_ceil(2).max(1) as u32;
+    // Step 5: Determine threshold. Use the operator-configured value when set
+    // (validated against the resolved owner count — the topology is the source
+    // of truth); otherwise fall back to the default majority algorithm. The
+    // frontend pre-computes this same default, so an untouched field arrives
+    // here carrying the majority value.
+    let owner_count = namespaces.len();
+    let threshold = match onboarding_config.threshold {
+        Some(t) if (1..=owner_count as i32).contains(&t) => t as u32,
+        Some(t) => {
+            anyhow::bail!("configured threshold {t} out of range 1..={owner_count} (owner count)",)
+        }
+        None => owner_count.div_ceil(2).max(1) as u32,
+    };
     tracing::info!(
-        "Using threshold {threshold} for {count} participants",
-        count = namespaces.len()
+        "Using threshold {threshold} for {owner_count} participants (configured: {configured:?})",
+        configured = onboarding_config.threshold,
     );
 
     // Step 6: Compute decentralized namespace

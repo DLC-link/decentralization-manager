@@ -22,6 +22,7 @@ import {
 } from "@mui/material";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import EditIcon from "@mui/icons-material/Edit";
+import TuneIcon from "@mui/icons-material/Tune";
 import PersonAddIcon from "@mui/icons-material/PersonAdd";
 import PersonRemoveIcon from "@mui/icons-material/PersonRemove";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
@@ -30,6 +31,7 @@ import RefreshIcon from "@mui/icons-material/Refresh";
 import { CopyableText } from "./CopyableText";
 import { TextHelp } from "./FieldHelp";
 import { AddPartyDialog } from "./AddPartyDialog";
+import { ChangeThresholdDialog } from "./ChangeThresholdDialog";
 import { KickDialog } from "./KickDialog";
 import { ContractsDialog } from "./ContractsDialog";
 import { PartyConfigDialog } from "./PartyConfigDialog";
@@ -186,6 +188,8 @@ export const PartyDetail = ({
 }: PartyDetailProps) => {
   const [kickDialogOpen, setKickDialogOpen] = useState(false);
   const [addDialogOpen, setAddDialogOpen] = useState(false);
+  const [changeThresholdDialogOpen, setChangeThresholdDialogOpen] =
+    useState(false);
   const [contractsDialogOpen, setContractsDialogOpen] = useState(false);
   const [configDialogOpen, setConfigDialogOpen] = useState(false);
   const [selectedParticipant, setSelectedParticipant] = useState("");
@@ -364,6 +368,17 @@ export const PartyDetail = ({
             {governanceType === "core_self"
               ? "New Proposal"
               : "Deploy Contracts"}
+          </Button>
+        )}
+        {isOwner && (
+          <Button
+            variant="outlined"
+            size="small"
+            startIcon={<TuneIcon />}
+            onClick={() => setChangeThresholdDialogOpen(true)}
+            disabled={!ADMIN_ACCESS}
+          >
+            Change Threshold
           </Button>
         )}
         {isOwner && rulesContract && (
@@ -725,6 +740,18 @@ export const PartyDetail = ({
         }}
         partyId={party.party_id}
         participantUids={party.participants.map((p) => p.participant_uid)}
+        currentThreshold={party.threshold}
+        currentOwnerCount={party.owners.length}
+      />
+
+      <ChangeThresholdDialog
+        open={changeThresholdDialogOpen}
+        onClose={() => setChangeThresholdDialogOpen(false)}
+        onComplete={() => {
+          onRefresh();
+          onNavigateToNotifications();
+        }}
+        partyId={party.party_id}
         currentThreshold={party.threshold}
         currentOwnerCount={party.owners.length}
       />
