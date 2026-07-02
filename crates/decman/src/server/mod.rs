@@ -1,8 +1,8 @@
 //! HTTP server and always-on Noise listener.
 //!
 //! Builds the actix-web application (REST API + embedded React UI; a Swagger UI
-//! is mounted only in test/dev builds, i.e. `cfg!(any(test, feature =
-//! "test-mode"))`), wires shared [`AppState`], and runs the long-lived Noise
+//! is mounted only when the node runs in insecure mode, i.e. `--insecure`),
+//! wires shared [`AppState`], and runs the long-lived Noise
 //! listener that
 //! handles inbound peer messages (invites, signing, health, cancellation)
 //! independently of any coordinator-driven workflow.
@@ -95,7 +95,7 @@ pub struct AppState {
     pub peer_job_sender: mpsc::UnboundedSender<PeerJob>,
     /// Pending invitations awaiting user acceptance
     pub pending_invitations: Arc<RwLock<Vec<PendingInvitation>>>,
-    /// Authentication registry (real Keycloak or mock for test mode)
+    /// Authentication registry (real Keycloak, or mock in insecure mode)
     pub auth: Arc<RwLock<Option<WorkflowAuth>>>,
     /// Inbound token validator — authenticates API callers.
     pub token_validator: TokenValidator,
@@ -116,7 +116,9 @@ pub struct AppState {
     /// `workflows.route(msg.instance)`, and `/workflows/{instance}/cancel`
     /// looks an entry up to abort its spawn.
     pub workflows: WorkflowRegistry,
-    /// Whether the server is running in test mode
+    /// Whether the server is running in insecure/permissive mode (`--insecure`
+    /// or tests): mock auth plus wildcard-token query filtering. Field name
+    /// kept as `test_mode` for continuity.
     pub test_mode: bool,
     /// Prefixes currently being refreshed from Canton (deduplication)
     pub refreshing_prefixes: Arc<RwLock<HashSet<String>>>,
