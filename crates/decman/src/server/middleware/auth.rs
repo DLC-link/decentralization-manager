@@ -184,7 +184,7 @@ fn parse_bearer(header: &str) -> Option<&str> {
 }
 
 /// Paths that bypass auth entirely. Covers the SPA entry point, static
-/// assets, swagger (only mounted with the `test-mode` Cargo feature),
+/// assets, swagger (only mounted in insecure mode, `--insecure`),
 /// `/auth-config` which the login page fetches before the user has a
 /// token, and `/healthz` — a no-I/O liveness probe the frontend pings to
 /// time its own round-trip to this node (kept auth-free so the measurement
