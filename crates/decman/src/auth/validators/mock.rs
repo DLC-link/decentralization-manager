@@ -6,7 +6,8 @@ use crate::auth::{
 /// Permissive inbound validator, selected at runtime in insecure mode
 /// (`--insecure` / `DECPM_INSECURE`, or under `cargo test`).
 ///
-/// Accepts either the hardcoded mock token or an empty/missing token, so the
+/// Accepts *any* token, including an empty/missing one — validation always
+/// succeeds and only logs when the token differs from the mock token. So the
 /// insecure-mode UX (swagger, unauthenticated curls) works while the
 /// middleware plumbing is still exercised end-to-end. The returned principal
 /// carries the admin role so gated endpoints (`PUT /party-config`, `POST /kick`)
