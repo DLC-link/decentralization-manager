@@ -13,9 +13,11 @@ use crate::{
 };
 
 /// Static mock token. Kept as the fallback if runtime minting ever fails, and
-/// as the reference the inbound `MockValidator` recognises. Equivalent to the
-/// default-configured runtime token (HS256, secret `unsafe`, aud
-/// `https://canton.network.global`, sub `ledger-api-user`).
+/// as the reference the inbound `MockValidator` recognises. Matches the
+/// default-configured runtime token on alg/secret/aud/sub (HS256, secret
+/// `unsafe`, aud `https://canton.network.global`, sub `ledger-api-user`) but
+/// carries a fixed `iat`, so it is not byte-for-byte identical to a freshly
+/// minted one.
 pub const MOCK_TOKEN: &str = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJodHRwczovL2NhbnRvbi5uZXR3b3JrLmdsb2JhbCIsImlhdCI6MTc2Mzc0ODcwMiwic3ViIjoibGVkZ2VyLWFwaS11c2VyIn0.vpkfH4SoM9AZqbE38W4hrvl3xxy69jYs4u8gveskw9k";
 
 /// Default subject/user id, used by the inbound `MockValidator` and as the

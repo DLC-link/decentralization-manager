@@ -183,14 +183,18 @@ async fn main() -> Result {
             }
 
             config.insecure = *insecure;
-            if let Some(v) = canton_hmac_secret {
-                config.insecure_auth.secret = v.clone();
-            }
-            if let Some(v) = canton_hmac_audience {
-                config.insecure_auth.audience = v.clone();
-            }
-            if let Some(v) = canton_hmac_subject {
-                config.insecure_auth.subject = v.clone();
+            // Only ingest the unsafe HMAC settings when insecure mode is on;
+            // in a secure run they do nothing, so don't store them.
+            if *insecure {
+                if let Some(v) = canton_hmac_secret {
+                    config.insecure_auth.secret = v.clone();
+                }
+                if let Some(v) = canton_hmac_audience {
+                    config.insecure_auth.audience = v.clone();
+                }
+                if let Some(v) = canton_hmac_subject {
+                    config.insecure_auth.subject = v.clone();
+                }
             }
         }
     }
