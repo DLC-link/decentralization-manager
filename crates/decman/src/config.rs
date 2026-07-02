@@ -214,6 +214,31 @@ impl NoiseRetryConfig {
     }
 }
 
+/// Settings for the unsafe HS256 ("HMAC") token decman presents to Canton
+/// when running in [`NodeConfig::insecure`] mode. Point Canton's unsafe auth
+/// service at the same `secret`/`audience` to have it accept the token.
+///
+/// Never serialized (the `secret` must not leak); populated only from CLI/env.
+#[derive(Clone, Debug)]
+pub struct InsecureAuthConfig {
+    /// HS256 signing secret. Canton's conventional dev secret is `unsafe`.
+    pub secret: String,
+    /// `aud` claim.
+    pub audience: String,
+    /// `sub` claim, doubling as the ledger-api user id.
+    pub subject: String,
+}
+
+impl Default for InsecureAuthConfig {
+    fn default() -> Self {
+        Self {
+            secret: "unsafe".to_string(),
+            audience: "https://canton.network.global".to_string(),
+            subject: "ledger-api-user".to_string(),
+        }
+    }
+}
+
 /// Individual node configuration
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
@@ -227,6 +252,14 @@ pub struct NodeConfig {
     /// Top-level Auth0 config for frontend website gating (mutually exclusive
     /// with `keycloak` — operator picks one via env vars at deploy time).
     pub auth0: Option<Auth0Config>,
+    /// Run without an IdP: accept any inbound token and mint an unsafe HS256
+    /// token for Canton. Never enable in production. Not serialized.
+    #[serde(skip)]
+    pub insecure: bool,
+    /// Unsafe token settings, used only when `insecure` is set. Not serialized
+    /// (carries the signing secret).
+    #[serde(skip)]
+    pub insecure_auth: InsecureAuthConfig,
     /// Root directory containing data/ subdirectory
     #[serde(skip)]
     root_dir: PathBuf,
@@ -241,6 +274,8 @@ impl Default for NodeConfig {
             noise_retry: NoiseRetryConfig::default(),
             keycloak: None,
             auth0: None,
+            insecure: false,
+            insecure_auth: InsecureAuthConfig::default(),
             root_dir: PathBuf::new(),
         }
     }

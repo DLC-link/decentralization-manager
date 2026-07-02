@@ -42,6 +42,9 @@ Bumping the tag in the Deployment manifest and re-applying is how you upgrade go
 
 The admin UI authenticates users through your identity provider using the **Authorization Code flow with PKCE**, so it needs a dedicated **public** client. Configure either Keycloak **or** Auth0 — the two providers are mutually exclusive at config-load time.
 
+> [!WARNING]
+> There is an `--insecure` / `DECPM_INSECURE` mode that bypasses the identity provider entirely (any inbound token is accepted and an unsafe shared-secret token is sent to Canton). It exists for local development against an unsafe-auth Canton and **must never be set in a production deployment.** Leave it unset (the default) for every environment described in this guide.
+
 ### Keycloak
 
 You need a **public** client in your realm. The client ID you choose here is what goes into `DECPM_KEYCLOAK_CLIENT_ID` in the Secret below; there is no client secret to copy because public SPA clients don't have one.

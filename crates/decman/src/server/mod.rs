@@ -1,8 +1,8 @@
 //! HTTP server and always-on Noise listener.
 //!
 //! Builds the actix-web application (REST API + embedded React UI; a Swagger UI
-//! is mounted only in test/dev builds, i.e. `cfg!(any(test, feature =
-//! "test-mode"))`), wires shared [`AppState`], and runs the long-lived Noise
+//! is mounted only when the node runs in insecure mode, i.e. `--insecure`),
+//! wires shared [`AppState`], and runs the long-lived Noise
 //! listener that
 //! handles inbound peer messages (invites, signing, health, cancellation)
 //! independently of any coordinator-driven workflow.
@@ -48,12 +48,10 @@ use tokio_noise::handshakes::nn_psk2::Responder;
 use utoipa_actix_web::AppExt;
 use utoipa_swagger_ui::SwaggerUi;
 
-#[cfg(not(any(test, feature = "test-mode")))]
-use crate::auth::{AuthRegistry, JwtValidator};
-#[cfg(any(test, feature = "test-mode"))]
-use crate::auth::{MockAuthRegistry, MockValidator};
 use crate::{
-    auth::{TokenValidator, WorkflowAuth},
+    auth::{
+        AuthRegistry, JwtValidator, MockAuthRegistry, MockValidator, TokenValidator, WorkflowAuth,
+    },
     canton_id::CantonId,
     config::{NodeConfig, PartyCredentials},
     db::schema::{Commitable, SchemaRead, SchemaWrite},
@@ -97,7 +95,7 @@ pub struct AppState {
     pub peer_job_sender: mpsc::UnboundedSender<PeerJob>,
     /// Pending invitations awaiting user acceptance
     pub pending_invitations: Arc<RwLock<Vec<PendingInvitation>>>,
-    /// Authentication registry (real Keycloak or mock for test mode)
+    /// Authentication registry (real Keycloak, or mock in insecure mode)
     pub auth: Arc<RwLock<Option<WorkflowAuth>>>,
     /// Inbound token validator — authenticates API callers.
     pub token_validator: TokenValidator,
@@ -118,7 +116,9 @@ pub struct AppState {
     /// `workflows.route(msg.instance)`, and `/workflows/{instance}/cancel`
     /// looks an entry up to abort its spawn.
     pub workflows: WorkflowRegistry,
-    /// Whether the server is running in test mode
+    /// Whether the server is running in insecure/permissive mode (`--insecure`
+    /// or tests): mock auth plus wildcard-token query filtering. Field name
+    /// kept as `test_mode` for continuity.
     pub test_mode: bool,
     /// Prefixes currently being refreshed from Canton (deduplication)
     pub refreshing_prefixes: Arc<RwLock<HashSet<String>>>,
@@ -776,17 +776,21 @@ pub async fn start_server(
     admin_role: Option<String>,
     allowed_origin: Option<String>,
 ) -> Result {
-    // Test-mode is a compile-time decision: it's `true` iff the binary was
-    // built with `--features test-mode` (or under `cargo test`). Production
-    // binaries cannot run with mock auth — the `MockValidator` and
-    // `MockAuthRegistry` selections below are gated by the same cfg.
-    let test_mode = cfg!(any(test, feature = "test-mode"));
+    // Insecure mode is a runtime decision: `--insecure` / `DECPM_INSECURE`
+    // selects mock auth (accept any inbound token, present an unsafe HMAC token
+    // to Canton) in any build. It is also forced on under `cargo test` and in
+    // `--features test-mode` builds so those keep working without the flag.
+    // Downstream (`AppState.test_mode`, query filtering) this means "using the
+    // permissive wildcard token".
+    let insecure = config.insecure || cfg!(any(test, feature = "test-mode"));
 
-    if !test_mode {
-        tracing::info!(
-            "Running production build (no `test-mode` feature). Swagger UI disabled, \
-             real JWT validation in effect."
+    if insecure {
+        tracing::warn!(
+            "INSECURE MODE ENABLED: inbound auth accepts ANY token and Canton auth uses an \
+             unsafe HMAC token. Authentication is effectively disabled — never use in production."
         );
+    } else {
+        tracing::info!("Running with real JWT validation.");
     }
 
     // Make the admin-role policy explicit at boot so a single-user deployment
@@ -813,16 +817,13 @@ pub async fn start_server(
     });
     let party_credentials = Arc::new(RwLock::new(db_party_creds.clone()));
 
-    // Initialize auth based on mode
-    #[cfg(any(test, feature = "test-mode"))]
-    let auth = {
-        tracing::info!("Running in TEST MODE - using mock authentication");
-        Some(WorkflowAuth::Mock(Arc::new(MockAuthRegistry::new(
+    // Initialize outbound auth (the token DPM presents to Canton) based on mode
+    let auth = if insecure {
+        Some(WorkflowAuth::Mock(Arc::new(MockAuthRegistry::with_config(
             party_credentials.clone(),
+            &config.insecure_auth,
         ))))
-    };
-    #[cfg(not(any(test, feature = "test-mode")))]
-    let auth = if db_party_creds.is_empty() {
+    } else if db_party_creds.is_empty() {
         tracing::info!("No party credentials configured, auth disabled");
         None
     } else {
@@ -849,14 +850,13 @@ pub async fn start_server(
         .expect("reqwest client build");
 
     // keycloak config plus any `party_credentials` rows. The permissive
-    // `MockValidator` is compiled in only behind `cfg(any(test, feature =
-    // "test-mode"))`, so a release binary cannot select it.
-    #[cfg(any(test, feature = "test-mode"))]
-    let token_validator = TokenValidator::Mock(Arc::new(MockValidator::new(
-        admin_role.clone().unwrap_or_default(),
-    )));
-    #[cfg(not(any(test, feature = "test-mode")))]
-    let token_validator = {
+    // `MockValidator` is selected only in insecure mode; production verifies
+    // real JWTs.
+    let token_validator = if insecure {
+        TokenValidator::Mock(Arc::new(MockValidator::new(
+            admin_role.clone().unwrap_or_default(),
+        )))
+    } else {
         let no_top_level_config = config.keycloak.is_none();
         let no_party_creds = party_credentials.read().await.is_empty();
         if no_top_level_config && no_party_creds {
@@ -910,7 +910,9 @@ pub async fn start_server(
         party_credentials: party_credentials.clone(),
         bootstrap_mu: Arc::new(Mutex::new(())),
         workflows: workflows.clone(),
-        test_mode,
+        // "test_mode" here means the permissive/wildcard-token mode; driven by
+        // `--insecure` (or tests). See the `insecure` binding above.
+        test_mode: insecure,
         refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
         http_client,
     });
@@ -1117,7 +1119,7 @@ pub async fn start_server(
             .split_for_parts();
 
         let mut app = app.wrap(AuthMiddleware).wrap(cors);
-        if test_mode {
+        if insecure {
             app = app
                 .service(SwaggerUi::new("/swagger-ui/{_:.*}").url("/api-docs/openapi.json", api));
         }
