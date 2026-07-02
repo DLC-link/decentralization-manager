@@ -3082,9 +3082,8 @@ mod tests {
 
     #[test]
     fn draw_shadow_clamps_at_screen_edge_without_panicking() {
-        let Ok(mut terminal) = Terminal::new(TestBackend::new(20, 10)) else {
-            panic!("failed to build test terminal");
-        };
+        // `TestBackend` is infallible, so `Terminal::new` can't error here.
+        let Ok(mut terminal) = Terminal::new(TestBackend::new(20, 10));
         // A popup flush against the bottom-right corner: the offset shadow must
         // clamp to the screen rather than panic on out-of-bounds.
         let drawn = terminal.draw(|frame| {
