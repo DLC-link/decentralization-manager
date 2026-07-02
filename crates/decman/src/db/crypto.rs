@@ -32,8 +32,8 @@ pub fn is_enabled() -> bool {
 /// exercised in tests without touching the process-global [`ENCRYPTION_KEY`].
 fn encrypt_str_with_key(key: &[u8; 32], plaintext: &str) -> Result<String> {
     let cipher = Aes256Gcm::new(key.into());
-    let nonce_bytes: [u8; 12] = Generate::try_generate()
-        .map_err(|e| anyhow::anyhow!("nonce generation failed: {e}"))?;
+    let nonce_bytes: [u8; 12] =
+        Generate::try_generate().map_err(|e| anyhow::anyhow!("nonce generation failed: {e}"))?;
 
     let ciphertext = cipher
         .encrypt(&nonce_bytes.into(), plaintext.as_bytes())
@@ -127,8 +127,8 @@ pub fn encrypt_bytes(plaintext: &[u8]) -> Result<Vec<u8>> {
 /// so the cipher can be exercised in tests without the process-global key.
 fn encrypt_bytes_with_key(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>> {
     let cipher = Aes256Gcm::new(key.into());
-    let nonce_bytes: [u8; 12] = Generate::try_generate()
-        .map_err(|e| anyhow::anyhow!("nonce generation failed: {e}"))?;
+    let nonce_bytes: [u8; 12] =
+        Generate::try_generate().map_err(|e| anyhow::anyhow!("nonce generation failed: {e}"))?;
 
     let ciphertext = cipher
         .encrypt(&nonce_bytes.into(), plaintext)
