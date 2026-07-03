@@ -2665,13 +2665,8 @@ async fn send_dars_invites(
 /// run of `kind` via [`pick_coordinator_run`] (deterministic lowest
 /// instance_name), so `/{kind}/status` and `/{kind}/cancel` always act on the
 /// same instance. Callers that know which run they mean should use
-/// `POST /workflows/{instance}/cancel`.
-///
-/// When no run of `kind` is registered in memory, the UI may still list one as
-/// InProgress off a persisted coordinator row — a run whose task exited without
-/// marking the row terminal, or one a restart's recovery failed to restore.
-/// Fall back to cancelling that row (see [`cancel_persisted_run`]) so a stuck
-/// run is never uncancellable.
+/// `POST /workflows/{instance}/cancel`. With no in-memory run, falls back to the
+/// persisted row (see [`cancel_persisted_run`]) so a stuck run stays cancellable.
 async fn cancel_workflow_state(
     data: &web::Data<AppState>,
     label: &str,
@@ -2683,12 +2678,8 @@ async fn cancel_workflow_state(
     cancel_persisted_run(data, label, kind).await
 }
 
-/// Cancel a coordinator run that has a persisted `inprogress` row but no live
-/// in-memory [`WorkflowInstance`] — there is no task to abort, so we cannot go
-/// through [`cancel_instance`]. Best-effort notifies the peers the row recorded
-/// (the in-memory invitee list is gone with the instance, so use the row's
-/// `expected_peers`), then flips the row to Cancelled so the feed reflects it.
-/// Returns 409 when no such row exists.
+/// Cancel a run with a persisted `inprogress` row but no in-memory instance
+/// (nothing to abort): notify the row's peers, flip it to Cancelled, 409 if none.
 async fn cancel_persisted_run(
     data: &web::Data<AppState>,
     label: &str,
@@ -2725,9 +2716,7 @@ async fn cancel_persisted_run(
         tracing::warn!("send_cancel_invites failed during {label} cancel: {e}");
     }
 
-    // Flip the persisted coordinator row to Cancelled so the feed reflects it.
-    // On a write failure the row stays InProgress and recovery may resume it, so
-    // surface 500 for the operator to retry against consistent state.
+    // On write failure the row stays InProgress (recovery may resume it) — 500.
     if let Err(e) = mark_run_status(
         &data.db,
         &run.instance_name,
