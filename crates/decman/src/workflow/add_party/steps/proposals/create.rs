@@ -5,10 +5,7 @@ use canton_proto_rs::com::digitalasset::canton::{
         party_to_participant::{HostingParticipant, hosting_participant},
         topology_mapping,
     },
-    topology::admin::v30::{
-        AuthorizeRequest, ForceFlag, StoreId, Synchronizer, authorize_request, store_id,
-        synchronizer,
-    },
+    topology::admin::v30::{AuthorizeRequest, ForceFlag, authorize_request},
 };
 use sqlx::SqlitePool;
 
@@ -17,13 +14,10 @@ use crate::{
     error::Result,
     utils,
     workflow::{
-        add_party::{
-            AddPartyConfig,
-            steps::export_state::{encode_length_prefixed_message, fetch_p2p_mapping},
-        },
+        add_party::AddPartyConfig,
         onboarding::steps::proposals::create::decode_keys_payload,
         storage::{WorkflowStorage, artifact_kinds},
-        topology::authorize_with_topology_retry,
+        topology,
     },
 };
 
@@ -108,7 +102,7 @@ pub async fn create_proposals(
 
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
     let party_id = &add_party_config.decentralized_party_id;
-    let current_p2p = fetch_p2p_mapping(config, &synchronizer_id, party_id).await?;
+    let current_p2p = topology::fetch_p2p_mapping(config, &synchronizer_id, party_id).await?;
 
     tracing::info!(
         "Current P2P mapping has {count} participant(s)",
@@ -148,7 +142,7 @@ pub async fn create_proposals(
     };
 
     tracing::info!("Creating DNS add-party proposal...");
-    let dns_response = authorize_with_topology_retry(
+    let dns_response = topology::authorize_with_topology_retry(
         config,
         proposal_request(
             &synchronizer_id,
@@ -162,7 +156,7 @@ pub async fn create_proposals(
         .ok_or_else(|| anyhow::anyhow!("No DNS transaction returned"))?;
 
     tracing::info!("Creating P2P add-party proposal...");
-    let p2p_response = authorize_with_topology_retry(
+    let p2p_response = topology::authorize_with_topology_retry(
         config,
         proposal_request(
             &synchronizer_id,
@@ -180,7 +174,7 @@ pub async fn create_proposals(
             instance_name,
             artifact_kinds::ADD_PARTY_DNS_PROPOSAL,
             None,
-            &encode_length_prefixed_message(&dns_transaction),
+            &utils::encode_length_prefixed_message(&dns_transaction),
         )
         .await?;
     storage
@@ -188,7 +182,7 @@ pub async fn create_proposals(
             instance_name,
             artifact_kinds::ADD_PARTY_P2P_PROPOSAL,
             None,
-            &encode_length_prefixed_message(&p2p_transaction),
+            &utils::encode_length_prefixed_message(&p2p_transaction),
         )
         .await?;
     storage
@@ -196,7 +190,7 @@ pub async fn create_proposals(
             instance_name,
             artifact_kinds::ADD_PARTY_NEW_NAMESPACE_DEF,
             None,
-            &encode_length_prefixed_message(&new_namespace_def),
+            &utils::encode_length_prefixed_message(&new_namespace_def),
         )
         .await?;
 
@@ -226,11 +220,7 @@ pub(crate) fn proposal_request(
         must_fully_authorize: false,
         force_changes: vec![ForceFlag::AllowUnvalidatedSigningKeys as i32],
         signed_by: vec![],
-        store: Some(StoreId {
-            store: Some(store_id::Store::Synchronizer(Synchronizer {
-                kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.to_string())),
-            })),
-        }),
+        store: Some(topology::synchronizer_store_id(synchronizer_id)),
         wait_to_become_effective: None,
     }
 }

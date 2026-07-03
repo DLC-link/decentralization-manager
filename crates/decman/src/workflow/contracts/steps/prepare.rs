@@ -1,11 +1,7 @@
-use bytes::{BufMut, BytesMut};
 use canton_proto_rs::com::daml::ledger::api::v2::{
     Command, CreateCommand, GenMap, Identifier, Optional, Record, RecordField, Value, command,
-    gen_map,
-    interactive::{PrepareSubmissionRequest, PrepareSubmissionResponse},
-    value,
+    gen_map, interactive::PrepareSubmissionRequest, value,
 };
-use prost::Message;
 use sqlx::SqlitePool;
 
 use crate::{
@@ -171,7 +167,7 @@ pub async fn prepare_submissions(
         // `utils::read_first_message_from_bytes` round-trip cleanly. This is
         // the exact byte shape `utils::write_messages_to_file(&[m], path)`
         // would have written for a single message.
-        let payload = encode_length_prefixed_message(&prepared_submission);
+        let payload = utils::encode_length_prefixed_message(&prepared_submission);
         let ordinal = format!("{idx:04}");
         tracing::debug!(
             "Saving prepared submission {index} to artifact peer key {ordinal}",
@@ -191,17 +187,6 @@ pub async fn prepare_submissions(
         count = contracts_config.contracts.len()
     );
     Ok(())
-}
-
-/// Encode a single protobuf message as `varint(len)||proto`, matching the
-/// byte layout produced by `utils::write_message_to_file`. Keeps the
-/// downstream `utils::read_first_message_from_bytes` reader unchanged.
-fn encode_length_prefixed_message(message: &PrepareSubmissionResponse) -> Vec<u8> {
-    let encoded = message.encode_to_vec();
-    let mut buffer = BytesMut::new();
-    prost::encoding::encode_varint(encoded.len() as u64, &mut buffer);
-    buffer.put_slice(&encoded);
-    buffer.to_vec()
 }
 
 /// Context for building field values in contract submissions

@@ -1,12 +1,8 @@
-use std::collections::HashMap;
-
 use canton_proto_rs::com::digitalasset::canton::{
-    protocol::v30::{DecentralizedNamespaceDefinition, SignedTopologyTransaction},
+    protocol::v30::DecentralizedNamespaceDefinition,
     topology::admin::v30::{
-        AddTransactionsRequest, BaseQuery, ListDecentralizedNamespaceDefinitionRequest,
-        ListPartyToParticipantRequest, StoreId, Synchronizer, base_query, store_id, synchronizer,
+        ListDecentralizedNamespaceDefinitionRequest, ListPartyToParticipantRequest,
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
-        topology_manager_write_service_client::TopologyManagerWriteServiceClient,
     },
 };
 use sqlx::SqlitePool;
@@ -15,18 +11,22 @@ use tokio::time;
 use crate::{
     canton_id::CantonId,
     config::NodeConfig,
-    consts::{
-        TOPOLOGY_PROPAGATION_DELAY_SECS, topology_retry_delay_secs, topology_retry_max_attempts,
-    },
+    consts::{topology_retry_delay_secs, topology_retry_max_attempts},
     error::Result,
     utils,
-    workflow::storage::{WorkflowStorage, artifact_kinds},
+    workflow::{
+        storage::{WorkflowStorage, artifact_kinds},
+        topology,
+    },
 };
 
 /// Submit the change-threshold proposals to the synchronizer.
 ///
 /// The coordinator aggregates the per-peer signatures onto its own proposals
-/// and submits the DNS mapping followed by the P2P mapping.
+/// and submits the DNS mapping followed by the P2P mapping. Both mappings
+/// already exist (owners and participants are unchanged), so the post-submit
+/// polls wait on the new threshold *value* rather than mere existence — else
+/// the check passes before the change lands.
 pub async fn submit_change(
     config: &NodeConfig,
     storage: &SqlitePool,
@@ -37,80 +37,20 @@ pub async fn submit_change(
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
     tracing::debug!("Using synchronizer ID: {synchronizer_id}");
 
-    // Read original DNS proposal
-    let dns_bytes = storage
-        .read_artifact(
-            instance_name,
-            artifact_kinds::CHANGE_THRESHOLD_DNS_PROPOSAL,
-            None,
-        )
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("CHANGE_THRESHOLD_DNS_PROPOSAL artifact missing"))?;
-    let mut dns_transaction: SignedTopologyTransaction =
-        utils::read_first_message_from_bytes(&dns_bytes)?;
+    let (dns_transaction, p2p_transaction) = topology::aggregate_dns_p2p_signatures(
+        storage,
+        instance_name,
+        topology::DnsP2pArtifactKinds {
+            dns_proposal: artifact_kinds::CHANGE_THRESHOLD_DNS_PROPOSAL,
+            p2p_proposal: artifact_kinds::CHANGE_THRESHOLD_P2P_PROPOSAL,
+            signed_dns: artifact_kinds::SIGNED_CHANGE_THRESHOLD_DNS,
+            signed_p2p: artifact_kinds::SIGNED_CHANGE_THRESHOLD_P2P,
+        },
+    )
+    .await?;
 
-    // Read original P2P proposal
-    let p2p_bytes = storage
-        .read_artifact(
-            instance_name,
-            artifact_kinds::CHANGE_THRESHOLD_P2P_PROPOSAL,
-            None,
-        )
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("CHANGE_THRESHOLD_P2P_PROPOSAL artifact missing"))?;
-    let mut p2p_transaction: SignedTopologyTransaction =
-        utils::read_first_message_from_bytes(&p2p_bytes)?;
-
-    // Gather per-peer signed proposals from storage, joining DNS and P2P by
-    // peer id so the two signatures stay paired.
-    let signed_dns = storage
-        .list_artifacts(instance_name, artifact_kinds::SIGNED_CHANGE_THRESHOLD_DNS)
-        .await?;
-    let signed_p2p: HashMap<String, Vec<u8>> = storage
-        .list_artifacts(instance_name, artifact_kinds::SIGNED_CHANGE_THRESHOLD_P2P)
-        .await?
-        .into_iter()
-        .collect();
-
-    tracing::info!(
-        "Found signed proposals from {count} peer(s)",
-        count = signed_dns.len()
-    );
-
-    if signed_dns.len() != signed_p2p.len() {
-        anyhow::bail!(
-            "Mismatched signed proposal counts: {dns} DNS vs {p2p} P2P",
-            dns = signed_dns.len(),
-            p2p = signed_p2p.len()
-        );
-    }
-
-    // Aggregate signatures from each peer onto the coordinator's proposals.
-    for (peer_id, dns_signed_bytes) in &signed_dns {
-        tracing::info!("Reading signatures from peer {peer_id}");
-
-        let dns_signed: SignedTopologyTransaction =
-            utils::read_first_message_from_bytes(dns_signed_bytes)?;
-        let p2p_signed_bytes = signed_p2p
-            .get(peer_id)
-            .ok_or_else(|| anyhow::anyhow!("Peer {peer_id} signed DNS but not P2P"))?;
-        let p2p_signed: SignedTopologyTransaction =
-            utils::read_first_message_from_bytes(p2p_signed_bytes)?;
-
-        dns_transaction.signatures.extend(dns_signed.signatures);
-        p2p_transaction.signatures.extend(p2p_signed.signatures);
-    }
-
-    tracing::info!(
-        "Final DNS proposal has {count} signature(s)",
-        count = dns_transaction.signatures.len()
-    );
-    tracing::info!(
-        "Final P2P proposal has {count} signature(s)",
-        count = p2p_transaction.signatures.len()
-    );
-
-    // Read new namespace definition for the topology-propagation poll.
+    // Read the new namespace definition (for the target threshold) + party id
+    // needed by the post-submit topology polls.
     let new_namespace_bytes = storage
         .read_artifact(
             instance_name,
@@ -122,7 +62,6 @@ pub async fn submit_change(
     let new_namespace_def: DecentralizedNamespaceDefinition =
         utils::read_first_message_from_bytes(&new_namespace_bytes)?;
 
-    // Read party ID
     let party_id_bytes = storage
         .read_artifact(
             instance_name,
@@ -135,71 +74,30 @@ pub async fn submit_change(
     let party_id = CantonId::parse(&party_id_raw)?;
     tracing::info!("Party ID: {party_id}");
 
-    // Submit DNS proposal first
-    tracing::info!("Submitting DNS change-threshold proposal...");
-    let mut topology_write_client =
-        TopologyManagerWriteServiceClient::connect(config.admin_api_url()).await?;
-
-    let dns_request = tonic::Request::new(AddTransactionsRequest {
-        transactions: vec![dns_transaction],
-        force_changes: vec![],
-        store: Some(StoreId {
-            store: Some(store_id::Store::Synchronizer(Synchronizer {
-                kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.clone())),
-            })),
-        }),
-        wait_to_become_effective: None,
-    });
-
-    topology_write_client.add_transactions(dns_request).await?;
-    tracing::info!("DNS change-threshold proposal submitted");
-
-    // Wait for the DNS to reflect the NEW threshold. The namespace already
-    // exists (owners are unchanged), so we must poll on the threshold value
-    // itself, not mere existence, or the check passes before the change lands.
-    tracing::info!("Waiting for DNS change-threshold to take effect in topology...");
-    wait_for_dns_in_topology(
+    topology::submit_dns_then_p2p(
         config,
         &synchronizer_id,
-        &new_namespace_def.decentralized_namespace,
-        new_namespace_def.threshold,
+        "change-threshold",
+        dns_transaction,
+        p2p_transaction,
+        || {
+            wait_for_dns_in_topology(
+                config,
+                &synchronizer_id,
+                &new_namespace_def.decentralized_namespace,
+                new_namespace_def.threshold,
+            )
+        },
+        || {
+            wait_for_p2p_in_topology(
+                config,
+                &synchronizer_id,
+                &party_id,
+                new_namespace_def.threshold as u32,
+            )
+        },
     )
     .await?;
-    tracing::info!("DNS change-threshold confirmed in topology");
-
-    // Submit P2P proposal
-    tracing::info!("Submitting P2P change-threshold proposal...");
-    let p2p_request = tonic::Request::new(AddTransactionsRequest {
-        transactions: vec![p2p_transaction],
-        force_changes: vec![],
-        store: Some(StoreId {
-            store: Some(store_id::Store::Synchronizer(Synchronizer {
-                kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.clone())),
-            })),
-        }),
-        wait_to_become_effective: None,
-    });
-
-    topology_write_client.add_transactions(p2p_request).await?;
-    tracing::info!("P2P change-threshold proposal submitted");
-
-    // Wait for the P2P mapping to reflect the NEW threshold. The party id is
-    // stable, so — like the DNS above — poll on the threshold value, not mere
-    // existence.
-    tracing::info!("Waiting for P2P change-threshold to take effect in topology...");
-    wait_for_p2p_in_topology(
-        config,
-        &synchronizer_id,
-        &party_id,
-        new_namespace_def.threshold as u32,
-    )
-    .await?;
-    tracing::info!("P2P change-threshold confirmed in topology");
-
-    // Additional wait for topology propagation
-    let propagation_delay = time::Duration::from_secs(TOPOLOGY_PROPAGATION_DELAY_SECS);
-    tracing::info!("Waiting {propagation_delay:?} for Canton to propagate topology updates...");
-    time::sleep(propagation_delay).await;
 
     tracing::info!("Change-threshold submitted and confirmed successfully");
     Ok(())
@@ -225,18 +123,7 @@ async fn wait_for_dns_in_topology(
 
     for attempt in 1..=max_attempts {
         let request = tonic::Request::new(ListDecentralizedNamespaceDefinitionRequest {
-            base_query: Some(BaseQuery {
-                store: Some(StoreId {
-                    store: Some(store_id::Store::Synchronizer(Synchronizer {
-                        kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.to_string())),
-                    })),
-                }),
-                proposals: false,
-                operation: 0,
-                time_query: Some(base_query::TimeQuery::HeadState(())),
-                filter_signed_key: String::new(),
-                protocol_version: None,
-            }),
+            base_query: Some(topology::head_state_query(synchronizer_id)),
             filter_namespace: namespace.to_string(),
         });
 
@@ -287,18 +174,7 @@ async fn wait_for_p2p_in_topology(
 
     for attempt in 1..=max_attempts {
         let request = tonic::Request::new(ListPartyToParticipantRequest {
-            base_query: Some(BaseQuery {
-                store: Some(StoreId {
-                    store: Some(store_id::Store::Synchronizer(Synchronizer {
-                        kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.to_string())),
-                    })),
-                }),
-                proposals: false,
-                operation: 0,
-                time_query: Some(base_query::TimeQuery::HeadState(())),
-                filter_signed_key: String::new(),
-                protocol_version: None,
-            }),
+            base_query: Some(topology::head_state_query(synchronizer_id)),
             filter_party: party_id_str.clone(),
             filter_participant: String::new(),
         });

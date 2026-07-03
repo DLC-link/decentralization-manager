@@ -1,10 +1,7 @@
-use bytes::{BufMut, BytesMut};
 use canton_proto_rs::com::digitalasset::canton::topology::admin::v30::{
-    BaseQuery, ListDecentralizedNamespaceDefinitionRequest, ListPartyToParticipantRequest, StoreId,
-    Synchronizer, base_query, store_id, synchronizer,
+    ListDecentralizedNamespaceDefinitionRequest, ListPartyToParticipantRequest,
     topology_manager_read_service_client::TopologyManagerReadServiceClient,
 };
-use prost::Message;
 use sqlx::SqlitePool;
 
 use crate::{
@@ -14,6 +11,7 @@ use crate::{
     workflow::{
         kick::KickConfig,
         storage::{WorkflowStorage, artifact_kinds},
+        topology,
     },
 };
 
@@ -42,18 +40,7 @@ pub async fn export_state(
         TopologyManagerReadServiceClient::connect(config.admin_api_url()).await?;
 
     let request = tonic::Request::new(ListDecentralizedNamespaceDefinitionRequest {
-        base_query: Some(BaseQuery {
-            store: Some(StoreId {
-                store: Some(store_id::Store::Synchronizer(Synchronizer {
-                    kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.clone())),
-                })),
-            }),
-            proposals: false,
-            operation: 0,
-            time_query: Some(base_query::TimeQuery::HeadState(())),
-            filter_signed_key: String::new(),
-            protocol_version: None,
-        }),
+        base_query: Some(topology::head_state_query(&synchronizer_id)),
         filter_namespace: namespace_hex.clone(),
     });
 
@@ -91,7 +78,7 @@ pub async fn export_state(
 
     // Save namespace definition as a length-prefixed protobuf — same byte
     // shape as the file written by `utils::write_message_to_file`.
-    let namespace_bytes = encode_length_prefixed_message(namespace_def);
+    let namespace_bytes = utils::encode_length_prefixed_message(namespace_def);
     storage
         .write_artifact(
             instance_name,
@@ -109,18 +96,7 @@ pub async fn export_state(
     tracing::info!("Querying P2P mapping for party: {party_id}");
 
     let p2p_request = tonic::Request::new(ListPartyToParticipantRequest {
-        base_query: Some(BaseQuery {
-            store: Some(StoreId {
-                store: Some(store_id::Store::Synchronizer(Synchronizer {
-                    kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.clone())),
-                })),
-            }),
-            proposals: false,
-            operation: 0,
-            time_query: Some(base_query::TimeQuery::HeadState(())),
-            filter_signed_key: String::new(),
-            protocol_version: None,
-        }),
+        base_query: Some(topology::head_state_query(&synchronizer_id)),
         filter_party: party_id.clone(),
         filter_participant: String::new(),
     });
@@ -206,15 +182,4 @@ pub async fn export_state(
 
     tracing::info!("State exported successfully to workflow storage");
     Ok(())
-}
-
-/// Encode a single protobuf message with a varint length prefix, matching the
-/// byte layout produced by `utils::write_message_to_file`. Used so reads via
-/// `utils::read_first_message_from_bytes` keep working unchanged.
-fn encode_length_prefixed_message<M: Message>(message: &M) -> Vec<u8> {
-    let encoded = message.encode_to_vec();
-    let mut buffer = BytesMut::new();
-    prost::encoding::encode_varint(encoded.len() as u64, &mut buffer);
-    buffer.put_slice(&encoded);
-    buffer.to_vec()
 }

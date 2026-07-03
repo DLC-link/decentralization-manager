@@ -1,6 +1,5 @@
 use std::collections::HashSet;
 
-use bytes::{BufMut, BytesMut};
 use canton_proto_rs::com::digitalasset::canton::{
     crypto::v30::{SigningKeysWithThreshold, SigningPublicKey},
     protocol::v30::{
@@ -308,19 +307,19 @@ pub async fn create_proposals(
 
     // Step 13: Persist proposals to storage. Each protobuf is written with the
     // same `varint(len)||proto` framing the original on-disk format used.
-    let dns_bytes = encode_length_prefixed_message(&dns_transaction);
+    let dns_bytes = utils::encode_length_prefixed_message(&dns_transaction);
     storage
         .write_artifact(instance_name, artifact_kinds::DNS_PROTO, None, &dns_bytes)
         .await?;
     tracing::info!("Saved DNS proposal to storage");
 
-    let p2p_bytes = encode_length_prefixed_message(&p2p_transaction);
+    let p2p_bytes = utils::encode_length_prefixed_message(&p2p_transaction);
     storage
         .write_artifact(instance_name, artifact_kinds::P2P_PROTO, None, &p2p_bytes)
         .await?;
     tracing::info!("Saved P2P proposal to storage");
 
-    let namespace_bytes = encode_length_prefixed_message(&namespace_def);
+    let namespace_bytes = utils::encode_length_prefixed_message(&namespace_def);
     storage
         .write_artifact(
             instance_name,
@@ -357,17 +356,6 @@ pub(crate) fn decode_keys_payload(payload: &[u8]) -> Result<Vec<SigningPublicKey
         cursor = rest;
     }
     Ok(keys)
-}
-
-/// Encode a protobuf message as `varint(len)||proto` — same framing
-/// `utils::write_message_to_file` produced, so existing readers like
-/// `read_first_message_from_bytes` round-trip cleanly.
-fn encode_length_prefixed_message<M: Message>(message: &M) -> Vec<u8> {
-    let encoded = message.encode_to_vec();
-    let mut buffer = BytesMut::new();
-    prost::encoding::encode_varint(encoded.len() as u64, &mut buffer);
-    buffer.put_slice(&encoded);
-    buffer.to_vec()
 }
 
 /// Compute decentralized namespace from individual namespaces
