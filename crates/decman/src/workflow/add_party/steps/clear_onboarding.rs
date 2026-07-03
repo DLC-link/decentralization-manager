@@ -7,7 +7,7 @@ use canton_proto_rs::com::digitalasset::canton::{
     },
     protocol::v30::{PartyToParticipant, SignedTopologyTransaction, topology_mapping},
     topology::admin::v30::{
-        SignTransactionsRequest, StoreId, Synchronizer, store_id, synchronizer,
+        SignTransactionsRequest,
         topology_manager_write_service_client::TopologyManagerWriteServiceClient,
     },
 };
@@ -20,16 +20,12 @@ use crate::{
     error::Result,
     utils,
     workflow::{
-        add_party::{
-            AddPartyConfig,
-            steps::{
-                export_state::{encode_length_prefixed_message, fetch_p2p_mapping},
-                proposals::create::proposal_request,
-                proposals::submit::add_transactions_request,
-            },
-        },
+        add_party::{AddPartyConfig, steps::proposals::create::proposal_request},
         storage::{WorkflowStorage, artifact_kinds},
-        topology::{authorize_with_topology_retry, sign_transactions_with_topology_retry},
+        topology::{
+            add_transactions_request, authorize_with_topology_retry, dedupe_signatures,
+            fetch_p2p_mapping, sign_transactions_with_topology_retry, synchronizer_store_id,
+        },
     },
 };
 
@@ -159,7 +155,7 @@ pub async fn author_clear_proposal(
 ) -> Result<Option<Vec<u8>>> {
     Ok(create_clear_proposal(config, add_party_config)
         .await?
-        .map(|transaction| encode_length_prefixed_message(&transaction)))
+        .map(|transaction| utils::encode_length_prefixed_message(&transaction)))
 }
 
 /// Build the onboarding-flag clearing proposal — the current P2P mapping
@@ -226,11 +222,7 @@ pub async fn sign_clear_proposal(
     let request = SignTransactionsRequest {
         transactions: vec![transaction],
         signed_by: vec![],
-        store: Some(StoreId {
-            store: Some(store_id::Store::Synchronizer(Synchronizer {
-                kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id)),
-            })),
-        }),
+        store: Some(synchronizer_store_id(&synchronizer_id)),
         force_flags: vec![],
     };
 
@@ -248,7 +240,7 @@ pub async fn sign_clear_proposal(
             instance_name,
             artifact_kinds::SIGNED_ADD_PARTY_CLEAR,
             Some(&node_id),
-            &encode_length_prefixed_message(&response.transactions[0]),
+            &utils::encode_length_prefixed_message(&response.transactions[0]),
         )
         .await?;
 
@@ -304,11 +296,7 @@ pub async fn submit_clear_proposal(
         SignTransactionsRequest {
             transactions: vec![transaction.clone()],
             signed_by: vec![],
-            store: Some(StoreId {
-                store: Some(store_id::Store::Synchronizer(Synchronizer {
-                    kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.clone())),
-                })),
-            }),
+            store: Some(synchronizer_store_id(&synchronizer_id)),
             force_flags: vec![],
         },
         "add-party-clear coordinator",
@@ -318,7 +306,7 @@ pub async fn submit_clear_proposal(
         transaction.signatures.extend(coordinator_signed.signatures);
     }
 
-    super::proposals::submit::dedupe_signatures(&mut transaction);
+    dedupe_signatures(&mut transaction);
 
     let mut topology_write_client =
         TopologyManagerWriteServiceClient::connect(config.admin_api_url()).await?;

@@ -1,29 +1,17 @@
-use std::collections::{HashMap, HashSet};
-
-use canton_proto_rs::com::digitalasset::canton::{
-    protocol::v30::{DecentralizedNamespaceDefinition, SignedTopologyTransaction},
-    topology::admin::v30::{
-        AddTransactionsRequest, StoreId, Synchronizer, store_id, synchronizer,
-        topology_manager_write_service_client::TopologyManagerWriteServiceClient,
-    },
-};
+use canton_proto_rs::com::digitalasset::canton::protocol::v30::DecentralizedNamespaceDefinition;
 use sqlx::SqlitePool;
 use tokio::time;
 
 use crate::{
     canton_id::CantonId,
     config::NodeConfig,
-    consts::{
-        TOPOLOGY_PROPAGATION_DELAY_SECS, topology_retry_delay_secs, topology_retry_max_attempts,
-    },
+    consts::{topology_retry_delay_secs, topology_retry_max_attempts},
     error::Result,
     utils,
     workflow::{
-        add_party::{
-            AddPartyConfig,
-            steps::export_state::{fetch_namespace_definition, fetch_p2p_mapping},
-        },
+        add_party::AddPartyConfig,
         storage::{WorkflowStorage, artifact_kinds},
+        topology,
     },
 };
 
@@ -31,10 +19,10 @@ use crate::{
 /// proposals and submit them — DNS first, then P2P — waiting after each for
 /// the updated mapping to land in the synchronizer head state.
 ///
-/// Unlike kick (where polling for mere existence suffices because the
-/// mapping briefly disappears), both mappings already exist here, so the
-/// waits check the COUNTS: DNS until the owner set has grown to the new
-/// size, P2P until the new participant appears.
+/// Unlike kick (where polling for mere existence suffices because the mapping
+/// briefly disappears), both mappings already exist here, so the waits check
+/// membership: DNS until the new member's fingerprint joins the owner set, P2P
+/// until the new participant appears.
 pub async fn submit_proposals(
     config: &NodeConfig,
     storage: &SqlitePool,
@@ -45,66 +33,23 @@ pub async fn submit_proposals(
 
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
 
-    let dns_bytes = storage
-        .read_artifact(instance_name, artifact_kinds::ADD_PARTY_DNS_PROPOSAL, None)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("ADD_PARTY_DNS_PROPOSAL artifact missing"))?;
-    let mut dns_transaction: SignedTopologyTransaction =
-        utils::read_first_message_from_bytes(&dns_bytes)?;
-
-    let p2p_bytes = storage
-        .read_artifact(instance_name, artifact_kinds::ADD_PARTY_P2P_PROPOSAL, None)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("ADD_PARTY_P2P_PROPOSAL artifact missing"))?;
-    let mut p2p_transaction: SignedTopologyTransaction =
-        utils::read_first_message_from_bytes(&p2p_bytes)?;
-
-    let signed_dns = storage
-        .list_artifacts(instance_name, artifact_kinds::SIGNED_ADD_PARTY_DNS)
-        .await?;
-    let signed_p2p: HashMap<String, Vec<u8>> = storage
-        .list_artifacts(instance_name, artifact_kinds::SIGNED_ADD_PARTY_P2P)
-        .await?
-        .into_iter()
-        .collect();
-
-    tracing::info!(
-        "Found signed proposals from {count} peer(s)",
-        count = signed_dns.len()
-    );
-    if signed_dns.len() != signed_p2p.len() {
-        anyhow::bail!(
-            "Mismatched signed proposal counts: {dns} DNS vs {p2p} P2P",
-            dns = signed_dns.len(),
-            p2p = signed_p2p.len()
-        );
-    }
-
-    for (peer_id, dns_signed_bytes) in &signed_dns {
-        tracing::info!("Aggregating signatures from peer {peer_id}");
-        let dns_signed: SignedTopologyTransaction =
-            utils::read_first_message_from_bytes(dns_signed_bytes)?;
-        let p2p_signed_bytes = signed_p2p
-            .get(peer_id)
-            .ok_or_else(|| anyhow::anyhow!("Peer {peer_id} signed DNS but not P2P"))?;
-        let p2p_signed: SignedTopologyTransaction =
-            utils::read_first_message_from_bytes(p2p_signed_bytes)?;
-
-        dns_transaction.signatures.extend(dns_signed.signatures);
-        p2p_transaction.signatures.extend(p2p_signed.signatures);
-    }
+    let (mut dns_transaction, mut p2p_transaction) = topology::aggregate_dns_p2p_signatures(
+        storage,
+        instance_name,
+        topology::DnsP2pArtifactKinds {
+            dns_proposal: artifact_kinds::ADD_PARTY_DNS_PROPOSAL,
+            p2p_proposal: artifact_kinds::ADD_PARTY_P2P_PROPOSAL,
+            signed_dns: artifact_kinds::SIGNED_ADD_PARTY_DNS,
+            signed_p2p: artifact_kinds::SIGNED_ADD_PARTY_P2P,
+        },
+    )
+    .await?;
 
     // Dedupe by signing fingerprint: the coordinator's own signature is
     // already on the original proposals, and a retried peer may have signed
     // twice. Canton rejects duplicate signatures on a submitted transaction.
-    dedupe_signatures(&mut dns_transaction);
-    dedupe_signatures(&mut p2p_transaction);
-
-    tracing::info!(
-        "Final DNS proposal has {dns} signature(s), P2P has {p2p}",
-        dns = dns_transaction.signatures.len(),
-        p2p = p2p_transaction.signatures.len()
-    );
+    topology::dedupe_signatures(&mut dns_transaction);
+    topology::dedupe_signatures(&mut p2p_transaction);
 
     let new_namespace_bytes = storage
         .read_artifact(
@@ -117,73 +62,33 @@ pub async fn submit_proposals(
     let new_namespace_def: DecentralizedNamespaceDefinition =
         utils::read_first_message_from_bytes(&new_namespace_bytes)?;
 
-    let mut topology_write_client =
-        TopologyManagerWriteServiceClient::connect(config.admin_api_url()).await?;
-
-    tracing::info!("Submitting DNS add-party proposal...");
-    topology_write_client
-        .add_transactions(tonic::Request::new(add_transactions_request(
-            &synchronizer_id,
-            dns_transaction,
-        )))
-        .await?;
-
-    tracing::info!("Waiting for the grown DNS owner set to appear in topology...");
-    wait_for_owners(
+    topology::submit_dns_then_p2p(
         config,
         &synchronizer_id,
-        &new_namespace_def.decentralized_namespace,
-        &new_namespace_def.owners,
+        "add-party",
+        dns_transaction,
+        p2p_transaction,
+        || {
+            wait_for_owners(
+                config,
+                &synchronizer_id,
+                &new_namespace_def.decentralized_namespace,
+                &new_namespace_def.owners,
+            )
+        },
+        || {
+            wait_for_participant(
+                config,
+                &synchronizer_id,
+                &add_party_config.decentralized_party_id,
+                &add_party_config.new_participant_id,
+            )
+        },
     )
     .await?;
-
-    tracing::info!("Submitting P2P add-party proposal...");
-    topology_write_client
-        .add_transactions(tonic::Request::new(add_transactions_request(
-            &synchronizer_id,
-            p2p_transaction,
-        )))
-        .await?;
-
-    tracing::info!("Waiting for the new participant to appear in the P2P mapping...");
-    wait_for_participant(
-        config,
-        &synchronizer_id,
-        &add_party_config.decentralized_party_id,
-        &add_party_config.new_participant_id,
-    )
-    .await?;
-
-    let propagation_delay = time::Duration::from_secs(TOPOLOGY_PROPAGATION_DELAY_SECS);
-    tracing::info!("Waiting {propagation_delay:?} for Canton to propagate topology updates...");
-    time::sleep(propagation_delay).await;
 
     tracing::info!("Add-party proposals submitted and confirmed successfully");
     Ok(())
-}
-
-/// Drop duplicate signatures, keeping the first per signing fingerprint.
-pub(crate) fn dedupe_signatures(transaction: &mut SignedTopologyTransaction) {
-    let mut seen = HashSet::new();
-    transaction
-        .signatures
-        .retain(|sig| seen.insert(sig.signed_by.clone()));
-}
-
-pub(crate) fn add_transactions_request(
-    synchronizer_id: &str,
-    transaction: SignedTopologyTransaction,
-) -> AddTransactionsRequest {
-    AddTransactionsRequest {
-        transactions: vec![transaction],
-        force_changes: vec![],
-        store: Some(StoreId {
-            store: Some(store_id::Store::Synchronizer(Synchronizer {
-                kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.to_string())),
-            })),
-        }),
-        wait_to_become_effective: None,
-    }
 }
 
 /// Poll the synchronizer head state until the decentralized namespace lists
@@ -202,7 +107,8 @@ async fn wait_for_owners(
     let retry_delay = time::Duration::from_secs(topology_retry_delay_secs());
 
     for attempt in 1..=max_attempts {
-        let namespace_def = fetch_namespace_definition(config, synchronizer_id, namespace).await?;
+        let namespace_def =
+            topology::fetch_namespace_definition(config, synchronizer_id, namespace).await?;
         let present = expected_owners
             .iter()
             .filter(|owner| namespace_def.owners.contains(owner))
@@ -243,7 +149,7 @@ async fn wait_for_participant(
     let participant_str = participant.to_string();
 
     for attempt in 1..=max_attempts {
-        let p2p = fetch_p2p_mapping(config, synchronizer_id, party_id).await?;
+        let p2p = topology::fetch_p2p_mapping(config, synchronizer_id, party_id).await?;
         if p2p
             .participants
             .iter()

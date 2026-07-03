@@ -4,9 +4,7 @@ use canton_proto_rs::com::digitalasset::canton::{
         topology_mapping,
     },
     topology::admin::v30::{
-        AuthorizeRequest, BaseQuery, ListPartyToParticipantRequest, StoreId, Synchronizer,
-        authorize_request, base_query, store_id, synchronizer,
-        topology_manager_read_service_client::TopologyManagerReadServiceClient,
+        AuthorizeRequest, authorize_request,
         topology_manager_write_service_client::TopologyManagerWriteServiceClient,
     },
 };
@@ -20,6 +18,7 @@ use crate::{
     workflow::{
         change_threshold::ChangeThresholdConfig,
         storage::{WorkflowStorage, artifact_kinds},
+        topology,
     },
 };
 
@@ -89,7 +88,7 @@ pub async fn create_proposals(
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
     tracing::debug!("Using synchronizer ID: {synchronizer_id}");
 
-    let current_p2p = get_current_p2p_mapping(config, &synchronizer_id, &party_id).await?;
+    let current_p2p = topology::fetch_p2p_mapping(config, &synchronizer_id, &party_id).await?;
     tracing::info!(
         "Current P2P mapping has {count} participant(s), threshold {threshold}",
         count = current_p2p.participants.len(),
@@ -124,11 +123,7 @@ pub async fn create_proposals(
         must_fully_authorize: false,
         force_changes: vec![],
         signed_by: vec![],
-        store: Some(StoreId {
-            store: Some(store_id::Store::Synchronizer(Synchronizer {
-                kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.clone())),
-            })),
-        }),
+        store: Some(topology::synchronizer_store_id(&synchronizer_id)),
         wait_to_become_effective: None,
     });
 
@@ -152,11 +147,7 @@ pub async fn create_proposals(
         must_fully_authorize: false,
         force_changes: vec![],
         signed_by: vec![],
-        store: Some(StoreId {
-            store: Some(store_id::Store::Synchronizer(Synchronizer {
-                kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.clone())),
-            })),
-        }),
+        store: Some(topology::synchronizer_store_id(&synchronizer_id)),
         wait_to_become_effective: None,
     });
 
@@ -213,45 +204,4 @@ pub async fn create_proposals(
 
     tracing::info!("Change-threshold proposals created and saved successfully");
     Ok(())
-}
-
-/// Get the current P2P mapping for the party.
-async fn get_current_p2p_mapping(
-    config: &NodeConfig,
-    synchronizer_id: &str,
-    party_id: &CantonId,
-) -> Result<PartyToParticipant> {
-    let party_id_str = party_id.to_string();
-    let mut topology_read_client =
-        TopologyManagerReadServiceClient::connect(config.admin_api_url()).await?;
-
-    let request = tonic::Request::new(ListPartyToParticipantRequest {
-        base_query: Some(BaseQuery {
-            store: Some(StoreId {
-                store: Some(store_id::Store::Synchronizer(Synchronizer {
-                    kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.to_string())),
-                })),
-            }),
-            proposals: false,
-            operation: 0,
-            time_query: Some(base_query::TimeQuery::HeadState(())),
-            filter_signed_key: String::new(),
-            protocol_version: None,
-        }),
-        filter_party: party_id_str,
-        filter_participant: String::new(),
-    });
-
-    let response = topology_read_client
-        .list_party_to_participant(request)
-        .await?
-        .into_inner();
-
-    let p2p = response
-        .results
-        .first()
-        .and_then(|r| r.item.as_ref())
-        .ok_or_else(|| anyhow::anyhow!("No P2P mapping found for party {party_id}"))?;
-
-    Ok(p2p.clone())
 }

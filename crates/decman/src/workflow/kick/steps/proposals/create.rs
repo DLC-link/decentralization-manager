@@ -1,17 +1,13 @@
-use bytes::{BufMut, BytesMut};
 use canton_proto_rs::com::digitalasset::canton::{
     protocol::v30::{
         DecentralizedNamespaceDefinition, PartyToParticipant, TopologyMapping, enums,
         topology_mapping,
     },
     topology::admin::v30::{
-        AuthorizeRequest, BaseQuery, ListPartyToParticipantRequest, StoreId, Synchronizer,
-        authorize_request, base_query, store_id, synchronizer,
-        topology_manager_read_service_client::TopologyManagerReadServiceClient,
+        AuthorizeRequest, authorize_request,
         topology_manager_write_service_client::TopologyManagerWriteServiceClient,
     },
 };
-use prost::Message;
 use sqlx::SqlitePool;
 
 use crate::{
@@ -22,6 +18,7 @@ use crate::{
     workflow::{
         kick::KickConfig,
         storage::{WorkflowStorage, artifact_kinds},
+        topology,
     },
 };
 
@@ -112,7 +109,7 @@ pub async fn create_proposals(
     tracing::debug!("Using synchronizer ID: {synchronizer_id}");
 
     // Get current P2P mapping
-    let current_p2p = get_current_p2p_mapping(config, &synchronizer_id, &party_id).await?;
+    let current_p2p = topology::fetch_p2p_mapping(config, &synchronizer_id, &party_id).await?;
 
     tracing::info!(
         "Current P2P mapping has {count} participant(s)",
@@ -164,11 +161,7 @@ pub async fn create_proposals(
         must_fully_authorize: false,
         force_changes: vec![],
         signed_by: vec![],
-        store: Some(StoreId {
-            store: Some(store_id::Store::Synchronizer(Synchronizer {
-                kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.clone())),
-            })),
-        }),
+        store: Some(topology::synchronizer_store_id(&synchronizer_id)),
         wait_to_become_effective: None,
     });
 
@@ -192,11 +185,7 @@ pub async fn create_proposals(
         must_fully_authorize: false,
         force_changes: vec![],
         signed_by: vec![],
-        store: Some(StoreId {
-            store: Some(store_id::Store::Synchronizer(Synchronizer {
-                kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.clone())),
-            })),
-        }),
+        store: Some(topology::synchronizer_store_id(&synchronizer_id)),
         wait_to_become_effective: None,
     });
 
@@ -208,7 +197,7 @@ pub async fn create_proposals(
     // Persist proposals + supporting data to workflow storage. Each protobuf
     // is written with the same `varint(len)||proto` framing the original file
     // path used (so `read_first_message_from_bytes` works unchanged).
-    let dns_bytes = encode_length_prefixed_message(&dns_transaction);
+    let dns_bytes = utils::encode_length_prefixed_message(&dns_transaction);
     storage
         .write_artifact(
             instance_name,
@@ -219,7 +208,7 @@ pub async fn create_proposals(
         .await?;
     tracing::info!("Saved DNS kick proposal to storage");
 
-    let p2p_bytes = encode_length_prefixed_message(&p2p_transaction);
+    let p2p_bytes = utils::encode_length_prefixed_message(&p2p_transaction);
     storage
         .write_artifact(
             instance_name,
@@ -230,7 +219,7 @@ pub async fn create_proposals(
         .await?;
     tracing::info!("Saved P2P kick proposal to storage");
 
-    let new_namespace_bytes = encode_length_prefixed_message(&new_namespace_def);
+    let new_namespace_bytes = utils::encode_length_prefixed_message(&new_namespace_def);
     storage
         .write_artifact(
             instance_name,
@@ -254,55 +243,4 @@ pub async fn create_proposals(
 
     tracing::info!("Kick proposals created and saved successfully");
     Ok(())
-}
-
-/// Get the current P2P mapping for the party
-async fn get_current_p2p_mapping(
-    config: &NodeConfig,
-    synchronizer_id: &str,
-    party_id: &CantonId,
-) -> Result<PartyToParticipant> {
-    let party_id_str = party_id.to_string();
-    let mut topology_read_client =
-        TopologyManagerReadServiceClient::connect(config.admin_api_url()).await?;
-
-    let request = tonic::Request::new(ListPartyToParticipantRequest {
-        base_query: Some(BaseQuery {
-            store: Some(StoreId {
-                store: Some(store_id::Store::Synchronizer(Synchronizer {
-                    kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.to_string())),
-                })),
-            }),
-            proposals: false,
-            operation: 0,
-            time_query: Some(base_query::TimeQuery::HeadState(())),
-            filter_signed_key: String::new(),
-            protocol_version: None,
-        }),
-        filter_party: party_id_str,
-        filter_participant: String::new(),
-    });
-
-    let response = topology_read_client
-        .list_party_to_participant(request)
-        .await?
-        .into_inner();
-
-    let p2p = response
-        .results
-        .first()
-        .and_then(|r| r.item.as_ref())
-        .ok_or_else(|| anyhow::anyhow!("No P2P mapping found for party {party_id}"))?;
-
-    Ok(p2p.clone())
-}
-
-/// Encode a protobuf message as `varint(len)||proto`, matching the on-disk
-/// format `utils::write_message_to_file` produces.
-fn encode_length_prefixed_message<M: Message>(message: &M) -> Vec<u8> {
-    let encoded = message.encode_to_vec();
-    let mut buffer = BytesMut::new();
-    prost::encoding::encode_varint(encoded.len() as u64, &mut buffer);
-    buffer.put_slice(&encoded);
-    buffer.to_vec()
 }
