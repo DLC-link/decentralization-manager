@@ -355,9 +355,14 @@ impl SchemaRead for SqlitePool {
         kind: WorkflowKind,
         role: WorkflowRole,
     ) -> Result<Option<WorkflowRun>> {
+        // ORDER BY instance_name so that, with concurrent same-kind runs (the
+        // per-kind unique index was dropped in migration 000013), this picks the
+        // same run as `pick_coordinator_run` (lowest instance_name) — the
+        // persisted-row cancel path must not target a different run than the feed.
         let row = sqlx::query_as::<_, WorkflowRunRow>(
             "SELECT * FROM workflow_runs \
              WHERE kind = ? AND role = ? AND status = 'inprogress' \
+             ORDER BY instance_name \
              LIMIT 1",
         )
         .bind(kind.as_str())

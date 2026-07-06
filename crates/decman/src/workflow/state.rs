@@ -212,9 +212,10 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
         if connected_count >= required {
             let current = self.current_step.read().await;
             if current.is_waiting_for_peers() {
+                let observed = *current;
                 drop(current);
                 drop(connected);
-                self.advance_step().await;
+                self.advance_step_if(observed).await;
             }
         }
     }
@@ -252,31 +253,48 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
         self.persist_step_progress(*current, completed_vec).await;
 
         if current.requires_peers() && self.signing_gate_satisfied(completed_count).await {
+            let observed = *current;
             drop(current);
             drop(completed);
-            self.advance_step().await;
+            self.advance_step_if(observed).await;
         }
     }
 
+    /// Unconditional advance, used by the coordinator loop which drives its own
+    /// non-peer steps sequentially (one task, no self-race).
     pub async fn advance_step(&self) {
         let mut current = self.current_step.write().await;
-        let mut completed = self.completed_peers.write().await;
+        self.advance_locked(&mut current).await;
+    }
 
+    /// Advance only if the machine is still on `expected`. Peer events run on
+    /// per-connection tasks, so with quorum < total two of them can observe the
+    /// same gate open at once; without this check-then-act guard both would
+    /// advance and skip a step. The CAS re-check under the write lock makes the
+    /// second call a no-op.
+    async fn advance_step_if(&self, expected: S) {
+        let mut current = self.current_step.write().await;
+        if *current != expected {
+            return;
+        }
+        self.advance_locked(&mut current).await;
+    }
+
+    /// Shared advance body; caller holds the `current_step` write lock.
+    /// Does NOT flip status to Completed — the spawning task does that via
+    /// `mark_run_completed` once `start_coordinator` returns (doing it here
+    /// triggers the artifact cleanup before the post-workflow PARTY_ID read and
+    /// re-marks the run Failed).
+    async fn advance_locked(&self, current: &mut S) {
+        let mut completed = self.completed_peers.write().await;
         if let Some(next_step) = current.next() {
-            let current_name = format!("{current:?}");
-            let next_name = format!("{next_step:?}");
-            tracing::info!("Advancing workflow: {current_name} -> {next_name}");
+            tracing::info!("Advancing workflow: {:?} -> {next_step:?}", *current);
             *current = next_step;
             completed.clear();
             self.persist_step_progress(next_step, Vec::new()).await;
         } else {
             tracing::info!("Workflow complete!");
         }
-        // Do NOT flip status to Completed here — the spawning task does that
-        // via `mark_run_completed` once `start_coordinator` returns. Doing it
-        // inside the state machine triggers the workflow_artifacts cleanup
-        // before the post-workflow PARTY_ID read (onboarding) and re-marks
-        // the run as Failed.
     }
 
     /// Mark the run as Failed with an error message. Used when a workflow
@@ -665,6 +683,30 @@ mod tests {
         assert_eq!(state.current_step().await, TestStep::WaitPeers);
 
         state.peer_connected(peer(2)).await;
+        assert_eq!(state.current_step().await, TestStep::Sign);
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn advance_step_if_only_advances_from_expected(pool: SqlitePool) {
+        let state = WorkflowState::new(
+            pool,
+            "test-run".to_string(),
+            TestStep::WaitPeers,
+            vec![peer(1)],
+            None,
+        );
+
+        // Stale "from" (a step we're already past / not on): no-op. This is the
+        // CAS guard that stops two concurrent peer events from double-advancing.
+        state.advance_step_if(TestStep::Sign).await;
+        assert_eq!(state.current_step().await, TestStep::WaitPeers);
+
+        // Matching "from": advances exactly one step.
+        state.advance_step_if(TestStep::WaitPeers).await;
+        assert_eq!(state.current_step().await, TestStep::Sign);
+
+        // A second call with the now-stale "from" must not advance again.
+        state.advance_step_if(TestStep::WaitPeers).await;
         assert_eq!(state.current_step().await, TestStep::Sign);
     }
 }

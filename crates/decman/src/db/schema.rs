@@ -99,8 +99,9 @@ pub trait SchemaRead {
     /// Get a single workflow run by its instance name.
     async fn get_workflow_run(&self, instance_name: &str) -> Result<Option<WorkflowRun>>;
 
-    /// Look up the in-progress run for a given (kind, role) on this node.
-    /// Returns at most one row thanks to the partial unique index.
+    /// Look up an in-progress run for a given (kind, role) on this node. With
+    /// concurrent same-kind runs (the per-kind unique index was dropped in
+    /// migration 000013) several may match; returns the lowest `instance_name`.
     async fn get_active_workflow_run(
         &self,
         kind: WorkflowKind,
