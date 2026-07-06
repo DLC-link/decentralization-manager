@@ -1904,7 +1904,9 @@ impl App {
             // Clicks only act on the plain tab view — overlays, the detail view
             // and search stay keyboard-driven (scroll still works there).
             MouseEventKind::Down(MouseButton::Left)
-                if matches!(self.overlay, Overlay::None) && self.detail.is_none() =>
+                if matches!(self.overlay, Overlay::None)
+                    && self.detail.is_none()
+                    && !self.searching =>
             {
                 self.on_click(mouse.column, mouse.row);
             }
@@ -3222,9 +3224,11 @@ impl App {
             );
             return;
         }
-        // Bound the threshold by the post-add member count (current + new one).
-        let member_count = i32::try_from(party.participants.len()).unwrap_or(i32::MAX);
-        let max_threshold = member_count.saturating_add(1);
+        // The signing threshold is over the namespace owners (like the kick
+        // flow) — not every participant is necessarily an owner. Bound it by the
+        // post-add owner count: the current owners plus the joining member.
+        let owner_count = i32::try_from(party.owners.len()).unwrap_or(i32::MAX);
+        let max_threshold = owner_count.saturating_add(1);
         self.overlay = Overlay::AddParty(AddPartyForm {
             party_id: party.party_id.to_string(),
             party_name: party_name(party).to_owned(),
@@ -3260,12 +3264,13 @@ impl App {
         let Some(party) = self.detail.as_ref() else {
             return;
         };
-        // A solo-owner party has a fixed threshold of 1 and nothing to change
-        // (mirrors the server's rejection).
-        let member_count = i32::try_from(party.participants.len()).unwrap_or(i32::MAX);
-        if member_count < 2 {
+        // The signing threshold is over the namespace owners (like the kick
+        // flow). A party with fewer than two owners has a fixed threshold of 1
+        // and nothing to change (mirrors the server's rejection).
+        let owner_count = i32::try_from(party.owners.len()).unwrap_or(i32::MAX);
+        if owner_count < 2 {
             self.overlay = Overlay::Message(
-                "Cannot change threshold: the party has only one member.".to_owned(),
+                "Cannot change threshold: the party has only one owner.".to_owned(),
             );
             return;
         }
@@ -3273,8 +3278,8 @@ impl App {
             party_id: party.party_id.to_string(),
             party_name: party_name(party).to_owned(),
             previous_threshold: party.threshold,
-            new_threshold: party.threshold.clamp(1, member_count),
-            max_threshold: member_count,
+            new_threshold: party.threshold.clamp(1, owner_count),
+            max_threshold: owner_count,
         });
     }
 

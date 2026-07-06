@@ -2855,6 +2855,7 @@ mod tests {
         // The invitation row is present and actionable.
         assert!(rendered.contains("Onboarding"));
         assert!(rendered.contains("vault-rc5"));
+        assert!(rendered.contains("Invitation"));
     }
 
     #[test]
@@ -2914,7 +2915,6 @@ mod tests {
         assert!(rendered.contains('–'));
         assert!(rendered.contains("1 missing"));
         assert!(rendered.contains("unreachable"));
-        assert!(rendered.contains("Invitation"));
     }
 
     #[test]
