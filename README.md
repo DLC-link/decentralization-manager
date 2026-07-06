@@ -34,7 +34,7 @@ The application runs as an HTTP server with an embedded React frontend. Multiple
 ```
 ┌─────────────────┐     Noise Protocol      ┌─────────────────┐
 │  Participant 1  │◄───────────────────────►│  Participant 2  │
-│   (Coordinator) │                         │    (Peer)   │
+│   (Coordinator) │                         │     (Peer)      │
 │   HTTP :8081    │                         │   HTTP :8082    │
 │   Noise :9001   │                         │   Noise :9002   │
 └────────┬────────┘                         └────────┬────────┘
