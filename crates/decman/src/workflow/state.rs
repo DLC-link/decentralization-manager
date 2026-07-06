@@ -160,11 +160,30 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
         }
     }
 
-    /// Advance once the quorum has completed AND every *connected* peer has — a
-    /// peer that never connects can't hold the gate open once the quorum signs.
-    async fn signing_gate_satisfied(&self, completed_count: usize) -> bool {
-        let connected_count = self.connected_peers.read().await.len();
-        completed_count >= self.peers_quorum() && completed_count >= connected_count
+    /// Re-evaluate the current step's peer gate and advance if it is satisfied.
+    /// Called on every peer poll and completion (not just the triggering event),
+    /// so a gate that became satisfiable without a fresh event — e.g. a quorum
+    /// restored from the persisted row after a restart — still advances the next
+    /// time a peer polls. Advancing goes through [`Self::advance_step_if`], so
+    /// concurrent callers can't double-advance.
+    async fn maybe_advance(&self) {
+        let cur = *self.current_step.read().await;
+        let quorum = self.peers_quorum();
+        let ready = if cur.is_waiting_for_peers() {
+            self.connected_peers.read().await.len() >= quorum
+        } else if cur.requires_peers() {
+            // Advance as soon as the quorum has signed. M signatures satisfy an
+            // M-of-N party, so we do NOT also wait for every *connected* peer: a
+            // peer that connected but then never signs (crash, refusal, or a
+            // straggler) must not hold the gate open. Waiting on the connected
+            // set is what hung the run in the connect-then-stall case.
+            self.completed_peers.read().await.len() >= quorum
+        } else {
+            false
+        };
+        if ready {
+            self.advance_step_if(cur).await;
+        }
     }
 
     pub async fn store_peer_data(&self, peer_id: CantonId, data: Vec<u8>) {
@@ -195,29 +214,22 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
             return;
         }
 
-        let mut connected = self.connected_peers.write().await;
-
-        let is_new = connected.insert(peer_id.clone());
-        if !is_new {
-            return;
-        }
-
-        let connected_count = connected.len();
-        let required = self.peers_quorum();
-        let total_count = self.expected_peers.len();
-        tracing::info!(
-            "Peer connected: {peer_id} ({connected_count}/{total_count}, need {required} to start)"
-        );
-
-        if connected_count >= required {
-            let current = self.current_step.read().await;
-            if current.is_waiting_for_peers() {
-                let observed = *current;
-                drop(current);
-                drop(connected);
-                self.advance_step_if(observed).await;
+        {
+            let mut connected = self.connected_peers.write().await;
+            if connected.insert(peer_id.clone()) {
+                tracing::info!(
+                    "Peer connected: {peer_id} ({}/{}, need {} to start)",
+                    connected.len(),
+                    self.expected_peers.len(),
+                    self.peers_quorum()
+                );
             }
         }
+        // Re-evaluate on every poll, not just the first connect: peers keep
+        // polling while they wait, so this re-checks a gate that became
+        // satisfiable without a fresh event (e.g. a quorum restored after a
+        // restart).
+        self.maybe_advance().await;
     }
 
     pub async fn current_command(&self) -> Option<MessageType> {
@@ -234,30 +246,23 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
             return;
         }
 
-        let mut completed = self.completed_peers.write().await;
-        completed.insert(peer_id.clone());
-
-        let current = self.current_step.read().await;
-        let completed_count = completed.len();
-        let total_count = self.expected_peers.len();
-        let step_name = format!("{current:?}");
-        tracing::info!(
-            "Peer completed step {step_name}: {peer_id} ({completed_count}/{total_count})"
-        );
-
-        // Persist the new completed-peers set. Failures here are logged
-        // but don't abort the workflow — on a future restart the recovery path
-        // would just re-issue the command, which steps are designed to no-op
-        // when the artefact already exists.
-        let completed_vec: Vec<CantonId> = completed.iter().cloned().collect();
-        self.persist_step_progress(*current, completed_vec).await;
-
-        if current.requires_peers() && self.signing_gate_satisfied(completed_count).await {
-            let observed = *current;
-            drop(current);
-            drop(completed);
-            self.advance_step_if(observed).await;
+        {
+            let mut completed = self.completed_peers.write().await;
+            completed.insert(peer_id.clone());
+            let current = *self.current_step.read().await;
+            let completed_vec: Vec<CantonId> = completed.iter().cloned().collect();
+            tracing::info!(
+                "Peer completed step {current:?}: {peer_id} ({}/{})",
+                completed_vec.len(),
+                self.expected_peers.len()
+            );
+            // Persist the new completed-peers set. Failures here are logged but
+            // don't abort the workflow — on a future restart the recovery path
+            // re-issues the command, which steps are designed to no-op when the
+            // artefact already exists.
+            self.persist_step_progress(current, completed_vec).await;
         }
+        self.maybe_advance().await;
     }
 
     /// Unconditional advance, used by the coordinator loop which drives its own
@@ -612,8 +617,11 @@ mod tests {
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]
-    async fn signing_gate_waits_for_all_connected_peers(pool: SqlitePool) {
-        // quorum 1, but both connected → wait for both to sign (not just one).
+    async fn signing_gate_advances_at_quorum_despite_connected_non_signer(pool: SqlitePool) {
+        // Regression (#207): quorum 1, both peers connect, but peer(2) never
+        // signs (connect-then-stall — crash or refusal). The run must still
+        // advance once the quorum (peer(1)) has signed; a connected-but-silent
+        // peer must not hold the gate open. M signatures satisfy an M-of-N party.
         let state = WorkflowState::new(
             pool,
             "test-run".to_string(),
@@ -623,12 +631,29 @@ mod tests {
         );
 
         state.peer_connected(peer(1)).await;
-        state.peer_connected(peer(2)).await;
+        state.peer_connected(peer(2)).await; // connects, then stalls forever
 
         state.peer_completed(peer(1)).await;
-        assert_eq!(state.current_step().await, TestStep::Sign);
+        assert_eq!(state.current_step().await, TestStep::Done);
+    }
 
-        state.peer_completed(peer(2)).await;
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn signing_gate_reevaluated_on_poll_after_restart(pool: SqlitePool) {
+        // Regression (#207): the quorum was met before a restart (peer(1)
+        // completed) but the advance never happened. On resume no fresh
+        // completion arrives — the completed peer only re-polls — so the gate
+        // must be re-evaluated on that poll rather than hanging.
+        let state = WorkflowState::from_persisted(
+            pool,
+            "test-run".to_string(),
+            TestStep::Sign,
+            vec![peer(1), peer(2)],
+            vec![peer(1)], // restored: peer(1) already completed pre-restart
+            Some(1),
+        );
+
+        // A bare poll (no new completion) must trip the already-met gate.
+        state.peer_connected(peer(1)).await;
         assert_eq!(state.current_step().await, TestStep::Done);
     }
 
