@@ -659,7 +659,7 @@ FAR configuration is used in:
 
 - **Canton Admin API access required**: The application needs access to privileged Admin API endpoints (topology management, key vaults, package upload). This is not the public Ledger API -- it requires high node-level privileges.
 - **6 Admin API services used**: TopologyManagerRead, TopologyManagerWrite, VaultManager, IdentityInitialization, SynchronizerConnectivity, PackageService
-- **Canton protocol version**: 34 (hardcoded for key export and topology operations)
+- **Canton protocol version**: 35 (hardcoded for key export and topology operations)
 - **Network ports**: TCP 8080 (HTTP server) + TCP 9000 (Noise P2P)
 
 ### Timing Constraints
